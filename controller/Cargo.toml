@@ -1,0 +1,32 @@
+[package]
+name = "azureclaw-controller"
+description = "Kubernetes operator for AzureClaw — manages ClawSandbox CRDs, sandbox lifecycle, policy enforcement, and Azure service connectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Kubernetes (kube-rs — CNCF Sandbox project)
+kube.workspace = true
+k8s-openapi.workspace = true
+schemars.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+prometheus.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true

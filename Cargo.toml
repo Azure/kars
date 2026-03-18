@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "inference-router",
+    "controller",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Azure/azureclaw"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Kubernetes
+kube = { version = "3.1", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.27", features = ["latest", "schemars"] }
+schemars = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+hyper = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Azure identity (via REST — no SDK dependency)
+jsonwebtoken = "9"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.28"
+prometheus = "0.13"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -26,15 +26,45 @@ AzureClaw is the open-source runtime for running [OpenClaw](https://openclaw.ai/
 
 ## Quick Start
 
-```bash
-# Install
-curl -fsSL https://aka.ms/azureclaw.sh | bash
+### Install
 
-# Login and spin up everything
+Works on macOS, Linux, Windows (WSL2). Pick your preferred method:
+
+```bash
+# npm (recommended — cross-platform, integrity-checked)
+npm install -g @azure/azureclaw
+
+# npx (run without installing)
+npx @azure/azureclaw up
+```
+
+<details>
+<summary><strong>Platform-specific package managers</strong></summary>
+
+```bash
+# macOS (Homebrew)
+brew install azure/azureclaw/azureclaw
+
+# Windows (winget)
+winget install Azure.AzureClaw
+
+# Linux (apt — Debian/Ubuntu)
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azureclaw stable main" | sudo tee /etc/apt/sources.list.d/azureclaw.list
+sudo apt update && sudo apt install azureclaw
+
+# Linux (dnf — Fedora/RHEL/Azure Linux)
+sudo dnf install -y https://packages.microsoft.com/config/azureclaw/azureclaw.rpm
+```
+
+</details>
+
+### Run
+
+```bash
 az login
 azureclaw up                          # provisions AKS, configures model, creates sandbox
 
-# Connect to your agent
 azureclaw my-assistant connect
 sandbox@my-assistant:~$ openclaw tui  # you're in
 ```

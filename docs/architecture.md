@@ -14,9 +14,9 @@ The primary user interface. Handles cluster initialization, onboarding, sandbox 
 
 ### 2. Blueprint Controller
 
-**Language:** Go (planned)
+**Language:** Rust (kube-rs, CNCF Sandbox)
 
-A Kubernetes operator built with controller-runtime that watches `ClawSandbox` custom resources and reconciles the desired state:
+A Kubernetes operator built with kube-rs that watches `ClawSandbox` custom resources and reconciles the desired state:
 
 - Creates isolated namespaces per sandbox
 - Deploys OpenClaw pods with security constraints
