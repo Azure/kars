@@ -1,51 +1,145 @@
 //! Reverse proxy logic — forwards inference requests to Azure OpenAI / AI Foundry.
+//!
+//! The proxy:
+//! 1. Strips any credentials the sandbox may have tried to inject
+//! 2. Acquires a Managed Identity token via Workload Identity
+//! 3. Injects the bearer token into the upstream request
+//! 4. Forwards to Azure OpenAI and streams the response back
+//! 5. Records metrics (latency, tokens, status)
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::http::{Request, Response};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use bytes::Bytes;
+use reqwest::Client;
+use std::time::Instant;
+
 use crate::auth::WorkloadIdentityAuth;
+use crate::metrics;
 
-/// Forward an inference request to the upstream Azure OpenAI endpoint.
-pub async fn forward_request(
+/// Upstream Azure OpenAI configuration for a single request.
+pub struct UpstreamConfig {
+    pub endpoint: String,
+    pub deployment: String,
+    pub api_version: String,
+    pub sandbox_name: String,
+}
+
+/// Forward an inference request to Azure OpenAI.
+/// Returns (status_code, headers, body_bytes).
+pub async fn forward_to_azure_openai(
     auth: &WorkloadIdentityAuth,
-    upstream_url: &str,
-    mut req: Request<Body>,
-) -> Result<Response<Body>> {
-    // Acquire token via Workload Identity (no API keys)
-    let token = auth
-        .get_token("https://cognitiveservices.azure.com")
-        .await?;
+    client: &Client,
+    upstream: &UpstreamConfig,
+    method: Method,
+    path: &str,
+    request_headers: &HeaderMap,
+    request_body: Bytes,
+) -> Result<(StatusCode, HeaderMap, Bytes)> {
+    let start = Instant::now();
 
-    // Strip any credentials the sandbox may have tried to inject
-    req.headers_mut().remove("authorization");
-    req.headers_mut().remove("api-key");
-
-    // Inject Managed Identity bearer token
-    req.headers_mut().insert(
-        "authorization",
-        format!("Bearer {token}").parse().unwrap(),
+    // Build upstream URL
+    let upstream_url = format!(
+        "{}/openai/deployments/{}/{}?api-version={}",
+        upstream.endpoint.trim_end_matches('/'),
+        upstream.deployment,
+        path.trim_start_matches('/'),
+        upstream.api_version,
     );
 
-    // Forward via reqwest (TODO: use hyper client for zero-copy)
-    let client = reqwest::Client::new();
-    let method = req.method().clone();
-    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await?;
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        model = %upstream.deployment,
+        method = %method,
+        path = %path,
+        "Forwarding inference request"
+    );
 
-    let upstream_resp = client
-        .request(method, upstream_url)
-        .headers(req.headers().clone())
-        .body(body_bytes.clone())
-        .send()
-        .await?;
+    // Acquire token via Workload Identity (zero credentials in sandbox)
+    let token = auth
+        .get_token("https://cognitiveservices.azure.com")
+        .await
+        .context("Failed to acquire Azure AD token")?;
 
-    let status = upstream_resp.status();
-    let headers = upstream_resp.headers().clone();
-    let resp_body = upstream_resp.bytes().await?;
-
-    let mut response = Response::builder().status(status);
-    for (k, v) in headers.iter() {
-        response = response.header(k, v);
+    // Build upstream request — strip sandbox-injected auth, inject ours
+    let mut upstream_headers = HeaderMap::new();
+    // Forward safe headers only
+    for (name, value) in request_headers.iter() {
+        let name_str = name.as_str();
+        match name_str {
+            // Strip any auth the sandbox tried to inject
+            "authorization" | "api-key" | "x-api-key" => continue,
+            // Strip hop-by-hop headers
+            "host" | "connection" | "transfer-encoding" => continue,
+            _ => {
+                upstream_headers.insert(name.clone(), value.clone());
+            }
+        }
     }
 
-    Ok(response.body(Body::from(resp_body))?)
+    // Inject Managed Identity bearer token
+    upstream_headers.insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("Invalid token value")?,
+    );
+
+    // Ensure content-type is set
+    upstream_headers
+        .entry("content-type")
+        .or_insert(HeaderValue::from_static("application/json"));
+
+    // Forward the request
+    let response = client
+        .request(method.clone(), &upstream_url)
+        .headers(upstream_headers)
+        .body(request_body)
+        .send()
+        .await
+        .context("Upstream request failed")?;
+
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let response_headers = response.headers().clone();
+    let response_body = response
+        .bytes()
+        .await
+        .context("Failed to read upstream response body")?;
+
+    let latency = start.elapsed();
+
+    // Record metrics
+    let status_label = if status.is_success() { "ok" } else { "error" };
+    metrics::INFERENCE_REQUESTS
+        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, status_label])
+        .inc();
+    metrics::INFERENCE_LATENCY
+        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment])
+        .observe(latency.as_secs_f64());
+
+    // Extract token usage from response body (if present)
+    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&response_body) {
+        if let Some(usage) = body_json.get("usage") {
+            if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                metrics::TOKENS_USED
+                    .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "input"])
+                    .inc_by(input as u64);
+            }
+            if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                metrics::TOKENS_USED
+                    .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "output"])
+                    .inc_by(output as u64);
+            }
+        }
+    }
+
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        model = %upstream.deployment,
+        status = %status.as_u16(),
+        latency_ms = %latency.as_millis(),
+        "Inference request completed"
+    );
+
+    Ok((status, response_headers, response_body))
 }
