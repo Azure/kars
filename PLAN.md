@@ -622,7 +622,7 @@ azureclaw/
 │   ├── network/
 │   │   └── baseline.yaml
 │   └── admission/
-│       └── webhook.go
+│       └── webhook.rs
 │
 ├── sandbox-images/                  Container images for sandboxes
 │   ├── base/
