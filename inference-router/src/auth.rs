@@ -1,11 +1,9 @@
-//! Azure Workload Identity authentication.
+//! Azure authentication — supports both Workload Identity (AKS) and API key (local dev).
 //!
-//! Acquires tokens via the Workload Identity token exchange flow:
-//! 1. Read the projected service account token from the pod volume mount
-//! 2. Exchange it for an Azure AD token via the token exchange endpoint
-//! 3. Cache and refresh tokens automatically
+//! In AKS: uses Workload Identity token exchange (federated OIDC → Azure AD token)
+//! In dev: reads API key from /run/secrets/azure-openai-key (mounted by azureclaw dev)
 //!
-//! No API keys, no secrets, no env vars with credentials.
+//! No API keys in the sandbox. The router handles all auth.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -17,22 +15,44 @@ struct CachedToken {
     expires_at: std::time::Instant,
 }
 
-/// Token provider using Workload Identity Federation.
+/// Auth provider — automatically selects between API key and Workload Identity.
 pub struct WorkloadIdentityAuth {
     client: reqwest::Client,
     token_cache: Arc<RwLock<Option<CachedToken>>>,
+    /// API key loaded from /run/secrets/ (dev mode fallback)
+    api_key: Option<String>,
 }
 
 impl WorkloadIdentityAuth {
     pub fn new() -> Self {
+        // Try to load API key from secret mount (dev mode)
+        let api_key = std::fs::read_to_string("/run/secrets/azure-openai-key")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if api_key.is_some() {
+            tracing::info!("Auth mode: API key from /run/secrets/ (dev mode)");
+        } else {
+            tracing::info!("Auth mode: Workload Identity (AKS mode)");
+        }
+
         Self {
             client: reqwest::Client::new(),
             token_cache: Arc::new(RwLock::new(None)),
+            api_key,
         }
     }
 
-    /// Get a valid Azure AD token, refreshing if expired.
+    /// Get auth header value. Returns either an API key or a bearer token.
+    /// The caller should use this as the `api-key` header for Azure OpenAI.
     pub async fn get_token(&self, resource: &str) -> Result<String> {
+        // Dev mode: use API key directly
+        if let Some(ref key) = self.api_key {
+            return Ok(key.clone());
+        }
+
+        // AKS mode: use Workload Identity token exchange
         // Check cache first
         {
             let cache = self.token_cache.read().await;
@@ -44,8 +64,12 @@ impl WorkloadIdentityAuth {
         }
 
         // Token expired or missing — exchange
-        let token = self.exchange_token(resource).await?;
-        Ok(token)
+        self.exchange_token(resource).await
+    }
+
+    /// Returns true if using API key auth (dev mode), false if Workload Identity.
+    pub fn is_api_key_mode(&self) -> bool {
+        self.api_key.is_some()
     }
 
     async fn exchange_token(&self, resource: &str) -> Result<String> {

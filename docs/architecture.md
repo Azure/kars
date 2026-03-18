@@ -26,6 +26,16 @@ A Kubernetes operator built with kube-rs that watches `ClawSandbox` custom resou
 
 ### 3. Inference Router
 
+**Language:** Rust (axum)
+
+High-performance reverse proxy that sits between OpenClaw and Azure AI backends. Every inference call flows through this router:
+
+- **Authentication:** Workload Identity (AKS) or API key from secret mount (dev mode)
+- **Token counting:** Prometheus metrics per sandbox (`azureclaw_tokens_total`, `azureclaw_inference_latency_seconds`)
+- **Content safety:** Azure AI Content Safety + Prompt Shields (on by default)
+- **Audit logging:** Every request logged with sandbox ID, model, status, latency
+- **Binary size:** ~5MB release build
+
 Routes all LLM API calls from sandboxes to Azure OpenAI / Azure AI Foundry. Authenticates using Workload Identity (no API keys in sandboxes). Integrates with Azure AI Content Safety and Prompt Shields.
 
 ### 4. Policy Engine
@@ -45,19 +55,34 @@ Multi-layer enforcement:
 
 ### 5. Sandbox Images
 
-Minimal OCI images with OpenClaw pre-installed. Built on a slim Node.js base with only essential tools. Scanned for vulnerabilities in CI. Signed with Notation.
+Minimal OCI images based on Azure Linux 4 with OpenClaw + Rust inference router pre-installed. Auto-configured by entrypoint script — OpenClaw gateway, inference router, and agent identity are set up on first start.
 
 ## Data Flow
 
+**Local dev mode (`azureclaw dev`):**
 ```
-User ──▶ azureclaw CLI ──▶ kubectl ──▶ AKS API Server
-                                           │
-                                           ▼
-                                    Blueprint Controller
-                                           │
-                            ┌──────────────┼──────────────┐
-                            ▼              ▼              ▼
-                      Namespace      NetworkPolicy    Deployment
+azureclaw CLI ──▶ Docker ──▶ Azure Linux 4 container
+                                    │
+                              ┌─────┴─────┐
+                              ▼           ▼
+                         OpenClaw    Inference Router (Rust)
+                         Gateway         │
+                              │          ▼
+                              │    Azure OpenAI / AI Foundry
+                              ▼
+                         Web UI (port 18789)
+```
+
+**AKS production mode (`azureclaw up`):**
+```
+azureclaw CLI ──▶ kubectl ──▶ AKS API Server
+                                    │
+                                    ▼
+                             Blueprint Controller (Rust)
+                                    │
+                     ┌──────────────┼──────────────┐
+                     ▼              ▼              ▼
+               Namespace      NetworkPolicy    Deployment
                       (isolated)     (strict)         (sandbox pod)
                                                           │
                                                           ▼

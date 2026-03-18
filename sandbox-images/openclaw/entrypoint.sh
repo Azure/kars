@@ -1,0 +1,156 @@
+#!/bin/bash
+# AzureClaw sandbox entrypoint
+# Configures OpenClaw automatically from mounted secrets and env vars.
+# The user never needs to manually configure anything.
+
+set -e
+
+OPENCLAW_DIR="/sandbox/.openclaw"
+OPENCLAW_CONFIG="$OPENCLAW_DIR/openclaw.json"
+WORKSPACE_DIR="/sandbox/.openclaw/workspace"
+
+# Read API key from mounted secret
+API_KEY=""
+if [ -f /run/secrets/azure-openai-key ]; then
+  API_KEY=$(cat /run/secrets/azure-openai-key)
+fi
+
+# Get config from env vars (set by azureclaw dev/up)
+ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
+MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
+
+# Generate gateway token early (needed for config file + .bashrc)
+GATEWAY_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
+export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
+
+# Only configure if not already done (idempotent)
+if [ ! -f "$OPENCLAW_CONFIG" ]; then
+  # Create OpenClaw directories
+  mkdir -p "$OPENCLAW_DIR" "$WORKSPACE_DIR"
+
+  # Write openclaw.json (2026.3.x config format — routed through inference router)
+  cat > "$OPENCLAW_CONFIG" << EOF
+{
+  "models": {
+    "providers": {
+      "azure-openai": {
+        "baseUrl": "http://127.0.0.1:8443/v1",
+        "apiKey": "routed-via-inference-router",
+        "api": "openai-completions",
+        "authHeader": false,
+        "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
+        "models": [
+          { "id": "${MODEL}", "name": "${MODEL} (Azure via AzureClaw)" }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "azure-openai/${MODEL}" }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "mode": "token"
+    },
+    "controlUi": {
+      "dangerouslyDisableDeviceAuth": true
+    }
+  }
+}
+EOF
+  chmod 600 "$OPENCLAW_CONFIG"
+
+  # Set provider credentials via environment (OpenClaw reads these automatically)
+  # These are exported so openclaw tui/agent picks them up
+  export AZURE_OPENAI_API_KEY="${API_KEY}"
+  export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
+
+  # Write a .bashrc snippet so credentials are available in interactive shells too
+  cat >> /sandbox/.bashrc << RCEOF
+
+# AzureClaw: Azure OpenAI credentials (loaded from /run/secrets/)
+export AZURE_OPENAI_API_KEY="\$(cat /run/secrets/azure-openai-key 2>/dev/null)"
+export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
+export OPENCLAW_MODEL="${MODEL}"
+RCEOF
+
+  # Write minimal workspace files so OpenClaw doesn't need onboarding
+  cat > "$WORKSPACE_DIR/AGENTS.md" << 'EOF'
+# AzureClaw Agent
+
+You are a helpful AI assistant running inside an AzureClaw sandbox on Azure.
+You are secure, sandboxed, and connected to Azure OpenAI.
+
+## Capabilities
+- You can help with coding, analysis, writing, and general questions
+- You have access to bash, file operations, and git inside the sandbox
+- Your workspace is /sandbox — all your files live here
+- Your network access is governed by policy — unauthorized endpoints will be blocked
+
+## Security context
+- You are running as a non-root user (sandbox:1000)
+- The root filesystem is read-only
+- You can write to /sandbox and /tmp only
+- All system calls are filtered by seccomp
+- Your inference calls go through Azure OpenAI with content safety enabled
+EOF
+
+  cat > "$WORKSPACE_DIR/SOUL.md" << 'EOF'
+# Soul
+
+You are **AzureClaw Agent** — a secure, sandboxed AI assistant powered by Azure.
+
+You are helpful, concise, and technically competent. You run inside an isolated
+container on Azure Linux, with your inference routed through Azure OpenAI.
+
+When asked about yourself, you can mention that you're running inside AzureClaw —
+an open-source secure runtime for AI agents on Azure.
+
+You are friendly but professional. You get things done.
+EOF
+
+  echo "[azureclaw] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
+else
+  # Load credentials for existing config
+  export AZURE_OPENAI_API_KEY="${API_KEY}"
+  export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
+  echo "[azureclaw] OpenClaw already configured"
+fi
+
+# Add gateway token to .bashrc so interactive shells have it
+cat >> /sandbox/.bashrc << RCEOF2
+
+# AzureClaw: Gateway auth
+export OPENCLAW_GATEWAY_TOKEN="${GATEWAY_TOKEN}"
+RCEOF2
+
+# Start AzureClaw inference router (Rust) — all model calls go through this
+ROUTER_PORT=8443 \
+AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
+DEFAULT_MODEL="$MODEL" \
+CONTENT_SAFETY_ENABLED=true \
+azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
+ROUTER_PID=$!
+sleep 1
+echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
+
+# Start OpenClaw gateway in the background (needed for TUI)
+OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
+GATEWAY_PID=$!
+
+# Wait for gateway to be ready
+for i in $(seq 1 10); do
+  if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
+    echo "[azureclaw] Gateway running (PID: $GATEWAY_PID)"
+    break
+  fi
+  sleep 1
+done
+
+# Keep the container alive — don't use exec (it would kill the gateway)
+# Instead, wait forever while keeping the gateway backgrounded
+tail -f /dev/null

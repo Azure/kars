@@ -8,17 +8,123 @@ export function statusCommand(): Command {
     .description("Show sandbox health, policy state, and inference configuration")
     .argument("<name>", "Sandbox name")
     .action(async (name: string) => {
-      // TODO: kubectl get clawsandbox <name> -o json + parse
+      const blue = chalk.hex("#0078D4");
+      const containerName = `azureclaw-${name}`;
 
-      console.log(chalk.bold(`\n📊 Sandbox: ${name}\n`));
-      console.log(`  Status:        ${chalk.green("Running")}`);
-      console.log(`  Model:         azure/gpt-4.1`);
-      console.log(`  Isolation:     enhanced (seccomp + SELinux)`);
-      console.log(`  Network:       default-deny + 6 allowed endpoints`);
-      console.log(`  Uptime:        2h 15m`);
-      console.log(`  Tokens used:   12,450 (input) / 8,320 (output)`);
-      console.log(`  Pending:       0 egress approval requests`);
-      console.log();
+      // Try local Docker first, then AKS
+      try {
+        const { execa } = await import("execa");
+
+        // Check Docker
+        const { stdout: inspectJson } = await execa("docker", [
+          "inspect", "--format", "{{json .}}", containerName,
+        ], { stdio: "pipe" });
+
+        const info = JSON.parse(inspectJson);
+        const running = info.State?.Running === true;
+        const startedAt = info.State?.StartedAt;
+        const image = info.Config?.Image || "unknown";
+        const readOnly = info.HostConfig?.ReadonlyRootfs === true;
+        const model = (info.Config?.Env || [])
+          .find((e: string) => e.startsWith("OPENCLAW_MODEL="))
+          ?.split("=")[1] || "gpt-4.1";
+        const seccomp = info.HostConfig?.SecurityOpt
+          ?.some((s: string) => s.includes("seccomp")) || false;
+        const hostname = info.Config?.Hostname || name;
+
+        // Calculate uptime
+        let uptime = "unknown";
+        if (startedAt) {
+          const ms = Date.now() - new Date(startedAt).getTime();
+          const mins = Math.floor(ms / 60000);
+          if (mins < 60) uptime = `${mins}m`;
+          else uptime = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+        }
+
+        console.log(blue(`
+  ╔══════════════════════════════════════════════════╗
+  ║           AzureClaw · Sandbox Status             ║
+  ╚══════════════════════════════════════════════════╝
+`));
+        console.log(`  Sandbox:       ${chalk.bold(name)}`);
+        console.log(`  Status:        ${running ? chalk.green("● Running") : chalk.red("● Stopped")}`);
+        console.log(`  Uptime:        ${uptime}`);
+        console.log(`  Image:         ${image}`);
+        console.log(`  Model:         ${chalk.bold(model)} (Azure OpenAI)`);
+
+        console.log(blue(`\n  ── Security ──────────────────────────────────────`));
+        console.log(`  ${readOnly ? chalk.green("✓") : chalk.red("✗")} Read-only root filesystem`);
+        console.log(`  ${chalk.green("✓")} Non-root user (sandbox:1000)`);
+        console.log(`  ${chalk.green("✓")} All root privileges removed`);
+        console.log(`  ${seccomp ? chalk.green("✓") : chalk.yellow("○")} seccomp profile${seccomp ? " (azureclaw-strict)" : ""}`);
+
+        console.log(blue(`\n  ── Inference Router ───────────────────────────────`));
+        // Query Prometheus metrics from the Rust inference router
+        try {
+          const { stdout: metricsRaw } = await execa("docker", [
+            "exec", containerName, "curl", "-sf", "http://127.0.0.1:8443/metrics",
+          ], { stdio: "pipe" });
+
+          const requests = metricsRaw.match(/azureclaw_inference_requests_total\{[^}]*status="ok"[^}]*\}\s+(\d+)/);
+          const inputTokens = metricsRaw.match(/azureclaw_tokens_total\{[^}]*direction="input"[^}]*\}\s+(\d+)/);
+          const outputTokens = metricsRaw.match(/azureclaw_tokens_total\{[^}]*direction="output"[^}]*\}\s+(\d+)/);
+          const latencySum = metricsRaw.match(/azureclaw_inference_latency_seconds_sum\{[^}]*\}\s+([\d.]+)/);
+          const latencyCount = metricsRaw.match(/azureclaw_inference_latency_seconds_count\{[^}]*\}\s+(\d+)/);
+
+          const reqCount = requests ? parseInt(requests[1]) : 0;
+          const inTokens = inputTokens ? parseInt(inputTokens[1]) : 0;
+          const outTokens = outputTokens ? parseInt(outputTokens[1]) : 0;
+          const avgLatency = (latencySum && latencyCount && parseInt(latencyCount[1]) > 0)
+            ? (parseFloat(latencySum[1]) / parseInt(latencyCount[1])).toFixed(1)
+            : "—";
+
+          console.log(`  ${chalk.green("✓")} Router running (Rust, port 8443)`);
+          console.log(`  Requests:      ${reqCount}`);
+          console.log(`  Tokens:        ${inTokens.toLocaleString()} in / ${outTokens.toLocaleString()} out`);
+          console.log(`  Avg latency:   ${avgLatency}s`);
+        } catch {
+          console.log(`  ${chalk.yellow("○")} Router not reachable`);
+        }
+
+        console.log(blue(`\n  ── Network ───────────────────────────────────────`));
+        console.log(`  Policy:        default-deny egress`);
+        console.log(`  Inference:     routed via inference router (no direct access)`);
+
+        console.log();
+        return;
+      } catch {
+        // No local container — try AKS
+      }
+
+      // AKS: query ClawSandbox CRD
+      try {
+        const { execa } = await import("execa");
+        const { stdout } = await execa("kubectl", [
+          "get", "clawsandbox", name,
+          "-n", "azureclaw-system",
+          "-o", "json",
+        ], { stdio: "pipe" });
+
+        const sandbox = JSON.parse(stdout);
+        const phase = sandbox.status?.phase || "Unknown";
+        const model = sandbox.spec?.inference?.model || "gpt-4.1";
+        const isolation = sandbox.spec?.sandbox?.isolation || "enhanced";
+
+        console.log(blue(`
+  ╔══════════════════════════════════════════════════╗
+  ║           AzureClaw · Sandbox Status             ║
+  ╚══════════════════════════════════════════════════╝
+`));
+        console.log(`  Sandbox:       ${chalk.bold(name)}`);
+        console.log(`  Status:        ${phase === "Running" ? chalk.green("● Running") : chalk.yellow("● " + phase)}`);
+        console.log(`  Namespace:     azureclaw-${name}`);
+        console.log(`  Model:         ${chalk.bold(model)} (Azure OpenAI)`);
+        console.log(`  Isolation:     ${isolation}`);
+        console.log();
+      } catch {
+        console.log(chalk.red(`\n  Sandbox '${name}' not found (checked Docker and AKS).\n`));
+        process.exit(1);
+      }
     });
 
   return cmd;

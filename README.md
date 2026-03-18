@@ -62,29 +62,64 @@ sudo dnf install -y https://packages.microsoft.com/config/azureclaw/azureclaw.rp
 ### Run
 
 ```bash
-az login
-azureclaw up                          # provisions AKS, configures model, creates sandbox
-
-azureclaw my-assistant connect
-sandbox@my-assistant:~$ openclaw tui  # you're in
-```
-
-That's it. `azureclaw up` handles the Azure resources, picks sensible defaults, and lands you in a running sandbox. Customize later.
-
-<details>
-<summary><strong>Advanced: step-by-step setup</strong></summary>
-
-For full control over each step:
-
-```bash
-# 1. Provision infrastructure
-azureclaw init --resource-group my-rg --location eastus2
-
-# 2. Interactive wizard: pick model, set policy, name your agent
+# First time — configure Azure OpenAI credentials (interactive, secure)
 azureclaw onboard
 
-# 3. Connect
-azureclaw my-assistant connect
+# Start the sandbox
+azureclaw dev
+
+# Connect and chat
+azureclaw connect dev-agent
+```
+
+`azureclaw dev` output:
+
+```
+  ╔══════════════════════════════════════════════════╗
+  ║           AzureClaw · Local Sandbox              ║
+  ║        Secure AI Agent Runtime on Azure          ║
+  ╚══════════════════════════════════════════════════╝
+
+  ── Security ──────────────────────────────────────
+  ✓ Read-only root filesystem
+  ✓ Non-root user (sandbox:1000)
+  ✓ All root privileges removed
+  ✓ seccomp profile (azureclaw-strict)
+  ✓ Writable paths: /sandbox, /tmp only
+  ✓ tmpfs /tmp (noexec, 1GB limit)
+  ✓ API key mounted as read-only secret (/run/secrets/)
+
+  ── Inference ─────────────────────────────────────
+  ✓ Rust inference router (port 8443)
+  ✓ All model calls routed through router
+  ✓ Token counting + latency metrics enabled
+
+  ── Commands ──────────────────────────────────────
+  Connect:  azureclaw connect dev-agent
+  Shell:    azureclaw connect dev-agent --shell
+  Status:   azureclaw status dev-agent
+  Web UI:   http://localhost:18789/#token=...
+```
+
+Inside the sandbox, OpenClaw TUI is pre-configured — just start chatting:
+
+```
+azureclaw@dev-agent:~$ openclaw tui
+> say hello in 3 words
+Hello, world, friend!
+```
+
+<details>
+<summary><strong>Advanced: AKS production setup</strong></summary>
+
+For deploying to AKS (production):
+
+```bash
+az login
+azureclaw init --resource-group my-rg --location eastus2
+azureclaw onboard
+azureclaw up
+azureclaw connect my-assistant
 ```
 
 Prerequisites: Node.js 22+, Azure CLI 2.60+, an Azure subscription.
@@ -180,43 +215,40 @@ When your agent tries to reach an endpoint not in the policy, you get a real-tim
 ## How It Works (short)
 
 ```
-azureclaw up
+azureclaw onboard       → configure Azure OpenAI credentials (once)
+azureclaw dev            → start local sandbox (Docker + Azure Linux 4)
      │
      ▼
-┌──────────────────────────────────┐
-│ AKS (Azure Container Linux nodes)│
-│                                  │
-│  ┌────────────┐  ┌────────────┐ │     ┌──────────────────┐
-│  │ Sandbox A  │  │ Sandbox B  │ │────▶│ Azure OpenAI /   │
-│  │ (OpenClaw) │  │ (OpenClaw) │ │     │ AI Foundry       │
-│  └────────────┘  └────────────┘ │     └──────────────────┘
-│         │               │       │     ┌──────────────────┐
-│    ┌────┴───────────────┘       │────▶│ Azure Services   │
-│    ▼                            │     │ (Storage, Search, │
-│  Policy Engine + Inference Router│     │  Cosmos, etc.)   │
-│  Inspektor Gadget (eBPF tracing)│     └──────────────────┘
-└──────────────────────────────────┘     ┌──────────────────┐
-                                    ────▶│ Azure Monitor    │
-                                         └──────────────────┘
+┌──────────────────────────────────────┐
+│ Docker (Azure Linux 4 container)     │
+│                                      │
+│  OpenClaw gateway + TUI              │
+│  Rust inference router ──────────────┼──▶ Azure OpenAI / AI Foundry
+│  seccomp + read-only rootfs          │
+│  Prometheus metrics (port 8443)      │
+│  Web UI (port 18789)                 │
+└──────────────────────────────────────┘
+
+azureclaw up             → same container, AKS nodes (production)
 ```
 
-Each sandbox is an isolated pod on AKS. Security is layered and on by default — you don't configure it, you configure exceptions. Azure services are accessible via Managed Identity without any credentials in the sandbox.
+Each sandbox is an isolated container. Security is layered and on by default. The Rust inference router handles all model calls — auth, token counting, content safety, and audit logging.
 
 ## Key Commands
 
 | Command | What it does |
 |---|---|
-| `azureclaw up` | One-command setup: provisions Azure resources, creates your first agent |
-| `azureclaw <name> connect` | Shell into a running sandbox |
-| `azureclaw <name> model set <model>` | Switch AI model (instant, no restart) |
-| `azureclaw <name> status` | Health, model, tokens, costs, pending approvals |
-| `azureclaw <name> logs [-f]` | Stream agent logs |
-| `azureclaw <name> trace` | Live eBPF trace (network, files, processes) |
-| `azureclaw <name> costs` | Compute + inference cost breakdown |
-| `azureclaw <name> policy set <file>` | Update network/service policy (hot-reload) |
-| `azureclaw <name> approve` | Approve pending egress requests |
-| `azureclaw launch <name>` | Create a new sandboxed agent |
-| `azureclaw deploy` | Deploy full stack (CI/CD friendly) |
+| `azureclaw onboard` | Configure Azure OpenAI credentials (interactive, secure) |
+| `azureclaw dev` | Start a sandboxed agent locally via Docker |
+| `azureclaw connect <name>` | Connect and launch OpenClaw TUI |
+| `azureclaw connect <name> --shell` | Drop to bash shell inside the sandbox |
+| `azureclaw status <name>` | Health, model, security, inference router metrics |
+| `azureclaw destroy <name>` | Tear down a sandbox |
+| `azureclaw up` | Deploy to AKS (production) |
+| `azureclaw model set <name> <model>` | Switch AI model (instant, no restart) |
+| `azureclaw trace <name>` | Live eBPF trace (network, files, processes) |
+| `azureclaw costs <name>` | Compute + inference cost breakdown |
+| `azureclaw policy set <name> <file>` | Update network/service policy (hot-reload) |
 
 ## Security — On by Default
 
