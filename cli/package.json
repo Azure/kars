@@ -10,6 +10,13 @@
   "bin": {
     "azureclaw": "./dist/index.js"
   },
+  "main": "dist/plugin.js",
+  "types": "dist/plugin.d.ts",
+  "openclaw": {
+    "extensions": [
+      "./dist/plugin.js"
+    ]
+  },
   "files": [
     "dist"
   ],
