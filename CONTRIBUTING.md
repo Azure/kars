@@ -22,13 +22,13 @@ npm run build
 npm run dev   # watch mode
 ```
 
-### Controller (Go)
+### Controller & Inference Router (Rust)
 
 ```bash
-cd controller
-go mod download
-go build ./...
-go test ./...
+cd controller    # or cd inference-router
+cargo build
+cargo test
+cargo clippy
 ```
 
 ### Infrastructure (Bicep)

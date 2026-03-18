@@ -41,7 +41,7 @@ AzureClaw is Azure's answer to NVIDIA NemoClaw — an open-source stack that mak
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  ┌───────────────┐ │
 │  │ azureclaw    │  │  Blueprint    │  │  Policy Engine │  │  Inference    │ │
 │  │ CLI          │  │  Controller   │  │  (Admission +  │  │  Router      │ │
-│  │ (TypeScript) │  │  (Go/Rust)    │  │   Network)     │  │  (Go/Rust)  │ │
+│  │ (TypeScript) │  │  (Rust)       │  │   Network)     │  │  (Rust)      │ │
 │  └──────┬───────┘  └──────┬───────┘  └───────┬────────┘  └──────┬───────┘ │
 │         │                 │                   │                   │         │
 └─────────┼─────────────────┼───────────────────┼───────────────────┼─────────┘
@@ -150,9 +150,9 @@ azureclaw/
 
 ### 3.2 Blueprint Controller
 
-**Language:** Go (Kubernetes-native, controller-runtime)
+**Language:** Rust (via [kube-rs](https://kube.rs/) — CNCF Sandbox, v3.1, 5.8k dependents)
 
-The blueprint controller is a Kubernetes operator that manages the lifecycle of sandboxed OpenClaw instances. It replaces NemoClaw's Python blueprint with a cloud-native CRD-based approach.
+The blueprint controller is a Kubernetes operator that manages the lifecycle of sandboxed OpenClaw instances. It replaces NemoClaw's Python blueprint with a cloud-native CRD-based approach, built in Rust using kube-rs.
 
 **Custom Resource Definitions:**
 
@@ -595,22 +595,23 @@ azureclaw/
 │   ├── package.json
 │   └── tsconfig.json
 │
-├── controller/                      Blueprint Controller (Go)
-│   ├── api/
-│   │   └── v1alpha1/
-│   │       ├── clawsandbox_types.go
-│   │       └── groupversion_info.go
-│   ├── controllers/
-│   │   └── clawsandbox_controller.go
-│   ├── webhooks/
-│   │   └── admission.go
-│   ├── go.mod
-│   └── main.go
-│
-├── inference-router/                Inference Router (Go/Rust)
+├── controller/                      Blueprint Controller (Rust, kube-rs)
 │   ├── src/
-│   ├── Dockerfile
-│   └── Cargo.toml                   (or go.mod)
+│   │   ├── main.rs
+│   │   ├── crd.rs
+│   │   └── reconciler.rs
+│   └── Cargo.toml
+│
+├── inference-router/                Inference Router (Rust, axum)
+│   ├── src/
+│   │   ├── main.rs
+│   │   ├── auth.rs
+│   │   ├── config.rs
+│   │   ├── proxy.rs
+│   │   ├── routes.rs
+│   │   ├── safety.rs
+│   │   └── metrics.rs
+│   └── Cargo.toml
 │
 ├── policy-engine/                   Policy definitions + enforcement
 │   ├── profiles/
@@ -764,8 +765,27 @@ ACL is Microsoft's hardened, minimal, container-optimized OS. It's the ideal nod
 - Fast boot (~2s) means nodes can scale quickly
 - Automatic updates keep the OS patched without operator intervention
 
-### 9.3 Why Go for the controller?
-The Kubernetes ecosystem is Go-native. controller-runtime, client-go, and the operator SDK are all Go. Building the controller in Go ensures we use battle-tested libraries and attract Kubernetes-native contributors.
+### 9.3 Why Rust-first?
+
+AzureClaw follows a **Rust-first policy**: all new systems components are written in Rust unless there's a compelling justification to use another language.
+
+**Why:**
+- **Memory safety without GC** — critical for security-focused infrastructure. No use-after-free, no buffer overflows, no data races.
+- **Performance** — the inference router is the hot path (every model call). Rust gives us zero-copy proxying, minimal latency, and small binary size.
+- **Microsoft alignment** — Microsoft is one of the largest Rust adopters. Azure, Windows, and the Rust Foundation all have Microsoft investment.
+- **OpenShell parity** — NVIDIA's OpenShell is 87.6% Rust. Matching their language choice signals equivalent engineering rigor.
+- **kube-rs maturity** — the Rust Kubernetes ecosystem (kube-rs) is a CNCF Sandbox project, at v3.1, with 5.8k dependents and 163 contributors. It's production-ready.
+- **Single language for systems** — both the controller and inference router are Rust. One toolchain, one CI pipeline, shared crate dependencies.
+
+**Language map:**
+
+| Component | Language | Justification |
+|---|---|---|
+| Inference Router | Rust (axum) | Performance-critical proxy, memory safety |
+| Blueprint Controller | Rust (kube-rs) | K8s operator, CRD derive macros, same toolchain |
+| CLI | TypeScript | OpenClaw ecosystem compatibility, agent developer UX |
+| Policy profiles | Declarative (JSON/YAML/TE) | Not code — configuration |
+| IaC | Bicep + Helm | Azure-native, Kubernetes-native |
 
 ### 9.4 Why Confidential Containers as an optional add-on?
 NemoClaw's isolation is container + Landlock + seccomp. This is good but all in the same trust boundary as the host. Confidential Containers (via Kata + SEV-SNP/TDX) run workloads in a hardware-encrypted Trusted Execution Environment — even the cloud operator can't read the agent's memory.
