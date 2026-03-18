@@ -42,31 +42,59 @@ export function devCommand(): Command {
         if (options.build) {
           // Build from local Dockerfile using Azure Linux 4 base
           spinner.text = `Building sandbox image from Azure Linux 4 (${AZURELINUX4_BASE})...`;
-          // TODO: docker build --build-arg AZURELINUX_BASE=... -t azureclaw-sandbox:dev .
+          const { execa } = await import("execa");
+          await execa("docker", [
+            "build",
+            "--build-arg", `AZURELINUX_BASE=${AZURELINUX4_BASE}`,
+            "-t", "azureclaw-sandbox:dev",
+            "-f", "sandbox-images/openclaw/Dockerfile",
+            ".",
+          ], { stdio: "pipe" });
           image = "azureclaw-sandbox:dev";
         } else {
           // Pull pre-built sandbox image
           spinner.text = `Pulling sandbox image (${image})...`;
-          // TODO: docker pull <image>
+          const { execa } = await import("execa");
+          try {
+            await execa("docker", ["pull", image], { stdio: "pipe" });
+          } catch {
+            // If pull fails, try building locally
+            spinner.text = `Pull failed — building locally from Azure Linux 4...`;
+            await execa("docker", [
+              "build",
+              "--build-arg", `AZURELINUX_BASE=${AZURELINUX4_BASE}`,
+              "-t", "azureclaw-sandbox:dev",
+              "-f", "sandbox-images/openclaw/Dockerfile",
+              ".",
+            ], { stdio: "pipe" });
+            image = "azureclaw-sandbox:dev";
+          }
         }
 
-        // Start container with:
-        // - seccomp profile from policy-engine/profiles/seccomp/
-        // - Network restrictions simulating the policy preset
-        // - Model routing via local Azure credentials (az login)
-        // - Writable /sandbox and /tmp only
+        // Start container with security constraints
         spinner.text = `Starting local sandbox '${options.name}'...`;
-        // TODO: docker run \
-        //   --name azureclaw-${options.name} \
-        //   --security-opt seccomp=policy-engine/profiles/seccomp/azureclaw-strict.json \
-        //   --read-only --tmpfs /tmp:rw,noexec,nosuid \
-        //   -v azureclaw-${options.name}-data:/sandbox \
-        //   -e AZURE_OPENAI_ENDPOINT=... \
-        //   -it ${image}
+        const containerName = `azureclaw-${options.name}`;
+        const { execa: exec2 } = await import("execa");
 
-        // Configure inference routing (uses local az login creds)
-        spinner.text = "Configuring inference routing...";
-        // TODO: Set up model proxy using local Azure credentials
+        // Stop any existing container with the same name
+        try {
+          await exec2("docker", ["rm", "-f", containerName], { stdio: "pipe" });
+        } catch {
+          // Container didn't exist — fine
+        }
+
+        // Run the sandbox container
+        await exec2("docker", [
+          "run", "-d",
+          "--name", containerName,
+          "--security-opt", `seccomp=${process.cwd()}/policy-engine/profiles/seccomp/azureclaw-strict.json`,
+          "--read-only",
+          "--tmpfs", "/tmp:rw,noexec,nosuid,size=1g",
+          "-v", `${containerName}-data:/sandbox`,
+          "-p", "18789:18789",
+          "-e", `OPENCLAW_MODEL=${options.model}`,
+          image,
+        ], { stdio: "pipe" });
 
         spinner.succeed("Local sandbox ready!");
 
