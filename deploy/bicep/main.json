@@ -1,0 +1,780 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.38.33.27573",
+      "templateHash": "14459152280850448221"
+    }
+  },
+  "parameters": {
+    "baseName": {
+      "type": "string",
+      "defaultValue": "azureclaw",
+      "metadata": {
+        "description": "Base name for all resources"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for deployment"
+      }
+    },
+    "nodeCount": {
+      "type": "int",
+      "defaultValue": 3,
+      "minValue": 1,
+      "maxValue": 100,
+      "metadata": {
+        "description": "AKS node count for sandbox pool"
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D4s_v5",
+      "metadata": {
+        "description": "VM size for sandbox nodes"
+      }
+    },
+    "enableConfidential": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable confidential computing (AMD SEV-SNP)"
+      }
+    },
+    "enableKata": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable Kata Containers for pod-level VM isolation"
+      }
+    },
+    "enableFips": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable FIPS 140-2 validated crypto"
+      }
+    },
+    "authorizedIpRanges": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Authorized IP CIDR ranges for AKS API server and service firewalls (empty = no restriction)"
+      }
+    },
+    "openAiModelName": {
+      "type": "string",
+      "defaultValue": "gpt-4.1",
+      "metadata": {
+        "description": "Azure OpenAI model deployment name"
+      }
+    },
+    "openAiModelVersion": {
+      "type": "string",
+      "defaultValue": "2025-04-14",
+      "metadata": {
+        "description": "Azure OpenAI model version"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('{0}-acr', parameters('baseName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[format('{0}acr', parameters('baseName'))]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "authorizedIpRanges": {
+            "value": "[parameters('authorizedIpRanges')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "8843431098822094405"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "ACR name (must be globally unique, alphanumeric)"
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "authorizedIpRanges": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Authorized IP CIDR ranges (empty = allow all)"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ContainerRegistry/registries",
+              "apiVersion": "2023-07-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Premium"
+              },
+              "properties": {
+                "adminUserEnabled": false,
+                "publicNetworkAccess": "Enabled",
+                "networkRuleBypassOptions": "AzureServices",
+                "networkRuleSet": {
+                  "copy": [
+                    {
+                      "name": "ipRules",
+                      "count": "[length(parameters('authorizedIpRanges'))]",
+                      "input": {
+                        "action": "Allow",
+                        "value": "[parameters('authorizedIpRanges')[copyIndex('ipRules')]]"
+                      }
+                    }
+                  ],
+                  "defaultAction": "[if(empty(parameters('authorizedIpRanges')), 'Allow', 'Deny')]"
+                },
+                "policies": {
+                  "trustPolicy": {
+                    "type": "Notary",
+                    "status": "enabled"
+                  },
+                  "quarantinePolicy": {
+                    "status": "disabled"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "acrId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('name'))]"
+            },
+            "loginServer": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('name')), '2023-07-01').loginServer]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('{0}-kv', parameters('baseName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[format('{0}-kv', parameters('baseName'))]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "7801397398815544204"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Key Vault name"
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2023-07-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "family": "A",
+                  "name": "standard"
+                },
+                "tenantId": "[subscription().tenantId]",
+                "enableRbacAuthorization": true,
+                "enableSoftDelete": true,
+                "softDeleteRetentionInDays": 30,
+                "enablePurgeProtection": true,
+                "networkAcls": {
+                  "defaultAction": "Deny",
+                  "bypass": "AzureServices"
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "keyVaultName": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "vaultUri": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('name')), '2023-07-01').vaultUri]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('{0}-aoai', parameters('baseName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[format('{0}-aoai', parameters('baseName'))]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "modelName": {
+            "value": "[parameters('openAiModelName')]"
+          },
+          "modelVersion": {
+            "value": "[parameters('openAiModelVersion')]"
+          },
+          "authorizedIpRanges": {
+            "value": "[parameters('authorizedIpRanges')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "636445065291174368"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure OpenAI account name"
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "modelName": {
+              "type": "string",
+              "metadata": {
+                "description": "Model deployment name"
+              }
+            },
+            "modelVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "Model version"
+              }
+            },
+            "authorizedIpRanges": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Authorized IP ranges (empty = allow all)"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2024-10-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "kind": "OpenAI",
+              "sku": {
+                "name": "S0"
+              },
+              "properties": {
+                "customSubDomainName": "[parameters('name')]",
+                "publicNetworkAccess": "Enabled",
+                "networkAcls": {
+                  "copy": [
+                    {
+                      "name": "ipRules",
+                      "count": "[length(parameters('authorizedIpRanges'))]",
+                      "input": {
+                        "value": "[replace(parameters('authorizedIpRanges')[copyIndex('ipRules')], '/32', '')]"
+                      }
+                    }
+                  ],
+                  "defaultAction": "[if(empty(parameters('authorizedIpRanges')), 'Allow', 'Deny')]"
+                },
+                "disableLocalAuth": true
+              }
+            },
+            {
+              "type": "Microsoft.CognitiveServices/accounts/deployments",
+              "apiVersion": "2024-10-01",
+              "name": "[format('{0}/{1}', parameters('name'), parameters('modelName'))]",
+              "sku": {
+                "name": "Standard",
+                "capacity": 30
+              },
+              "properties": {
+                "model": {
+                  "format": "OpenAI",
+                  "name": "[parameters('modelName')]",
+                  "version": "[parameters('modelVersion')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('name'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "endpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('name')), '2024-10-01').endpoint]"
+            },
+            "accountId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('name'))]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('{0}-monitor', parameters('baseName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[format('{0}-monitor', parameters('baseName'))]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "16540663700234282735"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource name prefix"
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2023-09-01",
+              "name": "[format('{0}-law', parameters('name'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": 90
+              }
+            },
+            {
+              "type": "Microsoft.Insights/components",
+              "apiVersion": "2020-02-02",
+              "name": "[format('{0}-ai', parameters('name'))]",
+              "location": "[parameters('location')]",
+              "kind": "web",
+              "properties": {
+                "Application_Type": "web",
+                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-law', parameters('name')))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-law', parameters('name')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-law', parameters('name')))]"
+            },
+            "appInsightsConnectionString": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/components', format('{0}-ai', parameters('name'))), '2020-02-02').ConnectionString]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('{0}-aks', parameters('baseName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[format('{0}-aks', parameters('baseName'))]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "nodeCount": {
+            "value": "[parameters('nodeCount')]"
+          },
+          "vmSize": "[if(parameters('enableConfidential'), createObject('value', 'Standard_DC4as_v5'), createObject('value', parameters('vmSize')))]",
+          "enableFips": {
+            "value": "[parameters('enableFips')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-monitor', parameters('baseName'))), '2025-04-01').outputs.logAnalyticsWorkspaceId.value]"
+          },
+          "acrId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-acr', parameters('baseName'))), '2025-04-01').outputs.acrId.value]"
+          },
+          "keyVaultName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-kv', parameters('baseName'))), '2025-04-01').outputs.keyVaultName.value]"
+          },
+          "openAiAccountId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName'))), '2025-04-01').outputs.accountId.value]"
+          },
+          "authorizedIpRanges": {
+            "value": "[parameters('authorizedIpRanges')]"
+          },
+          "enableKata": {
+            "value": "[parameters('enableKata')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.38.33.27573",
+              "templateHash": "16609947099236812081"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "AKS cluster name"
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "nodeCount": {
+              "type": "int",
+              "metadata": {
+                "description": "Node count for sandbox pool"
+              }
+            },
+            "vmSize": {
+              "type": "string",
+              "metadata": {
+                "description": "VM size for nodes"
+              }
+            },
+            "enableFips": {
+              "type": "bool",
+              "metadata": {
+                "description": "Enable FIPS"
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Log Analytics workspace ID for Container Insights"
+              }
+            },
+            "acrId": {
+              "type": "string",
+              "metadata": {
+                "description": "ACR resource ID for image pull"
+              }
+            },
+            "keyVaultName": {
+              "type": "string",
+              "metadata": {
+                "description": "Key Vault name for CSI driver"
+              }
+            },
+            "openAiAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure OpenAI account resource ID (for RBAC)"
+              }
+            },
+            "enableKata": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Enable Kata Containers (pod sandboxing) for confidential isolation"
+              }
+            },
+            "authorizedIpRanges": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Authorized IP CIDR ranges for API server (empty = no restriction)"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ContainerService/managedClusters",
+              "apiVersion": "2024-09-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "dnsPrefix": "[parameters('name')]",
+                "kubernetesVersion": "1.33",
+                "apiServerAccessProfile": "[if(not(empty(parameters('authorizedIpRanges'))), createObject('authorizedIPRanges', parameters('authorizedIpRanges')), null())]",
+                "networkProfile": {
+                  "networkPlugin": "azure",
+                  "networkPolicy": "cilium",
+                  "networkDataplane": "cilium"
+                },
+                "agentPoolProfiles": "[concat(createArray(createObject('name', 'system', 'count', 2, 'vmSize', 'Standard_D2s_v5', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'System', 'enableFIPS', parameters('enableFips')), createObject('name', 'clawpool', 'count', parameters('nodeCount'), 'vmSize', parameters('vmSize'), 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox'))), if(parameters('enableKata'), createArray(createObject('name', 'katapool', 'count', parameters('nodeCount'), 'vmSize', 'Standard_D4s_v3', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'workloadRuntime', 'KataMshvVmIsolation', 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox-kata'))), createArray()))]",
+                "addonProfiles": {
+                  "omsagent": {
+                    "enabled": true,
+                    "config": {
+                      "logAnalyticsWorkspaceResourceID": "[parameters('logAnalyticsWorkspaceId')]"
+                    }
+                  },
+                  "azureKeyvaultSecretsProvider": {
+                    "enabled": true,
+                    "config": {
+                      "enableSecretRotation": "true",
+                      "rotationPollInterval": "2m"
+                    }
+                  },
+                  "azurepolicy": {
+                    "enabled": true
+                  }
+                },
+                "securityProfile": {
+                  "workloadIdentity": {
+                    "enabled": true
+                  }
+                },
+                "oidcIssuerProfile": {
+                  "enabled": true
+                },
+                "autoUpgradeProfile": {
+                  "upgradeChannel": "stable",
+                  "nodeOSUpgradeChannel": "[if(parameters('enableKata'), 'NodeImage', 'SecurityPatch')]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}-sandbox-wi', parameters('name'))]",
+              "location": "[parameters('location')]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}/{1}', format('{0}-sandbox-wi', parameters('name')), 'azureclaw-sandbox')]",
+              "properties": {
+                "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').oidcIssuerProfile.issuerURL]",
+                "subject": "system:serviceaccount:azureclaw-system:azureclaw-sandbox",
+                "audiences": [
+                  "api://AzureADTokenExchange"
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', parameters('name'))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), parameters('acrId'), 'acrpull')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+                "principalId": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').identityProfile.kubeletidentity.objectId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.CognitiveServices/accounts/{0}', last(split(parameters('openAiAccountId'), '/')))]",
+              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), parameters('openAiAccountId'), 'openai-user')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.KeyVault/vaults/{0}', parameters('keyVaultName'))]",
+              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), 'kv-secrets-user')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "clusterName": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "clusterFqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').fqdn]"
+            },
+            "oidcIssuerUrl": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').oidcIssuerProfile.issuerURL]"
+            },
+            "kubeletIdentityObjectId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').identityProfile.kubeletidentity.objectId]"
+            },
+            "sandboxIdentityClientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').clientId]"
+            },
+            "sandboxIdentityPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', format('{0}-acr', parameters('baseName')))]",
+        "[resourceId('Microsoft.Resources/deployments', format('{0}-kv', parameters('baseName')))]",
+        "[resourceId('Microsoft.Resources/deployments', format('{0}-monitor', parameters('baseName')))]",
+        "[resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "aksClusterName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-aks', parameters('baseName'))), '2025-04-01').outputs.clusterName.value]"
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-acr', parameters('baseName'))), '2025-04-01').outputs.loginServer.value]"
+    },
+    "keyVaultUri": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-kv', parameters('baseName'))), '2025-04-01').outputs.vaultUri.value]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-kv', parameters('baseName'))), '2025-04-01').outputs.keyVaultName.value]"
+    },
+    "openAiEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName'))), '2025-04-01').outputs.endpoint.value]"
+    },
+    "logAnalyticsWorkspaceId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-monitor', parameters('baseName'))), '2025-04-01').outputs.logAnalyticsWorkspaceId.value]"
+    },
+    "sandboxIdentityClientId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-aks', parameters('baseName'))), '2025-04-01').outputs.sandboxIdentityClientId.value]"
+    }
+  }
+}
