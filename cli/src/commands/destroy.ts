@@ -31,10 +31,29 @@ export function destroyCommand(): Command {
         const spinner = ora(`Deleting resource group '${rg}' and all resources...`).start();
         try {
           const { execa } = await import("execa");
+          const baseName = "azureclaw";
+
+          // Delete the resource group (async)
           await execa("az", [
             "group", "delete", "--name", rg, "--yes", "--no-wait", "--output", "none",
           ], { stdio: "pipe" });
-          spinner.succeed(`Resource group '${rg}' deletion initiated (async — takes a few minutes)`);
+
+          // Purge soft-deleted resources so a fresh 'up' works without conflicts
+          spinner.text = "Purging soft-deleted Azure OpenAI account...";
+          await execa("az", [
+            "cognitiveservices", "account", "purge",
+            "--name", `${baseName}-aoai`,
+            "--resource-group", rg,
+            "--location", options.region,
+            "--output", "none",
+          ], { stdio: "pipe" }).catch(() => {});
+
+          spinner.text = "Purging soft-deleted Key Vault...";
+          await execa("az", [
+            "keyvault", "purge", "--name", `${baseName}-kv`,
+          ], { stdio: "pipe" }).catch(() => {});
+
+          spinner.succeed(`Resource group '${rg}' deletion initiated + soft-deleted resources purged`);
         } catch (error) {
           spinner.fail("Failed to delete resource group");
           const message = error instanceof Error ? error.message : String(error);
