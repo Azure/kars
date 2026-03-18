@@ -20,7 +20,7 @@ RUN cargo build --release --package azureclaw-inference-router
 
 FROM ${AZURELINUX_BASE}
 
-RUN tdnf install -y ca-certificates shadow-utils && tdnf clean all
+RUN dnf install -y ca-certificates shadow-utils && dnf clean all
 
 # Non-root user
 RUN groupadd -g 1000 router && useradd -u 1000 -g router -s /sbin/nologin router

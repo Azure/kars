@@ -10,9 +10,12 @@
   "bin": {
     "azureclaw": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "type": "module",
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts",
+    "build": "tsc && cp -r ../policy-engine/profiles dist/profiles",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",

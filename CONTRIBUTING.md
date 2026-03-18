@@ -13,29 +13,39 @@ Thank you for your interest in contributing to AzureClaw! This project welcomes 
 
 ## Development Setup
 
-### CLI (TypeScript)
+### CLI (TypeScript — OpenClaw plugin)
 
 ```bash
 cd cli
 npm install
-npm run build
-npm run dev   # watch mode
+npm run build        # tsc + copy seccomp profiles
+npm link             # makes 'azureclaw' available globally
 ```
 
 ### Controller & Inference Router (Rust)
 
 ```bash
-cd controller    # or cd inference-router
-cargo build
-cargo test
-cargo clippy
+cargo build --release   # builds both crates
+cargo test --all
+cargo clippy --all-targets
 ```
 
-### Infrastructure (Bicep)
+### Sandbox Image (Docker + Azure Linux 4)
 
 ```bash
-cd deploy/bicep
-az bicep build --file main.bicep
+# Requires Azure Linux 4 Alpha base image (see README for access)
+docker build --build-arg AZURELINUX_BASE=azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0 \
+  -t azureclaw-sandbox:dev -f sandbox-images/openclaw/Dockerfile .
+```
+
+### Full E2E Test
+
+```bash
+azureclaw onboard                    # configure Azure OpenAI (once)
+azureclaw dev                        # start sandbox
+azureclaw connect dev-agent          # chat with agent via OpenClaw TUI
+azureclaw status dev-agent           # check health + metrics
+azureclaw destroy dev-agent          # tear down
 ```
 
 ## Code of Conduct

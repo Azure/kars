@@ -38,13 +38,25 @@ pub async fn forward_to_azure_openai(
     let start = Instant::now();
 
     // Build upstream URL
-    let upstream_url = format!(
-        "{}/openai/deployments/{}/{}?api-version={}",
-        upstream.endpoint.trim_end_matches('/'),
-        upstream.deployment,
-        path.trim_start_matches('/'),
-        upstream.api_version,
-    );
+    let upstream_url = if auth.is_api_key_mode() {
+        // Azure OpenAI with API key — needs api-version query param
+        format!(
+            "{}/openai/deployments/{}/{}?api-version={}",
+            upstream.endpoint.trim_end_matches('/'),
+            upstream.deployment,
+            path.trim_start_matches('/'),
+            upstream.api_version,
+        )
+    } else {
+        // Workload Identity — standard /openai/deployments/ path
+        format!(
+            "{}/openai/deployments/{}/{}?api-version={}",
+            upstream.endpoint.trim_end_matches('/'),
+            upstream.deployment,
+            path.trim_start_matches('/'),
+            upstream.api_version,
+        )
+    };
 
     tracing::info!(
         sandbox = %upstream.sandbox_name,
@@ -76,12 +88,20 @@ pub async fn forward_to_azure_openai(
         }
     }
 
-    // Inject Managed Identity bearer token
-    upstream_headers.insert(
-        "authorization",
-        HeaderValue::from_str(&format!("Bearer {token}"))
-            .context("Invalid token value")?,
-    );
+    // Inject auth — API key header for dev mode, Bearer token for AKS
+    if auth.is_api_key_mode() {
+        upstream_headers.insert(
+            "api-key",
+            HeaderValue::from_str(&token)
+                .context("Invalid API key value")?,
+        );
+    } else {
+        upstream_headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}"))
+                .context("Invalid token value")?,
+        );
+    }
 
     // Ensure content-type is set
     upstream_headers

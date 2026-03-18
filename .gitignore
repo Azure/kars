@@ -416,3 +416,15 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+cli/dist/
+cli/package-lock.json
+
+# Docker
+.docker/

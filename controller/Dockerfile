@@ -19,7 +19,7 @@ RUN cargo build --release --package azureclaw-controller
 
 FROM ${AZURELINUX_BASE}
 
-RUN tdnf install -y ca-certificates shadow-utils && tdnf clean all
+RUN dnf install -y ca-certificates shadow-utils && dnf clean all
 
 # Non-root user
 RUN groupadd -g 1000 controller && useradd -u 1000 -g controller -s /sbin/nologin controller

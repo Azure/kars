@@ -97,9 +97,9 @@ AzureClaw is Azure's answer to NVIDIA NemoClaw — an open-source stack that mak
 
 ### 3.1 AzureClaw CLI (`azureclaw`)
 
-**Language:** TypeScript (matching NemoClaw's approach, maximizing OpenClaw ecosystem compatibility)
+**Language:** TypeScript (OpenClaw plugin — same approach as NemoClaw)
 
-The CLI is the primary user entrypoint. It mirrors NemoClaw's UX while adding Azure-specific capabilities.
+The CLI is an OpenClaw plugin that registers `openclaw azureclaw` commands and also provides the standalone `azureclaw` CLI. It's TypeScript because OpenClaw's plugin system is TypeScript/Node.js. The CLI is thin — it orchestrates calls to `az`, `kubectl`, `helm`, and `docker`. The heavy lifting happens server-side in Rust.
 
 ```
 azureclaw/
@@ -699,18 +699,26 @@ azureclaw/
 
 ## 8. Phased Delivery
 
-### Phase 1: Foundation (Weeks 1–4)
-- [ ] CLI scaffold with `init`, `onboard`, `launch`, `connect`, `status`, `logs`
-- [ ] Sandbox container images (base + OpenClaw)
-- [ ] Bicep IaC for AKS + ACR + Key Vault + Azure OpenAI
-- [ ] Basic Helm chart for sandbox deployment
-- [ ] seccomp + read-only rootfs + non-root enforcement
-- [ ] Inference router with Azure OpenAI (Managed Identity)
-- [ ] Basic network policy (default-deny + allowlist)
-- [ ] README + quickstart documentation
-- [ ] CI/CD pipeline (build, test, scan)
+### Phase 1: Foundation — DONE
+- [x] CLI: `onboard`, `dev`, `connect`, `status`, `destroy`, `up`, `model`, `trace`, `costs`, `policy`, `logs`, `launch`, `init`
+- [x] Sandbox container image on Azure Linux 4 (with entrypoint that auto-configures OpenClaw)
+- [x] Rust inference router (axum) — compiles, runs in sandbox, proxies to Azure OpenAI, Prometheus metrics
+- [x] Rust K8s controller (kube-rs) — compiles, CRD types, reconciler with namespace/SA/NetworkPolicy/Deployment creation
+- [x] Bicep IaC for AKS + ACR + Key Vault + Azure OpenAI + Monitor
+- [x] Helm chart with CRD, RBAC, NetworkPolicy, namespace
+- [x] seccomp profile + read-only rootfs + non-root + secret mount enforcement
+- [x] `azureclaw onboard` — interactive credential wizard with verification
+- [x] `azureclaw dev` — local Docker sandbox with full security + inference router
+- [x] `azureclaw connect` — launches OpenClaw TUI (pre-configured, no setup needed)
+- [x] `azureclaw status` — real-time Docker/K8s introspection + inference router metrics
+- [x] Web UI (OpenClaw Control UI) accessible with one-click token auth
+- [x] OpenClaw gateway running inside sandbox (auto-started by entrypoint)
+- [x] Agent identity (AGENTS.md + SOUL.md) pre-configured
+- [x] README + quickstart documentation
+- [x] CI/CD pipeline (Rust + TypeScript + Bicep + Helm + security scan)
 
-### Phase 2: Security Hardening (Weeks 5–8)
+### Phase 2: Security Hardening + AKS (next)
+- [ ] Deploy to AKS end-to-end (`azureclaw up` with real Azure resources)
 - [ ] SELinux policy modules for sandbox pods (leveraging ACL's enforcing SELinux)
 - [ ] Envoy sidecar with L7 egress filtering
 - [ ] Notation image signing + Ratify admission
@@ -765,25 +773,29 @@ ACL is Microsoft's hardened, minimal, container-optimized OS. It's the ideal nod
 - Fast boot (~2s) means nodes can scale quickly
 - Automatic updates keep the OS patched without operator intervention
 
-### 9.3 Why Rust-first?
+### 9.3 Why Rust-first (server-side)?
 
-AzureClaw follows a **Rust-first policy**: all new systems components are written in Rust unless there's a compelling justification to use another language.
+AzureClaw follows a **Rust-first policy for server-side components**: the controller and inference router that run on the AKS cluster are written in Rust. The CLI is TypeScript because it's an OpenClaw plugin.
 
-**Why:**
+**Server-side (Rust):**
 - **Memory safety without GC** — critical for security-focused infrastructure. No use-after-free, no buffer overflows, no data races.
 - **Performance** — the inference router is the hot path (every model call). Rust gives us zero-copy proxying, minimal latency, and small binary size.
 - **Microsoft alignment** — Microsoft is one of the largest Rust adopters. Azure, Windows, and the Rust Foundation all have Microsoft investment.
 - **OpenShell parity** — NVIDIA's OpenShell is 87.6% Rust. Matching their language choice signals equivalent engineering rigor.
 - **kube-rs maturity** — the Rust Kubernetes ecosystem (kube-rs) is a CNCF Sandbox project, at v3.1, with 5.8k dependents and 163 contributors. It's production-ready.
-- **Single language for systems** — both the controller and inference router are Rust. One toolchain, one CI pipeline, shared crate dependencies.
+
+**Client-side (TypeScript):**
+- The CLI is an **OpenClaw plugin** — it registers `openclaw azureclaw` commands and runs inside OpenClaw's Node.js process. This is the same approach NemoClaw uses.
+- OpenClaw's plugin system is TypeScript/Node.js. Using a different language would mean we can't be a plugin.
+- The CLI is thin — it orchestrates `az`, `kubectl`, `helm`, and `docker` calls. The heavy lifting is done by the Rust components on the cluster.
 
 **Language map:**
 
 | Component | Language | Justification |
 |---|---|---|
-| Inference Router | Rust (axum) | Performance-critical proxy, memory safety |
-| Blueprint Controller | Rust (kube-rs) | K8s operator, CRD derive macros, same toolchain |
-| CLI | TypeScript | OpenClaw ecosystem compatibility, agent developer UX |
+| Inference Router | Rust (axum) | Server-side: performance-critical proxy |
+| Blueprint Controller | Rust (kube-rs) | Server-side: K8s operator |
+| CLI / OpenClaw Plugin | TypeScript | Client-side: OpenClaw plugin system is TypeScript (same as NemoClaw) |
 | Policy profiles | Declarative (JSON/YAML/TE) | Not code — configuration |
 | IaC | Bicep + Helm | Azure-native, Kubernetes-native |
 
@@ -818,9 +830,10 @@ azureclaw migrate --from-nemoclaw ~/.nemoclaw/blueprints/
 ## 11. Open Questions
 
 1. **ACL Alpha / Azure Linux 4 Alpha:** Both are in preview (limited availability). Azure Linux 4 container base is available via ACR (`azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0`). ACL for AKS nodes may need `AzureLinux` osSKU as fallback until GA. Alpha testers must request access — see [AzureLinux4Alpha1](https://eng.ms/docs/products/azure-linux/overview/AzureLinux4Alpha1) and [Azure Container Linux Alpha](https://dev.azure.com/mariner-org/mariner/_wiki/wikis/Azure%20Container%20Linux%20Plan/6490/Azure-Container-Linux-Alpha).
-2. **OpenClaw plugin registration:** Should AzureClaw register as an OpenClaw plugin (like NemoClaw does) or operate as a standalone orchestrator?
+2. **OpenClaw plugin registration:** Yes — AzureClaw registers as an OpenClaw plugin (like NemoClaw does). The TypeScript CLI is the client-side plugin; `openclaw azureclaw` commands are available alongside `openclaw nemoclaw`. The Rust components (controller, inference router) are server-side only.
 3. **GPU support:** Do we want GPU node pools for local inference (Ollama on AKS)? What's the cost model?
-4. **Browser sandboxing:** OpenClaw has browser control — how do we sandbox headless Chrome in Confidential Containers?
+4. **Rust plugin for OpenClaw:** Investigate whether OpenClaw's plugin system supports Rust plugins (or could be extended to). If not, consider contributing Rust plugin support upstream to OpenClaw — this would let us move the CLI to Rust and go fully Rust across the stack.
+5. **Browser sandboxing:** OpenClaw has browser control — how do we sandbox headless Chrome in Confidential Containers?
 5. **Channel bridging:** For always-on agents, do we need a persistent ingress (Telegram webhook, etc.) at the AKS level?
 6. **Naming:** Is "AzureClaw" the final name or do we want something more... Azure-y? (AzureShell? Azure Agent Shell? Azure Claw Guard?)
 
