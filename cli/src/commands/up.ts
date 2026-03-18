@@ -26,7 +26,8 @@ export function upCommand(): Command {
     )
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
-    .option("--source-acr <server>", "Source ACR for pre-built images", "azureclawacr.azurecr.io")
+    .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
+    .option("--build", "Build images locally and push to ACR (developer mode)", false)
     .option("--dry-run", "Show what would be done without executing", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
@@ -50,7 +51,7 @@ export function upCommand(): Command {
         console.log(`   6. Add AKS egress IP to ACR + AOAI firewalls`);
         console.log(`   7. Attach ACR to AKS (az aks update --attach-acr)`);
         console.log(`   8. Get AKS credentials`);
-        console.log(`   9. Import images from ${options.sourceAcr}: controller, inference-router, openclaw-sandbox`);
+        console.log(`   9. ${options.build ? "Build images locally + push to ACR (docker build + docker push)" : `Import images from ${options.sourceAcr}: controller, inference-router, openclaw-sandbox`}`);
         console.log(`  10. Helm install: CRD + controller + seccomp DaemonSet + RBAC`);
         console.log(`  11. Create federated credential for azureclaw-${options.name}:sandbox`);
         console.log(`  12. Create ClawSandbox CR '${options.name}' (isolation: ${options.isolation})`);
@@ -290,30 +291,64 @@ export function upCommand(): Command {
           "--output", "none",
         ], { stdio: "pipe" });
 
-        // ── Step 5: Import pre-built images from source ACR ─────────────
+        // ── Step 5: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
-        const sourceAcr = options.sourceAcr;
-        const images = [
-          { source: `${sourceAcr}/azureclaw-controller:0.1.0`, target: "azureclaw-controller:0.1.0" },
-          { source: `${sourceAcr}/azureclaw-inference-router:0.1.0`, target: "azureclaw-inference-router:0.1.0" },
-          { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
-        ];
 
-        for (const img of images) {
-          spinner.text = `Importing ${img.target}...`;
-          await execa("az", [
-            "acr", "import",
-            "--name", acr,
-            "--source", img.source,
-            "--image", img.target,
-            "--force",
-          ], { stdio: "pipe" }).catch(() => {
-            // Image may already exist — non-fatal
-          });
+        if (options.build) {
+          // Developer mode: build locally and push
+          spinner.text = "Logging into ACR...";
+          await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
+
+          const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = []) => {
+            spinner.text = `Building ${tag}...`;
+            const args = [
+              "build", "--platform", "linux/amd64",
+              "--provenance=false", "--sbom=false",
+              "-f", path.join(repoRoot, dockerfile),
+              "-t", `${acrLoginServer}/${tag}`,
+              ...buildArgs,
+              repoRoot,
+            ];
+            await execa("docker", args, { stdio: "pipe" });
+            spinner.text = `Pushing ${tag}...`;
+            await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
+          };
+
+          await buildPush("controller/Dockerfile", "azureclaw-controller:0.1.0");
+          await buildPush("inference-router/Dockerfile", "azureclaw-inference-router:0.1.0");
+          await buildPush(
+            "sandbox-images/openclaw/Dockerfile",
+            "openclaw-sandbox:latest",
+            ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:0.1.0`]
+          );
+
+          spinner.succeed("Images built and pushed to ACR");
+          spinner.start();
+        } else {
+          // Customer mode: import pre-built images from source ACR
+          const sourceAcr = options.sourceAcr;
+          const images = [
+            { source: `${sourceAcr}/azureclaw-controller:0.1.0`, target: "azureclaw-controller:0.1.0" },
+            { source: `${sourceAcr}/azureclaw-inference-router:0.1.0`, target: "azureclaw-inference-router:0.1.0" },
+            { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
+          ];
+
+          for (const img of images) {
+            spinner.text = `Importing ${img.target}...`;
+            await execa("az", [
+              "acr", "import",
+              "--name", acr,
+              "--source", img.source,
+              "--image", img.target,
+              "--force",
+            ], { stdio: "pipe" }).catch(() => {
+              // Image may already exist — non-fatal
+            });
+          }
+
+          spinner.succeed("Images available in ACR");
+          spinner.start();
         }
-
-        spinner.succeed("Images available in ACR");
-        spinner.start();
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         spinner.text = "Installing AzureClaw controller...";
