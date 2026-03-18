@@ -1,0 +1,26 @@
+{
+  "id": "azureclaw",
+  "name": "AzureClaw",
+  "version": "0.1.0",
+  "description": "Secure AI agent runtime on Azure — sandboxed OpenClaw with Azure OpenAI, Azure Linux 4, and Rust inference router",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "description": "Azure OpenAI endpoint (e.g. https://your-resource.openai.azure.com)"
+      },
+      "model": {
+        "type": "string",
+        "description": "Default Azure OpenAI model deployment name",
+        "default": "gpt-4.1"
+      },
+      "sandboxName": {
+        "type": "string",
+        "description": "Name for the sandbox",
+        "default": "dev-agent"
+      }
+    },
+    "additionalProperties": false
+  }
+}
