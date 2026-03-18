@@ -105,12 +105,22 @@ export function destroyCommand(): Command {
             "--ignore-not-found",
           ], { stdio: "pipe" });
 
-          // Clean up sandbox namespaces
+          // Clean up sandbox namespaces and federated credentials
           const { stdout: nsList } = await execa("kubectl", [
             "get", "ns", "-o", "jsonpath={.items[*].metadata.name}",
           ], { stdio: "pipe" });
           for (const ns of nsList.split(" ")) {
             if (ns.startsWith("azureclaw-") && ns !== "azureclaw-system") {
+              // Delete federated credential for this sandbox
+              const sandboxName = ns.replace("azureclaw-", "");
+              await execa("az", [
+                "identity", "federated-credential", "delete",
+                "--identity-name", "azureclaw-aks-sandbox-wi",
+                "--resource-group", rg,
+                "--name", `azureclaw-${sandboxName}`,
+                "--yes", "--output", "none",
+              ], { stdio: "pipe" }).catch(() => {});
+
               await execa("kubectl", [
                 "delete", "ns", ns, "--ignore-not-found", "--wait=false",
               ], { stdio: "pipe" }).catch(() => {});
