@@ -125,7 +125,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
     }
     autoUpgradeProfile: {
       upgradeChannel: 'stable'
-      nodeOSUpgradeChannel: 'SecurityPatch'
+      nodeOSUpgradeChannel: 'NodeImage'  // SecurityPatch not supported on Kata nodes
     }
   }
 }
