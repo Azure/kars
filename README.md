@@ -254,12 +254,13 @@ Each sandbox is an isolated container. Security is layered and on by default. Th
 
 You don't need to be a security expert. AzureClaw ships secure defaults:
 
-- **Network:** Default-deny egress. Only endpoints you list are reachable.
+- **Network:** Default-deny egress. Only endpoints you list are reachable. The Rust inference router acts as an inference-as-network-policy enforcement point — all model calls are proxied, authenticated, and content-filtered before leaving the sandbox.
 - **Filesystem:** Read-only root. Agents can write to `/sandbox` and `/tmp` only.
 - **Identity:** No API keys or secrets in the sandbox. Ever. Managed Identity handles auth.
 - **Inference:** Every model call goes through Content Safety + Prompt Shields. Configurable, on by default.
 - **Node OS:** Azure Container Linux (AKS) + Azure Linux 4 (container base) — immutable, SELinux-enforcing, CIS-hardened, auto-patched.
-- **Visibility:** Every syscall, file open, network connection, and DNS lookup is traced.
+- **Governance:** Azure Policy for Kubernetes enforces subscription-level constraints (allowed regions, VM sizes, mandatory tags, deny public endpoints) — no Defender for Cloud required.
+- **Visibility:** Every syscall, file open, network connection, and DNS lookup is traced via Inspektor Gadget (eBPF).
 
 Want to go further? Add `--isolation confidential` and your workload runs in a hardware-encrypted TEE (AMD SEV-SNP).
 

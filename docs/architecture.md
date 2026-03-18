@@ -45,11 +45,13 @@ Multi-layer enforcement:
 | Layer | Technology | Scope |
 |-------|-----------|-------|
 | L3/L4 Network | Kubernetes NetworkPolicy (Cilium) | Namespace-level egress control |
+| Inference (network policy) | Rust inference router | Inference-as-network-policy — all model calls proxied, authenticated, content-filtered. No Azure credentials reach the OpenClaw process. |
 | L7 Application | Envoy sidecar proxy | HTTP method/path/header filtering |
+| Governance | Azure Policy for Kubernetes | Subscription-level constraints (allowed regions, VM sizes, deny public endpoints). AKS add-on — no Defender for Cloud required. |
 | Kernel | seccomp + SELinux | Syscall filtering + MAC (ACL-native SELinux) |
 | Container | Pod Security Standards | Read-only rootfs, non-root, no privesc |
 | Hardware | Confidential Containers (SEV-SNP) | Memory encryption (optional add-on) |
-| Inference | Azure AI Content Safety | Input/output content filtering |
+| Inference safety | Azure AI Content Safety | Input/output content filtering |
 | Runtime observability | Inspektor Gadget (eBPF) | Syscall/network/file/process tracing |
 | Node compliance | azure-osconfig (TODO) | CIS AKS Optimized + STIG baselines |
 

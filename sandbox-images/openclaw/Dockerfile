@@ -58,8 +58,12 @@ COPY --from=builder /usr/local/bin/openclaw /usr/local/bin/openclaw
 # Copy inference router from Rust builder
 COPY --from=rust-builder /build/target/release/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
 
-# Ensure openclaw binary is linked
-RUN ln -sf /usr/local/lib/node_modules/openclaw/dist/index.js /usr/local/bin/openclaw
+# Copy AzureClaw OpenClaw plugin (pre-built dist/)
+COPY cli/dist/ /opt/azureclaw-plugin/
+COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
+
+# Ensure openclaw binary is linked (must use openclaw.mjs entry for plugin CLI support)
+RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
 # Create writable directories
 RUN mkdir -p /sandbox /tmp && \

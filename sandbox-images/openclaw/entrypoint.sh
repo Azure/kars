@@ -114,6 +114,20 @@ You are friendly but professional. You get things done.
 EOF
 
   echo "[azureclaw] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
+
+  # Install AzureClaw plugin into OpenClaw's extensions directory
+  if [ -d /opt/azureclaw-plugin ]; then
+    mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
+    cp /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
+    cp /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
+    # Copy all built JS/TS files preserving directory structure
+    cd /opt/azureclaw-plugin && find . -name '*.js' -o -name '*.d.ts' -o -name '*.map' | while read f; do
+      mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist/$(dirname "$f")"
+      cp "$f" "$OPENCLAW_DIR/extensions/azureclaw/dist/$f"
+    done
+    cd /sandbox
+    echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
+  fi
 else
   # Load credentials for existing config
   export AZURE_OPENAI_API_KEY="${API_KEY}"

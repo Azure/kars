@@ -183,7 +183,6 @@ export function devCommand(): Command {
           "--tmpfs", "/home:ro,size=0",
           "--tmpfs", "/media:ro,size=0",
           "--tmpfs", "/mnt:ro,size=0",
-          "--tmpfs", "/opt:ro,size=0",
           "--tmpfs", "/srv:ro,size=0",
           "--tmpfs", "/root:ro,size=0",
           "-p", "18789:18789",

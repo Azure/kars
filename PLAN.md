@@ -146,6 +146,7 @@ azureclaw/
 | `azureclaw <name> policy set` | Apply/update network policy (hot-reload) |
 | `azureclaw <name> approve` | Approve a pending egress request |
 | `azureclaw <name> destroy` | Teardown sandbox with confirmation |
+| `azureclaw migrate` | Migrate existing OpenClaw installation into AzureClaw sandbox |
 | `azureclaw deploy` | Deploy full stack to AKS (CI/CD friendly) |
 
 ### 3.2 Blueprint Controller
@@ -228,27 +229,35 @@ The policy engine is a key differentiator. It combines multiple enforcement laye
 - Default-deny egress per sandbox namespace
 - Allowlist-only outbound
 
-#### Layer 2: Envoy Sidecar Proxy (L7)
-- Full HTTP method + path filtering (like NemoClaw but richer)
+#### Layer 2: Rust Inference Router (inference-as-network-policy)
+- **All inference calls** are routed through the Rust inference router (axum) — the router is both the authentication layer and a network enforcement point
+- Blocks unauthorized model access, enforces token budgets, and gates content safety
+- In dev mode: same binary runs inside the sandbox on port 8443
+- In AKS mode: runs as a cluster service, all sandbox pods route through it
+- The router replaces the need for a separate AI-egress firewall — it is the only path to Azure OpenAI
+
+#### Layer 3: Envoy Sidecar Proxy (L7)
+- Full HTTP method + path filtering for non-inference egress (APIs, webhooks)
 - TLS origination and inspection
 - Request/response logging
 - Rate limiting per endpoint
 - Request body size limits
 
-#### Layer 3: Admission Webhook (preventive)
+#### Layer 4: Admission Webhook + Azure Policy (preventive)
 - Validates all pod specs against security baseline
 - Blocks privilege escalation, host mounts, capabilities
 - Enforces image allowlists (only signed images from ACR)
-- Integrates with Azure Policy for Kubernetes
+- **Azure Policy for Kubernetes** enforces governance at subscription-level (no Defender for Cloud required)
+- Policy assignments ensure all AzureClaw deployments use private endpoints, content safety, approved models, etc.
 
-#### Layer 4: Kernel-level (defense in depth)
+#### Layer 5: Kernel-level (defense in depth)
 - **seccomp:** Strict syscall filtering (deny-by-default profile)
 - **SELinux:** Mandatory access control via ACL's enforcing SELinux policy (type `azureclaw_sandbox_t`)
 - **Read-only rootfs:** Writable only to /sandbox and /tmp via emptyDir
 - **Non-root:** All containers run as non-root user
 - **No new capabilities:** `allowPrivilegeEscalation: false`
 
-#### Layer 5: Confidential Containers (optional add-on)
+#### Layer 6: Confidential Containers (optional add-on)
 - **AMD SEV-SNP** or **Intel TDX** memory encryption
 - Workload attestation
 - Hardware-rooted trust
@@ -720,12 +729,14 @@ azureclaw/
 ### Phase 2: Security Hardening + AKS (next)
 - [ ] Deploy to AKS end-to-end (`azureclaw up` with real Azure resources)
 - [ ] SELinux policy modules for sandbox pods (leveraging ACL's enforcing SELinux)
-- [ ] Envoy sidecar with L7 egress filtering
+- [ ] Envoy sidecar with L7 egress filtering (non-inference traffic)
+- [ ] Rust inference router Workload Identity auth (prod path — already scaffolded)
 - [ ] Notation image signing + Ratify admission
-- [ ] Azure Policy for Kubernetes integration
+- [ ] Azure Policy for Kubernetes integration (governance without Defender for Cloud)
 - [ ] Key Vault CSI driver for secrets
 - [ ] Operator approval flow (TUI + API)
 - [ ] Inspektor Gadget DaemonSet deployment + integration with TUI
+- [ ] `azureclaw migrate` — import existing OpenClaw installations into AzureClaw sandbox
 - [ ] SBOM generation in CI
 
 ### Phase 3: Enterprise Features (Weeks 9–12)
@@ -808,6 +819,27 @@ Given NemoClaw's TEE narrative, we maintain support to ensure competitive parity
 
 ### 9.5 Why not fork OpenShell?
 OpenShell is a Rust application that embeds K3s. It's well-designed for single-developer use but fundamentally different from what we need (managed AKS, Azure integrations). It's cleaner to build AzureClaw as a Kubernetes-native stack from the start rather than retrofitting OpenShell.
+
+### 9.6 Integration approach — how Azure services are exposed
+
+AzureClaw has a split architecture with four distinct integration surfaces. Each has a clear responsibility:
+
+| Surface | Language | Runs where | Responsibility |
+|---|---|---|---|
+| **OpenClaw plugin** (`cli/src/plugin.ts`) | TypeScript | Inside OpenClaw's Node.js process | Model provider registration, CLI subcommands (`openclaw azureclaw <cmd>`), slash commands (`/azureclaw`). This is the **user-facing surface** — it tells OpenClaw which models exist and gives the user visibility from inside the assistant. |
+| **Rust inference router** (`inference-router/`) | Rust (axum) | Sidecar binary in the container (dev) or pod (AKS) | Auth (Workload Identity / API key), Content Safety filtering, Prompt Shields, token budgets, latency metrics. This is the **security-critical path** — every model call passes through it. No Azure credentials ever reach the OpenClaw process. |
+| **Host CLI** (`azureclaw`) | TypeScript | Developer's machine | Orchestrates `az`, `kubectl`, `helm`, `docker`. Provisions infrastructure, manages sandboxes, streams logs. Not inside the sandbox. |
+| **IaC** (Bicep + Helm) | Declarative | ARM / AKS API | Defines the Azure resources (AKS cluster, Key Vault, AOAI, Monitor, ACR, Azure Policy assignments) and Kubernetes manifests (RBAC, NetworkPolicy, CRDs). |
+
+**Why not put everything in the plugin?** NemoClaw routes model calls through its TypeScript plugin. AzureClaw deliberately doesn't — the Rust inference router handles the security-critical path (auth, content safety, token budgets) in a separate process with no access to the broader Node.js runtime. This means:
+- A compromised OpenClaw process can't extract Azure credentials (they never enter the Node.js process)
+- Content safety enforcement can't be bypassed by plugin code
+- Token budget enforcement is in Rust, not JavaScript (no prototype pollution, no monkey-patching)
+- The router runs as a separate binary with its own seccomp profile
+
+**Plugin is the surface, router is the enforcement.** The plugin tells OpenClaw "these models exist" and provides UX (status, slash commands). The router actually talks to Azure OpenAI and enforces policy. The host CLI provisions the infrastructure. The IaC defines it declaratively.
+
+**Azure Policy for governance.** Subscription-level governance (allowed VM sizes, allowed regions, mandatory tags, deny public endpoints) is enforced via Azure Policy for Kubernetes — no Defender for Cloud required. The AKS add-on `azure-policy` evaluates built-in and custom policy definitions at admission time.
 
 ---
 
