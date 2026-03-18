@@ -1,0 +1,108 @@
+# AzureClaw SELinux Policy Module for OpenClaw Sandbox Agents
+#
+# Azure Container Linux ships with SELinux in enforcing mode.
+# This type enforcement (.te) file defines the azureclaw_sandbox_t
+# confined domain for sandbox containers.
+#
+# On ACL, container_t is the base type for all containers. This policy
+# creates a more restricted sub-type for AzureClaw sandbox pods.
+
+policy_module(azureclaw_sandbox, 1.0.0)
+
+########################################
+# Type declarations
+########################################
+
+# The confined domain for AzureClaw sandbox containers
+type azureclaw_sandbox_t;
+
+# Writable directories inside the sandbox
+type azureclaw_sandbox_data_t;    # /sandbox
+type azureclaw_sandbox_tmp_t;     # /tmp
+
+########################################
+# Domain transition
+########################################
+
+# Sandbox containers transition into azureclaw_sandbox_t
+# (triggered by the container runtime label assignment)
+container_domain_template(azureclaw_sandbox)
+
+########################################
+# Filesystem access
+########################################
+
+# Read-only access to system paths
+files_read_etc_files(azureclaw_sandbox_t)
+files_read_usr_files(azureclaw_sandbox_t)
+libs_use_ld_so(azureclaw_sandbox_t)
+libs_use_shared_libs(azureclaw_sandbox_t)
+
+# Read-write access to /sandbox
+allow azureclaw_sandbox_t azureclaw_sandbox_data_t:dir { create read write getattr search add_name remove_name open };
+allow azureclaw_sandbox_t azureclaw_sandbox_data_t:file { create read write getattr setattr unlink open append rename };
+allow azureclaw_sandbox_t azureclaw_sandbox_data_t:lnk_file { create read getattr unlink };
+
+# Read-write access to /tmp
+allow azureclaw_sandbox_t azureclaw_sandbox_tmp_t:dir { create read write getattr search add_name remove_name open };
+allow azureclaw_sandbox_t azureclaw_sandbox_tmp_t:file { create read write getattr setattr unlink open append rename };
+
+# /dev/null, /dev/urandom
+allow azureclaw_sandbox_t null_device_t:chr_file { read write open getattr };
+allow azureclaw_sandbox_t urandom_device_t:chr_file { read open getattr };
+
+# /proc (read-only, restricted)
+allow azureclaw_sandbox_t proc_t:dir { read search getattr open };
+allow azureclaw_sandbox_t proc_t:file { read getattr open };
+
+########################################
+# Network access
+########################################
+
+# TCP/UDP sockets (actual filtering done by NetworkPolicy + Envoy sidecar)
+allow azureclaw_sandbox_t self:tcp_socket { create connect accept listen bind getopt setopt read write getattr shutdown };
+allow azureclaw_sandbox_t self:udp_socket { create connect bind getopt setopt read write getattr };
+
+# Unix domain sockets (for internal IPC)
+allow azureclaw_sandbox_t self:unix_stream_socket { create connect accept listen bind read write getattr };
+allow azureclaw_sandbox_t self:unix_dgram_socket { create connect bind read write getattr sendto };
+
+# Deny raw sockets (no packet sniffing, no ICMP from sandbox)
+dontaudit azureclaw_sandbox_t self:rawip_socket *;
+dontaudit azureclaw_sandbox_t self:packet_socket *;
+
+########################################
+# Process restrictions
+########################################
+
+# Allow fork/exec for Node.js, git, etc.
+allow azureclaw_sandbox_t self:process { fork signal sigchld getsched setsched };
+
+# Deny ptrace (no debugging other processes)
+dontaudit azureclaw_sandbox_t self:process ptrace;
+dontaudit azureclaw_sandbox_t domain:process ptrace;
+
+# Deny module loading
+dontaudit azureclaw_sandbox_t self:capability sys_module;
+
+# Deny mount operations
+dontaudit azureclaw_sandbox_t self:capability sys_admin;
+
+########################################
+# Capability restrictions
+########################################
+
+# Drop all capabilities except the minimum needed
+allow azureclaw_sandbox_t self:capability { chown dac_read_search fowner fsetid kill setgid setuid };
+
+# Explicitly deny dangerous capabilities
+dontaudit azureclaw_sandbox_t self:capability { sys_admin sys_ptrace sys_module sys_rawio sys_boot net_admin net_raw mknod sys_chroot };
+dontaudit azureclaw_sandbox_t self:capability2 { mac_admin mac_override };
+
+########################################
+# Deny everything else by default
+########################################
+
+# SELinux denies anything not explicitly allowed above.
+# AuditAllowance rules above form the complete allowlist.
+# Any access not listed will be denied and logged.

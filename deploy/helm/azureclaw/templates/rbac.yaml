@@ -1,0 +1,59 @@
+---
+# Controller ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: azureclaw-controller
+  namespace: azureclaw-system
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: controller
+  annotations:
+    azure.workload.identity/client-id: {{ "{{ .Values.azure.workloadIdentity.clientId }}" }}
+---
+# Controller ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: azureclaw-controller
+  labels:
+    app.kubernetes.io/name: azureclaw
+rules:
+  # Manage ClawSandbox CRDs
+  - apiGroups: ["azureclaw.azure.com"]
+    resources: ["clawsandboxes", "clawsandboxes/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Create and manage sandbox namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "delete"]
+  # Manage pods, services, configmaps in sandbox namespaces
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage network policies
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+# Bind controller role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: azureclaw-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: azureclaw-controller
+subjects:
+  - kind: ServiceAccount
+    name: azureclaw-controller
+    namespace: azureclaw-system

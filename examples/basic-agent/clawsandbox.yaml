@@ -1,0 +1,62 @@
+# AzureClaw Example: Basic OpenClaw Agent
+# This creates a sandboxed OpenClaw agent with default security settings.
+
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: my-assistant
+  namespace: azureclaw-system
+spec:
+  openclaw:
+    version: "2026.3.13"
+    image: azureclaw.azurecr.io/openclaw-sandbox:latest
+    config:
+      agent:
+        model: "azure/gpt-4.1"
+
+  sandbox:
+    isolation: "enhanced"
+    seccompProfile: "azureclaw-strict"
+    selinuxContext: "azureclaw_sandbox_t"
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+
+  inference:
+    provider: "azure-openai"
+    model: "gpt-4.1"
+    contentSafety: true
+    promptShields: true
+    tokenBudget:
+      daily: 500000
+      perRequest: 128000
+
+  networkPolicy:
+    defaultDeny: true
+    approvalRequired: true
+    allowedEndpoints:
+      - host: "github.com"
+        port: 443
+        methods: ["GET"]
+      - host: "api.github.com"
+        port: 443
+        methods: ["GET"]
+      - host: "clawhub.com"
+        port: 443
+        methods: ["GET", "POST"]
+
+  # Azure services accessible from inside the sandbox via Managed Identity
+  azureServices:
+    - service: ai-foundry
+      permissions: [inference, evaluate]
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

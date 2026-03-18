@@ -1,0 +1,210 @@
+# AzureClaw ClawSandbox CRD
+# This CRD defines the custom resource for managing OpenClaw sandboxes
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clawsandboxes.azureclaw.azure.com
+  labels:
+    app.kubernetes.io/name: azureclaw
+spec:
+  group: azureclaw.azure.com
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["openclaw", "sandbox", "inference"]
+              properties:
+                openclaw:
+                  type: object
+                  properties:
+                    version:
+                      type: string
+                      description: "OpenClaw version to deploy"
+                    image:
+                      type: string
+                      description: "Container image for the sandbox"
+                    config:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                      description: "OpenClaw configuration (openclaw.json equivalent)"
+                sandbox:
+                  type: object
+                  properties:
+                    isolation:
+                      type: string
+                      enum: ["standard", "enhanced", "confidential"]
+                      default: "enhanced"
+                      description: "Isolation level"
+                    seccompProfile:
+                      type: string
+                      default: "azureclaw-strict"
+                    selinuxContext:
+                      type: string
+                      default: "azureclaw_sandbox_t"
+                    readOnlyRootFilesystem:
+                      type: boolean
+                      default: true
+                    runAsNonRoot:
+                      type: boolean
+                      default: true
+                    allowPrivilegeEscalation:
+                      type: boolean
+                      default: false
+                    writablePaths:
+                      type: array
+                      items:
+                        type: string
+                      default: ["/sandbox", "/tmp"]
+                inference:
+                  type: object
+                  properties:
+                    provider:
+                      type: string
+                      enum: ["azure-openai", "azure-ai-foundry", "self-hosted"]
+                      default: "azure-openai"
+                    endpoint:
+                      type: string
+                    model:
+                      type: string
+                      default: "gpt-4.1"
+                    fallback:
+                      type: object
+                      properties:
+                        provider:
+                          type: string
+                        model:
+                          type: string
+                    contentSafety:
+                      type: boolean
+                      default: true
+                    promptShields:
+                      type: boolean
+                      default: true
+                    tokenBudget:
+                      type: object
+                      properties:
+                        daily:
+                          type: integer
+                        perRequest:
+                          type: integer
+                azureServices:
+                  type: array
+                  description: "Azure services the sandbox can access via Managed Identity"
+                  items:
+                    type: object
+                    required: ["service"]
+                    properties:
+                      service:
+                        type: string
+                        description: "Service type: storage, ai-search, cosmos-db, ai-foundry, keyvault, service-bus, event-hubs, sql"
+                      account:
+                        type: string
+                        description: "Account/resource name"
+                      permissions:
+                        type: array
+                        items:
+                          type: string
+                        description: "Permissions: read, write, search, inference, evaluate"
+                networkPolicy:
+                  type: object
+                  properties:
+                    defaultDeny:
+                      type: boolean
+                      default: true
+                    approvalRequired:
+                      type: boolean
+                      default: true
+                    allowedEndpoints:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          host:
+                            type: string
+                          port:
+                            type: integer
+                          methods:
+                            type: array
+                            items:
+                              type: string
+                          paths:
+                            type: array
+                            items:
+                              type: string
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    limits:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Creating", "Running", "Failed", "Terminating"]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                sandboxPod:
+                  type: string
+                  description: "Name of the sandbox pod"
+                namespace:
+                  type: string
+                  description: "Namespace created for this sandbox"
+                inferenceEndpoint:
+                  type: string
+                tokensUsed:
+                  type: object
+                  properties:
+                    input:
+                      type: integer
+                    output:
+                      type: integer
+                pendingApprovals:
+                  type: integer
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Model
+          type: string
+          jsonPath: .spec.inference.model
+        - name: Isolation
+          type: string
+          jsonPath: .spec.sandbox.isolation
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: clawsandboxes
+    singular: clawsandbox
+    kind: ClawSandbox
+    shortNames:
+      - cs
+      - claw
