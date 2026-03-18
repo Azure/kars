@@ -27,9 +27,45 @@ export function upCommand(): Command {
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
     .option("--source-acr <server>", "Source ACR for pre-built images", "azureclawacr.azurecr.io")
+    .option("--dry-run", "Show what would be done without executing", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
       const bold = chalk.bold;
+
+      // ── Dry-run mode: just print the plan ──────────────────────────
+      if (options.dryRun) {
+        const rg = options.resourceGroup || `azureclaw-${options.region}`;
+        const isolationDesc: Record<string, string> = {
+          standard: "standard (runc + RuntimeDefault seccomp)",
+          enhanced: "enhanced (runc + azureclaw-strict seccomp)",
+          confidential: "confidential (Kata VM isolation)",
+        };
+        console.log(blue(`\n  AzureClaw · Dry Run\n`));
+        console.log(`  Steps that would execute:\n`);
+        console.log(`   1. Check Azure credentials (az account show)`);
+        console.log(`   2. Create resource group '${rg}' in ${options.region}`);
+        console.log(`   3. Detect caller public IP for firewall rules`);
+        console.log(`   4. Register features: EncryptionAtHost${options.isolation === "confidential" ? ", KataVMIsolationPreview + aks-preview ext" : ""}`);
+        console.log(`   5. Deploy Bicep: AKS + ACR + KV + AOAI + Monitor + WI${options.isolation === "confidential" ? " + katapool" : ""}`);
+        console.log(`   6. Add AKS egress IP to ACR + AOAI firewalls`);
+        console.log(`   7. Attach ACR to AKS (az aks update --attach-acr)`);
+        console.log(`   8. Get AKS credentials`);
+        console.log(`   9. Import images from ${options.sourceAcr}: controller, inference-router, openclaw-sandbox`);
+        console.log(`  10. Helm install: CRD + controller + seccomp DaemonSet + RBAC`);
+        console.log(`  11. Create federated credential for azureclaw-${options.name}:sandbox`);
+        console.log(`  12. Create ClawSandbox CR '${options.name}' (isolation: ${options.isolation})`);
+        console.log(`  13. Wait for sandbox Running`);
+        console.log(`\n  Configuration:`);
+        console.log(`    Name:       ${options.name}`);
+        console.log(`    Model:      ${options.model}`);
+        console.log(`    Isolation:  ${isolationDesc[options.isolation] || options.isolation}`);
+        console.log(`    Region:     ${options.region}`);
+        console.log(`    RG:         ${rg}`);
+        console.log(`    Source ACR: ${options.sourceAcr}`);
+        console.log(`    Skip Infra: ${options.skipInfra}`);
+        console.log();
+        return;
+      }
 
       console.log(blue(`
   ╔══════════════════════════════════════════════════╗
