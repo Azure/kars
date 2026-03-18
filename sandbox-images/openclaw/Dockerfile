@@ -21,9 +21,11 @@ FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 
 FROM ${AZURELINUX_BASE} AS builder
 
-# Install Node.js 20, npm, git, ca-certificates (AL3 bundles npm with nodejs)
-RUN tdnf install -y nodejs npm git ca-certificates && \
-    tdnf clean all
+# Install Node.js 22 LTS (OpenClaw requires 22+, AL3 only has v20)
+RUN tdnf install -y tar gzip ca-certificates curl git && tdnf clean all
+RUN curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.gz -o /tmp/node.tar.gz && \
+    tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
+    rm /tmp/node.tar.gz
 
 # Install OpenClaw
 RUN npm install -g openclaw@latest
@@ -32,9 +34,11 @@ RUN npm install -g openclaw@latest
 
 FROM ${AZURELINUX_BASE}
 
-# Install Node.js runtime and minimal tools
-RUN tdnf install -y nodejs git shadow-utils && \
-    tdnf clean all
+# Install Node.js 22 LTS runtime and minimal tools
+RUN tdnf install -y tar gzip curl git shadow-utils ca-certificates && tdnf clean all
+RUN curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.gz -o /tmp/node.tar.gz && \
+    tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
+    rm /tmp/node.tar.gz
 
 # Security: create non-root user
 RUN groupadd -g 1000 sandbox && \
@@ -43,9 +47,9 @@ RUN groupadd -g 1000 sandbox && \
 # Set prompt for the sandbox user
 RUN echo 'export PS1="azureclaw@\\h:\\w\\$ "' >> /sandbox/.bashrc
 
-# Copy OpenClaw from builder (AL3 npm global root is /usr/lib/node_modules)
-COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
-RUN ln -s /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+# Copy OpenClaw from builder (npm global root is /usr/local/lib/node_modules)
+COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
@@ -54,8 +58,8 @@ COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/
 COPY cli/dist/ /opt/azureclaw-plugin/
 COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 
-# Ensure openclaw binary is linked (must use openclaw.mjs entry for plugin CLI support)
-RUN ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+# Ensure openclaw binary is linked
+RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
 # Create writable directories
 RUN mkdir -p /sandbox /tmp && \
