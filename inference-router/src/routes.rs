@@ -3,7 +3,7 @@
 use axum::{
     Router,
     body::Body,
-    extract::{Request, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -26,7 +26,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(config: &Config) -> anyhow::Result<Self> {
+    pub async fn new(_config: &Config) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(32)
             .build()?;

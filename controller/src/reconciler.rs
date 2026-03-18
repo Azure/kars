@@ -15,7 +15,7 @@ use k8s_openapi::api::{
     networking::v1::NetworkPolicy,
 };
 use kube::{
-    api::{Api, ListParams, ObjectMeta, Patch, PatchParams, PostParams},
+    api::{Api, ListParams, Patch, PatchParams},
     runtime::controller::{Action, Controller},
     Client, ResourceExt,
 };
@@ -23,7 +23,16 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use crate::crd::{ClawSandbox, ClawSandboxStatus};
+use crate::crd::ClawSandbox;
+
+/// Custom error type that bridges serde_json and kube errors.
+#[derive(Debug, thiserror::Error)]
+enum ReconcileError {
+    #[error("Kubernetes API error: {0}")]
+    Kube(#[from] kube::Error),
+    #[error("JSON serialization error: {0}")]
+    SerdeJson(#[from] serde_json::Error),
+}
 
 /// Shared controller context.
 struct Context {
@@ -31,7 +40,7 @@ struct Context {
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
-async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
+async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let name = sandbox.name_any();
     let sandbox_ns = format!("azureclaw-{name}");
     let client = &ctx.client;
@@ -45,7 +54,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // ── Step 1: Create namespace ─────────────────────────────────────────
     let ns_api: Api<Namespace> = Api::all(client.clone());
-    let ns = serde_json::from_value(json!({
+    let ns: Namespace = serde_json::from_value(json!({
         "apiVersion": "v1",
         "kind": "Namespace",
         "metadata": {
@@ -70,7 +79,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // ── Step 2: Create ServiceAccount with Workload Identity ─────────────
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), &sandbox_ns);
-    let sa = serde_json::from_value(json!({
+    let sa: ServiceAccount = serde_json::from_value(json!({
         "apiVersion": "v1",
         "kind": "ServiceAccount",
         "metadata": {
@@ -121,7 +130,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     }
 
-    let netpol = serde_json::from_value(json!({
+    let netpol: NetworkPolicy = serde_json::from_value(json!({
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
         "metadata": {
@@ -150,7 +159,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         .unwrap_or_else(|| "azureclaw.azurecr.io/openclaw-sandbox:latest".into());
 
     let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
-    let deployment = serde_json::from_value(json!({
+    let deployment: Deployment = serde_json::from_value(json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {
@@ -260,7 +269,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 }
 
 /// Error policy — what to do when reconciliation fails.
-fn error_policy(sandbox: Arc<ClawSandbox>, error: &kube::Error, _ctx: Arc<Context>) -> Action {
+fn error_policy(sandbox: Arc<ClawSandbox>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
     tracing::error!(
         "Reconciliation error for {}: {:?}",
         sandbox.name_any(),

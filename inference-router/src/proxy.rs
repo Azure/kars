@@ -8,8 +8,7 @@
 //! 5. Records metrics (latency, tokens, status)
 
 use anyhow::{Context, Result};
-use axum::body::Body;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use bytes::Bytes;
 use reqwest::Client;
 use std::time::Instant;
