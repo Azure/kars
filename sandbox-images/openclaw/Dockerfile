@@ -10,28 +10,20 @@
 #
 # This same image runs locally (azureclaw dev) and on AKS (azureclaw up).
 
-ARG AZURELINUX_BASE=azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
+ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:0.1.0
 
-# ─── Rust Builder (inference router) ─────────────────────────────────────────
+# ─── Use pre-built inference router image ────────────────────────────────────
 
-FROM rust:slim AS rust-builder
-
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-COPY Cargo.toml Cargo.lock* ./
-COPY inference-router/ inference-router/
-COPY controller/ controller/
-
-RUN cargo build --release --package azureclaw-inference-router
+FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 
 # ─── Node Builder (OpenClaw) ─────────────────────────────────────────────────
 
 FROM ${AZURELINUX_BASE} AS builder
 
-# Install Node.js 22, npm, git
-RUN dnf install -y nodejs22 npm git && \
-    dnf clean all
+# Install Node.js 20, npm, git, ca-certificates (AL3 bundles npm with nodejs)
+RUN tdnf install -y nodejs npm git ca-certificates && \
+    tdnf clean all
 
 # Install OpenClaw
 RUN npm install -g openclaw@latest
@@ -41,8 +33,8 @@ RUN npm install -g openclaw@latest
 FROM ${AZURELINUX_BASE}
 
 # Install Node.js runtime and minimal tools
-RUN dnf install -y nodejs22 git shadow-utils && \
-    dnf clean all
+RUN tdnf install -y nodejs git shadow-utils && \
+    tdnf clean all
 
 # Security: create non-root user
 RUN groupadd -g 1000 sandbox && \
@@ -51,19 +43,19 @@ RUN groupadd -g 1000 sandbox && \
 # Set prompt for the sandbox user
 RUN echo 'export PS1="azureclaw@\\h:\\w\\$ "' >> /sandbox/.bashrc
 
-# Copy OpenClaw from builder
-COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
-COPY --from=builder /usr/local/bin/openclaw /usr/local/bin/openclaw
+# Copy OpenClaw from builder (AL3 npm global root is /usr/lib/node_modules)
+COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
+RUN ln -s /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
-# Copy inference router from Rust builder
-COPY --from=rust-builder /build/target/release/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
+# Copy inference router from pre-built image
+COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
 
 # Copy AzureClaw OpenClaw plugin (pre-built dist/)
 COPY cli/dist/ /opt/azureclaw-plugin/
 COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 
 # Ensure openclaw binary is linked (must use openclaw.mjs entry for plugin CLI support)
-RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+RUN ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
 # Create writable directories
 RUN mkdir -p /sandbox /tmp && \
@@ -79,7 +71,7 @@ LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/Azure/azureclaw" \
-      org.opencontainers.image.base.name="azurelinux/base/core:4.0"
+      org.opencontainers.image.base.name="azurelinux/base/core:3.0"
 
 # Switch to non-root user
 USER sandbox

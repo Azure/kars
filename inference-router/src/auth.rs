@@ -89,14 +89,14 @@ impl WorkloadIdentityAuth {
             "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
         );
 
+        let scope = format!("{resource}/.default");
         let resp = self
             .client
             .post(&token_url)
             .form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                ("grant_type", "client_credentials"),
                 ("client_id", &client_id),
-                ("assertion", &sa_token),
-                ("scope", &format!("{resource}/.default")),
+                ("scope", &scope),
                 (
                     "client_assertion_type",
                     "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
@@ -108,6 +108,10 @@ impl WorkloadIdentityAuth {
             .context("Token exchange request failed")?;
 
         let body: serde_json::Value = resp.json().await?;
+        if let Some(err) = body.get("error") {
+            let desc = body["error_description"].as_str().unwrap_or("unknown");
+            anyhow::bail!("Azure AD token error: {err} — {desc}");
+        }
         let access_token = body["access_token"]
             .as_str()
             .context("No access_token in response")?

@@ -72,7 +72,10 @@ impl Default for SandboxConfig {
         Self {
             isolation: "enhanced".into(),
             seccomp_profile: "azureclaw-strict".into(),
-            selinux_context: "azureclaw_sandbox_t".into(),
+            // Empty = no custom SELinux type, compatible with restricted PodSecurity.
+            // Custom SELinux (e.g. "azureclaw_sandbox_t") requires baseline enforcement
+            // and a privileged DaemonSet to install the policy module on nodes.
+            selinux_context: String::new(),
             read_only_root_filesystem: true,
             run_as_non_root: true,
             allow_privilege_escalation: false,
@@ -185,7 +188,7 @@ pub struct TokensUsed {
 // Default helpers
 fn default_isolation() -> String { "enhanced".into() }
 fn default_seccomp() -> String { "azureclaw-strict".into() }
-fn default_selinux() -> String { "azureclaw_sandbox_t".into() }
+fn default_selinux() -> String { String::new() }
 fn default_provider() -> String { "azure-openai".into() }
 fn default_model() -> String { "gpt-4.1".into() }
 fn default_true() -> bool { true }

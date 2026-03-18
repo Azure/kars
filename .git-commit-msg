@@ -1,0 +1,21 @@
+Phase 2: E2E on AKS with 3 isolation levels and Kata VM sandboxing
+
+Security hardening:
+- All images built from Azure Linux 3 (no Debian) via rustup
+- AKS API + ACR + AOAI + KV locked to caller IP + AKS egress
+- AOAI disableLocalAuth (Entra-only), custom seccomp DaemonSet
+- restricted PodSecurity on all sandbox namespaces
+
+Three isolation levels (standard/enhanced/confidential):
+- standard: runc + RuntimeDefault seccomp on clawpool
+- enhanced: runc + Localhost seccomp azureclaw-strict on clawpool
+- confidential: Kata VM isolation on katapool
+
+azureclaw up --isolation parameter, pre-built image import,
+auto federated credentials per sandbox namespace
+
+E2E verified: GPT-4.1 through sandbox, WI auth, Content Safety,
+Prompt Shields. All 3 levels deployed and tested on AKS.
+
+Key fixes: WI client_credentials grant, seccomp sendmmsg/recvmmsg,
+entrypoint skip router in AKS mode, kata-vm-isolation RuntimeClass

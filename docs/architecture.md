@@ -48,10 +48,10 @@ Multi-layer enforcement:
 | Inference (network policy) | Rust inference router | Inference-as-network-policy — all model calls proxied, authenticated, content-filtered. No Azure credentials reach the OpenClaw process. |
 | L7 Application | Envoy sidecar proxy | HTTP method/path/header filtering |
 | Governance | Azure Policy for Kubernetes | Subscription-level constraints (allowed regions, VM sizes, deny public endpoints). AKS add-on — no Defender for Cloud required. |
-| Kernel | seccomp + SELinux | Syscall filtering + MAC (ACL-native SELinux) |
-| Container | Pod Security Standards | Read-only rootfs, non-root, no privesc |
-| Hardware | Confidential Containers (SEV-SNP) | Memory encryption (optional add-on) |
-| Inference safety | Azure AI Content Safety | Input/output content filtering |
+| Kernel | seccomp (custom Localhost profile) | Strict syscall allowlist — only explicitly permitted syscalls |
+| Container | Pod Security Standards (restricted) | Read-only rootfs, non-root, no privesc, drop ALL capabilities |
+| VM isolation | Kata Containers (confidential level) | Per-pod Cloud Hypervisor VM — kernel-level exploit containment |
+| Inference safety | Azure AI Content Safety + Prompt Shields | Input/output content filtering, jailbreak detection |
 | Runtime observability | Inspektor Gadget (eBPF) | Syscall/network/file/process tracing |
 | Node compliance | azure-osconfig (TODO) | CIS AKS Optimized + STIG baselines |
 

@@ -1,0 +1,82 @@
+{{- if .Values.sandbox.seccompProfile }}
+# Seccomp Profile Installer DaemonSet
+# Deploys the azureclaw-strict seccomp profile to every node so sandbox pods
+# can reference it as Localhost type under the restricted PodSecurity standard.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-seccomp-installer
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: seccomp-installer
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: azureclaw
+      app.kubernetes.io/component: seccomp-installer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: azureclaw
+        app.kubernetes.io/component: seccomp-installer
+    spec:
+      # Run on ALL nodes including sandbox nodes with taints
+      tolerations:
+        - key: "azureclaw.azure.com/sandbox"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "CriticalAddonsOnly"
+          operator: "Exists"
+      # Needs host access to write seccomp profile to kubelet directory
+      hostPID: false
+      hostNetwork: false
+      initContainers:
+        - name: install-profile
+          image: mcr.microsoft.com/azurelinux/base/core:3.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /host/seccomp/profiles
+              cat > /host/seccomp/profiles/{{ .Values.sandbox.seccompProfile }}.json << 'SECCOMP_EOF'
+{{ .Files.Get "files/azureclaw-strict.json" | indent 14 }}
+              SECCOMP_EOF
+              echo "Seccomp profile {{ .Values.sandbox.seccompProfile }} installed"
+          volumeMounts:
+            - name: seccomp-path
+              mountPath: /host/seccomp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsUser: 0
+      containers:
+        # DaemonSet requires at least one container — sleep indefinitely to keep
+        # the pod alive (ensures profiles survive node restarts via restart policy)
+        - name: pause
+          image: mcr.microsoft.com/azurelinux/base/core:3.0
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: "1m"
+              memory: "8Mi"
+            limits:
+              cpu: "10m"
+              memory: "16Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: seccomp-path
+          hostPath:
+            path: /var/lib/kubelet/seccomp
+            type: DirectoryOrCreate
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
+{{- end }}

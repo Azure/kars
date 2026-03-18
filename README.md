@@ -116,15 +116,36 @@ For deploying to AKS (production):
 
 ```bash
 az login
-azureclaw init --resource-group my-rg --location eastus2
-azureclaw onboard
-azureclaw up
+
+# Enhanced isolation (default) — runc + custom seccomp
+azureclaw up --name my-assistant --model gpt-4.1
+
+# Standard isolation — runc + kernel-default seccomp
+azureclaw up --name my-assistant --isolation standard
+
+# Confidential isolation — Kata VM per pod
+azureclaw up --name my-assistant --isolation confidential
+
 azureclaw connect my-assistant
 ```
 
 Prerequisites: Node.js 22+, Azure CLI 2.60+, an Azure subscription.
 
 </details>
+
+### Isolation Levels
+
+AzureClaw provides three isolation levels — choose the right trade-off between performance and security:
+
+| Level | Runtime | Seccomp | Node Pool | Use case |
+|---|---|---|---|---|
+| **standard** | runc | RuntimeDefault | clawpool | Dev/test, trusted workloads |
+| **enhanced** (default) | runc | Localhost (`azureclaw-strict`) | clawpool | Production, general-purpose |
+| **confidential** | Kata VM | RuntimeDefault | katapool | Multi-tenant, untrusted code, regulated environments |
+
+- **Standard**: Basic container isolation with the kernel's default syscall filter. Fastest, least overhead.
+- **Enhanced**: Custom strict seccomp profile that only allows explicitly listed syscalls. Blocks anything unknown.
+- **Confidential**: Each pod runs in its own lightweight VM (Cloud Hypervisor). Kernel-level exploits can't escape. Requires a dedicated Kata node pool.
 
 > **Alpha image access:** AzureClaw sandbox images are based on Azure Linux 4 Alpha and AKS nodes use Azure Container Linux Alpha — both are limited availability. To gain access:
 > - **Azure Linux 4 Alpha:** [AzureLinux4Alpha1 docs](https://eng.ms/docs/products/azure-linux/overview/AzureLinux4Alpha1)

@@ -12,6 +12,9 @@ param modelName string
 @description('Model version')
 param modelVersion string
 
+@description('Authorized IP ranges (empty = allow all)')
+param authorizedIpRanges array = []
+
 resource openAi 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   name: name
   location: location
@@ -21,11 +24,14 @@ resource openAi 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   }
   properties: {
     customSubDomainName: name
-    publicNetworkAccess: 'Disabled'
+    publicNetworkAccess: 'Enabled'    // Needed for IP-based access; firewall restricts to authorizedIpRanges
     networkAcls: {
-      defaultAction: 'Deny'
+      defaultAction: empty(authorizedIpRanges) ? 'Allow' : 'Deny'
+      ipRules: [for ip in authorizedIpRanges: {
+        value: replace(ip, '/32', '')  // Cognitive Services rejects CIDR /32 notation
+      }]
     }
-    disableLocalAuth: true   // Force Entra ID auth only
+    disableLocalAuth: true   // Force Entra ID auth only — no API keys
   }
 }
 

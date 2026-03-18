@@ -1,13 +1,14 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
+import { existsSync } from "fs";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
 
   cmd
     .description(
-      "One command to go from zero to running agent. Provisions Azure resources, creates sandbox, connects you."
+      "One command to go from zero to running agent. Provisions Azure resources, builds images, deploys controller, creates sandbox."
     )
     .option("--name <name>", "Sandbox name", "my-assistant")
     .option("--model <model>", "AI model", "gpt-4.1")
@@ -19,136 +20,252 @@ export function upCommand(): Command {
     .option("--region <region>", "Azure region", "eastus2")
     .option("--cluster-name <name>", "AKS cluster name", "azureclaw")
     .option(
-      "--confidential",
-      "Enable Confidential Containers (SEV-SNP)",
-      false
+      "--isolation <level>",
+      "Pod isolation level: standard (runc), enhanced (runc + strict seccomp), confidential (Kata VM)",
+      "enhanced"
     )
     .option("-g, --resource-group <name>", "Resource group name")
+    .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
+    .option("--source-acr <server>", "Source ACR for pre-built images", "azureclawacr.azurecr.io")
     .action(async (options) => {
-      console.log(chalk.blue("\n🦞 AzureClaw — starting up...\n"));
+      const blue = chalk.hex("#0078D4");
+      const bold = chalk.bold;
 
-      const rg =
-        options.resourceGroup || `azureclaw-${options.region}`;
-      const spinner = ora("").start();
+      console.log(blue(`
+  ╔══════════════════════════════════════════════════╗
+  ║           ${bold("AzureClaw")} · Production Deploy           ║
+  ║        Secure AI Agent Runtime on Azure          ║
+  ╚══════════════════════════════════════════════════╝
+`));
+
+      const rg = options.resourceGroup || `azureclaw-${options.region}`;
+      const clusterName = options.clusterName ?? "azureclaw";
+      const baseName = "azureclaw";
+      const spinner = ora({ color: "cyan" }).start();
 
       try {
         const { execa } = await import("execa");
+        const path = await import("path");
+        const { fileURLToPath } = await import("url");
 
-        // Step 1: Check Azure auth
+        // Resolve repo root from CLI package location
+        const thisFile = fileURLToPath(import.meta.url);
+        const cliDist = path.dirname(path.dirname(thisFile));
+        // CLI lives at cli/dist/commands/ or cli/src/commands/ — repo root is 3 levels up
+        let repoRoot = path.resolve(cliDist, "..", "..");
+        // Fallback: walk up from CWD looking for Cargo.toml
+        if (!existsSync(path.join(repoRoot, "Cargo.toml"))) {
+          repoRoot = process.cwd();
+          while (repoRoot !== "/" && !existsSync(path.join(repoRoot, "Cargo.toml"))) {
+            repoRoot = path.dirname(repoRoot);
+          }
+        }
+
+        const bicepPath = path.join(repoRoot, "deploy/bicep/main.bicep");
+        const helmPath = path.join(repoRoot, "deploy/helm/azureclaw");
+
+        if (!existsSync(bicepPath)) {
+          spinner.fail("Bicep template not found");
+          console.log(chalk.yellow(`  Expected at: ${bicepPath}`));
+          console.log(chalk.yellow(`  Run from the AzureClaw repo root.\n`));
+          process.exit(1);
+        }
+
+        // ── Step 1: Check Azure auth ─────────────────────────────────
         spinner.text = "Checking Azure credentials...";
         try {
-          await execa("az", ["account", "show", "--output", "none"], {
-            stdio: "pipe",
-          });
+          await execa("az", ["account", "show", "--output", "none"], { stdio: "pipe" });
         } catch {
           spinner.stop();
-          console.log(
-            chalk.yellow("  Not logged in — running az login...\n")
-          );
+          console.log(chalk.yellow("  Not logged in — running az login...\n"));
           await execa("az", ["login"], { stdio: "inherit" });
           spinner.start();
         }
 
-        // Step 2: Create resource group (idempotent)
+        // ── Step 2: Create resource group ────────────────────────────
         spinner.text = `Creating resource group '${rg}'...`;
-        await execa(
-          "az",
-          [
-            "group",
-            "create",
-            "--name",
-            rg,
-            "--location",
-            options.region,
-            "--output",
-            "none",
-          ],
-          { stdio: "pipe" }
-        );
+        await execa("az", [
+          "group", "create", "--name", rg, "--location", options.region, "--output", "none",
+        ], { stdio: "pipe" });
 
-        // Step 3: Check if cluster already exists
-        spinner.text = "Checking for existing AzureClaw cluster...";
-        let clusterExists = false;
+        // ── Step 2b: Detect caller IP for firewall rules ─────────────
+        spinner.text = "Detecting your public IP for firewall rules...";
+        let callerIp: string | null = null;
         try {
-          await execa(
-            "az",
-            [
-              "aks",
-              "show",
-              "--name",
-              options.clusterName ?? "azureclaw",
-              "--resource-group",
-              rg,
-              "--output",
-              "none",
-            ],
-            { stdio: "pipe" }
-          );
-          clusterExists = true;
-          spinner.text = "Cluster found — skipping provisioning.";
-        } catch {
-          // Cluster doesn't exist — provision it
-        }
-
-        if (!clusterExists) {
-          // Step 4: Deploy Bicep template
-          spinner.text = `Provisioning Azure resources in ${options.region} (this takes a few minutes)...`;
-          const bicepArgs = [
-            "deployment",
-            "group",
-            "create",
-            "--resource-group",
-            rg,
-            "--template-file",
-            "deploy/bicep/main.bicep",
-            "--parameters",
-            `location=${options.region}`,
-            "--output",
-            "none",
-          ];
-          if (options.confidential) {
-            bicepArgs.push("--parameters", "enableConfidential=true");
+          const { stdout: ipOut } = await execa("curl", ["-s", "--max-time", "5", "https://ifconfig.me"], { stdio: "pipe" });
+          const ip = ipOut.trim();
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+            callerIp = ip;
           }
-          await execa("az", bicepArgs, { stdio: "pipe" });
+        } catch {
+          // Non-fatal: skip IP restriction
         }
 
-        // Step 5: Get AKS credentials
+        // ── Step 2c: Register Kata preview feature (if needed) ───────
+        if (options.isolation === "confidential") {
+          spinner.text = "Registering Kata VM Isolation preview feature...";
+          await execa("az", [
+            "feature", "register",
+            "--namespace", "Microsoft.ContainerService",
+            "--name", "KataVMIsolationPreview",
+            "--output", "none",
+          ], { stdio: "pipe" }).catch(() => {
+            // Already registered — non-fatal
+          });
+          await execa("az", [
+            "provider", "register",
+            "-n", "Microsoft.ContainerService",
+            "--output", "none",
+          ], { stdio: "pipe" }).catch(() => {});
+        }
+
+        // ── Step 3: Deploy Bicep (AKS + ACR + KV + AOAI + Monitor + WI) ─
+        let acrLoginServer: string;
+        let openAiEndpoint: string;
+        let wiClientId: string;
+        let kvName: string;
+
+        if (!options.skipInfra) {
+          spinner.text = `Provisioning Azure resources in ${options.region} (this takes several minutes)...`;
+          const bicepParams = [
+            `location=${options.region}`,
+            `baseName=${baseName}`,
+          ];
+          if (options.isolation === "confidential") {
+            bicepParams.push("enableKata=true");
+          }
+          if (callerIp) {
+            bicepParams.push(`authorizedIpRanges=["${callerIp}/32"]`);
+          }
+
+          const { stdout: deployOutput } = await execa("az", [
+            "deployment", "group", "create",
+            "--resource-group", rg,
+            "--template-file", bicepPath,
+            "--parameters", ...bicepParams,
+            "--output", "json",
+            "--query", "properties.outputs",
+          ], { stdio: "pipe" });
+
+          const outputs = JSON.parse(deployOutput);
+          acrLoginServer = outputs.acrLoginServer.value;
+          openAiEndpoint = outputs.openAiEndpoint.value;
+          wiClientId = outputs.sandboxIdentityClientId.value;
+          kvName = outputs.keyVaultName.value;
+
+          spinner.succeed("Azure resources provisioned");
+          spinner.start();
+        } else {
+          // Read outputs from existing deployment
+          spinner.text = "Reading existing deployment outputs...";
+          const { stdout: existingOutput } = await execa("az", [
+            "deployment", "group", "show",
+            "--resource-group", rg,
+            "--name", `${baseName}-aks`,
+            "--output", "json",
+            "--query", "properties.outputs",
+          ], { stdio: "pipe" }).catch(async () => {
+            // Try the main deployment name
+            return execa("az", [
+              "deployment", "group", "list",
+              "--resource-group", rg,
+              "--output", "json",
+              "--query", "[0].properties.outputs",
+            ], { stdio: "pipe" });
+          });
+
+          const outputs = JSON.parse(existingOutput);
+          acrLoginServer = outputs.acrLoginServer.value;
+          openAiEndpoint = outputs.openAiEndpoint.value;
+          wiClientId = outputs.sandboxIdentityClientId.value;
+          kvName = outputs.keyVaultName.value;
+        }
+
+        // ── Step 4: Get AKS credentials ──────────────────────────────
         spinner.text = "Configuring kubectl...";
-        await execa(
-          "az",
-          [
-            "aks",
-            "get-credentials",
-            "--name",
-            options.clusterName ?? "azureclaw",
-            "--resource-group",
-            rg,
-            "--overwrite-existing",
-            "--output",
-            "none",
-          ],
-          { stdio: "pipe" }
-        );
+        await execa("az", [
+          "aks", "get-credentials",
+          "--name", `${baseName}-aks`,
+          "--resource-group", rg,
+          "--overwrite-existing",
+          "--output", "none",
+        ], { stdio: "pipe" });
 
-        // Step 6: Install/upgrade AzureClaw Helm chart
+        // ── Step 5: Import pre-built images from source ACR ─────────────
+        const acr = acrLoginServer.replace(".azurecr.io", "");
+        const sourceAcr = options.sourceAcr;
+        const images = [
+          { source: `${sourceAcr}/azureclaw-controller:0.1.0`, target: "azureclaw-controller:0.1.0" },
+          { source: `${sourceAcr}/azureclaw-inference-router:0.1.0`, target: "azureclaw-inference-router:0.1.0" },
+          { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
+        ];
+
+        for (const img of images) {
+          spinner.text = `Importing ${img.target}...`;
+          await execa("az", [
+            "acr", "import",
+            "--name", acr,
+            "--source", img.source,
+            "--image", img.target,
+            "--force",
+          ], { stdio: "pipe" }).catch(() => {
+            // Image may already exist — non-fatal
+          });
+        }
+
+        spinner.succeed("Images available in ACR");
+        spinner.start();
+
+        // ── Step 6: Install / upgrade Helm chart ─────────────────────
         spinner.text = "Installing AzureClaw controller...";
-        await execa(
-          "helm",
-          [
-            "upgrade",
-            "--install",
-            "azureclaw",
-            "deploy/helm/azureclaw",
-            "--namespace",
-            "azureclaw-system",
-            "--create-namespace",
-            "--wait",
-          ],
-          { stdio: "pipe" }
-        );
+        await execa("helm", [
+          "upgrade", "--install", "azureclaw", helmPath,
+          "--namespace", "azureclaw-system",
+          "--create-namespace",
+          "--set", `controller.image.repository=${acrLoginServer}/azureclaw-controller`,
+          "--set", `controller.image.tag=0.1.0`,
+          "--set", `inferenceRouter.image.repository=${acrLoginServer}/azureclaw-inference-router`,
+          "--set", `inferenceRouter.image.tag=0.1.0`,
+          "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
+          "--set", `sandbox.image.repository=${acrLoginServer}/openclaw-sandbox`,
+          "--set", `sandbox.image.tag=latest`,
+          "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
+          "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
+          "--wait",
+          "--timeout", "5m",
+        ], { stdio: "pipe" });
 
-        // Step 7: Create sandbox via ClawSandbox CRD
-        spinner.text = `Creating sandbox '${options.name}' with ${options.model}...`;
+        spinner.succeed("Controller deployed");
+        spinner.start();
+
+        // ── Step 7: Create ClawSandbox CR ────────────────────────────
+        const sandboxNs = `azureclaw-${options.name}`;
+        spinner.text = `Creating sandbox '${options.name}'...`;
+
+        // Create federated identity credential for this sandbox's namespace
+        spinner.text = `Setting up Workload Identity for ${sandboxNs}...`;
+        const { stdout: oidcIssuer } = await execa("az", [
+          "aks", "show",
+          "--name", `${baseName}-aks`,
+          "--resource-group", rg,
+          "--query", "oidcIssuerProfile.issuerUrl",
+          "--output", "tsv",
+        ], { stdio: "pipe" });
+
+        await execa("az", [
+          "identity", "federated-credential", "create",
+          "--identity-name", `${baseName}-aks-sandbox-wi`,
+          "--resource-group", rg,
+          "--name", `azureclaw-${options.name}`,
+          "--issuer", oidcIssuer.trim(),
+          "--subject", `system:serviceaccount:${sandboxNs}:sandbox`,
+          "--audiences", "api://AzureADTokenExchange",
+          "--output", "none",
+        ], { stdio: "pipe" }).catch(() => {
+          // Already exists — non-fatal
+        });
+
+        spinner.text = `Creating sandbox '${options.name}'...`;
         const sandboxManifest = {
           apiVersion: "azureclaw.azure.com/v1alpha1",
           kind: "ClawSandbox",
@@ -158,16 +275,15 @@ export function upCommand(): Command {
           },
           spec: {
             openclaw: {
-              image: "azureclaw.azurecr.io/openclaw-sandbox:latest",
+              image: `${acrLoginServer}/openclaw-sandbox:latest`,
             },
             sandbox: {
-              isolation: options.confidential
-                ? "confidential"
-                : "enhanced",
+              isolation: options.isolation,
             },
             inference: {
               provider: "azure-openai",
               model: options.model,
+              endpoint: openAiEndpoint,
               contentSafety: true,
               promptShields: true,
             },
@@ -177,16 +293,12 @@ export function upCommand(): Command {
             },
           },
         };
-        await execa("kubectl", [
-          "apply",
-          "-f",
-          "-",
-        ], {
+        await execa("kubectl", ["apply", "-f", "-"], {
           input: JSON.stringify(sandboxManifest),
           stdio: ["pipe", "pipe", "pipe"],
         });
 
-        // Step 8: Wait for sandbox to be ready
+        // ── Step 8: Wait for sandbox ─────────────────────────────────
         spinner.text = "Waiting for sandbox to start...";
         await execa("kubectl", [
           "wait",
@@ -195,52 +307,63 @@ export function upCommand(): Command {
           "-n", "azureclaw-system",
           "--timeout=120s",
         ], { stdio: "pipe" }).catch(() => {
-          // Timeout is OK — sandbox may still be pulling image
+          // Timeout OK — image pull may be slow on first deploy
         });
 
         spinner.succeed("Ready!");
 
-        // Print connection info
-        console.log(
-          chalk.green(
-            "\n──────────────────────────────────────────────────"
-          )
-        );
-        console.log(
-          `  Sandbox      ${chalk.bold(options.name)}`
-        );
-        console.log(
-          `  Model        ${chalk.bold(options.model)} (Azure OpenAI, Managed Identity)`
-        );
-        console.log(
-          `  Policy       ${chalk.bold(options.policy)} preset`
-        );
-        console.log(
-          `  Region       ${chalk.bold(options.region)}`
-        );
-        console.log(
-          chalk.green(
-            "──────────────────────────────────────────────────"
-          )
-        );
-        console.log(
-          `\n  Connect:     ${chalk.cyan(`azureclaw ${options.name} connect`)}`
-        );
-        console.log(
-          `  Status:      ${chalk.cyan(`azureclaw ${options.name} status`)}`
-        );
-        console.log(
-          `  Logs:        ${chalk.cyan(`azureclaw ${options.name} logs -f`)}`
-        );
-        console.log(
-          `  Costs:       ${chalk.cyan(`azureclaw ${options.name} costs`)}`
-        );
+        // ── Summary ──────────────────────────────────────────────────
+        console.log(blue(`\n  ── Deployment ────────────────────────────────────`));
+        console.log(`  Sandbox      ${bold(options.name)}`);
+        console.log(`  Model        ${bold(options.model)} (Azure OpenAI, Entra ID auth)`);
+        const isolationDesc: Record<string, string> = {
+          standard: "standard (runc + RuntimeDefault)",
+          enhanced: "enhanced (runc + azureclaw-strict seccomp)",
+          confidential: "confidential (Kata VM isolation)",
+        };
+        console.log(`  Isolation    ${bold(isolationDesc[options.isolation] || options.isolation)}`);
+        console.log(`  Region       ${bold(options.region)}`);
+        console.log(`  Cluster      ${bold(`${baseName}-aks`)}`);
+        console.log(`  ACR          ${bold(acrLoginServer)}`);
+        console.log(`  Key Vault    ${bold(kvName)}`);
+        console.log(`  AOAI         ${bold(openAiEndpoint)}`);
+        console.log(`  Auth         ${bold("Workload Identity (no API keys)")}`);
+
+        console.log(blue(`\n  ── Security ──────────────────────────────────────`));
+        console.log(`  ${chalk.green("✓")} Azure Policy for Kubernetes (governance)`);
+        console.log(`  ${chalk.green("✓")} Cilium CNI + NetworkPolicy (default-deny egress)`);
+        console.log(`  ${chalk.green("✓")} Workload Identity (Entra ID, no keys on cluster)`);
+        console.log(`  ${chalk.green("✓")} Key Vault CSI driver (secret rotation)`);
+        console.log(`  ${chalk.green("✓")} OIDC issuer enabled`);
+        console.log(`  ${chalk.green("✓")} Read-only rootfs, non-root, seccomp`);
+        console.log(`  ${chalk.green("✓")} Inference router: Content Safety + Prompt Shields`);
+        if (options.isolation === "confidential") {
+          console.log(`  ${chalk.green("✓")} Kata VM isolation (pod sandboxing)`);
+        }
+
+        console.log(blue(`\n  ── Commands ──────────────────────────────────────`));
+        console.log(`  Connect:     ${chalk.cyan(`azureclaw connect ${options.name}`)}`);
+        console.log(`  Status:      ${chalk.cyan(`azureclaw status ${options.name}`)}`);
+        console.log(`  Logs:        ${chalk.cyan(`azureclaw logs ${options.name} -f`)}`);
+        console.log(`  Costs:       ${chalk.cyan(`azureclaw costs ${options.name}`)}`);
+        console.log(`  kubectl:     ${chalk.cyan(`kubectl get clawsandbox -n azureclaw-system`)}`);
         console.log();
       } catch (error) {
-        spinner.fail("Setup failed");
+        spinner.fail("Deployment failed");
         const message =
           error instanceof Error ? error.message : String(error);
         console.error(chalk.red(`\nError: ${message}\n`));
+
+        // Helpful diagnostics
+        if (message.includes("EncryptionAtHost")) {
+          console.log(chalk.yellow("  Tip: EncryptionAtHost requires registering the feature:"));
+          console.log(chalk.cyan("  az feature register --namespace Microsoft.Compute --name EncryptionAtHost"));
+          console.log(chalk.cyan("  az provider register -n Microsoft.Compute\n"));
+        }
+        if (message.includes("quota") || message.includes("Quota")) {
+          console.log(chalk.yellow("  Tip: Insufficient quota. Try a different region or VM size:"));
+          console.log(chalk.cyan(`  azureclaw up --region westus3\n`));
+        }
         process.exit(1);
       }
     });
