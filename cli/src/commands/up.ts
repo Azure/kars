@@ -101,23 +101,33 @@ export function upCommand(): Command {
           // Non-fatal: skip IP restriction
         }
 
-        // ── Step 2c: Register Kata preview feature (if needed) ───────
+        // ── Step 2c: Register required preview features ──────────
+        spinner.text = "Registering preview features...";
+        // EncryptionAtHost is required for clawpool
+        await execa("az", [
+          "feature", "register",
+          "--namespace", "Microsoft.Compute",
+          "--name", "EncryptionAtHost",
+          "--output", "none",
+        ], { stdio: "pipe" }).catch(() => {});
+
         if (options.isolation === "confidential") {
-          spinner.text = "Registering Kata VM Isolation preview feature...";
+          // Install aks-preview extension for Kata workload runtime
+          await execa("az", [
+            "extension", "add", "--name", "aks-preview", "--upgrade",
+          ], { stdio: "pipe" }).catch(() => {});
+
           await execa("az", [
             "feature", "register",
             "--namespace", "Microsoft.ContainerService",
             "--name", "KataVMIsolationPreview",
             "--output", "none",
-          ], { stdio: "pipe" }).catch(() => {
-            // Already registered — non-fatal
-          });
-          await execa("az", [
-            "provider", "register",
-            "-n", "Microsoft.ContainerService",
-            "--output", "none",
           ], { stdio: "pipe" }).catch(() => {});
         }
+
+        // Propagate feature registrations
+        await execa("az", ["provider", "register", "-n", "Microsoft.Compute", "--output", "none"], { stdio: "pipe" }).catch(() => {});
+        await execa("az", ["provider", "register", "-n", "Microsoft.ContainerService", "--output", "none"], { stdio: "pipe" }).catch(() => {});
 
         // ── Step 3: Deploy Bicep (AKS + ACR + KV + AOAI + Monitor + WI) ─
         let acrLoginServer: string;
@@ -180,6 +190,59 @@ export function upCommand(): Command {
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
         }
+
+        // ── Step 3b: Add AKS egress IP to service firewalls ──────
+        spinner.text = "Adding AKS egress IP to service firewalls...";
+        try {
+          // Get AKS egress (outbound) IP
+          const { stdout: egressIpJson } = await execa("az", [
+            "aks", "show",
+            "--name", `${baseName}-aks`,
+            "--resource-group", rg,
+            "--query", "networkProfile.loadBalancerProfile.effectiveOutboundIPs[0].id",
+            "--output", "tsv",
+          ], { stdio: "pipe" });
+          if (egressIpJson.trim()) {
+            const { stdout: egressIp } = await execa("az", [
+              "network", "public-ip", "show",
+              "--ids", egressIpJson.trim(),
+              "--query", "ipAddress",
+              "--output", "tsv",
+            ], { stdio: "pipe" });
+            const aksEgress = egressIp.trim();
+            if (aksEgress && /^\d{1,3}(\.\d{1,3}){3}$/.test(aksEgress)) {
+              // Add AKS egress to ACR firewall
+              await execa("az", [
+                "acr", "network-rule", "add",
+                "--name", `${baseName}acr`,
+                "--ip-address", aksEgress,
+                "--output", "none",
+              ], { stdio: "pipe" }).catch(() => {});
+              // Add AKS egress to AOAI firewall
+              await execa("az", [
+                "cognitiveservices", "account", "network-rule", "add",
+                "--name", `${baseName}-aoai`,
+                "--resource-group", rg,
+                "--ip-address", `${aksEgress}/32`,
+                "--output", "none",
+              ], { stdio: "pipe" }).catch(() => {});
+            }
+          }
+        } catch {
+          // Non-fatal — firewalls may not have rules or may already include egress
+        }
+
+        // ── Step 3c: Attach ACR to AKS ──────────────────────────────
+        spinner.text = "Attaching ACR to AKS...";
+        await execa("az", [
+          "aks", "update",
+          "--name", `${baseName}-aks`,
+          "--resource-group", rg,
+          "--attach-acr", `${baseName}acr`,
+          "--output", "none",
+        ], { stdio: "pipe" }).catch(() => {
+          // Already attached — non-fatal
+        });
 
         // ── Step 4: Get AKS credentials ──────────────────────────────
         spinner.text = "Configuring kubectl...";

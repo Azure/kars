@@ -230,6 +230,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
 
+    let pull_policy = if image.ends_with(":latest") { "Always" } else { "IfNotPresent" };
+
     let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
@@ -240,6 +242,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         {
                             "name": "openclaw",
                             "image": image,
+                            "imagePullPolicy": pull_policy,
                             "ports": [{"containerPort": 18789, "name": "gateway"}],
                             "env": [
                                 {"name": "OPENCLAW_MODEL", "value": inference_config.model},
