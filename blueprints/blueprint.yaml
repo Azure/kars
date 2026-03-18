@@ -1,0 +1,68 @@
+# AzureClaw Blueprint Manifest
+# Defines version constraints, default profiles, and compatibility
+
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: Blueprint
+
+metadata:
+  name: azureclaw-default
+  version: "0.1.0"
+  description: "Default AzureClaw blueprint for OpenClaw sandboxes"
+
+compatibility:
+  min_openclaw_version: "2026.2.0"
+  min_kubernetes_version: "1.29"
+  supported_architectures:
+    - amd64
+    - arm64
+
+defaults:
+  sandbox:
+    image: "azureclaw.azurecr.io/openclaw-sandbox:latest"
+    isolation: "enhanced"
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+
+  inference:
+    provider: "azure-openai"
+    model: "gpt-4.1"
+    contentSafety: true
+    promptShields: true
+
+  policy:
+    network: "baseline"
+    filesystem: "restricted"
+    process: "strict"
+
+profiles:
+  standard:
+    description: "Standard isolation with seccomp + NetworkPolicy"
+    sandbox:
+      isolation: "standard"
+    features:
+      confidentialCompute: false
+      envoySidecar: false
+
+  enhanced:
+    description: "Enhanced isolation with seccomp + SELinux + Envoy L7 proxy"
+    sandbox:
+      isolation: "enhanced"
+    features:
+      confidentialCompute: false
+      envoySidecar: true
+
+  confidential:
+    description: "Maximum isolation with Confidential Containers (SEV-SNP/TDX)"
+    sandbox:
+      isolation: "confidential"
+    features:
+      confidentialCompute: true
+      envoySidecar: true
+    requirements:
+      vmSize: "Standard_DC*"
+      note: "Requires confidential computing capable VMs"

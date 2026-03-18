@@ -1,0 +1,146 @@
+# AzureClaw Baseline Network Policy
+# Compatible with NemoClaw openclaw-sandbox.yaml format
+#
+# This file defines the default network, filesystem, and inference
+# policies for sandboxed OpenClaw agents. Dynamic sections (network,
+# inference) can be hot-reloaded on a running sandbox.
+
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: SandboxPolicy
+
+metadata:
+  name: baseline
+  description: >
+    Strict-by-default policy for OpenClaw sandboxes.
+    Only explicitly listed endpoints are reachable.
+
+# ─── Filesystem Policy (locked at creation) ──────────────────────────────────
+
+filesystem:
+  writable:
+    - /sandbox
+    - /tmp
+    - /dev/null
+  readable:
+    - /usr
+    - /lib
+    - /lib64
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+  enforcement: selinux   # selinux | readonly-rootfs
+
+# ─── Process Policy (locked at creation) ─────────────────────────────────────
+
+process:
+  seccompProfile: azureclaw-strict
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ─── Network Policy (hot-reloadable) ─────────────────────────────────────────
+
+network:
+  defaultAction: deny
+
+  endpoints:
+    # Azure OpenAI (routed through inference router, not direct)
+    - name: inference-router
+      host: "azureclaw-inference-router.azureclaw-system.svc.cluster.local"
+      port: 8443
+      binary: "*"
+      methods: ["POST"]
+      paths: ["/v1/**"]
+
+    # GitHub
+    - name: github
+      host: "github.com"
+      port: 443
+      binary: "/usr/bin/gh,/usr/bin/git"
+      methods: ["*"]
+      paths: ["/**"]
+
+    - name: github_rest_api
+      host: "api.github.com"
+      port: 443
+      binary: "/usr/bin/gh"
+      methods: ["GET", "POST", "PATCH", "PUT", "DELETE"]
+      paths: ["/**"]
+
+    # OpenClaw ecosystem
+    - name: clawhub
+      host: "clawhub.com"
+      port: 443
+      binary: "/usr/local/bin/openclaw"
+      methods: ["GET", "POST"]
+      paths: ["/**"]
+
+    - name: openclaw_api
+      host: "openclaw.ai"
+      port: 443
+      binary: "/usr/local/bin/openclaw"
+      methods: ["GET", "POST"]
+      paths: ["/**"]
+
+    - name: openclaw_docs
+      host: "docs.openclaw.ai"
+      port: 443
+      binary: "/usr/local/bin/openclaw"
+      methods: ["GET"]
+      paths: ["/**"]
+
+    # Package registries (read-only)
+    - name: npm_registry
+      host: "registry.npmjs.org"
+      port: 443
+      binary: "/usr/local/bin/openclaw,/usr/local/bin/npm"
+      methods: ["GET"]
+      paths: ["/**"]
+
+    - name: pypi
+      host: "pypi.org"
+      port: 443
+      binary: "/usr/bin/python3,/usr/local/bin/pip"
+      methods: ["GET"]
+      paths: ["/**"]
+
+# ─── Inference Policy (hot-reloadable) ────────────────────────────────────────
+
+inference:
+  # All inference goes through the AzureClaw inference router
+  # The router authenticates with Azure OpenAI via Managed Identity
+  defaultRoute: azure-openai
+  routes:
+    - name: azure-openai
+      provider: azure-openai
+      endpoint: "https://${AZURE_OPENAI_ENDPOINT}"
+      model: "gpt-4.1"
+      auth: managed-identity
+      contentSafety: true
+      promptShields: true
+      tokenBudget:
+        daily: 1000000
+        perRequest: 128000
+
+    - name: azure-foundry
+      provider: azure-ai-foundry
+      model: "Phi-4"
+      auth: managed-identity
+      contentSafety: true
+
+# ─── Approval Configuration ──────────────────────────────────────────────────
+
+approval:
+  # When an agent tries to reach an unlisted endpoint:
+  mode: prompt          # prompt | auto-deny | auto-allow (dangerous)
+  timeout: 300          # seconds to wait for operator approval
+  persistApproved: false  # approved endpoints persist for session only
+  notifications:
+    - type: cli         # Show in azureclaw TUI
+    - type: webhook     # Optional: send to Teams/Slack webhook

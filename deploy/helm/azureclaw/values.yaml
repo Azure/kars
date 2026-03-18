@@ -1,0 +1,124 @@
+# AzureClaw Helm Chart Values
+
+# Controller configuration
+controller:
+  image:
+    repository: azureclaw.azurecr.io/azureclaw-controller
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Inference router configuration
+inferenceRouter:
+  image:
+    repository: azureclaw.azurecr.io/azureclaw-inference-router
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  azure:
+    openai:
+      endpoint: ""       # Set via azureclaw init
+      deploymentName: "gpt-4.1"
+    contentSafety:
+      enabled: true
+    promptShields:
+      enabled: true
+
+# Default sandbox configuration
+sandbox:
+  image:
+    repository: azureclaw.azurecr.io/openclaw-sandbox
+    tag: "latest"
+  isolation: "enhanced"  # standard | enhanced | confidential
+  seccompProfile: "azureclaw-strict"
+  selinuxContext: "azureclaw_sandbox_t"
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  writablePaths:
+    - /sandbox
+    - /tmp
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+# Network policy defaults
+networkPolicy:
+  defaultDenyEgress: true
+  allowedEndpoints:
+    - name: azure-openai
+      host: "*.openai.azure.com"
+      port: 443
+    - name: github
+      host: "github.com"
+      port: 443
+      methods: ["GET"]
+    - name: github-api
+      host: "api.github.com"
+      port: 443
+      methods: ["GET"]
+    - name: clawhub
+      host: "clawhub.com"
+      port: 443
+      methods: ["GET", "POST"]
+    - name: openclaw-api
+      host: "openclaw.ai"
+      port: 443
+      methods: ["GET", "POST"]
+    - name: npm-registry
+      host: "registry.npmjs.org"
+      port: 443
+      methods: ["GET"]
+
+# Monitoring
+monitoring:
+  enabled: true
+  containerInsights: true
+  prometheus:
+    enabled: true
+  grafana:
+    enabled: false   # Set to true if you want Grafana dashboards
+  inspektorGadget:
+    enabled: true    # eBPF-powered runtime observability
+    image:
+      repository: ghcr.io/inspektor-gadget/inspektor-gadget
+      tag: "latest"
+    gadgets:
+      traceExec: true       # Monitor process execution in sandboxes
+      traceOpen: true       # Track file opens for policy validation
+      traceTcp: true        # Network flow monitoring per pod
+      traceDns: true        # DNS snooping for policy bypass detection
+      traceMount: true      # Detect mount attempts (should be blocked)
+
+# Azure-specific configuration
+azure:
+  workloadIdentity:
+    enabled: true
+  keyVaultCsi:
+    enabled: true
+    keyVaultName: ""    # Set via azureclaw init
+  policy:
+    enabled: true
+  # Compliance: azure-osconfig integration (TODO)
+  osconfig:
+    enabled: false      # TODO: enable when azure-osconfig integration is ready
+    benchmark: "CIS_AKS_Optimized_Azure_Linux_3"

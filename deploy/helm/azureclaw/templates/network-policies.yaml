@@ -1,0 +1,49 @@
+# Default network policy for sandbox namespaces
+# Applied by the blueprint controller when a ClawSandbox is created
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: azureclaw-sandbox-default
+  namespace: {{ "{{ .sandbox.namespace }}" }}
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: sandbox-policy
+spec:
+  podSelector:
+    matchLabels:
+      azureclaw.azure.com/component: sandbox
+  policyTypes:
+    - Egress
+    - Ingress
+  # Default deny all egress
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow traffic to inference router (in azureclaw-system namespace)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: azureclaw
+          podSelector:
+            matchLabels:
+              azureclaw.azure.com/component: inference-router
+      ports:
+        - protocol: TCP
+          port: 8443
+  # Default deny all ingress (only allow from Envoy sidecar)
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              azureclaw.azure.com/component: sandbox
+      ports:
+        - protocol: TCP
+          port: 18789   # OpenClaw gateway port
