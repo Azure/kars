@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azureclaw-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: azureclaw
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: azureclaw
+        app.kubernetes.io/component: controller
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: azureclaw-controller
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: RUST_LOG
+              value: "info,azureclaw_controller=debug"
+            - name: AZURE_WI_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            - name: INFERENCE_ROUTER_IMAGE
+              value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
+            - name: SANDBOX_IMAGE
+              value: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
+            - name: AZURE_OPENAI_ENDPOINT
+              value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: {{ .Values.controller.resources.requests.cpu | quote }}
+              memory: {{ .Values.controller.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.controller.resources.limits.cpu | quote }}
+              memory: {{ .Values.controller.resources.limits.memory | quote }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /proc/1/status"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /proc/1/status"]
+            initialDelaySeconds: 3
+            periodSeconds: 10

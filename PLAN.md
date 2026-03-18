@@ -2,7 +2,7 @@
 
 > Azure's enterprise-grade, open-source runtime for running OpenClaw agents safely on Azure Kubernetes Service with Azure Container Linux.
 
-**Status:** Planning
+**Status:** Alpha — Phase 2 complete, E2E working on AKS
 **License:** MIT (open source)
 **Repository:** Azure/azureclaw
 
@@ -19,7 +19,7 @@ AzureClaw is Azure's answer to NVIDIA NemoClaw — an open-source stack that mak
 | **Runtime** | OpenShell (K3s in Docker) | AKS + Azure Container Linux (production K8s) |
 | **Node OS** | Generic container base | Azure Container Linux (node) + Azure Linux 4 (container base) |
 | **Inference** | NVIDIA Cloud (Nemotron 3) | Azure OpenAI, Azure AI Foundry (GPT-4o/4.1, o-series, Phi, + 1800 models) |
-| **Sandbox isolation** | Container + Landlock + seccomp | seccomp + SELinux (ACL-native) + Confidential Containers add-on |
+| **Sandbox isolation** | Container + Landlock + seccomp | 3 levels: standard (runc), enhanced (custom seccomp), confidential (Kata VM isolation) |
 | **Identity** | API keys only | Managed Identity + Entra ID + Workload Identity Federation |
 | **Secrets** | Env vars injected at runtime | Azure Key Vault with CSI driver, auto-rotation |
 | **Network policy** | Custom YAML proxy | Azure NPM / Cilium + Azure Firewall + Private Link |
@@ -726,30 +726,51 @@ azureclaw/
 - [x] README + quickstart documentation
 - [x] CI/CD pipeline (Rust + TypeScript + Bicep + Helm + security scan)
 
-### Phase 2: Security Hardening + AKS (next)
-- [ ] Deploy to AKS end-to-end (`azureclaw up` with real Azure resources)
-- [ ] SELinux policy modules for sandbox pods (leveraging ACL's enforcing SELinux)
+### Phase 2: Security Hardening + AKS — DONE
+- [x] Deploy to AKS end-to-end (`azureclaw up` with real Azure resources)
+  - [x] Bicep IaC: AKS + ACR + KV + AOAI + Monitor + Workload Identity + RBAC
+  - [x] Removed Defender for Cloud dependency — governance via Azure Policy add-on
+  - [x] AOAI: Entra-only auth (`disableLocalAuth: true`), public endpoint for alpha
+  - [x] Workload Identity: user-assigned identity + federated credential + Cognitive Services OpenAI User + KV Secrets User roles
+  - [x] Blueprint Controller: Rust operator watches ClawSandbox CRs, creates namespace + SA + NetworkPolicy + Deployment (OpenClaw + inference router sidecar)
+  - [x] Controller reads AZURE_WI_CLIENT_ID, AZURE_OPENAI_ENDPOINT, INFERENCE_ROUTER_IMAGE from env (set by Helm)
+  - [x] Helm chart: CRD + controller Deployment + RBAC + namespace + NetworkPolicy template + seccomp DaemonSet
+  - [x] `up.ts`: captures Bicep outputs, imports pre-built images via `az acr import`, passes outputs to Helm `--set`, creates ClawSandbox CR
+  - [x] `--skip-infra` flag for iterating without re-provisioning
+  - [x] `--isolation` flag: standard / enhanced / confidential
+  - [x] Auto-creates federated identity credential per sandbox namespace
+- [x] Firewall hardening: AKS API server + ACR + AOAI + KV locked to caller IP + AKS egress
+- [x] Rust inference router Workload Identity auth (`client_credentials` grant for federated token exchange)
+- [x] Azure Policy for Kubernetes integration (governance without Defender for Cloud — `azurepolicy` AKS add-on)
+- [x] Key Vault CSI driver for secrets (`azureKeyvaultSecretsProvider` add-on + KV Secrets User RBAC)
+- [x] Custom seccomp profile (`azureclaw-strict`) — DaemonSet installs to all nodes via hostPath
+- [x] E2E inference: GPT-4.1 responding through sandbox → inference router → Azure OpenAI (Entra-only)
+- [x] Three isolation levels deployed and verified:
+  - [x] **Standard**: runc + RuntimeDefault seccomp (clawpool)
+  - [x] **Enhanced**: runc + custom Localhost seccomp `azureclaw-strict` (clawpool)
+  - [x] **Confidential**: Kata VM isolation (`kata-vm-isolation` RuntimeClass, katapool with `KataMshvVmIsolation`)
+- [x] Azure Linux builder Dockerfiles (all images built from AL3, no Debian)
+- [x] Pre-built image distribution (customers pull via `az acr import`, no build step)
+- [ ] SELinux policy modules for sandbox pods (deferred — custom SELinux incompatible with restricted PodSecurity)
 - [ ] Envoy sidecar with L7 egress filtering (non-inference traffic)
-- [ ] Rust inference router Workload Identity auth (prod path — already scaffolded)
 - [ ] Notation image signing + Ratify admission
-- [ ] Azure Policy for Kubernetes integration (governance without Defender for Cloud)
-- [ ] Key Vault CSI driver for secrets
 - [ ] Operator approval flow (TUI + API)
 - [ ] Inspektor Gadget DaemonSet deployment + integration with TUI
 - [ ] `azureclaw migrate` — import existing OpenClaw installations into AzureClaw sandbox
 - [ ] SBOM generation in CI
 
-### Phase 3: Enterprise Features (Weeks 9–12)
-- [ ] Blueprint Controller (CRD-based operator)
-- [ ] Confidential Containers support as optional add-on (SEV-SNP)
+### Phase 3: Enterprise Features (next)
+- [ ] ~~Blueprint Controller (CRD-based operator)~~ — DONE in Phase 2
+- [x] Kata Containers pod sandboxing (confidential isolation level)
 - [ ] Multi-tenant namespace isolation
-- [ ] Azure AI Content Safety integration
-- [ ] Prompt Shields integration
+- [x] Azure AI Content Safety integration (on by default via inference router)
+- [x] Prompt Shields integration (on by default via inference router)
 - [ ] Token budgets + cost tracking
 - [ ] Azure Monitor dashboards + workbooks + Inspektor Gadget metrics
 - [ ] Alerting (token spikes, egress anomalies, syscall anomalies)
 - [ ] Hot-reload policy updates
 - [ ] TODO: azure-osconfig integration planning (CIS AKS Optimized baseline for ACL nodes)
+- [ ] **Agentic demo scenario** — demonstrate real-world agent with tool use, Azure service access, policy-governed egress
 
 ### Phase 4: Ecosystem & Polish (Weeks 13–16)
 - [ ] Azure AI Foundry model catalog integration

@@ -43,9 +43,13 @@ sandbox:
   image:
     repository: azureclaw.azurecr.io/openclaw-sandbox
     tag: "latest"
+    pullPolicy: IfNotPresent
   isolation: "enhanced"  # standard | enhanced | confidential
   seccompProfile: "azureclaw-strict"
-  selinuxContext: "azureclaw_sandbox_t"
+  # SELinux: empty = compatible with restricted PodSecurity (Approach C).
+  # Set to "azureclaw_sandbox_t" only if you install a custom SELinux policy module
+  # on nodes and switch namespace enforcement to baseline (Approach A).
+  selinuxContext: ""
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 1000
@@ -113,6 +117,7 @@ monitoring:
 azure:
   workloadIdentity:
     enabled: true
+    clientId: ""    # Set by azureclaw up from Bicep outputs
   keyVaultCsi:
     enabled: true
     keyVaultName: ""    # Set via azureclaw init

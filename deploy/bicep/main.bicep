@@ -20,8 +20,14 @@ param vmSize string = 'Standard_D4s_v5'
 @description('Enable confidential computing (AMD SEV-SNP)')
 param enableConfidential bool = false
 
+@description('Enable Kata Containers for pod-level VM isolation')
+param enableKata bool = false
+
 @description('Enable FIPS 140-2 validated crypto')
 param enableFips bool = false
+
+@description('Authorized IP CIDR ranges for AKS API server and service firewalls (empty = no restriction)')
+param authorizedIpRanges array = []
 
 @description('Azure OpenAI model deployment name')
 param openAiModelName string = 'gpt-4.1'
@@ -36,6 +42,7 @@ module acr 'modules/acr.bicep' = {
   params: {
     name: '${baseName}acr'
     location: location
+    authorizedIpRanges: authorizedIpRanges
   }
 }
 
@@ -58,6 +65,7 @@ module openAi 'modules/openai.bicep' = {
     location: location
     modelName: openAiModelName
     modelVersion: openAiModelVersion
+    authorizedIpRanges: authorizedIpRanges
   }
 }
 
@@ -80,11 +88,13 @@ module aks 'modules/aks.bicep' = {
     location: location
     nodeCount: nodeCount
     vmSize: enableConfidential ? 'Standard_DC4as_v5' : vmSize
-    enableConfidential: enableConfidential
     enableFips: enableFips
     logAnalyticsWorkspaceId: monitor.outputs.logAnalyticsWorkspaceId
     acrId: acr.outputs.acrId
     keyVaultName: keyVault.outputs.keyVaultName
+    openAiAccountId: openAi.outputs.accountId
+    authorizedIpRanges: authorizedIpRanges
+    enableKata: enableKata
   }
 }
 
@@ -93,5 +103,7 @@ module aks 'modules/aks.bicep' = {
 output aksClusterName string = aks.outputs.clusterName
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultUri string = keyVault.outputs.vaultUri
+output keyVaultName string = keyVault.outputs.keyVaultName
 output openAiEndpoint string = openAi.outputs.endpoint
 output logAnalyticsWorkspaceId string = monitor.outputs.logAnalyticsWorkspaceId
+output sandboxIdentityClientId string = aks.outputs.sandboxIdentityClientId

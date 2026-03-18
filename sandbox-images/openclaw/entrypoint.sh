@@ -142,15 +142,20 @@ cat >> /sandbox/.bashrc << RCEOF2
 export OPENCLAW_GATEWAY_TOKEN="${GATEWAY_TOKEN}"
 RCEOF2
 
-# Start AzureClaw inference router (Rust) — all model calls go through this
-ROUTER_PORT=8443 \
-AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
-DEFAULT_MODEL="$MODEL" \
-CONTENT_SAFETY_ENABLED=true \
-azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
-ROUTER_PID=$!
-sleep 1
-echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
+# Start AzureClaw inference router — only in dev mode (no sidecar).
+# In AKS, the controller deploys the router as a separate sidecar container.
+if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+  ROUTER_PORT=8443 \
+  AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
+  DEFAULT_MODEL="$MODEL" \
+  CONTENT_SAFETY_ENABLED=true \
+  azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
+  ROUTER_PID=$!
+  sleep 1
+  echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
+else
+  echo "[azureclaw] Inference router provided by sidecar (workload-identity mode)"
+fi
 
 # Start OpenClaw gateway in the background (needed for TUI)
 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &

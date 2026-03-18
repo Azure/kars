@@ -4,12 +4,12 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: azureclaw-controller
-  namespace: azureclaw-system
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: azureclaw
     app.kubernetes.io/component: controller
   annotations:
-    azure.workload.identity/client-id: {{ "{{ .Values.azure.workloadIdentity.clientId }}" }}
+    azure.workload.identity/client-id: {{ .Values.azure.workloadIdentity.clientId | quote }}
 ---
 # Controller ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -26,7 +26,7 @@ rules:
   # Create and manage sandbox namespaces
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "create", "delete"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
   # Manage pods, services, configmaps in sandbox namespaces
   - apiGroups: [""]
     resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
@@ -56,4 +56,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: azureclaw-controller
-    namespace: azureclaw-system
+    namespace: {{ .Release.Namespace }}

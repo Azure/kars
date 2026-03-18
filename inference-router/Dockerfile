@@ -1,13 +1,18 @@
-# AzureClaw Inference Router — multi-stage Rust build
+# AzureClaw Inference Router — multi-stage Rust build (Azure Linux)
 # Produces a minimal distroless binary (~15MB)
 
-ARG AZURELINUX_BASE=azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 
-FROM rust:1.85-slim AS builder
+FROM ${AZURELINUX_BASE} AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN tdnf install -y gcc glibc-devel binutils make pkg-config openssl-devel ca-certificates curl && tdnf clean all
+
+# Install Rust via rustup
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
@@ -20,7 +25,7 @@ RUN cargo build --release --package azureclaw-inference-router
 
 FROM ${AZURELINUX_BASE}
 
-RUN dnf install -y ca-certificates shadow-utils && dnf clean all
+RUN tdnf install -y ca-certificates shadow-utils && tdnf clean all
 
 # Non-root user
 RUN groupadd -g 1000 router && useradd -u 1000 -g router -s /sbin/nologin router
