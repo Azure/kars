@@ -66,19 +66,48 @@ export function modelCommand(): Command {
   cmd
     .command("list")
     .description("List available models from Foundry")
-    .action(async () => {
-      console.log(chalk.bold("\n  Available models (Foundry):\n"));
-      console.log("  OpenAI:");
-      console.log("    gpt-4.1, gpt-4o, gpt-4.1-mini, o3-mini, o1");
-      console.log("  Microsoft:");
-      console.log("    Phi-4, Phi-4-mini-instruct, Phi-4-multimodal-instruct");
-      console.log("  Meta:");
-      console.log("    Meta-Llama-3.1-405B-Instruct, Llama-3.2-90B-Vision-Instruct");
-      console.log("  Mistral:");
-      console.log("    Mistral-small-2503, Codestral-2501");
-      console.log("  Anthropic:");
-      console.log("    claude-sonnet-4-5, claude-opus-4-5");
-      console.log(chalk.dim("\n  1800+ models available. Deploy via Foundry portal.\n"));
+    .argument("[name]", "Sandbox name (queries live from Foundry if provided)")
+    .action(async (name?: string) => {
+      if (name) {
+        // Query live from the inference router inside the sandbox
+        const { execa } = await import("execa");
+        const namespace = `azureclaw-${name}`;
+        try {
+          const { stdout } = await execa("kubectl", [
+            "exec", "-n", namespace, `deploy/${name}`,
+            "-c", "inference-router", "--",
+            "sh", "-c", "curl -s http://localhost:8443/v1/models",
+          ], { stdio: "pipe" });
+          const data = JSON.parse(stdout);
+          const models = (data.data || []).map((m: any) => m.id).sort();
+          console.log(chalk.bold(`\n  Models available on ${name} (${models.length} total):\n`));
+          // Group by prefix
+          const groups: Record<string, string[]> = {};
+          for (const m of models) {
+            const prefix = m.split("-")[0];
+            (groups[prefix] = groups[prefix] || []).push(m);
+          }
+          for (const [prefix, ms] of Object.entries(groups).slice(0, 15)) {
+            console.log(`  ${prefix}: ${ms.slice(0, 5).join(", ")}${ms.length > 5 ? ` (+${ms.length - 5} more)` : ""}`);
+          }
+          if (Object.keys(groups).length > 15) {
+            console.log(chalk.dim(`  ... and ${Object.keys(groups).length - 15} more groups`));
+          }
+          console.log(chalk.dim(`\n  Total: ${models.length} models. Switch with: azureclaw model set ${name} <model>\n`));
+        } catch {
+          console.log(chalk.red(`\n  Could not query models from '${name}'. Is the sandbox running?\n`));
+        }
+      } else {
+        console.log(chalk.bold("\n  Available models (Foundry):\n"));
+        console.log("  OpenAI:     gpt-4.1, gpt-4o, gpt-5-mini, o3-mini, o4-mini");
+        console.log("  Microsoft:  Phi-4, Phi-4-mini-instruct, Phi-4-reasoning");
+        console.log("  Meta:       Llama-3.3-70B-Instruct, Llama-4-Scout");
+        console.log("  DeepSeek:   DeepSeek-V3.2, DeepSeek-R1");
+        console.log("  Mistral:    Mistral-small-2503, Codestral-2501");
+        console.log("  Anthropic:  claude-sonnet-4-5, claude-opus-4-6");
+        console.log("  xAI:        grok-3, grok-4-fast-reasoning");
+        console.log(chalk.dim("\n  1800+ models. Use: azureclaw model list <sandbox> for live query.\n"));
+      }
     });
 
   return cmd;

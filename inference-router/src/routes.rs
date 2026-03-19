@@ -70,6 +70,7 @@ pub fn inference_routes() -> Router<AppState> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/models", get(list_models))
 }
 
 /// Health and readiness routes.
@@ -326,4 +327,47 @@ async fn metrics() -> String {
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap_or_default()
+}
+
+/// GET /v1/models — list available models from Foundry.
+async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
+    let upstream = state.upstream_config("system");
+
+    // Get the endpoint URL for models
+    let endpoint = if state.config.provider == "azure-ai-foundry" {
+        state.config.foundry_endpoint.clone().unwrap_or_default()
+    } else {
+        state.config.azure_openai_endpoint.clone().unwrap_or_default()
+    };
+
+    let models_url = format!("{}/openai/v1/models", endpoint.trim_end_matches('/'));
+
+    // Get token
+    let token = match state.auth.get_token("https://cognitiveservices.azure.com").await {
+        Ok(t) => t,
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
+            }))).into_response();
+        }
+    };
+
+    let resp = state.client
+        .get(&models_url)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let body = r.bytes().await.unwrap_or_default();
+            (status, Body::from(body)).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": {"message": format!("Failed to list models: {e}"), "type": "proxy_error"}
+            }))).into_response()
+        }
+    }
 }
