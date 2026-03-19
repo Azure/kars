@@ -232,21 +232,22 @@ export function upCommand(): Command {
         spinner.text = "Adding AKS egress IP to service firewalls...";
         try {
           // Get AKS egress (outbound) IP
-          const { stdout: egressIpJson } = await execa("az", [
+          const { stdout: egressIpId } = await execa("az", [
             "aks", "show",
             "--name", `${baseName}-aks`,
             "--resource-group", rg,
             "--query", "networkProfile.loadBalancerProfile.effectiveOutboundIPs[0].id",
             "--output", "tsv",
           ], { stdio: "pipe" });
-          if (egressIpJson.trim()) {
-            const { stdout: egressIp } = await execa("az", [
+          const cleanIpId = egressIpId.trim().split("\n").pop()?.trim();
+          if (cleanIpId && cleanIpId.startsWith("/subscriptions")) {
+            const { stdout: egressIpRaw } = await execa("az", [
               "network", "public-ip", "show",
-              "--ids", egressIpJson.trim(),
+              "--ids", cleanIpId,
               "--query", "ipAddress",
               "--output", "tsv",
             ], { stdio: "pipe" });
-            const aksEgress = egressIp.trim();
+            const aksEgress = egressIpRaw.trim();
             if (aksEgress && /^\d{1,3}(\.\d{1,3}){3}$/.test(aksEgress)) {
               // Add AKS egress to ACR firewall
               await execa("az", [
@@ -260,7 +261,7 @@ export function upCommand(): Command {
                 "cognitiveservices", "account", "network-rule", "add",
                 "--name", `${baseName}-aoai`,
                 "--resource-group", rg,
-                "--ip-address", `${aksEgress}/32`,
+                "--ip-address", aksEgress,
                 "--output", "none",
               ], { stdio: "pipe" }).catch(() => {});
             }
