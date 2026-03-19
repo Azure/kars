@@ -447,6 +447,44 @@ export function upCommand(): Command {
 
         spinner.succeed("Ready!");
 
+        // ── Step 9: Extract gateway token and start port-forward ─────
+        spinner.start();
+        spinner.text = "Setting up WebUI access...";
+        let gatewayToken = "";
+        let webUiUrl = "";
+        try {
+          // Wait for gateway to be ready inside the pod
+          await new Promise(r => setTimeout(r, 5000));
+
+          // Extract gateway token from the sandbox
+          const { stdout: bashrc } = await execa("kubectl", [
+            "exec", "-n", sandboxNs, `deploy/${options.name}`,
+            "-c", "openclaw", "--",
+            "cat", "/sandbox/.bashrc",
+          ], { stdio: "pipe" });
+          const tokenMatch = bashrc.match(/OPENCLAW_GATEWAY_TOKEN="([^"]+)"/);
+          if (tokenMatch) {
+            gatewayToken = tokenMatch[1];
+          }
+
+          // Start port-forward in background
+          const portForward = execa("kubectl", [
+            "port-forward", "-n", sandboxNs,
+            `deploy/${options.name}`, "18789:18789",
+          ], { stdio: "pipe", detached: true });
+          portForward.unref();
+          // Give it a moment to bind
+          await new Promise(r => setTimeout(r, 2000));
+
+          if (gatewayToken) {
+            webUiUrl = `http://localhost:18789/#token=${gatewayToken}`;
+          }
+
+          spinner.succeed("WebUI accessible");
+        } catch {
+          spinner.warn("WebUI port-forward failed (run manually: kubectl port-forward -n " + sandboxNs + " deploy/" + options.name + " 18789:18789)");
+        }
+
         // ── Summary ──────────────────────────────────────────────────
         console.log(blue(`\n  ── Deployment ────────────────────────────────────`));
         console.log(`  Sandbox      ${bold(options.name)}`);
@@ -482,6 +520,13 @@ export function upCommand(): Command {
         console.log(`  Logs:        ${chalk.cyan(`azureclaw logs ${options.name} -f`)}`);
         console.log(`  Costs:       ${chalk.cyan(`azureclaw costs ${options.name}`)}`);
         console.log(`  kubectl:     ${chalk.cyan(`kubectl get clawsandbox -n azureclaw-system`)}`);
+
+        if (webUiUrl) {
+          console.log(blue(`\n  ── WebUI ─────────────────────────────────────────`));
+          console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(webUiUrl)}`);
+          console.log(chalk.dim(`    Port-forward active on localhost:18789`));
+        }
+
         console.log();
       } catch (error) {
         spinner.fail("Deployment failed");
