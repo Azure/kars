@@ -2,7 +2,7 @@
 
 > Azure's enterprise-grade, open-source runtime for running OpenClaw agents safely on Azure Kubernetes Service with Azure Container Linux.
 
-**Status:** Alpha — Phase 2 complete, E2E working on AKS
+**Status:** Alpha — Phase 3 in progress, Foundry integration E2E working on AKS
 **License:** MIT (open source)
 **Repository:** Azure/azureclaw
 
