@@ -54,6 +54,16 @@ export function connectCommand(): Command {
         // WebUI mode: extract token, port-forward, print link
         console.log(chalk.hex("#0078D4")(`\n  Connecting to ${chalk.bold(name)} WebUI...\n`));
 
+        // Check if this is a Kata (confidential) sandbox — port-forward doesn't work with Kata VMs
+        let isKata = false;
+        try {
+          const { stdout: rc } = await execa("kubectl", [
+            "get", "pod", "-n", namespace, "-l", `azureclaw.azure.com/sandbox=${name}`,
+            "-o", "jsonpath={.items[0].spec.runtimeClassName}",
+          ], { stdio: "pipe" });
+          isKata = rc.trim().includes("kata");
+        } catch {}
+
         // Extract gateway token
         let gatewayToken = "";
         try {
@@ -70,6 +80,23 @@ export function connectCommand(): Command {
 
         if (!gatewayToken) {
           console.log(chalk.red("  Gateway token not found. Is the sandbox running?\n"));
+          return;
+        }
+
+        if (isKata) {
+          // Kata VMs don't support kubectl port-forward — use shell mode instead
+          console.log(chalk.yellow("  Note: Kata VM pods don't support port-forward (known limitation)."));
+          console.log(chalk.yellow("  The WebUI is accessible from inside the cluster only.\n"));
+          console.log(chalk.dim(`  Gateway token: ${gatewayToken}`));
+          console.log(chalk.dim(`  To access the WebUI, use an enhanced (non-Kata) sandbox:\n`));
+          console.log(`  ${chalk.cyan(`azureclaw up --skip-infra --isolation enhanced --name ${name}-web`)}`);
+          console.log();
+          console.log(chalk.dim("  Falling back to shell mode...\n"));
+          await execa("kubectl", [
+            "exec", "-it", "-n", namespace,
+            `deploy/${name}`, "-c", "openclaw",
+            "--", "/bin/bash", "--login",
+          ], { stdio: "inherit" });
           return;
         }
 
