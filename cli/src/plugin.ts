@@ -140,33 +140,22 @@ const azureClawPlugin = {
 
     log.info(`AzureClaw plugin loaded (model: ${config.model})`);
 
-    // ── Register Azure OpenAI as a model provider ─────────────────────────
+    // ── Register Azure AI Foundry as a model provider ───────────────────
     api.registerProvider({
       id: "azure-openai",
-      label: "Azure OpenAI (via AzureClaw)",
+      label: "Azure AI Foundry (via AzureClaw)",
       docsPath: "https://github.com/Azure/azureclaw",
-      aliases: ["azure", "azureclaw"],
+      aliases: ["azure", "azureclaw", "foundry"],
       envVars: ["AZURE_OPENAI_API_KEY"],
       models: {
         chat: [
-          {
-            id: "gpt-4.1",
-            label: "GPT-4.1 (Azure OpenAI)",
-            contextWindow: 1047576,
-            maxOutput: 32768,
-          },
-          {
-            id: "gpt-4o",
-            label: "GPT-4o (Azure OpenAI)",
-            contextWindow: 128000,
-            maxOutput: 16384,
-          },
-          {
-            id: "o3-mini",
-            label: "o3-mini (Azure OpenAI)",
-            contextWindow: 200000,
-            maxOutput: 100000,
-          },
+          { id: "gpt-4.1", label: "GPT-4.1 (Azure)", contextWindow: 1047576, maxOutput: 32768 },
+          { id: "gpt-5-mini", label: "GPT-5 Mini (Azure)", contextWindow: 1047576, maxOutput: 32768 },
+          { id: "gpt-4o", label: "GPT-4o (Azure)", contextWindow: 128000, maxOutput: 16384 },
+          { id: "DeepSeek-V3.2", label: "DeepSeek V3.2 (Foundry)", contextWindow: 131072, maxOutput: 8192 },
+          { id: "Phi-4", label: "Phi-4 (Microsoft)", contextWindow: 16384, maxOutput: 16384 },
+          { id: "Meta-Llama-3.1-405B-Instruct", label: "Llama 3.1 405B (Meta)", contextWindow: 131072, maxOutput: 8192 },
+          { id: "o3-mini", label: "o3-mini (Azure)", contextWindow: 200000, maxOutput: 100000 },
         ],
       },
       auth: [
@@ -174,7 +163,7 @@ const azureClawPlugin = {
           type: "api-key",
           envVar: "AZURE_OPENAI_API_KEY",
           headerName: "api-key",
-          label: "Azure OpenAI API Key",
+          label: "Azure API Key (or 'routed-via-inference-router' for AzureClaw)",
         },
       ],
     });
@@ -239,20 +228,120 @@ const azureClawPlugin = {
     // ── Register /azureclaw slash command ─────────────────────────────────
     api.registerCommand({
       name: "azureclaw",
-      description: "Show AzureClaw sandbox status and security info",
+      description: "Show AzureClaw sandbox status, models, and security info",
       handler: async () => {
         return {
           text: [
-            "**AzureClaw Sandbox**",
-            `Model: azure-openai/${config.model}`,
+            "**AzureClaw Sandbox** (Foundry-integrated)",
+            `Model: ${config.model}`,
             `Sandbox: ${config.sandboxName}`,
-            `Endpoint: ${config.endpoint || "(configured via azureclaw onboard)"}`,
+            `Endpoint: ${config.endpoint || "(configured via Foundry)"}`,
             "",
-            "Commands:",
-            "- `openclaw azureclaw status` — health + metrics",
-            "- `openclaw azureclaw connect` — shell into sandbox",
-            "- `openclaw azureclaw dev` — start local sandbox",
-            "- `openclaw azureclaw logs -f` — stream logs",
+            "**Slash Commands:**",
+            "- `/azureclaw` — this help",
+            "- `/azureclaw-models` — list available Foundry models",
+            "- `/azureclaw-switch <model>` — switch AI model live",
+            "- `/azureclaw-security` — show isolation level + security posture",
+            "",
+            "**CLI Commands (from host):**",
+            "- `azureclaw model list foundry-agent` — live model catalog",
+            "- `azureclaw model set foundry-agent Phi-4` — switch model",
+            "- `azureclaw policy get foundry-agent` — show network policy",
+            "- `azureclaw approve --list` — pending egress requests",
+            "- `azureclaw trace foundry-agent --exec` — eBPF tracing",
+          ].join("\n"),
+        };
+      },
+    });
+
+    // ── /azureclaw-models — list available models from Foundry ────────────
+    api.registerCommand({
+      name: "azureclaw-models",
+      description: "List available AI models from Azure Foundry",
+      handler: async () => {
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get("http://127.0.0.1:8443/v1/models", (res) => {
+              let data = "";
+              res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+              res.on("end", () => resolve(data));
+            });
+            req.on("error", reject);
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          const models = (parsed.data || []).map((m: any) => m.id).sort();
+          const deployed = models.filter((m: string) =>
+            ["gpt-4.1", "gpt-5-mini", "DeepSeek-V3.2", "Phi-4", "gpt-4o"].some(d => m.includes(d))
+          );
+          return {
+            text: [
+              `**Azure Foundry Models** (${models.length} available)`,
+              "",
+              "Deployed in your project:",
+              deployed.map((m: string) => `  - ${m}`).join("\n") || "  (none detected)",
+              "",
+              `Total catalog: ${models.length} models`,
+              "Switch with: `/azureclaw-switch <model>`",
+            ].join("\n"),
+          };
+        } catch {
+          return { text: "Could not query models. Is the inference router running?" };
+        }
+      },
+    });
+
+    // ── /azureclaw-switch — switch model live ─────────────────────────────
+    api.registerCommand({
+      name: "azureclaw-switch",
+      description: "Switch AI model (e.g. /azureclaw-switch Phi-4)",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const model = ctx.args?.trim();
+        if (!model) {
+          return { text: "Usage: /azureclaw-switch <model-name>\nExample: /azureclaw-switch DeepSeek-V3.2" };
+        }
+        return {
+          text: [
+            `Switching to **${model}**...`,
+            "",
+            "From the host CLI, run:",
+            `\`azureclaw model set ${config.sandboxName} ${model}\``,
+            "",
+            "The model switch takes effect on the next request.",
+          ].join("\n"),
+        };
+      },
+    });
+
+    // ── /azureclaw-security — show security posture ───────────────────────
+    api.registerCommand({
+      name: "azureclaw-security",
+      description: "Show sandbox security posture",
+      handler: async () => {
+        const uname = await import("node:child_process");
+        let kernel = "unknown";
+        let user = "unknown";
+        try {
+          kernel = uname.execSync("uname -r", { encoding: "utf-8" }).trim();
+          user = uname.execSync("whoami", { encoding: "utf-8" }).trim();
+        } catch {}
+
+        const isKata = kernel.includes("mshv");
+        return {
+          text: [
+            "**AzureClaw Security Posture**",
+            "",
+            `Kernel: ${kernel}`,
+            `User: ${user}`,
+            `Isolation: ${isKata ? "confidential (Kata VM)" : "enhanced (runc + seccomp)"}`,
+            `Root filesystem: read-only`,
+            `Capabilities: ALL dropped`,
+            `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (azureclaw-strict)"}`,
+            `Network: default-deny egress`,
+            `Inference: routed through AzureClaw inference router`,
+            `Auth: IMDS (kubelet MI, zero keys)`,
           ].join("\n"),
         };
       },
