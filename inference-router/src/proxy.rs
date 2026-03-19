@@ -176,9 +176,9 @@ pub async fn forward_to_foundry(
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let start = Instant::now();
 
-    // Foundry Models API: /models/{path}
+    // Foundry/AI Services: /openai/v1/{path} — the unified OpenAI-compatible endpoint
     let upstream_url = format!(
-        "{}/models/{}?api-version=2024-05-01-preview",
+        "{}/openai/v1/{}",
         upstream.endpoint.trim_end_matches('/'),
         path.trim_start_matches('/'),
     );
