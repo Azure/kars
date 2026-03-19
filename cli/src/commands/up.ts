@@ -208,16 +208,17 @@ export function upCommand(): Command {
           const { stdout: existingOutput } = await execa("az", [
             "deployment", "group", "show",
             "--resource-group", rg,
-            "--name", `${baseName}-aks`,
+            "--name", "main",
             "--output", "json",
             "--query", "properties.outputs",
           ], { stdio: "pipe" }).catch(async () => {
-            // Try the main deployment name
+            // Fallback: try module deployment name
             return execa("az", [
-              "deployment", "group", "list",
+              "deployment", "group", "show",
               "--resource-group", rg,
+              "--name", `${baseName}-aks`,
               "--output", "json",
-              "--query", "[0].properties.outputs",
+              "--query", "properties.outputs",
             ], { stdio: "pipe" });
           });
 
