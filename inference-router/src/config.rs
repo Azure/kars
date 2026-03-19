@@ -20,6 +20,12 @@ pub struct Config {
 
     /// Azure AI Content Safety endpoint
     pub content_safety_endpoint: Option<String>,
+
+    /// Daily token budget per sandbox (0 = unlimited)
+    pub token_budget_daily: u64,
+
+    /// Per-request token limit (0 = unlimited)
+    pub token_budget_per_request: u64,
 }
 
 impl Config {
@@ -46,6 +52,16 @@ impl Config {
                 .unwrap_or(true),
 
             content_safety_endpoint: std::env::var("CONTENT_SAFETY_ENDPOINT").ok(),
+
+            token_budget_daily: std::env::var("TOKEN_BUDGET_DAILY")
+                .unwrap_or_else(|_| "0".into())
+                .parse()
+                .unwrap_or(0),
+
+            token_budget_per_request: std::env::var("TOKEN_BUDGET_PER_REQUEST")
+                .unwrap_or_else(|_| "0".into())
+                .parse()
+                .unwrap_or(0),
         })
     }
 }

@@ -13,6 +13,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::auth::WorkloadIdentityAuth;
+use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub auth: Arc<WorkloadIdentityAuth>,
     pub client: reqwest::Client,
     pub config: Arc<Config>,
+    pub budget: TokenBudgetTracker,
 }
 
 impl AppState {
@@ -31,10 +33,17 @@ impl AppState {
             .pool_max_idle_per_host(32)
             .build()?;
 
+        let config = Config::from_env()?;
+        let budget = TokenBudgetTracker::new(
+            config.token_budget_daily,
+            config.token_budget_per_request,
+        );
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             client,
-            config: Arc::new(Config::from_env()?),
+            config: Arc::new(config),
+            budget,
         })
     }
 
@@ -146,6 +155,22 @@ async fn chat_completions(
         }
     }
 
+    // Check token budget before forwarding
+    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+        tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded: {msg}");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": {
+                    "message": msg,
+                    "type": "token_budget_exceeded",
+                    "code": "budget_exceeded"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     // Forward to Azure OpenAI
     let upstream = state.upstream_config(sandbox_name);
     match proxy::forward_to_azure_openai(
@@ -160,6 +185,21 @@ async fn chat_completions(
     .await
     {
         Ok((status, resp_headers, resp_body)) => {
+            // Record token usage from response for budget tracking
+            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                if let Some(total) = body_json
+                    .get("usage")
+                    .and_then(|u| u.get("total_tokens"))
+                    .and_then(|v| v.as_u64())
+                {
+                    state.budget.record_usage(sandbox_name, total).await;
+
+                    if let Err(msg) = state.budget.check_per_request(total) {
+                        tracing::warn!(sandbox = %sandbox_name, "Per-request limit: {msg}");
+                    }
+                }
+            }
+
             let mut response = (status, Body::from(resp_body)).into_response();
             // Forward content-type from upstream
             if let Some(ct) = resp_headers.get("content-type") {
