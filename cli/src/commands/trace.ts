@@ -27,10 +27,16 @@ export function traceCommand(): Command {
         return;
       }
 
-      const gadget = options.network ? "tcp" :
-        options.files ? "open" :
-        options.dns ? "dns" :
-        options.exec ? "exec" : "exec";
+      const gadgetMap: Record<string, string> = {
+        network: "trace_tcp",
+        files: "trace_open",
+        dns: "trace_dns",
+        exec: "trace_exec",
+      };
+
+      const gadget = options.network ? "trace_tcp" :
+        options.files ? "trace_open" :
+        options.dns ? "trace_dns" : "trace_exec";
 
       console.log(chalk.hex("#0078D4")(
         `\n  Tracing ${chalk.bold(gadget)} in sandbox ${chalk.bold(name)}...\n`
@@ -40,7 +46,7 @@ export function traceCommand(): Command {
 
       try {
         await execa("kubectl", [
-          "gadget", "trace", gadget,
+          "gadget", "run", `${gadget}:latest`,
           "-n", namespace,
         ], { stdio: "inherit" });
       } catch {

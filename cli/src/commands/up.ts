@@ -374,6 +374,12 @@ export function upCommand(): Command {
         spinner.succeed("Controller deployed");
         spinner.start();
 
+        // ── Step 6b: Deploy Inspektor Gadget (eBPF observability) ────
+        spinner.text = "Deploying Inspektor Gadget (eBPF tracing)...";
+        await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {
+          // kubectl-gadget not installed or already deployed — non-fatal
+        });
+
         // ── Step 7: Create ClawSandbox CR ────────────────────────────
         const sandboxNs = `azureclaw-${options.name}`;
         spinner.text = `Creating sandbox '${options.name}'...`;

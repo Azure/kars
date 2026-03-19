@@ -102,10 +102,10 @@ monitoring:
   grafana:
     enabled: false   # Set to true if you want Grafana dashboards
   inspektorGadget:
-    enabled: true    # eBPF-powered runtime observability
+    enabled: false   # Install separately: kubectl gadget deploy
     image:
       repository: ghcr.io/inspektor-gadget/inspektor-gadget
-      tag: "latest"
+      tag: "v0.37.0"
     gadgets:
       traceExec: true       # Monitor process execution in sandboxes
       traceOpen: true       # Track file opens for policy validation
