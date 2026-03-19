@@ -1,0 +1,52 @@
+# AzureClaw - Azure Developer CLI (azd) template
+# Deploy with: azd init --template Azure/azureclaw && azd up
+
+name: azureclaw
+metadata:
+  template: Azure/azureclaw@main
+
+services:
+  controller:
+    project: ./controller
+    language: rust
+    host: aks
+
+  inference-router:
+    project: ./inference-router
+    language: rust
+    host: aks
+
+  sandbox:
+    project: ./sandbox-images/openclaw
+    language: js
+    host: aks
+
+hooks:
+  preprovision:
+    shell: sh
+    run: |
+      echo "Registering preview features..."
+      az feature register --namespace Microsoft.Compute --name EncryptionAtHost --output none 2>/dev/null || true
+      az provider register -n Microsoft.Compute --output none 2>/dev/null || true
+
+  postprovision:
+    shell: sh
+    run: |
+      echo "Configuring AKS access..."
+      az aks get-credentials --name ${AZURE_AKS_NAME} --resource-group ${AZURE_RESOURCE_GROUP} --overwrite-existing --output none
+      echo "Installing Helm chart..."
+      helm upgrade --install azureclaw ./deploy/helm/azureclaw \
+        --namespace azureclaw-system --create-namespace \
+        --set controller.image.repository=${AZURE_ACR_LOGIN_SERVER}/azureclaw-controller \
+        --set controller.image.tag=latest \
+        --set inferenceRouter.image.repository=${AZURE_ACR_LOGIN_SERVER}/azureclaw-inference-router \
+        --set inferenceRouter.image.tag=latest \
+        --set sandbox.image.repository=${AZURE_ACR_LOGIN_SERVER}/openclaw-sandbox \
+        --set sandbox.image.tag=latest \
+        --set azure.workloadIdentity.clientId=${AZURE_WI_CLIENT_ID} \
+        --set azure.keyVaultCsi.keyVaultName=${AZURE_KEY_VAULT_NAME} \
+        --wait --timeout 5m
+
+infra:
+  provider: bicep
+  path: ./deploy/bicep
