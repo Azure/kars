@@ -759,29 +759,38 @@ azureclaw/
 - [ ] `azureclaw migrate` — import existing OpenClaw installations into AzureClaw sandbox
 - [ ] SBOM generation in CI
 
-### Phase 3: Enterprise Features (next)
-- [ ] ~~Blueprint Controller (CRD-based operator)~~ — DONE in Phase 2
+### Phase 3: Enterprise Features — MOSTLY DONE
+- [x] ~~Blueprint Controller (CRD-based operator)~~ — DONE in Phase 2
 - [x] Kata Containers pod sandboxing (confidential isolation level)
-- [ ] Multi-tenant namespace isolation
+- [x] Multi-tenant namespace isolation (per-sandbox namespaces, RBAC, docs)
 - [x] Azure AI Content Safety integration (on by default via inference router)
 - [x] Prompt Shields integration (on by default via inference router)
-- [ ] Token budgets + cost tracking
-- [ ] Azure Monitor dashboards + workbooks + Inspektor Gadget metrics
-- [ ] Alerting (token spikes, egress anomalies, syscall anomalies)
-- [ ] Hot-reload policy updates
+- [x] Token budgets + cost tracking (per-sandbox daily/per-request limits, Prometheus metrics)
+- [x] Azure Monitor dashboards + workbooks (KQL queries for tokens, latency, costs)
+- [x] Hot-reload policy updates (`azureclaw policy allow/get/deny`)
+- [x] Azure AI Foundry integration (Foundry Models endpoint, IMDS auth, 200+ models)
+- [x] Foundry model catalog switching (`azureclaw model set/get/list`, live query)
+- [x] Operator approval flow (`azureclaw approve --list/--approve/--deny`)
+- [x] Inspektor Gadget eBPF tracing (`azureclaw trace`, official `kubectl gadget deploy`)
+- [x] OpenClaw plugin slash commands (`/azureclaw`, `/azureclaw-models`, `/azureclaw-switch`, `/azureclaw-security`)
+- [x] `azd` integration (`azure.yaml` template)
+- [x] Notation + Ratify guide (image signing + Gatekeeper admission)
+- [ ] Alerting (token spikes, egress anomalies, syscall alerts)
 - [ ] TODO: azure-osconfig integration planning (CIS AKS Optimized baseline for ACL nodes)
 - [ ] **Agentic demo scenario** — demonstrate real-world agent with tool use, Azure service access, policy-governed egress
 
-### Phase 4: Ecosystem & Polish (Weeks 13–16)
-- [ ] Azure AI Foundry model catalog integration
+### Phase 4: Ecosystem & Polish
+- [ ] Envoy sidecar with L7 egress filtering (HTTP method/path for non-inference)
+- [ ] SBOM generation in CI
 - [ ] Migration guide from NemoClaw
 - [ ] Multi-region deployment
 - [ ] Azure Linux 4 container image validation + Azure Container Linux AKS node pool validation
 - [ ] Comprehensive e2e test suite
 - [ ] Enterprise example (multi-tenant, compliance)
 - [ ] Community sandbox catalog (BYOC)
-- [ ] `azd` integration for one-click deployment
-- [ ] Public documentation site
+- [ ] Public npm/MCR/Helm package distribution
+- [ ] Public documentation site (GitHub Pages or Docusaurus)
+- [ ] `azureclaw migrate` — import existing OpenClaw installations
 
 ---
 
