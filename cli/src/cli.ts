@@ -11,6 +11,7 @@ import { modelCommand } from "./commands/model.js";
 import { traceCommand } from "./commands/trace.js";
 import { costsCommand } from "./commands/costs.js";
 import { policyCommand } from "./commands/policy.js";
+import { approveCommand } from "./commands/approve.js";
 import { destroyCommand } from "./commands/destroy.js";
 
 export function createCli(): Command {
@@ -40,6 +41,7 @@ export function createCli(): Command {
   program.addCommand(traceCommand());
   program.addCommand(costsCommand());
   program.addCommand(policyCommand());
+  program.addCommand(approveCommand());
   program.addCommand(destroyCommand());
 
   return program;
