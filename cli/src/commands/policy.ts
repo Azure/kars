@@ -19,16 +19,22 @@ export function policyCommand(): Command {
       const namespace = `azureclaw-${name}`;
 
       try {
-        // Patch the ClawSandbox CR to add the endpoint
+        // First get the current allowed endpoints
+        const { stdout: current } = await execa("kubectl", [
+          "get", "clawsandbox", name,
+          "-n", "azureclaw-system",
+          "-o", "jsonpath={.spec.networkPolicy.allowedEndpoints}",
+        ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+        const existing = current.trim() ? JSON.parse(current.trim()) : [];
+        existing.push({ host, port: parseInt(options.port) });
+
+        // Use merge patch to set the full array
         await execa("kubectl", [
           "patch", "clawsandbox", name,
           "-n", "azureclaw-system",
-          "--type", "json",
-          "-p", JSON.stringify([{
-            op: "add",
-            path: "/spec/networkPolicy/allowedEndpoints/-",
-            value: { host, port: parseInt(options.port) }
-          }]),
+          "--type", "merge",
+          "-p", JSON.stringify({ spec: { networkPolicy: { allowedEndpoints: existing } } }),
         ], { stdio: "pipe" });
 
         spinner.succeed(`${host}:${options.port} allowed for '${name}' (hot-reloaded)`);
