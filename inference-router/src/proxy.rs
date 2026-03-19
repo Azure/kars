@@ -205,9 +205,9 @@ pub async fn forward_to_foundry(
         request_body
     };
 
-    // Auth: try WI token first, fall back to API key
+    // Auth: Foundry uses https://ai.azure.com scope (not cognitiveservices.azure.com)
     let token = auth
-        .get_token("https://cognitiveservices.azure.com")
+        .get_token("https://ai.azure.com")
         .await
         .context("Failed to acquire token for Foundry")?;
 

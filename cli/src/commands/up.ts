@@ -413,6 +413,51 @@ export function upCommand(): Command {
           // Already exists — non-fatal
         });
 
+        // Grant Cognitive Services User role on Foundry resource (if --foundry-endpoint provided)
+        if (foundryEndpoint) {
+          spinner.text = "Granting Cognitive Services User role on Foundry resource...";
+          // Extract resource name from endpoint URL (e.g. "lsb-azureai" from "https://lsb-azureai.openai.azure.com")
+          const foundryHost = new URL(foundryEndpoint).hostname;
+          const foundryResourceName = foundryHost.split(".")[0];
+
+          // Get the MI's principal ID
+          const { stdout: wiPrincipalId } = await execa("az", [
+            "identity", "show",
+            "--name", `${baseName}-aks-sandbox-wi`,
+            "--resource-group", rg,
+            "--query", "principalId",
+            "--output", "tsv",
+          ], { stdio: "pipe" });
+
+          // Find the Foundry resource ID (search across subscription)
+          const { stdout: foundryResourceId } = await execa("az", [
+            "cognitiveservices", "account", "list",
+            "--query", `[?name=='${foundryResourceName}'].id | [0]`,
+            "--output", "tsv",
+          ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+          if (foundryResourceId.trim()) {
+            await execa("az", [
+              "role", "assignment", "create",
+              "--assignee", wiPrincipalId.trim(),
+              "--role", "Cognitive Services User",
+              "--scope", foundryResourceId.trim(),
+              "--output", "none",
+            ], { stdio: "pipe" }).catch(() => {
+              // Already assigned or insufficient permissions — non-fatal
+            });
+          } else {
+            // Fallback: assign at subscription scope
+            await execa("az", [
+              "role", "assignment", "create",
+              "--assignee", wiPrincipalId.trim(),
+              "--role", "Cognitive Services User",
+              "--scope", `/subscriptions/${(await execa("az", ["account", "show", "--query", "id", "--output", "tsv"], { stdio: "pipe" })).stdout.trim()}`,
+              "--output", "none",
+            ], { stdio: "pipe" }).catch(() => {});
+          }
+        }
+
         spinner.text = `Creating sandbox '${options.name}'...`;
         const sandboxManifest = {
           apiVersion: "azureclaw.azure.com/v1alpha1",
