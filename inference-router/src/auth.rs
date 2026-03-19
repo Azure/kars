@@ -63,8 +63,16 @@ impl WorkloadIdentityAuth {
             }
         }
 
-        // Token expired or missing — exchange
-        self.exchange_token(resource).await
+        // Token expired or missing — try WI first, fall back to IMDS
+        match self.exchange_token(resource).await {
+            Ok(token) => Ok(token),
+            Err(wi_err) => {
+                tracing::warn!("WI token exchange failed ({wi_err:#}), trying IMDS fallback");
+                self.imds_token(resource).await.map_err(|imds_err| {
+                    anyhow::anyhow!("Both WI ({wi_err:#}) and IMDS ({imds_err:#}) failed")
+                })
+            }
+        }
     }
 
     /// Returns true if using API key auth (dev mode), false if Workload Identity.
@@ -124,6 +132,47 @@ impl WorkloadIdentityAuth {
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
         });
 
+        Ok(access_token)
+    }
+
+    /// Acquire a token via IMDS (Azure Instance Metadata Service).
+    /// This works on AKS nodes with system/user-assigned managed identities
+    /// and bypasses WI federation + CA policies.
+    async fn imds_token(&self, resource: &str) -> Result<String> {
+        // Use IMDS_CLIENT_ID (kubelet MI) if set, otherwise AZURE_CLIENT_ID (WI MI)
+        let client_id = std::env::var("IMDS_CLIENT_ID")
+            .or_else(|_| std::env::var("AZURE_CLIENT_ID"))
+            .unwrap_or_default();
+        let mut url = format!(
+            "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={resource}"
+        );
+        if !client_id.is_empty() {
+            url.push_str(&format!("&client_id={client_id}"));
+        }
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("Metadata", "true")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .context("IMDS request failed")?;
+
+        let body: serde_json::Value = resp.json().await?;
+        let access_token = body["access_token"]
+            .as_str()
+            .context("No access_token in IMDS response")?
+            .to_string();
+
+        // Cache it
+        let mut cache = self.token_cache.write().await;
+        *cache = Some(CachedToken {
+            access_token: access_token.clone(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
+        });
+
+        tracing::info!("Token acquired via IMDS fallback");
         Ok(access_token)
     }
 }

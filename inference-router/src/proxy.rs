@@ -205,16 +205,16 @@ pub async fn forward_to_foundry(
         request_body
     };
 
-    // Auth: Foundry uses https://ai.azure.com scope (not cognitiveservices.azure.com)
+    // Auth: try cognitiveservices scope (works with IMDS), fall back to ai.azure.com
     let token = auth
-        .get_token("https://ai.azure.com")
+        .get_token("https://cognitiveservices.azure.com")
         .await
         .context("Failed to acquire token for Foundry")?;
 
     let mut upstream_headers = HeaderMap::new();
     for (name, value) in request_headers.iter() {
         match name.as_str() {
-            "authorization" | "api-key" | "x-api-key" | "host" | "connection" | "transfer-encoding" => continue,
+            "authorization" | "api-key" | "x-api-key" | "host" | "connection" | "transfer-encoding" | "content-length" => continue,
             _ => { upstream_headers.insert(name.clone(), value.clone()); }
         }
     }

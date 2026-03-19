@@ -98,6 +98,8 @@ struct Context {
     openai_endpoint: String,
     /// Foundry Models endpoint — injected via FOUNDRY_ENDPOINT env
     foundry_endpoint: String,
+    /// Kubelet MI client ID for IMDS fallback — injected via IMDS_CLIENT_ID env
+    imds_client_id: String,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -174,6 +176,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             ],
             "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]
         }),
+        // Allow IMDS (Azure Instance Metadata Service) for managed identity token acquisition
+        json!({
+            "to": [{"ipBlock": {"cidr": "169.254.169.254/32"}}],
+            "ports": [{"protocol": "TCP", "port": 80}]
+        }),
         // Always allow inference router sidecar (localhost, but explicit for clarity)
         json!({
             "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/name": "azureclaw"}},
@@ -181,7 +188,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "ports": [{"protocol": "TCP", "port": 8443}]
         }),
         // Allow HTTPS egress for Workload Identity (login.microsoftonline.com)
-        // and Azure OpenAI (*.openai.azure.com). Firewall rules on AOAI side
+        // and Azure OpenAI / Foundry / APIM. Firewall rules on AOAI side
         // restrict access to only the AKS egress IP.
         json!({
             "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}],
@@ -292,6 +299,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "env": [
                                 {"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint},
                                 {"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint},
+                                {"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id},
                                 {"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model},
                                 {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
                                 {"name": "AZURECLAW_CONTENT_SAFETY", "value": inference_config.content_safety.to_string()},
@@ -427,15 +435,14 @@ pub async fn run(client: Client) -> Result<()> {
         .unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT")
         .unwrap_or_default();
+    let imds_client_id = std::env::var("IMDS_CLIENT_ID")
+        .unwrap_or_default();
 
-    if wi_client_id.is_empty() {
-        tracing::warn!("AZURE_WI_CLIENT_ID not set — sandbox ServiceAccounts will lack Workload Identity");
-    }
-    if openai_endpoint.is_empty() && foundry_endpoint.is_empty() {
-        tracing::warn!("Neither AZURE_OPENAI_ENDPOINT nor FOUNDRY_ENDPOINT set — inference won't work");
-    }
     if !foundry_endpoint.is_empty() {
         tracing::info!("Using Foundry Models endpoint: {foundry_endpoint}");
+    }
+    if !imds_client_id.is_empty() {
+        tracing::info!("IMDS auth enabled with kubelet MI: {imds_client_id}");
     }
 
     let ctx = Arc::new(Context {
@@ -445,6 +452,7 @@ pub async fn run(client: Client) -> Result<()> {
         sandbox_image,
         openai_endpoint,
         foundry_endpoint,
+        imds_client_id,
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())
