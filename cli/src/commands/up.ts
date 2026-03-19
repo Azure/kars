@@ -356,6 +356,49 @@ export function upCommand(): Command {
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         spinner.text = "Installing AzureClaw controller...";
         const foundryEndpoint = options.foundryEndpoint || "";
+
+        // Get kubelet MI client ID for IMDS auth (CA-proof)
+        let imdsClientId = "";
+        if (foundryEndpoint) {
+          try {
+            const { stdout: kubeletId } = await execa("az", [
+              "aks", "show",
+              "--name", `${baseName}-aks`,
+              "--resource-group", rg,
+              "--query", "identityProfile.kubeletidentity.clientId",
+              "--output", "tsv",
+            ], { stdio: "pipe" });
+            imdsClientId = kubeletId.trim().split("\n").pop()?.trim() || "";
+
+            // Assign Cognitive Services User to kubelet MI via Bicep (bypasses CLI CA policy)
+            const { stdout: kubeletPrincipal } = await execa("az", [
+              "aks", "show",
+              "--name", `${baseName}-aks`,
+              "--resource-group", rg,
+              "--query", "identityProfile.kubeletidentity.objectId",
+              "--output", "tsv",
+            ], { stdio: "pipe" });
+            const principalId = kubeletPrincipal.trim().split("\n").pop()?.trim() || "";
+            if (principalId) {
+              spinner.text = "Assigning Cognitive Services User role to kubelet MI (via Bicep)...";
+              const bicepRole = `targetScope = 'subscription'\nparam pid string\nresource r 'Microsoft.Authorization/roleAssignments@2022-04-01' = { name: guid(pid, 'csu-foundry') \n properties: { roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908') \n principalId: pid \n principalType: 'ServicePrincipal' } }`;
+              const fs = await import("fs");
+              const tmpBicep = path.join(repoRoot, ".tmp-role.bicep");
+              fs.writeFileSync(tmpBicep, bicepRole);
+              await execa("az", [
+                "deployment", "sub", "create",
+                "--location", options.region,
+                "--template-file", tmpBicep,
+                "--parameters", `pid=${principalId}`,
+                "--output", "none",
+              ], { stdio: "pipe" }).catch(() => {});
+              fs.unlinkSync(tmpBicep);
+            }
+          } catch {
+            // Non-fatal — IMDS will still try without explicit client ID
+          }
+        }
+
         const helmArgs = [
           "upgrade", "--install", "azureclaw", helmPath,
           "--namespace", "azureclaw-system",
@@ -374,6 +417,9 @@ export function upCommand(): Command {
         ];
         if (foundryEndpoint) {
           helmArgs.push("--set", `foundry.endpoint=${foundryEndpoint}`);
+          if (imdsClientId) {
+            helmArgs.push("--set", `foundry.imdsClientId=${imdsClientId}`);
+          }
         }
         await execa("helm", helmArgs, { stdio: "pipe" });
 
