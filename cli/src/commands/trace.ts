@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { execa } from "execa";
+import chalk from "chalk";
 
 export function traceCommand(): Command {
   const cmd = new Command("trace");
@@ -12,35 +12,39 @@ export function traceCommand(): Command {
     .option("--network", "Show network connections only", false)
     .option("--files", "Show file operations only", false)
     .option("--exec", "Show process executions only", false)
+    .option("--dns", "Show DNS lookups only", false)
     .action(async (name: string, options) => {
+      const { execa } = await import("execa");
       const namespace = `azureclaw-${name}`;
-      const podLabel = `azureclaw.azure.com/sandbox=${name}`;
 
-      // Build kubectl gadget args based on what the user wants to trace
-      let gadget = "trace exec,open,tcp,dns"; // default: everything
-      if (options.network) gadget = "trace tcp,dns";
-      if (options.files) gadget = "trace open";
-      if (options.exec) gadget = "trace exec";
+      // Check kubectl-gadget is installed
+      try {
+        await execa("kubectl", ["gadget", "version"], { stdio: "pipe" });
+      } catch {
+        console.log(chalk.red("\n  kubectl-gadget not found."));
+        console.log(chalk.dim("  Install: kubectl krew install gadget"));
+        console.log(chalk.dim("  Or: brew install inspektor-gadget\n"));
+        return;
+      }
+
+      const gadget = options.network ? "tcp" :
+        options.files ? "open" :
+        options.dns ? "dns" :
+        options.exec ? "exec" : "exec";
+
+      console.log(chalk.hex("#0078D4")(
+        `\n  Tracing ${chalk.bold(gadget)} in sandbox ${chalk.bold(name)}...\n`
+      ));
+      console.log(chalk.dim(`  Namespace: ${namespace}`));
+      console.log(chalk.dim(`  Press Ctrl+C to stop.\n`));
 
       try {
-        // TODO: Use Inspektor Gadget API/CLI to stream traces
-        // For now, delegate to kubectl gadget
-        await execa(
-          "kubectl",
-          [
-            "gadget",
-            gadget,
-            "-n",
-            namespace,
-            "--podname",
-            podLabel,
-            "-o",
-            "columns",
-          ],
-          { stdio: "inherit" }
-        );
+        await execa("kubectl", [
+          "gadget", "trace", gadget,
+          "-n", namespace,
+        ], { stdio: "inherit" });
       } catch {
-        // Expected on disconnect
+        console.log(chalk.dim("\n  Trace stopped.\n"));
       }
     });
 
