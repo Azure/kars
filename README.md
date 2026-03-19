@@ -16,7 +16,7 @@ AzureClaw is the open-source runtime for running [OpenClaw](https://openclaw.ai/
 | Outcome | How it works | You don't need to think about |
 |---|---|---|
 | **Your agent runs safely** | Every sandbox is isolated by default — network, filesystem, and syscalls are locked down. You define what the agent *can* do, not what it can't. | seccomp, SELinux, Cilium, Envoy, NetworkPolicy |
-| **Any Azure AI model, one line** | Switch between GPT-4.1, o-series, Phi-4, Llama, Mistral, or 1800+ models. The agent never sees credentials. | Workload Identity, Key Vault, token routing |
+| **Any Azure AI model, one line** | Switch between GPT-4.1, o-series, Phi-4, Llama, Mistral, or 1800+ models via Azure AI Foundry. The agent never sees credentials. | Foundry Models, IMDS auth, zero keys |
 | **See what your agent is doing** | Every network call, file access, and process spawn is traced. Approve or deny egress requests in real time. | eBPF, Inspektor Gadget, Log Analytics |
 | **Azure services just work** | Your agent can use Azure Storage, Cosmos DB, AI Search, or any Azure service — authenticated via Managed Identity, no keys needed. | Service principals, RBAC bindings, CSI drivers |
 | **Ship to production** | One cluster, many agents. Autoscale. Multi-region. 99.95% SLA. Compliance baselines baked into the node OS. | AKS, Azure Container Linux, Azure Linux 4, azure-osconfig |
