@@ -96,6 +96,8 @@ struct Context {
     sandbox_image: String,
     /// Azure OpenAI endpoint — injected via AZURE_OPENAI_ENDPOINT env
     openai_endpoint: String,
+    /// Foundry Models endpoint — injected via FOUNDRY_ENDPOINT env
+    foundry_endpoint: String,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -289,6 +291,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             ],
                             "env": [
                                 {"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint},
+                                {"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint},
                                 {"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model},
                                 {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
                                 {"name": "AZURECLAW_CONTENT_SAFETY", "value": inference_config.content_safety.to_string()},
@@ -422,12 +425,17 @@ pub async fn run(client: Client) -> Result<()> {
         .unwrap_or_else(|_| "azureclawacr.azurecr.io/openclaw-sandbox:latest".into());
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
         .unwrap_or_default();
+    let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT")
+        .unwrap_or_default();
 
     if wi_client_id.is_empty() {
         tracing::warn!("AZURE_WI_CLIENT_ID not set — sandbox ServiceAccounts will lack Workload Identity");
     }
-    if openai_endpoint.is_empty() {
-        tracing::warn!("AZURE_OPENAI_ENDPOINT not set — sandbox pods won't know the AOAI endpoint");
+    if openai_endpoint.is_empty() && foundry_endpoint.is_empty() {
+        tracing::warn!("Neither AZURE_OPENAI_ENDPOINT nor FOUNDRY_ENDPOINT set — inference won't work");
+    }
+    if !foundry_endpoint.is_empty() {
+        tracing::info!("Using Foundry Models endpoint: {foundry_endpoint}");
     }
 
     let ctx = Arc::new(Context {
@@ -436,6 +444,7 @@ pub async fn run(client: Client) -> Result<()> {
         inference_router_image,
         sandbox_image,
         openai_endpoint,
+        foundry_endpoint,
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

@@ -48,12 +48,15 @@ impl AppState {
     }
 
     fn upstream_config(&self, sandbox_name: &str) -> UpstreamConfig {
+        // Use Foundry endpoint if available, otherwise fall back to AOAI
+        let endpoint = if self.config.provider == "azure-ai-foundry" {
+            self.config.foundry_endpoint.clone().unwrap_or_default()
+        } else {
+            self.config.azure_openai_endpoint.clone().unwrap_or_default()
+        };
+
         UpstreamConfig {
-            endpoint: self
-                .config
-                .azure_openai_endpoint
-                .clone()
-                .unwrap_or_default(),
+            endpoint,
             deployment: self.config.default_model.clone(),
             api_version: "2024-12-01-preview".to_string(),
             sandbox_name: sandbox_name.to_string(),
@@ -171,19 +174,31 @@ async fn chat_completions(
             .into_response();
     }
 
-    // Forward to Azure OpenAI
+    // Forward to inference backend (Foundry or AOAI)
     let upstream = state.upstream_config(sandbox_name);
-    match proxy::forward_to_azure_openai(
-        &state.auth,
-        &state.client,
-        &upstream,
-        axum::http::Method::POST,
-        "chat/completions",
-        &headers,
-        body,
-    )
-    .await
-    {
+    let result = if state.config.provider == "azure-ai-foundry" {
+        proxy::forward_to_foundry(
+            &state.auth,
+            &state.client,
+            &upstream,
+            axum::http::Method::POST,
+            "chat/completions",
+            &headers,
+            body,
+        ).await
+    } else {
+        proxy::forward_to_azure_openai(
+            &state.auth,
+            &state.client,
+            &upstream,
+            axum::http::Method::POST,
+            "chat/completions",
+            &headers,
+            body,
+        ).await
+    };
+
+    match result {
         Ok((status, resp_headers, resp_body)) => {
             // Record token usage from response for budget tracking
             if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
