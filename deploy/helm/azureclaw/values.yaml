@@ -93,6 +93,10 @@ networkPolicy:
       port: 443
       methods: ["GET"]
 
+# Foundry configuration (optional — for azure-ai-foundry provider)
+foundry:
+  endpoint: ""    # e.g. https://my-resource.services.ai.azure.com — set by azureclaw up or --foundry-endpoint
+
 # Monitoring
 monitoring:
   enabled: true

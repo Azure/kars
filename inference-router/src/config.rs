@@ -6,8 +6,14 @@ pub struct Config {
     /// Port to listen on (default: 8443)
     pub port: u16,
 
+    /// Inference provider: "azure-openai" | "azure-ai-foundry" (default: auto-detect)
+    pub provider: String,
+
     /// Azure OpenAI endpoint (e.g. https://my-aoai.openai.azure.com/)
     pub azure_openai_endpoint: Option<String>,
+
+    /// Foundry Models endpoint (e.g. https://my-resource.services.ai.azure.com/)
+    pub foundry_endpoint: Option<String>,
 
     /// Default model deployment name
     pub default_model: String,
@@ -30,13 +36,27 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").ok();
+        let azure_openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").ok();
+
+        // Auto-detect provider: prefer Foundry if endpoint is set
+        let provider = std::env::var("INFERENCE_PROVIDER").unwrap_or_else(|_| {
+            if foundry_endpoint.is_some() {
+                "azure-ai-foundry".into()
+            } else {
+                "azure-openai".into()
+            }
+        });
+
         Ok(Self {
             port: std::env::var("ROUTER_PORT")
                 .unwrap_or_else(|_| "8443".into())
                 .parse()
                 .context("ROUTER_PORT must be a valid port number")?,
 
-            azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
+            provider,
+            azure_openai_endpoint,
+            foundry_endpoint,
 
             default_model: std::env::var("DEFAULT_MODEL")
                 .unwrap_or_else(|_| "gpt-4.1".into()),

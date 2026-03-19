@@ -42,6 +42,8 @@ spec:
               value: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
+            - name: FOUNDRY_ENDPOINT
+              value: {{ .Values.foundry.endpoint | default "" | quote }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

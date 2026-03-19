@@ -28,6 +28,7 @@ export function upCommand(): Command {
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
+    .option("--foundry-endpoint <url>", "Existing Foundry/AI Services endpoint (skip AOAI deployment)")
     .option("--dry-run", "Show what would be done without executing", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
@@ -354,7 +355,8 @@ export function upCommand(): Command {
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         spinner.text = "Installing AzureClaw controller...";
-        await execa("helm", [
+        const foundryEndpoint = options.foundryEndpoint || "";
+        const helmArgs = [
           "upgrade", "--install", "azureclaw", helmPath,
           "--namespace", "azureclaw-system",
           "--create-namespace",
@@ -369,7 +371,11 @@ export function upCommand(): Command {
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--wait",
           "--timeout", "5m",
-        ], { stdio: "pipe" });
+        ];
+        if (foundryEndpoint) {
+          helmArgs.push("--set", `foundry.endpoint=${foundryEndpoint}`);
+        }
+        await execa("helm", helmArgs, { stdio: "pipe" });
 
         spinner.succeed("Controller deployed");
         spinner.start();
