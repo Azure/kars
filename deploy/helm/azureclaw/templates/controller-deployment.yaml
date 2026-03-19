@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
             - name: FOUNDRY_ENDPOINT
               value: {{ .Values.foundry.endpoint | default "" | quote }}
+            - name: IMDS_CLIENT_ID
+              value: {{ .Values.foundry.imdsClientId | default "" | quote }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
