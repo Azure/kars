@@ -1,82 +1,78 @@
 # Contributing to AzureClaw
 
-Thank you for your interest in contributing to AzureClaw! This project welcomes contributions and suggestions.
+This project welcomes contributions and suggestions.
 
-## Getting Started
-
-1. Fork the repository
-2. Clone your fork: `git clone https://github.com/<your-user>/azureclaw.git`
-3. Create a branch: `git checkout -b my-feature`
-4. Make your changes
-5. Run checks: `make test` (Rust + CLI), `make lint` (clippy + oxlint)
-6. Submit a pull request
-
-## Development Setup
-
-### Quick Start (Makefile)
+## Quick Start
 
 ```bash
-make build        # Build all components (Rust + CLI)
-make test         # Run all tests
-make lint         # Run clippy + oxlint
-make images       # Build Docker images
-make install-cli  # Install azureclaw CLI globally
-make help         # Show all available targets
+git clone https://github.com/<your-user>/azureclaw.git
+cd azureclaw
+make build    # Rust (controller + router) + TypeScript CLI
+make test     # 14 unit tests (Rust)
+make lint     # clippy + oxlint
 ```
 
-### CLI (TypeScript)
+## Project Structure
+
+| Directory | Language | What It Is |
+|-----------|----------|------------|
+| `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs |
+| `inference-router/` | Rust (axum) | Per-sandbox sidecar proxy — auth, safety, budgets |
+| `cli/` | TypeScript | 12 CLI commands + OpenClaw plugin |
+| `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
+| `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp) |
+| `sandbox-images/` | Dockerfile | Azure Linux 3 sandbox image |
+| `policy-engine/` | JSON | seccomp profile (`azureclaw-strict`) |
+| `tests/e2e/` | Bash | Kind-based E2E test framework |
+
+## Development
+
+### Rust (edition 2024, MSRV 1.88)
+
+```bash
+cargo build --release     # builds controller + inference-router
+cargo test --all          # 14 unit tests (9 controller + 5 budget)
+cargo clippy --all-targets -D warnings
+```
+
+### CLI (Node.js 22, TypeScript)
 
 ```bash
 cd cli
-npm install
-npm run build        # tsc + copy seccomp profiles
-npm link             # makes 'azureclaw' available globally
+npm install && npm run build && npm link
 ```
 
-### Controller & Inference Router (Rust)
+### Docker Images
 
 ```bash
-cargo build --release   # builds both crates
-cargo test --all
-cargo clippy --all-targets
+make images               # builds controller + inference-router images
+make push                 # pushes to configured ACR
 ```
 
-### Sandbox Image (Docker + Azure Linux 3)
+### Local E2E
 
 ```bash
-docker build -t azureclaw-sandbox:dev -f sandbox-images/openclaw/Dockerfile .
+azureclaw onboard         # configure Azure OpenAI (once)
+azureclaw dev             # start local sandbox
+azureclaw connect dev-agent
+azureclaw destroy dev-agent
 ```
 
-### Full E2E Test
+## Pull Requests
 
-```bash
-azureclaw onboard                    # configure Azure OpenAI (once)
-azureclaw dev                        # start sandbox
-azureclaw connect dev-agent          # chat with agent via OpenClaw TUI
-azureclaw status dev-agent           # check health + metrics
-azureclaw destroy dev-agent          # tear down
-```
+1. Clear description of the change
+2. Tests for new functionality
+3. `make test && make lint` passes
+4. Documentation updated if applicable
 
 ## Code of Conduct
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
-or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with questions.
+[Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/) · [FAQ](https://opensource.microsoft.com/codeofconduct/faq/) · [opencode@microsoft.com](mailto:opencode@microsoft.com)
 
-## Contributor License Agreement
+## CLA
 
-Most contributions require you to agree to a Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+Most contributions require a [Contributor License Agreement](https://cla.opensource.microsoft.com). A bot will guide you when you submit a PR.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide a CLA and decorate the PR appropriately.
+## Security
 
-## Pull Request Process
-
-1. Ensure your PR has a clear description of the change
-2. Include tests for new functionality
-3. Update documentation if applicable
-4. Ensure CI passes
-5. Request review from maintainers
-
-## Reporting Issues
-
-Use GitHub Issues for bug reports and feature requests. For security vulnerabilities, see [SECURITY.md](SECURITY.md).
+Report vulnerabilities via [SECURITY.md](SECURITY.md), not GitHub Issues.
