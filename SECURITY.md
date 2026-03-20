@@ -21,16 +21,15 @@ We will acknowledge receipt within 24 hours and provide a detailed response with
 
 ## Security Design
 
-AzureClaw implements defense-in-depth with 7+ layers:
+AzureClaw implements defense-in-depth with multiple layers:
 
-1. **Azure Infrastructure** — DDoS protection, NSG, Azure Firewall
-2. **Azure Container Linux** — Immutable, SELinux-enforcing, CIS-hardened host OS
-3. **Confidential Containers** — Hardware-encrypted TEE (AMD SEV-SNP / Intel TDX)
-4. **Container Hardening** — Read-only rootfs, non-root, no privilege escalation
-5. **Kernel Confinement** — seccomp syscall filtering + SELinux MAC (ACL-native, enforcing mode)
-6. **Network Segmentation** — Kubernetes NetworkPolicy with default-deny egress
-7. **Application Firewall** — Envoy L7 proxy with method/path/header filtering
-8. **Inference Safety** — Azure AI Content Safety + Prompt Shields
+1. **Azure Infrastructure** — DDoS protection, NSG, AKS API server authorized IPs
+2. **Azure Linux** — SELinux-enforcing node OS with automatic patching
+3. **Kata VM Isolation** — Per-pod dedicated kernel (`--isolation confidential`)
+4. **Container Hardening** — Read-only rootfs, non-root, no privilege escalation, drop ALL capabilities
+5. **Kernel Confinement** — Custom seccomp syscall filter (azureclaw-strict)
+6. **Network Segmentation** — Default-deny NetworkPolicy + iptables UID-based per-container egress control
+7. **Inference Safety** — Azure AI Content Safety + Prompt Shields + token budgets
 
 ## Supported Versions
 

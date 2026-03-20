@@ -428,3 +428,6 @@ cli/package-lock.json
 
 # Docker
 .docker/
+
+# Internal planning docs (not for public repo)
+PLAN.md
