@@ -74,10 +74,10 @@ fn record_metrics(upstream: &UpstreamConfig, status: StatusCode, latency: std::t
     }
 }
 
-/// Forward an inference request to Azure AI Foundry.
+/// Forward an inference request to the appropriate Azure backend.
 ///
-/// Uses the Foundry `/openai/v1/{path}` endpoint which is OpenAI-compatible
-/// and supports all endpoints: chat/completions, completions, embeddings, models.
+/// - **Dev mode** (API key): Azure OpenAI `/openai/deployments/{model}/{path}?api-version=...`
+/// - **AKS mode** (Workload Identity / IMDS): Foundry `/openai/v1/{path}` with model in body
 pub async fn forward(
     auth: &WorkloadIdentityAuth,
     client: &Client,
@@ -89,29 +89,42 @@ pub async fn forward(
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let start = Instant::now();
 
-    let upstream_url = format!(
-        "{}/openai/v1/{}",
-        upstream.endpoint.trim_end_matches('/'),
-        path.trim_start_matches('/'),
-    );
-
-    tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, path = %path, "Forwarding to Foundry");
-
-    // Inject model name into request body if not present
-    let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
-        if body_json.get("model").is_none() {
-            body_json.as_object_mut().unwrap().insert(
-                "model".into(),
-                serde_json::Value::String(upstream.deployment.clone()),
-            );
-        }
-        serde_json::to_vec(&body_json)?.into()
+    // Dev mode: Azure OpenAI deployment-scoped URL
+    // Prod mode: Foundry unified OpenAI-compatible URL
+    let (upstream_url, body) = if auth.is_api_key_mode() {
+        let url = format!(
+            "{}/openai/deployments/{}/{}?api-version=2024-12-01-preview",
+            upstream.endpoint.trim_end_matches('/'),
+            upstream.deployment,
+            path.trim_start_matches('/'),
+        );
+        (url, request_body)
     } else {
-        request_body
+        let url = format!(
+            "{}/openai/v1/{}",
+            upstream.endpoint.trim_end_matches('/'),
+            path.trim_start_matches('/'),
+        );
+        // Inject model name into request body for Foundry
+        let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
+            if body_json.get("model").is_none() {
+                body_json.as_object_mut().unwrap().insert(
+                    "model".into(),
+                    serde_json::Value::String(upstream.deployment.clone()),
+                );
+            }
+            serde_json::to_vec(&body_json)?.into()
+        } else {
+            request_body
+        };
+        (url, body)
     };
 
+    let mode = if auth.is_api_key_mode() { "dev" } else { "foundry" };
+    tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = %mode, "Forwarding inference");
+
     let token = auth.get_token("https://cognitiveservices.azure.com").await
-        .context("Failed to acquire token for Foundry")?;
+        .context("Failed to acquire auth token")?;
 
     let headers = build_upstream_headers(request_headers, auth, &token)?;
 
