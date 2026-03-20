@@ -37,6 +37,15 @@ npm install && npm run build && npm link
 
 Prerequisites: Node.js 22+, Azure CLI 2.60+, Docker (for local dev).
 
+**Azure permissions for `azureclaw up` (AKS deployment):**
+
+| Role | Scope | Why |
+|------|-------|-----|
+| **Owner** (recommended) | Resource group | Creates resources + assigns RBAC roles in one step |
+| *Or* Contributor + User Access Administrator | Resource group | Contributor creates resources, UAA assigns roles |
+
+> Without Owner/UAA, AzureClaw deploys infrastructure but cannot assign RBAC (ACR pull, Cognitive Services access). You would need to assign these roles manually after deployment.
+
 ### Run
 
 ```bash
