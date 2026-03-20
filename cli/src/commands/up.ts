@@ -246,6 +246,20 @@ export function upCommand(): Command {
           kvName = outputs.keyVaultName.value;
         }
 
+        // ── Step 3a: Ensure caller IP is in AKS API server authorized ranges ──
+        if (callerIp) {
+          spinner.text = "Step 3/8: Updating AKS API server authorized IPs...";
+          await execa("az", [
+            "aks", "update",
+            "--name", `${baseName}-aks`,
+            "--resource-group", rg,
+            "--api-server-authorized-ip-ranges", `${callerIp}/32`,
+            "--output", "none",
+          ], { stdio: "pipe" }).catch(() => {
+            // Non-fatal — may already be set or may not have permission
+          });
+        }
+
         // ── Step 3b: Add AKS egress IP to service firewalls ──────
         spinner.text = "Step 3/8: Adding AKS egress IP to service firewalls...";
         try {
