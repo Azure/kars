@@ -106,3 +106,48 @@ impl TokenBudgetTracker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unlimited_budget_always_allows() {
+        let tracker = TokenBudgetTracker::new(0, 0);
+        assert!(tracker.check_budget("sandbox-1").await.is_ok());
+        tracker.record_usage("sandbox-1", 1_000_000).await;
+        assert!(tracker.check_budget("sandbox-1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn daily_budget_blocks_when_exceeded() {
+        let tracker = TokenBudgetTracker::new(100, 0);
+        assert!(tracker.check_budget("sandbox-1").await.is_ok());
+        tracker.record_usage("sandbox-1", 100).await;
+        assert!(tracker.check_budget("sandbox-1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn per_request_limit_blocks_large_requests() {
+        let tracker = TokenBudgetTracker::new(0, 50);
+        assert!(tracker.check_per_request(49).is_ok());
+        assert!(tracker.check_per_request(50).is_ok());
+        assert!(tracker.check_per_request(51).is_err());
+    }
+
+    #[tokio::test]
+    async fn budgets_are_per_sandbox() {
+        let tracker = TokenBudgetTracker::new(100, 0);
+        tracker.record_usage("a", 100).await;
+        assert!(tracker.check_budget("a").await.is_err());
+        assert!(tracker.check_budget("b").await.is_ok()); // different sandbox
+    }
+
+    #[tokio::test]
+    async fn get_usage_returns_correct_values() {
+        let tracker = TokenBudgetTracker::new(500, 0);
+        assert_eq!(tracker.get_usage("x").await, (0, 500));
+        tracker.record_usage("x", 42).await;
+        assert_eq!(tracker.get_usage("x").await, (42, 500));
+    }
+}

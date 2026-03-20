@@ -31,8 +31,8 @@ inferenceRouter:
       memory: "1Gi"
   azure:
     openai:
-      endpoint: ""       # Set via azureclaw init
-      deploymentName: "gpt-4.1"
+      endpoint: ""       # Azure OpenAI endpoint for dev mode (set via azureclaw onboard)
+      deploymentName: "gpt-4.1"   # Default model for dev mode
     contentSafety:
       enabled: true
     promptShields:

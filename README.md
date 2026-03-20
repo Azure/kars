@@ -141,7 +141,7 @@ azureclaw my-assistant model set Phi-4              # Azure AI Foundry
 azureclaw my-assistant model set llama-3.3-70b      # Foundry catalog
 ```
 
-Model switching is instant — no restart, no credential changes. The inference router handles auth, rate limiting, and content safety transparently.
+Model switching takes effect on the next request — the CRD and deployment env vars are patched, which triggers a rolling update of the sandbox pod. For Foundry, the model is specified in each request body, so the switch is effective immediately for new requests.
 
 ### Connect to Azure services from inside the sandbox
 

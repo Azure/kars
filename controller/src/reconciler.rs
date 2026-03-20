@@ -117,6 +117,21 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let inference_config = spec.inference.unwrap_or_default();
     let openclaw_config = spec.openclaw.unwrap_or_default();
 
+    // ── Validate CRD inputs ──────────────────────────────────────────────
+    let isolation = &sandbox_config.isolation;
+    if !["standard", "enhanced", "confidential"].contains(&isolation.as_str()) {
+        tracing::error!("Invalid isolation level: {isolation} (must be standard/enhanced/confidential)");
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+    if inference_config.model.is_empty() {
+        tracing::error!("ClawSandbox {name} has empty model — skipping reconciliation");
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+    if ctx.foundry_endpoint.is_empty() && ctx.openai_endpoint.is_empty() {
+        tracing::error!("No inference endpoint configured (FOUNDRY_ENDPOINT or AZURE_OPENAI_ENDPOINT)");
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+
     // ── Step 1: Create namespace ─────────────────────────────────────────
     let ns_api: Api<Namespace> = Api::all(client.clone());
     let ns: Namespace = serde_json::from_value(json!({

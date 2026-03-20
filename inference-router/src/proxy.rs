@@ -1,11 +1,8 @@
 //! Reverse proxy logic — forwards inference requests to Azure AI Foundry.
 //!
-//! The proxy:
-//! 1. Strips any credentials the sandbox may have tried to inject
-//! 2. Acquires a Managed Identity token via Workload Identity / IMDS
-//! 3. Injects the bearer token into the upstream request
-//! 4. Forwards to Azure AI Foundry and returns the response
-//! 5. Records metrics (latency, tokens, status)
+//! Supports both buffered and SSE streaming responses.
+//! - Non-streaming: buffers response, extracts token usage for metrics/budgets
+//! - Streaming (SSE): pipes response bytes directly to client for low TTFT
 
 use anyhow::{Context, Result};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -15,6 +12,7 @@ use std::time::Instant;
 
 use crate::auth::WorkloadIdentityAuth;
 use crate::metrics;
+use std::sync::Arc;
 
 /// Upstream configuration for a single request.
 pub struct UpstreamConfig {
@@ -89,36 +87,7 @@ pub async fn forward(
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let start = Instant::now();
 
-    // Dev mode: Azure OpenAI deployment-scoped URL
-    // Prod mode: Foundry unified OpenAI-compatible URL
-    let (upstream_url, body) = if auth.is_api_key_mode() {
-        let url = format!(
-            "{}/openai/deployments/{}/{}?api-version=2024-12-01-preview",
-            upstream.endpoint.trim_end_matches('/'),
-            upstream.deployment,
-            path.trim_start_matches('/'),
-        );
-        (url, request_body)
-    } else {
-        let url = format!(
-            "{}/openai/v1/{}",
-            upstream.endpoint.trim_end_matches('/'),
-            path.trim_start_matches('/'),
-        );
-        // Inject model name into request body for Foundry
-        let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
-            if body_json.get("model").is_none() {
-                body_json.as_object_mut().unwrap().insert(
-                    "model".into(),
-                    serde_json::Value::String(upstream.deployment.clone()),
-                );
-            }
-            serde_json::to_vec(&body_json)?.into()
-        } else {
-            request_body
-        };
-        (url, body)
-    };
+    let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)?;
 
     let mode = if auth.is_api_key_mode() { "dev" } else { "foundry" };
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = %mode, "Forwarding inference");
@@ -145,4 +114,80 @@ pub async fn forward(
 
     tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), "Foundry complete");
     Ok((status, response_headers, response_body))
+}
+
+/// Forward a streaming (SSE) inference request. Returns a byte stream
+/// that can be piped directly to the axum response body for low TTFT.
+///
+/// Takes owned values to satisfy 'static lifetime for streaming body.
+pub async fn forward_stream(
+    auth: Arc<WorkloadIdentityAuth>,
+    client: Client,
+    upstream: UpstreamConfig,
+    path: &str,
+    request_headers: HeaderMap,
+    request_body: Bytes,
+) -> Result<(StatusCode, HeaderMap, impl futures::Stream<Item = Result<Bytes, reqwest::Error>>)> {
+    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, request_body)?;
+
+    tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
+
+    let token = auth.get_token("https://cognitiveservices.azure.com").await
+        .context("Failed to acquire auth token")?;
+    let headers = build_upstream_headers(&request_headers, &auth, &token)?;
+
+    let response = client
+        .post(&upstream_url)
+        .headers(headers)
+        .body(body)
+        .send()
+        .await
+        .context("Streaming upstream request failed")?;
+
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let response_headers = response.headers().clone();
+
+    // Record request metric (token metrics come from final SSE chunk with usage)
+    let status_label = if status.is_success() { "ok" } else { "error" };
+    metrics::INFERENCE_REQUESTS
+        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, status_label])
+        .inc();
+
+    Ok((status, response_headers, response.bytes_stream()))
+}
+
+/// Build the upstream URL and optionally inject model into request body.
+fn build_upstream_url(
+    auth: &WorkloadIdentityAuth,
+    upstream: &UpstreamConfig,
+    path: &str,
+    request_body: Bytes,
+) -> Result<(String, Bytes)> {
+    if auth.is_api_key_mode() {
+        let url = format!(
+            "{}/openai/deployments/{}/{}?api-version=2024-12-01-preview",
+            upstream.endpoint.trim_end_matches('/'),
+            upstream.deployment,
+            path.trim_start_matches('/'),
+        );
+        Ok((url, request_body))
+    } else {
+        let url = format!(
+            "{}/openai/v1/{}",
+            upstream.endpoint.trim_end_matches('/'),
+            path.trim_start_matches('/'),
+        );
+        let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
+            if body_json.get("model").is_none() {
+                body_json.as_object_mut().unwrap().insert(
+                    "model".into(),
+                    serde_json::Value::String(upstream.deployment.clone()),
+                );
+            }
+            serde_json::to_vec(&body_json)?.into()
+        } else {
+            request_body
+        };
+        Ok((url, body))
+    }
 }
