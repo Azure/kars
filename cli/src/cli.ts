@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { upCommand } from "./commands/up.js";
 import { devCommand } from "./commands/dev.js";
+import { addCommand } from "./commands/add.js";
 import { onboardCommand } from "./commands/onboard.js";
 import { connectCommand } from "./commands/connect.js";
 import { statusCommand } from "./commands/status.js";
@@ -24,6 +25,7 @@ export function createCli(): Command {
   // Primary commands
   program.addCommand(upCommand());
   program.addCommand(devCommand());
+  program.addCommand(addCommand());
   program.addCommand(onboardCommand());
 
   // Sandbox commands

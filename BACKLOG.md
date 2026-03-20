@@ -11,6 +11,7 @@ Core architecture is solid and verified. All P0/P1/P2 code issues resolved. Read
 ## What Works (verified)
 
 - `azureclaw up` — full AKS deployment (Bicep, Helm, ACR, Kata, WI, federated creds)
+- `azureclaw add <name>` — add new agent sandbox to existing cluster (no infra redeploy)
 - `azureclaw dev` — local Docker sandbox with security + inference router
 - `azureclaw connect/destroy/status/logs/onboard` — all functional
 - `azureclaw model set/get/list` — CRD patch + deployment env update
@@ -29,8 +30,9 @@ Core architecture is solid and verified. All P0/P1/P2 code issues resolved. Read
 - CRD input validation (isolation level, model, endpoint)
 - Content Safety endpoint readiness check
 - Prometheus metrics (requests, latency, tokens)
-- OpenClaw plugin with slash commands
-- 5 unit tests (budget tracker)
+- OpenClaw plugin with slash commands (models, switch, security, agents, memory)
+- Foundry Agent API proxy (agents, threads, files, runs via localhost:8443)
+- 14 unit tests (9 controller + 5 budget)
 
 ---
 

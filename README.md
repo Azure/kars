@@ -225,7 +225,8 @@ Each sandbox is an isolated container. Security is layered and on by default. Th
 | `azureclaw connect <name> --shell` | Drop to bash shell inside the sandbox |
 | `azureclaw status <name>` | Health, model, security, inference router metrics |
 | `azureclaw destroy <name>` | Tear down a sandbox |
-| `azureclaw up` | Deploy to AKS (production) |
+| `azureclaw up` | Deploy infrastructure + first sandbox to AKS |
+| `azureclaw add <name>` | Add a new agent sandbox to existing cluster |
 | `azureclaw model set <name> <model>` | Switch AI model |
 | `azureclaw trace <name>` | Live eBPF trace (network, files, processes) |
 | `azureclaw policy allow <name> <host>` | Add endpoint to network allowlist (hot-reload) |
