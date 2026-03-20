@@ -241,6 +241,8 @@ const azureClawPlugin = {
             "- `/azureclaw` — this help",
             "- `/azureclaw-models` — list available Foundry models",
             "- `/azureclaw-switch <model>` — switch AI model live",
+            "- `/azureclaw-agents` — list Foundry agents",
+            "- `/azureclaw-memory <agent-id>` — view agent memory (threads)",
             "- `/azureclaw-security` — show isolation level + security posture",
             "",
             "**CLI Commands (from host):**",
@@ -339,11 +341,102 @@ const azureClawPlugin = {
             `Root filesystem: read-only`,
             `Capabilities: ALL dropped`,
             `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (azureclaw-strict)"}`,
-            `Network: default-deny egress`,
+            `Network: default-deny egress + iptables UID guard`,
             `Inference: routed through AzureClaw inference router`,
+            `Foundry Agent API: proxied via localhost:8443/agents/*`,
             `Auth: IMDS (kubelet MI, zero keys)`,
           ].join("\n"),
         };
+      },
+    });
+
+    // ── /azureclaw-agents — list Foundry agents via proxied API ───────────
+    api.registerCommand({
+      name: "azureclaw-agents",
+      description: "List Foundry agents available in this sandbox",
+      handler: async () => {
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get("http://127.0.0.1:8443/agents", (res) => {
+              let data = "";
+              res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+              res.on("end", () => resolve(data));
+            });
+            req.on("error", reject);
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          const agents = parsed.data || [];
+          if (agents.length === 0) {
+            return {
+              text: [
+                "**Foundry Agents**: none created yet",
+                "",
+                "Create an agent via the Foundry Agent API:",
+                "```",
+                "POST http://localhost:8443/agents",
+                '{"name": "my-agent", "model": "gpt-4.1", "instructions": "You are a helpful assistant"}',
+                "```",
+                "",
+                "The router authenticates and proxies to Foundry automatically.",
+              ].join("\n"),
+            };
+          }
+          return {
+            text: [
+              `**Foundry Agents** (${agents.length})`,
+              "",
+              ...agents.map((a: any) => `- **${a.name || a.id}** (model: ${a.model || "default"}, id: ${a.id})`),
+              "",
+              "Use `/azureclaw-memory <agent-id>` to view threads.",
+            ].join("\n"),
+          };
+        } catch {
+          return { text: "Could not query Foundry agents. Is the inference router running?" };
+        }
+      },
+    });
+
+    // ── /azureclaw-memory — list Foundry threads (agent memory) ───────────
+    api.registerCommand({
+      name: "azureclaw-memory",
+      description: "List Foundry threads (agent memory) — /azureclaw-memory [agent-id]",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const agentId = ctx.args?.trim();
+        if (!agentId) {
+          return { text: "Usage: `/azureclaw-memory <agent-id>`\n\nUse `/azureclaw-agents` to list agents first." };
+        }
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get(`http://127.0.0.1:8443/agents/${agentId}/threads`, (res) => {
+              let data = "";
+              res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+              res.on("end", () => resolve(data));
+            });
+            req.on("error", reject);
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          const threads = parsed.data || [];
+          if (threads.length === 0) {
+            return { text: `No threads found for agent ${agentId}. Memory is created when the agent processes messages.` };
+          }
+          return {
+            text: [
+              `**Agent Memory** (${threads.length} threads for ${agentId})`,
+              "",
+              ...threads.slice(0, 10).map((t: any) =>
+                `- Thread ${t.id} (created: ${t.created_at || "unknown"})`
+              ),
+              threads.length > 10 ? `\n... and ${threads.length - 10} more` : "",
+            ].join("\n"),
+          };
+        } catch {
+          return { text: `Could not query threads for agent ${agentId}. Check that the agent exists.` };
+        }
       },
     });
   },

@@ -65,6 +65,7 @@ Core architecture is solid and verified. All P0/P1/P2 code issues resolved. Read
 | Decision | Rationale | Date |
 |----------|-----------|------|
 | Foundry as primary inference backend | Unified `/openai/v1/` API, 200+ models, IMDS auth bypasses CA policy | March 2026 |
+| Foundry Agent API proxy for memory/knowledge/tools | Router proxies `/agents/*` to Foundry — memory, threads, files, runs. No custom Cosmos/Search integration needed. | March 2026 |
 | iptables egress-guard for per-container isolation | Agent (UID 1000) restricted to localhost + DNS. No external host reachable. | March 2026 |
 | IMDS over WI for prod auth | Bypasses Conditional Access Token Protection policies | March 2026 |
 | Azure Linux 3 for container base | AL3 is GA on MCR. AL4 is alpha with limited access. | March 2026 |
