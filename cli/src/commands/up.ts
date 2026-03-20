@@ -26,6 +26,7 @@ export function upCommand(): Command {
     )
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
+    .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
     .option("--foundry-endpoint <url>", "Existing Foundry/AI Services endpoint (skip AOAI deployment)")
@@ -173,7 +174,7 @@ export function upCommand(): Command {
         let wiClientId: string;
         let kvName: string;
 
-        if (!options.skipInfra) {
+        if (!options.skipInfra && !options.forceInfra) {
           // Auto-detect: if AKS cluster already exists, skip Bicep (saves ~8 min)
           try {
             const { stdout: aksCheck } = await execa("az", [
@@ -446,8 +447,28 @@ export function upCommand(): Command {
             ], { stdio: "pipe" });
             const principalId = kubeletPrincipal.trim().split("\n").pop()?.trim() || "";
             if (principalId) {
-              spinner.text = "Assigning Cognitive Services User role to kubelet MI (via Bicep)...";
-              const bicepRole = `targetScope = 'subscription'\nparam pid string\nresource r 'Microsoft.Authorization/roleAssignments@2022-04-01' = { name: guid(pid, 'csu-foundry') \n properties: { roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908') \n principalId: pid \n principalType: 'ServicePrincipal' } }`;
+              spinner.text = "Step 7/8: Assigning Cognitive Services roles to kubelet MI (via Bicep)...";
+              // Assign BOTH roles: Cognitive Services User (control-plane) + OpenAI User (data-plane)
+              const bicepRole = [
+                "targetScope = 'subscription'",
+                "param pid string",
+                "resource csu 'Microsoft.Authorization/roleAssignments@2022-04-01' = {",
+                "  name: guid(pid, 'csu-foundry')",
+                "  properties: {",
+                "    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908')",
+                "    principalId: pid",
+                "    principalType: 'ServicePrincipal'",
+                "  }",
+                "}",
+                "resource csoai 'Microsoft.Authorization/roleAssignments@2022-04-01' = {",
+                "  name: guid(pid, 'csoai-foundry')",
+                "  properties: {",
+                "    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')",
+                "    principalId: pid",
+                "    principalType: 'ServicePrincipal'",
+                "  }",
+                "}",
+              ].join("\n");
               const fs = await import("fs");
               const tmpBicep = path.join(repoRoot, ".tmp-role.bicep");
               fs.writeFileSync(tmpBicep, bicepRole);
