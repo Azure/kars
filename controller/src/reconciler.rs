@@ -307,6 +307,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             )],
             "securityContext": {
                 "runAsUser": 0,
+                "runAsNonRoot": false,
                 "capabilities": {
                     "add": ["NET_ADMIN", "NET_RAW"],
                     "drop": ["ALL"]
