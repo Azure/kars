@@ -143,9 +143,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "app.kubernetes.io/name": "azureclaw",
                 "app.kubernetes.io/component": "sandbox",
                 "azureclaw.azure.com/sandbox": name,
-                "pod-security.kubernetes.io/enforce": "baseline",
-                "pod-security.kubernetes.io/audit": "restricted",
-                "pod-security.kubernetes.io/warn": "restricted"
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/audit": "baseline",
+                "pod-security.kubernetes.io/warn": "baseline"
             }
         }
     }))?;
