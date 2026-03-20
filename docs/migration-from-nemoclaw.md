@@ -1,90 +1,55 @@
 # Migrating from NemoClaw to AzureClaw
 
-This guide walks you through migrating an existing NemoClaw deployment to AzureClaw.
+## Concept Mapping
 
-## Overview
-
-AzureClaw maintains compatibility with NemoClaw's core concepts:
-
-| NemoClaw Concept | AzureClaw Equivalent |
+| NemoClaw | AzureClaw |
 |---|---|
 | `nemoclaw onboard` | `azureclaw onboard` |
-| `nemoclaw <name> connect` | `azureclaw <name> connect` |
-| `nemoclaw <name> status` | `azureclaw <name> status` |
-| `nemoclaw <name> logs` | `azureclaw <name> logs` |
+| `nemoclaw <name> connect` | `azureclaw connect <name>` |
+| `nemoclaw <name> status` | `azureclaw status <name>` |
 | OpenShell sandbox | AKS pod (ClawSandbox CRD) |
-| Blueprint (Python artifact) | Blueprint Controller (K8s operator) |
-| NVIDIA cloud inference | Azure OpenAI / AI Foundry |
-| `openclaw-sandbox.yaml` | `baseline.yaml` (compatible format) |
+| Blueprint (Python artifact) | Rust K8s controller (kube-rs) |
+| NVIDIA cloud inference (Nemotron) | Azure AI Foundry (200+ models) |
+| API keys | Managed Identity (zero credentials) |
+| K3s (single node) | AKS (multi-node, managed) |
+| Landlock + seccomp | seccomp + iptables UID-based + optional Kata VM |
 
 ## Steps
 
-### 1. Install AzureClaw
-
 ```bash
-npm install -g @azure/azureclaw
-```
+# 1. Install
+git clone https://github.com/Azure/azureclaw.git
+cd azureclaw/cli && npm install && npm run build && npm link
 
-### 2. Initialize Azure Infrastructure
-
-```bash
+# 2. Deploy (creates AKS cluster + sandbox)
 az login
-azureclaw init --resource-group my-rg --location eastus2
-```
+azureclaw up --name my-agent --model gpt-4.1
 
-### 3. Export NemoClaw Configuration
-
-```bash
-# Export your NemoClaw policy
-cp ~/.nemoclaw/blueprints/policies/openclaw-sandbox.yaml ./my-policy.yaml
-```
-
-### 4. Convert and Apply
-
-Manually adapt your NemoClaw policy to AzureClaw's ClawSandbox CRD format:
-
-```bash
-# Create a ClawSandbox YAML from your exported policy
-# See examples/basic-agent/clawsandbox.yaml for the format
-azureclaw up --name my-assistant --model gpt-4.1
-```
-
-### 5. Verify
-
-```bash
-azureclaw my-assistant status
-azureclaw my-assistant connect
-```
-
-## Policy Compatibility
-
-AzureClaw's baseline policy uses the same YAML schema as NemoClaw's `openclaw-sandbox.yaml` for the network section, with Azure-specific extensions:
-
-**NemoClaw format (supported):**
-```yaml
-network:
-  endpoints:
-    - name: github
-      host: "github.com"
-      port: 443
-      binary: "/usr/bin/git"
-      methods: ["*"]
-```
-
-**AzureClaw extensions:**
-```yaml
-network:
-  endpoints:
-    - name: github
-      host: "github.com"
-      port: 443
-      methods: ["GET"]
+# 3. Connect (same OpenClaw TUI experience)
+azureclaw connect my-agent
 ```
 
 ## Key Differences
 
-1. **Inference:** NemoClaw routes to NVIDIA cloud (Nemotron). AzureClaw routes to Azure OpenAI/AI Foundry with 200+ models.
-2. **Identity:** NemoClaw uses API keys. AzureClaw uses Managed Identity (zero credentials in sandbox).
-3. **Isolation:** AzureClaw adds Kata VM per-pod isolation for the confidential level.
-4. **Scale:** AzureClaw runs on AKS (multi-node) vs NemoClaw's single-node K3s.
-5. **Inference safety:** AzureClaw integrates Azure AI Content Safety + Prompt Shields on every inference call.
+1. **Inference:** Foundry (200+ models) instead of NVIDIA cloud. The inference router transparently handles auth and content safety.
+2. **Identity:** No API keys. Managed Identity (IMDS) authenticates all model calls. Agent container cannot access credentials.
+3. **Isolation:** Three levels (standard/enhanced/confidential). Confidential adds a Kata VM per pod.
+4. **Network:** iptables UID-based egress + NetworkPolicy + inference-as-network-policy. Agent container can only reach localhost.
+5. **Scale:** AKS multi-node with per-namespace tenant isolation.
+6. **Safety:** Content Safety + Prompt Shields on every inference call (on by default).
+
+## Network Policy Compatibility
+
+NemoClaw network endpoint format is compatible with AzureClaw's CRD `allowedEndpoints`:
+
+```yaml
+# NemoClaw
+network:
+  endpoints:
+    - name: github
+      host: "github.com"
+      port: 443
+
+# AzureClaw (via CLI)
+azureclaw policy allow my-agent github.com
+```

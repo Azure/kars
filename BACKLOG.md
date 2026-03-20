@@ -1,78 +1,52 @@
 # AzureClaw — Backlog
 
-> Last updated: March 20, 2026
-
-## Status: Alpha
-
-Core architecture is solid and verified. All P0/P1/P2 code issues resolved. Ready for internal review before public release.
+> Last updated: March 20, 2026 · Status: **Alpha**
 
 ---
 
-## What Works (verified)
+## Implemented
 
-- `azureclaw up` — full AKS deployment (Bicep, Helm, ACR, Kata, WI, federated creds)
-- `azureclaw add <name>` — add new agent sandbox to existing cluster (no infra redeploy)
-- `azureclaw dev` — local Docker sandbox with security + inference router
-- `azureclaw connect/destroy/status/logs/onboard` — all functional
-- `azureclaw model set/get/list` — CRD patch + deployment env update
-- `azureclaw policy allow/get/deny` — hot-reload via CRD merge patch
-- `azureclaw trace` — kubectl gadget eBPF tracing
-- `azureclaw approve --list/--approve/--deny` — ConfigMap-based workflow
-- Rust inference router — Foundry (prod) + Azure OpenAI (dev) dual-mode
-- SSE streaming for chat/completions when `stream: true`
-- Content Safety + Prompt Shields (on by default, fail-open)
-- Token budgets (daily + per-request, 429 enforcement)
-- iptables egress-guard (UID-based per-container network isolation)
-- Three isolation levels (standard/enhanced/confidential with Kata VM)
-- seccomp profile DaemonSet, namespace isolation, graceful shutdown
-- Concurrency rate limiting (64 concurrent requests max)
-- Per-scope token cache (HashMap keyed by resource)
-- CRD input validation (isolation level, model, endpoint)
-- Content Safety endpoint readiness check
-- Prometheus metrics (requests, latency, tokens)
-- OpenClaw plugin with slash commands (models, switch, security, agents, memory)
-- Foundry Agent API proxy (agents, threads, files, runs via localhost:8443)
-- 14 unit tests (9 controller + 5 budget)
+| Area | What works |
+|------|-----------|
+| **CLI** | 12 commands: `up`, `add`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `onboard`, `destroy`. All fully implemented. |
+| **Controller** | Rust/kube-rs operator. Reconciles ClawSandbox CRDs → namespaces, pods, NetworkPolicies, iptables init containers. 3 isolation levels (standard/enhanced/confidential). 9 unit tests. |
+| **Inference Router** | Rust/axum sidecar. Foundry (prod) + AOAI (dev) dual-mode. SSE streaming. Content Safety + Prompt Shields (fail-open). Token budgets (daily + per-request, 429). IMDS/WI auth with per-scope caching. Foundry Agent API proxy (`/agents/*`). Concurrency limit (64). 5 unit tests. |
+| **Infrastructure** | Bicep: AKS (Azure Linux, Cilium, WI), ACR (Premium), KV, AOAI, Monitor. Helm: CRD, controller, RBAC, seccomp DaemonSet. Deployment hardened against soft-delete, Helm stale releases, IP drift, PodSecurity conflicts. |
+| **Security** | 7-layer defense-in-depth. seccomp (custom strict profile). iptables UID-based egress. Default-deny NetworkPolicy. Kata VM (confidential). Read-only rootfs, non-root, drop ALL. |
+| **CI/CD** | `ci.yml`: Rust (fmt, clippy, build, test), CLI (typecheck, lint, build), Bicep validate, Helm lint, Trivy scan. `image-sign-sbom.yml`: Notation signing + Syft SBOM on tag. |
+| **Build** | Makefile with 11 targets. Container images versioned (`VERSION-GIT_SHA`). Azure Linux 3 base. |
+| **Plugin** | OpenClaw provider registration (7 models), slash commands (/azureclaw status, agents, memory). |
+| **Metrics** | Prometheus: `inference_requests`, `inference_latency`, `tokens_used` (per sandbox, model, direction). |
 
 ---
 
-## Remaining Work
+## Roadmap
 
-### Before Public Release
-
-| Item | Status | Notes |
-|------|--------|-------|
-| Internal MS links in PLAN.md | Done | PLAN.md is gitignored, no internal links in tracked files |
-| Container image versioning | Done | Makefile tags with `VERSION-GIT_SHA`, Dockerfiles have OCI version labels |
-| Public package distribution | Ready | `cli/package.json` has `publishConfig.access: public`, needs `npm publish` |
-| Makefile for build/test/lint | Done | `make build`, `make test`, `make lint`, `make images` |
-
-### Future Roadmap
-
-| Item | Priority | Effort | Notes |
-|------|----------|--------|-------|
-| Image signing (Notation + Ratify) | Medium | Medium | Guide exists, needs CI integration |
-| SBOM generation | Medium | Small | `cosign attach sbom` in CI |
-| Node compliance (azure-osconfig) | Low | Large | Requires external team |
-| Multi-region AKS deployment | Low | Large | Cross-region state sync |
-| Documentation site | Medium | Small | GitHub Pages or Docusaurus |
-| Alerting (Azure Monitor) | Medium | Medium | Token spikes, egress anomalies |
-| E2E test suite | High | Large | Kind cluster + mock Azure |
-| Controller unit tests | Medium | Medium | Mock K8s client via kube-rs |
+| Item | Priority | Notes |
+|------|----------|-------|
+| E2E test suite | High | Kind-based framework exists (`tests/e2e/`). Needs mock Azure services. |
+| CLI unit tests | Medium | vitest not yet configured. |
+| `azureServices` CRD wiring | Medium | Schema exists. Controller does not yet create RBAC bindings for declared services (Storage, AI Search, etc). |
+| Image signing enforcement | Medium | Notation signing in CI. Ratify admission guide exists. Not auto-deployed by `azureclaw up`. |
+| Azure Monitor alerting | Medium | Token spikes, egress anomalies. KQL queries exist in `deploy/monitoring/dashboards.md`. |
+| Node compliance | Low | azure-osconfig for CIS AKS benchmarks. |
+| Multi-region AKS | Low | Cross-region state sync. |
+| Documentation site | Low | GitHub Pages or Docusaurus. |
 
 ---
 
 ## Architecture Decisions
 
-| Decision | Rationale | Date |
-|----------|-----------|------|
-| Foundry as primary inference backend | Unified `/openai/v1/` API, 200+ models, IMDS auth bypasses CA policy | March 2026 |
-| Foundry Agent API proxy for memory/knowledge/tools | Router proxies `/agents/*` to Foundry — memory, threads, files, runs. No custom Cosmos/Search integration needed. | March 2026 |
-| iptables egress-guard for per-container isolation | Agent (UID 1000) restricted to localhost + DNS. No external host reachable. | March 2026 |
-| IMDS over WI for prod auth | Bypasses Conditional Access Token Protection policies | March 2026 |
-| Azure Linux 3 for container base | AL3 is GA on MCR. AL4 is alpha with limited access. | March 2026 |
-| Per-pod sidecar router | Each sandbox gets its own process. Simple NetworkPolicy, no cross-tenant blast radius. | March 2026 |
-| Baseline PodSecurity (not restricted) | egress-guard init container needs NET_ADMIN. Audit+warn remain restricted. | March 2026 |
-| No custom SELinux types | Incompatible with restricted PodSecurity. seccomp + iptables + Kata sufficient. | March 2026 |
-| SSE streaming for chat | Buffer non-streaming for budget tracking. Stream SSE for low TTFT. | March 2026 |
-| Concurrency limit over rate limit | `ConcurrencyLimitLayer(64)` is Clone-compatible with axum. Per-second rate limiting needs tower-governor (future). | March 2026 |
+| Decision | Rationale |
+|----------|-----------|
+| Foundry as primary inference backend | Unified `/openai/v1/` API, 200+ models, IMDS auth bypasses CA Token Protection |
+| Foundry Agent API proxy (`/agents/*`) | Memory, threads, files, runs via Foundry — no custom Cosmos/Search needed |
+| iptables egress-guard (UID-based) | Agent (UID 1000) restricted to localhost + DNS. Strictly stronger than proxy-only. |
+| IMDS over Workload Identity for prod | Bypasses Conditional Access Token Protection policies |
+| Per-pod sidecar router (not shared gateway) | No cross-tenant blast radius. Simple NetworkPolicy. |
+| `enforce: privileged` PodSecurity | egress-guard init container needs NET_ADMIN. Audit+warn remain restricted. |
+| seccomp + iptables + Kata (no custom SELinux) | Custom SELinux types incompatible with restricted PodSecurity |
+| SSE streaming for chat completions | Direct pipe for low TTFT. Non-streaming buffered for budget tracking. |
+| Concurrency limit (64) over rate limit | `ConcurrencyLimitLayer` is Clone-compatible with axum. Per-second limiting deferred. |
+| Azure Linux 3 base images | AL3 is GA on MCR. |
+| Rust edition 2024 / MSRV 1.88 | Latest stable language features |

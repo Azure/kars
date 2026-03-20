@@ -2,41 +2,37 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in AzureClaw, please report it responsibly.
-
 **Do NOT open a GitHub issue for security vulnerabilities.**
 
-Instead, please report security vulnerabilities through the Microsoft Security Response Center (MSRC):
+Report through the Microsoft Security Response Center (MSRC):
 
 - **Web:** https://msrc.microsoft.com/create-report
 - **Email:** secure@microsoft.com
 
-Please include:
-- Description of the vulnerability
-- Steps to reproduce
-- Impact assessment
-- Any suggested mitigations
+Include: description, reproduction steps, impact assessment, suggested mitigations.
 
-We will acknowledge receipt within 24 hours and provide a detailed response within 72 hours.
+We acknowledge receipt within 24 hours and respond within 72 hours.
 
 ## Security Design
 
-AzureClaw implements defense-in-depth with multiple layers:
+Seven independent defense-in-depth layers, all active by default:
 
-1. **Azure Infrastructure** — DDoS protection, NSG, AKS API server authorized IPs
-2. **Azure Linux** — SELinux-enforcing node OS with automatic patching
-3. **Kata VM Isolation** — Per-pod dedicated kernel (`--isolation confidential`)
-4. **Container Hardening** — Read-only rootfs, non-root, no privilege escalation, drop ALL capabilities
-5. **Kernel Confinement** — Custom seccomp syscall filter (azureclaw-strict)
-6. **Network Segmentation** — Default-deny NetworkPolicy + iptables UID-based per-container egress control
-7. **Inference Safety** — Azure AI Content Safety + Prompt Shields + token budgets
+1. **Azure Infrastructure** — NSG, AKS API server IP allowlist, DDoS protection
+2. **Azure Linux** — SELinux-enforcing nodes, automatic security patching
+3. **Kata VM** (confidential) — per-pod dedicated kernel
+4. **Container Hardening** — read-only rootfs, non-root (UID 1000), drop ALL capabilities
+5. **Kernel Confinement** — custom seccomp profile (`azureclaw-strict`, ~150 allowed syscalls)
+6. **Network Segmentation** — iptables UID-based egress (agent → localhost + DNS only) + default-deny NetworkPolicy
+7. **Inference Safety** — Content Safety + Prompt Shields + per-sandbox token budgets
+
+See [docs/security.md](docs/security.md) for the full breakdown.
 
 ## Supported Versions
 
 | Version | Supported |
 |---------|-----------|
-| 0.x (alpha) | Yes (best-effort) |
+| 0.x (alpha) | Best-effort |
 
 ## Security Updates
 
-Security patches are released as soon as possible after verification. Subscribe to GitHub releases for notifications.
+Patches released as soon as possible after verification. Subscribe to GitHub releases.

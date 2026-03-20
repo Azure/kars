@@ -1,84 +1,138 @@
 # AzureClaw Security
 
-## Defense in Depth
+AzureClaw implements defense-in-depth: seven independent security layers, each active by default. No single layer failing compromises the sandbox.
 
-AzureClaw implements multiple security layers, each independently enforceable:
+---
+
+## Security Layers
 
 ### Layer 0: Azure Infrastructure
-- Azure DDoS Protection
-- Network Security Groups (NSG)
-- AKS API server authorized IP ranges
+- AKS API server restricted to authorized IP ranges
+- Network Security Groups on AKS subnet
+- Azure DDoS Protection (platform-level)
+- ACR Premium with content trust and network rules
 
-### Layer 1: Azure Linux (Host OS)
-- AKS nodes run Azure Linux
+### Layer 1: Node OS (Azure Linux)
+- AKS nodes run Azure Linux (default AKS node OS)
 - SELinux in enforcing mode
 - Automatic security patch updates via node image upgrades
+- No SSH access to nodes by default
 
-### Layer 2: Kata VM Isolation (Confidential Level)
-- Each pod runs in its own lightweight VM (Cloud Hypervisor) with a dedicated kernel
-- Container escape attacks are trapped inside the VM, not the host kernel
-- Requires `--isolation confidential` and a dedicated Kata node pool
-- Uses AKS `KataVMIsolationPreview` feature
+### Layer 2: Kata VM Isolation (confidential level only)
+- Each pod runs in a dedicated lightweight VM (Cloud Hypervisor) with its own kernel
+- Container escape attacks are trapped inside the VM boundary
+- Requires `--isolation confidential` and a dedicated Kata node pool (`katapool`)
+- AKS preview feature: `KataVMIsolationPreview`
 
 ### Layer 3: Container Hardening
-- Read-only root filesystem (`readOnlyRootFilesystem: true`)
-- Non-root user (`runAsNonRoot: true`, UID 1000)
-- No privilege escalation (`allowPrivilegeEscalation: false`)
-- All capabilities dropped (`drop: [ALL]`)
-- Writable only: `/sandbox` and `/tmp`
+Applied to every sandbox pod:
+
+| Control | Setting |
+|---------|---------|
+| Root filesystem | Read-only (`readOnlyRootFilesystem: true`) |
+| User | Non-root (`runAsNonRoot: true`, UID 1000 for agent) |
+| Privilege escalation | Blocked (`allowPrivilegeEscalation: false`) |
+| Capabilities | All dropped (`drop: [ALL]`) |
+| Writable paths | `/sandbox` and `/tmp` only (emptyDir volumes) |
 
 ### Layer 4: Kernel Confinement (seccomp)
-- **Standard isolation**: RuntimeDefault seccomp profile
-- **Enhanced isolation** (default): Custom `azureclaw-strict` Localhost seccomp profile. Blocks mount, ptrace, bpf, module loading, namespace manipulation.
-- Installed via DaemonSet on all nodes
+
+| Isolation Level | seccomp Profile | Effect |
+|-----------------|----------------|--------|
+| standard | RuntimeDefault | Kernel's default syscall filter |
+| enhanced (default) | Localhost `azureclaw-strict` | Custom strict allowlist (~150 syscalls). Blocks: mount, ptrace, bpf, unshare, setns, init_module, kexec_load, pivot_root, chroot, reboot, perf_event_open. |
+| confidential | RuntimeDefault | Kata VM provides the isolation boundary |
+
+The seccomp profile is installed on every node via a DaemonSet that writes `azureclaw-strict.json` to `/var/lib/kubelet/seccomp/profiles/`.
 
 ### Layer 5: Network Segmentation
-- Kubernetes NetworkPolicy with default-deny egress per sandbox namespace
-- `egress-guard` iptables init container enforces per-container UID-based rules:
-  - Agent (UID 1000): restricted to localhost + DNS only
-  - Inference router (UID 1001): controlled by pod-level NetworkPolicy
-- Additional endpoints require `azureclaw policy allow` or operator approval
+
+**Three enforcement layers for network control:**
+
+1. **iptables UID-based egress guard** (init container):
+   - Agent (UID 1000): can only reach `localhost` + UDP port 53 (DNS). All other outbound traffic dropped.
+   - Inference router (UID 1001): unrestricted within the pod's NetworkPolicy.
+   - Effect: even if an agent exploits a vulnerability, it cannot make arbitrary network connections.
+
+2. **Kubernetes NetworkPolicy** (per namespace):
+   - Default-deny egress per sandbox namespace
+   - Allowlist managed via `azureclaw policy allow/deny` (CRD merge patch → controller reconcile)
+   - DNS (kube-dns) always allowed
+   - IMDS (169.254.169.254) allowed for inference router only
+
+3. **Inference-as-network-policy**:
+   - The inference router is the sole egress path for AI model calls
+   - Agent cannot bypass the router (iptables + NetworkPolicy + no credentials)
 
 ### Layer 6: Inference Safety
-- **Azure AI Content Safety:** Filter harmful content in inputs and outputs
-- **Prompt Shields:** Detect jailbreak and prompt injection attempts
-- **Token budgets:** Per-sandbox daily and per-request limits
-- **Audit logging:** Prometheus metrics per sandbox (requests, latency, tokens)
+
+| Control | Service | Default |
+|---------|---------|---------|
+| Content filtering | Azure AI Content Safety (`text:analyze`) | On (fail-open) |
+| Jailbreak detection | Prompt Shields | On (fail-open) |
+| Token budgets | In-process enforcement | Per-sandbox daily + per-request limits, HTTP 429 |
+| Audit | Prometheus metrics | Always on (requests, latency, tokens per sandbox) |
+
+"Fail-open" means: if Content Safety is unreachable, inference proceeds. This prevents the safety service from becoming a denial-of-service vector.
+
+---
 
 ## Identity & Access
 
-- **Zero standing credentials:** No API keys in images or env vars
-- **Workload Identity:** Pods authenticate via federated OIDC tokens
-- **IMDS fallback:** Kubelet Managed Identity via Instance Metadata Service
-- **Credential isolation:** Only inference-router (UID 1001) can reach IMDS. Agent container (UID 1000) is blocked by iptables.
+| Principle | Implementation |
+|-----------|----------------|
+| Zero standing credentials | No API keys in images, env vars, or mounted secrets (AKS mode) |
+| IMDS authentication | Inference router acquires tokens via Instance Metadata Service (kubelet Managed Identity) |
+| Workload Identity fallback | Federated OIDC token exchange (projected SA token → Azure AD bearer) |
+| Per-scope token caching | HashMap keyed by resource scope, auto-refresh on expiry |
+| Credential isolation | Only UID 1001 (router) can reach IMDS — UID 1000 (agent) is blocked by iptables |
 
-## Runtime Observability (Inspektor Gadget)
+**Required Azure RBAC roles on the kubelet identity:**
 
-[Inspektor Gadget](https://www.inspektor-gadget.io/) provides eBPF-powered observability:
+| Role | Role Definition ID | Why |
+|------|-------------------|-----|
+| Cognitive Services User | `a97b65f3-24c7-4388-baec-2e87135dc908` | Content Safety API access |
+| Cognitive Services OpenAI User | `5e0bd9bd-7b93-4f28-af87-19fc36ad61bd` | OpenAI inference API access |
+| AcrPull | `7f951dda-4ed3-4680-a7ca-43fe172d538d` | Pull sandbox images from ACR |
+| Key Vault Secrets User | `4633458b-17de-408a-b874-0445c86b69e6` | Read secrets from Key Vault |
 
-- **Syscall tracing** via `azureclaw trace --exec`
-- **Network flow monitoring** via `azureclaw trace --network`
-- **File access tracing** via `azureclaw trace --files`
-- **DNS monitoring** via `azureclaw trace --dns`
+---
+
+## PodSecurity Standards
+
+| Label | Value | Reason |
+|-------|-------|--------|
+| `pod-security.kubernetes.io/enforce` | `privileged` | egress-guard init container requires `NET_ADMIN` capability |
+| `pod-security.kubernetes.io/audit` | `restricted` | Audit violations for post-init containers |
+| `pod-security.kubernetes.io/warn` | `restricted` | Warn on violations |
+
+The init container (egress-guard) runs as root with NET_ADMIN to install iptables rules, then exits. All runtime containers are non-root with all capabilities dropped.
+
+---
 
 ## Comparison with NemoClaw
 
 | Feature | NemoClaw | AzureClaw |
 |---------|----------|-----------|
-| Container isolation | Docker + K3s | AKS (managed K8s) |
+| Orchestration | K3s (single node) | AKS (multi-node, managed) |
+| Container isolation | Docker | runc + Kata VM option |
 | Kernel hardening | Landlock + seccomp | seccomp (custom Localhost profile) |
-| Network filtering | Custom proxy | NetworkPolicy + iptables UID-based egress |
-| Hardware isolation | None | Kata VM per pod (`--isolation confidential`) |
-| Identity | API keys | Managed Identity + Workload Identity |
-| Inference safety | None | Content Safety + Prompt Shields |
-| Runtime observability | TUI + logs | Inspektor Gadget (eBPF) + Prometheus |
-| Scale | Single node | Multi-node AKS cluster |
+| Network control | Custom proxy | NetworkPolicy + iptables UID-based + inference-as-network-policy |
+| Hardware isolation | None | Kata VM per pod (confidential level) |
+| Identity | API keys | Managed Identity + Workload Identity (zero credentials) |
+| Inference safety | None | Content Safety + Prompt Shields + token budgets |
+| Observability | TUI + logs | Prometheus metrics + optional eBPF (Inspektor Gadget) |
+| Scale | Single node | Multi-node AKS cluster, multi-tenant namespace isolation |
+| AI models | NVIDIA (Nemotron) | Azure AI Foundry (200+ models) |
+
+---
 
 ## Roadmap
 
-The following security features are planned but **not yet implemented**:
+Not yet implemented:
 
-- **Image signing:** Notation with Ratify admission controller
-- **SBOM generation:** Automatic SPDX generation attached to images
-- **Node compliance:** azure-osconfig for CIS AKS Optimized benchmarks
-- **Alerting:** Token spike and egress anomaly alerts via Azure Monitor
+| Feature | Notes |
+|---------|-------|
+| Image signing enforcement | Notation signing exists in CI. Ratify admission controller guide exists but not auto-deployed. |
+| Node compliance | azure-osconfig for CIS AKS benchmarks |
+| Azure Monitor alerting | Token spike and egress anomaly alerts |
