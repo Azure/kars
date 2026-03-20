@@ -41,12 +41,12 @@ cp ~/.nemoclaw/blueprints/policies/openclaw-sandbox.yaml ./my-policy.yaml
 
 ### 4. Convert and Apply
 
-```bash
-# The migrate command converts NemoClaw policies to AzureClaw format
-azureclaw migrate --from-nemoclaw ./my-policy.yaml
+Manually adapt your NemoClaw policy to AzureClaw's ClawSandbox CRD format:
 
-# Onboard with your existing configuration
-azureclaw onboard --policy ./my-policy.azureclaw.yaml
+```bash
+# Create a ClawSandbox YAML from your exported policy
+# See examples/basic-agent/clawsandbox.yaml for the format
+azureclaw up --name my-assistant --model gpt-4.1
 ```
 
 ### 5. Verify
@@ -78,18 +78,13 @@ network:
     - name: github
       host: "github.com"
       port: 443
-      binary: "/usr/bin/git"
-      methods: ["*"]
-      # AzureClaw additions:
-      rateLimit: 100         # requests per minute
-      maxBodySize: "10MB"    # request body size limit
-      audit: true            # log all requests
+      methods: ["GET"]
 ```
 
 ## Key Differences
 
-1. **Inference:** NemoClaw routes to NVIDIA cloud (Nemotron). AzureClaw routes to Azure OpenAI/AI Foundry with 1800+ models.
+1. **Inference:** NemoClaw routes to NVIDIA cloud (Nemotron). AzureClaw routes to Azure OpenAI/AI Foundry with 200+ models.
 2. **Identity:** NemoClaw uses API keys. AzureClaw uses Managed Identity (zero credentials in sandbox).
-3. **Isolation:** AzureClaw adds Confidential Containers for hardware-level isolation.
-4. **Scale:** AzureClaw runs on AKS (multi-node, multi-region) vs NemoClaw's single-node K3s.
-5. **Compliance:** AzureClaw includes azure-osconfig for CIS/STIG baseline enforcement on ACL nodes (TODO).
+3. **Isolation:** AzureClaw adds Kata VM per-pod isolation for the confidential level.
+4. **Scale:** AzureClaw runs on AKS (multi-node) vs NemoClaw's single-node K3s.
+5. **Inference safety:** AzureClaw integrates Azure AI Content Safety + Prompt Shields on every inference call.

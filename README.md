@@ -15,12 +15,11 @@ AzureClaw is the open-source runtime for running [OpenClaw](https://openclaw.ai/
 
 | Outcome | How it works | You don't need to think about |
 |---|---|---|
-| **Your agent runs safely** | Every sandbox is isolated by default — network, filesystem, and syscalls are locked down. You define what the agent *can* do, not what it can't. | seccomp, SELinux, Cilium, Envoy, NetworkPolicy |
-| **Any Azure AI model, one line** | Switch between GPT-4.1, o-series, Phi-4, Llama, Mistral, or 1800+ models via Azure AI Foundry. The agent never sees credentials. | Foundry Models, IMDS auth, zero keys |
+| **Your agent runs safely** | Every sandbox is isolated by default — network, filesystem, and syscalls are locked down. You define what the agent *can* do, not what it can't. | seccomp, NetworkPolicy, capabilities |
+| **Any Azure AI model, one line** | Switch between GPT-4.1, o-series, Phi-4, Llama, Mistral, or 200+ models via Azure AI Foundry. The agent never sees credentials. | Foundry Models, IMDS auth, zero keys |
 | **See what your agent is doing** | Every network call, file access, and process spawn is traced. Approve or deny egress requests in real time. | eBPF, Inspektor Gadget, Log Analytics |
 | **Azure services just work** | Your agent can use Azure Storage, Cosmos DB, AI Search, or any Azure service — authenticated via Managed Identity, no keys needed. | Service principals, RBAC bindings, CSI drivers |
-| **Ship to production** | One cluster, many agents. Autoscale. Multi-region. 99.95% SLA. Compliance baselines baked into the node OS. | AKS, Azure Container Linux, Azure Linux 4, azure-osconfig |
-| **Stays safe over time** | Immutable node OS, auto-patching, signed images, continuous drift remediation. | dm-verity, Notation, SBOM, CIS benchmarks |
+| **Ship to production** | One cluster, many agents. Namespace isolation. Per-sandbox token budgets. Content Safety + Prompt Shields on every request. | AKS, Azure Linux, Kata VM, NetworkPolicy |
 
 ---
 
@@ -147,11 +146,7 @@ AzureClaw provides three isolation levels — choose the right trade-off between
 - **Enhanced**: Custom strict seccomp profile that only allows explicitly listed syscalls. Blocks anything unknown.
 - **Confidential**: Each pod runs in its own lightweight VM (Cloud Hypervisor). Kernel-level exploits can't escape. Requires a dedicated Kata node pool.
 
-> **Alpha image access:** AzureClaw sandbox images are based on Azure Linux 4 Alpha and AKS nodes use Azure Container Linux Alpha — both are limited availability. To gain access:
-> - **Azure Linux 4 Alpha:** [AzureLinux4Alpha1 docs](https://eng.ms/docs/products/azure-linux/overview/AzureLinux4Alpha1)
-> - **Azure Container Linux Alpha:** [Azure Container Linux Alpha docs](https://dev.azure.com/mariner-org/mariner/_wiki/wikis/Azure%20Container%20Linux%20Plan/6490/Azure-Container-Linux-Alpha)
->
-> Contact the respective teams for access to the ACR staging images.
+> **Alpha image access:** AzureClaw sandbox images currently use Azure Linux 3.0 as the container base. AKS nodes run Azure Linux (default AKS node OS). Kata VM isolation requires AKS preview feature registration (`KataVMIsolationPreview`).
 
 ---
 
@@ -206,7 +201,7 @@ AzureClaw is the runtime layer that complements Azure AI Foundry:
 
 | Foundry provides | AzureClaw provides |
 |---|---|
-| Model catalog (1800+ models) | Sandboxed environment to run agents that call those models |
+| Model catalog (200+ models) | Sandboxed environment to run agents that call those models |
 | Prompt Flow / agent orchestration | Isolated execution with policy-governed egress |
 | Evaluations (quality, safety, groundedness) | Per-sandbox evaluation metrics streamed to Log Analytics |
 | Content Safety + Prompt Shields | Transparent enforcement on every inference call |
@@ -237,11 +232,11 @@ When your agent tries to reach an endpoint not in the policy, you get a real-tim
 
 ```
 azureclaw onboard       → configure Azure OpenAI credentials (once)
-azureclaw dev            → start local sandbox (Docker + Azure Linux 4)
+azureclaw dev            → start local sandbox (Docker + Azure Linux container)
      │
      ▼
 ┌──────────────────────────────────────┐
-│ Docker (Azure Linux 4 container)     │
+│ Docker (Azure Linux 3 container)     │
 │                                      │
 │  OpenClaw gateway + TUI              │
 │  Rust inference router ──────────────┼──▶ Azure OpenAI / AI Foundry
@@ -269,40 +264,34 @@ Each sandbox is an isolated container. Security is layered and on by default. Th
 | `azureclaw model set <name> <model>` | Switch AI model (instant, no restart) |
 | `azureclaw trace <name>` | Live eBPF trace (network, files, processes) |
 | `azureclaw costs <name>` | Compute + inference cost breakdown |
-| `azureclaw policy set <name> <file>` | Update network/service policy (hot-reload) |
+| `azureclaw policy allow <name> <host>` | Add endpoint to network allowlist (hot-reload) |
+| `azureclaw approve --list` | List/approve/deny pending egress requests |
 
 ## Security — On by Default
 
 You don't need to be a security expert. AzureClaw ships secure defaults:
 
-- **Network:** Default-deny egress. Only endpoints you list are reachable. The Rust inference router acts as an inference-as-network-policy enforcement point — all model calls are proxied, authenticated, and content-filtered before leaving the sandbox.
+- **Network:** Default-deny egress. Only endpoints you list are reachable. The Rust inference router acts as an inference-as-network-policy enforcement point — all model calls are proxied, authenticated, and content-filtered before leaving the sandbox. Agent containers are further restricted by iptables UID-based rules to localhost + DNS only.
 - **Filesystem:** Read-only root. Agents can write to `/sandbox` and `/tmp` only.
 - **Identity:** No API keys or secrets in the sandbox. Ever. Managed Identity handles auth.
 - **Inference:** Every model call goes through Content Safety + Prompt Shields. Configurable, on by default.
-- **Node OS:** Azure Container Linux (AKS) + Azure Linux 4 (container base) — immutable, SELinux-enforcing, CIS-hardened, auto-patched.
-- **Governance:** Azure Policy for Kubernetes enforces subscription-level constraints (allowed regions, VM sizes, mandatory tags, deny public endpoints) — no Defender for Cloud required.
+- **Node OS:** Azure Linux — auto-patched, SELinux-enforcing.
+- **Governance:** Azure Policy for Kubernetes enforces subscription-level constraints (allowed regions, VM sizes, mandatory tags, deny public endpoints).
 - **Visibility:** Every syscall, file open, network connection, and DNS lookup is traced via Inspektor Gadget (eBPF).
 
-Want to go further? Add `--isolation confidential` and your workload runs in a hardware-encrypted TEE (AMD SEV-SNP).
+Want to go further? Add `--isolation confidential` and your workload runs in a Kata VM with its own dedicated kernel.
 
 ## Migration from NemoClaw
 
-AzureClaw maintains compatibility with NemoClaw's policy format and core UX:
-
-```bash
-azureclaw migrate --from-nemoclaw ~/.nemoclaw/blueprints/
-```
+AzureClaw is compatible with NemoClaw's core UX patterns. See [Migration Guide](docs/migration-from-nemoclaw.md) for details.
 
 ## Learn More
 
 - [Plan](PLAN.md) — full project plan, architecture, and phased delivery
 - [Architecture](docs/architecture.md) — detailed component design
 - [Security](docs/security.md) — defense-in-depth model
-- [Demo: Operation Claw Shield](docs/DEMO.md) — multi-agent attack simulation showcasing 8 security layers
-- [Network Policies](docs/network-policies.md) — egress control reference
-- [Inference Providers](docs/inference-providers.md) — model configuration
-- [Confidential Containers](docs/confidential-containers.md) — hardware isolation
-- [Compliance](docs/compliance.md) — regulatory framework support
+- [Demo: Operation Claw Shield](docs/DEMO.md) — multi-agent attack simulation showcasing security layers
+- [Multi-Tenant Isolation](docs/multi-tenant.md) — namespace isolation model
 - [Migration from NemoClaw](docs/migration-from-nemoclaw.md) — step-by-step guide
 
 ## Contributing

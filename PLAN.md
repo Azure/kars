@@ -16,18 +16,16 @@ AzureClaw is Azure's answer to NVIDIA NemoClaw — an open-source stack that mak
 
 | Dimension | NemoClaw (NVIDIA) | AzureClaw (Azure) |
 |---|---|---|
-| **Runtime** | OpenShell (K3s in Docker) | AKS + Azure Container Linux (production K8s) |
-| **Node OS** | Generic container base | Azure Container Linux (node) + Azure Linux 4 (container base) |
-| **Inference** | NVIDIA Cloud (Nemotron 3) | Azure OpenAI, Azure AI Foundry (GPT-4o/4.1, o-series, Phi, + 1800 models) |
-| **Sandbox isolation** | Container + Landlock + seccomp | 3 levels: standard (runc), enhanced (custom seccomp), confidential (Kata VM isolation) |
-| **Identity** | API keys only | Managed Identity + Entra ID + Workload Identity Federation |
-| **Secrets** | Env vars injected at runtime | Azure Key Vault with CSI driver, auto-rotation |
-| **Network policy** | Custom YAML proxy | Azure NPM / Cilium + Azure Firewall + Private Link |
-| **Compliance** | Manual | azure-osconfig + Compliance Augmentation Engine (CIS/STIG baselines) — TODO |
-| **Observability** | TUI + logs | Azure Monitor + Inspektor Gadget (eBPF) + Log Analytics + Prometheus/Grafana |
-| **Deployment** | Single-node Docker | Multi-node AKS, multi-region, autoscale |
+| **Runtime** | OpenShell (K3s in Docker) | AKS (production K8s) |
+| **Node OS** | Generic container base | Azure Linux (node + container base) |
+| **Inference** | NVIDIA Cloud (Nemotron 3) | Azure OpenAI, Azure AI Foundry (GPT-4.1, o-series, Phi, 200+ models) |
+| **Sandbox isolation** | Container + Landlock + seccomp | 3 levels: standard (runc), enhanced (custom seccomp), confidential (Kata VM) |
+| **Identity** | API keys only | Managed Identity + Workload Identity + IMDS |
+| **Network policy** | Custom YAML proxy | Kubernetes NetworkPolicy + iptables UID-based egress |
+| **Inference safety** | None | Azure AI Content Safety + Prompt Shields |
+| **Observability** | TUI + logs | Inspektor Gadget (eBPF) + Prometheus metrics |
+| **Deployment** | Single-node Docker | Multi-node AKS |
 | **Scale** | Single-player | Multi-tenant with namespace isolation |
-| **Supply chain** | Blueprint digest verification | Notation + ORAS supply chain signing, ACR vulnerability scanning |
 | **Cost** | NVIDIA API pricing | Azure Reserved Instances, Spot VMs, per-token billing transparency |
 
 ---
