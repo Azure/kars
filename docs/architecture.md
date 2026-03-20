@@ -1,13 +1,20 @@
 # AzureClaw Architecture
 
-AzureClaw is a Kubernetes-native runtime for running OpenClaw AI agents safely on Azure. It replaces NVIDIA's single-node NemoClaw approach with a production-grade architecture built on AKS and Azure AI Foundry.
+AzureClaw is a Kubernetes-native runtime for running OpenClaw AI agents safely on Azure. Three pillars:
+
+- **OpenClaw** — agent framework (authoring, orchestration, local tools, channels)
+- **Azure AI Foundry** — managed AI services replacing unsafe built-ins (models, memory, knowledge, web, code)
+- **AGT** (opt-in) — behavioral governance for multi-agent (trust, policy, inter-agent, kill switch)
+- **AzureClaw** — infrastructure security (seccomp, iptables, Kata VM, NetworkPolicy, IMDS, Content Safety, token budgets)
 
 ## Design Principles
 
-1. **AzureClaw is the runtime layer, not the AI platform.** Foundry provides models, agent orchestration, memory, and evaluation. AzureClaw provides sandboxed execution.
-2. **Don't duplicate Azure AI platform services.** Use Content Safety, not a custom filter. Use Foundry Agent API, not custom Cosmos/Search integrations.
-3. **Security on by default.** Every layer is enabled out of the box. Operators opt out, not in.
-4. **Per-sandbox sidecar, not shared gateway.** Each sandbox gets its own inference router process. No cross-tenant blast radius.
+1. **OpenClaw owns the agent.** Users build agents with AGENTS.md/SOUL.md/skills. AzureClaw doesn't reinvent agent authoring.
+2. **Foundry replaces unsafe built-ins.** Memory via threads (not local files). Knowledge via file_search (not grep). Web via managed search (not curl).
+3. **AzureClaw is the runtime layer, not the AI platform.** Foundry provides managed AI services. AzureClaw provides sandboxed execution.
+4. **AGT is opt-in and non-overlapping.** If AzureClaw enforces at kernel/router level, AGT doesn't touch it. AGT only handles tool-level policy the router can't see.
+5. **CRD is single source of truth.** No dual configuration. Token budgets, content safety, tools, governance — all in one CRD.
+6. **Per-sandbox sidecar, not shared gateway.** Each sandbox gets its own inference router process. No cross-tenant blast radius.
 
 ---
 

@@ -1,6 +1,6 @@
 # AzureClaw Security
 
-AzureClaw implements defense-in-depth: seven independent security layers, each active by default. No single layer failing compromises the sandbox.
+AzureClaw implements defense-in-depth: eight infrastructure layers (always on) plus two behavioral governance layers (opt-in via AGT). Together: 10/10 OWASP Agentic Security Index coverage.
 
 ---
 
@@ -127,6 +127,49 @@ The init container (egress-guard) runs as root with NET_ADMIN to install iptable
 
 ---
 
+## Layer 7: Behavioral Governance — AGT (opt-in)
+
+When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) adds application-layer governance that AzureClaw's infrastructure can't provide:
+
+| Control | What it does | OWASP ASI |
+|---------|-------------|-----------|
+| **Tool-level policy** | Allow/deny per tool call before execution (<0.1ms). Shell safety, destructive approval. | ASI-02, ASI-04 |
+| **Inter-agent trust** | Ed25519 DID identity per agent. Trust scoring 0-1000 with decay. | ASI-03, ASI-07 |
+| **Tamper-evident audit** | Hash-chain append-only log of every action. | ASI-09 |
+| **Kill switch** | Behavioral anomaly detection → agent termination. | ASI-10 |
+| **Circuit breakers** | SLO enforcement, error budgets, automatic fallback. | ASI-08 |
+
+### Overlap resolution
+
+AGT does NOT duplicate AzureClaw infrastructure controls:
+
+| Control | Owner | AGT defers to |
+|---------|-------|---------------|
+| Token budgets | AzureClaw Router | AGT reads, doesn't enforce |
+| Content safety | AzureClaw Router (Azure AI) | AGT has NO content rules |
+| Network restrictions | AzureClaw (iptables) | AGT has NO network rules |
+| Filesystem scope | AzureClaw (read-only rootfs) | AGT has NO filesystem rules |
+| Tool allow/deny | **AGT only** | Router can't see tool calls |
+
+---
+
+## OWASP Agentic Top 10 Coverage
+
+| Risk | ASI | AzureClaw (infra) | AGT (behavioral) |
+|------|-----|-------------------|-------------------|
+| Agent Goal Hijacking | ASI-01 | Content Safety + Prompt Shields | Policy engine blocks unauthorized goals |
+| Excessive Capabilities | ASI-02 | iptables + NetworkPolicy | Capability model (least-privilege) |
+| Identity & Privilege Abuse | ASI-03 | Workload Identity (OIDC) | DID/Ed25519 agent identities |
+| Uncontrolled Code Execution | ASI-04 | seccomp + Kata VM + read-only rootfs | Execution rings + sandboxing |
+| Insecure Output Handling | ASI-05 | Content Safety + Prompt Shields | Content output policies |
+| Memory Poisoning | ASI-06 | Content Safety pre-model | CMVK majority voting (AGT) |
+| Unsafe Inter-Agent Comms | ASI-07 | NetworkPolicy | IATP encrypted channels + trust gates |
+| Cascading Failures | ASI-08 | Token budgets + concurrency limit | Circuit breakers + SLOs |
+| Human-Agent Trust | ASI-09 | Approve/deny workflow | Audit trails + flight recorder |
+| Rogue Agents | ASI-10 | eBPF tracing + iptables kill | Behavioral anomaly + kill switch |
+
+---
+
 ## Roadmap
 
 Not yet implemented:
@@ -136,3 +179,4 @@ Not yet implemented:
 | Image signing enforcement | Notation signing exists in CI. Ratify admission controller guide exists but not auto-deployed. |
 | Node compliance | azure-osconfig for CIS AKS benchmarks |
 | Azure Monitor alerting | Token spike and egress anomaly alerts |
+| `/mesh/*` inter-agent routes | IATP messaging between sandbox namespaces via router |
