@@ -78,7 +78,6 @@ AzureClaw implements multiple security layers, each independently enforceable:
 
 The following security features are planned but **not yet implemented**:
 
-- **Envoy L7 sidecar:** HTTP method/path filtering for non-inference egress
 - **Image signing:** Notation with Ratify admission controller
 - **SBOM generation:** Automatic SPDX generation attached to images
 - **Node compliance:** azure-osconfig for CIS AKS Optimized benchmarks

@@ -91,7 +91,7 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Extract sandbox identity from header (set by Envoy sidecar)
+    // Extract sandbox identity from header (set by controller)
     let sandbox_name = headers
         .get("x-azureclaw-sandbox")
         .and_then(|v| v.to_str().ok())
