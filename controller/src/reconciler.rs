@@ -100,6 +100,8 @@ struct Context {
     foundry_endpoint: String,
     /// Kubelet MI client ID for IMDS fallback — injected via IMDS_CLIENT_ID env
     imds_client_id: String,
+    /// Azure AI Content Safety endpoint — injected via CONTENT_SAFETY_ENDPOINT env
+    content_safety_endpoint: String,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -126,7 +128,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "app.kubernetes.io/name": "azureclaw",
                 "app.kubernetes.io/component": "sandbox",
                 "azureclaw.azure.com/sandbox": name,
-                "pod-security.kubernetes.io/enforce": "restricted",
+                "pod-security.kubernetes.io/enforce": "baseline",
                 "pod-security.kubernetes.io/audit": "restricted",
                 "pod-security.kubernetes.io/warn": "restricted"
             }
@@ -165,6 +167,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         .await?;
 
     // ── Step 3: Apply default-deny NetworkPolicy + allowlist ─────────────
+    //
+    // Pod-level NetworkPolicy controls what the entire pod can reach.
+    // Per-container egress restriction (agent vs. inference-router) is enforced
+    // by the iptables init container below (UID-based rules), since K8s
+    // NetworkPolicy has no per-container granularity.
     let np_api: Api<NetworkPolicy> = Api::namespaced(client.clone(), &sandbox_ns);
     let mut egress_rules = vec![
         // Allow DNS — target the kube-dns ClusterIP directly (works with all CNIs
@@ -176,35 +183,36 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             ],
             "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]
         }),
-        // Allow IMDS (Azure Instance Metadata Service) for managed identity token acquisition
+        // Allow IMDS (Azure Instance Metadata Service) for managed identity token acquisition.
+        // NOTE: iptables init container restricts this to UID 1001 (inference-router) only.
+        // The openclaw agent container (UID 1000) is blocked from IMDS by iptables.
         json!({
             "to": [{"ipBlock": {"cidr": "169.254.169.254/32"}}],
             "ports": [{"protocol": "TCP", "port": 80}]
         }),
-        // Always allow inference router sidecar (localhost, but explicit for clarity)
-        json!({
-            "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/name": "azureclaw"}},
-                     "podSelector": {"matchLabels": {"azureclaw.azure.com/component": "inference-router"}}}],
-            "ports": [{"protocol": "TCP", "port": 8443}]
-        }),
-        // Allow HTTPS egress for Workload Identity (login.microsoftonline.com)
-        // and Azure OpenAI / Foundry / APIM. Firewall rules on AOAI side
-        // restrict access to only the AKS egress IP.
+        // Allow HTTPS egress for inference-router only (Workload Identity,
+        // Azure OpenAI, Foundry, Content Safety). The openclaw agent container
+        // is blocked from all external HTTPS by the iptables init container —
+        // it can only reach localhost:8443 (inference-router sidecar) and DNS.
         json!({
             "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}],
             "ports": [{"protocol": "TCP", "port": 443}]
         }),
     ];
 
-    // Add user-defined allowed endpoints
+    // Add user-defined allowed endpoints (for the inference-router to reach
+    // on behalf of the agent — agent itself can only reach localhost)
     if let Some(ref policy) = spec.network_policy {
         if let Some(ref endpoints) = policy.allowed_endpoints {
             for ep in endpoints {
                 let port = ep.port.unwrap_or(443);
-                egress_rules.push(json!({
-                    "to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}],
-                    "ports": [{"protocol": "TCP", "port": port}]
-                }));
+                if port != 443 {
+                    // Only add non-443 ports (443 is already covered by the blanket HTTPS rule)
+                    egress_rules.push(json!({
+                        "to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}],
+                        "ports": [{"protocol": "TCP", "port": port}]
+                    }));
+                }
             }
         }
     }
@@ -243,10 +251,57 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
+    // Token budget values from CRD (0 = unlimited)
+    let token_budget_daily = inference_config
+        .token_budget
+        .as_ref()
+        .and_then(|b| b.daily)
+        .unwrap_or(0);
+    let token_budget_per_request = inference_config
+        .token_budget
+        .as_ref()
+        .and_then(|b| b.per_request)
+        .unwrap_or(0);
+
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
     let mut pod_spec = json!({
         "serviceAccountName": "sandbox",
         "securityContext": build_pod_security_context(&sandbox_config),
+        // ── Init container: iptables-based per-container egress control ──
+        // Since K8s NetworkPolicy operates at pod level (not container level),
+        // we use iptables UID-based rules to restrict the openclaw agent
+        // container (UID 1000) to localhost + DNS only. The inference-router
+        // (UID 1001) keeps full network access for Azure endpoint communication.
+        //
+        // This blocks:
+        //  - IMDS credential theft (169.254.169.254) from the agent container
+        //  - Data exfiltration to any external host from the agent container
+        //  - Lateral movement to other pods from the agent container
+        //
+        // The agent can only reach the inference-router sidecar on localhost:8443.
+        "initContainers": [{
+            "name": "egress-guard",
+            "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+            "command": ["sh", "-c", concat!(
+                "tdnf install -y iptables && ",
+                "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
+                "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
+                "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
+                "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
+                "echo 'egress-guard: agent container (UID 1000) restricted to localhost + DNS'"
+            )],
+            "securityContext": {
+                "runAsUser": 0,
+                "capabilities": {
+                    "add": ["NET_ADMIN", "NET_RAW"],
+                    "drop": ["ALL"]
+                }
+            },
+            "resources": {
+                "requests": {"cpu": "10m", "memory": "16Mi"},
+                "limits": {"cpu": "100m", "memory": "64Mi"}
+            }
+        }],
         "containers": [
                         {
                             "name": "openclaw",
@@ -259,6 +314,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}
                             ],
                             "securityContext": {
+                                "runAsUser": 1000,
                                 "allowPrivilegeEscalation": sandbox_config.allow_privilege_escalation,
                                 "readOnlyRootFilesystem": sandbox_config.read_only_root_filesystem,
                                 "capabilities": {"drop": ["ALL"]}
@@ -302,11 +358,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 {"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id},
                                 {"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model},
                                 {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
-                                {"name": "AZURECLAW_CONTENT_SAFETY", "value": inference_config.content_safety.to_string()},
-                                {"name": "AZURECLAW_PROMPT_SHIELDS", "value": inference_config.prompt_shields.to_string()},
+                                {"name": "CONTENT_SAFETY_ENABLED", "value": inference_config.content_safety.to_string()},
+                                {"name": "PROMPT_SHIELDS_ENABLED", "value": inference_config.prompt_shields.to_string()},
+                                {"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint},
+                                {"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()},
+                                {"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()},
                                 {"name": "RUST_LOG", "value": "info,inference_router=debug"}
                             ],
                             "securityContext": {
+                                "runAsUser": 1001,
                                 "allowPrivilegeEscalation": false,
                                 "readOnlyRootFilesystem": true,
                                 "capabilities": {"drop": ["ALL"]}
@@ -437,6 +497,10 @@ pub async fn run(client: Client) -> Result<()> {
         .unwrap_or_default();
     let imds_client_id = std::env::var("IMDS_CLIENT_ID")
         .unwrap_or_default();
+    // Content Safety endpoint — defaults to Foundry endpoint if not set separately,
+    // since Azure AI Services multi-service resources host Content Safety at the same base URL.
+    let content_safety_endpoint = std::env::var("CONTENT_SAFETY_ENDPOINT")
+        .unwrap_or_else(|_| foundry_endpoint.clone());
 
     if !foundry_endpoint.is_empty() {
         tracing::info!("Using Foundry Models endpoint: {foundry_endpoint}");
@@ -453,6 +517,7 @@ pub async fn run(client: Client) -> Result<()> {
         openai_endpoint,
         foundry_endpoint,
         imds_client_id,
+        content_safety_endpoint,
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

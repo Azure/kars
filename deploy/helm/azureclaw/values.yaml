@@ -97,6 +97,12 @@ networkPolicy:
 foundry:
   endpoint: ""    # e.g. https://my-resource.services.ai.azure.com — set by azureclaw up or --foundry-endpoint
 
+# Azure AI Content Safety configuration
+# Used for both Content Safety text analysis and Prompt Shields.
+# Defaults to Foundry endpoint (Azure AI Services host Content Safety at the same URL).
+contentSafety:
+  endpoint: ""    # e.g. https://my-resource.cognitiveservices.azure.com — auto-detected from Foundry endpoint
+
 # Monitoring
 monitoring:
   enabled: true
