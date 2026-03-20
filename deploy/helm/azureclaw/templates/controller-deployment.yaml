@@ -46,6 +46,8 @@ spec:
               value: {{ .Values.foundry.endpoint | default "" | quote }}
             - name: IMDS_CLIENT_ID
               value: {{ .Values.foundry.imdsClientId | default "" | quote }}
+            - name: CONTENT_SAFETY_ENDPOINT
+              value: {{ .Values.contentSafety.endpoint | default .Values.foundry.endpoint | default "" | quote }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
