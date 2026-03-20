@@ -8,7 +8,7 @@ Thank you for your interest in contributing to AzureClaw! This project welcomes 
 2. Clone your fork: `git clone https://github.com/<your-user>/azureclaw.git`
 3. Create a branch: `git checkout -b my-feature`
 4. Make your changes
-5. Run tests: `npm test` (CLI), `go test ./...` (controller)
+5. Run checks: `cargo check --all` (Rust), `cd cli && npm run build` (CLI)
 6. Submit a pull request
 
 ## Development Setup
@@ -30,12 +30,10 @@ cargo test --all
 cargo clippy --all-targets
 ```
 
-### Sandbox Image (Docker + Azure Linux 4)
+### Sandbox Image (Docker + Azure Linux 3)
 
 ```bash
-# Requires Azure Linux 4 Alpha base image (see README for access)
-docker build --build-arg AZURELINUX_BASE=azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0 \
-  -t azureclaw-sandbox:dev -f sandbox-images/openclaw/Dockerfile .
+docker build -t azureclaw-sandbox:dev -f sandbox-images/openclaw/Dockerfile .
 ```
 
 ### Full E2E Test

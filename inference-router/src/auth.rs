@@ -6,6 +6,7 @@
 //! No API keys in the sandbox. The router handles all auth.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -18,7 +19,8 @@ struct CachedToken {
 /// Auth provider — automatically selects between API key and Workload Identity.
 pub struct WorkloadIdentityAuth {
     client: reqwest::Client,
-    token_cache: Arc<RwLock<Option<CachedToken>>>,
+    /// Per-scope token cache (e.g. cognitiveservices, management)
+    token_cache: Arc<RwLock<HashMap<String, CachedToken>>>,
     /// API key loaded from /run/secrets/ (dev mode fallback)
     api_key: Option<String>,
 }
@@ -39,7 +41,7 @@ impl WorkloadIdentityAuth {
 
         Self {
             client: reqwest::Client::new(),
-            token_cache: Arc::new(RwLock::new(None)),
+            token_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key,
         }
     }
@@ -53,10 +55,10 @@ impl WorkloadIdentityAuth {
         }
 
         // AKS mode: use Workload Identity token exchange
-        // Check cache first
+        // Check cache first (keyed by resource scope)
         {
             let cache = self.token_cache.read().await;
-            if let Some(ref cached) = *cache {
+            if let Some(cached) = cache.get(resource) {
                 if cached.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60) {
                     return Ok(cached.access_token.clone());
                 }
@@ -125,9 +127,9 @@ impl WorkloadIdentityAuth {
             .context("No access_token in response")?
             .to_string();
 
-        // Cache it
+        // Cache it (keyed by resource scope)
         let mut cache = self.token_cache.write().await;
-        *cache = Some(CachedToken {
+        cache.insert(resource.to_string(), CachedToken {
             access_token: access_token.clone(),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
         });
@@ -165,9 +167,9 @@ impl WorkloadIdentityAuth {
             .context("No access_token in IMDS response")?
             .to_string();
 
-        // Cache it
+        // Cache it (keyed by resource scope)
         let mut cache = self.token_cache.write().await;
-        *cache = Some(CachedToken {
+        cache.insert(resource.to_string(), CachedToken {
             access_token: access_token.clone(),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
         });

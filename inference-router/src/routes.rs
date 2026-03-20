@@ -173,15 +173,49 @@ async fn chat_completions(
 
     // Forward to Foundry
     let upstream = state.upstream_config(sandbox_name);
-    let result = proxy::forward(
-        &state.auth,
-        &state.client,
-        &upstream,
-        axum::http::Method::POST,
-        "chat/completions",
-        &headers,
-        body,
-    ).await;
+
+    // Check if client requested streaming
+    let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("stream")?.as_bool())
+        .unwrap_or(false);
+
+    if is_stream {
+        // SSE streaming — pipe response directly for low TTFT
+        match proxy::forward_stream(
+            state.auth.clone(),
+            state.client.clone(),
+            upstream,
+            "chat/completions",
+            headers.clone(),
+            body,
+        ).await {
+            Ok((status, resp_headers, stream)) => {
+                let body = Body::from_stream(stream);
+                let mut response = (status, body).into_response();
+                if let Some(ct) = resp_headers.get("content-type") {
+                    response.headers_mut().insert("content-type", ct.clone());
+                }
+                response
+            }
+            Err(e) => {
+                tracing::error!(sandbox = %sandbox_name, "Stream proxy error: {e:#}");
+                (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                    "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                }))).into_response()
+            }
+        }
+    } else {
+        // Buffered — extract token usage for budget tracking
+        let result = proxy::forward(
+            &state.auth,
+            &state.client,
+            &upstream,
+            axum::http::Method::POST,
+            "chat/completions",
+            &headers,
+            body,
+        ).await;
 
     match result {
         Ok((status, resp_headers, resp_body)) => {
@@ -221,7 +255,8 @@ async fn chat_completions(
             )
                 .into_response()
         }
-    }
+    } // end else (buffered)
+    } // end if is_stream
 }
 
 async fn completions(
@@ -289,13 +324,26 @@ async fn healthz() -> &'static str {
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    // Check that we can acquire a token (validates Workload Identity setup)
+    // Check that we can acquire a token (validates Workload Identity / IMDS setup)
     match state
         .auth
         .get_token("https://cognitiveservices.azure.com")
         .await
     {
-        Ok(_) => (StatusCode::OK, "ok").into_response(),
+        Ok(_) => {
+            // Also check Content Safety endpoint if configured
+            if let Some(ref cs_endpoint) = state.config.content_safety_endpoint {
+                if state.config.content_safety_enabled {
+                    let url = format!("{}/contentsafety/text:analyze?api-version=2024-09-01", cs_endpoint.trim_end_matches('/'));
+                    let reachable = state.client.post(&url).timeout(std::time::Duration::from_secs(3)).send().await.is_ok();
+                    if !reachable {
+                        tracing::warn!("Content Safety endpoint unreachable: {cs_endpoint}");
+                        return (StatusCode::OK, "ok (content safety unreachable — failing open)").into_response();
+                    }
+                }
+            }
+            (StatusCode::OK, "ok").into_response()
+        }
         Err(e) => {
             tracing::warn!("Readiness check failed: {e}");
             (StatusCode::SERVICE_UNAVAILABLE, "not ready — token acquisition failed")

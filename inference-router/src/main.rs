@@ -44,7 +44,9 @@ async fn main() -> Result<()> {
         .merge(routes::inference_routes())
         .merge(routes::health_routes())
         .merge(routes::metrics_routes())
-        .with_state(state);
+        .with_state(state)
+        // Rate limit: max 64 concurrent requests (prevents DoS from compromised agent)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(64));
 
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Listening on {addr}");
