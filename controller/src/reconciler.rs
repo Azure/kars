@@ -315,8 +315,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             },
             "resources": {
-                "requests": {"cpu": "10m", "memory": "16Mi"},
-                "limits": {"cpu": "100m", "memory": "64Mi"}
+                "requests": {"cpu": "10m", "memory": "32Mi"},
+                "limits": {"cpu": "200m", "memory": "256Mi"}
             }
         }],
         "containers": [
