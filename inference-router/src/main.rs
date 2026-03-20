@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(routes::inference_routes())
         .merge(routes::foundry_agent_routes())
+        .merge(routes::foundry_standalone_routes())
         .merge(routes::health_routes())
         .merge(routes::metrics_routes())
         .with_state(state)

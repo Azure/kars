@@ -69,13 +69,27 @@ pub fn inference_routes() -> Router<AppState> {
         .route("/v1/models", get(list_models))
 }
 
-/// Foundry Agent API routes — threads (memory), files (knowledge), runs (tools).
-/// These are proxied to the same Foundry endpoint, authenticated via IMDS.
+/// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
+/// These are proxied to the Foundry project endpoint, authenticated via IMDS with ai.azure.com audience.
 pub fn foundry_agent_routes() -> Router<AppState> {
     Router::new()
-        // Catch-all for Foundry Agent Service API paths
         .route("/agents", get(foundry_proxy).post(foundry_proxy))
         .route("/agents/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+}
+
+/// Foundry standalone API routes — Memory Store, Foundry IQ (Knowledge), Evaluations.
+/// These work without a hosted Foundry agent. Direct project-level APIs.
+pub fn foundry_standalone_routes() -> Router<AppState> {
+    Router::new()
+        // Memory Store APIs (persistent long-term memory)
+        .route("/memory-stores", get(foundry_proxy).post(foundry_proxy))
+        .route("/memory-stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        // Foundry IQ / Knowledge Base APIs (agentic retrieval)
+        .route("/knowledgebases", get(foundry_proxy).post(foundry_proxy))
+        .route("/knowledgebases/{*path}", get(foundry_proxy).post(foundry_proxy))
+        // Evaluations APIs
+        .route("/evaluations", get(foundry_proxy).post(foundry_proxy))
+        .route("/evaluations/{*path}", get(foundry_proxy).post(foundry_proxy))
 }
 
 /// Health and readiness routes.
@@ -408,9 +422,9 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Generic Foundry Agent API proxy.
-/// Forwards any request under /agents/* to the Foundry endpoint with IMDS auth.
-/// Supports: agent management, threads (memory), files (knowledge), runs (tools).
+/// Generic Foundry project-level API proxy.
+/// Forwards requests to the Foundry project endpoint with IMDS auth (ai.azure.com audience).
+/// Handles: /agents/*, /memory-stores/*, /knowledgebases/*, /evaluations/*
 async fn foundry_proxy(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -423,7 +437,9 @@ async fn foundry_proxy(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    let endpoint = state.config.foundry_endpoint.clone()
+    // Use project endpoint for agent/standalone APIs, fall back to foundry/openai endpoint
+    let endpoint = state.config.foundry_project_endpoint.clone()
+        .or_else(|| state.config.foundry_endpoint.clone())
         .or_else(|| state.config.azure_openai_endpoint.clone())
         .unwrap_or_default();
 

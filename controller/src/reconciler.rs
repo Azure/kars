@@ -98,6 +98,8 @@ struct Context {
     openai_endpoint: String,
     /// Foundry Models endpoint — injected via FOUNDRY_ENDPOINT env
     foundry_endpoint: String,
+    /// Foundry project endpoint for standalone APIs (Memory Store, IQ, agents)
+    foundry_project_endpoint: String,
     /// Kubelet MI client ID for IMDS fallback — injected via IMDS_CLIENT_ID env
     imds_client_id: String,
     /// Azure AI Content Safety endpoint — injected via CONTENT_SAFETY_ENDPOINT env
@@ -285,7 +287,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
         json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
     ];
-    // Inject Foundry Agent ID if set in status (by controller or externally)
+    // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
+    if !ctx.foundry_endpoint.is_empty() {
+        openclaw_env.push(json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_endpoint}));
+    }
+    // Inject Foundry Agent ID if set in status (for tools needing agent runs)
     if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone()) {
         if !agent_id.is_empty() {
             openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
@@ -400,6 +406,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "env": [
                                 {"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint},
                                 {"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint},
+                                {"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint},
                                 {"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id},
                                 {"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model},
                                 {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
@@ -546,6 +553,8 @@ pub async fn run(client: Client) -> Result<()> {
         .unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT")
         .unwrap_or_default();
+    let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT")
+        .unwrap_or_default();
     let imds_client_id = std::env::var("IMDS_CLIENT_ID")
         .unwrap_or_default();
     // Content Safety endpoint — defaults to Foundry endpoint if not set separately,
@@ -555,6 +564,9 @@ pub async fn run(client: Client) -> Result<()> {
 
     if !foundry_endpoint.is_empty() {
         tracing::info!("Using Foundry Models endpoint: {foundry_endpoint}");
+    }
+    if !foundry_project_endpoint.is_empty() {
+        tracing::info!("Using Foundry Project endpoint: {foundry_project_endpoint}");
     }
     if !imds_client_id.is_empty() {
         tracing::info!("IMDS auth enabled with kubelet MI: {imds_client_id}");
@@ -567,6 +579,7 @@ pub async fn run(client: Client) -> Result<()> {
         sandbox_image,
         openai_endpoint,
         foundry_endpoint,
+        foundry_project_endpoint,
         imds_client_id,
         content_safety_endpoint,
     });

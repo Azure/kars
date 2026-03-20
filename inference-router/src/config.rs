@@ -6,9 +6,14 @@ pub struct Config {
     /// Port to listen on (default: 8443)
     pub port: u16,
 
-    /// Azure AI Foundry endpoint (e.g. https://my-resource.services.ai.azure.com/)
+    /// Azure AI Foundry endpoint for inference (e.g. https://my-resource.openai.azure.com/)
     /// Falls back to AZURE_OPENAI_ENDPOINT for dev-mode compatibility.
     pub foundry_endpoint: Option<String>,
+
+    /// Foundry project endpoint for standalone APIs: Memory Store, Foundry IQ, Agent Service.
+    /// (e.g. https://my-resource.services.ai.azure.com/api/projects/my-project)
+    /// Uses https://ai.azure.com token audience.
+    pub foundry_project_endpoint: Option<String>,
 
     /// Legacy Azure OpenAI endpoint — used as fallback if FOUNDRY_ENDPOINT is not set.
     pub azure_openai_endpoint: Option<String>,
@@ -41,6 +46,7 @@ impl Config {
                 .context("ROUTER_PORT must be a valid port number")?,
 
             foundry_endpoint: std::env::var("FOUNDRY_ENDPOINT").ok(),
+            foundry_project_endpoint: std::env::var("FOUNDRY_PROJECT_ENDPOINT").ok(),
             azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
 
             default_model: std::env::var("DEFAULT_MODEL")
