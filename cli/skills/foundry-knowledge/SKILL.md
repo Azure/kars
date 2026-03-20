@@ -1,71 +1,71 @@
 ---
 name: foundry-knowledge
-description: Knowledge retrieval (RAG) via Azure AI Foundry file_search. Search uploaded documents with vector similarity.
-metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_AGENT_ID"]}, "primaryEnv": "FOUNDRY_AGENT_ID"}}
+description: Knowledge retrieval (RAG) via Foundry IQ and Azure AI Search. Agentic retrieval with citations — no Foundry hosted agent needed.
+metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Knowledge — File Search (RAG)
+# Foundry Knowledge — Foundry IQ (Direct)
 
-You have access to knowledge retrieval via Azure AI Foundry file_search. Use this to search uploaded documents, PDFs, and text files with vector similarity — grounding your answers in real data.
+You have access to knowledge retrieval via Foundry IQ — a managed knowledge layer backed by Azure AI Search. It provides agentic retrieval: query decomposition, parallel search, semantic reranking, and citation-backed answers. No Foundry hosted agent needed — this uses direct APIs.
 
 ## Why use this instead of local grep
 
-Local grep only does text matching. Foundry file_search uses vector embeddings for semantic search — it finds relevant content even when exact keywords don't match. Documents are indexed and searchable across sessions.
+Local grep does text matching only. Foundry IQ uses:
+- **Vector + hybrid search** — finds relevant content even when exact keywords don't match
+- **Agentic retrieval** — decomposes complex questions into sub-queries, runs them in parallel
+- **Multi-source** — searches across Azure Blob Storage, SharePoint, OneLake, and web
+- **ACL-aware** — respects permissions and Purview sensitivity labels
+- **Citations** — returns source references so you can trace answers
 
 ## Endpoints
 
-All requests go through `http://localhost:8443`. Auth is automatic (IMDS). Agent ID: `$FOUNDRY_AGENT_ID`.
+All requests go through `http://localhost:8443`. Auth is automatic (IMDS).
+
+Knowledge bases are queried via Azure AI Search agentic retrieval endpoints.
 
 ## Operations
 
-### Upload a file for indexing
+### Query a knowledge base (agentic retrieval)
 
 ```bash
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/files \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@/sandbox/document.pdf" \
-  -F "purpose=assistants"
+curl -s -X POST "http://localhost:8443/knowledgebases/${KB_NAME}/retrieve?api-version=v1" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What does the Q3 report say about revenue?", "retrieval_mode": "agentic"}'
 ```
 
-Returns `{"id": "file_abc123", ...}`.
+Returns results with citations referencing source documents, chunks, and page numbers.
 
-### Search documents via a run
-
-To search uploaded documents, create a thread and run with `file_search` enabled:
+### Simple search (keyword/vector/hybrid)
 
 ```bash
-# Create a thread
-THREAD_ID=$(curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads \
-  -H "Content-Type: application/json" -d '{}' | jq -r .id)
-
-# Add the question
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/messages \
+curl -s -X POST "http://localhost:8443/knowledgebases/${KB_NAME}/search?api-version=v1" \
   -H "Content-Type: application/json" \
-  -d '{"role": "user", "content": "What does the report say about Q3 revenue?"}'
-
-# Run with file_search
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/runs \
-  -H "Content-Type: application/json" \
-  -d '{"tools": [{"type": "file_search"}]}'
+  -d '{"search": "revenue Q3", "queryType": "semantic", "top": 5}'
 ```
 
-The response includes the answer with citations referencing the source documents.
-
-### List uploaded files
+### List knowledge bases
 
 ```bash
-curl -s http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/files
+curl -s "http://localhost:8443/knowledgebases?api-version=v1"
 ```
 
 ## When to use
 
-- User asks questions about uploaded documents: "what does the report say about X"
-- User uploads a file and wants to query it
-- You need to ground answers in specific source material (RAG)
-- User says "search my documents", "find in my files"
+- User asks questions about organizational documents: "what does the report say about X"
+- You need to ground answers in enterprise data with citations
+- User says "search my documents", "find in the knowledge base"
+- Answering questions that require multiple document sources
 
 ## When NOT to use
 
 - For real-time web information (use foundry-web-search)
 - For running code or calculations (use foundry-code)
-- For simple text files already in /sandbox/ (just read them directly)
+- For simple text files in /sandbox/ (just read them directly)
+- For remembering user preferences (use foundry-memory)
+
+## Knowledge sources supported
+
+- Azure Blob Storage (PDFs, docs, text)
+- SharePoint document libraries
+- Microsoft OneLake
+- Public web content

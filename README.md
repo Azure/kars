@@ -17,7 +17,7 @@ AzureClaw is an open-source Kubernetes-native runtime for running [OpenClaw](htt
 |---|---|
 | **Sandboxed execution** | Read-only rootfs, non-root (UID 1000), custom seccomp, iptables UID-based egress, default-deny NetworkPolicy |
 | **200+ AI models** | Azure AI Foundry inference via Rust sidecar proxy. IMDS auth — zero keys in sandbox. |
-| **Foundry agentic skills** | Persistent memory (threads), knowledge search (file_search), web grounding (web_search), code interpreter — shipped as OpenClaw skills via plugin |
+| **Foundry agentic skills** | Persistent memory (Memory Store API), knowledge search (Foundry IQ / AI Search), web grounding, code interpreter — shipped as OpenClaw skills, no Foundry hosted agent needed |
 | **Content safety** | Azure AI Content Safety + Prompt Shields on every inference call (on by default, fail-open) |
 | **Token governance** | Per-sandbox daily and per-request budgets with HTTP 429 enforcement |
 | **Three isolation levels** | `standard` (runc), `enhanced` (custom seccomp), `confidential` (Kata VM per pod) |

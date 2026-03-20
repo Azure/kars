@@ -69,7 +69,9 @@ EOF
   export AZURE_OPENAI_API_KEY="${API_KEY}"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
-  # Foundry Agent ID (set by controller when spec.agent is configured)
+  # Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
+  FOUNDRY_PROJECT_ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT:-}"
+  # Foundry Agent ID (only needed for tools requiring agent runs: code_interpreter, web_search)
   FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID:-}"
 
   # Write a .bashrc snippet so credentials are available in interactive shells too
@@ -79,6 +81,7 @@ EOF
 export AZURE_OPENAI_API_KEY="\$(cat /run/secrets/azure-openai-key 2>/dev/null)"
 export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 export OPENCLAW_MODEL="${MODEL}"
+export FOUNDRY_PROJECT_ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT}"
 export FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID}"
 RCEOF
 
@@ -121,19 +124,23 @@ EOF
 All tools are accessed via the inference router at http://localhost:8443.
 Authentication is handled automatically — no API keys needed.
 
-## Inference (working now)
-- `POST /v1/chat/completions` — chat with any Foundry model
+## Inference (working)
+- `POST /v1/chat/completions` — chat with any Foundry model (200+ catalog)
 - `POST /v1/completions` — text completion
 - `POST /v1/embeddings` — generate embeddings
 - `GET /v1/models` — list available models
 
-## Foundry Agent API (requires $FOUNDRY_AGENT_ID)
-- `POST /agents/{id}/threads` — create a memory thread
-- `GET /agents/{id}/threads` — list threads
-- `POST /agents/{id}/threads/{tid}/messages` — add message to thread
-- `GET /agents/{id}/threads/{tid}/messages` — read thread messages
-- `POST /agents/{id}/threads/{tid}/runs` — execute tools (file_search, web_search, code_interpreter)
-- `POST /agents/{id}/files` — upload a file for knowledge search
+## Foundry Standalone APIs (no hosted agent needed)
+- `POST /memory-stores` — create a memory store
+- `POST /memory-stores/{name}/memories` — write a memory
+- `POST /memory-stores/{name}/memories/search` — search memories
+- `POST /knowledgebases/{name}/retrieve` — agentic retrieval (Foundry IQ)
+- `POST /knowledgebases/{name}/search` — keyword/vector/hybrid search
+
+## Foundry Agent API (for tools needing agent runs)
+- `POST /agents` — create a Foundry prompt agent
+- `GET /agents` — list agents
+- `POST /agents/{name}/threads/{tid}/runs` — execute tools (code_interpreter, web_search)
 
 ## Health & Metrics
 - `GET /healthz` — readiness check
