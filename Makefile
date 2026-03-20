@@ -30,6 +30,9 @@ test: ## Run all tests
 test-rust: ## Run Rust tests only
 	cargo test --all
 
+test-e2e: ## Run E2E tests (requires Docker + Kind)
+	bash tests/e2e/run.sh
+
 # ─── Lint ─────────────────────────────────────────────────────────────────────
 
 lint: ## Run linters

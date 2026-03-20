@@ -41,3 +41,6 @@ LABEL org.opencontainers.image.title="AzureClaw Controller" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["azureclaw-controller"]
+
+# SBOM generation: run `syft` on the final image to produce an SPDX SBOM
+# Usage: docker buildx build --sbom=true or syft azureclaw-controller:tag -o spdx-json

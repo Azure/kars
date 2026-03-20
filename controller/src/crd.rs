@@ -35,7 +35,10 @@ pub struct ClawSandboxSpec {
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 
-    /// Azure services accessible from the sandbox
+    /// Azure services accessible from the sandbox.
+    /// NOTE: Schema reserved for future use. The controller does not yet create
+    /// Azure role assignments for declared services. Inference via Foundry works
+    /// through the inference router sidecar (no role assignment needed).
     pub azure_services: Option<Vec<AzureServiceConfig>>,
 
     /// Resource limits
