@@ -370,8 +370,27 @@ export function upCommand(): Command {
         }
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
-        spinner.text = "Installing AzureClaw controller...";
+        spinner.text = "Preparing Helm deployment...";
         const foundryEndpoint = options.foundryEndpoint || "";
+
+        // Fix orphaned namespace: label it for Helm adoption if it exists but isn't Helm-managed
+        try {
+          await execa("kubectl", [
+            "label", "namespace", "azureclaw-system",
+            "app.kubernetes.io/managed-by=Helm",
+            "--overwrite",
+          ], { stdio: "pipe" }).catch(() => {});
+          await execa("kubectl", [
+            "annotate", "namespace", "azureclaw-system",
+            "meta.helm.sh/release-name=azureclaw",
+            "meta.helm.sh/release-namespace=azureclaw-system",
+            "--overwrite",
+          ], { stdio: "pipe" }).catch(() => {});
+        } catch {
+          // Namespace may not exist yet — Helm will create it
+        }
+
+        spinner.text = "Detecting kubelet managed identity for IMDS auth...";
 
         // Get kubelet MI client ID for IMDS auth (CA-proof)
         let imdsClientId = "";
@@ -437,6 +456,7 @@ export function upCommand(): Command {
             helmArgs.push("--set", `foundry.imdsClientId=${imdsClientId}`);
           }
         }
+        spinner.text = "Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...";
         await execa("helm", helmArgs, { stdio: "pipe" });
 
         spinner.succeed("Controller deployed");
