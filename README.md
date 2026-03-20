@@ -143,12 +143,14 @@ azureclaw my-assistant model set llama-3.3-70b      # Foundry catalog
 
 Model switching takes effect on the next request — the CRD and deployment env vars are patched, which triggers a rolling update of the sandbox pod. For Foundry, the model is specified in each request body, so the switch is effective immediately for new requests.
 
-### Connect to Azure services from inside the sandbox
+### Connect to Azure services from inside the sandbox (roadmap)
 
-Agents often need to call Azure services — search an index, read a blob, query a database. AzureClaw makes this seamless:
+> **Note:** The `azureServices` CRD field is reserved for future use. The controller does not yet create Azure role assignments for declared services. Inference via Azure AI Foundry already works through the inference router sidecar.
+
+The planned model: agents declare which Azure services they need, and AzureClaw automatically provisions the necessary RBAC bindings via Workload Identity:
 
 ```yaml
-# In your sandbox policy — grant access to specific Azure services
+# Planned — schema exists in ClawSandbox CRD but not yet wired
 azureServices:
   - service: storage
     account: my-data-lake
@@ -156,22 +158,6 @@ azureServices:
   - service: ai-search
     index: product-catalog
     permissions: [search]
-  - service: cosmos-db
-    database: agent-memory
-    permissions: [read, write]
-```
-
-Inside the sandbox, the Azure SDKs authenticate automatically via Managed Identity. No keys, no connection strings, no secrets.
-
-```typescript
-// Inside the sandbox — this just works
-import { BlobServiceClient } from "@azure/storage-blob";
-import { DefaultAzureCredential } from "@azure/identity";
-
-const client = new BlobServiceClient(
-  "https://mydatalake.blob.core.windows.net",
-  new DefaultAzureCredential() // resolved via Workload Identity — zero config
-);
 ```
 
 ### Azure AI Foundry integration

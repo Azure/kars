@@ -28,7 +28,7 @@ use crate::crd::{ClawSandbox, SandboxConfig};
 /// Build pod security context, conditionally including SELinux options and
 /// choosing between RuntimeDefault and Localhost seccomp profiles.
 /// For Kata (confidential), we use RuntimeDefault since the VM provides isolation.
-fn build_pod_security_context(cfg: &SandboxConfig) -> serde_json::Value {
+pub(crate) fn build_pod_security_context(cfg: &SandboxConfig) -> serde_json::Value {
     // Standard and Confidential use RuntimeDefault seccomp:
     //   standard     — basic container isolation, kernel-default syscall filter
     //   confidential — Kata VM boundary is the isolation layer
@@ -69,7 +69,7 @@ fn build_pod_security_context(cfg: &SandboxConfig) -> serde_json::Value {
 ///   standard   → runc on clawpool, no custom seccomp
 ///   enhanced   → runc on clawpool + Localhost seccomp (azureclaw-strict)
 ///   confidential → Kata VM isolation on katapool
-fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'static str) {
+pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'static str) {
     match isolation {
         "confidential" => (Some("kata-vm-isolation"), "sandbox-kata"),
         _ => (None, "sandbox"), // standard + enhanced both on clawpool
@@ -546,4 +546,103 @@ pub async fn run(client: Client) -> Result<()> {
         .await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::SandboxConfig;
+
+    #[test]
+    fn standard_isolation_uses_runtime_default_seccomp() {
+        let cfg = SandboxConfig {
+            isolation: "standard".into(),
+            ..Default::default()
+        };
+        let ctx = build_pod_security_context(&cfg);
+        assert_eq!(ctx["seccompProfile"]["type"], "RuntimeDefault");
+    }
+
+    #[test]
+    fn enhanced_isolation_uses_localhost_seccomp() {
+        let cfg = SandboxConfig {
+            isolation: "enhanced".into(),
+            seccomp_profile: "azureclaw-strict".into(),
+            ..Default::default()
+        };
+        let ctx = build_pod_security_context(&cfg);
+        assert_eq!(ctx["seccompProfile"]["type"], "Localhost");
+        assert_eq!(
+            ctx["seccompProfile"]["localhostProfile"],
+            "profiles/azureclaw-strict.json"
+        );
+    }
+
+    #[test]
+    fn confidential_isolation_uses_runtime_default_seccomp() {
+        let cfg = SandboxConfig {
+            isolation: "confidential".into(),
+            seccomp_profile: "azureclaw-strict".into(),
+            ..Default::default()
+        };
+        let ctx = build_pod_security_context(&cfg);
+        // Kata VM provides isolation, so RuntimeDefault is sufficient
+        assert_eq!(ctx["seccompProfile"]["type"], "RuntimeDefault");
+    }
+
+    #[test]
+    fn security_context_enforces_non_root() {
+        let cfg = SandboxConfig::default();
+        let ctx = build_pod_security_context(&cfg);
+        assert_eq!(ctx["runAsNonRoot"], true);
+        assert_eq!(ctx["runAsUser"], 1000);
+        assert_eq!(ctx["runAsGroup"], 1000);
+        assert_eq!(ctx["fsGroup"], 1000);
+    }
+
+    #[test]
+    fn selinux_context_only_set_when_non_empty() {
+        let cfg = SandboxConfig::default(); // empty selinux_context
+        let ctx = build_pod_security_context(&cfg);
+        assert!(ctx.get("seLinuxOptions").is_none());
+
+        let cfg_with_selinux = SandboxConfig {
+            selinux_context: "custom_t".into(),
+            ..Default::default()
+        };
+        let ctx2 = build_pod_security_context(&cfg_with_selinux);
+        assert_eq!(ctx2["seLinuxOptions"]["type"], "custom_t");
+    }
+
+    #[test]
+    fn isolation_scheduling_standard() {
+        let (runtime, pool) = isolation_scheduling("standard");
+        assert!(runtime.is_none());
+        assert_eq!(pool, "sandbox");
+    }
+
+    #[test]
+    fn isolation_scheduling_enhanced() {
+        let (runtime, pool) = isolation_scheduling("enhanced");
+        assert!(runtime.is_none());
+        assert_eq!(pool, "sandbox");
+    }
+
+    #[test]
+    fn isolation_scheduling_confidential() {
+        let (runtime, pool) = isolation_scheduling("confidential");
+        assert_eq!(runtime, Some("kata-vm-isolation"));
+        assert_eq!(pool, "sandbox-kata");
+    }
+
+    #[test]
+    fn crd_defaults_are_secure() {
+        let cfg = SandboxConfig::default();
+        assert_eq!(cfg.isolation, "enhanced");
+        assert!(cfg.read_only_root_filesystem);
+        assert!(cfg.run_as_non_root);
+        assert!(!cfg.allow_privilege_escalation);
+        assert_eq!(cfg.seccomp_profile, "azureclaw-strict");
+        assert!(cfg.selinux_context.is_empty());
+    }
 }

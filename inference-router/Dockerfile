@@ -43,3 +43,6 @@ LABEL org.opencontainers.image.title="AzureClaw Inference Router" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["azureclaw-inference-router"]
+
+# SBOM generation: run `syft` on the final image to produce an SPDX SBOM
+# Usage: docker buildx build --sbom=true or syft azureclaw-inference-router:tag -o spdx-json

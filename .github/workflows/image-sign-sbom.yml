@@ -1,0 +1,94 @@
+name: Image Build, Sign & SBOM
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version tag"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write  # Required for Notation signing with OIDC
+
+env:
+  REGISTRY: azureclawacr.azurecr.io
+  VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  build-sign-sbom:
+    name: Build, Sign & SBOM
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component:
+          - name: controller
+            dockerfile: controller/Dockerfile
+            image: azureclaw-controller
+          - name: inference-router
+            dockerfile: inference-router/Dockerfile
+            image: azureclaw-inference-router
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        uses: azure/docker-login@v2
+        with:
+          login-server: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.component.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.component.image }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ matrix.component.image }}:latest
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          # Enable BuildKit SBOM attestation
+          sbom: true
+          provenance: true
+
+      # ─── SBOM Generation ─────────────────────────────────────────────
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ matrix.component.image }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.component.name }}.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.component.name }}
+          path: sbom-${{ matrix.component.name }}.spdx.json
+
+      # ─── Image Signing with Notation ──────────────────────────────────
+      - name: Install Notation
+        uses: notaryproject/notation-action/setup@v1
+        with:
+          version: "1.2.0"
+
+      - name: Sign image with Notation
+        uses: notaryproject/notation-action/sign@v1
+        with:
+          plugin_name: azure-kv
+          plugin_url: https://github.com/Azure/notation-azure-kv/releases/download/v1.2.0/notation-azure-kv_1.2.0_linux_amd64.tar.gz
+          key_id: ${{ secrets.NOTATION_KEY_ID }}
+          target_artifact_reference: ${{ env.REGISTRY }}/${{ matrix.component.image }}:${{ env.VERSION }}
+
+      - name: Verify signature
+        run: |
+          notation verify ${{ env.REGISTRY }}/${{ matrix.component.image }}:${{ env.VERSION }} \
+            --trust-policy-file deploy/security/notation-trust-policy.json
