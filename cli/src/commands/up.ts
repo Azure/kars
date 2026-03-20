@@ -181,7 +181,7 @@ export function upCommand(): Command {
               "--query", "provisioningState", "-o", "tsv",
             ], { stdio: "pipe" });
             if (aksCheck.trim() === "Succeeded") {
-              spinner.info("AKS cluster already exists — skipping Bicep (use --skip-infra=false to force)");
+              spinner.text = "AKS cluster already exists — skipping Bicep. Reading deployment outputs...";
               options.skipInfra = true;
             }
           } catch {
@@ -221,8 +221,7 @@ export function upCommand(): Command {
           spinner.start();
         } else {
           // Read outputs from existing deployment
-          spinner.text = "Reading existing deployment outputs...";
-          console.log(chalk.dim("  Checking: Bicep outputs, ACR, AOAI, WI, KV..."));
+          spinner.text = "Step 2/8: Reading existing deployment outputs (ACR, AOAI, WI, KV)...";
           const { stdout: existingOutput } = await execa("az", [
             "deployment", "group", "show",
             "--resource-group", rg,
