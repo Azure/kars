@@ -45,7 +45,7 @@ export function addCommand(): Command {
             writablePaths: ["/sandbox", "/tmp"],
           },
           inference: {
-            provider: "foundry",
+            provider: "azure-ai-foundry",
             model: options.model,
             contentSafety: true,
             promptShields: true,
