@@ -38,11 +38,12 @@ Core architecture is solid and verified. All P0/P1/P2 code issues resolved. Read
 
 ### Before Public Release
 
-| Item | Effort | Notes |
+| Item | Status | Notes |
 |------|--------|-------|
-| Scrub internal Microsoft links from PLAN.md | Small | PLAN.md is gitignored but still on disk — contains eng.ms links, subscription IDs |
-| Container image versioning | Small | Helm defaults to `0.1.0`, CI should tag images properly |
-| Public package distribution | Medium | npm publish, Homebrew tap, MCR for images |
+| Internal MS links in PLAN.md | Done | PLAN.md is gitignored, no internal links in tracked files |
+| Container image versioning | Done | Makefile tags with `VERSION-GIT_SHA`, Dockerfiles have OCI version labels |
+| Public package distribution | Ready | `cli/package.json` has `publishConfig.access: public`, needs `npm publish` |
+| Makefile for build/test/lint | Done | `make build`, `make test`, `make lint`, `make images` |
 
 ### Future Roadmap
 

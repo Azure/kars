@@ -8,12 +8,23 @@ Thank you for your interest in contributing to AzureClaw! This project welcomes 
 2. Clone your fork: `git clone https://github.com/<your-user>/azureclaw.git`
 3. Create a branch: `git checkout -b my-feature`
 4. Make your changes
-5. Run checks: `cargo check --all` (Rust), `cd cli && npm run build` (CLI)
+5. Run checks: `make test` (Rust + CLI), `make lint` (clippy + oxlint)
 6. Submit a pull request
 
 ## Development Setup
 
-### CLI (TypeScript — OpenClaw plugin)
+### Quick Start (Makefile)
+
+```bash
+make build        # Build all components (Rust + CLI)
+make test         # Run all tests
+make lint         # Run clippy + oxlint
+make images       # Build Docker images
+make install-cli  # Install azureclaw CLI globally
+make help         # Show all available targets
+```
+
+### CLI (TypeScript)
 
 ```bash
 cd cli
