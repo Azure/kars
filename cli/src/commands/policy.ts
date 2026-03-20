@@ -90,8 +90,38 @@ export function policyCommand(): Command {
     .argument("<name>", "Sandbox name")
     .argument("<host>", "Hostname to deny")
     .action(async (name: string, host: string) => {
-      console.log(chalk.yellow(`\n  Removing ${host} from '${name}' allowlist...`));
-      console.log(chalk.dim("  TODO: patch CRD to remove endpoint, controller re-reconciles.\n"));
+      const { execa } = await import("execa");
+      const spinner = ora(`Removing ${host} from '${name}' allowlist...`).start();
+
+      try {
+        const { stdout: current } = await execa("kubectl", [
+          "get", "clawsandbox", name,
+          "-n", "azureclaw-system",
+          "-o", "jsonpath={.spec.networkPolicy.allowedEndpoints}",
+        ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+        const existing: Array<{ host: string; port?: number }> = current.trim() ? JSON.parse(current.trim()) : [];
+        const filtered = existing.filter((ep) => ep.host !== host);
+
+        if (filtered.length === existing.length) {
+          spinner.warn(`${host} was not in the allowlist for '${name}'`);
+          return;
+        }
+
+        await execa("kubectl", [
+          "patch", "clawsandbox", name,
+          "-n", "azureclaw-system",
+          "--type", "merge",
+          "-p", JSON.stringify({ spec: { networkPolicy: { allowedEndpoints: filtered } } }),
+        ], { stdio: "pipe" });
+
+        spinner.succeed(`${host} removed from '${name}' allowlist (hot-reloaded)`);
+        console.log(chalk.dim("  Controller will update NetworkPolicy within seconds.\n"));
+      } catch (error) {
+        spinner.fail("Failed to update policy");
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(chalk.red(`\nError: ${message}\n`));
+      }
     });
 
   return cmd;

@@ -17,8 +17,7 @@ AzureClaw is the open-source runtime for running [OpenClaw](https://openclaw.ai/
 |---|---|---|
 | **Your agent runs safely** | Every sandbox is isolated by default — network, filesystem, and syscalls are locked down. You define what the agent *can* do, not what it can't. | seccomp, NetworkPolicy, capabilities |
 | **Any Azure AI model, one line** | Switch between GPT-4.1, o-series, Phi-4, Llama, Mistral, or 200+ models via Azure AI Foundry. The agent never sees credentials. | Foundry Models, IMDS auth, zero keys |
-| **See what your agent is doing** | Every network call, file access, and process spawn is traced. Approve or deny egress requests in real time. | eBPF, Inspektor Gadget, Log Analytics |
-| **Azure services just work** | Your agent can use Azure Storage, Cosmos DB, AI Search, or any Azure service — authenticated via Managed Identity, no keys needed. | Service principals, RBAC bindings, CSI drivers |
+| **See what your agent is doing** | Every network call, file access, and process spawn is traced. Approve or deny egress requests in real time. | eBPF, Inspektor Gadget, Prometheus |
 | **Ship to production** | One cluster, many agents. Namespace isolation. Per-sandbox token budgets. Content Safety + Prompt Shields on every request. | AKS, Azure Linux, Kata VM, NetworkPolicy |
 
 ---
@@ -30,33 +29,13 @@ AzureClaw is the open-source runtime for running [OpenClaw](https://openclaw.ai/
 Works on macOS, Linux, Windows (WSL2). Pick your preferred method:
 
 ```bash
-# npm (recommended — cross-platform, integrity-checked)
-npm install -g @azure/azureclaw
-
-# npx (run without installing)
-npx @azure/azureclaw up
+# Clone and install locally
+git clone https://github.com/Azure/azureclaw.git
+cd azureclaw/cli
+npm install && npm run build && npm link
 ```
 
-<details>
-<summary><strong>Platform-specific package managers</strong></summary>
-
-```bash
-# macOS (Homebrew)
-brew install azure/azureclaw/azureclaw
-
-# Windows (winget)
-winget install Azure.AzureClaw
-
-# Linux (apt — Debian/Ubuntu)
-curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
-echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azureclaw stable main" | sudo tee /etc/apt/sources.list.d/azureclaw.list
-sudo apt update && sudo apt install azureclaw
-
-# Linux (dnf — Fedora/RHEL/Azure Linux)
-sudo dnf install -y https://packages.microsoft.com/config/azureclaw/azureclaw.rpm
-```
-
-</details>
+Prerequisites: Node.js 22+, Azure CLI 2.60+, Docker (for local dev).
 
 ### Run
 
@@ -215,7 +194,7 @@ Think of it as: **Foundry is where you build and evaluate your agent. AzureClaw 
 azureclaw my-assistant status          # health, model, tokens used, pending approvals
 azureclaw my-assistant logs -f         # stream agent logs
 azureclaw my-assistant trace           # live eBPF trace (network, files, processes)
-azureclaw my-assistant costs           # compute + inference cost breakdown
+azureclaw my-assistant status          # health, model, tokens used, pending approvals
 ```
 
 When your agent tries to reach an endpoint not in the policy, you get a real-time prompt:
@@ -263,8 +242,8 @@ Each sandbox is an isolated container. Security is layered and on by default. Th
 | `azureclaw up` | Deploy to AKS (production) |
 | `azureclaw model set <name> <model>` | Switch AI model (instant, no restart) |
 | `azureclaw trace <name>` | Live eBPF trace (network, files, processes) |
-| `azureclaw costs <name>` | Compute + inference cost breakdown |
 | `azureclaw policy allow <name> <host>` | Add endpoint to network allowlist (hot-reload) |
+| `azureclaw policy deny <name> <host>` | Remove endpoint from allowlist (hot-reload) |
 | `azureclaw approve --list` | List/approve/deny pending egress requests |
 
 ## Security — On by Default
