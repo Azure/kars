@@ -174,6 +174,22 @@ export function upCommand(): Command {
         let kvName: string;
 
         if (!options.skipInfra) {
+          // Auto-detect: if AKS cluster already exists, skip Bicep (saves ~8 min)
+          try {
+            const { stdout: aksCheck } = await execa("az", [
+              "aks", "show", "-g", rg, "-n", `${baseName}-aks`,
+              "--query", "provisioningState", "-o", "tsv",
+            ], { stdio: "pipe" });
+            if (aksCheck.trim() === "Succeeded") {
+              spinner.info("AKS cluster already exists — skipping Bicep (use --skip-infra=false to force)");
+              options.skipInfra = true;
+            }
+          } catch {
+            // Cluster doesn't exist — proceed with Bicep
+          }
+        }
+
+        if (!options.skipInfra) {
           spinner.text = `Provisioning Azure resources in ${options.region} (this takes several minutes)...`;
           const bicepParams = [
             `location=${options.region}`,
