@@ -93,6 +93,23 @@ spec:
                           type: integer
                         perRequest:
                           type: integer
+                agent:
+                  type: object
+                  description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"
+                  properties:
+                    instructions:
+                      type: string
+                      description: "System prompt / instructions for the Foundry agent"
+                    tools:
+                      type: array
+                      description: "Foundry tools to enable: file_search, web_search, code_interpreter"
+                      items:
+                        type: string
+                    fileIds:
+                      type: array
+                      description: "Pre-uploaded Foundry file IDs for knowledge retrieval"
+                      items:
+                        type: string
                 azureServices:
                   type: array
                   description: "Azure services the sandbox can access via Managed Identity"
@@ -185,6 +202,9 @@ spec:
                       type: integer
                 pendingApprovals:
                   type: integer
+                foundryAgentId:
+                  type: string
+                  description: "Foundry Agent Service agent ID (created by controller)"
       subresources:
         status: {}
       additionalPrinterColumns:

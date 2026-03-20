@@ -12,12 +12,14 @@ export function addCommand(): Command {
     .option("--isolation <level>", "Isolation level: standard | enhanced | confidential", "enhanced")
     .option("--token-budget-daily <tokens>", "Daily token budget (0 = unlimited)", "0")
     .option("--token-budget-per-request <tokens>", "Per-request token limit (0 = unlimited)", "0")
+    .option("--agent-instructions <instructions>", "System prompt for Foundry agent")
+    .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
     .option("--image <image>", "Custom sandbox image (default: from Helm values)")
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
 
-      const sandbox = {
+      const sandbox: Record<string, unknown> = {
         apiVersion: "azureclaw.azure.com/v1alpha1",
         kind: "ClawSandbox",
         metadata: {
@@ -66,6 +68,18 @@ export function addCommand(): Command {
           },
         },
       };
+
+      // Add Foundry agent config if provided
+      if (options.agentInstructions || options.agentTools) {
+        const agentSpec: Record<string, unknown> = {};
+        if (options.agentInstructions) {
+          agentSpec.instructions = options.agentInstructions;
+        }
+        if (options.agentTools) {
+          agentSpec.tools = options.agentTools.split(",").map((t: string) => t.trim());
+        }
+        (sandbox.spec as Record<string, unknown>).agent = agentSpec;
+      }
 
       const yaml = JSON.stringify(sandbox, null, 2);
 

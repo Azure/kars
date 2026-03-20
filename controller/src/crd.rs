@@ -35,6 +35,11 @@ pub struct ClawSandboxSpec {
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 
+    /// Foundry Agent Service configuration.
+    /// When set, the controller creates a Foundry prompt agent on reconcile
+    /// and injects FOUNDRY_AGENT_ID into the OpenClaw container.
+    pub agent: Option<AgentConfig>,
+
     /// Azure services accessible from the sandbox.
     /// NOTE: Schema reserved for future use. The controller does not yet create
     /// Azure role assignments for declared services. Inference via Foundry works
@@ -170,6 +175,17 @@ pub struct ResourceConfig {
     pub limits: Option<serde_json::Value>,
 }
 
+/// Foundry Agent Service configuration.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct AgentConfig {
+    /// System prompt / instructions for the Foundry prompt agent.
+    pub instructions: Option<String>,
+    /// Foundry tools to enable: file_search, web_search, code_interpreter.
+    pub tools: Option<Vec<String>>,
+    /// Pre-uploaded Foundry file IDs for knowledge retrieval.
+    pub file_ids: Option<Vec<String>>,
+}
+
 /// ClawSandbox status — reflects the current observed state.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 pub struct ClawSandboxStatus {
@@ -180,6 +196,8 @@ pub struct ClawSandboxStatus {
     pub inference_endpoint: Option<String>,
     pub tokens_used: Option<TokensUsed>,
     pub pending_approvals: Option<i32>,
+    /// Foundry Agent ID created by the controller.
+    pub foundry_agent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
