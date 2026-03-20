@@ -240,7 +240,7 @@ Each sandbox is an isolated container. Security is layered and on by default. Th
 | `azureclaw status <name>` | Health, model, security, inference router metrics |
 | `azureclaw destroy <name>` | Tear down a sandbox |
 | `azureclaw up` | Deploy to AKS (production) |
-| `azureclaw model set <name> <model>` | Switch AI model (instant, no restart) |
+| `azureclaw model set <name> <model>` | Switch AI model |
 | `azureclaw trace <name>` | Live eBPF trace (network, files, processes) |
 | `azureclaw policy allow <name> <host>` | Add endpoint to network allowlist (hot-reload) |
 | `azureclaw policy deny <name> <host>` | Remove endpoint from allowlist (hot-reload) |

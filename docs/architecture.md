@@ -12,7 +12,7 @@ AzureClaw is a Kubernetes-native stack for running OpenClaw AI assistants safely
 
 User interface for cluster initialization, onboarding, sandbox management, and policy operations.
 
-**Commands:** `up`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `costs`, `destroy`, `init`, `onboard`, `launch`
+**Commands:** `up`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `destroy`, `onboard`
 
 ### 2. Blueprint Controller
 

@@ -17,7 +17,6 @@ spec:
   sandbox:
     isolation: "enhanced"
     seccompProfile: "azureclaw-strict"
-    selinuxContext: "azureclaw_sandbox_t"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

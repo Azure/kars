@@ -43,7 +43,7 @@
       "type": "bool",
       "defaultValue": false,
       "metadata": {
-        "description": "Enable confidential computing (AMD SEV-SNP)"
+        "description": "Enable Kata VM isolation for confidential sandbox level"
       }
     },
     "enableKata": {
