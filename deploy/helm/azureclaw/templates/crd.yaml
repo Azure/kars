@@ -46,7 +46,7 @@ spec:
                       default: "azureclaw-strict"
                     selinuxContext:
                       type: string
-                      default: "azureclaw_sandbox_t"
+                      default: \"\"
                     readOnlyRootFilesystem:
                       type: boolean
                       default: true

@@ -1,5 +1,5 @@
 // AzureClaw - AKS Module
-// Deploys AKS cluster with Azure Container Linux node pools
+// Deploys AKS cluster with Azure Linux node pools
 // Governance: Azure Policy add-on (no Defender for Cloud required)
 
 @description('AKS cluster name')

@@ -34,7 +34,7 @@ export function devCommand(): Command {
     )
     .option(
       "--build",
-      "Build sandbox image locally from Dockerfile (uses Azure Linux 4 base)",
+      "Build sandbox image locally from Dockerfile",
       false
     )
     .option(
@@ -84,9 +84,9 @@ export function devCommand(): Command {
           try {
             await execa("docker", ["image", "inspect", baseImage], { stdio: "pipe" });
           } catch {
-            spinner.fail(`Azure Linux 4 base image not found`);
+            spinner.fail(`Azure Linux base image not found`);
             console.log(chalk.yellow(`
-  The AzureClaw sandbox requires the Azure Linux 4 Alpha base image.
+  The AzureClaw sandbox requires the Azure Linux 3 base image.
   This is a limited-availability image — request access first:
 
   ${chalk.bold("1.")} Request access: ${chalk.cyan("https://eng.ms/docs/products/azure-linux/overview/AzureLinux4Alpha1")}
@@ -109,7 +109,7 @@ export function devCommand(): Command {
             process.exit(1);
           }
 
-          spinner.text = "Building sandbox image from Azure Linux 4 (first run takes a few minutes)...";
+          spinner.text = "Building sandbox image (first run takes a few minutes)...";
           await execa("docker", [
             "build",
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
@@ -211,7 +211,7 @@ export function devCommand(): Command {
 
         // ── Environment info ─────────────────────────────────────────
         console.log(blue(`\n  ── Environment ───────────────────────────────────`));
-        console.log(`  OS:       ${bold("Azure Linux 4.0")} (Alpha)`);
+        console.log(`  OS:       ${bold("Azure Linux 3.0")}`);
         console.log(`  OpenClaw: ${bold("2026.3.13")}`);
         console.log(`  Model:    ${bold(model)} (Azure OpenAI)`);
         console.log(`  Endpoint: ${bold(config.endpoint)}`);

@@ -106,7 +106,7 @@ export function modelCommand(): Command {
         console.log("  Mistral:    Mistral-small-2503, Codestral-2501");
         console.log("  Anthropic:  claude-sonnet-4-5, claude-opus-4-6");
         console.log("  xAI:        grok-3, grok-4-fast-reasoning");
-        console.log(chalk.dim("\n  1800+ models. Use: azureclaw model list <sandbox> for live query.\n"));
+        console.log(chalk.dim("\n  200+ models. Use: azureclaw model list <sandbox> for live query.\n"));
       }
     });
 

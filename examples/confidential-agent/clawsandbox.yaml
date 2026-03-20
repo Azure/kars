@@ -1,6 +1,6 @@
 # AzureClaw Example: Confidential Agent
-# Uses AMD SEV-SNP Confidential Containers for hardware-level isolation.
-# Even the cloud operator cannot read the agent's memory.
+# Uses Kata VM isolation for per-pod dedicated kernel.
+# Container escape attacks are trapped inside the VM, not the host.
 
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
@@ -16,9 +16,8 @@ spec:
         model: "azure/gpt-4.1"
 
   sandbox:
-    isolation: "confidential"        # Hardware-encrypted TEE
+    isolation: "confidential"        # Kata VM with dedicated kernel
     seccompProfile: "azureclaw-strict"
-    selinuxContext: "azureclaw_sandbox_t"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

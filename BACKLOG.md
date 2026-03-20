@@ -65,7 +65,7 @@ Core architecture is solid and verified. All P0/P1/P2 code issues resolved. Read
 | Decision | Rationale | Date |
 |----------|-----------|------|
 | Foundry as primary inference backend | Unified `/openai/v1/` API, 200+ models, IMDS auth bypasses CA policy | March 2026 |
-| iptables egress-guard over Envoy | Agent (UID 1000) restricted to localhost + DNS. Strictly stronger than L7 proxy. | March 2026 |
+| iptables egress-guard for per-container isolation | Agent (UID 1000) restricted to localhost + DNS. No external host reachable. | March 2026 |
 | IMDS over WI for prod auth | Bypasses Conditional Access Token Protection policies | March 2026 |
 | Azure Linux 3 for container base | AL3 is GA on MCR. AL4 is alpha with limited access. | March 2026 |
 | Per-pod sidecar router | Each sandbox gets its own process. Simple NetworkPolicy, no cross-tenant blast radius. | March 2026 |

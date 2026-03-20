@@ -1,5 +1,5 @@
 // AzureClaw Infrastructure - Main Bicep Template
-// Deploys: AKS (Azure Container Linux) + ACR + Key Vault + Azure OpenAI + Monitor
+// Deploys: AKS (Azure Linux) + ACR + Key Vault + Azure OpenAI + Monitor
 
 targetScope = 'resourceGroup'
 
@@ -17,7 +17,7 @@ param nodeCount int = 3
 @description('VM size for sandbox nodes')
 param vmSize string = 'Standard_D4s_v5'
 
-@description('Enable confidential computing (AMD SEV-SNP)')
+@description('Enable Kata VM isolation for confidential sandbox level')
 param enableConfidential bool = false
 
 @description('Enable Kata Containers for pod-level VM isolation')

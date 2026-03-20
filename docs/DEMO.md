@@ -616,7 +616,7 @@ azureclaw up --name fabrikam-legal-agent-v2 \
 | Token budget enforcement | None | None | ✅ Per-sandbox daily + per-request limits |
 | eBPF runtime tracing | Manual setup | None | ✅ Inspektor Gadget integration |
 | Keyless Azure auth | N/A | N/A | ✅ Workload Identity + IMDS (no API keys) |
-| Model switching (1800+ models) | N/A | NVIDIA NIM only | ✅ Azure AI Foundry catalog |
+| Model switching (200+ models) | N/A | NVIDIA NIM only | ✅ Azure AI Foundry catalog |
 | Read-only rootfs + non-root | Manual | Manual | ✅ Default on all sandboxes |
 | seccomp profiles | Manual | None | ✅ Custom azureclaw-strict profile |
 | Operator approval flow | None | None | ✅ CLI + TUI for egress requests |

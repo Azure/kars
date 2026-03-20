@@ -2,7 +2,7 @@
   "id": "azureclaw",
   "name": "AzureClaw",
   "version": "0.1.0",
-  "description": "Secure AI agent runtime on Azure — sandboxed OpenClaw with Azure OpenAI, Azure Linux 4, and Rust inference router",
+  "description": "Secure AI agent runtime on Azure — sandboxed OpenClaw with Azure AI Foundry and Rust inference router",
   "configSchema": {
     "type": "object",
     "properties": {
