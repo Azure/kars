@@ -2,145 +2,75 @@
 
 ## Overview
 
-AzureClaw is a Kubernetes-native stack for running OpenClaw AI assistants safely on Azure. It replaces NVIDIA's single-node OpenShell/NemoClaw approach with a production-grade architecture built on AKS, Azure Container Linux, and Azure AI services.
+AzureClaw is a Kubernetes-native stack for running OpenClaw AI assistants safely on Azure. It replaces NVIDIA's single-node OpenShell/NemoClaw approach with a production-grade architecture built on AKS and Azure AI services.
 
 ## Components
 
-### 1. AzureClaw CLI (`azureclaw`)
+### 1. AzureClaw CLI
 
 **Language:** TypeScript
 
-The primary user interface. Handles cluster initialization, onboarding, sandbox management, and policy operations. Designed to be familiar to NemoClaw users while adding Azure-specific capabilities.
+User interface for cluster initialization, onboarding, sandbox management, and policy operations.
+
+**Commands:** `up`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `costs`, `destroy`, `init`, `onboard`, `launch`
 
 ### 2. Blueprint Controller
 
-**Language:** Rust (kube-rs, CNCF Sandbox)
+**Language:** Rust (kube-rs)
 
-A Kubernetes operator built with kube-rs that watches `ClawSandbox` custom resources and reconciles the desired state:
+Kubernetes operator that watches `ClawSandbox` custom resources and reconciles:
 
-- Creates isolated namespaces per sandbox
-- Deploys OpenClaw pods with security constraints
-- Configures NetworkPolicies and Envoy sidecars
-- Manages inference routing
-- Handles hot-reload of dynamic policies
+- Isolated namespaces per sandbox
+- OpenClaw pods with security constraints
+- NetworkPolicies (default-deny egress)
+- iptables egress-guard init containers for per-container network isolation
+- Content Safety endpoint, token budgets, and IMDS credentials injected into inference router
+- Workload Identity ServiceAccounts
 
 ### 3. Inference Router
 
 **Language:** Rust (axum)
 
-High-performance reverse proxy that sits between OpenClaw and Azure AI backends. Every inference call flows through this router:
+Sidecar proxy in every sandbox pod. Every inference call flows through this router:
 
-- **Authentication:** Workload Identity (AKS) or API key from secret mount (dev mode)
-- **Token counting:** Prometheus metrics per sandbox (`azureclaw_tokens_total`, `azureclaw_inference_latency_seconds`)
-- **Content safety:** Azure AI Content Safety + Prompt Shields (on by default)
-- **Audit logging:** Every request logged with sandbox ID, model, status, latency
-- **Binary size:** ~5MB release build
-
-Routes all LLM API calls from sandboxes to Azure OpenAI / Azure AI Foundry. Authenticates using Workload Identity (no API keys in sandboxes). Integrates with Azure AI Content Safety and Prompt Shields.
+- **Authentication:** Workload Identity federation + IMDS fallback (zero keys)
+- **Token counting:** Prometheus metrics (`azureclaw_tokens_total`, `azureclaw_inference_latency_seconds`, `azureclaw_inference_requests_total`)
+- **Content Safety:** Azure AI Content Safety text analysis (on by default)
+- **Prompt Shields:** Jailbreak and prompt injection detection (on by default)
+- **Token budgets:** Per-sandbox daily and per-request limits with HTTP 429 enforcement
+- **Provider routing:** Azure OpenAI and Azure AI Foundry backends
+- **Model listing:** `/v1/models` endpoint queries Foundry catalog live
 
 ### 4. Policy Engine
 
-Multi-layer enforcement:
-
 | Layer | Technology | Scope |
 |-------|-----------|-------|
-| L3/L4 Network | Kubernetes NetworkPolicy (Cilium) | Namespace-level egress control |
-| Inference (network policy) | Rust inference router | Inference-as-network-policy — all model calls proxied, authenticated, content-filtered. No Azure credentials reach the OpenClaw process. |
-| L7 Application | Envoy sidecar proxy | HTTP method/path/header filtering |
-| Governance | Azure Policy for Kubernetes | Subscription-level constraints (allowed regions, VM sizes, deny public endpoints). AKS add-on — no Defender for Cloud required. |
-| Kernel | seccomp (custom Localhost profile) | Strict syscall allowlist — only explicitly permitted syscalls |
-| Container | Pod Security Standards (restricted) | Read-only rootfs, non-root, no privesc, drop ALL capabilities |
-| VM isolation | Kata Containers (confidential level) | Per-pod Cloud Hypervisor VM — kernel-level exploit containment |
-| Inference safety | Azure AI Content Safety + Prompt Shields | Input/output content filtering, jailbreak detection |
-| Runtime observability | Inspektor Gadget (eBPF) | Syscall/network/file/process tracing |
-| Node compliance | azure-osconfig (TODO) | CIS AKS Optimized + STIG baselines |
+| Kernel | seccomp (Localhost profile) | Strict syscall allowlist |
+| Container | Pod Security Standards | Read-only rootfs, non-root, drop ALL |
+| Per-container egress | iptables init container (UID-based) | Agent restricted to localhost + DNS |
+| L3/L4 Network | Kubernetes NetworkPolicy | Namespace-level egress control |
+| Inference safety | Content Safety + Prompt Shields | Input/output filtering |
+| Governance | Azure Policy for Kubernetes | Subscription-level constraints |
+| VM isolation | Kata Containers (confidential) | Per-pod VM isolation |
+| Runtime observability | Inspektor Gadget (eBPF) | Syscall/network/file tracing |
 
 ### 5. Sandbox Images
 
-Minimal OCI images based on Azure Linux 4 with OpenClaw + Rust inference router pre-installed. Auto-configured by entrypoint script — OpenClaw gateway, inference router, and agent identity are set up on first start.
-
-## Data Flow
-
-**Local dev mode (`azureclaw dev`):**
-```
-azureclaw CLI ──▶ Docker ──▶ Azure Linux 4 container
-                                    │
-                              ┌─────┴─────┐
-                              ▼           ▼
-                         OpenClaw    Inference Router (Rust)
-                         Gateway         │
-                              │          ▼
-                              │    Azure OpenAI / AI Foundry
-                              ▼
-                         Web UI (port 18789)
-```
-
-**AKS production mode (`azureclaw up`):**
-```
-azureclaw CLI ──▶ kubectl ──▶ AKS API Server
-                                    │
-                                    ▼
-                             Blueprint Controller (Rust)
-                                    │
-                     ┌──────────────┼──────────────┐
-                     ▼              ▼              ▼
-               Namespace      NetworkPolicy    Deployment
-                      (isolated)     (strict)         (sandbox pod)
-                                                          │
-                                                          ▼
-                                                    OpenClaw Agent
-                                                          │
-                                                          ▼
-                                                    Envoy Sidecar
-                                                          │
-                                                          ▼
-                                                   Inference Router
-                                                          │
-                                                          ▼
-                                                    Azure OpenAI
-```
+OCI images based on Azure Linux 3 with OpenClaw + Node.js 22. The inference router runs as a separate sidecar container.
 
 ## Security Model
 
-See [security.md](security.md) for the full defense-in-depth breakdown.
+See [security.md](security.md) for the defense-in-depth breakdown.
 
-## Azure Linux OS Strategy
+## Runtime Observability
 
-AzureClaw uses two related Microsoft Linux distributions:
+Inspektor Gadget provides eBPF tracing. Deployed via `kubectl gadget deploy` during `azureclaw up`. Queried via `azureclaw trace <name>`.
 
-| Layer | Distro | Where |
-|-------|--------|-------|
-| **Container image** | Azure Linux 4 | Base OS inside sandbox containers |
-| **Node OS** | Azure Container Linux (ACL) | AKS node pool host OS |
+## Roadmap
 
-Both are SELinux-enforcing, CIS-hardened, and share the same rpm/tdnf package ecosystem.
+Planned but **not yet implemented**:
 
-### Azure Linux 4 (container base)
-
-- Base image for all sandbox Dockerfiles: `azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0`
-- Same image runs locally (`azureclaw dev`) and on AKS (`azureclaw up`)
-- Lightweight tdnf package manager, no apt/Debian dependencies
-
-### Azure Container Linux (AKS node OS)
-
-AKS node pools run Azure Container Linux:
-
-- **Minimal attack surface:** No package manager on the host
-- **Immutable root FS:** A/B partition updates
-- **Verified boot:** dm-verity chain
-- **SELinux enforcing:** Mandatory access control
-- **CIS L1 hardened:** Out of the box
-- **Fast boot (~2s):** Critical for scaling sandboxes quickly
-- **azure-osconfig (TODO):** Continuous CIS AKS Optimized + DISA STIG compliance enforcement via declarative desired-state model
-
-## Runtime Observability (Inspektor Gadget)
-
-[Inspektor Gadget](https://www.inspektor-gadget.io/) runs as a DaemonSet on ACL nodes, providing eBPF-powered tracing:
-
-- `trace exec` — monitor process execution inside sandboxes
-- `trace open` — track file opens, validate filesystem policy
-- `trace tcp` / `trace dns` — network observability per pod
-- `trace mount` — detect mount attempts (should be blocked)
-- `snapshot process` — point-in-time process inventory per sandbox
-
-Data feeds into Azure Monitor / Log Analytics, Prometheus metrics, and the AzureClaw TUI.
+- Envoy L7 sidecar for HTTP method/path filtering
+- Multi-region AKS deployment
+- SBOM generation in CI
+- Node compliance via azure-osconfig

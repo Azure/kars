@@ -16,7 +16,7 @@ azureclaw-agent-3         # Tenant C's sandbox
 
 | Layer | How it works |
 |---|---|
-| **Pod Security** | `restricted` enforcement on all sandbox namespaces |
+| **Pod Security** | `baseline` enforcement (allows egress-guard init container), `restricted` audit/warn |
 | **Network** | Default-deny egress NetworkPolicy per namespace |
 | **RBAC** | ServiceAccount per namespace with minimal permissions |
 | **Seccomp** | Custom seccomp profile (enhanced) or RuntimeDefault (standard) |
@@ -30,7 +30,7 @@ azureclaw-agent-3         # Tenant C's sandbox
 - Read other tenants' secrets or config
 - Communicate with other tenants' pods (NetworkPolicy blocks inter-namespace traffic)
 - Escape the container (seccomp + read-only rootfs + non-root + drop ALL capabilities)
-- Access IMDS with other tenants' identity (kubelet MI is shared but token is scoped)
+- Access IMDS from the agent container (blocked by iptables UID-based rules)
 
 ### Creating multiple tenants
 ```bash
