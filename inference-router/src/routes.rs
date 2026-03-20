@@ -427,9 +427,10 @@ async fn foundry_proxy(
         .or_else(|| state.config.azure_openai_endpoint.clone())
         .unwrap_or_default();
 
-    // Forward the request path to Foundry
+    // Forward the request path + query string to Foundry
     let path = uri.path();
-    let upstream_url = format!("{}{}", endpoint.trim_end_matches('/'), path);
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let upstream_url = format!("{}{}{}", endpoint.trim_end_matches('/'), path, query);
 
     tracing::info!(
         sandbox = %sandbox_name,
@@ -438,7 +439,10 @@ async fn foundry_proxy(
         "Proxying Foundry Agent API"
     );
 
-    let token = match state.auth.get_token("https://cognitiveservices.azure.com").await {
+    // Foundry Agent API (project endpoints at services.ai.azure.com) requires
+    // https://ai.azure.com audience, unlike inference endpoints which use
+    // https://cognitiveservices.azure.com
+    let token = match state.auth.get_token("https://ai.azure.com").await {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Foundry proxy auth failed: {e}");
