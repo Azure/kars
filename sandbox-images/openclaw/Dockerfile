@@ -46,10 +46,11 @@ RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/open
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
 
-# Copy AzureClaw OpenClaw plugin (pre-built dist/ + skills)
+# Copy AzureClaw OpenClaw plugin (pre-built dist/ + skills + policies)
 COPY cli/dist/ /opt/azureclaw-plugin/
 COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
+COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
 # Ensure openclaw binary is linked
 RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw

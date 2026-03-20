@@ -169,7 +169,14 @@ EOF
     # Copy Foundry skills (SKILL.md files)
     if [ -d /opt/azureclaw-plugin/skills ]; then
       cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
-      echo "[azureclaw] Foundry skills installed (memory, knowledge, web-search, code)"
+      echo "[azureclaw] Foundry + governance skills installed"
+    fi
+    # Copy AGT policies if governance enabled
+    if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
+      mkdir -p "$OPENCLAW_DIR/policies"
+      cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
+      export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
+      echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
     fi
     cd /sandbox
     echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
