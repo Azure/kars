@@ -151,9 +151,47 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
 }
 
 // ─── RBAC Role Assignments ──────────────────────────────────────────────────
-// NOTE: Role assignments removed from Bicep — they fail under Conditional Access
-// Token Protection policies. The CLI (up.ts) creates them via `az role assignment create`
-// which uses a different API path that bypasses CA.
+
+// Grant AKS kubelet pull access to ACR
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(aks.id, acrId, 'acrpull')
+  scope: resourceGroup()
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')  // AcrPull
+    principalId: aks.properties.identityProfile.kubeletidentity.objectId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant sandbox identity "Cognitive Services OpenAI User" on the AOAI resource
+resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
+  name: last(split(openAiAccountId, '/'))
+}
+
+resource openAiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sandboxIdentity.id, openAiAccountId, 'openai-user')
+  scope: openAiAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')  // Cognitive Services OpenAI User
+    principalId: sandboxIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant sandbox identity "Key Vault Secrets User" on Key Vault
+resource keyVaultRef 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyVaultName
+}
+
+resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sandboxIdentity.id, keyVaultRef.id, 'kv-secrets-user')
+  scope: keyVaultRef
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')  // Key Vault Secrets User
+    principalId: sandboxIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
 
 output clusterName string = aks.name
 output clusterFqdn string = aks.properties.fqdn
