@@ -294,16 +294,21 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         //  - Lateral movement to other pods from the agent container
         //
         // The agent can only reach the inference-router sidecar on localhost:8443.
+        // NOTE: The egress-guard uses the sandbox image which has the inference router.
+        // During sandbox image build, iptables is not pre-installed, so we use the
+        // inference-router image (Azure Linux 3) and install iptables on first boot.
+        // The NetworkPolicy allows DNS egress which lets tdnf work.
+        // However the init container must complete before NetworkPolicy takes effect
+        // on the pod, so download access is available during init.
         "initContainers": [{
             "name": "egress-guard",
-            "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+            "image": &ctx.inference_router_image,
             "command": ["sh", "-c", concat!(
-                "tdnf install -y iptables && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                "echo 'egress-guard: agent container (UID 1000) restricted to localhost + DNS'"
+                "echo 'egress-guard: UID 1000 restricted to localhost + DNS'"
             )],
             "securityContext": {
                 "runAsUser": 0,
