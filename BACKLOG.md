@@ -11,7 +11,7 @@
 | **CLI** | 12 commands: `up`, `add`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `onboard`, `destroy`. `add` supports `--agent-instructions`, `--agent-tools`. |
 | **Controller** | Rust/kube-rs operator. Reconciles ClawSandbox CRDs → namespaces, pods, NetworkPolicies, iptables init containers. 3 isolation levels. Injects Foundry Agent ID + tools + AGT governance env vars from CRD. 9 unit tests. |
 | **Inference Router** | Rust/axum sidecar. Foundry (prod) + AOAI (dev) dual-mode. SSE streaming. Content Safety + Prompt Shields. Token budgets (429). IMDS/WI auth. Foundry Agent API proxy (`/agents/*`). Concurrency limit (64). 5 unit tests. |
-| **Foundry Skills** | 4 OpenClaw SKILL.md files: foundry-memory (threads), foundry-knowledge (file_search), foundry-web-search (web grounding), foundry-code (code_interpreter). Shipped via plugin. |
+| **Foundry Skills** | 4 OpenClaw SKILL.md files: foundry-memory (Memory Store APIs — standalone, no hosted agent), foundry-knowledge (Foundry IQ / AI Search — standalone), foundry-web-search (web grounding), foundry-code (code_interpreter via agent runs). Shipped via plugin. |
 | **AGT Governance** | Opt-in via CRD `spec.governance`. Tool-level policy (shell-safety, destructive-approval, rate limits). No overlap with AzureClaw infra controls. AGT skill teaches agent about trust + policy. |
 | **CRD** | `spec.agent` (instructions, tools, fileIds) + `spec.governance` (enabled, toolPolicy, trustThreshold) + `status.foundryAgentId` |
 | **Infrastructure** | Bicep: AKS, ACR, KV, AOAI, Monitor. Helm: CRD, controller, RBAC, seccomp DaemonSet. |
@@ -26,7 +26,7 @@
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Controller-side Foundry agent creation | High | POST /agents on reconcile. Currently agent ID must be set externally. |
+| Controller-side Foundry agent creation | Low | Only needed for code_interpreter/web_search (agent run tools). Memory + knowledge use standalone APIs. |
 | `/mesh/*` inter-agent routes | Medium | IATP messaging between sandbox namespaces via router. |
 | E2E test suite | High | Kind-based framework exists. Needs mock Azure services. |
 | Foundry evaluation + prompt optimization | Medium | CLI-side `azureclaw eval` command. |

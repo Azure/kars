@@ -3,18 +3,37 @@
 AzureClaw is a Kubernetes-native runtime for running OpenClaw AI agents safely on Azure. Three pillars:
 
 - **OpenClaw** — agent framework (authoring, orchestration, local tools, channels)
-- **Azure AI Foundry** — managed AI services replacing unsafe built-ins (models, memory, knowledge, web, code)
+- **Azure AI Foundry** — managed AI services replacing unsafe built-ins (models, memory, knowledge, web, code, evaluations, guardrails)
 - **AGT** (opt-in) — behavioral governance for multi-agent (trust, policy, inter-agent, kill switch)
 - **AzureClaw** — infrastructure security (seccomp, iptables, Kata VM, NetworkPolicy, IMDS, Content Safety, token budgets)
 
 ## Design Principles
 
 1. **OpenClaw owns the agent.** Users build agents with AGENTS.md/SOUL.md/skills. AzureClaw doesn't reinvent agent authoring.
-2. **Foundry replaces unsafe built-ins.** Memory via threads (not local files). Knowledge via file_search (not grep). Web via managed search (not curl).
+2. **Use Foundry standalone APIs, not hosted agents.** Memory via Memory Store APIs (not threads). Knowledge via Foundry IQ / AI Search (not file_search runs). No Foundry hosted agent required — OpenClaw stays the orchestrator.
 3. **AzureClaw is the runtime layer, not the AI platform.** Foundry provides managed AI services. AzureClaw provides sandboxed execution.
 4. **AGT is opt-in and non-overlapping.** If AzureClaw enforces at kernel/router level, AGT doesn't touch it. AGT only handles tool-level policy the router can't see.
 5. **CRD is single source of truth.** No dual configuration. Token budgets, content safety, tools, governance — all in one CRD.
 6. **Per-sandbox sidecar, not shared gateway.** Each sandbox gets its own inference router process. No cross-tenant blast radius.
+
+## Foundry Integration Model — Standalone APIs
+
+AzureClaw uses Foundry services as standalone APIs through the inference router. **No Foundry hosted agent is created or managed.** OpenClaw is the only orchestrator.
+
+| Foundry Capability | API Type | Needs Hosted Agent? | How AzureClaw uses it |
+|---|---|---|---|
+| **Model Catalog (200+)** | `/openai/v1/chat/completions` | No | Router proxies inference (DONE) |
+| **Content Safety** | Content Safety REST API | No | Router calls on every request (DONE) |
+| **Prompt Shields** | Content Safety REST API | No | Router calls on every request (DONE) |
+| **Foundry IQ (Knowledge)** | AI Search agentic retrieval API | No | Skill teaches agent to query knowledge bases |
+| **Memory Store** | Memory Store REST API | No | Skill teaches agent to read/write memories |
+| **Evaluations** | Eval REST API | No | CLI-side `azureclaw eval` (future) |
+| **Guardrails** | Content Safety custom policies | No | Configurable via router |
+| **Web Search** | Bing Search API or Foundry web tool | Agent run for managed version | Skill teaches agent (Bing direct or agent run) |
+| **Code Interpreter** | Foundry Agent Service runs | Yes (agent run) | Skill teaches agent to create runs (optional) |
+| **Fine-tuning** | Fine-tune REST API | No | CLI-side `azureclaw fine-tune` (future) |
+
+**Key insight:** Most Foundry capabilities work as standalone APIs callable from any application. Only code_interpreter and some managed tools require Foundry agent runs. The `/agents/*` proxy routes remain available for these cases.
 
 ---
 

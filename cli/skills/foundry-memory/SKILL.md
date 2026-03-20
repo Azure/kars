@@ -1,69 +1,66 @@
 ---
 name: foundry-memory
-description: Persistent conversation memory via Azure AI Foundry threads. Memory survives pod restarts.
-metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_AGENT_ID"]}, "primaryEnv": "FOUNDRY_AGENT_ID"}}
+description: Persistent long-term memory via Foundry Memory Store APIs. User preferences and chat summaries survive pod restarts — no Foundry hosted agent needed.
+metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Memory — Persistent Threads
+# Foundry Memory — Memory Store APIs (Direct)
 
-You have access to persistent memory via Azure AI Foundry threads. Use this when the user asks you to remember something, recall previous conversations, or when you need context that should survive across sessions.
+You have access to persistent long-term memory via Foundry Memory Store APIs. Memory survives pod restarts, upgrades, and session boundaries. This uses direct APIs — no Foundry hosted agent needed.
 
 ## Why use this instead of local files
 
-Local files in `/sandbox/` are lost when the pod restarts. Foundry threads persist server-side — your memory survives restarts, upgrades, and redeployments.
+Local files in `/sandbox/` are lost when the pod restarts. Foundry Memory Store is managed and supports:
+- **User profile memory**: preferences, name, restrictions (retrieve once per session)
+- **Chat summary memory**: distilled summaries of past conversations (cross-session continuity)
+
+The system automatically extracts, consolidates, and deduplicates memories.
 
 ## Endpoints
 
-All requests go through the AzureClaw inference router at `http://localhost:8443`. Authentication is handled automatically (IMDS). You never need API keys.
-
-The Foundry Agent ID is available as `$FOUNDRY_AGENT_ID`.
+All requests go through `http://localhost:8443`. Auth is automatic (IMDS).
 
 ## Operations
 
-### Create a new thread (start a memory session)
+### Create a memory store
 
 ```bash
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads \
+curl -s -X POST "http://localhost:8443/memory-stores?api-version=v1" \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"name":"agent-memory","user_profile_details":["name","preferences","expertise"],"chat_summary_enabled":true}'
 ```
 
-Returns `{"id": "thread_abc123", ...}`. Save the thread ID for subsequent messages.
-
-### Add a message to a thread (store memory)
+### Write a memory
 
 ```bash
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/messages \
+curl -s -X POST "http://localhost:8443/memory-stores/agent-memory/memories?api-version=v1" \
   -H "Content-Type: application/json" \
-  -d '{"role": "user", "content": "Remember: the project deadline is March 30."}'
+  -d '{"scope":"user-123","content":"User prefers concise responses. Expert in security.","type":"user_profile"}'
 ```
 
-### List messages in a thread (recall memory)
+### Search memories
 
 ```bash
-curl -s http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/messages
+curl -s -X POST "http://localhost:8443/memory-stores/agent-memory/memories/search?api-version=v1" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"user-123","query":"user preferences"}'
 ```
 
-### List all threads (browse memory sessions)
+### List memories
 
 ```bash
-curl -s http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads
+curl -s "http://localhost:8443/memory-stores/agent-memory/memories?scope=user-123&api-version=v1"
 ```
 
 ## When to use
 
-- User says "remember this", "save this for later", "don't forget"
-- User asks "what did we discuss about X", "what was the deadline"
-- You need to persist context across sessions (e.g., project state, preferences)
-- You want to maintain a running log of decisions or findings
+- User says "remember this", "save this for later"
+- You need to persist user preferences across sessions
+- You want conversation summaries that survive pod restarts
+- User asks "what do you know about me"
 
 ## When NOT to use
 
-- For temporary scratch data within a single conversation (use local files)
-- For storing large files (use the foundry-knowledge skill instead)
-
-## Thread management tips
-
-- Create one thread per topic or project for organization
-- Add messages with clear labels: "Project: X, Decision: Y"
-- List threads to find the right context before answering recall questions
+- For searching documents (use foundry-knowledge skill)
+- For temporary scratch data (use local files)
+- For real-time web info (use foundry-web-search skill)
