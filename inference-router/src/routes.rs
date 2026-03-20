@@ -6,7 +6,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json,
 };
 use bytes::Bytes;
@@ -67,6 +67,15 @@ pub fn inference_routes() -> Router<AppState> {
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/models", get(list_models))
+}
+
+/// Foundry Agent API routes — threads (memory), files (knowledge), runs (tools).
+/// These are proxied to the same Foundry endpoint, authenticated via IMDS.
+pub fn foundry_agent_routes() -> Router<AppState> {
+    Router::new()
+        // Catch-all for Foundry Agent Service API paths
+        .route("/agents", get(foundry_proxy).post(foundry_proxy))
+        .route("/agents/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
 }
 
 /// Health and readiness routes.
@@ -394,6 +403,93 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         Err(e) => {
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
                 "error": {"message": format!("Failed to list models: {e}"), "type": "proxy_error"}
+            }))).into_response()
+        }
+    }
+}
+
+/// Generic Foundry Agent API proxy.
+/// Forwards any request under /agents/* to the Foundry endpoint with IMDS auth.
+/// Supports: agent management, threads (memory), files (knowledge), runs (tools).
+async fn foundry_proxy(
+    State(state): State<AppState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sandbox_name = headers
+        .get("x-azureclaw-sandbox")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+
+    let endpoint = state.config.foundry_endpoint.clone()
+        .or_else(|| state.config.azure_openai_endpoint.clone())
+        .unwrap_or_default();
+
+    // Forward the request path to Foundry
+    let path = uri.path();
+    let upstream_url = format!("{}{}", endpoint.trim_end_matches('/'), path);
+
+    tracing::info!(
+        sandbox = %sandbox_name,
+        method = %method,
+        path = %path,
+        "Proxying Foundry Agent API"
+    );
+
+    let token = match state.auth.get_token("https://cognitiveservices.azure.com").await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Foundry proxy auth failed: {e}");
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": {"message": format!("Auth error: {e}"), "type": "auth_error"}
+            }))).into_response();
+        }
+    };
+
+    // Build upstream request — strip sandbox headers, inject auth
+    let mut upstream_headers = HeaderMap::new();
+    for (name, value) in headers.iter() {
+        match name.as_str() {
+            "authorization" | "api-key" | "x-api-key"
+            | "host" | "connection" | "transfer-encoding" | "content-length"
+            | "x-azureclaw-sandbox" => continue,
+            _ => { upstream_headers.insert(name.clone(), value.clone()); }
+        }
+    }
+    upstream_headers.insert(
+        "authorization",
+        axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    upstream_headers.entry("content-type")
+        .or_insert(axum::http::HeaderValue::from_static("application/json"));
+
+    let resp = state.client
+        .request(method, &upstream_url)
+        .headers(upstream_headers)
+        .body(body)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let resp_headers = r.headers().clone();
+            let body = r.bytes().await.unwrap_or_default();
+
+            tracing::info!(sandbox = %sandbox_name, status = %status.as_u16(), path = %path, "Foundry Agent API complete");
+
+            let mut response = (status, Body::from(body)).into_response();
+            if let Some(ct) = resp_headers.get("content-type") {
+                response.headers_mut().insert("content-type", ct.clone());
+            }
+            response
+        }
+        Err(e) => {
+            tracing::error!(sandbox = %sandbox_name, "Foundry proxy error: {e}");
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": {"message": format!("Foundry Agent API error: {e}"), "type": "proxy_error"}
             }))).into_response()
         }
     }
