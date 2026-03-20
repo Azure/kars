@@ -15,6 +15,9 @@ param modelVersion string
 @description('Authorized IP ranges (empty = allow all)')
 param authorizedIpRanges array = []
 
+@description('Restore from soft-delete')
+param restore bool = false
+
 resource openAi 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   name: name
   location: location
@@ -24,6 +27,7 @@ resource openAi 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   }
   properties: {
     customSubDomainName: name
+    restore: restore
     publicNetworkAccess: 'Enabled'    // Needed for IP-based access; firewall restricts to authorizedIpRanges
     networkAcls: {
       defaultAction: empty(authorizedIpRanges) ? 'Allow' : 'Deny'
