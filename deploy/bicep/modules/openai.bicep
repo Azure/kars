@@ -15,7 +15,7 @@ param modelVersion string
 @description('Authorized IP ranges (empty = allow all)')
 param authorizedIpRanges array = []
 
-@description('Restore from soft-delete')
+@description('Restore from soft-delete (set false for first deploy)')
 param restore bool = false
 
 resource openAi 'Microsoft.CognitiveServices/accounts@2024-10-01' = {

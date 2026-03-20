@@ -53,7 +53,7 @@ module keyVault 'modules/keyvault.bicep' = {
   params: {
     name: '${baseName}-kv'
     location: location
-    recover: true  // Recover soft-deleted vault if it exists
+    recover: true  // Recover soft-deleted vault (cannot be purged on this sub)
   }
 }
 
@@ -67,7 +67,7 @@ module openAi 'modules/openai.bicep' = {
     modelName: openAiModelName
     modelVersion: openAiModelVersion
     authorizedIpRanges: authorizedIpRanges
-    restore: true  // Restore from soft-delete if needed
+    restore: false  // Set true only if AOAI was soft-deleted (not purged)
   }
 }
 
