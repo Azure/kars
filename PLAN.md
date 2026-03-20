@@ -2,7 +2,7 @@
 
 > Azure's enterprise-grade, open-source runtime for running OpenClaw agents safely on Azure Kubernetes Service with Azure Container Linux.
 
-**Status:** Alpha — Phase 3 in progress, Foundry integration E2E working on AKS
+**Status:** Alpha — Phase 3 complete, Foundry integration E2E working on AKS
 **License:** MIT (open source)
 **Repository:** Azure/azureclaw
 
@@ -759,7 +759,7 @@ azureclaw/
 - [ ] `azureclaw migrate` — import existing OpenClaw installations into AzureClaw sandbox
 - [ ] SBOM generation in CI
 
-### Phase 3: Enterprise Features — MOSTLY DONE
+### Phase 3: Enterprise Features — DONE (alerting + osconfig deferred to Phase 4)
 - [x] ~~Blueprint Controller (CRD-based operator)~~ — DONE in Phase 2
 - [x] Kata Containers pod sandboxing (confidential isolation level)
 - [x] Multi-tenant namespace isolation (per-sandbox namespaces, RBAC, docs)
@@ -777,7 +777,7 @@ azureclaw/
 - [x] Notation + Ratify guide (image signing + Gatekeeper admission)
 - [ ] Alerting (token spikes, egress anomalies, syscall alerts)
 - [ ] TODO: azure-osconfig integration planning (CIS AKS Optimized baseline for ACL nodes)
-- [ ] **Agentic demo scenario** — demonstrate real-world agent with tool use, Azure service access, policy-governed egress
+- [x] **Agentic demo scenario** — "Operation Claw Shield" multi-company multi-agent attack simulation; 3 companies (Contoso/Fabrikam/Northwind), indirect prompt injection, container escape, lateral movement, credential theft — all blocked by 8 security layers; docs/DEMO.md + examples/demo-clawshield/
 
 ### Phase 4: Ecosystem & Polish
 - [ ] Envoy sidecar with L7 egress filtering (HTTP method/path for non-inference)

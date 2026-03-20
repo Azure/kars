@@ -298,6 +298,7 @@ azureclaw migrate --from-nemoclaw ~/.nemoclaw/blueprints/
 - [Plan](PLAN.md) — full project plan, architecture, and phased delivery
 - [Architecture](docs/architecture.md) — detailed component design
 - [Security](docs/security.md) — defense-in-depth model
+- [Demo: Operation Claw Shield](docs/DEMO.md) — multi-agent attack simulation showcasing 8 security layers
 - [Network Policies](docs/network-policies.md) — egress control reference
 - [Inference Providers](docs/inference-providers.md) — model configuration
 - [Confidential Containers](docs/confidential-containers.md) — hardware isolation
