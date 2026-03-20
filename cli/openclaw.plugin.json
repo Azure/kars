@@ -1,8 +1,14 @@
 {
   "id": "azureclaw",
   "name": "AzureClaw",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Secure AI agent runtime on Azure — sandboxed OpenClaw with Azure AI Foundry and Rust inference router",
+  "skills": [
+    "skills/foundry-memory",
+    "skills/foundry-knowledge",
+    "skills/foundry-web-search",
+    "skills/foundry-code"
+  ],
   "configSchema": {
     "type": "object",
     "properties": {

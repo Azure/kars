@@ -69,6 +69,9 @@ EOF
   export AZURE_OPENAI_API_KEY="${API_KEY}"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
+  # Foundry Agent ID (set by controller when spec.agent is configured)
+  FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID:-}"
+
   # Write a .bashrc snippet so credentials are available in interactive shells too
   cat >> /sandbox/.bashrc << RCEOF
 
@@ -76,6 +79,7 @@ EOF
 export AZURE_OPENAI_API_KEY="\$(cat /run/secrets/azure-openai-key 2>/dev/null)"
 export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 export OPENCLAW_MODEL="${MODEL}"
+export FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID}"
 RCEOF
 
   # Write minimal workspace files so OpenClaw doesn't need onboarding
@@ -83,7 +87,7 @@ RCEOF
 # AzureClaw Agent
 
 You are a helpful AI assistant running inside an AzureClaw sandbox on Azure.
-You are secure, sandboxed, and connected to Azure OpenAI.
+You are secure, sandboxed, and connected to Azure AI Foundry.
 
 ## Capabilities
 - You can help with coding, analysis, writing, and general questions
@@ -91,13 +95,50 @@ You are secure, sandboxed, and connected to Azure OpenAI.
 - Your workspace is /sandbox — all your files live here
 - Your network access is governed by policy — unauthorized endpoints will be blocked
 
+## Azure AI Foundry capabilities (via AzureClaw inference router)
+- **200+ AI models** — inference through Foundry model catalog (GPT-4.1, DeepSeek, Phi-4, Llama, etc.)
+- **Persistent memory** — Foundry threads survive pod restarts (use the foundry-memory skill)
+- **Knowledge search** — upload documents and search them with vector similarity (foundry-knowledge skill)
+- **Web search** — real-time web grounding with citations, no egress needed (foundry-web-search skill)
+- **Code interpreter** — Python execution for data analysis and charts (foundry-code skill)
+
+All Foundry services are accessed through http://localhost:8443. Authentication is automatic (IMDS).
+You never need API keys.
+
 ## Security context
 - You are running as a non-root user (sandbox:1000)
 - The root filesystem is read-only
 - You can write to /sandbox and /tmp only
 - All system calls are filtered by seccomp
-- Your inference calls go through Azure OpenAI with content safety enabled
+- Your inference calls go through Content Safety + Prompt Shields
+- Token budgets are enforced per sandbox
 EOF
+
+  # Write TOOLS.md describing available Foundry endpoints
+  cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
+# AzureClaw Tools
+
+All tools are accessed via the inference router at http://localhost:8443.
+Authentication is handled automatically — no API keys needed.
+
+## Inference (working now)
+- `POST /v1/chat/completions` — chat with any Foundry model
+- `POST /v1/completions` — text completion
+- `POST /v1/embeddings` — generate embeddings
+- `GET /v1/models` — list available models
+
+## Foundry Agent API (requires $FOUNDRY_AGENT_ID)
+- `POST /agents/{id}/threads` — create a memory thread
+- `GET /agents/{id}/threads` — list threads
+- `POST /agents/{id}/threads/{tid}/messages` — add message to thread
+- `GET /agents/{id}/threads/{tid}/messages` — read thread messages
+- `POST /agents/{id}/threads/{tid}/runs` — execute tools (file_search, web_search, code_interpreter)
+- `POST /agents/{id}/files` — upload a file for knowledge search
+
+## Health & Metrics
+- `GET /healthz` — readiness check
+- `GET /metrics` — Prometheus metrics (tokens, latency, requests)
+TOOLSEOF
 
   cat > "$WORKSPACE_DIR/SOUL.md" << 'EOF'
 # Soul
@@ -125,6 +166,11 @@ EOF
       mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist/$(dirname "$f")"
       cp "$f" "$OPENCLAW_DIR/extensions/azureclaw/dist/$f"
     done
+    # Copy Foundry skills (SKILL.md files)
+    if [ -d /opt/azureclaw-plugin/skills ]; then
+      cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
+      echo "[azureclaw] Foundry skills installed (memory, knowledge, web-search, code)"
+    fi
     cd /sandbox
     echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
   fi
