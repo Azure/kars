@@ -81,15 +81,44 @@ pub fn foundry_agent_routes() -> Router<AppState> {
 /// These work without a hosted Foundry agent. Direct project-level APIs.
 pub fn foundry_standalone_routes() -> Router<AppState> {
     Router::new()
-        // Memory Store APIs (persistent long-term memory)
-        .route("/memory-stores", get(foundry_proxy).post(foundry_proxy))
-        .route("/memory-stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        // Memory Store APIs (persistent long-term memory) — uses underscores per REST spec
+        .route("/memory_stores", get(foundry_proxy).post(foundry_proxy))
+        .route("/memory_stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         // Foundry IQ / Knowledge Base APIs (agentic retrieval)
         .route("/knowledgebases", get(foundry_proxy).post(foundry_proxy))
         .route("/knowledgebases/{*path}", get(foundry_proxy).post(foundry_proxy))
         // Evaluations APIs
         .route("/evaluations", get(foundry_proxy).post(foundry_proxy))
         .route("/evaluations/{*path}", get(foundry_proxy).post(foundry_proxy))
+        // Evaluators APIs
+        .route("/evaluators", get(foundry_proxy).post(foundry_proxy))
+        .route("/evaluators/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        // Evaluation rules APIs
+        .route("/evaluationrules", get(foundry_proxy).post(foundry_proxy))
+        .route("/evaluationrules/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        // Indexes APIs
+        .route("/indexes", get(foundry_proxy).post(foundry_proxy))
+        .route("/indexes/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        // Connections APIs
+        .route("/connections", get(foundry_proxy).post(foundry_proxy))
+        .route("/connections/{*path}", get(foundry_proxy).post(foundry_proxy))
+        // Deployments APIs
+        .route("/deployments", get(foundry_proxy))
+        .route("/deployments/{*path}", get(foundry_proxy))
+        // Datasets APIs
+        .route("/datasets", get(foundry_proxy))
+        .route("/datasets/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        // Insights APIs
+        .route("/insights", get(foundry_proxy).post(foundry_proxy))
+        .route("/insights/{*path}", get(foundry_proxy))
+        // OpenAI Conversations + Responses + Evals
+        .route("/openai/conversations", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/conversations/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/responses", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/responses/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/evals", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/evals/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/fine-tuning/{*path}", get(foundry_proxy).post(foundry_proxy))
 }
 
 /// Health and readiness routes.
