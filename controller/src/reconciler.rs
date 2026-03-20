@@ -116,6 +116,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let sandbox_config = spec.sandbox.unwrap_or_default();
     let inference_config = spec.inference.unwrap_or_default();
     let openclaw_config = spec.openclaw.unwrap_or_default();
+    let agent_config = spec.agent.unwrap_or_default();
 
     // ── Validate CRD inputs ──────────────────────────────────────────────
     let isolation = &sandbox_config.isolation;
@@ -278,6 +279,25 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         .and_then(|b| b.per_request)
         .unwrap_or(0);
 
+    // Build OpenClaw container env vars
+    let mut openclaw_env = vec![
+        json!({"name": "OPENCLAW_MODEL", "value": inference_config.model}),
+        json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
+        json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
+    ];
+    // Inject Foundry Agent ID if set in status (by controller or externally)
+    if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone()) {
+        if !agent_id.is_empty() {
+            openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
+        }
+    }
+    // Signal configured Foundry agent tools
+    if let Some(ref tools) = agent_config.tools {
+        if !tools.is_empty() {
+            openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
+        }
+    }
+
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
     let mut pod_spec = json!({
         "serviceAccountName": "sandbox",
@@ -330,11 +350,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "image": image,
                             "imagePullPolicy": pull_policy,
                             "ports": [{"containerPort": 18789, "name": "gateway"}],
-                            "env": [
-                                {"name": "OPENCLAW_MODEL", "value": inference_config.model},
-                                {"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint},
-                                {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}
-                            ],
+                            "env": openclaw_env,
                             "securityContext": {
                                 "runAsUser": 1000,
                                 "allowPrivilegeEscalation": sandbox_config.allow_privilege_escalation,
@@ -471,7 +487,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // ── Step 5: Update status ────────────────────────────────────────────
     let sandbox_api: Api<ClawSandbox> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-    let status = json!({
+    let mut status_obj = json!({
         "status": {
             "phase": "Running",
             "namespace": sandbox_ns,
@@ -480,8 +496,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "pendingApprovals": 0
         }
     });
+    // Preserve existing foundryAgentId in status (set externally or by future controller logic)
+    if let Some(ref existing_status) = sandbox.status {
+        if let Some(ref agent_id) = existing_status.foundry_agent_id {
+            status_obj["status"]["foundryAgentId"] = json!(agent_id);
+        }
+    }
     let _ = sandbox_api
-        .patch_status(&name, &PatchParams::apply("azureclaw-controller"), &Patch::Merge(status))
+        .patch_status(&name, &PatchParams::apply("azureclaw-controller"), &Patch::Merge(status_obj))
         .await;
 
     tracing::info!("ClawSandbox {name} reconciled successfully");
