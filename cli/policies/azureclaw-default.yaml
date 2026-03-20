@@ -1,0 +1,76 @@
+# AzureClaw AGT Governance Policy — Application Layer Only
+#
+# Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
+# are handled by AzureClaw at kernel/router level. AGT only governs
+# application-level behavior that AzureClaw can't see.
+#
+# Rule: If AzureClaw enforces it at kernel/network/router, AGT doesn't touch it.
+
+version: "1.0"
+agent: openclaw
+description: AzureClaw behavioral governance (tool-level only, no infra overlap)
+
+policies:
+  # Tool-level restrictions — AzureClaw CAN'T see tool calls before execution
+  - name: shell-safety
+    type: capability
+    allowed_actions:
+      - "shell:ls"
+      - "shell:cat"
+      - "shell:grep"
+      - "shell:find"
+      - "shell:echo"
+      - "shell:head"
+      - "shell:tail"
+      - "shell:wc"
+      - "shell:sort"
+      - "shell:uniq"
+      - "shell:diff"
+      - "shell:python"
+      - "shell:python3"
+      - "shell:pip"
+      - "shell:node"
+      - "shell:npm"
+      - "shell:git"
+      - "shell:curl"
+      - "shell:jq"
+      - "shell:sed"
+      - "shell:awk"
+    denied_actions:
+      - "shell:rm -rf /*"
+      - "shell:rm -rf /"
+      - "shell:dd"
+      - "shell:mkfs"
+      - "shell:shutdown"
+      - "shell:reboot"
+      - "shell:chmod 777"
+      - "shell:chown"
+      - "shell:mount"
+      - "shell:umount"
+
+  # Destructive operations require approval
+  - name: destructive-approval
+    type: approval
+    actions:
+      - "delete_*"
+      - "shell:rm *"
+      - "file:write:.env"
+      - "file:write:.bashrc"
+    min_approvals: 1
+    approval_timeout_minutes: 15
+
+  # Tool-specific rate limits (different from AzureClaw's token budget)
+  - name: tool-rate-limit
+    type: rate_limit
+    scope: tool_calls
+    max_calls: 20
+    window: 1m
+    actions: ["shell:*"]
+
+  # NOT included — AzureClaw handles these at infrastructure level:
+  # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
+  # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
+  # ✗ content-safety (Azure AI Content Safety — router-level enforcement)
+  # ✗ token-budgets (inference router — router-level enforcement)
+  # ✗ IMDS-blocking (iptables UID-based — kernel-level enforcement)
+  # ✗ rate-limit for API calls (ConcurrencyLimitLayer — router-level enforcement)

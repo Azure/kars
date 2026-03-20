@@ -297,6 +297,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
         }
     }
+    // AGT governance env vars (opt-in)
+    let governance_config = spec.governance.unwrap_or_default();
+    if governance_config.enabled {
+        openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
+        openclaw_env.push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
+        openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+    }
 
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
     let mut pod_spec = json!({

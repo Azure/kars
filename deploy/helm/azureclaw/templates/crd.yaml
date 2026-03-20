@@ -110,6 +110,22 @@ spec:
                       description: "Pre-uploaded Foundry file IDs for knowledge retrieval"
                       items:
                         type: string
+                governance:
+                  type: object
+                  description: "AGT behavioral governance (opt-in for multi-agent)"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: "Enable AGT governance (tool-level policy, trust, audit)"
+                    toolPolicy:
+                      type: string
+                      default: "default"
+                      description: "Policy profile name (references policies ConfigMap)"
+                    trustThreshold:
+                      type: integer
+                      default: 500
+                      description: "Minimum trust score (0-1000) for inter-agent communication"
                 azureServices:
                   type: array
                   description: "Azure services the sandbox can access via Managed Identity"

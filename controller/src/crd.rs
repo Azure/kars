@@ -40,6 +40,10 @@ pub struct ClawSandboxSpec {
     /// and injects FOUNDRY_AGENT_ID into the OpenClaw container.
     pub agent: Option<AgentConfig>,
 
+    /// AGT behavioral governance (opt-in for multi-agent).
+    /// When enabled, the controller injects AGT env vars and mounts policy config.
+    pub governance: Option<GovernanceConfig>,
+
     /// Azure services accessible from the sandbox.
     /// NOTE: Schema reserved for future use. The controller does not yet create
     /// Azure role assignments for declared services. Inference via Foundry works
@@ -185,6 +189,23 @@ pub struct AgentConfig {
     /// Pre-uploaded Foundry file IDs for knowledge retrieval.
     pub file_ids: Option<Vec<String>>,
 }
+
+/// AGT behavioral governance configuration.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct GovernanceConfig {
+    /// Enable AGT governance (tool policy, trust, audit).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Policy profile name (references policies ConfigMap).
+    #[serde(default = "default_policy")]
+    pub tool_policy: String,
+    /// Minimum trust score (0-1000) for inter-agent communication.
+    #[serde(default = "default_trust_threshold")]
+    pub trust_threshold: i32,
+}
+
+fn default_policy() -> String { "default".into() }
+fn default_trust_threshold() -> i32 { 500 }
 
 /// ClawSandbox status — reflects the current observed state.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
