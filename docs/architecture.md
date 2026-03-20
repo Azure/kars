@@ -70,7 +70,6 @@ Inspektor Gadget provides eBPF tracing. Deployed via `kubectl gadget deploy` dur
 
 Planned but **not yet implemented**:
 
-- Envoy L7 sidecar for HTTP method/path filtering
 - Multi-region AKS deployment
 - SBOM generation in CI
 - Node compliance via azure-osconfig

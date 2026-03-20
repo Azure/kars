@@ -4,7 +4,7 @@
 //! - Isolated namespace per sandbox
 //! - OpenClaw agent pod with security constraints (seccomp, SELinux, read-only rootfs)
 //! - NetworkPolicy (default-deny + allowlist from CRD spec)
-//! - Envoy sidecar for L7 egress filtering
+//! - iptables egress-guard for per-container network isolation
 //! - Workload Identity bindings for Azure service access
 //! - Inference router configuration
 //!
