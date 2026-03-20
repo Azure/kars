@@ -59,5 +59,8 @@
     "security",
     "aks",
     "kubernetes"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

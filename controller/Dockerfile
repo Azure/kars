@@ -1,6 +1,7 @@
 # AzureClaw Controller — multi-stage Rust build (Azure Linux)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
+ARG VERSION=0.1.0
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,7 @@ USER controller
 LABEL org.opencontainers.image.title="AzureClaw Controller" \
       org.opencontainers.image.description="Kubernetes operator for AzureClaw sandbox lifecycle" \
       org.opencontainers.image.vendor="Microsoft" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["azureclaw-controller"]

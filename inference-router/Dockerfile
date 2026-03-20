@@ -2,6 +2,7 @@
 # Produces a minimal distroless binary (~15MB)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
+ARG VERSION=0.1.0
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ EXPOSE 8443
 LABEL org.opencontainers.image.title="AzureClaw Inference Router" \
       org.opencontainers.image.description="High-performance inference proxy for AzureClaw" \
       org.opencontainers.image.vendor="Microsoft" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["azureclaw-inference-router"]
