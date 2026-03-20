@@ -222,6 +222,7 @@ export function upCommand(): Command {
         } else {
           // Read outputs from existing deployment
           spinner.text = "Reading existing deployment outputs...";
+          console.log(chalk.dim("  Checking: Bicep outputs, ACR, AOAI, WI, KV..."));
           const { stdout: existingOutput } = await execa("az", [
             "deployment", "group", "show",
             "--resource-group", rg,
@@ -247,7 +248,7 @@ export function upCommand(): Command {
         }
 
         // ── Step 3b: Add AKS egress IP to service firewalls ──────
-        spinner.text = "Adding AKS egress IP to service firewalls...";
+        spinner.text = "Step 3/8: Adding AKS egress IP to service firewalls...";
         try {
           // Get AKS egress (outbound) IP
           const { stdout: egressIpId } = await execa("az", [
@@ -289,7 +290,7 @@ export function upCommand(): Command {
         }
 
         // ── Step 3c: Attach ACR to AKS ──────────────────────────────
-        spinner.text = "Attaching ACR to AKS...";
+        spinner.text = "Step 4/8: Attaching ACR to AKS...";
         await execa("az", [
           "aks", "update",
           "--name", `${baseName}-aks`,
@@ -301,7 +302,7 @@ export function upCommand(): Command {
         });
 
         // ── Step 4: Get AKS credentials ──────────────────────────────
-        spinner.text = "Configuring kubectl...";
+        spinner.text = "Step 5/8: Configuring kubectl...";
         await execa("az", [
           "aks", "get-credentials",
           "--name", `${baseName}-aks`,
@@ -315,11 +316,11 @@ export function upCommand(): Command {
 
         if (options.build) {
           // Developer mode: build locally and push
-          spinner.text = "Logging into ACR...";
+          spinner.text = "Step 6/8: Logging into ACR...";
           await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
 
           const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = []) => {
-            spinner.text = `Building ${tag}...`;
+            spinner.text = `Step 6/8: Building ${tag} (this may take a few minutes)...`;
             const args = [
               "build", "--platform", "linux/amd64",
               "--provenance=false", "--sbom=false",
@@ -370,7 +371,7 @@ export function upCommand(): Command {
         }
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
-        spinner.text = "Preparing Helm deployment...";
+        spinner.text = "Step 7/8: Preparing Helm deployment...";
         const foundryEndpoint = options.foundryEndpoint || "";
 
         // Fix orphaned namespace: label it for Helm adoption if it exists but isn't Helm-managed
@@ -390,7 +391,24 @@ export function upCommand(): Command {
           // Namespace may not exist yet — Helm will create it
         }
 
-        spinner.text = "Detecting kubelet managed identity for IMDS auth...";
+        // Clean up stale Helm releases (pending-install from failed previous attempts)
+        try {
+          const { stdout: helmSecrets } = await execa("kubectl", [
+            "get", "secrets", "-n", "azureclaw-system",
+            "-l", "owner=helm,status=pending-install",
+            "-o", "jsonpath={.items[*].metadata.name}",
+          ], { stdio: "pipe" });
+          if (helmSecrets.trim()) {
+            for (const secret of helmSecrets.trim().split(" ")) {
+              spinner.text = "Cleaning stale Helm release...";
+              await execa("kubectl", ["delete", "secret", secret, "-n", "azureclaw-system"], { stdio: "pipe" }).catch(() => {});
+            }
+          }
+        } catch {
+          // No stale secrets — normal
+        }
+
+        spinner.text = "Step 7/8: Detecting kubelet managed identity for IMDS auth...";
 
         // Get kubelet MI client ID for IMDS auth (CA-proof)
         let imdsClientId = "";
@@ -456,7 +474,7 @@ export function upCommand(): Command {
             helmArgs.push("--set", `foundry.imdsClientId=${imdsClientId}`);
           }
         }
-        spinner.text = "Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...";
+        spinner.text = "Step 7/8: Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...";
         await execa("helm", helmArgs, { stdio: "pipe" });
 
         spinner.succeed("Controller deployed");
