@@ -6,6 +6,9 @@ param name string
 @description('Azure region')
 param location string
 
+@description('Recover soft-deleted vault')
+param recover bool = false
+
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: name
   location: location
@@ -19,6 +22,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 30
     enablePurgeProtection: true
+    createMode: recover ? 'recover' : 'default'
     networkAcls: {
       defaultAction: 'Deny'
       bypass: 'AzureServices'
