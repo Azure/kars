@@ -48,23 +48,19 @@ impl AppState {
     }
 
     fn upstream_config(&self, sandbox_name: &str) -> UpstreamConfig {
-        // Use Foundry endpoint if available, otherwise fall back to AOAI
-        let endpoint = if self.config.provider == "azure-ai-foundry" {
-            self.config.foundry_endpoint.clone().unwrap_or_default()
-        } else {
-            self.config.azure_openai_endpoint.clone().unwrap_or_default()
-        };
+        let endpoint = self.config.foundry_endpoint.clone()
+            .or_else(|| self.config.azure_openai_endpoint.clone())
+            .unwrap_or_default();
 
         UpstreamConfig {
             endpoint,
             deployment: self.config.default_model.clone(),
-            api_version: "2024-12-01-preview".to_string(),
             sandbox_name: sandbox_name.to_string(),
         }
     }
 }
 
-/// Inference API routes — proxied to Azure OpenAI / AI Foundry.
+/// Inference API routes — proxied to Azure AI Foundry.
 pub fn inference_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -175,29 +171,17 @@ async fn chat_completions(
             .into_response();
     }
 
-    // Forward to inference backend (Foundry or AOAI)
+    // Forward to Foundry
     let upstream = state.upstream_config(sandbox_name);
-    let result = if state.config.provider == "azure-ai-foundry" {
-        proxy::forward_to_foundry(
-            &state.auth,
-            &state.client,
-            &upstream,
-            axum::http::Method::POST,
-            "chat/completions",
-            &headers,
-            body,
-        ).await
-    } else {
-        proxy::forward_to_azure_openai(
-            &state.auth,
-            &state.client,
-            &upstream,
-            axum::http::Method::POST,
-            "chat/completions",
-            &headers,
-            body,
-        ).await
-    };
+    let result = proxy::forward(
+        &state.auth,
+        &state.client,
+        &upstream,
+        axum::http::Method::POST,
+        "chat/completions",
+        &headers,
+        body,
+    ).await;
 
     match result {
         Ok((status, resp_headers, resp_body)) => {
@@ -251,7 +235,7 @@ async fn completions(
         .unwrap_or("unknown");
 
     let upstream = state.upstream_config(sandbox_name);
-    match proxy::forward_to_azure_openai(
+    match proxy::forward(
         &state.auth,
         &state.client,
         &upstream,
@@ -281,7 +265,7 @@ async fn embeddings(
         .unwrap_or("unknown");
 
     let upstream = state.upstream_config(sandbox_name);
-    match proxy::forward_to_azure_openai(
+    match proxy::forward(
         &state.auth,
         &state.client,
         &upstream,
@@ -331,14 +315,9 @@ async fn metrics() -> String {
 
 /// GET /v1/models — list available models from Foundry.
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let upstream = state.upstream_config("system");
-
-    // Get the endpoint URL for models
-    let endpoint = if state.config.provider == "azure-ai-foundry" {
-        state.config.foundry_endpoint.clone().unwrap_or_default()
-    } else {
-        state.config.azure_openai_endpoint.clone().unwrap_or_default()
-    };
+    let endpoint = state.config.foundry_endpoint.clone()
+        .or_else(|| state.config.azure_openai_endpoint.clone())
+        .unwrap_or_default();
 
     let models_url = format!("{}/openai/v1/models", endpoint.trim_end_matches('/'));
 
