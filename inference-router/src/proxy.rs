@@ -1,10 +1,10 @@
-//! Reverse proxy logic — forwards inference requests to Azure OpenAI / AI Foundry.
+//! Reverse proxy logic — forwards inference requests to Azure AI Foundry.
 //!
 //! The proxy:
 //! 1. Strips any credentials the sandbox may have tried to inject
-//! 2. Acquires a Managed Identity token via Workload Identity
+//! 2. Acquires a Managed Identity token via Workload Identity / IMDS
 //! 3. Injects the bearer token into the upstream request
-//! 4. Forwards to Azure OpenAI / Foundry and returns the response
+//! 4. Forwards to Azure AI Foundry and returns the response
 //! 5. Records metrics (latency, tokens, status)
 
 use anyhow::{Context, Result};
@@ -16,11 +16,10 @@ use std::time::Instant;
 use crate::auth::WorkloadIdentityAuth;
 use crate::metrics;
 
-/// Upstream Azure OpenAI configuration for a single request.
+/// Upstream configuration for a single request.
 pub struct UpstreamConfig {
     pub endpoint: String,
     pub deployment: String,
-    pub api_version: String,
     pub sandbox_name: String,
 }
 
@@ -30,14 +29,12 @@ fn build_upstream_headers(
     request_headers: &HeaderMap,
     auth: &WorkloadIdentityAuth,
     token: &str,
-    strip_content_length: bool,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     for (name, value) in request_headers.iter() {
         match name.as_str() {
             "authorization" | "api-key" | "x-api-key" => continue,
-            "host" | "connection" | "transfer-encoding" => continue,
-            "content-length" if strip_content_length => continue,
+            "host" | "connection" | "transfer-encoding" | "content-length" => continue,
             _ => { headers.insert(name.clone(), value.clone()); }
         }
     }
@@ -77,54 +74,11 @@ fn record_metrics(upstream: &UpstreamConfig, status: StatusCode, latency: std::t
     }
 }
 
-/// Forward an inference request to Azure OpenAI.
-pub async fn forward_to_azure_openai(
-    auth: &WorkloadIdentityAuth,
-    client: &Client,
-    upstream: &UpstreamConfig,
-    method: Method,
-    path: &str,
-    request_headers: &HeaderMap,
-    request_body: Bytes,
-) -> Result<(StatusCode, HeaderMap, Bytes)> {
-    let start = Instant::now();
-
-    let upstream_url = format!(
-        "{}/openai/deployments/{}/{}?api-version={}",
-        upstream.endpoint.trim_end_matches('/'),
-        upstream.deployment,
-        path.trim_start_matches('/'),
-        upstream.api_version,
-    );
-
-    tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, "Forwarding to Azure OpenAI");
-
-    let token = auth.get_token("https://cognitiveservices.azure.com").await
-        .context("Failed to acquire Azure AD token")?;
-
-    let headers = build_upstream_headers(request_headers, auth, &token, false)?;
-
-    let response = client
-        .request(method, &upstream_url)
-        .headers(headers)
-        .body(request_body)
-        .send()
-        .await
-        .context("Upstream request failed")?;
-
-    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let response_headers = response.headers().clone();
-    let response_body = response.bytes().await.context("Failed to read response body")?;
-    let latency = start.elapsed();
-
-    record_metrics(upstream, status, latency, &response_body);
-
-    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), "Azure OpenAI complete");
-    Ok((status, response_headers, response_body))
-}
-
-/// Forward an inference request to Azure AI Foundry Models endpoint.
-pub async fn forward_to_foundry(
+/// Forward an inference request to Azure AI Foundry.
+///
+/// Uses the Foundry `/openai/v1/{path}` endpoint which is OpenAI-compatible
+/// and supports all endpoints: chat/completions, completions, embeddings, models.
+pub async fn forward(
     auth: &WorkloadIdentityAuth,
     client: &Client,
     upstream: &UpstreamConfig,
@@ -141,7 +95,7 @@ pub async fn forward_to_foundry(
         path.trim_start_matches('/'),
     );
 
-    tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, provider = "foundry", "Forwarding to Foundry");
+    tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, path = %path, "Forwarding to Foundry");
 
     // Inject model name into request body if not present
     let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
@@ -159,8 +113,7 @@ pub async fn forward_to_foundry(
     let token = auth.get_token("https://cognitiveservices.azure.com").await
         .context("Failed to acquire token for Foundry")?;
 
-    // Strip content-length since we may have modified the body
-    let headers = build_upstream_headers(request_headers, auth, &token, true)?;
+    let headers = build_upstream_headers(request_headers, auth, &token)?;
 
     let response = client
         .request(method, &upstream_url)
@@ -177,6 +130,6 @@ pub async fn forward_to_foundry(
 
     record_metrics(upstream, status, latency, &response_body);
 
-    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), provider = "foundry", "Foundry complete");
+    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), "Foundry complete");
     Ok((status, response_headers, response_body))
 }

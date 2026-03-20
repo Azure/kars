@@ -1,4 +1,4 @@
-//! Configuration loaded from environment variables and ConfigMap mounts.
+//! Configuration loaded from environment variables.
 
 use anyhow::{Context, Result};
 
@@ -6,16 +6,14 @@ pub struct Config {
     /// Port to listen on (default: 8443)
     pub port: u16,
 
-    /// Inference provider: "azure-openai" | "azure-ai-foundry" (default: auto-detect)
-    pub provider: String,
-
-    /// Azure OpenAI endpoint (e.g. https://my-aoai.openai.azure.com/)
-    pub azure_openai_endpoint: Option<String>,
-
-    /// Foundry Models endpoint (e.g. https://my-resource.services.ai.azure.com/)
+    /// Azure AI Foundry endpoint (e.g. https://my-resource.services.ai.azure.com/)
+    /// Falls back to AZURE_OPENAI_ENDPOINT for dev-mode compatibility.
     pub foundry_endpoint: Option<String>,
 
-    /// Default model deployment name
+    /// Legacy Azure OpenAI endpoint — used as fallback if FOUNDRY_ENDPOINT is not set.
+    pub azure_openai_endpoint: Option<String>,
+
+    /// Default model name
     pub default_model: String,
 
     /// Enable Azure AI Content Safety (default: true)
@@ -36,29 +34,17 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").ok();
-        let azure_openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").ok();
-
-        // Auto-detect provider: prefer Foundry if endpoint is set
-        let provider = std::env::var("INFERENCE_PROVIDER").unwrap_or_else(|_| {
-            if foundry_endpoint.is_some() {
-                "azure-ai-foundry".into()
-            } else {
-                "azure-openai".into()
-            }
-        });
-
         Ok(Self {
             port: std::env::var("ROUTER_PORT")
                 .unwrap_or_else(|_| "8443".into())
                 .parse()
                 .context("ROUTER_PORT must be a valid port number")?,
 
-            provider,
-            azure_openai_endpoint,
-            foundry_endpoint,
+            foundry_endpoint: std::env::var("FOUNDRY_ENDPOINT").ok(),
+            azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
 
             default_model: std::env::var("DEFAULT_MODEL")
+                .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
                 .unwrap_or_else(|_| "gpt-4.1".into()),
 
             content_safety_enabled: std::env::var("CONTENT_SAFETY_ENABLED")
