@@ -288,8 +288,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
     ];
     // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
-    if !ctx.foundry_endpoint.is_empty() {
-        openclaw_env.push(json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_endpoint}));
+    if !ctx.foundry_project_endpoint.is_empty() {
+        openclaw_env.push(json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}));
     }
     // Inject Foundry Agent ID if set in status (for tools needing agent runs)
     if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone()) {
