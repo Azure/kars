@@ -1,6 +1,6 @@
 # AzureClaw — Backlog
 
-> Last updated: March 20, 2026 · Status: **Alpha**
+> Last updated: March 21, 2026 · Status: **Alpha**
 
 ---
 
@@ -8,17 +8,19 @@
 
 | Area | What works |
 |------|-----------|
-| **CLI** | 12 commands: `up`, `add`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `onboard`, `destroy`. `add` supports `--agent-instructions`, `--agent-tools`. |
-| **Controller** | Rust/kube-rs operator. Reconciles ClawSandbox CRDs → namespaces, pods, NetworkPolicies, iptables init containers. 3 isolation levels. Injects Foundry Agent ID + tools + AGT governance env vars from CRD. 9 unit tests. |
-| **Inference Router** | Rust/axum sidecar. Foundry (prod) + AOAI (dev) dual-mode. SSE streaming. Content Safety + Prompt Shields. Token budgets (429). IMDS/WI auth. Foundry Agent API proxy (`/agents/*`). Concurrency limit (64). 5 unit tests. |
-| **Foundry Skills** | 4 OpenClaw SKILL.md files: foundry-memory (Memory Store APIs — standalone, no hosted agent), foundry-knowledge (Foundry IQ / AI Search — standalone), foundry-web-search (web grounding), foundry-code (code_interpreter via agent runs). Shipped via plugin. |
-| **AGT Governance** | Opt-in via CRD `spec.governance`. Tool-level policy (shell-safety, destructive-approval, rate limits). No overlap with AzureClaw infra controls. AGT skill teaches agent about trust + policy. |
-| **CRD** | `spec.agent` (instructions, tools, fileIds) + `spec.governance` (enabled, toolPolicy, trustThreshold) + `status.foundryAgentId` |
+| **CLI** | 13 commands: `up`, `add`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `eval`, `onboard`, `destroy`. `add` supports `--governance`, `--trust-threshold`, `--policy-profile`, `--agent-tools`. |
+| **Controller** | Rust/kube-rs operator. Reconciles ClawSandbox → NS, SA, NetworkPolicy, Deployment, Service, ConfigMap. 3 isolation levels. AGT: Service (mesh DNS), ConfigMap (policy), volume mount, mesh ingress. Azure Services RBAC annotations. 9 unit tests. |
+| **Inference Router** | Rust/axum sidecar. 40+ routes, 18 Foundry API groups. SSE streaming. Content Safety + Prompt Shields. Token budgets (429). IMDS/WI auth. AGT module: PolicyEngine, TrustStore, AuditLog, MeshInbox. 9 `/agt/*` endpoints. |
+| **Foundry Integration** | All services via Responses API — no hosted agents. 18 API groups E2E tested: memory_stores, agents, evaluators, evaluationrules, indexes, connections, deployments, datasets, insights, openai/*, knowledgebases, redTeams, schedules, evaluationtaxonomies. |
+| **Foundry Skills** | 9 SKILL.md files: foundry-memory, foundry-code, foundry-knowledge, foundry-web-search, foundry-agents, foundry-conversations, foundry-evaluations, foundry-deployments, agt-governance. |
+| **AGT Governance** | Opt-in via CRD or `--governance` flag. Router-integrated PolicyEngine, TrustStore (0-1000), AuditLog (hash-chain), MeshInbox. Inter-agent mesh via K8s DNS. Controller creates Service + ConfigMap + mesh ingress. E2E: 2 agents, 21/21 tests. |
+| **Foundry RBAC** | `azureclaw up` auto-configures: project MI → Azure AI User on RG, sandbox WI → Azure AI User on AI Services (via Bicep). |
 | **Infrastructure** | Bicep: AKS, ACR, KV, AOAI, Monitor. Helm: CRD, controller, RBAC, seccomp DaemonSet. |
-| **Security** | 8-layer defense-in-depth (infra) + 2-layer AGT governance (behavioral) = 10/10 OWASP Agentic. |
-| **CI/CD** | ci.yml + image-sign-sbom.yml. |
-| **Plugin** | OpenClaw provider (7 models), 6 slash commands, 5 skills (4 Foundry + 1 AGT). |
+| **Security** | 8-layer defense-in-depth + AGT governance (opt-in). Local dev iptables guard. |
+| **CI/CD** | ci.yml + image-sign-sbom.yml (Notation signing with Azure KV). |
+| **Plugin** | OpenClaw provider (7 models), 6 slash commands, 9 skills. |
 | **Metrics** | Prometheus: `inference_requests`, `inference_latency`, `tokens_used`. |
+| **E2E Tests** | infra-e2e.sh (22 pass), AGT multi-agent mesh (21 pass). |
 
 ---
 
@@ -26,16 +28,12 @@
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Controller-side Foundry agent creation | Low | Only needed for code_interpreter/web_search (agent run tools). Memory + knowledge use standalone APIs. |
-| `/mesh/*` inter-agent routes | Medium | IATP messaging between sandbox namespaces via router. |
-| E2E test suite | High | Kind-based framework exists. Needs mock Azure services. |
-| Foundry evaluation + prompt optimization | Medium | CLI-side `azureclaw eval` command. |
-| CLI unit tests | Medium | vitest not yet configured. |
-| `azureServices` CRD wiring | Medium | Schema exists. Controller does not yet create RBAC bindings. |
-| Image signing enforcement | Medium | Notation in CI. Ratify not auto-deployed. |
+| Image signing enforcement (Ratify) | Medium | Notation in CI. Ratify admission controller not auto-deployed. |
 | Azure Monitor alerting | Medium | Token spikes, egress anomalies. |
-| AGT sidecar container | Low | Upgrade from in-process SDK for stronger isolation. |
+| Node compliance (OS Config) | Low | azure-osconfig for CIS AKS benchmarks. |
+| Behavioral anomaly detection | Low | Kill switch + SLO circuit breakers (AGT v2). |
 | Multi-region AKS | Low | Cross-region state sync. |
+| CLI unit tests (vitest) | Low | Framework not yet configured. |
 
 ---
 

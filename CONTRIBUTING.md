@@ -16,14 +16,16 @@ make lint     # clippy + oxlint
 
 | Directory | Language | What It Is |
 |-----------|----------|------------|
-| `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs |
-| `inference-router/` | Rust (axum) | Per-sandbox sidecar proxy — auth, safety, budgets |
-| `cli/` | TypeScript | 12 CLI commands + OpenClaw plugin |
+| `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs into sandboxes |
+| `inference-router/` | Rust (axum) | Per-sandbox sidecar — auth, safety, budgets, 18 Foundry APIs, AGT governance |
+| `cli/` | TypeScript | 13 CLI commands + OpenClaw plugin + 9 Foundry skills |
+| `cli/skills/` | Markdown | 9 SKILL.md files teaching the agent to use Foundry services |
+| `cli/policies/` | YAML | AGT policy profiles (shell-safety, approval, rate-limit) |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
-| `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp) |
-| `sandbox-images/` | Dockerfile | Azure Linux 3 sandbox image |
-| `policy-engine/` | JSON | seccomp profile (`azureclaw-strict`) |
-| `tests/e2e/` | Bash | Kind-based E2E test framework |
+| `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
+| `deploy/seccomp/` | JSON | seccomp profile (`azureclaw-strict.json`) |
+| `sandbox-images/` | Dockerfile | Azure Linux 3 sandbox image + entrypoint |
+| `tests/e2e/` | Bash | E2E tests: Kind-based + live AKS infra tests |
 
 ## Development
 
