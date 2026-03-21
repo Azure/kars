@@ -145,6 +145,10 @@ pub struct NetworkPolicyConfig {
     #[serde(default = "default_true")]
     pub approval_required: bool,
     pub allowed_endpoints: Option<Vec<EndpointConfig>>,
+    /// Enable egress learn mode: observe all accessed domains (blocklist still enforced).
+    /// Use `azureclaw policy learn <name>` to export the learned allowlist.
+    #[serde(default)]
+    pub learn_egress: bool,
 }
 
 impl Default for NetworkPolicyConfig {
@@ -153,6 +157,7 @@ impl Default for NetworkPolicyConfig {
             default_deny: true,
             approval_required: true,
             allowed_endpoints: None,
+            learn_egress: false,
         }
     }
 }
