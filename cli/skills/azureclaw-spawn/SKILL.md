@@ -1,87 +1,67 @@
 ---
 name: azureclaw-spawn
-description: Spawn new AzureClaw sandboxed agents or sub-agents on the AKS cluster. Creates isolated sandboxes with their own inference router, security controls, and optional AGT governance.
+description: Spawn new AzureClaw sandboxed sub-agents using the azureclaw CLI. Each sub-agent gets its own isolated sandbox with security controls and optional AGT mesh communication.
 metadata: {"openclaw": {"requires": {"env": ["SANDBOX_NAME"]}, "primaryEnv": "SANDBOX_NAME"}}
 ---
 
 # AzureClaw Spawn — Create Sub-Agents
 
-You can spawn new sandboxed agents on the AKS cluster. Each spawned agent gets its own:
+You can spawn new sandboxed agents using the `azureclaw` CLI. Each spawned agent gets its own:
 - Isolated namespace with NetworkPolicy
 - Inference router sidecar (IMDS auth, Content Safety, token budgets)
 - Domain blocklist (auto-refreshing threat intelligence)
 - Optional AGT governance (trust-gated mesh communication back to you)
 
+**Important**: You do NOT have kubectl or K8s access. Always use the `azureclaw` CLI.
+
 ## When to use this
 
-- **Delegation**: spawn a specialist agent for a specific task (e.g., security audit, data analysis)
+- **Delegation**: spawn a specialist agent for a specific task
 - **Parallel work**: run multiple agents simultaneously on different tasks
 - **Isolation**: give untrusted code its own sandbox with tighter controls
 
 ## How to spawn
 
-Use `kubectl` to create a ClawSandbox CRD. The controller will reconcile it into a running sandbox.
-
-### Basic spawn (same model)
+### Basic spawn
 
 ```bash
-kubectl apply -f - <<EOF
-{
-  "apiVersion": "azureclaw.azure.com/v1alpha1",
-  "kind": "ClawSandbox",
-  "metadata": {"name": "sub-analyst", "namespace": "azureclaw-system"},
-  "spec": {
-    "openclaw": {"version": "2026.3.13", "config": {"agent": {"model": "azure/gpt-4.1"}}},
-    "sandbox": {"isolation": "enhanced"},
-    "inference": {"model": "gpt-4.1", "contentSafety": true, "promptShields": true},
-    "networkPolicy": {"defaultDeny": true}
-  }
-}
-EOF
+azureclaw add sub-analyst --model gpt-4.1
 ```
 
-### Spawn with AGT governance (enables mesh communication)
+### Spawn with AGT governance (enables mesh communication with you)
 
 ```bash
-kubectl apply -f - <<EOF
-{
-  "apiVersion": "azureclaw.azure.com/v1alpha1",
-  "kind": "ClawSandbox",
-  "metadata": {"name": "sub-analyst", "namespace": "azureclaw-system"},
-  "spec": {
-    "openclaw": {"version": "2026.3.13", "config": {"agent": {"model": "azure/gpt-4.1"}}},
-    "sandbox": {"isolation": "enhanced"},
-    "inference": {"model": "gpt-4.1", "contentSafety": true, "promptShields": true},
-    "networkPolicy": {"defaultDeny": true},
-    "governance": {"enabled": true, "toolPolicy": "default", "trustThreshold": 500}
-  }
-}
-EOF
+azureclaw add sub-analyst --model gpt-4.1 --governance --trust-threshold 500
 ```
 
-### Spawn with learn mode (discover needed domains)
+### Spawn with learn mode (discover needed domains, then lock down)
 
 ```bash
-kubectl apply -f - <<EOF
-{
-  "apiVersion": "azureclaw.azure.com/v1alpha1",
-  "kind": "ClawSandbox",
-  "metadata": {"name": "sub-analyst", "namespace": "azureclaw-system"},
-  "spec": {
-    "openclaw": {"version": "2026.3.13", "config": {"agent": {"model": "azure/gpt-4.1"}}},
-    "sandbox": {"isolation": "enhanced"},
-    "inference": {"model": "gpt-4.1", "contentSafety": true, "promptShields": true},
-    "networkPolicy": {"defaultDeny": true, "learnEgress": true}
-  }
-}
-EOF
+azureclaw add sub-analyst --model gpt-4.1 --learn-egress
 ```
 
-## Check spawn status
+### Spawn with a different model
 
 ```bash
-kubectl get clawsandbox -n azureclaw-system
-kubectl get pods -n azureclaw-sub-analyst
+azureclaw add sub-coder --model DeepSeek-V3.2
+```
+
+### Spawn with token budget limits
+
+```bash
+azureclaw add sub-analyst --model gpt-4.1 --token-budget-daily 100000 --token-budget-per-request 4096
+```
+
+### Dry run (preview the CRD without creating)
+
+```bash
+azureclaw add sub-analyst --model gpt-4.1 --governance --dry-run
+```
+
+## Check status
+
+```bash
+azureclaw status sub-analyst
 ```
 
 ## Communicate with spawned agent (AGT mesh)
@@ -89,14 +69,35 @@ kubectl get pods -n azureclaw-sub-analyst
 If governance is enabled on both you and the sub-agent, use the AGT mesh:
 
 ```bash
-# Send task to sub-agent
+# Send a task to the sub-agent
 curl -s -X POST http://localhost:8443/agt/mesh/send \
   -H 'Content-Type: application/json' \
-  -d '{"to_agent": "sub-analyst", "content": "Analyze the security posture of our k8s cluster", "type": "task_request"}'
+  -d '{"to_agent": "sub-analyst", "content": "Analyze the security posture of our cluster", "type": "task_request"}'
 
-# Check for response
+# Check for responses
 curl -s http://localhost:8443/agt/mesh/inbox
 ```
+
+## Connect to the spawned agent (interactive)
+
+```bash
+azureclaw connect sub-analyst
+```
+
+## Tear down
+
+```bash
+azureclaw destroy sub-analyst
+```
+
+## Important notes
+
+- The sub-agent runs in its **own isolated namespace** — it cannot see your files or memory
+- AGT mesh is the only way to communicate between agents (trust-gated, audited)
+- Each sub-agent has its own token budget, blocklist, and Content Safety
+- The sandbox name must be unique across the cluster
+- Memory Store scopes are per-agent — each agent uses its own `SANDBOX_NAME` as scope
+- You do NOT have kubectl access — always use the `azureclaw` CLI
 
 ## Tear down spawned agent
 
