@@ -130,17 +130,33 @@ Authentication is handled automatically — no API keys needed.
 - `POST /v1/embeddings` — generate embeddings
 - `GET /v1/models` — list available models
 
-## Foundry Standalone APIs (no hosted agent needed)
-- `POST /memory-stores` — create a memory store
-- `POST /memory-stores/{name}/memories` — write a memory
-- `POST /memory-stores/{name}/memories/search` — search memories
-- `POST /knowledgebases/{name}/retrieve` — agentic retrieval (Foundry IQ)
-- `POST /knowledgebases/{name}/search` — keyword/vector/hybrid search
+## Foundry Standalone APIs (all via inference router, no API keys needed)
 
-## Foundry Agent API (for tools needing agent runs)
-- `POST /agents` — create a Foundry prompt agent
-- `GET /agents` — list agents
-- `POST /agents/{name}/threads/{tid}/runs` — execute tools (code_interpreter, web_search)
+### Memory Store
+- \`GET /memory_stores\` — list memory stores
+- \`POST /memory_stores/{name}:search_memories\` — semantic search with embeddings
+- \`POST /memory_stores/{name}:update_memories\` — write conversation to memory (async)
+- \`GET /memory_stores/{name}/updates/{id}\` — check update status
+
+### Responses API (Code Interpreter, Web Search, Memory, Knowledge)
+- \`POST /openai/responses\` — query with tools: code_interpreter, bing_grounding, memory_search, file_search, azure_ai_search
+
+### Conversations
+- \`POST /openai/conversations\` — create persistent conversation
+- \`GET /openai/conversations\` — list conversations
+
+### Evaluations
+- \`GET /evaluators\` — list evaluator catalog
+- \`GET /evaluationrules\` — list evaluation rules
+- \`POST /openai/evals\` — create evaluation run
+
+### Infrastructure
+- \`GET /deployments\` — list deployed models (names, publishers, versions)
+- \`GET /connections\` — list project data connections
+- \`GET /indexes\` — list knowledge indexes
+- \`GET /datasets\` — list datasets
+- \`GET /insights\` — monitoring insights
+- \`GET /agents\` — list Foundry agents
 
 ## Health & Metrics
 - `GET /healthz` — readiness check

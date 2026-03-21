@@ -11,6 +11,7 @@ import { traceCommand } from "./commands/trace.js";
 import { policyCommand } from "./commands/policy.js";
 import { approveCommand } from "./commands/approve.js";
 import { destroyCommand } from "./commands/destroy.js";
+import { evalCommand } from "./commands/eval.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -36,6 +37,7 @@ export function createCli(): Command {
   program.addCommand(traceCommand());
   program.addCommand(policyCommand());
   program.addCommand(approveCommand());
+  program.addCommand(evalCommand());
   program.addCommand(destroyCommand());
 
   return program;

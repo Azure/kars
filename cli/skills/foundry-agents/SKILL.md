@@ -1,60 +1,65 @@
 ---
 name: foundry-agents
-description: Create and manage Foundry prompt agents via the Agents API. Define agent instructions, model, and tools — no hosted containers needed.
+description: Query and inspect Foundry prompt agents and invoke Foundry tools via the Responses API. OpenClaw is the orchestrator — Foundry provides managed AI services.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Agents — Prompt Agent Management
+# Foundry Services — Agent Tools via Responses API
 
-You can create, list, update, and delete Foundry prompt agents via the Agents API. Prompt agents define instructions, model selection, and available tools. They can be invoked via the Responses API.
+OpenClaw is the agent orchestrator. Foundry provides managed AI services that OpenClaw agents can use via the Responses API. **You do NOT create Foundry agents** — you call Foundry tools directly.
 
 ## Endpoint
 
 All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Auth is automatic.
 
-## Operations
+## Calling Foundry Tools via Responses API
 
-### Create a prompt agent
+### Code Interpreter (run Python)
 
 ```bash
-curl -s -X POST 'http://localhost:8443/agents?api-version=2025-11-15-preview' \
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"name":"my-agent","definition":{"kind":"prompt","model":"gpt-4.1","instructions":"You are a helpful assistant","tools":[{"type":"code_interpreter","container":{"type":"auto"}}]}}'
+  -d '{"model":"gpt-4.1","input":"Calculate fibonacci(20) using Python","tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"store":false}'
 ```
 
-### List agents
+### Web Search (Bing grounding)
+
+```bash
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"What are the latest Rust language features?","tools":[{"type":"bing_grounding"}],"store":false}'
+```
+
+### Memory Search (cross-session recall)
+
+```bash
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"What beverage does the user prefer?","tools":[{"type":"memory_search","memory_store_name":"azureclaw-memory","scope":"default"}],"store":false}'
+```
+
+## Querying Foundry Infrastructure
+
+### List existing agents in the project
 
 ```bash
 curl -s 'http://localhost:8443/agents?api-version=2025-11-15-preview'
 ```
 
-### Get a specific agent
+### List model deployments
 
 ```bash
-curl -s 'http://localhost:8443/agents/my-agent?api-version=2025-11-15-preview'
-```
-
-### Invoke an agent via Responses API
-
-```bash
-curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
-  -H 'Content-Type: application/json' \
-  -d '{"input":"Hello","agent":{"name":"my-agent","type":"agent_reference"}}'
-```
-
-### Delete an agent
-
-```bash
-curl -s -X DELETE 'http://localhost:8443/agents/my-agent?api-version=2025-11-15-preview'
+curl -s 'http://localhost:8443/deployments?api-version=2025-11-15-preview'
 ```
 
 ## When to use
 
-- Create reusable agent configurations with specific tools and instructions
-- Invoke agents with consistent behavior across conversations
-- Manage agent versions for A/B testing
+- Call Foundry tools (code interpreter, web search, memory) via Responses API
+- Inspect what Foundry agents or models exist in the project
+- Use Foundry as a service layer for OpenClaw agent capabilities
 
 ## When NOT to use
 
-- For one-off queries (just use /v1/chat/completions or /openai/responses directly)
-- For memory management (use foundry-memory skill)
+- Do NOT create Foundry agents — OpenClaw is the agent orchestrator
+- For memory CRUD operations (use foundry-memory skill)
+- For simple chat completions (use /v1/chat/completions directly)

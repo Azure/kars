@@ -1,6 +1,9 @@
 # AzureClaw OpenClaw Sandbox Image
 # Based on Azure Linux 3 for a Microsoft-maintained, hardened container base.
 # This same image runs locally (azureclaw dev) and on AKS (azureclaw up).
+#
+# Build: docker build --platform linux/amd64 -f sandbox-images/openclaw/Dockerfile .
+# (Azure Linux base images are x86_64 only; use --platform on ARM hosts)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
 ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:0.1.0
