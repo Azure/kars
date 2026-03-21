@@ -11,7 +11,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::Deployment,
-    core::v1::{Namespace, ServiceAccount},
+    core::v1::{ConfigMap, Namespace, Service, ServiceAccount},
     networking::v1::NetworkPolicy,
 };
 use kube::{
@@ -314,6 +314,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
         router_agt_env.push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
         router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+        // Mesh namespace for K8s DNS routing between agents
+        router_agt_env.push(json!({"name": "AGT_MESH_NAMESPACE", "value": &sandbox_ns}));
     }
 
     // Build the inference-router env array
@@ -472,6 +474,46 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         );
     }
 
+    // If AGT governance is enabled, mount the policy ConfigMap into the router
+    if governance_config.enabled {
+        let policy_profile = &governance_config.tool_policy;
+        let cm_name = format!("agt-policy-{}", policy_profile);
+
+        // Add policy volume
+        if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
+            volumes.push(json!({
+                "name": "agt-policy",
+                "configMap": {
+                    "name": cm_name
+                }
+            }));
+        }
+
+        // Add volumeMount + AGT_POLICY_DIR env to the router container
+        if let Some(containers) = pod_spec.get_mut("containers").and_then(|c| c.as_array_mut()) {
+            for container in containers.iter_mut() {
+                if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
+                    // Add volumeMount
+                    let mounts = container
+                        .as_object_mut().unwrap()
+                        .entry("volumeMounts")
+                        .or_insert(json!([]));
+                    if let Some(mounts_arr) = mounts.as_array_mut() {
+                        mounts_arr.push(json!({
+                            "name": "agt-policy",
+                            "mountPath": "/etc/agt/policies",
+                            "readOnly": true
+                        }));
+                    }
+                    // Add AGT_POLICY_DIR env var pointing to the mounted path
+                    if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
+                        env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
+                    }
+                }
+            }
+        }
+    }
+
     let deployment: Deployment = serde_json::from_value(json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -557,6 +599,110 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "Azure services RBAC annotations applied to ServiceAccount"
             );
         }
+    }
+
+    // ── Step 4c: AGT governance infrastructure ──────────────────────────
+    // When governance is enabled, create:
+    //  - K8s Service exposing port 8443 (enables mesh DNS: {name}.{ns}.svc.cluster.local)
+    //  - ConfigMap with the policy YAML (mounted into router container at /etc/agt/policies/)
+    //  - NetworkPolicy ingress rule allowing mesh traffic on port 8443
+    if governance_config.enabled {
+        // Create Service for inter-agent mesh DNS routing
+        let svc_api: Api<Service> = Api::namespaced(client.clone(), &sandbox_ns);
+        let svc: Service = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": &name,
+                "namespace": &sandbox_ns,
+                "labels": {
+                    "azureclaw.azure.com/sandbox": &name,
+                    "azureclaw.azure.com/component": "sandbox"
+                }
+            },
+            "spec": {
+                "selector": {
+                    "azureclaw.azure.com/sandbox": &name
+                },
+                "ports": [{
+                    "name": "inference",
+                    "port": 8443,
+                    "targetPort": 8443,
+                    "protocol": "TCP"
+                }]
+            }
+        }))?;
+        svc_api
+            .patch(
+                &name,
+                &PatchParams::apply("azureclaw-controller"),
+                &Patch::Apply(svc),
+            )
+            .await?;
+
+        // Create ConfigMap with default policy YAML
+        let policy_profile = &governance_config.tool_policy;
+        let policy_yaml = include_str!("../../cli/policies/azureclaw-default.yaml");
+        let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
+        let cm_name = format!("agt-policy-{}", policy_profile);
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": &cm_name,
+                "namespace": &sandbox_ns,
+                "labels": {
+                    "azureclaw.azure.com/sandbox": &name,
+                    "azureclaw.azure.com/component": "agt-policy"
+                }
+            },
+            "data": {
+                format!("azureclaw-{}.yaml", policy_profile): policy_yaml
+            }
+        }))?;
+        cm_api
+            .patch(
+                &cm_name,
+                &PatchParams::apply("azureclaw-controller"),
+                &Patch::Apply(cm),
+            )
+            .await?;
+
+        // Patch NetworkPolicy to allow ingress on port 8443 for mesh messages
+        let mesh_ingress_patch = json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": "sandbox-policy",
+                "namespace": &sandbox_ns
+            },
+            "spec": {
+                "podSelector": {"matchLabels": {"azureclaw.azure.com/component": "sandbox"}},
+                "policyTypes": ["Ingress"],
+                "ingress": [{
+                    "from": [{
+                        "namespaceSelector": {
+                            "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
+                        }
+                    }],
+                    "ports": [{"port": 8443, "protocol": "TCP"}]
+                }]
+            }
+        });
+        let _ = np_api
+            .patch(
+                "sandbox-policy",
+                &PatchParams::apply("azureclaw-controller-mesh"),
+                &Patch::Apply(serde_json::from_value::<NetworkPolicy>(mesh_ingress_patch)?),
+            )
+            .await;
+
+        tracing::info!(
+            sandbox = %name,
+            service = format!("{name}.{sandbox_ns}.svc.cluster.local:8443"),
+            policy_cm = %cm_name,
+            "AGT governance infrastructure created (Service + ConfigMap + mesh ingress)"
+        );
     }
 
     // ── Step 5: Update status ────────────────────────────────────────────
