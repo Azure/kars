@@ -1,56 +1,50 @@
 ---
 name: foundry-web-search
-description: Real-time web search via Azure AI Foundry. Get current information with citations — no egress policy needed.
-metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_AGENT_ID"]}, "primaryEnv": "FOUNDRY_AGENT_ID"}}
+description: Real-time web search via Azure AI Foundry Responses API with bing_grounding tool. Get current information with citations — no egress policy needed.
+metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Web Search — Real-Time Web Grounding
+# Foundry Web Search — Bing Grounding (Responses API)
 
-You have access to real-time web search via Azure AI Foundry. Use this to answer questions about current events, look up documentation, or verify facts — all with inline citations.
+You have access to real-time web search via the Foundry Responses API `bing_grounding` tool. Results come with inline URL citations. No sandbox egress policy exceptions needed — search runs server-side.
 
-## Why use this instead of curl
+**Note:** Requires a Bing Grounding connection configured in the Foundry project. If not available, the model will answer from its training data instead.
 
-Your sandbox has restricted network egress (default-deny). Foundry web_search runs server-side — no egress policy exceptions needed. Results come with proper citations. No risk of the agent accessing malicious URLs.
+## Endpoint
 
-## Endpoints
-
-All requests go through `http://localhost:8443`. Auth is automatic. Agent ID: `$FOUNDRY_AGENT_ID`.
+All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Auth is automatic.
 
 ## Operations
 
-### Search the web via a run
+### Search the web
 
 ```bash
-# Create a thread
-THREAD_ID=$(curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads \
-  -H "Content-Type: application/json" -d '{}' | jq -r .id)
-
-# Add the question
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/messages \
-  -H "Content-Type: application/json" \
-  -d '{"role": "user", "content": "What are the latest Azure AI Foundry announcements?"}'
-
-# Run with web_search
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/runs \
-  -H "Content-Type: application/json" \
-  -d '{"tools": [{"type": "web_search"}]}'
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"What are the latest Azure AI Foundry announcements?","tools":[{"type":"bing_grounding","bing_grounding":{"search_configurations":[{"project_connection_id":"/connections/bing"}]}}],"store":false}'
 ```
 
-The response includes the answer with inline citations linking to source URLs.
+The response includes the answer with inline URL citations.
+
+### Simple search (no Bing connection needed)
+
+If Bing is not configured, use plain chat — the model answers from training data:
+
+```bash
+curl -s -X POST 'http://localhost:8443/v1/chat/completions' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","messages":[{"role":"user","content":"What are the main features of Azure AI Foundry?"}]}'
+```
 
 ## When to use
 
-- User asks about current events: "what's the latest on X"
-- User needs real-time data: stock prices, weather, news
-- You need to verify a fact or look up documentation
-- User says "search the web", "look up", "what's happening with"
+- User asks about current events, news, recent changes
+- Need real-time data: weather, stock prices, sports scores
+- Verifying facts with web sources
+- User says "search the web", "look up", "what's the latest"
 
 ## When NOT to use
 
 - For information in uploaded documents (use foundry-knowledge)
 - For calculations or data analysis (use foundry-code)
 - For recalling previous conversations (use foundry-memory)
-
-## Citations
-
-Web search results include citations. Always include them in your response so the user can verify sources. Format: [Source Title](url).

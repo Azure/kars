@@ -1,71 +1,63 @@
 ---
 name: foundry-knowledge
-description: Knowledge retrieval (RAG) via Foundry IQ and Azure AI Search. Agentic retrieval with citations — no Foundry hosted agent needed.
+description: Knowledge retrieval (RAG) via Foundry file_search and azure_ai_search tools. Agentic retrieval with citations — uses Responses API.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Knowledge — Foundry IQ (Direct)
+# Foundry Knowledge — File Search & Azure AI Search (Responses API)
 
-You have access to knowledge retrieval via Foundry IQ — a managed knowledge layer backed by Azure AI Search. It provides agentic retrieval: query decomposition, parallel search, semantic reranking, and citation-backed answers. No Foundry hosted agent needed — this uses direct APIs.
+You have access to knowledge retrieval via Foundry's built-in search tools:
+- **file_search**: Searches uploaded files in vector stores (PDFs, docs, text)
+- **azure_ai_search**: Searches Azure AI Search indexes (enterprise RAG)
 
-## Why use this instead of local grep
+Both return results with citations. No hosted agent needed — uses direct Responses API.
 
-Local grep does text matching only. Foundry IQ uses:
-- **Vector + hybrid search** — finds relevant content even when exact keywords don't match
-- **Agentic retrieval** — decomposes complex questions into sub-queries, runs them in parallel
-- **Multi-source** — searches across Azure Blob Storage, SharePoint, OneLake, and web
-- **ACL-aware** — respects permissions and Purview sensitivity labels
-- **Citations** — returns source references so you can trace answers
+## Endpoint
 
-## Endpoints
-
-All requests go through `http://localhost:8443`. Auth is automatic (IMDS).
-
-Knowledge bases are queried via Azure AI Search agentic retrieval endpoints.
+All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Auth is automatic.
 
 ## Operations
 
-### Query a knowledge base (agentic retrieval)
+### Search uploaded files (file_search)
+
+Requires vector store IDs from previously uploaded files:
 
 ```bash
-curl -s -X POST "http://localhost:8443/knowledgebases/${KB_NAME}/retrieve?api-version=v1" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What does the Q3 report say about revenue?", "retrieval_mode": "agentic"}'
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"What does the Q3 report say about revenue?","tools":[{"type":"file_search","vector_store_ids":["vs_abc123"]}],"store":false}'
 ```
 
-Returns results with citations referencing source documents, chunks, and page numbers.
+### Search Azure AI Search index
 
-### Simple search (keyword/vector/hybrid)
+Requires an AI Search index configured as a connection in the Foundry project:
 
 ```bash
-curl -s -X POST "http://localhost:8443/knowledgebases/${KB_NAME}/search?api-version=v1" \
-  -H "Content-Type: application/json" \
-  -d '{"search": "revenue Q3", "queryType": "semantic", "top": 5}'
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"Find documents about security best practices","tools":[{"type":"azure_ai_search","azure_ai_search":{"indexes":[{"index_name":"my-index","project_connection_id":"/connections/my-search"}]}}],"store":false}'
 ```
 
-### List knowledge bases
+### List available indexes
 
 ```bash
-curl -s "http://localhost:8443/knowledgebases?api-version=v1"
+curl -s 'http://localhost:8443/indexes?api-version=2025-11-15-preview'
 ```
 
 ## When to use
 
-- User asks questions about organizational documents: "what does the report say about X"
-- You need to ground answers in enterprise data with citations
+- User asks "what does the report say about X" — RAG over enterprise docs
+- Need to ground answers in specific documents with citations
 - User says "search my documents", "find in the knowledge base"
-- Answering questions that require multiple document sources
+- Questions requiring multiple document sources
 
 ## When NOT to use
 
 - For real-time web information (use foundry-web-search)
-- For running code or calculations (use foundry-code)
+- For code execution or calculations (use foundry-code)
 - For simple text files in /sandbox/ (just read them directly)
 - For remembering user preferences (use foundry-memory)
 
-## Knowledge sources supported
+## Note on setup
 
-- Azure Blob Storage (PDFs, docs, text)
-- SharePoint document libraries
-- Microsoft OneLake
-- Public web content
+File search requires uploading files to Foundry vector stores first. Azure AI Search requires an index and connection configured in the project. If neither is set up, the tools will return empty results — the agent should fall back to its training data.
