@@ -97,8 +97,8 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
         .route("/evaluationrules", get(foundry_proxy).post(foundry_proxy))
         .route("/evaluationrules/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         // Indexes APIs
-        .route("/indexes", get(foundry_proxy).post(foundry_proxy))
-        .route("/indexes/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/indexes", get(foundry_proxy))
+        .route("/indexes/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy).patch(foundry_proxy))
         // Connections APIs
         .route("/connections", get(foundry_proxy).post(foundry_proxy))
         .route("/connections/{*path}", get(foundry_proxy).post(foundry_proxy))
@@ -107,7 +107,7 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
         .route("/deployments/{*path}", get(foundry_proxy))
         // Datasets APIs
         .route("/datasets", get(foundry_proxy))
-        .route("/datasets/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/datasets/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy).patch(foundry_proxy))
         // Insights APIs
         .route("/insights", get(foundry_proxy).post(foundry_proxy))
         .route("/insights/{*path}", get(foundry_proxy))
@@ -119,6 +119,15 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
         .route("/openai/evals", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/evals/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/fine-tuning/{*path}", get(foundry_proxy).post(foundry_proxy))
+        // Red Teams APIs
+        .route("/redTeams/runs", get(foundry_proxy).post(foundry_proxy))
+        .route("/redTeams/runs/{*path}", get(foundry_proxy))
+        // Schedules APIs
+        .route("/schedules", get(foundry_proxy))
+        .route("/schedules/{*path}", get(foundry_proxy).put(foundry_proxy).delete(foundry_proxy))
+        // Evaluation Taxonomies APIs
+        .route("/evaluationtaxonomies", get(foundry_proxy).post(foundry_proxy))
+        .route("/evaluationtaxonomies/{*path}", get(foundry_proxy).put(foundry_proxy).delete(foundry_proxy).patch(foundry_proxy))
 }
 
 /// Health and readiness routes.
