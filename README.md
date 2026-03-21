@@ -11,58 +11,56 @@ AzureClaw runs AI agents safely on AKS with defense-in-depth security, zero-cred
 
 ---
 
+## What Is AzureClaw?
+
+AzureClaw is the **runtime layer** between [OpenClaw](https://openclaw.ai) (the agent framework) and [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) (managed AI services). It solves one problem: **how do you run AI agents on Azure without giving them the keys to the kingdom?**
+
+Every agent runs in an isolated Kubernetes sandbox with 8 layers of security. The agent can only reach the outside world through a **Rust sidecar proxy** (inference router) that authenticates, filters, rate-limits, and audits every request. When multiple agents need to collaborate, they communicate through a **trust-gated mesh** — no direct network access between sandboxes.
+
+**Three pillars:**
+- **[OpenClaw](https://openclaw.ai)** owns the agent — authoring, orchestration, TUI, skills
+- **[Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/)** provides managed AI services — 200+ models, memory, code interpreter, web search, evaluations
+- **[AGT](https://github.com/microsoft/agent-governance-toolkit)** governs multi-agent behavior — tool-level policy, inter-agent trust, tamper-evident audit
+
+AzureClaw connects them with enterprise-grade security out of the box.
+
+---
+
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph AKS["AKS Cluster — Azure Linux, Cilium CNI"]
-        subgraph SYS["azureclaw-system namespace"]
-            CTRL["🦀 Controller\n(Rust, kube-rs × 2)\nWatches ClawSandbox CRDs"]
-            CRD[("ClawSandbox\nCRD v1alpha1")]
-            SEC["🔒 seccomp DaemonSet\nazureclaw-strict.json"]
-        end
-
-        subgraph NS1["azureclaw-agent-alpha namespace"]
-            subgraph POD1["Pod (2 containers + init)"]
-                INIT1["init: egress-guard\niptables: UID 1000 → localhost only"]
-                OC1["🦞 OpenClaw Agent\nUID 1000 · read-only rootfs\n9 Foundry skills · AGT governance"]
-                IR1["⚡ Inference Router\nUID 1001 · Rust/axum\nIMDS auth · Content Safety\nToken budgets · 18 Foundry APIs\nAGT mesh + trust + audit"]
-            end
-            SVC1["Service: agent-alpha:8443"]
-            NP1["NetworkPolicy\ndefault-deny + mesh ingress"]
-            SA1["ServiceAccount\nWorkload Identity"]
-        end
-
-        subgraph NS2["azureclaw-agent-beta namespace"]
-            subgraph POD2["Pod"]
-                OC2["🦞 OpenClaw Agent"]
-                IR2["⚡ Inference Router"]
-            end
-            SVC2["Service: agent-beta:8443"]
-        end
-    end
-
-    FOUNDRY["☁️ Azure AI Foundry\n200+ models · Memory Store\nCode Interpreter · Web Search\nEvaluations · Conversations"]
-    CS["🛡️ Azure AI Content Safety\n+ Prompt Shields"]
-
-    CTRL -->|reconciles| NS1
-    CTRL -->|reconciles| NS2
-    CRD -.->|watched by| CTRL
-    OC1 -->|localhost:8443| IR1
-    IR1 -->|IMDS auth| FOUNDRY
-    IR1 -->|every request| CS
-    IR1 <-->|"AGT mesh\nK8s DNS"| SVC2
-    IR2 <-->|"AGT mesh\nK8s DNS"| SVC1
-    OC2 -->|localhost:8443| IR2
-    IR2 -->|IMDS auth| FOUNDRY
-
-    style AKS fill:#f0f4ff,stroke:#0078D4,stroke-width:2px
-    style FOUNDRY fill:#e8f5e9,stroke:#2e7d32
-    style CS fill:#fff3e0,stroke:#e65100
-    style OC1 fill:#fff8e1,stroke:#f9a825
-    style OC2 fill:#fff8e1,stroke:#f9a825
-    style IR1 fill:#e3f2fd,stroke:#1565c0
-    style IR2 fill:#e3f2fd,stroke:#1565c0
+```
+┌─ AKS Cluster (Azure Linux, Cilium CNI) ──────────────────────────────────────────┐
+│                                                                                    │
+│  azureclaw-system namespace                                                        │
+│  ┌──────────────────────────────────────────────────────┐                          │
+│  │  🦀 Controller (Rust/kube-rs) × 2 replicas           │                          │
+│  │  Watches ClawSandbox CRDs → reconciles sandboxes     │                          │
+│  │  Creates: namespace, SA, NetworkPolicy, Deployment,   │                          │
+│  │           Service, ConfigMap (per agent)              │                          │
+│  └──────────────────────────────────────────────────────┘                          │
+│  🔒 seccomp DaemonSet (azureclaw-strict on every node)                             │
+│                                                                                    │
+│  azureclaw-<agent> namespace (one per sandbox)                                     │
+│  ┌──────────────────────────────────────────────────────────────────────┐           │
+│  │  Pod (2 containers + 1 init)                                         │           │
+│  │                                                                      │           │
+│  │  init: egress-guard                                                  │           │
+│  │   └─ iptables: UID 1000 → localhost + DNS only                       │           │
+│  │                                                                      │           │
+│  │  🦞 openclaw (UID 1000)              ⚡ inference-router (UID 1001) │           │
+│  │  ├─ OpenClaw agent                   ├─ IMDS/WI auth (zero keys)    │           │
+│  │  ├─ Read-only rootfs       ────────► ├─ Content Safety + Shields    ──────► ☁️ Foundry
+│  │  ├─ 9 Foundry skills      localhost  ├─ Token budgets (429)         │           │
+│  │  └─ AGT governance         :8443     ├─ 18 Foundry API groups       │           │
+│  │                                      ├─ AGT mesh + trust + audit    │           │
+│  │                                      └─ Prometheus metrics          │           │
+│  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                        │           │
+│  ├─ NetworkPolicy (default-deny egress + AGT mesh ingress)              │           │
+│  └─ ServiceAccount (Workload Identity)                                  │           │
+│                                                                                    │
+│  🔗 AGT mesh: agent-alpha ◄──K8s DNS──► agent-beta                                │
+│     (trust-gated, audited, routed through inference routers)                       │
+└────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why These Components?
