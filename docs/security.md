@@ -127,17 +127,24 @@ The init container (egress-guard) runs as root with NET_ADMIN to install iptable
 
 ---
 
-## Layer 7: Behavioral Governance — AGT (opt-in)
+## Layer 7: Behavioral Governance — AGT
 
-When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) adds application-layer governance that AzureClaw's infrastructure can't provide:
+When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) adds application-layer governance implemented in the inference router:
 
-| Control | What it does | OWASP ASI |
-|---------|-------------|-----------|
-| **Tool-level policy** | Allow/deny per tool call before execution (<0.1ms). Shell safety, destructive approval. | ASI-02, ASI-04 |
-| **Inter-agent trust** | Ed25519 DID identity per agent. Trust scoring 0-1000 with decay. | ASI-03, ASI-07 |
-| **Tamper-evident audit** | Hash-chain append-only log of every action. | ASI-09 |
-| **Kill switch** | Behavioral anomaly detection → agent termination. | ASI-10 |
-| **Circuit breakers** | SLO enforcement, error budgets, automatic fallback. | ASI-08 |
+| Control | Implementation | API Endpoint |
+|---------|----------------|--------------|
+| **Tool-level policy** | PolicyEngine loads YAML from ConfigMap, evaluates allow/deny/approval/rate-limit per action (<0.1ms) | `POST /agt/evaluate` |
+| **Inter-agent trust** | TrustStore tracks scores 0-1000 per agent. +10 on success, -50 on failure. 5 tiers. | `GET /agt/trust/{agent}` |
+| **Trust-gated mesh** | Messages routed via K8s DNS, trust gate on both sender and receiver | `POST /agt/mesh/send` |
+| **Tamper-evident audit** | Hash-chain append-only log (SHA-256), integrity verification endpoint | `GET /agt/audit/verify` |
+
+### What the controller creates for AGT
+
+When governance is enabled, the controller (Step 4c) creates:
+- **K8s Service** — `{name}:8443` for mesh DNS routing
+- **ConfigMap** — `agt-policy-{profile}` with policy YAML, mounted at `/etc/agt/policies`
+- **NetworkPolicy ingress** — allows port 8443 from other sandbox namespaces
+- **Env vars** — `AGT_GOVERNANCE_ENABLED`, `AGT_TRUST_THRESHOLD`, `AGT_MESH_NAMESPACE`, `AGT_POLICY_DIR`
 
 ### Overlap resolution
 
@@ -170,13 +177,11 @@ AGT does NOT duplicate AzureClaw infrastructure controls:
 
 ---
 
-## Roadmap
+## Remaining Roadmap
 
-Not yet implemented:
-
-| Feature | Notes |
-|---------|-------|
-| Image signing enforcement | Notation signing exists in CI. Ratify admission controller guide exists but not auto-deployed. |
-| Node compliance | azure-osconfig for CIS AKS benchmarks |
-| Azure Monitor alerting | Token spike and egress anomaly alerts |
-| `/mesh/*` inter-agent routes | IATP messaging between sandbox namespaces via router |
+| Feature | Status |
+|---------|--------|
+| Image signing enforcement | Notation signing in CI. Ratify admission controller not auto-deployed. |
+| Node compliance | azure-osconfig for CIS AKS benchmarks (deferred) |
+| Azure Monitor alerting | Token spike and egress anomaly alerts (planned) |
+| Behavioral anomaly detection | Kill switch + SLO circuit breakers (planned for AGT v2) |
