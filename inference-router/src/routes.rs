@@ -9,6 +9,7 @@ use axum::{
     routing::{get, post},
     Json,
 };
+use axum::extract::Path;
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use crate::config::Config;
 use crate::governance::GovernanceState;
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
+use crate::spawn;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -952,4 +954,79 @@ async fn egress_learned_clear(State(state): State<AppState>) -> impl IntoRespons
         "status": "cleared",
         "learn_mode": state.blocklist.is_learn_mode(),
     }))
+}
+
+// ==========================================================================
+// Sub-agent spawn routes
+// ==========================================================================
+
+/// Sandbox spawn routes — create/list/status/delete sub-agent ClawSandbox CRDs.
+pub fn spawn_routes() -> Router<AppState> {
+    Router::new()
+        .route("/sandbox/spawn", post(sandbox_spawn))
+        .route("/sandbox/list", get(sandbox_list))
+        .route("/sandbox/{name}/status", get(sandbox_status))
+        .route("/sandbox/{name}", axum::routing::delete(sandbox_delete))
+}
+
+/// POST /sandbox/spawn — create a new sub-agent sandbox.
+async fn sandbox_spawn(
+    State(_state): State<AppState>,
+    Json(req): Json<spawn::SpawnRequest>,
+) -> impl IntoResponse {
+    let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+
+    match spawn::create_sandbox(&parent_name, &req).await {
+        Ok(resp) => (StatusCode::CREATED, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(msg) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        ).into_response(),
+    }
+}
+
+/// GET /sandbox/list — list sub-agents spawned by this sandbox.
+async fn sandbox_list(State(_state): State<AppState>) -> impl IntoResponse {
+    let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+
+    match spawn::list_sandboxes(&parent_name).await {
+        Ok(entries) => Json(serde_json::json!({
+            "parent": parent_name,
+            "count": entries.len(),
+            "sandboxes": entries,
+        })),
+        Err(msg) => Json(serde_json::json!({
+            "parent": parent_name,
+            "error": msg,
+            "count": 0,
+            "sandboxes": [],
+        })),
+    }
+}
+
+/// GET /sandbox/{name}/status — get status of a specific sub-agent.
+async fn sandbox_status(Path(name): Path<String>) -> impl IntoResponse {
+    match spawn::get_sandbox_status(&name).await {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(msg) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": msg })),
+        ).into_response(),
+    }
+}
+
+/// DELETE /sandbox/{name} — tear down a sub-agent sandbox.
+async fn sandbox_delete(
+    State(_state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+
+    match spawn::delete_sandbox(&parent_name, &name).await {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(msg) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": msg })),
+        ).into_response(),
+    }
 }

@@ -23,6 +23,7 @@ mod proxy;
 mod routes;
 mod safety;
 mod metrics;
+mod spawn;
 
 use anyhow::Result;
 use axum::Router;
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
         .merge(routes::foundry_agent_routes())
         .merge(routes::foundry_standalone_routes())
         .merge(routes::agt_routes())
+        .merge(routes::spawn_routes())
         .merge(routes::health_routes())
         .merge(routes::metrics_routes())
         .with_state(state)

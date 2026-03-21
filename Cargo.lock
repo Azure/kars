@@ -163,6 +163,8 @@ dependencies = [
  "futures",
  "hyper",
  "jsonwebtoken",
+ "k8s-openapi",
+ "kube",
  "prometheus",
  "reqwest",
  "serde",

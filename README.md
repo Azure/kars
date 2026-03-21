@@ -51,9 +51,10 @@ AzureClaw connects them with enterprise-grade security out of the box.
 │  │  ├─ OpenClaw agent               ├─ IMDS/WI auth (zero keys)  │           │
 │  │  ├─ AzureClaw plugin    ───────► ├─ Content Safety + Shields  ───► ☁️ Foundry
 │  │  │  └─ 9 Foundry skills localhost ├─ Token budgets (429)       │           │
-│  │  │  └─ 6 slash commands  :8443   ├─ 18 Foundry API groups      │           │
+│  │  │  └─ 9 slash commands  :8443   ├─ 18 Foundry API groups      │           │
 │  │  ├─ Read-only rootfs             ├─ Domain blocklist (auto)    │           │
 │  │  └─ AGT governance (opt-in)      ├─ AGT mesh + trust + audit   │           │
+│  │                                  ├─ Sub-agent spawn (CRD)      │           │
 │  │                                  └─ Prometheus metrics         │           │
 │  │                                                                │           │
 │  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                  │           │
@@ -71,8 +72,8 @@ AzureClaw connects them with enterprise-grade security out of the box.
 |-----------|----------|---------------|
 | **CLI** (`azureclaw`) | TypeScript | Single command to go from zero to production. Provisions AKS, ACR, Key Vault, Foundry, Helm, CRD — or runs locally with Docker. |
 | **Controller** | Rust (kube-rs) | K8s operator that reconciles `ClawSandbox` CRDs into isolated sandboxes with all security controls. Creates namespace, ServiceAccount, NetworkPolicy, Deployment, Service, ConfigMap per agent. |
-| **Inference Router** | Rust (axum) | Per-sandbox sidecar proxy — the **only** network path for the agent. Handles IMDS auth, Content Safety, Prompt Shields, token budgets, SSE streaming, all 18 Foundry API groups, AGT governance (policy, trust, audit, mesh). |
-| **OpenClaw Plugin** | TypeScript | Slash commands inside the agent: `/azureclaw-models`, `/azureclaw-security`, `/azureclaw-switch`. Ships 9 Foundry skills. |
+| **Inference Router** | Rust (axum) | Per-sandbox sidecar proxy — the **only** network path for the agent. Handles IMDS auth, Content Safety, Prompt Shields, token budgets, SSE streaming, all 18 Foundry API groups, AGT governance (policy, trust, audit, mesh), sub-agent spawn via K8s API. |
+| **OpenClaw Plugin** | TypeScript | Slash commands inside the agent: `/azureclaw-models`, `/azureclaw-security`, `/azureclaw-switch`, `/azureclaw-spawn`, `/azureclaw-spawn-list`, `/azureclaw-spawn-destroy`. Ships 10 Foundry skills. |
 
 ### External Dependencies
 

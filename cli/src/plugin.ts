@@ -439,6 +439,241 @@ const azureClawPlugin = {
         }
       },
     });
+
+    // ── /azureclaw-spawn — spawn a sub-agent sandbox via router ────────────
+    api.registerCommand({
+      name: "azureclaw-spawn",
+      description: "Spawn a sub-agent sandbox — /azureclaw-spawn <name> [--model X] [--governance] [--learn-egress]",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const raw = ctx.args?.trim() || "";
+        if (!raw) {
+          return {
+            text: [
+              "**Usage:** `/azureclaw-spawn <name> [options]`",
+              "",
+              "**Options:**",
+              "  `--model <name>` — model deployment (default: gpt-4.1)",
+              "  `--governance` — enable AGT governance + mesh",
+              "  `--trust-threshold <n>` — AGT trust threshold (default: 500)",
+              "  `--learn-egress` — enable egress learn mode",
+              "  `--token-budget-daily <n>` — daily token limit",
+              "",
+              "**Examples:**",
+              "  `/azureclaw-spawn sub-analyst --model gpt-4.1 --governance`",
+              "  `/azureclaw-spawn sub-coder --model DeepSeek-V3.2 --learn-egress`",
+              "",
+              "**After spawning:**",
+              "  `/azureclaw-spawn-list` — list your sub-agents",
+              "  Use AGT mesh to communicate: `POST localhost:8443/agt/mesh/send`",
+            ].join("\n"),
+          };
+        }
+
+        // Parse args: first token is name, rest are flags
+        const tokens = raw.split(/\s+/);
+        const name = tokens[0];
+        const body: Record<string, unknown> = { name };
+
+        for (let i = 1; i < tokens.length; i++) {
+          switch (tokens[i]) {
+            case "--model":
+              body.model = tokens[++i];
+              break;
+            case "--governance":
+              body.governance = true;
+              break;
+            case "--trust-threshold":
+              body.trust_threshold = parseInt(tokens[++i], 10);
+              break;
+            case "--learn-egress":
+              body.learn_egress = true;
+              break;
+            case "--token-budget-daily":
+              body.token_budget_daily = parseInt(tokens[++i], 10);
+              break;
+            case "--token-budget-per-request":
+              body.token_budget_per_request = parseInt(tokens[++i], 10);
+              break;
+            case "--isolation":
+              body.isolation = tokens[++i];
+              break;
+          }
+        }
+
+        try {
+          const http = await import("node:http");
+          const postData = JSON.stringify(body);
+          const result = await new Promise<string>((resolve, reject) => {
+            const req = http.request(
+              {
+                hostname: "127.0.0.1",
+                port: 8443,
+                path: "/sandbox/spawn",
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+              },
+              (res) => {
+                let data = "";
+                res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+                res.on("end", () => resolve(data));
+              },
+            );
+            req.on("error", reject);
+            req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
+            req.write(postData);
+            req.end();
+          });
+          const parsed = JSON.parse(result);
+          if (parsed.error) {
+            return { text: `**Spawn failed:** ${parsed.error}` };
+          }
+          return {
+            text: [
+              `**Sub-agent spawned:** ${parsed.name}`,
+              `Namespace: ${parsed.namespace || "pending"}`,
+              `Phase: ${parsed.phase || "Pending"}`,
+              parsed.message || "",
+              "",
+              "**Next steps:**",
+              body.governance
+                ? "- Send tasks via AGT mesh: `POST localhost:8443/agt/mesh/send`"
+                : "- Enable governance for inter-agent communication",
+              "- Check status: `/azureclaw-spawn-list`",
+              "- Tear down: `/azureclaw-spawn-destroy " + name + "`",
+            ].join("\n"),
+          };
+        } catch (e) {
+          return { text: `**Spawn error:** Could not reach the inference router. Is it running?` };
+        }
+      },
+    });
+
+    // ── /azureclaw-spawn-list — list spawned sub-agents ───────────────────
+    api.registerCommand({
+      name: "azureclaw-spawn-list",
+      description: "List sub-agents spawned from this sandbox",
+      handler: async () => {
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get("http://127.0.0.1:8443/sandbox/list", (res) => {
+              let data = "";
+              res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+              res.on("end", () => resolve(data));
+            });
+            req.on("error", reject);
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          if (parsed.error) {
+            return { text: `**Error:** ${parsed.error}` };
+          }
+          const sandboxes = parsed.sandboxes || [];
+          if (sandboxes.length === 0) {
+            return { text: "No sub-agents spawned yet. Use `/azureclaw-spawn <name>` to create one." };
+          }
+          return {
+            text: [
+              `**Sub-Agents** (${sandboxes.length})`,
+              "",
+              ...sandboxes.map((s: any) =>
+                `- **${s.name}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
+              ),
+              "",
+              "Communicate via AGT mesh: `POST localhost:8443/agt/mesh/send`",
+              "Destroy: `/azureclaw-spawn-destroy <name>`",
+            ].join("\n"),
+          };
+        } catch {
+          return { text: "Could not list sub-agents. Is the inference router running?" };
+        }
+      },
+    });
+
+    // ── /azureclaw-spawn-destroy — tear down a sub-agent ──────────────────
+    api.registerCommand({
+      name: "azureclaw-spawn-destroy",
+      description: "Destroy a spawned sub-agent — /azureclaw-spawn-destroy <name>",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const name = ctx.args?.trim();
+        if (!name) {
+          return { text: "Usage: `/azureclaw-spawn-destroy <name>`\n\nUse `/azureclaw-spawn-list` to see your sub-agents." };
+        }
+        try {
+          const http = await import("node:http");
+          const result = await new Promise<string>((resolve, reject) => {
+            const req = http.request(
+              {
+                hostname: "127.0.0.1",
+                port: 8443,
+                path: `/sandbox/${encodeURIComponent(name)}`,
+                method: "DELETE",
+              },
+              (res) => {
+                let data = "";
+                res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+                res.on("end", () => resolve(data));
+              },
+            );
+            req.on("error", reject);
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+            req.end();
+          });
+          const parsed = JSON.parse(result);
+          if (parsed.error) {
+            return { text: `**Delete failed:** ${parsed.error}` };
+          }
+          return { text: `**Destroyed:** ${parsed.name} — ${parsed.message || "teardown in progress"}` };
+        } catch {
+          return { text: `Could not delete sub-agent '${name}'. Is the inference router running?` };
+        }
+      },
+    });
+
+    // ── /azureclaw-spawn-status — check status of a sub-agent ─────────────
+    api.registerCommand({
+      name: "azureclaw-spawn-status",
+      description: "Check status of a spawned sub-agent — /azureclaw-spawn-status <name>",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const name = ctx.args?.trim();
+        if (!name) {
+          return { text: "Usage: `/azureclaw-spawn-status <name>`\n\nUse `/azureclaw-spawn-list` to see your sub-agents." };
+        }
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get(`http://127.0.0.1:8443/sandbox/${encodeURIComponent(name)}/status`, (res) => {
+              let data = "";
+              res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+              res.on("end", () => resolve(data));
+            });
+            req.on("error", reject);
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          if (parsed.error) {
+            return { text: `**Not found:** ${parsed.error}` };
+          }
+          const ready = parsed.phase === "Running";
+          return {
+            text: [
+              `**Sub-Agent: ${parsed.name}**`,
+              `Phase: ${parsed.phase || "unknown"} ${ready ? "(ready for mesh)" : "(not ready yet)"}`,
+              parsed.namespace ? `Namespace: ${parsed.namespace}` : "",
+              "",
+              ready
+                ? "Send a task: `POST localhost:8443/agt/mesh/send` with `to_agent: \"" + name + "\"`"
+                : "Wait for phase=Running before sending mesh messages.",
+            ].filter(Boolean).join("\n"),
+          };
+        } catch {
+          return { text: `Could not check status of '${name}'. Is the inference router running?` };
+        }
+      },
+    });
   },
 };
 
