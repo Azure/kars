@@ -8,6 +8,10 @@
     "skills/foundry-knowledge",
     "skills/foundry-web-search",
     "skills/foundry-code",
+    "skills/foundry-agents",
+    "skills/foundry-conversations",
+    "skills/foundry-evaluations",
+    "skills/foundry-deployments",
     "skills/agt-governance"
   ],
   "configSchema": {
