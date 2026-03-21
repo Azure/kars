@@ -146,6 +146,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "app.kubernetes.io/name": "azureclaw",
                 "app.kubernetes.io/component": "sandbox",
                 "azureclaw.azure.com/sandbox": name,
+                "azureclaw.azure.com/role": "sandbox",
                 "pod-security.kubernetes.io/enforce": "privileged",
                 "pod-security.kubernetes.io/audit": "baseline",
                 "pod-security.kubernetes.io/warn": "baseline"
@@ -215,6 +216,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({
             "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}],
             "ports": [{"protocol": "TCP", "port": 443}]
+        }),
+        // Allow AGT mesh egress: inference-router → other sandbox routers on port 8443.
+        // This permits cross-namespace mesh communication between parent and child agents.
+        json!({
+            "to": [{"namespaceSelector": {"matchLabels": {"azureclaw.azure.com/role": "sandbox"}}}],
+            "ports": [{"protocol": "TCP", "port": 8443}]
         }),
     ];
 
@@ -732,7 +739,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let _ = np_api
             .patch(
                 "sandbox-policy",
-                &PatchParams::apply("azureclaw-controller-mesh"),
+                &PatchParams::apply("azureclaw-controller").force(),
                 &Patch::Apply(serde_json::from_value::<NetworkPolicy>(mesh_ingress_patch)?),
             )
             .await;
