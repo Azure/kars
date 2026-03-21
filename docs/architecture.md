@@ -175,6 +175,8 @@ Per-sandbox sidecar that intercepts every inference call. The agent container (U
 | `GET /healthz` | Readiness probe. |
 | `GET /readyz` | Deep readiness (token + Content Safety check). |
 | `GET /metrics` | Prometheus metrics. |
+| `GET /blocklist/status` | Blocklist health: domain count + enabled state. |
+| `POST /blocklist/check` | Check if a domain/URL is blocked by threat intelligence. |
 
 All Foundry project routes use the `foundry_proxy` handler: acquire IMDS token (audience: `https://ai.azure.com`), forward request with original path + query string, log method/path/status.
 

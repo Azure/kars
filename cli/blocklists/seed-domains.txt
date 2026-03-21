@@ -1,0 +1,62 @@
+# AzureClaw Domain Blocklist — Seed File
+# This file bootstraps the blocklist before upstream feeds are fetched.
+# Lines starting with # are comments. One domain per line. *. prefix stripped.
+#
+# Updated by controller CronJob from OISD + URLhaus feeds.
+# Router refreshes in-memory copy every 6 hours from live feeds.
+#
+# Sources:
+#   - OISD small (https://small.oisd.nl/domainswild)
+#   - URLhaus (https://urlhaus.abuse.ch/downloads/hostfile/)
+#   - Manual additions for known AI-agent attack vectors
+#
+# === Known malware C2 / phishing domains ===
+# These are always blocked regardless of feed availability.
+
+# Cryptojacking pools
+*.coinhive.com
+*.crypto-loot.com
+*.coin-hive.com
+*.authedmine.com
+*.jsecoin.com
+*.coinimp.com
+*.ppoi.org
+*.cryptoloot.pro
+*.2giga.link
+*.minero.cc
+
+# Known malware distribution
+*.malware-traffic-analysis.net
+*.malwaredomainlist.com
+
+# Data exfiltration / credential harvesting
+*.requestbin.com
+*.pipedream.net
+*.beeceptor.com
+*.webhook.site
+*.hookbin.com
+*.burpcollaborator.net
+*.interactsh.com
+*.canarytokens.com
+*.oastify.com
+
+# Paste / file sharing often abused for C2
+*.paste.ee
+*.ghostbin.co
+
+# DNS tunneling services
+*.dnscat2.com
+*.iodine.code-hierarchie.de
+
+# Reverse shell services
+*.ngrok.io
+*.ngrok-free.app
+*.serveo.net
+*.localtunnel.me
+*.bore.digital
+*.playit.gg
+
+# AI-specific attack vectors
+# (domains used to exfiltrate training data or inject prompts remotely)
+*.promptinjection.com
+*.jailbreakchat.com

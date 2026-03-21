@@ -64,6 +64,18 @@ The seccomp profile is installed on every node via a DaemonSet that writes `azur
    - The inference router is the sole egress path for AI model calls
    - Agent cannot bypass the router (iptables + NetworkPolicy + no credentials)
 
+4. **Domain blocklist** (auto-refreshing):
+   - Blocks known-malicious domains: malware C2, phishing, cryptojacking pools, reverse shell services
+   - Seed file embedded in controller binary, mounted as ConfigMap (`/etc/azureclaw/blocklist/domains.txt`)
+   - Router background task refreshes from [OISD](https://oisd.nl/) + [URLhaus](https://urlhaus.abuse.ch/) every 6h
+   - K8s CronJob also refreshes the ConfigMap every 6h (defense-in-depth)
+   - GitHub Actions daily cron keeps the seed file in the repo fresh (≤ 24h old)
+   - High-risk TLDs blocked: `.tk`, `.ml`, `.ga`, `.cf`, `.gq` (>80% of phishing per APWG)
+   - Bare IP addresses blocked (no DNS = suspicious)
+   - Subdomain matching: if `evil.com` is blocked, `sub.evil.com` is too
+   - Safe refresh: if all upstream feeds fail, previous entries are preserved (no wipe-on-failure)
+   - Endpoints: `GET /blocklist/status`, `POST /blocklist/check`
+
 ### Layer 6: Inference Safety
 
 | Control | Service | Default |

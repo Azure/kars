@@ -13,6 +13,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::auth::WorkloadIdentityAuth;
+use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
 use crate::governance::GovernanceState;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
     pub governance: Arc<GovernanceState>,
+    pub blocklist: Blocklist,
 }
 
 impl AppState {
@@ -43,12 +45,36 @@ impl AppState {
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
+        // Initialize blocklist — enabled via BLOCKLIST_ENABLED=true
+        let blocklist_enabled = std::env::var("BLOCKLIST_ENABLED")
+            .unwrap_or_else(|_| "true".into())
+            .parse::<bool>()
+            .unwrap_or(true);
+
+        let blocklist = if blocklist_enabled {
+            let seed_path = std::env::var("BLOCKLIST_SEED_PATH")
+                .unwrap_or_else(|_| "/etc/azureclaw/blocklist/domains.txt".into());
+            let bl = Blocklist::new(Some(&seed_path)).await;
+
+            let refresh_secs = std::env::var("BLOCKLIST_REFRESH_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok());
+
+            bl.start_refresh_task(client.clone(), refresh_secs, Some(seed_path));
+            tracing::info!("Blocklist enabled — auto-refresh active");
+            bl
+        } else {
+            tracing::info!("Blocklist disabled");
+            Blocklist::disabled()
+        };
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             client,
             config: Arc::new(config),
             budget,
             governance: Arc::new(GovernanceState::new(&sandbox_name)),
+            blocklist,
         })
     }
 
@@ -162,6 +188,9 @@ pub fn agt_routes() -> Router<AppState> {
         .route("/agt/mesh/send", post(agt_mesh_send))
         .route("/agt/mesh/inbox", get(agt_mesh_inbox))
         .route("/agt/mesh/receive", post(agt_mesh_receive))
+        // Blocklist
+        .route("/blocklist/status", get(blocklist_status))
+        .route("/blocklist/check", post(blocklist_check))
         // Status
         .route("/agt/status", get(agt_status))
 }
@@ -505,6 +534,25 @@ async fn foundry_proxy(
         .or_else(|| state.config.azure_openai_endpoint.clone())
         .unwrap_or_default();
 
+    // Blocklist check — block requests to known-malicious Foundry project endpoints
+    if let crate::blocklist::BlockResult::Blocked { reason, domain } =
+        state.blocklist.is_blocked(&endpoint).await
+    {
+        tracing::warn!(
+            sandbox = %sandbox_name,
+            domain = %domain,
+            reason = %reason,
+            "Blocklist: blocked Foundry proxy request"
+        );
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": {
+                "message": format!("Request blocked by threat intelligence: {reason}"),
+                "type": "blocklist_violation",
+                "domain": domain
+            }
+        }))).into_response();
+    }
+
     // Forward the request path + query string to Foundry
     let path = uri.path();
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -805,6 +853,8 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
     let trust_agents = state.governance.trust.all_agents().await;
     let inbox = state.governance.inbox.peek().await;
 
+    let blocklist_len = state.blocklist.len().await;
+
     Json(serde_json::json!({
         "enabled": state.governance.enabled,
         "sandbox": state.governance.sandbox_name,
@@ -814,7 +864,50 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         "known_agents": trust_agents.len(),
         "trust_states": trust_agents,
         "inbox_messages": inbox.len(),
+        "blocklist_domains": blocklist_len,
     }))
+}
+
+/// GET /blocklist/status — blocklist health and domain count.
+async fn blocklist_status(State(state): State<AppState>) -> impl IntoResponse {
+    let count = state.blocklist.len().await;
+    Json(serde_json::json!({
+        "enabled": count > 0 || std::env::var("BLOCKLIST_ENABLED").unwrap_or_else(|_| "true".into()) == "true",
+        "domain_count": count,
+    }))
+}
+
+/// POST /blocklist/check — check if a domain/URL is blocked.
+async fn blocklist_check(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let input = body.get("domain")
+        .or_else(|| body.get("url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if input.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Provide 'domain' or 'url' field"
+        }))).into_response();
+    }
+
+    match state.blocklist.is_blocked(input).await {
+        crate::blocklist::BlockResult::Blocked { reason, domain } => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "blocked": true,
+                "domain": domain,
+                "reason": reason,
+            }))).into_response()
+        }
+        crate::blocklist::BlockResult::Allowed => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "blocked": false,
+                "domain": input,
+            }))).into_response()
+        }
+    }
 }
 
 fn uuid_v4() -> String {
