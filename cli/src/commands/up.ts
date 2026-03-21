@@ -499,6 +499,7 @@ export function upCommand(): Command {
           "--set", `sandbox.image.tag=latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
+          "--force",
           "--wait",
           "--timeout", "5m",
         ];
