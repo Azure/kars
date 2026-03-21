@@ -35,3 +35,6 @@ prometheus.workspace = true
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+
+# AGT governance (policy YAML parsing)
+serde_yaml = "0.9"

@@ -303,13 +303,36 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
         }
     }
-    // AGT governance env vars (opt-in)
+    // AGT governance env vars (opt-in) — injected into BOTH openclaw and router containers
     let governance_config = spec.governance.unwrap_or_default();
+    let mut router_agt_env: Vec<serde_json::Value> = Vec::new();
     if governance_config.enabled {
         openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
         openclaw_env.push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
         openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+        // Router needs these too for the AGT governance module
+        router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
+        router_agt_env.push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
+        router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
     }
+
+    // Build the inference-router env array
+    let mut router_env = vec![
+        json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
+        json!({"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint}),
+        json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
+        json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
+        json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model}),
+        json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
+        json!({"name": "CONTENT_SAFETY_ENABLED", "value": inference_config.content_safety.to_string()}),
+        json!({"name": "PROMPT_SHIELDS_ENABLED", "value": inference_config.prompt_shields.to_string()}),
+        json!({"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint}),
+        json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
+        json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
+        json!({"name": "SANDBOX_NAME", "value": &name}),
+        json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
+    ];
+    router_env.extend(router_agt_env);
 
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
     let mut pod_spec = json!({
@@ -403,20 +426,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 {"containerPort": 8443, "name": "inference"},
                                 {"containerPort": 9090, "name": "metrics"}
                             ],
-                            "env": [
-                                {"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint},
-                                {"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint},
-                                {"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint},
-                                {"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id},
-                                {"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model},
-                                {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
-                                {"name": "CONTENT_SAFETY_ENABLED", "value": inference_config.content_safety.to_string()},
-                                {"name": "PROMPT_SHIELDS_ENABLED", "value": inference_config.prompt_shields.to_string()},
-                                {"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint},
-                                {"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()},
-                                {"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()},
-                                {"name": "RUST_LOG", "value": "info,inference_router=debug"}
-                            ],
+                            "env": router_env,
                             "securityContext": {
                                 "runAsUser": 1001,
                                 "allowPrivilegeEscalation": false,
