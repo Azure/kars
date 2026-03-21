@@ -177,6 +177,17 @@ Per-sandbox sidecar that intercepts every inference call. The agent container (U
 | `GET /metrics` | Prometheus metrics. |
 | `GET /blocklist/status` | Blocklist health: domain count + enabled state. |
 | `POST /blocklist/check` | Check if a domain/URL is blocked by threat intelligence. |
+| `GET /egress/learned` | List learned egress domains (learn mode). |
+| `POST /egress/learned/clear` | Clear learned domains. |
+| `POST /agt/evaluate` | AGT policy evaluation. |
+| `GET /agt/trust`, `GET /agt/trust/{agent_id}` | Trust store queries. |
+| `GET /agt/audit`, `GET /agt/audit/verify` | Audit log + integrity verification. |
+| `POST /agt/mesh/send`, `GET /agt/mesh/inbox`, `POST /agt/mesh/receive` | Inter-agent AGT mesh. |
+| `GET /agt/status` | AGT governance status. |
+| `POST /sandbox/spawn` | Create sub-agent ClawSandbox CRD via K8s API. |
+| `GET /sandbox/list` | List sub-agents spawned by this sandbox. |
+| `GET /sandbox/{name}/status` | Get sub-agent status. |
+| `DELETE /sandbox/{name}` | Tear down a sub-agent sandbox. |
 
 All Foundry project routes use the `foundry_proxy` handler: acquire IMDS token (audience: `https://ai.azure.com`), forward request with original path + query string, log method/path/status.
 
