@@ -51,7 +51,7 @@ impl AppState {
             .parse::<bool>()
             .unwrap_or(true);
 
-        let blocklist = if blocklist_enabled {
+        let mut blocklist = if blocklist_enabled {
             let seed_path = std::env::var("BLOCKLIST_SEED_PATH")
                 .unwrap_or_else(|_| "/etc/azureclaw/blocklist/domains.txt".into());
             let bl = Blocklist::new(Some(&seed_path)).await;
@@ -67,6 +67,15 @@ impl AppState {
             tracing::info!("Blocklist disabled");
             Blocklist::disabled()
         };
+
+        // Learn mode: observe all egress domains (blocklist still enforced)
+        let learn_mode = std::env::var("EGRESS_LEARN_MODE")
+            .unwrap_or_else(|_| "false".into())
+            .parse::<bool>()
+            .unwrap_or(false);
+        if learn_mode {
+            blocklist.set_learn_mode(true);
+        }
 
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
@@ -191,6 +200,9 @@ pub fn agt_routes() -> Router<AppState> {
         // Blocklist
         .route("/blocklist/status", get(blocklist_status))
         .route("/blocklist/check", post(blocklist_check))
+        // Egress learn mode
+        .route("/egress/learned", get(egress_learned))
+        .route("/egress/learned/clear", post(egress_learned_clear))
         // Status
         .route("/agt/status", get(agt_status))
 }
@@ -553,6 +565,9 @@ async fn foundry_proxy(
         }))).into_response();
     }
 
+    // Learn mode: record this domain as accessed (for allowlist generation)
+    state.blocklist.record_learned(&endpoint).await;
+
     // Forward the request path + query string to Foundry
     let path = uri.path();
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -865,6 +880,8 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         "trust_states": trust_agents,
         "inbox_messages": inbox.len(),
         "blocklist_domains": blocklist_len,
+        "egress_learn_mode": state.blocklist.is_learn_mode(),
+        "egress_learned_domains": state.blocklist.learned_count().await,
     }))
 }
 
@@ -874,6 +891,8 @@ async fn blocklist_status(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "enabled": count > 0 || std::env::var("BLOCKLIST_ENABLED").unwrap_or_else(|_| "true".into()) == "true",
         "domain_count": count,
+        "learn_mode": state.blocklist.is_learn_mode(),
+        "learned_domains": state.blocklist.learned_count().await,
     }))
 }
 
@@ -914,4 +933,23 @@ fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     format!("{:x}-{:x}", d.as_secs(), d.subsec_nanos())
+}
+
+/// GET /egress/learned — list all domains observed during learn mode.
+async fn egress_learned(State(state): State<AppState>) -> impl IntoResponse {
+    let domains = state.blocklist.get_learned_domains().await;
+    Json(serde_json::json!({
+        "learn_mode": state.blocklist.is_learn_mode(),
+        "count": domains.len(),
+        "domains": domains,
+    }))
+}
+
+/// POST /egress/learned/clear — clear learned domains (after export/review).
+async fn egress_learned_clear(State(state): State<AppState>) -> impl IntoResponse {
+    state.blocklist.clear_learned().await;
+    Json(serde_json::json!({
+        "status": "cleared",
+        "learn_mode": state.blocklist.is_learn_mode(),
+    }))
 }

@@ -44,6 +44,11 @@ pub struct Blocklist {
     high_risk_tlds_enabled: bool,
     ip_direct_blocked: bool,
     enabled: bool,
+    /// Learn mode: log all accessed domains instead of relying on a static allowlist.
+    /// Blocklist (known-bad) is STILL enforced in learn mode.
+    learn_mode: bool,
+    /// Domains observed during learn mode (for generating an allowlist later).
+    learned_domains: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Blocklist {
@@ -54,6 +59,8 @@ impl Blocklist {
             high_risk_tlds_enabled: false,
             ip_direct_blocked: false,
             enabled: false,
+            learn_mode: false,
+            learned_domains: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -83,6 +90,8 @@ impl Blocklist {
             high_risk_tlds_enabled: true,
             ip_direct_blocked: true,
             enabled: true,
+            learn_mode: false,
+            learned_domains: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -211,6 +220,47 @@ impl Blocklist {
     /// Returns current blocklist size (for health/metrics).
     pub async fn len(&self) -> usize {
         self.domains.read().await.len()
+    }
+
+    /// Enable learn mode. Blocklist still enforced, but unknown domains are
+    /// allowed through and recorded for later review.
+    pub fn set_learn_mode(&mut self, enabled: bool) {
+        self.learn_mode = enabled;
+        if enabled {
+            tracing::info!("Egress learn mode enabled — logging all accessed domains (blocklist still enforced)");
+        }
+    }
+
+    /// Returns whether learn mode is active.
+    pub fn is_learn_mode(&self) -> bool {
+        self.learn_mode
+    }
+
+    /// Record a domain as observed during learn mode.
+    pub async fn record_learned(&self, domain: &str) {
+        if self.learn_mode {
+            let domain = extract_domain(domain).to_lowercase();
+            if !domain.is_empty() && is_valid_domain(&domain) {
+                self.learned_domains.write().await.insert(domain);
+            }
+        }
+    }
+
+    /// Get all learned domains (for generating an allowlist).
+    pub async fn get_learned_domains(&self) -> Vec<String> {
+        let mut domains: Vec<String> = self.learned_domains.read().await.iter().cloned().collect();
+        domains.sort();
+        domains
+    }
+
+    /// Get learned domain count.
+    pub async fn learned_count(&self) -> usize {
+        self.learned_domains.read().await.len()
+    }
+
+    /// Clear learned domains (after export/review).
+    pub async fn clear_learned(&self) {
+        self.learned_domains.write().await.clear();
     }
 }
 

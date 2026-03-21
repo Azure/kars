@@ -343,6 +343,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
     router_env.push(json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}));
 
+    // Egress learn mode — observe all accessed domains (blocklist still enforced)
+    if spec.network_policy.as_ref().map_or(false, |np| np.learn_egress) {
+        router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
+    }
+
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
     let mut pod_spec = json!({
         "serviceAccountName": "sandbox",

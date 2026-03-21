@@ -18,6 +18,7 @@ export function addCommand(): Command {
     .option("--governance", "Enable AGT governance (tool policy, trust, audit)", false)
     .option("--trust-threshold <score>", "AGT trust threshold (0-1000, default: 500)", "500")
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
+    .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
@@ -91,6 +92,12 @@ export function addCommand(): Command {
           toolPolicy: options.policyProfile || "default",
           trustThreshold: parseInt(options.trustThreshold) || 500,
         };
+      }
+
+      // Egress learn mode
+      if (options.learnEgress) {
+        const np = (sandbox.spec as Record<string, unknown>).networkPolicy as Record<string, unknown>;
+        np.learnEgress = true;
       }
 
       const yaml = JSON.stringify(sandbox, null, 2);

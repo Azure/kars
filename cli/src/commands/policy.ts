@@ -124,5 +124,93 @@ export function policyCommand(): Command {
       }
     });
 
+  cmd
+    .command("learn")
+    .description("Export learned egress domains from a sandbox running in learn mode")
+    .argument("<name>", "Sandbox name")
+    .option("--apply", "Apply learned domains as the sandbox allowlist", false)
+    .option("--clear", "Clear learned domains after export", false)
+    .action(async (name: string, options) => {
+      const { execa } = await import("execa");
+      const namespace = `azureclaw-${name}`;
+      const spinner = ora(`Fetching learned domains from '${name}'...`).start();
+
+      try {
+        // Port-forward to the router and query /egress/learned
+        const pod = await execa("kubectl", [
+          "get", "pods", "-n", namespace,
+          "-o", "jsonpath={.items[0].metadata.name}",
+        ], { stdio: "pipe" });
+
+        const podName = pod.stdout.trim();
+        if (!podName) {
+          spinner.fail(`No running pod found for '${name}'`);
+          return;
+        }
+
+        // Use kubectl exec to curl the router from inside the pod
+        const { stdout } = await execa("kubectl", [
+          "exec", "-n", namespace, podName, "-c", "openclaw", "--",
+          "curl", "-sf", "http://localhost:8443/egress/learned",
+        ], { stdio: "pipe" });
+
+        const data = JSON.parse(stdout);
+        const domains: string[] = data.domains || [];
+
+        spinner.succeed(`Learned ${domains.length} domains from '${name}'`);
+
+        if (!data.learn_mode) {
+          console.log(chalk.yellow("\n  ⚠ Learn mode is not active on this sandbox."));
+          console.log(chalk.yellow("  Enable with: azureclaw add <name> --learn-egress\n"));
+        }
+
+        if (domains.length === 0) {
+          console.log(chalk.dim("  No domains observed yet.\n"));
+          return;
+        }
+
+        console.log(chalk.bold("\n  Learned domains (review before approving):\n"));
+        for (const domain of domains) {
+          console.log(`    ${chalk.green("+")} ${domain}`);
+        }
+        console.log();
+
+        // Apply as allowlist if requested
+        if (options.apply) {
+          const applySpinner = ora("Applying learned domains as allowlist...").start();
+          const endpoints = domains.map((d) => ({ host: d, port: 443 }));
+          await execa("kubectl", [
+            "patch", "clawsandbox", name,
+            "-n", "azureclaw-system",
+            "--type", "merge",
+            "-p", JSON.stringify({
+              spec: {
+                networkPolicy: {
+                  allowedEndpoints: endpoints,
+                  learnEgress: false,
+                },
+              },
+            }),
+          ], { stdio: "pipe" });
+          applySpinner.succeed("Allowlist applied + learn mode disabled");
+          console.log(chalk.dim(`  ${domains.length} domains now in allowlist.`));
+          console.log(chalk.dim("  Controller will reconcile within seconds.\n"));
+        }
+
+        // Clear learned domains if requested
+        if (options.clear) {
+          await execa("kubectl", [
+            "exec", "-n", namespace, podName, "-c", "openclaw", "--",
+            "curl", "-sf", "-X", "POST", "http://localhost:8443/egress/learned/clear",
+          ], { stdio: "pipe" });
+          console.log(chalk.dim("  Learned domains cleared.\n"));
+        }
+      } catch (error) {
+        spinner.fail("Failed to fetch learned domains");
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(chalk.red(`\nError: ${message}\n`));
+      }
+    });
+
   return cmd;
 }
