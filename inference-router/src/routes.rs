@@ -6,7 +6,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post},
     Json,
 };
 use bytes::Bytes;
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::auth::WorkloadIdentityAuth;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
+use crate::governance::GovernanceState;
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
 
@@ -25,6 +26,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
+    pub governance: Arc<GovernanceState>,
 }
 
 impl AppState {
@@ -39,11 +41,14 @@ impl AppState {
             config.token_budget_per_request,
         );
 
+        let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             client,
             config: Arc::new(config),
             budget,
+            governance: Arc::new(GovernanceState::new(&sandbox_name)),
         })
     }
 
@@ -140,6 +145,25 @@ pub fn health_routes() -> Router<AppState> {
 /// Prometheus metrics endpoint.
 pub fn metrics_routes() -> Router<AppState> {
     Router::new().route("/metrics", get(metrics))
+}
+
+/// AGT governance routes — policy evaluation, trust, audit, inter-agent mesh.
+pub fn agt_routes() -> Router<AppState> {
+    Router::new()
+        // Policy evaluation
+        .route("/agt/evaluate", post(agt_evaluate))
+        // Trust management
+        .route("/agt/trust", get(agt_trust_list))
+        .route("/agt/trust/{agent_id}", get(agt_trust_get))
+        // Audit log
+        .route("/agt/audit", get(agt_audit))
+        .route("/agt/audit/verify", get(agt_audit_verify))
+        // Inter-agent mesh
+        .route("/agt/mesh/send", post(agt_mesh_send))
+        .route("/agt/mesh/inbox", get(agt_mesh_inbox))
+        .route("/agt/mesh/receive", post(agt_mesh_receive))
+        // Status
+        .route("/agt/status", get(agt_status))
 }
 
 /// POST /v1/chat/completions — the primary inference endpoint.
@@ -551,4 +575,228 @@ async fn foundry_proxy(
             }))).into_response()
         }
     }
+}
+
+// ── AGT Governance Handlers ──────────────────────────────────────────────────
+
+/// POST /agt/evaluate — evaluate a tool action against loaded policy.
+async fn agt_evaluate(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if action.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Missing 'action' field"
+        }))).into_response();
+    }
+
+    let decision = state.governance.evaluate_action(action).await;
+    let (status, result) = match decision {
+        crate::governance::PolicyDecision::Allow => (StatusCode::OK, serde_json::json!({
+            "decision": "allow", "action": action
+        })),
+        crate::governance::PolicyDecision::Deny(reason) => (StatusCode::FORBIDDEN, serde_json::json!({
+            "decision": "deny", "action": action, "reason": reason
+        })),
+        crate::governance::PolicyDecision::RequiresApproval(reason) => (StatusCode::ACCEPTED, serde_json::json!({
+            "decision": "requires_approval", "action": action, "reason": reason
+        })),
+        crate::governance::PolicyDecision::RateLimited { retry_after_secs } => (StatusCode::TOO_MANY_REQUESTS, serde_json::json!({
+            "decision": "rate_limited", "action": action, "retry_after_secs": retry_after_secs
+        })),
+    };
+
+    (status, Json(result)).into_response()
+}
+
+/// GET /agt/trust — list all known agent trust states.
+async fn agt_trust_list(State(state): State<AppState>) -> impl IntoResponse {
+    let agents = state.governance.trust.all_agents().await;
+    Json(serde_json::json!({ "agents": agents }))
+}
+
+/// GET /agt/trust/:agent_id — get trust state for a specific agent.
+async fn agt_trust_get(
+    State(state): State<AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let trust = state.governance.trust.get_trust(&agent_id).await;
+    Json(serde_json::json!(trust))
+}
+
+/// GET /agt/audit — get the full audit log.
+async fn agt_audit(State(state): State<AppState>) -> impl IntoResponse {
+    let entries = state.governance.audit.entries().await;
+    Json(serde_json::json!({
+        "entries": entries,
+        "count": entries.len(),
+        "sandbox": state.governance.sandbox_name
+    }))
+}
+
+/// GET /agt/audit/verify — verify hash-chain integrity.
+async fn agt_audit_verify(State(state): State<AppState>) -> impl IntoResponse {
+    let valid = state.governance.audit.verify_integrity().await;
+    let count = state.governance.audit.entries().await.len();
+    Json(serde_json::json!({
+        "integrity": if valid { "valid" } else { "COMPROMISED" },
+        "entries": count,
+        "sandbox": state.governance.sandbox_name
+    }))
+}
+
+/// POST /agt/mesh/send — send a message to another agent.
+/// The message is forwarded through the mesh relay service (K8s Service).
+async fn agt_mesh_send(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let to_agent = body.get("to_agent").and_then(|v| v.as_str()).unwrap_or("");
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let msg_type = body.get("type").and_then(|v| v.as_str()).unwrap_or("request");
+
+    if to_agent.is_empty() || content.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Missing 'to_agent' or 'content' field"
+        }))).into_response();
+    }
+
+    // Trust gate: check if target agent is trusted
+    if !state.governance.trust.is_trusted(to_agent).await {
+        let trust = state.governance.trust.get_trust(to_agent).await;
+        state.governance.audit.append(
+            &format!("mesh:send:{}", to_agent),
+            "deny",
+            &format!("Trust score {} below threshold", trust.score),
+        ).await;
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "Target agent trust score below threshold",
+            "agent": to_agent,
+            "score": trust.score,
+            "threshold": state.governance.trust.default_score
+        }))).into_response();
+    }
+
+    let msg = crate::governance::MeshMessage {
+        id: format!("{}-{}", state.governance.sandbox_name, uuid_v4()),
+        from_agent: state.governance.sandbox_name.clone(),
+        to_agent: to_agent.to_string(),
+        content: content.to_string(),
+        message_type: msg_type.to_string(),
+        timestamp: format!("{}Z", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+        signature: String::new(), // TODO: HMAC signing with sandbox secret
+    };
+
+    // Forward to mesh relay (K8s Service in azureclaw-system)
+    let relay_url = std::env::var("AGT_MESH_RELAY_URL")
+        .unwrap_or_else(|_| "http://azureclaw-mesh-relay.azureclaw-system.svc.cluster.local:8444".into());
+
+    match state.client.post(format!("{}/relay", relay_url))
+        .json(&msg)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            state.governance.trust.record_success(to_agent).await;
+            state.governance.audit.append(
+                &format!("mesh:send:{}", to_agent),
+                "allow",
+                &format!("Message {} delivered", msg.id),
+            ).await;
+            tracing::info!(from = %state.governance.sandbox_name, to = %to_agent, "Mesh message sent");
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": "delivered",
+                "message_id": msg.id,
+                "to_agent": to_agent
+            }))).into_response()
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            state.governance.trust.record_failure(to_agent).await;
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": format!("Mesh relay returned {}", status),
+                "to_agent": to_agent
+            }))).into_response()
+        }
+        Err(e) => {
+            // Mesh relay not available — queue locally
+            tracing::warn!(error = %e, "Mesh relay not reachable, message queued locally");
+            state.governance.audit.append(
+                &format!("mesh:send:{}", to_agent),
+                "queued",
+                &format!("Relay unavailable: {}", e),
+            ).await;
+            (StatusCode::ACCEPTED, Json(serde_json::json!({
+                "status": "queued",
+                "message_id": msg.id,
+                "reason": "Mesh relay not available, message queued"
+            }))).into_response()
+        }
+    }
+}
+
+/// GET /agt/mesh/inbox — read received messages.
+async fn agt_mesh_inbox(State(state): State<AppState>) -> impl IntoResponse {
+    let messages = state.governance.inbox.peek().await;
+    Json(serde_json::json!({
+        "messages": messages,
+        "count": messages.len()
+    }))
+}
+
+/// POST /agt/mesh/receive — receive a message from the mesh relay (internal).
+async fn agt_mesh_receive(
+    State(state): State<AppState>,
+    Json(msg): Json<crate::governance::MeshMessage>,
+) -> impl IntoResponse {
+    tracing::info!(from = %msg.from_agent, to = %msg.to_agent, "Mesh message received");
+
+    // Trust gate on incoming messages too
+    if !state.governance.trust.is_trusted(&msg.from_agent).await {
+        state.governance.audit.append(
+            &format!("mesh:receive:{}", msg.from_agent),
+            "deny",
+            "Sender trust below threshold",
+        ).await;
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": "Sender trust score below threshold"
+        }))).into_response();
+    }
+
+    state.governance.trust.record_success(&msg.from_agent).await;
+    state.governance.audit.append(
+        &format!("mesh:receive:{}", msg.from_agent),
+        "allow",
+        &format!("Message {} received", msg.id),
+    ).await;
+    state.governance.inbox.receive(msg).await;
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "received"}))).into_response()
+}
+
+/// GET /agt/status — overall governance status.
+async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
+    let audit_entries = state.governance.audit.entries().await;
+    let trust_agents = state.governance.trust.all_agents().await;
+    let inbox = state.governance.inbox.peek().await;
+
+    Json(serde_json::json!({
+        "enabled": state.governance.enabled,
+        "sandbox": state.governance.sandbox_name,
+        "policy_loaded": state.governance.policy.is_loaded(),
+        "audit_entries": audit_entries.len(),
+        "audit_integrity": state.governance.audit.verify_integrity().await,
+        "known_agents": trust_agents.len(),
+        "trust_states": trust_agents,
+        "inbox_messages": inbox.len(),
+    }))
+}
+
+fn uuid_v4() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    format!("{:x}-{:x}", d.as_secs(), d.subsec_nanos())
 }

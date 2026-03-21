@@ -15,6 +15,9 @@ export function addCommand(): Command {
     .option("--agent-instructions <instructions>", "System prompt for Foundry agent")
     .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
     .option("--image <image>", "Custom sandbox image (default: from Helm values)")
+    .option("--governance", "Enable AGT governance (tool policy, trust, audit)", false)
+    .option("--trust-threshold <score>", "AGT trust threshold (0-1000, default: 500)", "500")
+    .option("--policy-profile <profile>", "AGT policy profile name", "default")
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
@@ -79,6 +82,15 @@ export function addCommand(): Command {
           agentSpec.tools = options.agentTools.split(",").map((t: string) => t.trim());
         }
         (sandbox.spec as Record<string, unknown>).agent = agentSpec;
+      }
+
+      // Add AGT governance config if enabled
+      if (options.governance) {
+        (sandbox.spec as Record<string, unknown>).governance = {
+          enabled: true,
+          toolPolicy: options.policyProfile || "default",
+          trustThreshold: parseInt(options.trustThreshold) || 500,
+        };
       }
 
       const yaml = JSON.stringify(sandbox, null, 2);
