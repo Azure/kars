@@ -647,7 +647,8 @@ async fn agt_audit_verify(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /agt/mesh/send — send a message to another agent.
-/// The message is forwarded through the mesh relay service (K8s Service).
+/// Routes directly via K8s DNS: http://{agent}.{namespace}.svc.cluster.local:8443/agt/mesh/receive
+/// Each agent's inference-router sidecar (UID 1001) can reach other services within the cluster.
 async fn agt_mesh_send(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -686,14 +687,28 @@ async fn agt_mesh_send(
         message_type: msg_type.to_string(),
         timestamp: format!("{}Z", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
-        signature: String::new(), // TODO: HMAC signing with sandbox secret
+        signature: String::new(),
     };
 
-    // Forward to mesh relay (K8s Service in azureclaw-system)
-    let relay_url = std::env::var("AGT_MESH_RELAY_URL")
-        .unwrap_or_else(|_| "http://azureclaw-mesh-relay.azureclaw-system.svc.cluster.local:8444".into());
+    // Resolve target agent's router via K8s DNS or explicit URL override.
+    // Priority: AGT_MESH_TARGET_URL env var > K8s DNS discovery
+    let namespace = std::env::var("AGT_MESH_NAMESPACE")
+        .unwrap_or_else(|_| std::env::var("NAMESPACE").unwrap_or_else(|_| "azureclaw-foundry-test".into()));
+    let target_url = std::env::var("AGT_MESH_TARGET_URL")
+        .unwrap_or_else(|_| format!(
+            "http://{}.{}.svc.cluster.local:8443",
+            to_agent, namespace
+        ));
+    let receive_url = format!("{}/agt/mesh/receive", target_url.trim_end_matches('/'));
 
-    match state.client.post(format!("{}/relay", relay_url))
+    tracing::info!(
+        from = %state.governance.sandbox_name,
+        to = %to_agent,
+        url = %receive_url,
+        "Sending mesh message"
+    );
+
+    match state.client.post(&receive_url)
         .json(&msg)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -703,36 +718,43 @@ async fn agt_mesh_send(
             state.governance.trust.record_success(to_agent).await;
             state.governance.audit.append(
                 &format!("mesh:send:{}", to_agent),
-                "allow",
-                &format!("Message {} delivered", msg.id),
+                "delivered",
+                &format!("Message {} delivered to {}", msg.id, to_agent),
             ).await;
-            tracing::info!(from = %state.governance.sandbox_name, to = %to_agent, "Mesh message sent");
+            tracing::info!(from = %state.governance.sandbox_name, to = %to_agent, id = %msg.id, "Mesh message delivered");
             (StatusCode::OK, Json(serde_json::json!({
                 "status": "delivered",
                 "message_id": msg.id,
-                "to_agent": to_agent
+                "to_agent": to_agent,
+                "from_agent": state.governance.sandbox_name
             }))).into_response()
         }
         Ok(resp) => {
-            let status = resp.status();
+            let status_code = resp.status().as_u16();
+            let body_text = resp.text().await.unwrap_or_default();
             state.governance.trust.record_failure(to_agent).await;
+            state.governance.audit.append(
+                &format!("mesh:send:{}", to_agent),
+                "failed",
+                &format!("Target returned {}: {}", status_code, &body_text[..body_text.len().min(100)]),
+            ).await;
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": format!("Mesh relay returned {}", status),
-                "to_agent": to_agent
+                "error": format!("Target agent returned {}", status_code),
+                "to_agent": to_agent,
+                "details": &body_text[..body_text.len().min(200)]
             }))).into_response()
         }
         Err(e) => {
-            // Mesh relay not available — queue locally
-            tracing::warn!(error = %e, "Mesh relay not reachable, message queued locally");
+            tracing::warn!(to = %to_agent, error = %e, "Target agent unreachable");
             state.governance.audit.append(
                 &format!("mesh:send:{}", to_agent),
-                "queued",
-                &format!("Relay unavailable: {}", e),
+                "unreachable",
+                &format!("Target unreachable: {}", e),
             ).await;
-            (StatusCode::ACCEPTED, Json(serde_json::json!({
-                "status": "queued",
-                "message_id": msg.id,
-                "reason": "Mesh relay not available, message queued"
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                "error": format!("Target agent '{}' unreachable: {}", to_agent, e),
+                "to_agent": to_agent,
+                "message_id": msg.id
             }))).into_response()
         }
     }
