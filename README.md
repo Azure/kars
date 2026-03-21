@@ -15,7 +15,7 @@ AzureClaw runs AI agents safely on AKS with defense-in-depth security, zero-cred
 
 AzureClaw is the **runtime layer** between [OpenClaw](https://openclaw.ai) (the agent framework) and [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) (managed AI services). It solves one problem: **how do you run AI agents on Azure without giving them the keys to the kingdom?**
 
-Every agent runs in an isolated Kubernetes sandbox with 8 layers of security. The agent can only reach the outside world through a **Rust sidecar proxy** (inference router) that authenticates, filters, rate-limits, and audits every request. When multiple agents need to collaborate, they communicate through a **trust-gated mesh** — no direct network access between sandboxes.
+Every agent runs in an isolated Kubernetes sandbox with 8 layers of security. The agent can only reach the outside world through a **Rust sidecar proxy** (inference router) that authenticates, filters, rate-limits, and audits every request. When multiple agents need to collaborate, they can opt in to [AGT](https://github.com/microsoft/agent-governance-toolkit)'s **trust-gated mesh** for secure inter-agent communication — no direct network access between sandboxes.
 
 **Three pillars:**
 - **[OpenClaw](https://openclaw.ai)** owns the agent — authoring, orchestration, TUI, skills
@@ -29,38 +29,39 @@ AzureClaw connects them with enterprise-grade security out of the box.
 ## Architecture
 
 ```
-┌─ AKS Cluster (Azure Linux, Cilium CNI) ──────────────────────────────────────────┐
-│                                                                                    │
-│  azureclaw-system namespace                                                        │
-│  ┌──────────────────────────────────────────────────────┐                          │
-│  │  🦀 Controller (Rust/kube-rs) × 2 replicas           │                          │
-│  │  Watches ClawSandbox CRDs → reconciles sandboxes     │                          │
-│  │  Creates: namespace, SA, NetworkPolicy, Deployment,   │                          │
-│  │           Service, ConfigMap (per agent)              │                          │
-│  └──────────────────────────────────────────────────────┘                          │
-│  🔒 seccomp DaemonSet (azureclaw-strict on every node)                             │
-│                                                                                    │
-│  azureclaw-<agent> namespace (one per sandbox)                                     │
-│  ┌──────────────────────────────────────────────────────────────────────┐           │
-│  │  Pod (2 containers + 1 init)                                         │           │
-│  │                                                                      │           │
-│  │  init: egress-guard                                                  │           │
-│  │   └─ iptables: UID 1000 → localhost + DNS only                       │           │
-│  │                                                                      │           │
-│  │  🦞 openclaw (UID 1000)              ⚡ inference-router (UID 1001) │           │
-│  │  ├─ OpenClaw agent                   ├─ IMDS/WI auth (zero keys)    │           │
-│  │  ├─ Read-only rootfs       ────────► ├─ Content Safety + Shields    ──────► ☁️ Foundry
-│  │  ├─ 9 Foundry skills      localhost  ├─ Token budgets (429)         │           │
-│  │  └─ AGT governance         :8443     ├─ 18 Foundry API groups       │           │
-│  │                                      ├─ AGT mesh + trust + audit    │           │
-│  │                                      └─ Prometheus metrics          │           │
-│  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                        │           │
-│  ├─ NetworkPolicy (default-deny egress + AGT mesh ingress)              │           │
-│  └─ ServiceAccount (Workload Identity)                                  │           │
-│                                                                                    │
-│  🔗 AGT mesh: agent-alpha ◄──K8s DNS──► agent-beta                                │
-│     (trust-gated, audited, routed through inference routers)                       │
-└────────────────────────────────────────────────────────────────────────────────────┘
+┌─ AKS Cluster (Azure Linux, Cilium CNI) ─────────────────────────────────────┐
+│                                                                              │
+│  azureclaw-system namespace                                                  │
+│  ┌────────────────────────────────────────────────────┐                       │
+│  │  🦀 Controller (Rust/kube-rs) × 2 replicas         │                       │
+│  │  Watches ClawSandbox CRDs → reconciles sandboxes   │                       │
+│  │  Creates: NS, SA, NetworkPolicy, Deployment,        │                       │
+│  │           Service, ConfigMap (per agent)            │                       │
+│  └────────────────────────────────────────────────────┘                       │
+│  🔒 seccomp DaemonSet (azureclaw-strict on every node)                       │
+│                                                                              │
+│  azureclaw-<agent> namespace (one per sandbox)                               │
+│  ┌────────────────────────────────────────────────────────────────┐           │
+│  │  Pod (2 containers + 1 init)                                   │           │
+│  │                                                                │           │
+│  │  init: egress-guard                                            │           │
+│  │   └─ iptables: UID 1000 → localhost + DNS only                 │           │
+│  │                                                                │           │
+│  │  🦞 openclaw (UID 1000)          ⚡ inference-router (UID 1001)│           │
+│  │  ├─ OpenClaw agent               ├─ IMDS/WI auth (zero keys)  │           │
+│  │  ├─ AzureClaw plugin    ───────► ├─ Content Safety + Shields  ───► ☁️ Foundry
+│  │  │  └─ 9 Foundry skills localhost ├─ Token budgets (429)       │           │
+│  │  │  └─ 6 slash commands  :8443   ├─ 18 Foundry API groups      │           │
+│  │  ├─ Read-only rootfs             ├─ AGT mesh + trust + audit   │           │
+│  │  └─ AGT governance (opt-in)      └─ Prometheus metrics         │           │
+│  │                                                                │           │
+│  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                  │           │
+│  ├─ NetworkPolicy (default-deny egress + AGT mesh ingress)        │           │
+│  └─ ServiceAccount (Workload Identity)                            │           │
+│                                                                              │
+│  🔗 AGT mesh (opt-in): agent-alpha ◄──K8s DNS──► agent-beta                 │
+│     (trust-gated, audited, routed through inference routers)                 │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why These Components?
