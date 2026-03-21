@@ -203,6 +203,33 @@ POST /blocklist/check         → test if a domain/URL is blocked
 
 Sources: [OISD](https://oisd.nl/) (curated aggregator), [URLhaus](https://urlhaus.abuse.ch/) (abuse.ch malware URLs).
 
+### Egress Learn Mode
+
+Instead of guessing what domains an agent needs, run it in **learn mode** to discover them automatically:
+
+```bash
+# 1. Deploy with learn mode (blocklist still enforced)
+azureclaw add my-agent --model gpt-4.1 --learn-egress
+
+# 2. Let the agent work normally...
+
+# 3. Review what it accessed
+azureclaw policy learn my-agent
+#   Learned domains:
+#     + lsb-azureai.services.ai.azure.com
+#     + api.github.com
+
+# 4. Approve and lock down (one command)
+azureclaw policy learn my-agent --apply
+#   → Allowlist applied + learn mode disabled
+```
+
+| Layer | Enforcement |
+|---|---|
+| **Known-bad (blocklist)** | Always blocked — learn mode cannot override |
+| **Unknown domains** | Allowed + recorded during learn mode |
+| **After --apply** | Only learned domains allowed |
+
 ---
 
 ## Security
@@ -311,13 +338,14 @@ azureclaw eval my-agent --dataset test.jsonl --evaluator relevance
 | Command | Description |
 |---|---|
 | `azureclaw up` | Deploy full AKS stack + first sandbox |
-| `azureclaw add <name>` | Add sandbox (supports `--governance`, `--trust-threshold`, `--policy-profile`) |
+| `azureclaw add <name>` | Add sandbox (supports `--governance`, `--trust-threshold`, `--policy-profile`, `--learn-egress`) |
 | `azureclaw dev` | Local Docker sandbox (with iptables + seccomp) |
 | `azureclaw connect <name>` | Attach to OpenClaw TUI |
 | `azureclaw status <name>` | Health, model, tokens used |
 | `azureclaw model set <name> <model>` | Hot-switch AI model |
 | `azureclaw eval <name>` | Run Foundry evaluations (`--list-evaluators`, `--dataset`) |
 | `azureclaw policy allow <name> <host>` | Manage network allowlist |
+| `azureclaw policy learn <name>` | Export learned egress domains (`--apply`, `--clear`) |
 | `azureclaw trace <name>` | eBPF tracing |
 | `azureclaw approve --list` | Review pending egress requests |
 | `azureclaw logs <name>` | Stream container logs |
