@@ -8,6 +8,20 @@ metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "prim
 
 You have access to persistent long-term memory via Azure AI Foundry Memory Store. Memory survives pod restarts, upgrades, and session boundaries. The system uses embedding models for semantic search and chat models to extract/consolidate memories automatically.
 
+## Memory Persistence — How It Works
+
+Memories are stored server-side in Foundry's managed Memory Store (not in the pod). They persist across pod restarts, upgrades, and session boundaries.
+
+**Scope** is the key to persistence. Always use `$SANDBOX_NAME` (environment variable) as the scope. This is the agent's stable identity — the CRD name (e.g., `my-agent`) — and never changes even when pods restart.
+
+```bash
+# Read the stable scope from environment
+SCOPE=$(printenv SANDBOX_NAME)
+# Use it in all memory operations
+```
+
+For per-user memory within an agent, use a composite scope like `${SANDBOX_NAME}-${user_id}`.
+
 ## Why use this instead of local files
 
 Local files in `/sandbox/` are ephemeral. Foundry Memory Store is managed, uses vector search (text-embedding-3-small), and supports:
@@ -33,7 +47,7 @@ curl -s -X POST 'http://localhost:8443/memory_stores?api-version=2025-11-15-prev
 ```bash
 curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:update_memories?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"items":[{"role":"user","content":"I prefer dark roast coffee and code in Rust","type":"message"},{"role":"assistant","content":"Noted!","type":"message"}],"scope":"user-123","update_delay":0}'
+  -d '{"items":[{"role":"user","content":"I prefer dark roast coffee and code in Rust","type":"message"},{"role":"assistant","content":"Noted!","type":"message"}],"scope":"$SANDBOX_NAME","update_delay":0}'
 ```
 
 Returns `{"update_id": "...", "status": "queued"}`. The system asynchronously extracts memories using the chat model.
@@ -43,7 +57,7 @@ Returns `{"update_id": "...", "status": "queued"}`. The system asynchronously ex
 ```bash
 curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memories?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"scope":"user-123","items":[{"role":"user","content":"What coffee does the user like?","type":"message"}],"options":{"max_memories":10}}'
+  -d '{"scope":"$SANDBOX_NAME","items":[{"role":"user","content":"What coffee does the user like?","type":"message"}],"options":{"max_memories":10}}'
 ```
 
 Returns `memories[]` array with content, kind (user_profile/chat_summary), and usage (embedding_tokens).
@@ -53,7 +67,7 @@ Returns `memories[]` array with content, kind (user_profile/chat_summary), and u
 ```bash
 curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memories?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"scope":"user-123","options":{"max_memories":50}}'
+  -d '{"scope":"$SANDBOX_NAME","options":{"max_memories":50}}'
 ```
 
 ### Delete memories for a scope
@@ -61,7 +75,7 @@ curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memorie
 ```bash
 curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:delete_scope?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"scope":"user-123"}'
+  -d '{"scope":"$SANDBOX_NAME"}'
 ```
 
 ## When to use

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Isolation","type":"string","jsonPath":".spec.sandbox.isolation"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
+#[serde(rename_all = "camelCase")]
 pub struct ClawSandboxSpec {
     /// OpenClaw configuration
     pub openclaw: Option<OpenClawConfig>,
@@ -62,6 +63,7 @@ pub struct OpenClawConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SandboxConfig {
     /// standard | enhanced | confidential
     #[serde(default = "default_isolation")]
@@ -97,6 +99,7 @@ impl Default for SandboxConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct InferenceConfig {
     /// azure-openai | azure-ai-foundry | self-hosted
     #[serde(default = "default_provider")]
@@ -133,6 +136,7 @@ pub struct FallbackConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenBudgetConfig {
     pub daily: Option<i64>,
     pub per_request: Option<i64>,
@@ -148,7 +152,7 @@ pub struct NetworkPolicyConfig {
     pub allowed_endpoints: Option<Vec<EndpointConfig>>,
     /// Enable egress learn mode: observe all accessed domains (blocklist still enforced).
     /// Use `azureclaw policy learn <name>` to export the learned allowlist.
-    #[serde(default, alias = "learnEgress")]
+    #[serde(default)]
     pub learn_egress: bool,
 }
 
@@ -187,6 +191,7 @@ pub struct ResourceConfig {
 
 /// Foundry Agent Service configuration.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     /// System prompt / instructions for the Foundry prompt agent.
     pub instructions: Option<String>,
@@ -198,6 +203,7 @@ pub struct AgentConfig {
 
 /// AGT behavioral governance configuration.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GovernanceConfig {
     /// Enable AGT governance (tool policy, trust, audit).
     #[serde(default)]
@@ -215,6 +221,7 @@ fn default_trust_threshold() -> i32 { 500 }
 
 /// ClawSandbox status — reflects the current observed state.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ClawSandboxStatus {
     /// Pending | Creating | Running | Failed | Terminating
     pub phase: Option<String>,

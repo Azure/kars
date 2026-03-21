@@ -12,7 +12,8 @@
     "skills/foundry-conversations",
     "skills/foundry-evaluations",
     "skills/foundry-deployments",
-    "skills/agt-governance"
+    "skills/agt-governance",
+    "skills/azureclaw-spawn"
   ],
   "configSchema": {
     "type": "object",
