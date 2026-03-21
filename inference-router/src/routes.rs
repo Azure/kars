@@ -756,14 +756,22 @@ async fn agt_mesh_send(
     };
 
     // Resolve target agent's router via K8s DNS or explicit URL override.
-    // Priority: AGT_MESH_TARGET_URL env var > K8s DNS discovery
-    let namespace = std::env::var("AGT_MESH_NAMESPACE")
-        .unwrap_or_else(|_| std::env::var("NAMESPACE").unwrap_or_else(|_| "azureclaw-foundry-test".into()));
-    let target_url = std::env::var("AGT_MESH_TARGET_URL")
-        .unwrap_or_else(|_| format!(
-            "http://{}.{}.svc.cluster.local:8443",
-            to_agent, namespace
-        ));
+    // Priority: AGT_MESH_TARGET_URL env var > CRD namespace lookup > K8s DNS in parent namespace
+    let target_url = if let Ok(url) = std::env::var("AGT_MESH_TARGET_URL") {
+        url
+    } else {
+        // Try to resolve the target's actual namespace from ClawSandbox CRD status
+        let target_ns = match spawn::get_sandbox_status(to_agent).await {
+            Ok(resp) => resp.namespace.unwrap_or_else(|| format!("azureclaw-{}", to_agent)),
+            Err(_) => {
+                // Not a spawned sub-agent — try same namespace (peer agents like agent-alpha/agent-beta)
+                std::env::var("AGT_MESH_NAMESPACE")
+                    .unwrap_or_else(|_| std::env::var("NAMESPACE")
+                        .unwrap_or_else(|_| "azureclaw-foundry-test".into()))
+            }
+        };
+        format!("http://{}.{}.svc.cluster.local:8443", to_agent, target_ns)
+    };
     let receive_url = format!("{}/agt/mesh/receive", target_url.trim_end_matches('/'));
 
     tracing::info!(
