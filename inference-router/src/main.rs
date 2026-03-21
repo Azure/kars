@@ -15,6 +15,7 @@
 //!   token counts, latency, and content safety results.
 
 mod auth;
+mod blocklist;
 mod budget;
 mod config;
 mod governance;

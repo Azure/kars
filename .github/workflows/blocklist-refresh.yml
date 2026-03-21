@@ -1,0 +1,102 @@
+name: Refresh Blocklist Seed
+
+on:
+  schedule:
+    # Run daily at 04:00 UTC — keeps the seed file fresh so any build
+    # from main ships a recent blocklist in the controller binary.
+    - cron: "0 4 * * *"
+  workflow_dispatch: # manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    name: Fetch threat intelligence feeds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch OISD + URLhaus → seed-domains.txt
+        run: |
+          set -euo pipefail
+          OUT="cli/blocklists/seed-domains.txt"
+          TMP=$(mktemp -d)
+
+          echo "# AzureClaw Domain Blocklist — Auto-refreshed Seed File"  > "$TMP/merged.txt"
+          echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"            >> "$TMP/merged.txt"
+          echo "# Sources: OISD small, URLhaus hostfile, manual entries"  >> "$TMP/merged.txt"
+          echo "#"                                                        >> "$TMP/merged.txt"
+
+          # ── Preserve manual entries (lines between markers) ──
+          if grep -q '# === Known malware' "$OUT" 2>/dev/null; then
+            sed -n '/^# === Known malware/,$ p' "$OUT" >> "$TMP/merged.txt"
+            echo "" >> "$TMP/merged.txt"
+          fi
+
+          # ── OISD small (domainswild format) ──
+          echo "# === OISD small feed ===" >> "$TMP/merged.txt"
+          if curl -sfL --max-time 120 --max-filesize 52428800 \
+               "https://small.oisd.nl/domainswild" -o "$TMP/oisd.txt"; then
+            OISD_COUNT=$(grep -cv '^#\|^$' "$TMP/oisd.txt" || true)
+            echo "# $OISD_COUNT domains from OISD" >> "$TMP/merged.txt"
+            cat "$TMP/oisd.txt" >> "$TMP/merged.txt"
+            echo "::notice::OISD: $OISD_COUNT domains fetched"
+          else
+            echo "# OISD fetch failed — skipped" >> "$TMP/merged.txt"
+            echo "::warning::OISD fetch failed"
+          fi
+
+          # ── URLhaus (hostfile format → domain-only) ──
+          echo "" >> "$TMP/merged.txt"
+          echo "# === URLhaus feed ===" >> "$TMP/merged.txt"
+          if curl -sfL --max-time 120 --max-filesize 52428800 \
+               "https://urlhaus.abuse.ch/downloads/hostfile/" -o "$TMP/urlhaus.txt"; then
+            grep '^127\.0\.0\.1' "$TMP/urlhaus.txt" | awk '{print $2}' > "$TMP/urlhaus-domains.txt"
+            UH_COUNT=$(wc -l < "$TMP/urlhaus-domains.txt" | tr -d ' ')
+            echo "# $UH_COUNT domains from URLhaus" >> "$TMP/merged.txt"
+            cat "$TMP/urlhaus-domains.txt" >> "$TMP/merged.txt"
+            echo "::notice::URLhaus: $UH_COUNT domains fetched"
+          else
+            echo "# URLhaus fetch failed — skipped" >> "$TMP/merged.txt"
+            echo "::warning::URLhaus fetch failed"
+          fi
+
+          # ── Deduplicate + sort ──
+          # Separate comments from domains, sort domains, reassemble
+          grep '^#\|^!' "$TMP/merged.txt" > "$TMP/comments.txt" || true
+          grep -v '^#\|^!\|^$' "$TMP/merged.txt" | sort -u > "$TMP/domains-sorted.txt" || true
+          TOTAL=$(wc -l < "$TMP/domains-sorted.txt" | tr -d ' ')
+
+          cat "$TMP/comments.txt" > "$OUT"
+          echo "# Total unique domains: $TOTAL" >> "$OUT"
+          echo "" >> "$OUT"
+          cat "$TMP/domains-sorted.txt" >> "$OUT"
+
+          echo "::notice::Total unique domains in seed: $TOTAL"
+          rm -rf "$TMP"
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet cli/blocklists/seed-domains.txt; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to blocklist seed"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            LINES=$(wc -l < cli/blocklists/seed-domains.txt | tr -d ' ')
+            echo "Blocklist updated: $LINES lines"
+          fi
+
+      - name: Commit and push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cli/blocklists/seed-domains.txt
+          DOMAINS=$(grep -cv '^#\|^$' cli/blocklists/seed-domains.txt || echo 0)
+          git commit -m "chore(blocklist): auto-refresh seed — $DOMAINS domains
+
+          Sources: OISD small, URLhaus hostfile
+          Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push

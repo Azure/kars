@@ -52,8 +52,9 @@ AzureClaw connects them with enterprise-grade security out of the box.
 │  │  ├─ AzureClaw plugin    ───────► ├─ Content Safety + Shields  ───► ☁️ Foundry
 │  │  │  └─ 9 Foundry skills localhost ├─ Token budgets (429)       │           │
 │  │  │  └─ 6 slash commands  :8443   ├─ 18 Foundry API groups      │           │
-│  │  ├─ Read-only rootfs             ├─ AGT mesh + trust + audit   │           │
-│  │  └─ AGT governance (opt-in)      └─ Prometheus metrics         │           │
+│  │  ├─ Read-only rootfs             ├─ Domain blocklist (auto)    │           │
+│  │  └─ AGT governance (opt-in)      ├─ AGT mesh + trust + audit   │           │
+│  │                                  └─ Prometheus metrics         │           │
 │  │                                                                │           │
 │  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                  │           │
 │  ├─ NetworkPolicy (default-deny egress + AGT mesh ingress)        │           │
@@ -180,6 +181,30 @@ AGT does NOT duplicate infrastructure controls — no network rules, no content 
 
 ---
 
+## Domain Blocklist
+
+The inference router includes an **auto-refreshing domain blocklist** that blocks requests to known-malicious domains (malware C2, phishing, cryptojacking, reverse shells). Always-on, zero configuration.
+
+| Layer | Freshness | How |
+|---|---|---|
+| **Seed file** | ≤ 24h | GitHub Actions [daily cron](.github/workflows/blocklist-refresh.yml) fetches OISD + URLhaus → auto-commits to `main` |
+| **K8s ConfigMap** | ≤ 6h | CronJob fetches feeds → patches ConfigMap (survives pod restarts) |
+| **In-memory** | ≤ 6h | Router background task fetches OISD + URLhaus directly |
+
+Also blocks:
+- **High-risk TLDs** (.tk, .ml, .ga, .cf, .gq — >80% of phishing campaigns)
+- **Bare IP addresses** (no DNS = suspicious for AI agent traffic)
+- **Subdomain matching** (if `evil.com` is blocked, `sub.evil.com` is too)
+
+```
+GET  /blocklist/status        → domain count + enabled state
+POST /blocklist/check         → test if a domain/URL is blocked
+```
+
+Sources: [OISD](https://oisd.nl/) (curated aggregator), [URLhaus](https://urlhaus.abuse.ch/) (abuse.ch malware URLs).
+
+---
+
 ## Security
 
 8 infrastructure layers (always on) + AGT governance (opt-in):
@@ -191,7 +216,7 @@ AGT does NOT duplicate infrastructure controls — no network rules, no content 
 | 2 | **Kata VM** | Per-pod dedicated kernel (confidential level only) |
 | 3 | **Container** | Read-only rootfs, non-root, drop ALL capabilities |
 | 4 | **Kernel** | Custom seccomp (~150 allowed syscalls) |
-| 5 | **Network** | iptables UID guard + default-deny NetworkPolicy |
+| 5 | **Network** | iptables UID guard + default-deny NetworkPolicy + domain blocklist |
 | 6 | **Inference** | Content Safety + Prompt Shields + token budgets |
 | 7 | **AGT** | Policy engine + trust scoring + audit log + mesh |
 

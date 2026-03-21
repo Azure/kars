@@ -336,6 +336,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     ];
     router_env.extend(router_agt_env);
 
+    // ── Blocklist ConfigMap + env vars ──
+    // The blocklist is always-on: router loads a seed file at startup, then
+    // auto-refreshes from OISD + URLhaus feeds every 6 hours.
+    let blocklist_cm_name = format!("{}-blocklist", &name);
+    router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
+    router_env.push(json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}));
+
     // Build the pod spec — runtimeClassName only set for Kata (confidential)
     let mut pod_spec = json!({
         "serviceAccountName": "sandbox",
@@ -509,6 +516,34 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
                         env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
                     }
+                }
+            }
+        }
+    }
+
+    // Mount blocklist seed ConfigMap into the router container
+    if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
+        volumes.push(json!({
+            "name": "blocklist-seed",
+            "configMap": {
+                "name": &blocklist_cm_name,
+                "optional": true
+            }
+        }));
+    }
+    if let Some(containers) = pod_spec.get_mut("containers").and_then(|c| c.as_array_mut()) {
+        for container in containers.iter_mut() {
+            if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
+                let mounts = container
+                    .as_object_mut().unwrap()
+                    .entry("volumeMounts")
+                    .or_insert(json!([]));
+                if let Some(mounts_arr) = mounts.as_array_mut() {
+                    mounts_arr.push(json!({
+                        "name": "blocklist-seed",
+                        "mountPath": "/etc/azureclaw/blocklist",
+                        "readOnly": true
+                    }));
                 }
             }
         }
@@ -702,6 +737,127 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             service = format!("{name}.{sandbox_ns}.svc.cluster.local:8443"),
             policy_cm = %cm_name,
             "AGT governance infrastructure created (Service + ConfigMap + mesh ingress)"
+        );
+    }
+
+    // ── Step 4d: Blocklist seed ConfigMap + CronJob ──────────────────────
+    // Create ConfigMap with seed blocklist (immediate protection from day 0).
+    // Create CronJob that fetches fresh lists from OISD + URLhaus every 6h
+    // and patches the ConfigMap — so even if the router can't reach feeds
+    // directly, the mounted file stays fresh.
+    {
+        let seed_domains = include_str!("../../cli/blocklists/seed-domains.txt");
+        let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": &blocklist_cm_name,
+                "namespace": &sandbox_ns,
+                "labels": {
+                    "azureclaw.azure.com/sandbox": &name,
+                    "azureclaw.azure.com/component": "blocklist"
+                }
+            },
+            "data": {
+                "domains.txt": seed_domains
+            }
+        }))?;
+        cm_api
+            .patch(
+                &blocklist_cm_name,
+                &PatchParams::apply("azureclaw-controller"),
+                &Patch::Apply(cm),
+            )
+            .await?;
+
+        // CronJob: fetch OISD + URLhaus → patch ConfigMap every 6h
+        // Uses kubectl to patch the ConfigMap in-place. The router's background
+        // task also fetches feeds directly, so this is defense-in-depth.
+        let cronjob_name = format!("{}-blocklist-refresh", &name);
+        let cronjob: serde_json::Value = json!({
+            "apiVersion": "batch/v1",
+            "kind": "CronJob",
+            "metadata": {
+                "name": &cronjob_name,
+                "namespace": &sandbox_ns,
+                "labels": {
+                    "azureclaw.azure.com/sandbox": &name,
+                    "azureclaw.azure.com/component": "blocklist-refresh"
+                }
+            },
+            "spec": {
+                "schedule": "0 */6 * * *",
+                "successfulJobsHistoryLimit": 1,
+                "failedJobsHistoryLimit": 1,
+                "jobTemplate": {
+                    "spec": {
+                        "backoffLimit": 2,
+                        "template": {
+                            "spec": {
+                                "serviceAccountName": "sandbox",
+                                "restartPolicy": "OnFailure",
+                                "containers": [{
+                                    "name": "refresh",
+                                    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0",
+                                    "command": ["sh", "-c", concat!(
+                                        "set -e; ",
+                                        "echo '# Auto-refreshed blocklist' > /tmp/domains.txt; ",
+                                        "echo '# Updated: '$(date -u +%Y-%m-%dT%H:%M:%SZ) >> /tmp/domains.txt; ",
+                                        // Fetch OISD small list
+                                        "curl -sfL --max-time 60 --max-filesize 52428800 ",
+                                        "'https://small.oisd.nl/domainswild' >> /tmp/domains.txt 2>/dev/null || ",
+                                        "echo '# OISD fetch failed' >> /tmp/domains.txt; ",
+                                        // Fetch URLhaus hostfile
+                                        "curl -sfL --max-time 60 --max-filesize 52428800 ",
+                                        "'https://urlhaus.abuse.ch/downloads/hostfile/' >> /tmp/urlhaus.txt 2>/dev/null && ",
+                                        "grep '^127\\.0\\.0\\.1' /tmp/urlhaus.txt | awk '{print $2}' >> /tmp/domains.txt || ",
+                                        "echo '# URLhaus fetch failed' >> /tmp/domains.txt; ",
+                                        // Patch the ConfigMap via kubectl
+                                        "kubectl create configmap ", // Continued in args
+                                    )],
+                                    "args": [
+                                        format!("{} --from-file=domains.txt=/tmp/domains.txt -n {} --dry-run=client -o yaml | kubectl apply -f -",
+                                            &blocklist_cm_name, &sandbox_ns)
+                                    ],
+                                    "resources": {
+                                        "requests": {"cpu": "50m", "memory": "64Mi"},
+                                        "limits": {"cpu": "200m", "memory": "256Mi"}
+                                    },
+                                    "securityContext": {
+                                        "runAsNonRoot": true,
+                                        "runAsUser": 65534,
+                                        "readOnlyRootFilesystem": false,
+                                        "allowPrivilegeEscalation": false
+                                    }
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Use dynamic API for CronJob (batch/v1)
+        let cj_gvk = kube::api::GroupVersionKind::gvk("batch", "v1", "CronJob");
+        let (cj_ar, _caps) = kube::discovery::pinned_kind(&client, &cj_gvk).await?;
+        let cj_api: Api<kube::api::DynamicObject> = Api::namespaced_with(
+            client.clone(), &sandbox_ns, &cj_ar,
+        );
+        let cj_obj: kube::api::DynamicObject = serde_json::from_value(cronjob)?;
+        let _ = cj_api
+            .patch(
+                &cronjob_name,
+                &PatchParams::apply("azureclaw-controller"),
+                &Patch::Apply(cj_obj),
+            )
+            .await;
+
+        tracing::info!(
+            sandbox = %name,
+            configmap = %blocklist_cm_name,
+            cronjob = %cronjob_name,
+            "Blocklist infrastructure created (seed ConfigMap + 6h refresh CronJob)"
         );
     }
 
