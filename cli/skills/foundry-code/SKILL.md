@@ -1,70 +1,51 @@
 ---
 name: foundry-code
-description: Python code execution via Azure AI Foundry code_interpreter. Data analysis, charts, and math in a managed sandbox.
-metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_AGENT_ID"]}, "primaryEnv": "FOUNDRY_AGENT_ID"}}
+description: Python code execution via Azure AI Foundry Responses API with code_interpreter tool. Data analysis, charts, and math in a managed sandbox.
+metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Code — Code Interpreter
+# Foundry Code — Code Interpreter (Responses API)
 
-You have access to Python code execution via Azure AI Foundry code_interpreter. Use this for data analysis, chart generation, complex math, and file processing in a managed sandbox.
+You have access to Python code execution via the Foundry Responses API `code_interpreter` tool. Use this for data analysis, chart generation, complex math, and file processing. No Foundry hosted agent needed — uses direct Responses API.
 
 ## Why use this instead of local bash/python
 
-The local sandbox has limited Python packages and restricted filesystem. Foundry code_interpreter runs in a managed environment with common data science libraries (pandas, numpy, matplotlib, etc.) pre-installed. It can generate charts and process uploaded files.
+The local sandbox has restricted packages. Foundry code_interpreter runs server-side with pre-installed data science libraries (pandas, numpy, matplotlib, scipy, etc.) and can generate visualizations.
 
-## Endpoints
+## Endpoint
 
-All requests go through `http://localhost:8443`. Auth is automatic. Agent ID: `$FOUNDRY_AGENT_ID`.
+All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Auth is automatic.
 
 ## Operations
 
-### Run Python code via a thread
+### Run Python code
 
 ```bash
-# Create a thread
-THREAD_ID=$(curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads \
-  -H "Content-Type: application/json" -d '{}' | jq -r .id)
-
-# Ask for analysis
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/messages \
-  -H "Content-Type: application/json" \
-  -d '{"role": "user", "content": "Calculate the first 20 Fibonacci numbers and plot them."}'
-
-# Run with code_interpreter
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/runs \
-  -H "Content-Type: application/json" \
-  -d '{"tools": [{"type": "code_interpreter"}]}'
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"Calculate the first 20 Fibonacci numbers and show them.","tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"store":false}'
 ```
 
-### Analyze an uploaded file
+The model will write and execute Python code, returning both the code and its output.
 
-Upload a file first (using the foundry-knowledge upload endpoint), then reference it:
+### Data analysis
 
 ```bash
-curl -s -X POST http://localhost:8443/agents/${FOUNDRY_AGENT_ID}/threads/${THREAD_ID}/messages \
-  -H "Content-Type: application/json" \
-  -d '{"role": "user", "content": "Analyze the CSV I uploaded. Show summary statistics and a trend chart.", "attachments": [{"file_id": "file_abc123", "tools": [{"type": "code_interpreter"}]}]}'
+curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1","input":"Generate 100 random data points, compute mean/median/std, and tell me if normally distributed.","tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"store":false}'
 ```
 
 ## When to use
 
-- User asks for data analysis: "analyze this CSV", "show summary statistics"
-- User needs charts or visualizations: "plot the trend", "create a bar chart"
+- User asks for data analysis: "analyze this", "show statistics"
+- Charts or visualizations: "plot the trend", "create a chart"
 - Complex math: "solve this equation", "calculate correlation"
-- File processing: "convert this data", "parse and summarize"
+- Anything requiring Python runtime
 
 ## When NOT to use
 
 - For simple shell commands (use local bash)
 - For web searches (use foundry-web-search)
 - For document Q&A (use foundry-knowledge)
-
-## Capabilities
-
-The code_interpreter has access to common Python packages:
-- Data: pandas, numpy, scipy
-- Visualization: matplotlib, seaborn
-- File processing: csv, json, openpyxl
-- Math: sympy, statistics
-
-Generated files (charts, CSVs) are returned as downloadable attachments in the response.
+- For remembering preferences (use foundry-memory)

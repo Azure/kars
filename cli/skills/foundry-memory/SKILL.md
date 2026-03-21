@@ -4,59 +4,71 @@ description: Persistent long-term memory via Foundry Memory Store APIs. User pre
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
 
-# Foundry Memory — Memory Store APIs (Direct)
+# Foundry Memory — Memory Store APIs
 
-You have access to persistent long-term memory via Foundry Memory Store APIs. Memory survives pod restarts, upgrades, and session boundaries. This uses direct APIs — no Foundry hosted agent needed.
+You have access to persistent long-term memory via Azure AI Foundry Memory Store. Memory survives pod restarts, upgrades, and session boundaries. The system uses embedding models for semantic search and chat models to extract/consolidate memories automatically.
 
 ## Why use this instead of local files
 
-Local files in `/sandbox/` are lost when the pod restarts. Foundry Memory Store is managed and supports:
-- **User profile memory**: preferences, name, restrictions (retrieve once per session)
-- **Chat summary memory**: distilled summaries of past conversations (cross-session continuity)
+Local files in `/sandbox/` are ephemeral. Foundry Memory Store is managed, uses vector search (text-embedding-3-small), and supports:
+- **User profile memory**: preferences, name, restrictions
+- **Chat summary memory**: distilled summaries of past conversations
 
-The system automatically extracts, consolidates, and deduplicates memories.
+## Endpoint
 
-## Endpoints
-
-All requests go through `http://localhost:8443`. Auth is automatic (IMDS).
+All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Auth is automatic.
 
 ## Operations
 
 ### Create a memory store
 
 ```bash
-curl -s -X POST "http://localhost:8443/memory-stores?api-version=v1" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"agent-memory","user_profile_details":["name","preferences","expertise"],"chat_summary_enabled":true}'
+curl -s -X POST 'http://localhost:8443/memory_stores?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"agent-memory","description":"Agent persistent memory","definition":{"kind":"default","chat_model":"gpt-4.1","embedding_model":"text-embedding-3-small","options":{"user_profile_enabled":true,"chat_summary_enabled":true}}}'
 ```
 
-### Write a memory
+### Store memories from conversation
 
 ```bash
-curl -s -X POST "http://localhost:8443/memory-stores/agent-memory/memories?api-version=v1" \
-  -H "Content-Type: application/json" \
-  -d '{"scope":"user-123","content":"User prefers concise responses. Expert in security.","type":"user_profile"}'
+curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:update_memories?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"role":"user","content":"I prefer dark roast coffee and code in Rust","type":"message"},{"role":"assistant","content":"Noted!","type":"message"}],"scope":"user-123","update_delay":0}'
 ```
 
-### Search memories
+Returns `{"update_id": "...", "status": "queued"}`. The system asynchronously extracts memories using the chat model.
+
+### Search memories (with semantic embedding)
 
 ```bash
-curl -s -X POST "http://localhost:8443/memory-stores/agent-memory/memories/search?api-version=v1" \
-  -H "Content-Type: application/json" \
-  -d '{"scope":"user-123","query":"user preferences"}'
+curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memories?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"user-123","items":[{"role":"user","content":"What coffee does the user like?","type":"message"}],"options":{"max_memories":10}}'
 ```
 
-### List memories
+Returns `memories[]` array with content, kind (user_profile/chat_summary), and usage (embedding_tokens).
+
+### List all memories for scope (no embedding)
 
 ```bash
-curl -s "http://localhost:8443/memory-stores/agent-memory/memories?scope=user-123&api-version=v1"
+curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:search_memories?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"user-123","options":{"max_memories":50}}'
+```
+
+### Delete memories for a scope
+
+```bash
+curl -s -X POST 'http://localhost:8443/memory_stores/agent-memory:delete_scope?api-version=2025-11-15-preview' \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"user-123"}'
 ```
 
 ## When to use
 
 - User says "remember this", "save this for later"
-- You need to persist user preferences across sessions
-- You want conversation summaries that survive pod restarts
+- Start of session: search memories for the user to personalize
+- After meaningful conversation: store key facts via update_memories
 - User asks "what do you know about me"
 
 ## When NOT to use
