@@ -13,35 +13,56 @@ AzureClaw runs AI agents safely on AKS with defense-in-depth security, zero-cred
 
 ## Architecture
 
-```
-┌─ AKS Cluster (Azure Linux, Cilium CNI) ──────────────────────────────────────┐
-│                                                                               │
-│  azureclaw-system namespace                                                   │
-│  ┌─────────────────────────────────────────────┐                              │
-│  │ Controller (Rust, kube-rs) × 2 replicas     │  Watches ClawSandbox CRDs    │
-│  │ Reconciles → namespace, pod, NetworkPolicy, │  and creates sandboxes       │
-│  │ ServiceAccount, Service, ConfigMap          │                              │
-│  └─────────────────────────────────────────────┘                              │
-│                                                                               │
-│  azureclaw-<agent> namespace (per sandbox)                                    │
-│  ┌────────────────────────────────────────────────────────────────────┐        │
-│  │ Pod (2 containers + 1 init)                                        │        │
-│  │                                                                    │        │
-│  │  init: egress-guard (iptables: UID 1000 → localhost + DNS only)    │        │
-│  │                                                                    │        │
-│  │  ┌──────────────────────┐    ┌────────────────────────────────┐    │        │
-│  │  │ openclaw (UID 1000)  │    │ inference-router (UID 1001)    │    │        │
-│  │  │ • OpenClaw agent     │    │ • IMDS/WI auth (zero keys)    │    │        │
-│  │  │ • Read-only rootfs   │───►│ • Content Safety + Shields    │───►│ Foundry │
-│  │  │ • 9 Foundry skills   │    │ • Token budgets (429)         │    │        │
-│  │  │ • AGT governance     │    │ • 18 Foundry API groups       │    │        │
-│  │  │                      │    │ • AGT mesh + trust + audit    │    │        │
-│  │  └──────────────────────┘    └────────────────────────────────┘    │        │
-│  │       localhost:8443 ──────────────────┘                           │        │
-│  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                      │        │
-│  ├─ NetworkPolicy (default-deny egress + mesh ingress)                │        │
-│  └─ ServiceAccount (Workload Identity)                                │        │
-└───────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph AKS["AKS Cluster — Azure Linux, Cilium CNI"]
+        subgraph SYS["azureclaw-system namespace"]
+            CTRL["🦀 Controller\n(Rust, kube-rs × 2)\nWatches ClawSandbox CRDs"]
+            CRD[("ClawSandbox\nCRD v1alpha1")]
+            SEC["🔒 seccomp DaemonSet\nazureclaw-strict.json"]
+        end
+
+        subgraph NS1["azureclaw-agent-alpha namespace"]
+            subgraph POD1["Pod (2 containers + init)"]
+                INIT1["init: egress-guard\niptables: UID 1000 → localhost only"]
+                OC1["🦞 OpenClaw Agent\nUID 1000 · read-only rootfs\n9 Foundry skills · AGT governance"]
+                IR1["⚡ Inference Router\nUID 1001 · Rust/axum\nIMDS auth · Content Safety\nToken budgets · 18 Foundry APIs\nAGT mesh + trust + audit"]
+            end
+            SVC1["Service: agent-alpha:8443"]
+            NP1["NetworkPolicy\ndefault-deny + mesh ingress"]
+            SA1["ServiceAccount\nWorkload Identity"]
+        end
+
+        subgraph NS2["azureclaw-agent-beta namespace"]
+            subgraph POD2["Pod"]
+                OC2["🦞 OpenClaw Agent"]
+                IR2["⚡ Inference Router"]
+            end
+            SVC2["Service: agent-beta:8443"]
+        end
+    end
+
+    FOUNDRY["☁️ Azure AI Foundry\n200+ models · Memory Store\nCode Interpreter · Web Search\nEvaluations · Conversations"]
+    CS["🛡️ Azure AI Content Safety\n+ Prompt Shields"]
+
+    CTRL -->|reconciles| NS1
+    CTRL -->|reconciles| NS2
+    CRD -.->|watched by| CTRL
+    OC1 -->|localhost:8443| IR1
+    IR1 -->|IMDS auth| FOUNDRY
+    IR1 -->|every request| CS
+    IR1 <-->|"AGT mesh\nK8s DNS"| SVC2
+    IR2 <-->|"AGT mesh\nK8s DNS"| SVC1
+    OC2 -->|localhost:8443| IR2
+    IR2 -->|IMDS auth| FOUNDRY
+
+    style AKS fill:#f0f4ff,stroke:#0078D4,stroke-width:2px
+    style FOUNDRY fill:#e8f5e9,stroke:#2e7d32
+    style CS fill:#fff3e0,stroke:#e65100
+    style OC1 fill:#fff8e1,stroke:#f9a825
+    style OC2 fill:#fff8e1,stroke:#f9a825
+    style IR1 fill:#e3f2fd,stroke:#1565c0
+    style IR2 fill:#e3f2fd,stroke:#1565c0
 ```
 
 ### Why These Components?
@@ -81,7 +102,40 @@ azureclaw up --name my-agent --model gpt-4.1
 azureclaw connect my-agent
 ```
 
-**Prerequisites:** Node.js 22+, Azure CLI 2.60+, Docker.
+### Prerequisites
+
+| Requirement | Details |
+|---|---|
+| **Node.js 22+** | CLI runtime |
+| **Azure CLI 2.60+** | `az login` for authentication |
+| **Docker** | Local dev mode (`azureclaw dev`) |
+| **Azure Subscription** | With permissions to create resource groups |
+
+### Azure Setup (required for AKS deployment)
+
+**Azure AI Foundry project** is required for inference and Foundry services:
+
+1. Create an [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) project (or use an existing one)
+2. Deploy at least one model (e.g., `gpt-4.1`) in the project
+3. Note the **Foundry project endpoint** (e.g., `https://my-resource.services.ai.azure.com/api/projects/my-project`)
+
+**Required Azure RBAC roles** on the identity running `azureclaw up`:
+
+| Role | Scope | Why |
+|---|---|---|
+| **Owner** (recommended) | Resource group | Creates resources + assigns RBAC |
+| *Or* Contributor + User Access Administrator | Resource group | Split create/assign |
+
+The controller automatically assigns these roles to the AKS kubelet identity:
+
+| Role | Purpose |
+|---|---|
+| Cognitive Services OpenAI User | Model inference API access |
+| Cognitive Services User | Content Safety API access |
+| Azure AI User | Memory Store internal model calls |
+| AcrPull | Pull sandbox images from ACR |
+
+For Memory Store to work, `azureclaw up` also grants **Azure AI User** to the Foundry project's managed identity on the resource group (automated via Bicep).
 
 ---
 
@@ -158,40 +212,72 @@ See [docs/security.md](docs/security.md) for details.
 
 ---
 
-## Examples
+## Examples — Interacting via OpenClaw
 
-### Deploy two governed agents that communicate
+All interaction happens through the **OpenClaw agent TUI** — the agent uses Foundry services automatically via skills. No curl needed.
+
+### Memory Store — remember and recall across sessions
 
 ```bash
+azureclaw connect my-agent
+```
+```
+🦞 You: Remember that I'm a backend engineer who loves Rust and espresso.
+Agent: I've stored that in your profile.
+
+# Later, in a new session:
+🦞 You: What programming language do I love and what do I drink?
+Agent: You love Rust, and you drink espresso.
+```
+
+### Code Interpreter — run Python for data analysis
+
+```
+🦞 You: Calculate the first 15 prime numbers using Python and show the list.
+Agent: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
+```
+
+### Multi-agent governance — two agents communicate via AGT mesh
+
+```bash
+# Deploy two governed agents
 azureclaw add agent-alpha --model gpt-4.1 --governance --trust-threshold 500
 azureclaw add agent-beta --model gpt-4.1 --governance --trust-threshold 500
 
-# Alpha sends a task to Beta (from inside sandbox)
-curl -X POST http://localhost:8443/agt/mesh/send \
-  -H 'Content-Type: application/json' \
-  -d '{"to_agent":"agent-beta","content":"Analyze the cluster security","type":"task_request"}'
-
-# Beta checks inbox
-curl http://localhost:8443/agt/mesh/inbox
+# Connect to Alpha and ask it to delegate work to Beta
+azureclaw connect agent-alpha
+```
+```
+🦞 You: Send a task to agent-beta asking it to analyze our cluster security posture.
+Agent: Message sent to agent-beta via AGT mesh (trust score: 500, tier: Standard).
+       Message ID: agent-alpha-69bed776-104adcbe, status: delivered.
+```
+```bash
+# Connect to Beta to see the received task
+azureclaw connect agent-beta
+```
+```
+🦞 You: Check your inbox for messages from other agents.
+Agent: 1 message from agent-alpha:
+       "Please analyze the cluster security posture" (type: task_request)
 ```
 
-### Store and recall memories
+### Query Foundry deployments
 
-```bash
-# Store memories
-curl -X POST 'http://localhost:8443/memory_stores/my-store:update_memories?api-version=2025-11-15-preview' \
-  -d '{"items":[{"role":"user","content":"I prefer Rust and espresso","type":"message"}],"scope":"default"}'
-
-# Semantic search
-curl -X POST 'http://localhost:8443/memory_stores/my-store:search_memories?api-version=2025-11-15-preview' \
-  -d '{"scope":"default","items":[{"role":"user","content":"What language?","type":"message"}],"options":{"max_memories":5}}'
+```
+🦞 You: List all deployed AI models in our Foundry project.
+Agent: 4 models deployed:
+       1. gpt-5-mini (OpenAI, v2025-08-07)
+       2. gpt-4.1 (OpenAI, v2025-04-14)
+       3. DeepSeek-V3.2 (DeepSeek, v1)
+       4. text-embedding-3-small (OpenAI, v1)
 ```
 
-### Run Code Interpreter
+### Run evaluations
 
 ```bash
-curl -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
-  -d '{"model":"gpt-4.1","input":"Calculate fibonacci(20)","tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"store":false}'
+azureclaw eval my-agent --list-evaluators
+azureclaw eval my-agent --dataset test.jsonl --evaluator relevance
 ```
 
 ---
