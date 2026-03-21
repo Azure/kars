@@ -22,18 +22,26 @@ AzureClaw uses Foundry services as standalone APIs through the inference router.
 
 | Foundry Capability | API Type | Needs Hosted Agent? | How AzureClaw uses it |
 |---|---|---|---|
-| **Model Catalog (200+)** | `/openai/v1/chat/completions` | No | Router proxies inference (DONE) |
-| **Content Safety** | Content Safety REST API | No | Router calls on every request (DONE) |
-| **Prompt Shields** | Content Safety REST API | No | Router calls on every request (DONE) |
-| **Foundry IQ (Knowledge)** | AI Search agentic retrieval API | No | Skill teaches agent to query knowledge bases |
-| **Memory Store** | Memory Store REST API | No | Skill teaches agent to read/write memories |
-| **Evaluations** | Eval REST API | No | CLI-side `azureclaw eval` (future) |
+| **Model Catalog (200+)** | `/v1/chat/completions` | No | Router proxies inference |
+| **Content Safety** | Content Safety REST API | No | Router calls on every request |
+| **Prompt Shields** | Content Safety REST API | No | Router calls on every request |
+| **Memory Store** | `/memory_stores/*` REST API | No | Skill teaches agent to store/search memories. Async update + semantic search with embeddings. |
+| **Code Interpreter** | `/openai/responses` + `code_interpreter` tool | No | Responses API with `tools: [{type: "code_interpreter"}]`. No hosted agent needed. |
+| **Web Search** | `/openai/responses` + `bing_grounding` tool | No | Responses API with `tools: [{type: "bing_grounding"}]`. No hosted agent needed. |
+| **Memory Search** | `/openai/responses` + `memory_search` tool | No | Responses API with `tools: [{type: "memory_search"}]`. Cross-session memory recall. |
+| **Knowledge (Foundry IQ)** | `/openai/responses` + `file_search` / `azure_ai_search` | No | Responses API with agentic retrieval tools. RAG over uploaded or indexed documents. |
+| **Evaluations** | `/openai/evals`, `/evaluators`, `/evaluationrules` | No | Full eval lifecycle via REST API. |
+| **Conversations** | `/openai/conversations` | No | Persistent multi-turn conversation threads. |
+| **Agents** | `/agents` | No | Prompt agent CRUD (used by Foundry, not OpenClaw orchestration). |
+| **Deployments** | `/deployments` | No | Query deployed models, versions, capabilities. |
+| **Connections** | `/connections` | No | Query project data connections (AI Search, etc.). |
+| **Datasets** | `/datasets` | No | Upload/manage evaluation datasets. |
+| **Indexes** | `/indexes` | No | Knowledge indexes for agentic retrieval. |
+| **Insights** | `/insights` | No | Agent monitoring and usage analytics. |
 | **Guardrails** | Content Safety custom policies | No | Configurable via router |
-| **Web Search** | Bing Search API or Foundry web tool | Agent run for managed version | Skill teaches agent (Bing direct or agent run) |
-| **Code Interpreter** | Foundry Agent Service runs | Yes (agent run) | Skill teaches agent to create runs (optional) |
-| **Fine-tuning** | Fine-tune REST API | No | CLI-side `azureclaw fine-tune` (future) |
+| **Fine-tuning** | `/openai/fine-tuning/jobs` | No | Fine-tune REST API (regional availability varies). |
 
-**Key insight:** Most Foundry capabilities work as standalone APIs callable from any application. Only code_interpreter and some managed tools require Foundry agent runs. The `/agents/*` proxy routes remain available for these cases.
+**Key insight:** ALL Foundry capabilities work as standalone APIs via the Responses API — no hosted Foundry agents are required. OpenClaw is the sole orchestrator; Foundry provides the managed AI services. The router proxies 18 distinct API groups with IMDS authentication.
 
 ---
 
@@ -147,9 +155,28 @@ Per-sandbox sidecar that intercepts every inference call. The agent container (U
 | `POST /v1/completions` | Forward to Foundry. |
 | `POST /v1/embeddings` | Forward to Foundry. |
 | `GET /v1/models` | Query Foundry model catalog. |
-| `GET/POST /agents`, `/agents/{*path}` | Foundry Agent API proxy (threads, memory, files, runs). |
+| `/memory_stores`, `/memory_stores/{*path}` | Memory Store — CRUD, search, update memories. |
+| `/openai/responses`, `/openai/responses/{*path}` | Responses API — Code Interpreter, Web Search, Memory Search, Knowledge. |
+| `/openai/conversations`, `/openai/conversations/{*path}` | Persistent multi-turn conversations. |
+| `/openai/evals`, `/openai/evals/{*path}` | OpenAI Evaluations — create evals, runs. |
+| `/openai/fine-tuning/{*path}` | Fine-tuning jobs. |
+| `/agents`, `/agents/{*path}` | Foundry Agents — prompt agent CRUD. |
+| `/evaluators`, `/evaluators/{*path}` | Evaluator catalog. |
+| `/evaluationrules`, `/evaluationrules/{*path}` | Evaluation rules. |
+| `/evaluationtaxonomies`, `/evaluationtaxonomies/{*path}` | Evaluation taxonomies. |
+| `/indexes`, `/indexes/{*path}` | Knowledge indexes (Foundry IQ). |
+| `/connections`, `/connections/{*path}` | Project data connections. |
+| `/deployments`, `/deployments/{*path}` | Model deployments. |
+| `/datasets`, `/datasets/{*path}` | Datasets (upload, versions). |
+| `/insights`, `/insights/{*path}` | Agent monitoring insights. |
+| `/knowledgebases`, `/knowledgebases/{*path}` | Knowledge bases (agentic retrieval). |
+| `/redTeams/runs`, `/redTeams/runs/{*path}` | Red team runs. |
+| `/schedules`, `/schedules/{*path}` | Scheduled jobs. |
 | `GET /healthz` | Readiness probe. |
+| `GET /readyz` | Deep readiness (token + Content Safety check). |
 | `GET /metrics` | Prometheus metrics. |
+
+All Foundry project routes use the `foundry_proxy` handler: acquire IMDS token (audience: `https://ai.azure.com`), forward request with original path + query string, log method/path/status.
 
 **Request pipeline:**
 

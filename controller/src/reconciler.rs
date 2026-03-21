@@ -498,6 +498,57 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // ── Step 4b: Azure Services RBAC annotations ─────────────────────────
+    // If spec.azure_services is configured, annotate the ServiceAccount and
+    // namespace so that `azureclaw up` (or a future RBAC controller) can
+    // create the necessary Azure role assignments for the sandbox identity.
+    if let Some(ref azure_services) = spec.azure_services {
+        if !azure_services.is_empty() {
+            let sa_api: Api<k8s_openapi::api::core::v1::ServiceAccount> =
+                Api::namespaced(client.clone(), &sandbox_ns);
+            let mut annotations = std::collections::BTreeMap::new();
+            for (i, svc) in azure_services.iter().enumerate() {
+                annotations.insert(
+                    format!("azureclaw.azure.com/service-{i}"),
+                    svc.service.clone(),
+                );
+                if let Some(ref acct) = svc.account {
+                    annotations.insert(
+                        format!("azureclaw.azure.com/service-{i}-account"),
+                        acct.clone(),
+                    );
+                }
+                if let Some(ref perms) = svc.permissions {
+                    annotations.insert(
+                        format!("azureclaw.azure.com/service-{i}-permissions"),
+                        perms.join(","),
+                    );
+                }
+            }
+            let sa_patch = json!({
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {
+                    "name": &name,
+                    "namespace": &sandbox_ns,
+                    "annotations": annotations,
+                }
+            });
+            sa_api
+                .patch(
+                    &name,
+                    &PatchParams::apply("azureclaw-controller"),
+                    &Patch::Apply(serde_json::from_value::<k8s_openapi::api::core::v1::ServiceAccount>(sa_patch)?),
+                )
+                .await?;
+            tracing::info!(
+                sandbox = %name,
+                services = azure_services.len(),
+                "Azure services RBAC annotations applied to ServiceAccount"
+            );
+        }
+    }
+
     // ── Step 5: Update status ────────────────────────────────────────────
     let sandbox_api: Api<ClawSandbox> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());

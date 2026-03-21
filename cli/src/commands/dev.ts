@@ -173,6 +173,8 @@ export function devCommand(): Command {
           "--hostname", options.name,
           ...seccompArgs,
           "--read-only",
+          // Grant NET_ADMIN for iptables egress guard (same as AKS init container)
+          "--cap-add", "NET_ADMIN",
           // Writable paths
           "--tmpfs", "/tmp:rw,noexec,nosuid,size=1g",
           "-v", `${containerName}-data:/sandbox`,
@@ -191,6 +193,29 @@ export function devCommand(): Command {
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,
           image,
         ], { stdio: "pipe" });
+
+        // ── Egress guard: iptables restricts UID 1000 to localhost + DNS ──
+        // Same rules as the AKS egress-guard init container.
+        // UID 1000 (openclaw agent) can only reach localhost and DNS.
+        // UID 1001 (inference-router) can reach the internet for Foundry API.
+        let hasIptables = false;
+        try {
+          await execa("docker", [
+            "exec", "-u", "root", containerName, "sh", "-c",
+            [
+              "iptables -N AZURECLAW_EGRESS 2>/dev/null || true",
+              "iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT",
+              "iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT",
+              "iptables -A AZURECLAW_EGRESS -p tcp --dport 53 -j ACCEPT",
+              "iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable",
+              "iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS",
+            ].join(" && "),
+          ], { stdio: "pipe" });
+          hasIptables = true;
+        } catch {
+          // iptables not available (e.g., rootless Docker) — fall back to Docker isolation only
+        }
+
         spinner.succeed("Sandbox running");
 
         // ── Security status ──────────────────────────────────────────
@@ -199,6 +224,7 @@ export function devCommand(): Command {
         console.log(`  ${chalk.green("✓")} Non-root user (sandbox:1000)`);
         console.log(`  ${chalk.green("✓")} All root privileges removed`);
         console.log(`  ${hasSeccomp ? chalk.green("✓") : chalk.yellow("○")} seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
+        console.log(`  ${hasIptables ? chalk.green("✓") : chalk.yellow("○")} iptables egress guard ${hasIptables ? "(UID 1000 → localhost + DNS only)" : "(not available)"}`);
         console.log(`  ${chalk.green("✓")} Writable paths: /sandbox, /tmp only`);
         console.log(`  ${chalk.green("✓")} tmpfs /tmp (noexec, 1GB limit)`);
         console.log(`  ${chalk.green("✓")} API key mounted as read-only secret (/run/secrets/)`);
