@@ -18,6 +18,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY controller/ controller/
 COPY inference-router/ inference-router/
+COPY cli/policies/ cli/policies/
+COPY cli/blocklists/ cli/blocklists/
 
 RUN cargo build --release --package azureclaw-controller
 

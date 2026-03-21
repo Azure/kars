@@ -139,6 +139,7 @@ pub struct TokenBudgetConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NetworkPolicyConfig {
     #[serde(default = "default_true")]
     pub default_deny: bool,
@@ -147,7 +148,7 @@ pub struct NetworkPolicyConfig {
     pub allowed_endpoints: Option<Vec<EndpointConfig>>,
     /// Enable egress learn mode: observe all accessed domains (blocklist still enforced).
     /// Use `azureclaw policy learn <name>` to export the learned allowlist.
-    #[serde(default)]
+    #[serde(default, alias = "learnEgress")]
     pub learn_egress: bool,
 }
 
