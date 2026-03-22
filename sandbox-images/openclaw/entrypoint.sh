@@ -48,6 +48,9 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "tools": {
     "deny": ["sessions_spawn", "sessions_send"]
   },
+  "plugins": {
+    "allow": ["azureclaw"]
+  },
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" }
@@ -195,7 +198,10 @@ EOF
     # Copy Foundry skills (SKILL.md files)
     if [ -d /opt/azureclaw-plugin/skills ]; then
       cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
-      echo "[azureclaw] Foundry + governance skills installed"
+      # Also copy to workspace skills so they're in the standard location
+      mkdir -p "$WORKSPACE_DIR/skills"
+      cp -r /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+      echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
     fi
     # Copy node_modules for AGT SDK (@agentmesh/sdk)
     if [ -d /opt/azureclaw-plugin/node_modules ]; then
