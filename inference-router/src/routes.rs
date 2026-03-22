@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use axum::extract::Path;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -205,6 +206,9 @@ pub fn agt_routes() -> Router<AppState> {
         // Egress learn mode
         .route("/egress/learned", get(egress_learned))
         .route("/egress/learned/clear", post(egress_learned_clear))
+        // AGT relay proxy (WebSocket + HTTP registry)
+        .route("/agt/relay", get(agt_relay_proxy))
+        .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
         // Status
         .route("/agt/status", get(agt_status))
 }
@@ -990,6 +994,125 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         "egress_learn_mode": state.blocklist.is_learn_mode(),
         "egress_learned_domains": state.blocklist.learned_count().await,
     }))
+}
+
+/// GET /agt/relay — WebSocket proxy to the self-hosted AgentMesh relay.
+/// The plugin (UID 1000) can only reach localhost. The router (UID 1001) proxies
+/// WebSocket connections to the relay at agentmesh-relay.agentmesh.svc.cluster.local:8765.
+async fn agt_relay_proxy(
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let relay_url = std::env::var("AGT_RELAY_URL")
+        .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
+
+    ws.on_upgrade(move |client_socket| async move {
+        relay_websocket_bridge(client_socket, &relay_url).await;
+    })
+}
+
+/// Bidirectional WebSocket bridge: client ↔ relay.
+async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
+    use futures::stream::StreamExt;
+    use futures::sink::SinkExt;
+    use tokio_tungstenite::tungstenite;
+
+    // Connect to the upstream relay
+    let upstream = match tokio_tungstenite::connect_async(relay_url).await {
+        Ok((ws, _)) => ws,
+        Err(e) => {
+            tracing::error!(error = %e, url = %relay_url, "Failed to connect to AGT relay");
+            return;
+        }
+    };
+
+    tracing::info!(url = %relay_url, "AGT relay WebSocket proxy connected");
+
+    let (mut client_tx, mut client_rx) = client_socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+
+    // Forward: client → relay
+    let client_to_relay = tokio::spawn(async move {
+        while let Some(Ok(msg)) = client_rx.next().await {
+            let tung_msg = match msg {
+                Message::Text(t) => tungstenite::Message::Text(t.to_string().into()),
+                Message::Binary(b) => tungstenite::Message::Binary(b.to_vec().into()),
+                Message::Ping(p) => tungstenite::Message::Ping(p.to_vec().into()),
+                Message::Pong(p) => tungstenite::Message::Pong(p.to_vec().into()),
+                Message::Close(_) => break,
+            };
+            if upstream_tx.send(tung_msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Forward: relay → client
+    let relay_to_client = tokio::spawn(async move {
+        while let Some(Ok(msg)) = upstream_rx.next().await {
+            let axum_msg = match msg {
+                tungstenite::Message::Text(t) => Message::Text(t.to_string().into()),
+                tungstenite::Message::Binary(b) => Message::Binary(b.to_vec().into()),
+                tungstenite::Message::Ping(p) => Message::Ping(p.to_vec().into()),
+                tungstenite::Message::Pong(p) => Message::Pong(p.to_vec().into()),
+                tungstenite::Message::Close(_) => break,
+                _ => continue,
+            };
+            if client_tx.send(axum_msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Wait for either direction to close
+    tokio::select! {
+        _ = client_to_relay => {},
+        _ = relay_to_client => {},
+    }
+    tracing::info!("AGT relay WebSocket proxy disconnected");
+}
+
+/// GET/POST /agt/registry/* — HTTP proxy to the self-hosted AgentMesh registry.
+/// Proxies all registry API calls so the plugin (UID 1000, localhost-only) can
+/// reach the registry service via the router.
+async fn agt_registry_proxy(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+    method: axum::http::Method,
+    body: Bytes,
+) -> impl IntoResponse {
+    let registry_url = std::env::var("AGT_REGISTRY_URL")
+        .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
+
+    let url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
+
+    let mut req = state.client.request(
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
+        &url,
+    );
+
+    // Forward Content-Type
+    if let Some(ct) = headers.get("content-type") {
+        req = req.header("content-type", ct);
+    }
+
+    if !body.is_empty() {
+        req = req.body(body.to_vec());
+    }
+
+    match req.timeout(std::time::Duration::from_secs(10)).send().await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let body = resp.bytes().await.unwrap_or_default();
+            (status, [(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(url = %url, error = %e, "AGT registry proxy failed");
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": format!("Registry unreachable: {}", e)
+            }))).into_response()
+        }
+    }
 }
 
 /// GET /blocklist/status — blocklist health and domain count.

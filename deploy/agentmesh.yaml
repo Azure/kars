@@ -1,0 +1,183 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+---
+# PostgreSQL for the AGT registry
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: agentmesh
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: agentmesh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: agentmesh
+            - name: POSTGRES_PASSWORD
+              value: agentmesh-aks
+            - name: POSTGRES_DB
+              value: agentmesh
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [sh, -c, "pg_isready -U agentmesh"]
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agentmesh
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+# AGT Registry API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: agentmesh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentmesh-registry
+  template:
+    metadata:
+      labels:
+        app: agentmesh-registry
+    spec:
+      containers:
+        - name: registry
+          image: azureclawacr.azurecr.io/agentmesh-registry:v0.3.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              value: postgres://agentmesh:agentmesh-aks@postgres.agentmesh.svc.cluster.local:5432/agentmesh
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: RUST_LOG
+              value: agentmesh_registry=info,actix_web=info
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-registry
+  namespace: agentmesh
+spec:
+  selector:
+    app: agentmesh-registry
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# AGT Relay Server (WebSocket)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: agentmesh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentmesh-relay
+  template:
+    metadata:
+      labels:
+        app: agentmesh-relay
+    spec:
+      containers:
+        - name: relay
+          image: azureclawacr.azurecr.io/agentmesh-relay:v0.3.0
+          ports:
+            - containerPort: 8765
+          env:
+            - name: RUST_LOG
+              value: agentmesh_relay=info
+            - name: RELAY_ADDR
+              value: "0.0.0.0:8765"
+          readinessProbe:
+            tcpSocket:
+              port: 8765
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-relay
+  namespace: agentmesh
+spec:
+  selector:
+    app: agentmesh-relay
+  ports:
+    - port: 8765
+      targetPort: 8765

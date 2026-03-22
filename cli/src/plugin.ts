@@ -14,18 +14,22 @@
 import type { Command } from "commander";
 
 // ---------------------------------------------------------------------------
-// AGT SDK — Microsoft Agent Governance Toolkit
-// Tool-level policy, trust, audit (application layer).
-// Infrastructure controls (mesh routing, NetworkPolicy) stay in Rust router.
+// AGT SDK — AgentMesh (amitayks/agentmesh)
+// Full E2E encrypted inter-agent communication via self-hosted relay/registry.
+// Also: tool-level policy, trust scoring, audit logging.
+// Infrastructure controls (NetworkPolicy, token budgets) stay in Rust router.
 // ---------------------------------------------------------------------------
 
 let agtPolicy: any = null;
 let agtTrustStore: any = null;
 let agtAuditLogger: any = null;
+let agtMeshClient: any = null;
+let agtIdentity: any = null;
 
-function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
+async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
   try {
     const sdk = require("@agentmesh/sdk");
+
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
       { action: "web_search", effect: "allow" },
@@ -41,11 +45,46 @@ function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) 
       { action: "shell:dd", effect: "deny" },
       { action: "shell:mkfs", effect: "deny" },
     ]);
+
     // Trust store — 0-1000 scoring with tiers
     agtTrustStore = sdk.createTrustStore();
     // Audit logger — hash-chain append-only log
     agtAuditLogger = sdk.createAuditLogger();
-    log.info(`AGT SDK loaded (v${sdk.VERSION}) — policy, trust, audit active`);
+
+    // Generate cryptographic identity (Ed25519 + X25519)
+    agtIdentity = await sdk.Identity.generate();
+    log.info(`AGT identity: ${agtIdentity.amid}`);
+
+    // Create AgentMeshClient — connects to self-hosted relay/registry via router proxy
+    // Router (UID 1001) proxies: /agt/relay → ws://agentmesh-relay:8765
+    //                            /agt/registry/* → http://agentmesh-registry:8080/v1/*
+    const registryUrl = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+    const relayUrl = process.env.AGT_RELAY_URL || "ws://127.0.0.1:8443/agt/relay";
+
+    agtMeshClient = new sdk.AgentMeshClient(agtIdentity, {
+      storage: new sdk.MemoryStorage(),
+      registryUrl,
+      relayUrl,
+    });
+
+    // Connect to the mesh — registers with registry + connects to relay
+    const sandboxName = process.env.SANDBOX_NAME || "unknown";
+    try {
+      await agtMeshClient.connect({
+        displayName: sandboxName,
+        capabilities: ["azureclaw-agent", "task-execution"],
+      });
+      log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
+    } catch (connErr: any) {
+      log.warn(`AGT mesh connect deferred: ${connErr.message} (will retry on first send)`);
+    }
+
+    // Set up message handler
+    agtMeshClient.onMessage((fromAmid: string, message: any) => {
+      log.info(`AGT mesh message from ${fromAmid.slice(0, 12)}...: ${JSON.stringify(message).slice(0, 200)}`);
+    });
+
+    log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit, mesh active`);
   } catch (e: any) {
     log.warn(`AGT SDK not available: ${e.message}. Using router-native governance.`);
   }
@@ -179,8 +218,8 @@ const azureClawPlugin = {
 
     log.info(`AzureClaw plugin loaded (model: ${config.model})`);
 
-    // Initialize AGT SDK (tool-level governance)
-    initAGT(log);
+    // Initialize AGT SDK (identity, policy, trust, audit, mesh)
+    initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
 
     // ── Register Azure AI Foundry as a model provider ───────────────────
     api.registerProvider({
@@ -436,6 +475,10 @@ const azureClawPlugin = {
         const sdkStatus = agtPolicy ? "active (@agentmesh/sdk)" : "unavailable (using router-native)";
         const trustStatus = agtTrustStore ? "active (Ed25519, 0-1000 scale)" : "unavailable";
         const auditStatus = agtAuditLogger ? "active (hash-chain)" : "unavailable";
+        const meshStatus = agtMeshClient
+          ? (agtMeshClient.isConnected ? "connected (E2E encrypted)" : "initialized (not connected)")
+          : "unavailable";
+        const identityStatus = agtIdentity ? `AMID: ${agtIdentity.amid}` : "not generated";
 
         try {
           const http = await import("node:http");
@@ -451,6 +494,8 @@ const azureClawPlugin = {
               "**AzureClaw AGT Governance**",
               "",
               "**Application Layer** (plugin, @agentmesh/sdk):",
+              `  Identity: ${identityStatus}`,
+              `  Mesh client: ${meshStatus}`,
               `  Policy engine: ${sdkStatus}`,
               `  Trust store: ${trustStatus}`,
               `  Audit logger: ${auditStatus}`,
