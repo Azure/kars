@@ -601,7 +601,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     deploy_api
         .patch(
             &name,
-            &PatchParams::apply("azureclaw-controller"),
+            &PatchParams::apply("azureclaw-controller").force(),
             &Patch::Apply(deployment),
         )
         .await?;
@@ -767,7 +767,17 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // and patches the ConfigMap — so even if the router can't reach feeds
     // directly, the mounted file stays fresh.
     {
-        let seed_domains = include_str!("../../cli/blocklists/seed-domains.txt");
+        let full_seed = include_str!("../../cli/blocklists/seed-domains.txt");
+        // Truncate to stay under 1MB ConfigMap limit (K8s rejects >1048576 bytes)
+        let seed_domains = if full_seed.len() > 900_000 {
+            // Take the first N lines that fit in 900KB
+            let mut end = 900_000;
+            while end > 0 && !full_seed.is_char_boundary(end) { end -= 1; }
+            // Find last newline before the boundary
+            if let Some(pos) = full_seed[..end].rfind('\n') { &full_seed[..pos] } else { &full_seed[..end] }
+        } else {
+            full_seed
+        };
         let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
         let cm: ConfigMap = serde_json::from_value(json!({
             "apiVersion": "v1",
