@@ -1,7 +1,6 @@
 target/
 cli/node_modules/
 .git/
-*.md
 LICENSE
 .github/
 docs/
