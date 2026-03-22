@@ -39,6 +39,9 @@ anyhow.workspace = true
 # AGT governance (policy YAML parsing)
 serde_yaml = "0.9"
 
+# WebSocket proxy for AGT relay
+tokio-tungstenite = "0.26"
+
 # Kubernetes (for sub-agent spawn via CRD)
 kube.workspace = true
 k8s-openapi.workspace = true
