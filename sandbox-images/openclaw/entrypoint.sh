@@ -46,6 +46,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
     }
   },
   "tools": {
+    "allow": ["azureclaw"],
     "deny": ["sessions_spawn", "sessions_send"]
   },
   "plugins": {
