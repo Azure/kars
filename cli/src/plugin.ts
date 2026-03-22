@@ -42,6 +42,13 @@ let agtAuditLogger: any = null;
 let agtMeshClient: any = null;
 let agtIdentity: any = null;
 
+// AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
+const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string }> = [];
+
+// AMID → agent name mapping (populated during send via registry search)
+const amidToName: Map<string, string> = new Map();
+const nameToAmid: Map<string, string> = new Map();
+
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
   try {
     const sdk = require("@agentmesh/sdk");
@@ -83,24 +90,35 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       relayUrl,
     });
 
-    // Connect to the mesh — registers with registry + connects to relay
+    // Connect to the mesh — registers with registry + connects to relay.
+    // Capabilities include the sandbox name so other agents can discover us.
     const sandboxName = process.env.SANDBOX_NAME || "unknown";
     try {
       await agtMeshClient.connect({
         displayName: sandboxName,
-        capabilities: ["azureclaw-agent", "task-execution"],
+        capabilities: ["azureclaw-agent", "task-execution", sandboxName],
       });
       log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
     } catch (connErr: any) {
       log.warn(`AGT mesh connect deferred: ${connErr.message} (will retry on first send)`);
     }
 
-    // Set up message handler
+    // Set up message handler — stores received messages in the AGT inbox buffer
     agtMeshClient.onMessage((fromAmid: string, message: any) => {
-      log.info(`AGT mesh message from ${fromAmid.slice(0, 12)}...: ${JSON.stringify(message).slice(0, 200)}`);
+      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      const entry = {
+        from_amid: fromAmid,
+        from_agent: fromName,
+        content: typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message)),
+        message_type: message?.type || "message",
+        timestamp: new Date().toISOString(),
+        id: `agt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      };
+      agtInbox.push(entry);
+      log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(entry.content).slice(0, 200)}`);
     });
 
-    log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit, mesh active`);
+    log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit, mesh ACTIVE (relay path for inter-agent comms)`);
   } catch (e: any) {
     log.warn(`AGT SDK not available: ${e.message}. Using router-native governance.`);
   }
@@ -327,7 +345,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh. The sub-agent will auto-process the task with its AI model and send the result back to your inbox. Wait for the sub-agent to be Running first.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). The sub-agent will auto-process the task with its AI model and send the result back to your inbox. Wait for the sub-agent to be Running first.",
       parameters: {
         type: "object",
         properties: {
@@ -337,13 +355,97 @@ const azureClawPlugin = definePluginEntry({
         required: ["to_agent", "content"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
+        const agentName = params.to_agent as string;
+        const msgContent = params.content as string;
+
+        // ── Primary path: AGT SDK relay (E2E encrypted) ──
+        if (agtMeshClient && agtIdentity) {
+          try {
+            // 1. Discover target agent's AMID via registry search
+            let targetAmid = nameToAmid.get(agentName);
+            if (!targetAmid) {
+              // Try SDK search first (uses registry's capability-based search)
+              try {
+                const searchResult = await agtMeshClient.search({ capability: agentName });
+                if (searchResult && searchResult.results && searchResult.results.length > 0) {
+                  const match = searchResult.results.find((r: any) =>
+                    r.displayName === agentName || r.capabilities?.includes(agentName)
+                  ) || searchResult.results[0];
+                  targetAmid = match.amid || match.id;
+                }
+              } catch (searchErr: any) {
+                log.warn(`AGT SDK search for '${agentName}': ${searchErr.message}`);
+              }
+
+              // Fallback: direct registry HTTP search by capability
+              if (!targetAmid) {
+                try {
+                  const http = await import("node:http");
+                  const regResult: any = await new Promise((resolve, reject) => {
+                    const req = http.get(
+                      `http://127.0.0.1:8443/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`,
+                      (res: any) => {
+                        let data = "";
+                        res.on("data", (c: Buffer) => { data += c.toString(); });
+                        res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+                      },
+                    );
+                    req.on("error", reject);
+                    req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+                  });
+                  if (regResult && Array.isArray(regResult.agents)) {
+                    const match = regResult.agents.find((a: any) =>
+                      a.displayName === agentName || a.capabilities?.includes(agentName)
+                    );
+                    if (match) targetAmid = match.amid;
+                  }
+                } catch (regErr: any) {
+                  log.warn(`AGT registry HTTP search: ${regErr.message}`);
+                }
+              }
+
+              if (targetAmid) {
+                nameToAmid.set(agentName, targetAmid);
+                amidToName.set(targetAmid, agentName);
+              }
+            }
+
+            if (targetAmid) {
+              // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
+              await agtMeshClient.send(targetAmid, {
+                type: "task_request",
+                content: msgContent,
+                from_agent: process.env.SANDBOX_NAME || "unknown",
+                timestamp: new Date().toISOString(),
+              });
+              log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
+              return { content: [{ type: "text", text: JSON.stringify({
+                status: "delivered_via_agt_relay",
+                to_agent: agentName,
+                to_amid: targetAmid,
+                from_amid: agtIdentity.amid,
+                protocol: "AGT E2E encrypted (Signal Protocol)",
+                message_id: `agt-${Date.now().toString(36)}`,
+              }, null, 2) }] };
+            } else {
+              log.warn(`AGT relay: target '${agentName}' not found in registry, falling back to router`);
+            }
+          } catch (agtErr: any) {
+            log.warn(`AGT relay send failed: ${agtErr.message}, falling back to router`);
+          }
+        }
+
+        // ── Fallback: router HTTP (K8s DNS, no encryption) ──
         try {
           const result = await routerCall("POST", "/agt/mesh/send", {
-            to_agent: params.to_agent,
-            content: params.content,
+            to_agent: agentName,
+            content: msgContent,
             type: "task_request",
           });
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: JSON.stringify({
+            ...result,
+            protocol: "router_http_fallback (no E2E encryption)",
+          }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Mesh send failed: ${e.message}` }] };
         }
@@ -353,12 +455,34 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_inbox",
       label: "Check Mesh Inbox",
-      description: "Check your AGT mesh inbox for responses from sub-agents. Returns messages with from_agent, message_type, and content. Call this after sending a task and waiting for the sub-agent to process it (typically 15-60 seconds).",
+      description: "Check your AGT mesh inbox for responses from sub-agents. Returns messages received via the E2E encrypted AGT relay and any router-level messages.",
       parameters: { type: "object", properties: {} },
       async execute(_id: string, _params: Record<string, unknown>) {
         try {
-          const result = await routerCall("GET", "/agt/mesh/inbox");
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          // Collect messages from both sources
+          const agtMessages = agtInbox.splice(0, agtInbox.length); // drain AGT buffer
+
+          // Also get any router-level messages (fallback / auto-reply)
+          let routerMessages: any[] = [];
+          try {
+            const routerResult = await routerCall("GET", "/agt/mesh/inbox");
+            routerMessages = routerResult.messages || [];
+          } catch {
+            // Router inbox unavailable — use AGT only
+          }
+
+          // Merge and deduplicate (prefer AGT source)
+          const allMessages = [
+            ...agtMessages.map((m: any) => ({ ...m, source: "agt_relay_e2e" })),
+            ...routerMessages.map((m: any) => ({ ...m, source: "router_http" })),
+          ];
+
+          return { content: [{ type: "text", text: JSON.stringify({
+            count: allMessages.length,
+            agt_relay_count: agtMessages.length,
+            router_count: routerMessages.length,
+            messages: allMessages,
+          }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Inbox check failed: ${e.message}` }] };
         }

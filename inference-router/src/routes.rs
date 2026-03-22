@@ -1079,6 +1079,7 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
 async fn agt_registry_proxy(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    query: axum::extract::RawQuery,
     headers: HeaderMap,
     method: axum::http::Method,
     body: Bytes,
@@ -1086,7 +1087,12 @@ async fn agt_registry_proxy(
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
-    let url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
+    let mut url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
+    // Forward query parameters (critical for search/lookup)
+    if let Some(qs) = query.0 {
+        url.push('?');
+        url.push_str(&qs);
+    }
 
     let mut req = state.client.request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
