@@ -1,7 +1,7 @@
 ---
 name: azureclaw-spawn
 description: Spawn, manage, and communicate with isolated sub-agent sandboxes using AzureClaw plugin slash commands. Each sub-agent gets its own K8s namespace with full security controls and AGT mesh communication.
-metadata: {"openclaw": {"requires": {"env": ["SANDBOX_NAME"]}, "primaryEnv": "SANDBOX_NAME"}}
+metadata: {"openclaw": {"always": true}}
 ---
 
 # AzureClaw Sub-Agent Spawn
