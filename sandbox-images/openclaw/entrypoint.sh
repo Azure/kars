@@ -197,6 +197,11 @@ EOF
       cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
       echo "[azureclaw] Foundry + governance skills installed"
     fi
+    # Copy node_modules for AGT SDK (@agentmesh/sdk)
+    if [ -d /opt/azureclaw-plugin/node_modules ]; then
+      cp -r /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
+      echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
+    fi
     # Copy AGT policies if governance enabled
     if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
       mkdir -p "$OPENCLAW_DIR/policies"
