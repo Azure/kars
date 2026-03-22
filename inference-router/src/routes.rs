@@ -843,11 +843,13 @@ async fn agt_mesh_inbox(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /agt/mesh/receive — receive a message from the mesh relay (internal).
+/// If the message is a task_request, auto-processes it via the local model
+/// and sends the result back to the sender via mesh.
 async fn agt_mesh_receive(
     State(state): State<AppState>,
     Json(msg): Json<crate::governance::MeshMessage>,
 ) -> impl IntoResponse {
-    tracing::info!(from = %msg.from_agent, to = %msg.to_agent, "Mesh message received");
+    tracing::info!(from = %msg.from_agent, to = %msg.to_agent, msg_type = %msg.message_type, "Mesh message received");
 
     // Trust gate on incoming messages too
     if !state.governance.trust.is_trusted(&msg.from_agent).await {
@@ -867,7 +869,102 @@ async fn agt_mesh_receive(
         "allow",
         &format!("Message {} received", msg.id),
     ).await;
+
+    let from_agent = msg.from_agent.clone();
+    let msg_id = msg.id.clone();
+    let msg_type = msg.message_type.clone();
+    let task_content = msg.content.clone();
     state.governance.inbox.receive(msg).await;
+
+    // Auto-process task_request messages: call local model and send result back
+    if msg_type == "task_request" {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            tracing::info!(from = %from_agent, "Auto-processing task_request via local model");
+
+            // Call local inference to process the task
+            let chat_body = serde_json::json!({
+                "model": state_clone.config.default_model,
+                "messages": [
+                    {"role": "system", "content": "You are a sub-agent. Complete the requested task concisely. Return only the result."},
+                    {"role": "user", "content": task_content}
+                ],
+                "max_tokens": 1024
+            });
+
+            let result_content = match state_clone.client
+                .post("http://127.0.0.1:8443/v1/chat/completions")
+                .json(&chat_body)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(data) => data
+                            .get("choices").and_then(|c| c.get(0))
+                            .and_then(|c| c.get("message"))
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("Task completed but no output generated.")
+                            .to_string(),
+                        Err(e) => format!("Task processing error: {e}"),
+                    }
+                }
+                Err(e) => format!("Inference unavailable: {e}"),
+            };
+
+            tracing::info!(from = %from_agent, result_len = result_content.len(), "Task processed, sending result back");
+
+            // Send result back via mesh
+            let reply = crate::governance::MeshMessage {
+                id: format!("{}-reply-{}", state_clone.governance.sandbox_name, uuid_v4()),
+                from_agent: state_clone.governance.sandbox_name.clone(),
+                to_agent: from_agent.clone(),
+                content: result_content,
+                message_type: "task_response".into(),
+                timestamp: format!("{}Z", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                signature: String::new(),
+            };
+
+            // Resolve sender's namespace for reply
+            let target_url = match spawn::get_sandbox_status(&from_agent).await {
+                Ok(resp) => {
+                    let ns = resp.namespace.unwrap_or_else(|| format!("azureclaw-{}", from_agent));
+                    format!("http://{}.{}.svc.cluster.local:8443", from_agent, ns)
+                }
+                Err(_) => {
+                    let ns = std::env::var("AGT_MESH_NAMESPACE")
+                        .unwrap_or_else(|_| "azureclaw-foundry-test".into());
+                    format!("http://{}.{}.svc.cluster.local:8443", from_agent, ns)
+                }
+            };
+
+            match state_clone.client
+                .post(&format!("{}/agt/mesh/receive", target_url))
+                .json(&reply)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(to = %from_agent, "Task result sent back via mesh");
+                    state_clone.governance.audit.append(
+                        &format!("mesh:auto-reply:{}", from_agent),
+                        "delivered",
+                        &format!("Auto-reply to task {} delivered", msg_id),
+                    ).await;
+                }
+                Ok(resp) => {
+                    tracing::warn!(to = %from_agent, status = %resp.status(), "Failed to send task result back");
+                }
+                Err(e) => {
+                    tracing::warn!(to = %from_agent, error = %e, "Could not reach sender for reply");
+                }
+            }
+        });
+    }
 
     (StatusCode::OK, Json(serde_json::json!({"status": "received"}))).into_response()
 }

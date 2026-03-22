@@ -30,22 +30,23 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentmesh/sdk": "^0.1.2",
     "@azure/identity": "^4.0.0",
     "@azure/keyvault-secrets": "^4.8.0",
-    "commander": "^13.0.0",
     "chalk": "^5.3.0",
-    "ora": "^8.0.0",
+    "commander": "^13.0.0",
+    "execa": "^9.0.0",
     "inquirer": "^12.0.0",
-    "yaml": "^2.6.0",
-    "execa": "^9.0.0"
+    "ora": "^8.0.0",
+    "yaml": "^2.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
+    "oxlint": "^0.16.0",
     "tsdown": "^0.6.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "oxlint": "^0.16.0"
+    "vitest": "^3.0.0"
   },
   "engines": {
     "node": ">=22.0.0"
