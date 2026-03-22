@@ -1,34 +1,28 @@
 ---
 name: azureclaw-spawn
-description: Spawn, manage, and communicate with sub-agent sandboxes using AzureClaw slash commands. Each sub-agent gets its own isolated K8s namespace with security controls and optional AGT mesh communication.
+description: Spawn, manage, and communicate with isolated sub-agent sandboxes using AzureClaw plugin slash commands. Each sub-agent gets its own K8s namespace with full security controls and AGT mesh communication.
 metadata: {"openclaw": {"requires": {"env": ["SANDBOX_NAME"]}, "primaryEnv": "SANDBOX_NAME"}}
 ---
 
-# AzureClaw Spawn — Sub-Agent Management
+# AzureClaw Sub-Agent Spawn
 
-You can spawn new sandboxed sub-agents using the `/azureclaw-spawn` slash command.
-Each spawned agent gets its own:
+Use the `/azureclaw-spawn` family of slash commands to create, monitor, and
+tear down isolated sub-agent sandboxes. Each sub-agent gets its own:
 - Isolated K8s namespace with NetworkPolicy
 - Inference router sidecar (IMDS auth, Content Safety, token budgets)
 - Domain blocklist (auto-refreshing threat intelligence)
-- Optional AGT governance (trust-gated mesh communication back to you)
-
-**Important**: You do NOT have kubectl, K8s API, or CLI access inside the sandbox.
-All sub-agent management goes through slash commands, which call the inference
-router sidecar at `localhost:8443`.
+- AGT governance (trust-gated mesh communication)
 
 ## When to spawn a sub-agent
 
-- **Delegation**: spawn a specialist agent for a specific task
-- **Parallel work**: run multiple agents simultaneously on different tasks
-- **Isolation**: give untrusted code its own sandbox with tighter controls
+- **Delegation**: spawn a specialist for a focused task
+- **Parallel work**: run multiple agents on different tasks
+- **Isolation**: give untrusted code its own sandbox
 
-## Slash commands
-
-### Spawn a sub-agent
+## Spawn a sub-agent
 
 ```
-/azureclaw-spawn sub-analyst --model gpt-4.1 --governance
+/azureclaw-spawn my-scout --model gpt-4.1 --governance
 ```
 
 Options:
@@ -37,59 +31,55 @@ Options:
 - `--trust-threshold <n>` — AGT trust threshold (default: 500)
 - `--learn-egress` — enable egress learn mode
 - `--token-budget-daily <n>` — daily token limit
-- `--isolation <level>` — standard | enhanced | confidential
 
-### List your sub-agents
+## Check status
+
+```
+/azureclaw-spawn-status my-scout
+```
+
+Wait until phase is "Running" before sending mesh messages.
+
+## List your sub-agents
 
 ```
 /azureclaw-spawn-list
 ```
 
-### Destroy a sub-agent
+## Send a task via AGT mesh
 
-```
-/azureclaw-spawn-destroy sub-analyst
-```
+Once the sub-agent is Running, send it a task through the AGT mesh:
 
-## Communication via AGT mesh
-
-If governance is enabled on both you and the sub-agent, use the AGT mesh
-endpoints on your inference router:
-
-```
-# Send a task to the sub-agent
-POST http://localhost:8443/agt/mesh/send
-{"to_agent": "sub-analyst", "content": "Analyze the security posture", "type": "task_request"}
-
-# Check for responses
-GET http://localhost:8443/agt/mesh/inbox
+```bash
+curl -s -X POST http://localhost:8443/agt/mesh/send \
+  -H 'Content-Type: application/json' \
+  -d '{"to_agent":"my-scout","content":"Your task here","type":"task_request"}'
 ```
 
-## Examples
+## Check your inbox for responses
 
-### Spawn a research assistant with governance
-
-```
-/azureclaw-spawn researcher --model gpt-4.1 --governance --trust-threshold 500
+```bash
+curl -s http://localhost:8443/agt/mesh/inbox
 ```
 
-### Spawn a coder with a different model and learn mode
+## Destroy when done
 
 ```
-/azureclaw-spawn coder --model DeepSeek-V3.2 --learn-egress
+/azureclaw-spawn-destroy my-scout
 ```
 
-### Spawn with token budget limits
+## Complete workflow
 
-```
-/azureclaw-spawn analyst --model gpt-4.1 --token-budget-daily 100000
-```
+1. `/azureclaw-spawn analyst --model gpt-4.1 --governance`
+2. `/azureclaw-spawn-status analyst` — wait for Running
+3. Send task via AGT mesh (curl to localhost:8443/agt/mesh/send)
+4. Check inbox (curl to localhost:8443/agt/mesh/inbox)
+5. `/azureclaw-spawn-destroy analyst`
 
 ## Important notes
 
-- The sub-agent runs in its **own isolated namespace** — it cannot see your files or memory
-- AGT mesh is the only way to communicate between agents (trust-gated, audited)
+- Each sub-agent runs in its **own isolated namespace** — it cannot see your files
+- AGT mesh is the only communication channel (trust-gated, audited)
 - Each sub-agent has its own token budget, blocklist, and Content Safety
-- The sandbox name must be unique across the cluster (DNS-safe, 1-63 chars)
-- Memory Store scopes are per-agent — each agent uses its own `SANDBOX_NAME` as scope
+- Names must be DNS-safe: lowercase alphanumeric + hyphens, 1-63 chars
 - Only you (the parent) can destroy sub-agents you spawned

@@ -45,6 +45,9 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
       }
     }
   },
+  "tools": {
+    "deny": ["sessions_spawn", "sessions_send"]
+  },
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" }
