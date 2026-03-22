@@ -1,80 +1,60 @@
 ---
 name: azureclaw-spawn
-description: Spawn, manage, and communicate with isolated sub-agent sandboxes using AzureClaw plugin slash commands. Each sub-agent gets its own K8s namespace with full security controls and AGT mesh communication.
+description: Spawn secure isolated sub-agent sandboxes via the AzureClaw router API (localhost:8443). Use curl to spawn, send tasks via AGT mesh, receive replies, and destroy sub-agents.
 metadata: {"openclaw": {"always": true}}
 ---
 
 # AzureClaw Sub-Agent Spawn
 
-Use the `/azureclaw-spawn` family of slash commands to create, monitor, and
-tear down isolated sub-agent sandboxes. Each sub-agent gets its own:
-- Isolated K8s namespace with NetworkPolicy
-- Inference router sidecar (IMDS auth, Content Safety, token budgets)
-- Domain blocklist (auto-refreshing threat intelligence)
-- AGT governance (trust-gated mesh communication)
+Spawn secure isolated sub-agent sandboxes via the AzureClaw router API at localhost:8443. Each sub-agent runs in its own K8s namespace with full security controls. Use bash with curl for ALL operations.
 
-## When to spawn a sub-agent
+## When to use
 
-- **Delegation**: spawn a specialist for a focused task
-- **Parallel work**: run multiple agents on different tasks
-- **Isolation**: give untrusted code its own sandbox
+- **Delegation**: spawn a specialist for a focused task (e.g. security audit, code review)
+- **Parallel work**: run multiple agents on different tasks simultaneously
+- **Isolation**: give untrusted code its own sandboxed environment
 
-## Spawn a sub-agent
+## Step 1: Spawn a sub-agent
 
-```
-/azureclaw-spawn my-scout --model gpt-4.1 --governance
+```bash
+curl -s -X POST http://localhost:8443/sandbox/spawn \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"my-worker","model":"gpt-4.1","governance":true,"trust_threshold":500}'
 ```
 
-Options:
-- `--model <name>` — model deployment (default: gpt-4.1)
-- `--governance` — enable AGT governance + mesh communication
-- `--trust-threshold <n>` — AGT trust threshold (default: 500)
-- `--learn-egress` — enable egress learn mode
-- `--token-budget-daily <n>` — daily token limit
+## Step 2: Wait for Running
 
-## Check status
+Poll every 5 seconds until phase is "Running":
 
-```
-/azureclaw-spawn-status my-scout
+```bash
+curl -s http://localhost:8443/sandbox/my-worker/status
 ```
 
-Wait until phase is "Running" before sending mesh messages.
-
-## List your sub-agents
-
-```
-/azureclaw-spawn-list
-```
-
-## Send a task via AGT mesh
-
-Once the sub-agent is Running, send it a task through the AGT mesh:
+## Step 3: Send a task via AGT mesh
 
 ```bash
 curl -s -X POST http://localhost:8443/agt/mesh/send \
   -H 'Content-Type: application/json' \
-  -d '{"to_agent":"my-scout","content":"Your task here","type":"task_request"}'
+  -d '{"to_agent":"my-worker","content":"Your task description here","type":"task_request"}'
 ```
 
-## Check your inbox for responses
+Wait 15 seconds for DNS propagation before sending. The sub-agent will auto-process the task via its local AI model and send the result back.
+
+## Step 4: Check inbox for the sub-agent response
+
+Wait 30-60 seconds for the sub-agent to process and reply, then:
 
 ```bash
 curl -s http://localhost:8443/agt/mesh/inbox
 ```
 
-## Destroy when done
+The response will contain the sub-agent's `task_response` with the result.
 
+## Step 5: Destroy when done
+
+```bash
+curl -s -X DELETE http://localhost:8443/sandbox/my-worker
 ```
-/azureclaw-spawn-destroy my-scout
-```
-
-## Complete workflow
-
-1. `/azureclaw-spawn analyst --model gpt-4.1 --governance`
-2. `/azureclaw-spawn-status analyst` — wait for Running
-3. Send task via AGT mesh (curl to localhost:8443/agt/mesh/send)
-4. Check inbox (curl to localhost:8443/agt/mesh/inbox)
-5. `/azureclaw-spawn-destroy analyst`
 
 ## Important notes
 

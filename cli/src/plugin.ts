@@ -145,6 +145,13 @@ interface PluginCommandDefinition {
   handler: (ctx: { args?: string; channel?: string; config: OpenClawConfig }) => Promise<{ text: string }> | { text: string };
 }
 
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters?: Record<string, unknown>;
+  handler: (params: Record<string, unknown>) => Promise<{ text: string; error?: string }>;
+}
+
 interface OpenClawPluginApi {
   id: string;
   name: string;
@@ -155,6 +162,7 @@ interface OpenClawPluginApi {
   registerCommand: (command: PluginCommandDefinition) => void;
   registerCli: (registrar: (ctx: PluginCliContext) => void, opts?: { commands?: string[] }) => void;
   registerProvider: (provider: ProviderPlugin) => void;
+  registerTool?: (tool: ToolDefinition) => void;
   resolvePath: (input: string) => string;
 }
 
@@ -220,6 +228,144 @@ const azureClawPlugin = {
 
     // Initialize AGT SDK (identity, policy, trust, audit, mesh)
     initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
+
+    // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
+    // These are first-class tools the model can call directly.
+    const ROUTER = "http://127.0.0.1:8443";
+    async function routerCall(method: string, path: string, body?: unknown): Promise<any> {
+      const http = await import("node:http");
+      const url = `${ROUTER}${path}`;
+      return new Promise((resolve, reject) => {
+        const opts: any = { method, timeout: 30000, headers: {} };
+        if (body) opts.headers["Content-Type"] = "application/json";
+        const req = http.request(url, opts, (res: any) => {
+          let data = "";
+          res.on("data", (c: Buffer) => { data += c.toString(); });
+          res.on("end", () => {
+            try { resolve(JSON.parse(data)); } catch { resolve({ raw: data }); }
+          });
+        });
+        req.on("error", (e: Error) => reject(e));
+        req.setTimeout(30000, () => { req.destroy(); reject(new Error("timeout")); });
+        if (body) req.write(JSON.stringify(body));
+        req.end();
+      });
+    }
+
+    if (api.registerTool) {
+      // Tool: azureclaw_spawn — spawn a secure sub-agent
+      api.registerTool({
+        name: "azureclaw_spawn",
+        description: "Spawn a secure isolated sub-agent sandbox on AKS. Returns the sub-agent name, namespace, and phase. Use governance=true for AGT mesh communication.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "DNS-safe name for the sub-agent (e.g. 'auditor', 'analyst')" },
+            model: { type: "string", description: "AI model (default: gpt-4.1)" },
+            governance: { type: "boolean", description: "Enable AGT governance + mesh (default: true)" },
+          },
+          required: ["name"],
+        },
+        handler: async (params) => {
+          try {
+            const result = await routerCall("POST", "/sandbox/spawn", {
+              name: params.name,
+              model: params.model || "gpt-4.1",
+              governance: params.governance !== false,
+              trust_threshold: 500,
+            });
+            return { text: JSON.stringify(result, null, 2) };
+          } catch (e: any) {
+            return { text: `Spawn failed: ${e.message}`, error: e.message };
+          }
+        },
+      });
+
+      // Tool: azureclaw_spawn_status — check sub-agent status
+      api.registerTool({
+        name: "azureclaw_spawn_status",
+        description: "Check the status of a spawned sub-agent. Returns phase (Pending/Running/Terminating) and namespace.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Name of the sub-agent to check" },
+          },
+          required: ["name"],
+        },
+        handler: async (params) => {
+          try {
+            const result = await routerCall("GET", `/sandbox/${encodeURIComponent(params.name as string)}/status`);
+            return { text: JSON.stringify(result, null, 2) };
+          } catch (e: any) {
+            return { text: `Status check failed: ${e.message}`, error: e.message };
+          }
+        },
+      });
+
+      // Tool: azureclaw_mesh_send — send a task to a sub-agent via AGT mesh
+      api.registerTool({
+        name: "azureclaw_mesh_send",
+        description: "Send a task to a sub-agent via AGT mesh. The sub-agent will auto-process the task with its AI model and send the result back to your inbox.",
+        parameters: {
+          type: "object",
+          properties: {
+            to_agent: { type: "string", description: "Name of the target sub-agent" },
+            content: { type: "string", description: "Task description to send" },
+          },
+          required: ["to_agent", "content"],
+        },
+        handler: async (params) => {
+          try {
+            const result = await routerCall("POST", "/agt/mesh/send", {
+              to_agent: params.to_agent,
+              content: params.content,
+              type: "task_request",
+            });
+            return { text: JSON.stringify(result, null, 2) };
+          } catch (e: any) {
+            return { text: `Mesh send failed: ${e.message}`, error: e.message };
+          }
+        },
+      });
+
+      // Tool: azureclaw_mesh_inbox — check inbox for sub-agent responses
+      api.registerTool({
+        name: "azureclaw_mesh_inbox",
+        description: "Check your AGT mesh inbox for responses from sub-agents. Returns messages with from_agent, message_type, and content.",
+        parameters: { type: "object", properties: {} },
+        handler: async () => {
+          try {
+            const result = await routerCall("GET", "/agt/mesh/inbox");
+            return { text: JSON.stringify(result, null, 2) };
+          } catch (e: any) {
+            return { text: `Inbox check failed: ${e.message}`, error: e.message };
+          }
+        },
+      });
+
+      // Tool: azureclaw_spawn_destroy — tear down a sub-agent
+      api.registerTool({
+        name: "azureclaw_spawn_destroy",
+        description: "Destroy a spawned sub-agent sandbox. Use this to clean up after the sub-agent has completed its task.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Name of the sub-agent to destroy" },
+          },
+          required: ["name"],
+        },
+        handler: async (params) => {
+          try {
+            const result = await routerCall("DELETE", `/sandbox/${encodeURIComponent(params.name as string)}`);
+            return { text: JSON.stringify(result, null, 2) };
+          } catch (e: any) {
+            return { text: `Destroy failed: ${e.message}`, error: e.message };
+          }
+        },
+      });
+
+      log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy");
+    }
 
     // ── Register Azure AI Foundry as a model provider ───────────────────
     api.registerProvider({
