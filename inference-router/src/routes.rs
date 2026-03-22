@@ -932,28 +932,30 @@ async fn agt_mesh_receive(
                 signature: String::new(),
             };
 
-            // Resolve sender's namespace for reply
+            // Resolve sender's namespace for reply — follows AzureClaw naming convention
             let target_url = match spawn::get_sandbox_status(&from_agent).await {
                 Ok(resp) => {
                     let ns = resp.namespace.unwrap_or_else(|| format!("azureclaw-{}", from_agent));
                     format!("http://{}.{}.svc.cluster.local:8443", from_agent, ns)
                 }
                 Err(_) => {
-                    let ns = std::env::var("AGT_MESH_NAMESPACE")
-                        .unwrap_or_else(|_| "azureclaw-foundry-test".into());
-                    format!("http://{}.{}.svc.cluster.local:8443", from_agent, ns)
+                    // CRD lookup failed (sub-agent SA may lack perms, or parent isn't a spawned agent).
+                    // Fall back to AzureClaw naming convention: namespace = azureclaw-{agent_name}
+                    format!("http://{}.azureclaw-{}.svc.cluster.local:8443", from_agent, from_agent)
                 }
             };
+            let reply_url = format!("{}/agt/mesh/receive", target_url);
+            tracing::info!(to = %from_agent, url = %reply_url, "Sending auto-reply via mesh");
 
             match state_clone.client
-                .post(&format!("{}/agt/mesh/receive", target_url))
+                .post(&reply_url)
                 .json(&reply)
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
                 .send()
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    tracing::info!(to = %from_agent, "Task result sent back via mesh");
+                    tracing::info!(to = %from_agent, url = %reply_url, "Task result sent back via mesh");
                     state_clone.governance.audit.append(
                         &format!("mesh:auto-reply:{}", from_agent),
                         "delivered",
