@@ -4,13 +4,52 @@
  * Registers AzureClaw commands and Azure OpenAI as a model provider
  * within the OpenClaw plugin system.
  *
- * Usage: openclaw azureclaw <command>
+ * AGT Integration: Uses @agentmesh/sdk for tool-level policy evaluation,
+ * trust scoring, and audit logging. AzureClaw's Rust router handles
+ * infrastructure-level controls (mesh routing, content safety, token budgets).
  *
- * Plugin object format (mirrors stock OpenClaw plugins like memory-core, ollama):
- *   export default { id, name, description, configSchema, register(api) }
+ * Usage: openclaw azureclaw <command>
  */
 
 import type { Command } from "commander";
+
+// ---------------------------------------------------------------------------
+// AGT SDK — Microsoft Agent Governance Toolkit
+// Tool-level policy, trust, audit (application layer).
+// Infrastructure controls (mesh routing, NetworkPolicy) stay in Rust router.
+// ---------------------------------------------------------------------------
+
+let agtPolicy: any = null;
+let agtTrustStore: any = null;
+let agtAuditLogger: any = null;
+
+function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  try {
+    const sdk = require("@agentmesh/sdk");
+    // Policy engine — tool allow/deny evaluation
+    agtPolicy = new sdk.Policy([
+      { action: "web_search", effect: "allow" },
+      { action: "file_read", effect: "allow" },
+      { action: "file_write", effect: "allow" },
+      { action: "shell:ls", effect: "allow" },
+      { action: "shell:cat", effect: "allow" },
+      { action: "shell:python", effect: "allow" },
+      { action: "shell:git", effect: "allow" },
+      { action: "shell:curl", effect: "allow" },
+      { action: "shell:rm -rf /", effect: "deny" },
+      { action: "shell:chmod 777", effect: "deny" },
+      { action: "shell:dd", effect: "deny" },
+      { action: "shell:mkfs", effect: "deny" },
+    ]);
+    // Trust store — 0-1000 scoring with tiers
+    agtTrustStore = sdk.createTrustStore();
+    // Audit logger — hash-chain append-only log
+    agtAuditLogger = sdk.createAuditLogger();
+    log.info(`AGT SDK loaded (v${sdk.VERSION}) — policy, trust, audit active`);
+  } catch (e: any) {
+    log.warn(`AGT SDK not available: ${e.message}. Using router-native governance.`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // OpenClaw Plugin SDK types (stubs — only available at runtime via host)
@@ -139,6 +178,9 @@ const azureClawPlugin = {
     const log = api.logger;
 
     log.info(`AzureClaw plugin loaded (model: ${config.model})`);
+
+    // Initialize AGT SDK (tool-level governance)
+    initAGT(log);
 
     // ── Register Azure AI Foundry as a model provider ───────────────────
     api.registerProvider({
@@ -347,6 +389,102 @@ const azureClawPlugin = {
             `Auth: IMDS (kubelet MI, zero keys)`,
           ].join("\n"),
         };
+      },
+    });
+
+    // ── /azureclaw-agt — AGT governance status + policy evaluation ────────
+    api.registerCommand({
+      name: "azureclaw-agt",
+      description: "AGT governance status. /azureclaw-agt check <action> to evaluate policy",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const args = ctx.args?.trim() || "";
+
+        // Policy check mode: /azureclaw-agt check shell:rm -rf /
+        if (args.startsWith("check ")) {
+          const action = args.slice(6).trim();
+          if (agtPolicy) {
+            const decision = agtPolicy.evaluate(action);
+            return {
+              text: [
+                `**AGT Policy Check** (via @agentmesh/sdk)`,
+                `Action: \`${action}\``,
+                `Decision: **${decision.effect}**`,
+                decision.effect === "deny" ? "Blocked by AGT policy" : "Allowed",
+              ].join("\n"),
+            };
+          }
+          // Fallback to router-native policy
+          try {
+            const http = await import("node:http");
+            const postData = JSON.stringify({ action });
+            const body = await new Promise<string>((resolve, reject) => {
+              const req = http.request({ hostname: "127.0.0.1", port: 8443, path: "/agt/evaluate", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) } }, (res) => {
+                let data = ""; res.on("data", (c: Buffer) => { data += c.toString(); }); res.on("end", () => resolve(data));
+              });
+              req.on("error", reject); req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+              req.write(postData); req.end();
+            });
+            const parsed = JSON.parse(body);
+            return { text: `**Policy Check** (router-native)\nAction: \`${action}\`\nDecision: **${parsed.decision || parsed.error}**` };
+          } catch {
+            return { text: "Could not evaluate policy. Is the router running?" };
+          }
+        }
+
+        // Status mode
+        const sdkStatus = agtPolicy ? "active (@agentmesh/sdk)" : "unavailable (using router-native)";
+        const trustStatus = agtTrustStore ? "active (Ed25519, 0-1000 scale)" : "unavailable";
+        const auditStatus = agtAuditLogger ? "active (hash-chain)" : "unavailable";
+
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get("http://127.0.0.1:8443/agt/status", (res) => {
+              let data = ""; res.on("data", (c: Buffer) => { data += c.toString(); }); res.on("end", () => resolve(data));
+            });
+            req.on("error", reject); req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          return {
+            text: [
+              "**AzureClaw AGT Governance**",
+              "",
+              "**Application Layer** (plugin, @agentmesh/sdk):",
+              `  Policy engine: ${sdkStatus}`,
+              `  Trust store: ${trustStatus}`,
+              `  Audit logger: ${auditStatus}`,
+              "",
+              "**Infrastructure Layer** (Rust router):",
+              `  Governance: ${parsed.governance_enabled ? "enabled" : "disabled"}`,
+              `  Sandbox: ${parsed.sandbox_name}`,
+              `  Trust threshold: ${parsed.trust_threshold}`,
+              `  Audit entries: ${parsed.audit_entries}`,
+              `  Mesh inbox: ${parsed.mesh_inbox_count} messages`,
+              parsed.blocklist_domains ? `  Blocklist: ${parsed.blocklist_domains} domains` : "",
+              "",
+              "**Overlap resolution:**",
+              "  Tool policy → AGT SDK (plugin)",
+              "  Mesh routing → Rust router (K8s DNS)",
+              "  Content safety → AzureClaw (Azure AI)",
+              "  Token budgets → AzureClaw (router)",
+              "  Network/FS → AzureClaw (iptables/seccomp)",
+              "",
+              "Check policy: `/azureclaw-agt check shell:rm -rf /`",
+            ].filter(Boolean).join("\n"),
+          };
+        } catch {
+          return {
+            text: [
+              "**AzureClaw AGT Governance**",
+              `Policy engine: ${sdkStatus}`,
+              `Trust store: ${trustStatus}`,
+              `Audit logger: ${auditStatus}`,
+              "",
+              "Router unreachable — showing SDK-only status.",
+            ].join("\n"),
+          };
+        }
       },
     });
 

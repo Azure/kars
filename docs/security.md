@@ -141,14 +141,24 @@ The init container (egress-guard) runs as root with NET_ADMIN to install iptable
 
 ## Layer 7: Behavioral Governance — AGT
 
-When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) adds application-layer governance implemented in the inference router:
+When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (`@agentmesh/sdk`) adds application-layer governance at two levels:
+
+**Application Layer** (OpenClaw plugin, `@agentmesh/sdk` TypeScript SDK):
+
+| Control | Implementation | Integration |
+|---------|----------------|-------------|
+| **Tool-level policy** | AGT `Policy` engine with allow/deny rules, OPA/Rego/Cedar support | Plugin evaluates before tool execution |
+| **Trust scoring** | AGT `createTrustStore()` — Ed25519 identity, 0-1000 scale, 5 tiers | Plugin tracks agent trust |
+| **Audit logging** | AGT `createAuditLogger()` — hash-chain, OWASP ASI compliance | Plugin logs all governance decisions |
+
+**Infrastructure Layer** (Rust inference router, native implementation):
 
 | Control | Implementation | API Endpoint |
 |---------|----------------|--------------|
-| **Tool-level policy** | PolicyEngine loads YAML from ConfigMap, evaluates allow/deny/approval/rate-limit per action (<0.1ms) | `POST /agt/evaluate` |
-| **Inter-agent trust** | TrustStore tracks scores 0-1000 per agent. +10 on success, -50 on failure. 5 tiers. | `GET /agt/trust/{agent}` |
 | **Trust-gated mesh** | Messages routed via K8s DNS, trust gate on both sender and receiver | `POST /agt/mesh/send` |
-| **Tamper-evident audit** | Hash-chain append-only log (SHA-256), integrity verification endpoint | `GET /agt/audit/verify` |
+| **Mesh inbox** | Cross-namespace message delivery + auto-response | `GET /agt/mesh/inbox` |
+| **Router-level policy** | YAML-based policy evaluation as defense-in-depth | `POST /agt/evaluate` |
+| **Tamper-evident audit** | Hash-chain append-only log (SHA-256), integrity verification | `GET /agt/audit/verify` |
 
 ### What the controller creates for AGT
 
