@@ -55,6 +55,9 @@ COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
+# Install plugin runtime dependencies (@agentmesh/sdk for AGT governance)
+RUN cd /opt/azureclaw-plugin && npm install --omit=dev --ignore-scripts 2>/dev/null || true
+
 # Ensure openclaw binary is linked
 RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
