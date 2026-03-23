@@ -1076,7 +1076,22 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
             };
             out_count.fetch_add(1, Ordering::Relaxed);
             out_bytes.fetch_add(size as u64, Ordering::Relaxed);
-            tracing::debug!(direction = "agent→relay", size, "AGT relay: encrypted message forwarded");
+            // Hex-dump first 128 bytes for traffic capture / E2E encryption proof.
+            // The relay only ever sees ciphertext — readable plaintext here means encryption failed.
+            let raw_bytes: Vec<u8> = match &tung_msg {
+                tungstenite::Message::Text(t) => t.as_bytes().to_vec(),
+                tungstenite::Message::Binary(b) => b.to_vec(),
+                _ => vec![],
+            };
+            let hex_preview: String = raw_bytes.iter().take(128).map(|b| format!("{b:02x}")).collect::<Vec<String>>().join(" ");
+            let printable: String = raw_bytes.iter().take(128).map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' }).collect();
+            tracing::debug!(
+                direction = "agent->relay",
+                size,
+                hex = %hex_preview,
+                ascii = %printable,
+                "AGT relay: TRAFFIC CAPTURE (outbound frame)"
+            );
             if upstream_tx.send(tung_msg).await.is_err() {
                 break;
             }
@@ -1108,7 +1123,21 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
             };
             in_count.fetch_add(1, Ordering::Relaxed);
             in_bytes.fetch_add(size as u64, Ordering::Relaxed);
-            tracing::debug!(direction = "relay→agent", size, "AGT relay: encrypted message forwarded");
+            // Hex-dump first 128 bytes of each inbound frame for traffic capture.
+            let raw_bytes: Vec<u8> = match &msg {
+                tungstenite::Message::Text(t) => t.as_bytes().to_vec(),
+                tungstenite::Message::Binary(b) => b.to_vec(),
+                _ => vec![],
+            };
+            let hex_preview: String = raw_bytes.iter().take(128).map(|b| format!("{b:02x}")).collect::<Vec<String>>().join(" ");
+            let printable: String = raw_bytes.iter().take(128).map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' }).collect();
+            tracing::debug!(
+                direction = "relay->agent",
+                size,
+                hex = %hex_preview,
+                ascii = %printable,
+                "AGT relay: TRAFFIC CAPTURE (inbound frame)"
+            );
             if client_tx.send(axum_msg).await.is_err() {
                 break;
             }

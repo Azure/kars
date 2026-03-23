@@ -180,6 +180,35 @@ AGT does NOT duplicate AzureClaw infrastructure controls:
 | Filesystem scope | AzureClaw (read-only rootfs) | AGT has NO filesystem rules |
 | Tool allow/deny | **AGT only** | Router can't see tool calls |
 
+### Layer 8: E2E Encrypted Inter-Agent Communications
+
+All inter-agent messages are encrypted end-to-end using the **Signal Protocol** via the AgentMesh SDK (`@agentmesh/sdk`). The relay server acts as a dumb routing pipe — it can see who is talking to whom (AMIDs) but **cannot read message content**.
+
+**Protocol stack:**
+
+| Layer | Component | What it sees |
+|-------|-----------|-------------|
+| Application | OpenClaw agent | Plaintext messages |
+| Encryption | AGT SDK (Signal Protocol) | Encrypts before send, decrypts on receive |
+| Transport | WebSocket relay bridge | Opaque `encrypted_payload` + routing AMIDs |
+| Relay | AgentMesh relay server | Same as transport — cannot decrypt |
+
+**Signal Protocol features used:**
+- **X3DH** (Extended Triple Diffie-Hellman) — Initial key agreement between agents
+- **Double Ratchet** — Forward secrecy with per-message key rotation
+- **Identity keys** — Each agent has a unique AMID derived from its Signal Protocol identity key
+
+**Message flow:**
+1. Agent connects to relay with AMID + public key (key exchange)
+2. Relay assigns session UUID, confirms connection
+3. Agent encrypts message with recipient's public key → `encrypted_payload`
+4. Relay routes by AMID, forwards opaque payload
+5. Recipient decrypts with its private key → plaintext
+
+**Traffic capture proof:** A full hex-dump analysis of a live inter-agent exchange
+is documented in [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md), showing that
+the relay sees only encrypted payloads while endpoints see plaintext.
+
 ---
 
 ## OWASP Agentic Top 10 Coverage
@@ -192,7 +221,7 @@ AGT does NOT duplicate AzureClaw infrastructure controls:
 | Uncontrolled Code Execution | ASI-04 | seccomp + Kata VM + read-only rootfs | Execution rings + sandboxing |
 | Insecure Output Handling | ASI-05 | Content Safety + Prompt Shields | Content output policies |
 | Memory Poisoning | ASI-06 | Content Safety pre-model | CMVK majority voting (AGT) |
-| Unsafe Inter-Agent Comms | ASI-07 | NetworkPolicy | IATP encrypted channels + trust gates |
+| Unsafe Inter-Agent Comms | ASI-07 | NetworkPolicy + E2E encryption | Signal Protocol encrypted relay + trust gates |
 | Cascading Failures | ASI-08 | Token budgets + concurrency limit | Circuit breakers + SLOs |
 | Human-Agent Trust | ASI-09 | Approve/deny workflow | Audit trails + flight recorder |
 | Rogue Agents | ASI-10 | eBPF tracing + iptables kill | Behavioral anomaly + kill switch |
