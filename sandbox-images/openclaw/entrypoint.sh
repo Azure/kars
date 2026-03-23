@@ -284,8 +284,10 @@ done
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
 # Without this, the agent only has plugin tools (AzureClaw) and no local execution.
+# Use a unique node-id so it doesn't conflict with the TUI device pairing.
 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw node run \
-  --host 127.0.0.1 --port 18789 > /tmp/node-host.log 2>&1 &
+  --host 127.0.0.1 --port 18789 \
+  --node-id "node-$(hostname)" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!
 sleep 2
 if grep -q "connected" /tmp/node-host.log 2>/dev/null; then
