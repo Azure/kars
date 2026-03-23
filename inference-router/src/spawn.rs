@@ -146,6 +146,15 @@ pub async fn create_sandbox(
         });
     }
 
+    // Propagate Foundry agent tools from parent environment
+    let mut agent_tools: Vec<String> = Vec::new();
+    if let Ok(tools) = std::env::var("FOUNDRY_AGENT_TOOLS") {
+        agent_tools = tools.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    }
+    if !agent_tools.is_empty() {
+        spec["agent"] = serde_json::json!({ "tools": agent_tools });
+    }
+
     // Build labels
     let mut labels = BTreeMap::new();
     labels.insert("azureclaw.azure.com/parent".to_string(), parent_name.to_string());
