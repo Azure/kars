@@ -348,12 +348,12 @@ export function upCommand(): Command {
             await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
           };
 
-          await buildPush("controller/Dockerfile", "azureclaw-controller:0.1.0");
-          await buildPush("inference-router/Dockerfile", "azureclaw-inference-router:0.1.0");
+          await buildPush("controller/Dockerfile", "azureclaw-controller:latest");
+          await buildPush("inference-router/Dockerfile", "azureclaw-inference-router:latest");
           await buildPush(
             "sandbox-images/openclaw/Dockerfile",
             "openclaw-sandbox:latest",
-            ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:0.1.0`]
+            ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
           );
 
           spinner.succeed("Images built and pushed to ACR");
@@ -362,8 +362,8 @@ export function upCommand(): Command {
           // Customer mode: import pre-built images from source ACR
           const sourceAcr = options.sourceAcr;
           const images = [
-            { source: `${sourceAcr}/azureclaw-controller:0.1.0`, target: "azureclaw-controller:0.1.0" },
-            { source: `${sourceAcr}/azureclaw-inference-router:0.1.0`, target: "azureclaw-inference-router:0.1.0" },
+            { source: `${sourceAcr}/azureclaw-controller:latest`, target: "azureclaw-controller:latest" },
+            { source: `${sourceAcr}/azureclaw-inference-router:latest`, target: "azureclaw-inference-router:latest" },
             { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
           ];
 
@@ -491,9 +491,9 @@ export function upCommand(): Command {
           "--namespace", "azureclaw-system",
           "--create-namespace",
           "--set", `controller.image.repository=${acrLoginServer}/azureclaw-controller`,
-          "--set", `controller.image.tag=0.1.0`,
+          "--set", `controller.image.tag=latest`,
           "--set", `inferenceRouter.image.repository=${acrLoginServer}/azureclaw-inference-router`,
-          "--set", `inferenceRouter.image.tag=0.1.0`,
+          "--set", `inferenceRouter.image.tag=latest`,
           "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
           "--set", `sandbox.image.repository=${acrLoginServer}/openclaw-sandbox`,
           "--set", `sandbox.image.tag=latest`,
@@ -656,8 +656,9 @@ export function upCommand(): Command {
               ], { stdio: "pipe" });
             } catch {
               // Non-fatal — user may lack Owner on the Foundry RG
+            } finally {
+              try { fs.unlinkSync(tmpBicep); } catch {}
             }
-            fs.unlinkSync(tmpBicep);
 
             if (!projectMiPrincipalId) {
               console.log(chalk.yellow("\n  ⚠ Foundry project has no system-assigned MI. Memory Store will not work."));
@@ -692,14 +693,17 @@ export function upCommand(): Command {
                 "  }",
                 "}",
               ].join("\n"));
-              await execa("az", [
-                "deployment", "group", "create",
-                "--resource-group", foundryRg || rg,
-                "--template-file", tmpBicep,
-                "--parameters", `pid=${wiPid.trim().split("\n").pop()?.trim()}`,
-                "--output", "none",
-              ], { stdio: "pipe" }).catch(() => {});
-              fs.unlinkSync(tmpBicep);
+              try {
+                await execa("az", [
+                  "deployment", "group", "create",
+                  "--resource-group", foundryRg || rg,
+                  "--template-file", tmpBicep,
+                  "--parameters", `pid=${wiPid.trim().split("\n").pop()?.trim()}`,
+                  "--output", "none",
+                ], { stdio: "pipe" }).catch(() => {});
+              } finally {
+                try { fs.unlinkSync(tmpBicep); } catch {}
+              }
             }
           }
         }

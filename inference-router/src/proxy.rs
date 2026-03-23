@@ -56,18 +56,18 @@ fn record_metrics(upstream: &UpstreamConfig, status: StatusCode, latency: std::t
         .with_label_values(&[&upstream.sandbox_name, &upstream.deployment])
         .observe(latency.as_secs_f64());
 
-    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(response_body) {
-        if let Some(usage) = body_json.get("usage") {
-            if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-                metrics::TOKENS_USED
-                    .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "input"])
-                    .inc_by(input as u64);
-            }
-            if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-                metrics::TOKENS_USED
-                    .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "output"])
-                    .inc_by(output as u64);
-            }
+    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(response_body)
+        && let Some(usage) = body_json.get("usage")
+    {
+        if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+            metrics::TOKENS_USED
+                .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "input"])
+                .inc_by(input as u64);
+        }
+        if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+            metrics::TOKENS_USED
+                .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "output"])
+                .inc_by(output as u64);
         }
     }
 }

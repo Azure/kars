@@ -226,64 +226,58 @@ async fn chat_completions(
         .unwrap_or("unknown");
 
     // Content Safety check (on by default)
-    if state.config.content_safety_enabled {
-        if let Some(ref endpoint) = state.config.content_safety_endpoint {
-            // Extract user message from request body for safety check
-            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
-                if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
-                    if let Some(last_user_msg) = messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                    {
-                        if let Err(e) = safety::check_content_safety(endpoint, last_user_msg).await
-                        {
-                            tracing::warn!(sandbox = %sandbox_name, "Content safety blocked: {e}");
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(serde_json::json!({
-                                    "error": {
-                                        "message": "Request blocked by content safety policy",
-                                        "type": "content_safety_violation",
-                                        "code": "content_filtered"
-                                    }
-                                })),
-                            )
-                                .into_response();
-                        }
+    if state.config.content_safety_enabled
+        && let Some(ref endpoint) = state.config.content_safety_endpoint
+    {
+        // Extract user message from request body for safety check
+        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body)
+            && let Some(messages) = body_json.get("messages").and_then(|m| m.as_array())
+            && let Some(last_user_msg) = messages
+                .iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            && let Err(e) = safety::check_content_safety(endpoint, last_user_msg).await
+        {
+            tracing::warn!(sandbox = %sandbox_name, "Content safety blocked: {e}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Request blocked by content safety policy",
+                        "type": "content_safety_violation",
+                        "code": "content_filtered"
                     }
-                }
-            }
+                })),
+            )
+                .into_response();
         }
     }
 
     // Prompt Shields check
-    if state.config.prompt_shields_enabled {
-        if let Some(ref endpoint) = state.config.content_safety_endpoint {
-            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
-                if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
-                    let full_prompt: String = messages
-                        .iter()
-                        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if let Err(e) = safety::check_prompt_shields(endpoint, &full_prompt).await {
-                        tracing::warn!(sandbox = %sandbox_name, "Prompt shield blocked: {e}");
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({
-                                "error": {
-                                    "message": "Request blocked by prompt shield — possible injection detected",
-                                    "type": "prompt_shield_violation",
-                                    "code": "prompt_filtered"
-                                }
-                            })),
-                        )
-                            .into_response();
+    if state.config.prompt_shields_enabled
+        && let Some(ref endpoint) = state.config.content_safety_endpoint
+        && let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body)
+        && let Some(messages) = body_json.get("messages").and_then(|m| m.as_array())
+    {
+        let full_prompt: String = messages
+            .iter()
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Err(e) = safety::check_prompt_shields(endpoint, &full_prompt).await {
+            tracing::warn!(sandbox = %sandbox_name, "Prompt shield blocked: {e}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Request blocked by prompt shield — possible injection detected",
+                        "type": "prompt_shield_violation",
+                        "code": "prompt_filtered"
                     }
-                }
-            }
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -352,17 +346,16 @@ async fn chat_completions(
     match result {
         Ok((status, resp_headers, resp_body)) => {
             // Record token usage from response for budget tracking
-            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
-                if let Some(total) = body_json
+            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
+                && let Some(total) = body_json
                     .get("usage")
                     .and_then(|u| u.get("total_tokens"))
                     .and_then(|v| v.as_u64())
-                {
-                    state.budget.record_usage(sandbox_name, total).await;
+            {
+                state.budget.record_usage(sandbox_name, total).await;
 
-                    if let Err(msg) = state.budget.check_per_request(total) {
-                        tracing::warn!(sandbox = %sandbox_name, "Per-request limit: {msg}");
-                    }
+                if let Err(msg) = state.budget.check_per_request(total) {
+                    tracing::warn!(sandbox = %sandbox_name, "Per-request limit: {msg}");
                 }
             }
 
@@ -464,14 +457,14 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     {
         Ok(_) => {
             // Also check Content Safety endpoint if configured
-            if let Some(ref cs_endpoint) = state.config.content_safety_endpoint {
-                if state.config.content_safety_enabled {
-                    let url = format!("{}/contentsafety/text:analyze?api-version=2024-09-01", cs_endpoint.trim_end_matches('/'));
-                    let reachable = state.client.post(&url).timeout(std::time::Duration::from_secs(3)).send().await.is_ok();
-                    if !reachable {
-                        tracing::warn!("Content Safety endpoint unreachable: {cs_endpoint}");
-                        return (StatusCode::OK, "ok (content safety unreachable — failing open)").into_response();
-                    }
+            if let Some(ref cs_endpoint) = state.config.content_safety_endpoint
+                && state.config.content_safety_enabled
+            {
+                let url = format!("{}/contentsafety/text:analyze?api-version=2024-09-01", cs_endpoint.trim_end_matches('/'));
+                let reachable = state.client.post(&url).timeout(std::time::Duration::from_secs(3)).send().await.is_ok();
+                if !reachable {
+                    tracing::warn!("Content Safety endpoint unreachable: {cs_endpoint}");
+                    return (StatusCode::OK, "ok (content safety unreachable — failing open)").into_response();
                 }
             }
             (StatusCode::OK, "ok").into_response()

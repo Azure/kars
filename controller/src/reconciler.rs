@@ -233,17 +233,17 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // Add user-defined allowed endpoints (for the inference-router to reach
     // on behalf of the agent — agent itself can only reach localhost)
-    if let Some(ref policy) = spec.network_policy {
-        if let Some(ref endpoints) = policy.allowed_endpoints {
-            for ep in endpoints {
-                let port = ep.port.unwrap_or(443);
-                if port != 443 {
-                    // Only add non-443 ports (443 is already covered by the blanket HTTPS rule)
-                    egress_rules.push(json!({
-                        "to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}],
-                        "ports": [{"protocol": "TCP", "port": port}]
-                    }));
-                }
+    if let Some(ref policy) = spec.network_policy
+        && let Some(ref endpoints) = policy.allowed_endpoints
+    {
+        for ep in endpoints {
+            let port = ep.port.unwrap_or(443);
+            if port != 443 {
+                // Only add non-443 ports (443 is already covered by the blanket HTTPS rule)
+                egress_rules.push(json!({
+                    "to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}],
+                    "ports": [{"protocol": "TCP", "port": port}]
+                }));
             }
         }
     }
@@ -305,16 +305,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         openclaw_env.push(json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}));
     }
     // Inject Foundry Agent ID if set in status (for tools needing agent runs)
-    if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone()) {
-        if !agent_id.is_empty() {
-            openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
-        }
+    if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone())
+        && !agent_id.is_empty()
+    {
+        openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
     }
     // Signal configured Foundry agent tools
-    if let Some(ref tools) = agent_config.tools {
-        if !tools.is_empty() {
-            openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
-        }
+    if let Some(ref tools) = agent_config.tools
+        && !tools.is_empty()
+    {
+        openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
     }
     // AGT governance env vars (opt-in) — injected into BOTH openclaw and router containers
     let governance_config = spec.governance.unwrap_or_default();
@@ -360,7 +360,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     router_env.push(json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}));
 
     // Egress learn mode — observe all accessed domains (blocklist still enforced)
-    if spec.network_policy.as_ref().map_or(false, |np| np.learn_egress) {
+    if spec.network_policy.as_ref().is_some_and(|np| np.learn_egress) {
         router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
     }
 
@@ -610,51 +610,51 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // If spec.azure_services is configured, annotate the ServiceAccount and
     // namespace so that `azureclaw up` (or a future RBAC controller) can
     // create the necessary Azure role assignments for the sandbox identity.
-    if let Some(ref azure_services) = spec.azure_services {
-        if !azure_services.is_empty() {
-            let sa_api: Api<k8s_openapi::api::core::v1::ServiceAccount> =
-                Api::namespaced(client.clone(), &sandbox_ns);
-            let mut annotations = std::collections::BTreeMap::new();
-            for (i, svc) in azure_services.iter().enumerate() {
-                annotations.insert(
-                    format!("azureclaw.azure.com/service-{i}"),
-                    svc.service.clone(),
-                );
-                if let Some(ref acct) = svc.account {
-                    annotations.insert(
-                        format!("azureclaw.azure.com/service-{i}-account"),
-                        acct.clone(),
-                    );
-                }
-                if let Some(ref perms) = svc.permissions {
-                    annotations.insert(
-                        format!("azureclaw.azure.com/service-{i}-permissions"),
-                        perms.join(","),
-                    );
-                }
-            }
-            let sa_patch = json!({
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
-                "metadata": {
-                    "name": &name,
-                    "namespace": &sandbox_ns,
-                    "annotations": annotations,
-                }
-            });
-            sa_api
-                .patch(
-                    &name,
-                    &PatchParams::apply("azureclaw-controller").force(),
-                    &Patch::Apply(serde_json::from_value::<k8s_openapi::api::core::v1::ServiceAccount>(sa_patch)?),
-                )
-                .await?;
-            tracing::info!(
-                sandbox = %name,
-                services = azure_services.len(),
-                "Azure services RBAC annotations applied to ServiceAccount"
+    if let Some(ref azure_services) = spec.azure_services
+        && !azure_services.is_empty()
+    {
+        let sa_api: Api<k8s_openapi::api::core::v1::ServiceAccount> =
+            Api::namespaced(client.clone(), &sandbox_ns);
+        let mut annotations = std::collections::BTreeMap::new();
+        for (i, svc) in azure_services.iter().enumerate() {
+            annotations.insert(
+                format!("azureclaw.azure.com/service-{i}"),
+                svc.service.clone(),
             );
+            if let Some(ref acct) = svc.account {
+                annotations.insert(
+                    format!("azureclaw.azure.com/service-{i}-account"),
+                    acct.clone(),
+                );
+            }
+            if let Some(ref perms) = svc.permissions {
+                annotations.insert(
+                    format!("azureclaw.azure.com/service-{i}-permissions"),
+                    perms.join(","),
+                );
+            }
         }
+        let sa_patch = json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {
+                "name": &name,
+                "namespace": &sandbox_ns,
+                "annotations": annotations,
+            }
+        });
+        sa_api
+            .patch(
+                &name,
+                &PatchParams::apply("azureclaw-controller").force(),
+                &Patch::Apply(serde_json::from_value::<k8s_openapi::api::core::v1::ServiceAccount>(sa_patch)?),
+            )
+            .await?;
+        tracing::info!(
+            sandbox = %name,
+            services = azure_services.len(),
+            "Azure services RBAC annotations applied to ServiceAccount"
+        );
     }
 
     // ── Step 4c: AGT governance infrastructure ──────────────────────────
@@ -871,7 +871,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         // Use dynamic API for CronJob (batch/v1)
         let cj_gvk = kube::api::GroupVersionKind::gvk("batch", "v1", "CronJob");
-        let (cj_ar, _caps) = kube::discovery::pinned_kind(&client, &cj_gvk).await?;
+        let (cj_ar, _caps) = kube::discovery::pinned_kind(client, &cj_gvk).await?;
         let cj_api: Api<kube::api::DynamicObject> = Api::namespaced_with(
             client.clone(), &sandbox_ns, &cj_ar,
         );
@@ -905,10 +905,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     });
     // Preserve existing foundryAgentId in status (set externally or by future controller logic)
-    if let Some(ref existing_status) = sandbox.status {
-        if let Some(ref agent_id) = existing_status.foundry_agent_id {
-            status_obj["status"]["foundryAgentId"] = json!(agent_id);
-        }
+    if let Some(ref existing_status) = sandbox.status
+        && let Some(ref agent_id) = existing_status.foundry_agent_id
+    {
+        status_obj["status"]["foundryAgentId"] = json!(agent_id);
     }
     let _ = sandbox_api
         .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
@@ -940,9 +940,15 @@ pub async fn run(client: Client) -> Result<()> {
     let wi_client_id = std::env::var("AZURE_WI_CLIENT_ID")
         .unwrap_or_default();
     let inference_router_image = std::env::var("INFERENCE_ROUTER_IMAGE")
-        .unwrap_or_else(|_| "azureclawacr.azurecr.io/azureclaw-inference-router:0.1.0".into());
+        .unwrap_or_else(|_| {
+            tracing::warn!("INFERENCE_ROUTER_IMAGE not set — using default :latest image");
+            "azureclawacr.azurecr.io/azureclaw-inference-router:latest".into()
+        });
     let sandbox_image = std::env::var("SANDBOX_IMAGE")
-        .unwrap_or_else(|_| "azureclawacr.azurecr.io/openclaw-sandbox:latest".into());
+        .unwrap_or_else(|_| {
+            tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
+            "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
+        });
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
         .unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT")
@@ -956,6 +962,9 @@ pub async fn run(client: Client) -> Result<()> {
     let content_safety_endpoint = std::env::var("CONTENT_SAFETY_ENDPOINT")
         .unwrap_or_else(|_| foundry_endpoint.clone());
 
+    if openai_endpoint.is_empty() && foundry_endpoint.is_empty() {
+        tracing::warn!("Neither AZURE_OPENAI_ENDPOINT nor FOUNDRY_ENDPOINT set — inference routing will fail");
+    }
     if !foundry_endpoint.is_empty() {
         tracing::info!("Using Foundry Models endpoint: {foundry_endpoint}");
     }

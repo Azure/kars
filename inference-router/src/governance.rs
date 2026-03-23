@@ -40,6 +40,7 @@ pub enum PolicyDecision {
 
 /// A loaded policy profile.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct PolicyProfile {
     pub version: String,
     pub agent: String,
@@ -199,18 +200,18 @@ impl PolicyEngine {
 
 /// Pattern matching: `shell:*` matches `shell:ls`, `delete_*` matches `delete_file`.
 fn action_matches(action: &str, pattern: &str) -> bool {
-    if pattern.ends_with('*') {
-        action.starts_with(&pattern[..pattern.len() - 1])
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        action.starts_with(prefix)
     } else {
         action == pattern
     }
 }
 
 fn parse_duration(s: &str) -> u64 {
-    if s.ends_with('m') {
-        s[..s.len()-1].parse::<u64>().unwrap_or(60) * 60
-    } else if s.ends_with('s') {
-        s[..s.len()-1].parse::<u64>().unwrap_or(60)
+    if let Some(val) = s.strip_suffix('m') {
+        val.parse::<u64>().unwrap_or(60) * 60
+    } else if let Some(val) = s.strip_suffix('s') {
+        val.parse::<u64>().unwrap_or(60)
     } else {
         60
     }
@@ -404,6 +405,7 @@ impl AuditLog {
     }
 
     /// Get entries since a sequence number.
+    #[allow(dead_code)]
     pub async fn entries_since(&self, since_seq: u64) -> Vec<AuditEntry> {
         self.entries.read().await
             .iter()
@@ -467,6 +469,7 @@ impl MeshInbox {
         self.messages.write().await.push(msg);
     }
 
+    #[allow(dead_code)]
     pub async fn drain(&self) -> Vec<MeshMessage> {
         let mut msgs = self.messages.write().await;
         std::mem::take(&mut *msgs)

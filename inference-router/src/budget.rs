@@ -98,6 +98,7 @@ impl TokenBudgetTracker {
     }
 
     /// Get current usage for a sandbox.
+    #[allow(dead_code)]
     pub async fn get_usage(&self, sandbox: &str) -> (u64, u64) {
         let usage = self.usage.read().await;
         match usage.get(sandbox) {

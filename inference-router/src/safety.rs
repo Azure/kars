@@ -153,10 +153,10 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
         .await
         .context("Failed to parse Prompt Shields response")?;
 
-    if let Some(analysis) = result.user_prompt_analysis {
-        if analysis.attack_detected {
-            bail!("Prompt injection attack detected");
-        }
+    if let Some(analysis) = result.user_prompt_analysis
+        && analysis.attack_detected
+    {
+        bail!("Prompt injection attack detected");
     }
 
     Ok(())
