@@ -170,19 +170,62 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
 
-      // Auto-reply to task_request messages via AGT relay (E2E encrypted)
+      // Process task_request messages: call local LLM via sidecar router and reply via E2E encrypted relay
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
+        const taskContent = message?.content || content;
         try {
+          // Call the local inference router (sidecar) to get an LLM response
+          const http = await import("node:http");
+          const llmResponse = await new Promise<string>((resolve, reject) => {
+            const postData = JSON.stringify({
+              model: process.env.MODEL || "gpt-4.1",
+              messages: [
+                { role: "system", content: "You are a helpful sub-agent. Answer the user's request concisely. Do not mention that you are a sub-agent or that this came via a relay." },
+                { role: "user", content: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent) },
+              ],
+              max_tokens: 1024,
+            });
+            const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+              timeout: 30000,
+            }, (res) => {
+              let body = "";
+              res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+              res.on("end", () => {
+                try {
+                  const parsed = JSON.parse(body);
+                  const answer = parsed?.choices?.[0]?.message?.content || body;
+                  resolve(answer);
+                } catch { resolve(body); }
+              });
+            });
+            req.on("error", (e) => reject(e));
+            req.on("timeout", () => { req.destroy(); reject(new Error("LLM timeout")); });
+            req.write(postData);
+            req.end();
+          });
+
+          // Send the LLM response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
-            content: "AGT RELAY CONFIRMED",
+            content: llmResponse,
             from_agent: agtSandboxName,
-            in_reply_to: message?.content || content,
+            in_reply_to: taskContent,
             timestamp: new Date().toISOString(),
           });
-          log.info(`AGT relay: auto-replied to ${fromName} via E2E encrypted relay`);
+          log.info(`AGT relay: LLM-processed reply sent to ${fromName} via E2E encrypted relay`);
         } catch (replyErr: any) {
-          log.warn(`AGT relay: auto-reply failed: ${replyErr.message}`);
+          // Fallback: send error message back so parent knows what happened
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "task_response",
+              content: `Error processing task: ${replyErr.message}`,
+              from_agent: agtSandboxName,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+          log.warn(`AGT relay: LLM reply failed: ${replyErr.message}`);
         }
       }
     });
