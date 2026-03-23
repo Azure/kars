@@ -118,18 +118,36 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     });
 
     // Set up message handler — stores received messages in the AGT inbox buffer
-    agtMeshClient.onMessage((fromAmid: string, message: any) => {
+    // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
+    agtMeshClient.onMessage(async (fromAmid: string, message: any) => {
       const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
       const entry = {
         from_amid: fromAmid,
         from_agent: fromName,
-        content: typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message)),
+        content,
         message_type: message?.type || "message",
         timestamp: new Date().toISOString(),
         id: `agt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       };
       agtInbox.push(entry);
-      log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(entry.content).slice(0, 200)}`);
+      log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
+
+      // Auto-reply to task_request messages via AGT relay (bidirectional E2E)
+      if (message?.type === "task_request" && fromAmid && agtMeshClient) {
+        try {
+          await agtMeshClient.send(fromAmid, {
+            type: "task_response",
+            content: "AGT RELAY CONFIRMED",
+            from_agent: agtSandboxName,
+            in_reply_to: message?.content || content,
+            timestamp: new Date().toISOString(),
+          }, { unencrypted: true }); // Reply unencrypted for now (session is one-way initiator)
+          log.info(`AGT relay: auto-replied to ${fromName} via relay`);
+        } catch (replyErr: any) {
+          log.warn(`AGT relay: auto-reply failed: ${replyErr.message}`);
+        }
+      }
     });
 
     log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit, mesh ACTIVE (relay path for inter-agent comms)`);

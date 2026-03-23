@@ -346,9 +346,11 @@ export class AgentMeshClient {
               try { handler(fromAmid, decrypted); } catch { /* handler error */ }
             }
           } catch (e: any) {
-            // Decryption failed — deliver the raw parsed object
+            // Log the error for debugging, then deliver as plaintext fallback
+            console.error('[AGT] E2E decrypt failed:', e?.message || e);
+            // Try to deliver the raw parsed object so the handler can at least see it
             for (const handler of this.messageHandlers) {
-              try { handler(fromAmid, parsed); } catch { /* handler error */ }
+              try { handler(fromAmid, { _encrypted: true, _error: e?.message, ...parsed }); } catch { /* handler error */ }
             }
           }
         } else if (parsed.type === 'encrypted') {
