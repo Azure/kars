@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO agents (id, amid, signing_public_key, exchange_public_key, tier, organization_id, display_name, capabilities, status, reputation_score, created_at, updated_at, last_seen)\n        VALUES ($1, $2, $3, $4, 'organization', $5, $6, $7, 'offline', 0.7, NOW(), NOW(), NOW())\n        ON CONFLICT (amid) DO UPDATE SET\n            tier = 'organization',\n            organization_id = EXCLUDED.organization_id,\n            updated_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4d9a35d6d9eff1ad1a33d1b59a21b08e62b865ee768979e3cb75399e9444e475"
+}

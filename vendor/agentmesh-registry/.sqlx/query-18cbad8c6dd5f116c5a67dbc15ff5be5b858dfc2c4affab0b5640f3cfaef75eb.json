@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT a.amid, a.tier::text as \"tier!\", a.reputation_score, a.created_at,\n               (SELECT COUNT(*) FROM reputation_feedbacks rf WHERE rf.target_amid = a.amid) as feedback_count\n        FROM agents a\n        WHERE a.reputation_score > 0\n          AND (SELECT COUNT(*) FROM reputation_feedbacks rf WHERE rf.target_amid = a.amid) >= $2\n        ORDER BY a.reputation_score DESC\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "amid",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "tier!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "reputation_score",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "feedback_count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "18cbad8c6dd5f116c5a67dbc15ff5be5b858dfc2c4affab0b5640f3cfaef75eb"
+}

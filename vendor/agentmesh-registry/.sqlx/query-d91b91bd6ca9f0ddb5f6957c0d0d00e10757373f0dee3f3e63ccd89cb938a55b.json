@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE agents SET tier = 'verified', updated_at = NOW()\n        WHERE amid = $1 AND tier = 'anonymous'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d91b91bd6ca9f0ddb5f6957c0d0d00e10757373f0dee3f3e63ccd89cb938a55b"
+}

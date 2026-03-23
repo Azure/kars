@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, name, domain, root_certificate, dns_challenge, dns_verified, admin_amid, created_at, verified_at\n        FROM organizations\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "domain",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "root_certificate",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "dns_challenge",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "dns_verified",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "admin_amid",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "verified_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "934545ca0d9e600d3103295e01a07e709237b695d9fedcba067b7a36158b87e6"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT score, from_tier\n        FROM reputation_feedbacks\n        WHERE target_amid = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "from_tier",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8581c98f9021ac8ed51a9fa2c560f95221d4dfc59387e2be6269a64cdf2e3229"
+}

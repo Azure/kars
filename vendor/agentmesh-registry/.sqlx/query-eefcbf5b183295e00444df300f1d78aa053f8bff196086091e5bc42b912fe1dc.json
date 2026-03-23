@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO reputation_feedbacks (id, target_amid, from_amid, session_id, score, tags, from_tier, created_at)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Float8",
+        "TextArray",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eefcbf5b183295e00444df300f1d78aa053f8bff196086091e5bc42b912fe1dc"
+}
