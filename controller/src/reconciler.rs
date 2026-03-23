@@ -11,7 +11,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::Deployment,
-    core::v1::{ConfigMap, Namespace, Service, ServiceAccount},
+    core::v1::{ConfigMap, Namespace, Secret, Service, ServiceAccount},
     networking::v1::NetworkPolicy,
 };
 use kube::{
@@ -185,6 +185,64 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // ── Step 2b: Create/reuse gateway token Secret ───────────────────────
+    // Shared between openclaw and inference-router containers so the TUI
+    // can authenticate to the gateway running inside the pod.
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
+    let gateway_token = {
+        // Reuse existing token if the Secret already exists (idempotent reconcile)
+        let existing = secret_api.get_opt("gateway-token").await?;
+        if let Some(ref s) = existing {
+            s.data
+                .as_ref()
+                .and_then(|d| d.get("token"))
+                .and_then(|v| String::from_utf8(v.0.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    let gateway_token = if gateway_token.is_empty() {
+        // Generate a new 32-char alphanumeric token using OS randomness
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let mut token = String::with_capacity(32);
+        for _ in 0..4 {
+            let s = RandomState::new();
+            let mut h = s.build_hasher();
+            h.write_u64(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64);
+            token.push_str(&format!("{:016x}", h.finish()));
+        }
+        token.truncate(32);
+        token
+    } else {
+        gateway_token
+    };
+    let gw_secret: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "gateway-token",
+            "namespace": sandbox_ns,
+            "labels": {
+                "azureclaw.azure.com/sandbox": name
+            }
+        },
+        "stringData": {
+            "token": gateway_token
+        }
+    }))?;
+    secret_api
+        .patch(
+            "gateway-token",
+            &PatchParams::apply("azureclaw-controller").force(),
+            &Patch::Apply(gw_secret),
+        )
+        .await?;
+
     // ── Step 3: Apply default-deny NetworkPolicy + allowlist ─────────────
     //
     // Pod-level NetworkPolicy controls what the entire pod can reach.
@@ -299,6 +357,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "OPENCLAW_MODEL", "value": inference_config.model}),
         json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
         json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
+        json!({"name": "OPENCLAW_GATEWAY_TOKEN", "value": &gateway_token}),
     ];
     // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
     if !ctx.foundry_project_endpoint.is_empty() {

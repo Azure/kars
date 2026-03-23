@@ -163,12 +163,12 @@ resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// Grant sandbox identity "Cognitive Services OpenAI User" on the AOAI resource
-resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
+// Grant sandbox identity "Cognitive Services OpenAI User" on the AOAI resource (only when AOAI is deployed)
+resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (!empty(openAiAccountId)) {
   name: last(split(openAiAccountId, '/'))
 }
 
-resource openAiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource openAiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(openAiAccountId)) {
   name: guid(sandboxIdentity.id, openAiAccountId, 'openai-user')
   scope: openAiAccount
   properties: {

@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          image: azureclawacr.azurecr.io/postgres:16-alpine
           ports:
             - containerPort: 5432
           env:

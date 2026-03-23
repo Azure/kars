@@ -79,7 +79,8 @@ export function upCommand(): Command {
 
       const rg = options.resourceGroup || `azureclaw-${options.region}`;
       const clusterName = options.clusterName ?? "azureclaw";
-      const baseName = "azureclaw";
+      const baseName = clusterName.replace(/-aks$/, "");  // derive from cluster name
+      const acrName = baseName.replace(/-/g, "") + "acr";  // ACR names must be alphanumeric
       const spinner = ora({ color: "cyan" }).start();
 
       try {
@@ -202,6 +203,9 @@ export function upCommand(): Command {
           if (callerIp) {
             bicepParams.push(`authorizedIpRanges=["${callerIp}/32"]`);
           }
+          if (options.foundryEndpoint) {
+            bicepParams.push("deployAoai=false");
+          }
 
           const { stdout: deployOutput } = await execa("az", [
             "deployment", "group", "create",
@@ -285,18 +289,20 @@ export function upCommand(): Command {
               // Add AKS egress to ACR firewall
               await execa("az", [
                 "acr", "network-rule", "add",
-                "--name", `${baseName}acr`,
+                "--name", acrName,
                 "--ip-address", aksEgress,
                 "--output", "none",
               ], { stdio: "pipe" }).catch(() => {});
-              // Add AKS egress to AOAI firewall
-              await execa("az", [
-                "cognitiveservices", "account", "network-rule", "add",
-                "--name", `${baseName}-aoai`,
-                "--resource-group", rg,
-                "--ip-address", aksEgress,
-                "--output", "none",
-              ], { stdio: "pipe" }).catch(() => {});
+              // Add AKS egress to AOAI firewall (only when AOAI is deployed in this RG)
+              if (!options.foundryEndpoint) {
+                await execa("az", [
+                  "cognitiveservices", "account", "network-rule", "add",
+                  "--name", `${baseName}-aoai`,
+                  "--resource-group", rg,
+                  "--ip-address", aksEgress,
+                  "--output", "none",
+                ], { stdio: "pipe" }).catch(() => {});
+              }
             }
           }
         } catch {
@@ -309,7 +315,7 @@ export function upCommand(): Command {
           "aks", "update",
           "--name", `${baseName}-aks`,
           "--resource-group", rg,
-          "--attach-acr", `${baseName}acr`,
+          "--attach-acr", acrName,
           "--output", "none",
         ], { stdio: "pipe" }).catch(() => {
           // Already attached — non-fatal
@@ -333,7 +339,7 @@ export function upCommand(): Command {
           spinner.text = "Step 6/8: Logging into ACR...";
           await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
 
-          const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = []) => {
+          const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = [], context?: string) => {
             spinner.text = `Step 6/8: Building ${tag} (this may take a few minutes)...`;
             const args = [
               "build", "--platform", "linux/amd64",
@@ -341,7 +347,7 @@ export function upCommand(): Command {
               "-f", path.join(repoRoot, dockerfile),
               "-t", `${acrLoginServer}/${tag}`,
               ...buildArgs,
-              repoRoot,
+              context ? path.join(repoRoot, context) : repoRoot,
             ];
             await execa("docker", args, { stdio: "pipe" });
             spinner.text = `Pushing ${tag}...`;
@@ -356,6 +362,10 @@ export function upCommand(): Command {
             ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
           );
 
+          // AgentMesh components (relay + registry for E2E encrypted inter-agent comms)
+          await buildPush("vendor/agentmesh-relay/Dockerfile", "agentmesh-relay:latest", [], "vendor/agentmesh-relay");
+          await buildPush("vendor/agentmesh-registry/Dockerfile", "agentmesh-registry:latest", [], "vendor/agentmesh-registry");
+
           spinner.succeed("Images built and pushed to ACR");
           spinner.start();
         } else {
@@ -365,6 +375,8 @@ export function upCommand(): Command {
             { source: `${sourceAcr}/azureclaw-controller:latest`, target: "azureclaw-controller:latest" },
             { source: `${sourceAcr}/azureclaw-inference-router:latest`, target: "azureclaw-inference-router:latest" },
             { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
+            { source: `${sourceAcr}/agentmesh-relay:latest`, target: "agentmesh-relay:latest" },
+            { source: `${sourceAcr}/agentmesh-registry:latest`, target: "agentmesh-registry:latest" },
           ];
 
           for (const img of images) {
@@ -499,7 +511,6 @@ export function upCommand(): Command {
           "--set", `sandbox.image.tag=latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
-          "--force",
           "--wait",
           "--timeout", "5m",
         ];
@@ -512,6 +523,18 @@ export function upCommand(): Command {
         spinner.text = "Step 7/8: Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...";
         await execa("helm", helmArgs, { stdio: "pipe" });
 
+        // Force rollout when using :latest tags (Helm won't restart pods if spec hash is unchanged)
+        spinner.text = "Rolling out updated controller...";
+        await execa("kubectl", [
+          "rollout", "restart", "deployment/azureclaw-controller",
+          "-n", "azureclaw-system",
+        ], { stdio: "pipe" }).catch(() => {});
+        await execa("kubectl", [
+          "rollout", "status", "deployment/azureclaw-controller",
+          "-n", "azureclaw-system",
+          "--timeout=120s",
+        ], { stdio: "pipe" }).catch(() => {});
+
         spinner.succeed("Controller deployed");
         spinner.start();
 
@@ -520,6 +543,56 @@ export function upCommand(): Command {
         await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {
           // kubectl-gadget not installed or already deployed — non-fatal
         });
+
+        // ── Step 6c: Deploy AgentMesh infrastructure (relay + registry) ──
+        spinner.text = "Deploying AgentMesh infrastructure (relay + registry + postgres)...";
+        const agentmeshManifest = path.join(repoRoot, "deploy", "agentmesh.yaml");
+        if (existsSync(agentmeshManifest)) {
+          // Import postgres image into ACR (Azure Policy blocks Docker Hub images)
+          spinner.text = "Importing postgres image into ACR...";
+          await execa("az", [
+            "acr", "import",
+            "--name", acr,
+            "--source", "docker.io/library/postgres:16-alpine",
+            "--image", "postgres:16-alpine",
+            "--force",
+          ], { stdio: "pipe" }).catch(() => {
+            // May already exist — non-fatal
+          });
+
+          // Substitute ACR login server in the manifest
+          const fs = await import("fs");
+          const manifest = fs.readFileSync(agentmeshManifest, "utf-8");
+          const patchedManifest = manifest.replace(
+            /azureclawacr\.azurecr\.io/g,
+            acrLoginServer
+          );
+          const tmpManifest = path.join(repoRoot, ".tmp-agentmesh.yaml");
+          try {
+            fs.writeFileSync(tmpManifest, patchedManifest);
+            await execa("kubectl", ["apply", "-f", tmpManifest], { stdio: "pipe" });
+
+            // Wait for AgentMesh pods to be ready
+            spinner.text = "Waiting for AgentMesh pods to be ready...";
+            await execa("kubectl", [
+              "wait", "--for=condition=Ready", "pod",
+              "-l", "app=agentmesh-relay",
+              "-n", "agentmesh",
+              "--timeout=180s",
+            ], { stdio: "pipe" }).catch(() => {});
+            await execa("kubectl", [
+              "wait", "--for=condition=Ready", "pod",
+              "-l", "app=agentmesh-registry",
+              "-n", "agentmesh",
+              "--timeout=180s",
+            ], { stdio: "pipe" }).catch(() => {});
+
+            spinner.succeed("AgentMesh infrastructure deployed");
+            spinner.start();
+          } finally {
+            try { fs.unlinkSync(tmpManifest); } catch { /* noop */ }
+          }
+        }
 
         // ── Step 7: Create ClawSandbox CR ────────────────────────────
         const sandboxNs = `azureclaw-${options.name}`;
@@ -734,6 +807,11 @@ export function upCommand(): Command {
               defaultDeny: true,
               approvalRequired: true,
             },
+            governance: {
+              enabled: true,
+              toolPolicy: "default",
+              trustThreshold: 500,
+            },
           },
         };
         await execa("kubectl", ["apply", "-f", "-"], {
@@ -775,11 +853,12 @@ export function upCommand(): Command {
             gatewayToken = tokenMatch[1];
           }
 
-          // Start port-forward in background
-          const portForward = execa("kubectl", [
+          // Start port-forward in background (fully detached so CLI can exit)
+          const { spawn } = await import("child_process");
+          const portForward = spawn("kubectl", [
             "port-forward", "-n", sandboxNs,
             `deploy/${options.name}`, "18789:18789",
-          ], { stdio: "pipe", detached: true });
+          ], { stdio: "ignore", detached: true });
           portForward.unref();
           // Give it a moment to bind
           await new Promise(r => setTimeout(r, 2000));
