@@ -1,10 +1,18 @@
 # AgentMesh Relay Server
-# Multi-stage build for minimal final image
+# Multi-stage build for minimal final image (Azure Linux 3)
 
-FROM rust:1.94-alpine AS builder
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
 
-# Install build dependencies
-RUN apk add --no-cache musl-dev
+# ─── Builder ──────────────────────────────────────────────────────────────────
+
+FROM ${AZURELINUX_BASE} AS builder
+
+RUN tdnf install -y gcc glibc-devel binutils make pkg-config ca-certificates curl kernel-headers && tdnf clean all
+
+# Install Rust via rustup
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
 
 WORKDIR /app
 
@@ -23,10 +31,11 @@ COPY src ./src
 # Build release binary
 RUN touch src/main.rs && cargo build --release
 
-# Final stage
-FROM alpine:3.19
+# ─── Runtime ──────────────────────────────────────────────────────────────────
 
-RUN apk add --no-cache ca-certificates
+FROM ${AZURELINUX_BASE}
+
+RUN tdnf install -y ca-certificates shadow-utils && tdnf clean all
 
 WORKDIR /app
 
@@ -34,15 +43,11 @@ WORKDIR /app
 COPY --from=builder /app/target/release/agentmesh-relay /app/relay
 
 # Create non-root user
-RUN adduser -D -u 1000 agentmesh
+RUN useradd -r -u 1000 -M -s /sbin/nologin agentmesh
 USER agentmesh
 
 # Expose WebSocket port
 EXPOSE 8765
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s \
-    CMD nc -z localhost 8765 || exit 1
 
 ENV RUST_LOG=agentmesh_relay=info
 ENV RELAY_ADDR=0.0.0.0:8765

@@ -1,5 +1,7 @@
 # AgentMesh Registry API
-# Multi-stage build for minimal final image
+# Multi-stage build for minimal final image (Azure Linux 3)
+
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
 
 # Stage 1: Build React frontend
 FROM node:20-alpine AS frontend-builder
@@ -19,13 +21,18 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Build Rust backend
-FROM rust:1.94-alpine AS builder
+FROM ${AZURELINUX_BASE} AS builder
 
 # Use SQLx offline mode - no database needed during build
 ENV SQLX_OFFLINE=true
 
 # Install build dependencies
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
+RUN tdnf install -y gcc glibc-devel binutils make pkg-config openssl-devel ca-certificates curl kernel-headers zstd-devel && tdnf clean all
+
+# Install Rust via rustup
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
 
 WORKDIR /app
 
@@ -47,9 +54,9 @@ COPY .sqlx ./.sqlx
 RUN touch src/main.rs && cargo build --release
 
 # Stage 3: Final runtime image
-FROM alpine:3.19
+FROM ${AZURELINUX_BASE}
 
-RUN apk add --no-cache ca-certificates
+RUN tdnf install -y ca-certificates shadow-utils curl && tdnf clean all
 
 WORKDIR /app
 
@@ -61,15 +68,11 @@ COPY --from=builder /app/migrations /app/migrations
 COPY --from=frontend-builder /app/frontend/dist /app/static
 
 # Create non-root user
-RUN adduser -D -u 1000 agentmesh
+RUN useradd -r -u 1000 -M -s /sbin/nologin agentmesh
 USER agentmesh
 
 # Expose HTTP port
 EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s \
-    CMD wget -q --spider http://localhost:8080/v1/health || exit 1
 
 ENV RUST_LOG=agentmesh_registry=info,actix_web=info
 ENV HOST=0.0.0.0

@@ -35,12 +35,18 @@ param openAiModelName string = 'gpt-4.1'
 @description('Azure OpenAI model version')
 param openAiModelVersion string = '2025-04-14'
 
+@description('Deploy Azure OpenAI resource (set false when using --foundry-endpoint)')
+param deployAoai bool = true
+
 // ─── Azure Container Registry ───────────────────────────────────────────────
+
+// ACR names must be alphanumeric — strip hyphens from baseName
+var acrName = '${replace(baseName, '-', '')}acr'
 
 module acr 'modules/acr.bicep' = {
   name: '${baseName}-acr'
   params: {
-    name: '${baseName}acr'
+    name: acrName
     location: location
     authorizedIpRanges: authorizedIpRanges
   }
@@ -53,13 +59,13 @@ module keyVault 'modules/keyvault.bicep' = {
   params: {
     name: '${baseName}-kv'
     location: location
-    recover: true  // Recover soft-deleted vault (cannot be purged on this sub)
+    recover: false
   }
 }
 
-// ─── Azure OpenAI ───────────────────────────────────────────────────────────
+// ─── Azure OpenAI (optional — skipped when using external Foundry endpoint) ─
 
-module openAi 'modules/openai.bicep' = {
+module openAi 'modules/openai.bicep' = if (deployAoai) {
   name: '${baseName}-aoai'
   params: {
     name: '${baseName}-aoai'
@@ -94,7 +100,7 @@ module aks 'modules/aks.bicep' = {
     logAnalyticsWorkspaceId: monitor.outputs.logAnalyticsWorkspaceId
     acrId: acr.outputs.acrId
     keyVaultName: keyVault.outputs.keyVaultName
-    openAiAccountId: openAi.outputs.accountId
+    openAiAccountId: deployAoai ? openAi.outputs.accountId : ''
     authorizedIpRanges: authorizedIpRanges
     enableKata: enableKata
   }
@@ -106,6 +112,6 @@ output aksClusterName string = aks.outputs.clusterName
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultUri string = keyVault.outputs.vaultUri
 output keyVaultName string = keyVault.outputs.keyVaultName
-output openAiEndpoint string = openAi.outputs.endpoint
+output openAiEndpoint string = deployAoai ? openAi.outputs.endpoint : ''
 output logAnalyticsWorkspaceId string = monitor.outputs.logAnalyticsWorkspaceId
 output sandboxIdentityClientId string = aks.outputs.sandboxIdentityClientId
