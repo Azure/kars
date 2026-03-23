@@ -55,10 +55,17 @@ COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
-# Install plugin runtime dependencies, then replace @agentmesh/sdk with vendored patch
-# (fixes buildBundle() prekey signature + one-time prekey bugs)
+# Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm install --omit=dev --ignore-scripts 2>/dev/null || true
-COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/dist/
+# Install vendored SDK with its dependencies (libsodium-wrappers etc.)
+COPY vendor/agentmesh-sdk/package.json /opt/azureclaw-vendored-sdk/package.json
+COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
+RUN cd /opt/azureclaw-vendored-sdk && npm install --omit=dev --ignore-scripts 2>/dev/null || true
+# Overlay vendored SDK into plugin node_modules (patched dist + deps)
+RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
+    cp -r /opt/azureclaw-vendored-sdk/dist /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
+    cp /opt/azureclaw-vendored-sdk/package.json /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
+    cp -r /opt/azureclaw-vendored-sdk/node_modules/* /opt/azureclaw-plugin/node_modules/ 2>/dev/null || true
 
 # Ensure openclaw binary is linked
 RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw

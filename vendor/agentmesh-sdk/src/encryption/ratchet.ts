@@ -153,6 +153,34 @@ export class DoubleRatchetSession {
   }
 
   /**
+   * Initialize a responder session using the signed prekey as the ratchet keypair.
+   *
+   * Per Signal Protocol, the responder's initial ratchet key IS the signed prekey,
+   * because the initiator encrypted using DH(initiator_ratchet, signedPrekey_pub).
+   * The responder decrypts using DH(signedPrekey_priv, initiator_ratchet_pub).
+   */
+  static async initializeResponder(
+    sharedSecret: Uint8Array,
+    signedPrekeyPrivate: Uint8Array,
+    signedPrekeyPublic: Uint8Array,
+  ): Promise<DoubleRatchetSession> {
+    const state: DoubleRatchetState = {
+      dhPrivate: signedPrekeyPrivate,
+      dhPublic: signedPrekeyPublic,
+      peerDhPublic: null, // Will be set from the first message's header
+      rootKey: sharedSecret,
+      sendChainKey: null,
+      recvChainKey: null,
+      sendMessageNumber: 0,
+      recvMessageNumber: 0,
+      previousChainLength: 0,
+      skippedKeys: new Map(),
+    };
+
+    return new DoubleRatchetSession(state, false);
+  }
+
+  /**
    * Restore session from serialized state.
    */
   static fromState(state: DoubleRatchetState, isInitiator: boolean): DoubleRatchetSession {

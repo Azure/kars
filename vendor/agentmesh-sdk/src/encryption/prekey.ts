@@ -428,6 +428,17 @@ export class PrekeyManager {
   }
 
   /**
+   * Get signed prekey public key by ID.
+   */
+  getSignedPrekeyPublic(id: number): Uint8Array | null {
+    if (!this.state) return null;
+    if (id === this.state.signedPrekeyId) {
+      return this.state.signedPrekeyPublic;
+    }
+    return null;
+  }
+
+  /**
    * Get one-time prekey private key by ID.
    */
   getOneTimePrekeyPrivate(id: number): Uint8Array | null {
