@@ -56,7 +56,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
       {
         name: 'system'
         count: 2
-        vmSize: 'Standard_D2s_v5'
+        vmSize: 'Standard_D2as_v5'
         osType: 'Linux'
         osSKU: 'AzureLinux'
         mode: 'System'
