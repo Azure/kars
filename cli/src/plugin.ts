@@ -155,7 +155,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   process.env.__AGT_INITIALIZED = '1';
 
   try {
-    const sdk = require("@agentmesh/sdk");
+    const sdk: any = await import("@agentmesh/sdk");
 
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
