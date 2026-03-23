@@ -70,6 +70,10 @@ RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
 # Ensure openclaw binary is linked
 RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
 
+# Symlink Control UI assets (the gateway expects dist/control-ui/)
+RUN ln -s /usr/local/lib/node_modules/openclaw/dist/canvas-host/a2ui \
+          /usr/local/lib/node_modules/openclaw/dist/control-ui
+
 # Create writable directories
 RUN mkdir -p /sandbox /tmp && \
     chown -R sandbox:sandbox /sandbox /tmp
