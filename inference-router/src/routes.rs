@@ -91,8 +91,11 @@ impl AppState {
     }
 
     fn upstream_config(&self, sandbox_name: &str) -> UpstreamConfig {
-        let endpoint = self.config.foundry_endpoint.clone()
-            .or_else(|| self.config.azure_openai_endpoint.clone())
+        // For inference (chat completions, embeddings): prefer the dedicated OpenAI endpoint
+        // (openai.azure.com) over the Foundry project endpoint (services.ai.azure.com).
+        // Foundry project endpoint is used for agent/memory/knowledge APIs, not inference.
+        let endpoint = self.config.azure_openai_endpoint.clone()
+            .or_else(|| self.config.foundry_endpoint.clone())
             .unwrap_or_default();
 
         UpstreamConfig {
@@ -450,9 +453,16 @@ async fn healthz() -> &'static str {
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     // Check that we can acquire a token (validates Workload Identity / IMDS setup)
+    let audience = if state.config.foundry_endpoint.as_deref()
+        .is_some_and(|ep| ep.contains("services.ai.azure.com") && ep.contains("/api/projects/"))
+    {
+        "https://ai.azure.com"
+    } else {
+        "https://cognitiveservices.azure.com"
+    };
     match state
         .auth
-        .get_token("https://cognitiveservices.azure.com")
+        .get_token(audience)
         .await
     {
         Ok(_) => {
@@ -486,16 +496,21 @@ async fn metrics() -> String {
     String::from_utf8(buffer).unwrap_or_default()
 }
 
-/// GET /v1/models — list available models from Foundry.
+/// GET /v1/models — list available models from the OpenAI endpoint.
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let endpoint = state.config.foundry_endpoint.clone()
-        .or_else(|| state.config.azure_openai_endpoint.clone())
+    let endpoint = state.config.azure_openai_endpoint.clone()
+        .or_else(|| state.config.foundry_endpoint.clone())
         .unwrap_or_default();
 
     let models_url = format!("{}/openai/v1/models", endpoint.trim_end_matches('/'));
 
-    // Get token
-    let token = match state.auth.get_token("https://cognitiveservices.azure.com").await {
+    // Get token — use correct audience for Foundry project vs legacy AOAI
+    let audience = if endpoint.contains("services.ai.azure.com") && endpoint.contains("/api/projects/") {
+        "https://ai.azure.com"
+    } else {
+        "https://cognitiveservices.azure.com"
+    };
+    let token = match state.auth.get_token(audience).await {
         Ok(t) => t,
         Err(e) => {
             return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
