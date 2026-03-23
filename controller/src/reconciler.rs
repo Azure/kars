@@ -16,7 +16,7 @@ use k8s_openapi::api::{
     rbac::v1::ClusterRoleBinding,
 };
 use kube::{
-    api::{Api, ListParams, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams},
     runtime::controller::{Action, Controller},
     Client, ResourceExt,
 };
@@ -114,6 +114,67 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let client = &ctx.client;
 
     tracing::info!("Reconciling ClawSandbox {name}");
+
+    // ── Finalizer: cascading namespace deletion ──────────────────────────
+    const FINALIZER: &str = "azureclaw.azure.com/namespace-cleanup";
+
+    if sandbox.metadata.deletion_timestamp.is_some() {
+        tracing::info!("ClawSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
+
+        // Delete the namespace (cascades to all resources within it)
+        let ns_api: Api<Namespace> = Api::all(client.clone());
+        match ns_api.delete(&sandbox_ns, &DeleteParams::default()).await {
+            Ok(_) => tracing::info!("Namespace {sandbox_ns} deletion initiated"),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                tracing::info!("Namespace {sandbox_ns} already gone");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to delete namespace {sandbox_ns}");
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+        }
+
+        // Clean up the spawner ClusterRoleBinding
+        let crb_api: Api<ClusterRoleBinding> = Api::all(client.clone());
+        let crb_name = format!("azureclaw-spawner-{name}");
+        match crb_api.delete(&crb_name, &DeleteParams::default()).await {
+            Ok(_) => tracing::info!("ClusterRoleBinding {crb_name} deleted"),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => tracing::warn!(error = %e, "Failed to delete ClusterRoleBinding {crb_name}"),
+        }
+
+        // Remove the finalizer so K8s can complete CRD deletion
+        let sandbox_api: Api<ClawSandbox> =
+            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+        let patch = json!({
+            "metadata": {
+                "finalizers": sandbox.metadata.finalizers.as_ref()
+                    .map(|f| f.iter().filter(|x| x.as_str() != FINALIZER).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            }
+        });
+        let _ = sandbox_api
+            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await;
+
+        tracing::info!("ClawSandbox {name} cleanup complete");
+        return Ok(Action::await_change());
+    }
+
+    // Ensure our finalizer is present (add it if missing)
+    let has_finalizer = sandbox.metadata.finalizers.as_ref()
+        .is_some_and(|f| f.iter().any(|x| x == FINALIZER));
+    if !has_finalizer {
+        let sandbox_api: Api<ClawSandbox> =
+            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+        let mut finalizers = sandbox.metadata.finalizers.clone().unwrap_or_default();
+        finalizers.push(FINALIZER.to_string());
+        let patch = json!({ "metadata": { "finalizers": finalizers } });
+        sandbox_api
+            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
+        tracing::info!("Added finalizer to ClawSandbox {name}");
+    }
 
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();

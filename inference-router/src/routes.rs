@@ -1024,6 +1024,7 @@ async fn agt_relay_proxy(
 async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
     use futures::stream::StreamExt;
     use futures::sink::SinkExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio_tungstenite::tungstenite;
 
     // Connect to the upstream relay
@@ -1040,33 +1041,74 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
     let (mut client_tx, mut client_rx) = client_socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
 
-    // Forward: client → relay
+    // Message counters (never log content — E2E encrypted)
+    let outbound_count = std::sync::Arc::new(AtomicU64::new(0));
+    let outbound_bytes = std::sync::Arc::new(AtomicU64::new(0));
+    let inbound_count = std::sync::Arc::new(AtomicU64::new(0));
+    let inbound_bytes = std::sync::Arc::new(AtomicU64::new(0));
+
+    let out_count = outbound_count.clone();
+    let out_bytes = outbound_bytes.clone();
+    let in_count = inbound_count.clone();
+    let in_bytes = inbound_bytes.clone();
+
+    // Forward: client → relay (outbound encrypted messages)
     let client_to_relay = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_rx.next().await {
-            let tung_msg = match msg {
-                Message::Text(t) => tungstenite::Message::Text(t.to_string().into()),
-                Message::Binary(b) => tungstenite::Message::Binary(b.to_vec().into()),
-                Message::Ping(p) => tungstenite::Message::Ping(p.to_vec().into()),
-                Message::Pong(p) => tungstenite::Message::Pong(p.to_vec().into()),
+            let (tung_msg, size) = match msg {
+                Message::Text(ref t) => (
+                    tungstenite::Message::Text(t.to_string().into()),
+                    t.len(),
+                ),
+                Message::Binary(ref b) => (
+                    tungstenite::Message::Binary(b.to_vec().into()),
+                    b.len(),
+                ),
+                Message::Ping(p) => {
+                    let _ = upstream_tx.send(tungstenite::Message::Ping(p.to_vec().into())).await;
+                    continue;
+                }
+                Message::Pong(p) => {
+                    let _ = upstream_tx.send(tungstenite::Message::Pong(p.to_vec().into())).await;
+                    continue;
+                }
                 Message::Close(_) => break,
             };
+            out_count.fetch_add(1, Ordering::Relaxed);
+            out_bytes.fetch_add(size as u64, Ordering::Relaxed);
+            tracing::debug!(direction = "agent→relay", size, "AGT relay: encrypted message forwarded");
             if upstream_tx.send(tung_msg).await.is_err() {
                 break;
             }
         }
     });
 
-    // Forward: relay → client
+    // Forward: relay → client (inbound encrypted messages)
     let relay_to_client = tokio::spawn(async move {
         while let Some(Ok(msg)) = upstream_rx.next().await {
-            let axum_msg = match msg {
-                tungstenite::Message::Text(t) => Message::Text(t.to_string().into()),
-                tungstenite::Message::Binary(b) => Message::Binary(b.to_vec().into()),
-                tungstenite::Message::Ping(p) => Message::Ping(p.to_vec().into()),
-                tungstenite::Message::Pong(p) => Message::Pong(p.to_vec().into()),
+            let (axum_msg, size) = match msg {
+                tungstenite::Message::Text(ref t) => (
+                    Message::Text(t.to_string().into()),
+                    t.len(),
+                ),
+                tungstenite::Message::Binary(ref b) => (
+                    Message::Binary(b.to_vec().into()),
+                    b.len(),
+                ),
+                tungstenite::Message::Ping(p) => {
+                    let _ = client_tx.send(Message::Ping(p.to_vec().into())).await;
+                    continue;
+                }
+                tungstenite::Message::Pong(p) => {
+                    let _ = client_tx.send(Message::Pong(p.to_vec().into())).await;
+                    continue;
+                }
                 tungstenite::Message::Close(_) => break,
                 _ => continue,
             };
+            in_count.fetch_add(1, Ordering::Relaxed);
+            in_bytes.fetch_add(size as u64, Ordering::Relaxed);
+            tracing::debug!(direction = "relay→agent", size, "AGT relay: encrypted message forwarded");
             if client_tx.send(axum_msg).await.is_err() {
                 break;
             }
@@ -1078,7 +1120,18 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
         _ = client_to_relay => {},
         _ = relay_to_client => {},
     }
-    tracing::info!("AGT relay WebSocket proxy disconnected");
+
+    let out_n = outbound_count.load(Ordering::Relaxed);
+    let out_b = outbound_bytes.load(Ordering::Relaxed);
+    let in_n = inbound_count.load(Ordering::Relaxed);
+    let in_b = inbound_bytes.load(Ordering::Relaxed);
+    tracing::info!(
+        outbound_messages = out_n,
+        outbound_bytes = out_b,
+        inbound_messages = in_n,
+        inbound_bytes = in_b,
+        "AGT relay WebSocket proxy disconnected"
+    );
 }
 
 /// GET/POST /agt/registry/* — HTTP proxy to the self-hosted AgentMesh registry.
