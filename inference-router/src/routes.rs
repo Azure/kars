@@ -854,9 +854,9 @@ async fn agt_mesh_inbox(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-/// POST /agt/mesh/receive — receive a message from the mesh relay (internal).
-/// If the message is a task_request, auto-processes it via the local model
-/// and sends the result back to the sender via mesh.
+/// POST /agt/mesh/receive — receive a message from another agent (HTTP fallback).
+/// Stores in inbox only. Task processing happens via the AGT relay (E2E encrypted)
+/// path in the OpenClaw plugin, which has full tool access via the node host.
 async fn agt_mesh_receive(
     State(state): State<AppState>,
     Json(msg): Json<crate::governance::MeshMessage>,
@@ -882,103 +882,13 @@ async fn agt_mesh_receive(
         &format!("Message {} received", msg.id),
     ).await;
 
-    let from_agent = msg.from_agent.clone();
-    let msg_id = msg.id.clone();
-    let msg_type = msg.message_type.clone();
-    let task_content = msg.content.clone();
+    let _from_agent = msg.from_agent.clone();
+    let _msg_id = msg.id.clone();
     state.governance.inbox.receive(msg).await;
 
-    // Auto-process task_request messages: call local model and send result back
-    if msg_type == "task_request" {
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            tracing::info!(from = %from_agent, "Auto-processing task_request via local model");
-
-            // Call local inference to process the task
-            let chat_body = serde_json::json!({
-                "model": state_clone.config.default_model,
-                "messages": [
-                    {"role": "system", "content": "You are a sub-agent. Complete the requested task concisely. Return only the result."},
-                    {"role": "user", "content": task_content}
-                ],
-                "max_tokens": 1024
-            });
-
-            let result_content = match state_clone.client
-                .post("http://127.0.0.1:8443/v1/chat/completions")
-                .json(&chat_body)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(data) => data
-                            .get("choices").and_then(|c| c.get(0))
-                            .and_then(|c| c.get("message"))
-                            .and_then(|m| m.get("content"))
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("Task completed but no output generated.")
-                            .to_string(),
-                        Err(e) => format!("Task processing error: {e}"),
-                    }
-                }
-                Err(e) => format!("Inference unavailable: {e}"),
-            };
-
-            tracing::info!(from = %from_agent, result_len = result_content.len(), "Task processed, sending result back");
-
-            // Send result back via mesh
-            let reply = crate::governance::MeshMessage {
-                id: format!("{}-reply-{}", state_clone.governance.sandbox_name, uuid_v4()),
-                from_agent: state_clone.governance.sandbox_name.clone(),
-                to_agent: from_agent.clone(),
-                content: result_content,
-                message_type: "task_response".into(),
-                timestamp: format!("{}Z", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
-                signature: String::new(),
-            };
-
-            // Resolve sender's namespace for reply — follows AzureClaw naming convention
-            let target_url = match spawn::get_sandbox_status(&from_agent).await {
-                Ok(resp) => {
-                    let ns = resp.namespace.unwrap_or_else(|| format!("azureclaw-{}", from_agent));
-                    format!("http://{}.{}.svc.cluster.local:8443", from_agent, ns)
-                }
-                Err(_) => {
-                    // CRD lookup failed (sub-agent SA may lack perms, or parent isn't a spawned agent).
-                    // Fall back to AzureClaw naming convention: namespace = azureclaw-{agent_name}
-                    format!("http://{}.azureclaw-{}.svc.cluster.local:8443", from_agent, from_agent)
-                }
-            };
-            let reply_url = format!("{}/agt/mesh/receive", target_url);
-            tracing::info!(to = %from_agent, url = %reply_url, "Sending auto-reply via mesh");
-
-            match state_clone.client
-                .post(&reply_url)
-                .json(&reply)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    tracing::info!(to = %from_agent, url = %reply_url, "Task result sent back via mesh");
-                    state_clone.governance.audit.append(
-                        &format!("mesh:auto-reply:{}", from_agent),
-                        "delivered",
-                        &format!("Auto-reply to task {} delivered", msg_id),
-                    ).await;
-                }
-                Ok(resp) => {
-                    tracing::warn!(to = %from_agent, status = %resp.status(), "Failed to send task result back");
-                }
-                Err(e) => {
-                    tracing::warn!(to = %from_agent, error = %e, "Could not reach sender for reply");
-                }
-            }
-        });
-    }
+    // No auto-processing here. Task_request messages are handled by the OpenClaw
+    // plugin via the AGT relay (E2E encrypted) onMessage handler, which has full
+    // tool access (exec/shell) through the node host.
 
     (StatusCode::OK, Json(serde_json::json!({"status": "received"}))).into_response()
 }

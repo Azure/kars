@@ -82,7 +82,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
       {
         name: 'katapool'
         count: nodeCount
-        vmSize: 'Standard_D4s_v3'  // Must support nested virtualization
+        vmSize: 'Standard_D4as_v6'  // AMD v6, better availability than D4s_v3
         osType: 'Linux'
         osSKU: 'AzureLinux'
         mode: 'User'
