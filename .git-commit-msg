@@ -1,0 +1,27 @@
+feat: AGT E2E encrypted relay for inter-agent messaging
+
+Bidirectional E2E encrypted communication between agents via AgentMesh
+relay (Signal Protocol: X3DH key exchange + Double Ratchet encryption).
+
+Vendored patches for upstream agentmesh components:
+
+vendor/agentmesh-relay/ (v0.3.1-rawts):
+- Fix timestamp Z vs +00:00 mismatch in auth signature verification
+
+vendor/agentmesh-registry/ (v0.3.1-rawts):
+- Same timestamp fix for prekey upload + status update auth
+
+vendor/agentmesh-sdk/ (patched v0.1.2):
+- Fix PrekeyManager.buildBundle() empty signature + missing prekeys
+- Fix base64Decode crash on x25519:/ed25519: key type prefix
+- Fix X3DH to Double Ratchet handoff (pass signedPrekey as ratchet key)
+- Wire relay transport receive events to AgentMeshClient handlers
+- Include X3DH initiator params in first encrypted message
+- Send KNOCK via relay for protocol-compliant session establishment
+
+Plugin changes:
+- Register onKnock handler for auto-accepting incoming KNOCKs
+
+Infrastructure:
+- deploy/agentmesh.yaml updated to v0.3.1-rawts images
+- Dockerfile overlays vendored SDK dist onto npm @agentmesh/sdk

@@ -430,10 +430,21 @@ cli/package-lock.json
 .docker/
 
 #Vendor — allow vendored patches for agentmesh components
-# vendor/  (disabled — we vendor patched relay, registry, and SDK)
+# Only track src/, Cargo.toml, Dockerfile, README for each component
 vendor/agentmesh-sdk/node_modules/
 vendor/agentmesh-sdk/.turbo/
+vendor/agentmesh-sdk/dist/*.map
+vendor/agentmesh-sdk/tests/
+vendor/agentmesh-sdk/examples/
+vendor/agentmesh-sdk/docs/
+vendor/agentmesh-sdk/openspec/
+vendor/agentmesh-sdk/AUDIT_REPORT.md
+vendor/agentmesh-sdk/vitest.config.ts
+vendor/agentmesh-sdk/package-lock.json
+vendor/agentmesh-registry/.sqlx/
 vendor/agentmesh-registry/frontend/node_modules/
+vendor/agentmesh-registry/frontend/dist/
+vendor/agentmesh-registry/migrations/
 
 # Internal planning docs (not for public repo)
 PLAN.md

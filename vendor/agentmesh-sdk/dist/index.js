@@ -2892,9 +2892,10 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             }
           } catch (e) {
+            console.error("[AGT] E2E decrypt failed:", e?.message || e);
             for (const handler of this.messageHandlers) {
               try {
-                handler(fromAmid, parsed);
+                handler(fromAmid, { _encrypted: true, _error: e?.message, ...parsed });
               } catch {
               }
             }
