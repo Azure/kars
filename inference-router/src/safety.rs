@@ -13,6 +13,16 @@ use crate::auth::WorkloadIdentityAuth;
 static AUTH: std::sync::LazyLock<WorkloadIdentityAuth> =
     std::sync::LazyLock::new(WorkloadIdentityAuth::new);
 
+/// Determine audience for safety endpoints: Foundry project endpoints use ai.azure.com,
+/// standalone Content Safety resources use cognitiveservices.azure.com.
+fn safety_audience(endpoint: &str) -> &'static str {
+    if endpoint.contains("services.ai.azure.com") {
+        "https://ai.azure.com"
+    } else {
+        "https://cognitiveservices.azure.com"
+    }
+}
+
 // ─── Content Safety ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -39,12 +49,17 @@ struct CategoryAnalysis {
 /// Returns Ok(()) if safe, Err if content is blocked.
 pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
     let token = AUTH
-        .get_token("https://cognitiveservices.azure.com")
+        .get_token(safety_audience(endpoint))
         .await
         .context("Failed to get token for Content Safety")?;
 
+    let api_version = if endpoint.contains("services.ai.azure.com") {
+        "2025-04-01-preview"
+    } else {
+        "2024-09-01"
+    };
     let url = format!(
-        "{}/contentsafety/text:analyze?api-version=2024-09-01",
+        "{}/contentsafety/text:analyze?api-version={api_version}",
         endpoint.trim_end_matches('/')
     );
 
@@ -120,12 +135,17 @@ struct PromptAnalysis {
 /// Check for prompt injection / jailbreak attempts via Prompt Shields.
 pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
     let token = AUTH
-        .get_token("https://cognitiveservices.azure.com")
+        .get_token(safety_audience(endpoint))
         .await
         .context("Failed to get token for Prompt Shields")?;
 
+    let api_version = if endpoint.contains("services.ai.azure.com") {
+        "2025-04-01-preview"
+    } else {
+        "2024-09-01"
+    };
     let url = format!(
-        "{}/contentsafety/text:shieldPrompt?api-version=2024-09-01",
+        "{}/contentsafety/text:shieldPrompt?api-version={api_version}",
         endpoint.trim_end_matches('/')
     );
 

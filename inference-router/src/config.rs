@@ -45,9 +45,9 @@ impl Config {
                 .parse()
                 .context("ROUTER_PORT must be a valid port number")?,
 
-            foundry_endpoint: std::env::var("FOUNDRY_ENDPOINT").ok(),
-            foundry_project_endpoint: std::env::var("FOUNDRY_PROJECT_ENDPOINT").ok(),
-            azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
+            foundry_endpoint: std::env::var("FOUNDRY_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            foundry_project_endpoint: std::env::var("FOUNDRY_PROJECT_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok().filter(|s| !s.is_empty()),
 
             default_model: std::env::var("DEFAULT_MODEL")
                 .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
