@@ -19,9 +19,13 @@ fi
 ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 
-# Generate gateway token early (needed for config file + .bashrc)
-GATEWAY_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
-export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
+# Use existing gateway token if injected by controller, or generate a new one
+if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN"
+else
+  GATEWAY_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
+  export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
+fi
 
 # Only configure if not already done (idempotent)
 if [ ! -f "$OPENCLAW_CONFIG" ]; then
@@ -191,20 +195,21 @@ EOF
     mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
     cp /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
     cp /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
-    # Copy all built JS/TS files preserving directory structure
-    cd /opt/azureclaw-plugin && find . -name '*.js' -o -name '*.d.ts' -o -name '*.map' | while read f; do
-      mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist/$(dirname "$f")"
-      cp "$f" "$OPENCLAW_DIR/extensions/azureclaw/dist/$f"
-    done
+    # Copy built JS/TS output (exclude node_modules — copied separately below)
+    cp -r /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+    cp -r /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+    cp -r /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+    if [ -d /opt/azureclaw-plugin/commands ]; then
+      cp -r /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/"
+    fi
     # Copy Foundry skills (SKILL.md files)
     if [ -d /opt/azureclaw-plugin/skills ]; then
       cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
-      # Also copy to workspace skills so they're in the standard location
       mkdir -p "$WORKSPACE_DIR/skills"
       cp -r /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
       echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
     fi
-    # Copy node_modules for AGT SDK (@agentmesh/sdk)
+    # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
     if [ -d /opt/azureclaw-plugin/node_modules ]; then
       cp -r /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
       echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
