@@ -13,6 +13,7 @@ use k8s_openapi::api::{
     apps::v1::Deployment,
     core::v1::{ConfigMap, Namespace, Secret, Service, ServiceAccount},
     networking::v1::NetworkPolicy,
+    rbac::v1::ClusterRoleBinding,
 };
 use kube::{
     api::{Api, ListParams, Patch, PatchParams},
@@ -182,6 +183,40 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "sandbox",
             &PatchParams::apply("azureclaw-controller").force(),
             &Patch::Apply(sa),
+        )
+        .await?;
+
+    // ── Step 2a: Grant sandbox SA permission to spawn sub-agents ─────────
+    // Bind the sandbox SA to the azureclaw-sandbox-spawner ClusterRole so
+    // agents can create/list/delete ClawSandbox CRDs for sub-agent spawning.
+    let crb_api: Api<ClusterRoleBinding> = Api::all(client.clone());
+    let crb_name = format!("azureclaw-spawner-{}", name);
+    let crb: ClusterRoleBinding = serde_json::from_value(json!({
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "metadata": {
+            "name": crb_name,
+            "labels": {
+                "azureclaw.azure.com/sandbox": name,
+                "app.kubernetes.io/managed-by": "azureclaw-controller"
+            }
+        },
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "azureclaw-sandbox-spawner"
+        },
+        "subjects": [{
+            "kind": "ServiceAccount",
+            "name": "sandbox",
+            "namespace": sandbox_ns
+        }]
+    }))?;
+    crb_api
+        .patch(
+            &crb_name,
+            &PatchParams::apply("azureclaw-controller").force(),
+            &Patch::Apply(crb),
         )
         .await?;
 
