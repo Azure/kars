@@ -786,33 +786,39 @@ const azureClawPlugin = definePluginEntry({
       handler: async () => {
         try {
           const http = await import("node:http");
+          // Query actual Foundry deployments (not the full catalog)
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/v1/models", (res) => {
-              let data = "";
-              res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-              res.on("end", () => resolve(data));
-            });
+            const req = http.get(
+              "http://127.0.0.1:8443/deployments?api-version=2025-11-15-preview",
+              { headers: { "x-azureclaw-sandbox": "self" } },
+              (res) => {
+                let data = "";
+                res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+                res.on("end", () => resolve(data));
+              },
+            );
             req.on("error", reject);
             req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
           });
           const parsed = JSON.parse(body);
-          const models = (parsed.data || []).map((m: any) => m.id).sort();
-          const deployed = models.filter((m: string) =>
-            ["gpt-4.1", "gpt-5-mini", "DeepSeek-V3.2", "Phi-4", "gpt-4o"].some(d => m.includes(d))
-          );
+          const deployments = parsed.data || parsed.value || [];
+          const lines = deployments.map((d: any) => {
+            const name = d.id || d.name || "?";
+            const model = d.model?.name || d.model || d.properties?.model?.name || "";
+            const status = d.status || d.properties?.provisioningState || "?";
+            return `  - **${name}**${model ? ` (${model})` : ""} — ${status}`;
+          });
           return {
             text: [
-              `**Azure Foundry Models** (${models.length} available)`,
+              `**Foundry Deployments** (${deployments.length})`,
               "",
-              "Deployed in your project:",
-              deployed.map((m: string) => `  - ${m}`).join("\n") || "  (none detected)",
+              ...lines,
               "",
-              `Total catalog: ${models.length} models`,
               "Switch with: `/azureclaw-switch <model>`",
             ].join("\n"),
           };
         } catch {
-          return { text: "Could not query models. Is the inference router running?" };
+          return { text: "Could not query deployments. Is the inference router running?" };
         }
       },
     });

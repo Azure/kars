@@ -43,6 +43,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Manage spawner role bindings for sandbox sub-agent creation
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
 ---
 # Bind controller role
 apiVersion: rbac.authorization.k8s.io/v1
@@ -57,3 +61,15 @@ subjects:
   - kind: ServiceAccount
     name: azureclaw-controller
     namespace: {{ .Release.Namespace }}
+---
+# Sandbox spawner ClusterRole — allows sub-agent creation from within sandboxes
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: azureclaw-sandbox-spawner
+  labels:
+    app.kubernetes.io/name: azureclaw
+rules:
+  - apiGroups: ["azureclaw.azure.com"]
+    resources: ["clawsandboxes"]
+    verbs: ["get", "list", "create", "delete"]
