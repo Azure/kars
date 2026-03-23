@@ -17,7 +17,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing;
 
 /// High-risk TLDs frequently abused for phishing/malware.
 /// Source: APWG Phishing Activity Trends, Spamhaus TLD stats.
@@ -105,7 +104,7 @@ impl Blocklist {
         let domain = extract_domain(input);
 
         // Block bare IP addresses (no DNS = suspicious)
-        if self.ip_direct_blocked && is_ip_address(&domain) {
+        if self.ip_direct_blocked && is_ip_address(domain) {
             return BlockResult::Blocked {
                 reason: "IP-direct access blocked — use DNS hostnames".into(),
                 domain: domain.to_string(),
@@ -173,11 +172,11 @@ impl Blocklist {
                 let mut new_domains = HashSet::new();
 
                 // Re-load seed file (controller may have updated it via CronJob)
-                if let Some(ref path) = seed_path {
-                    if let Ok(content) = tokio::fs::read_to_string(path).await {
-                        let count = parse_domain_list(&content, &mut new_domains);
-                        tracing::info!(count, "Blocklist: reloaded seed file");
-                    }
+                if let Some(ref path) = seed_path
+                    && let Ok(content) = tokio::fs::read_to_string(path).await
+                {
+                    let count = parse_domain_list(&content, &mut new_domains);
+                    tracing::info!(count, "Blocklist: reloaded seed file");
                 }
 
                 // Fetch OISD (domainswild format: one domain per line)
@@ -272,6 +271,7 @@ pub enum BlockResult {
 }
 
 impl BlockResult {
+    #[allow(dead_code)]
     pub fn is_blocked(&self) -> bool {
         matches!(self, BlockResult::Blocked { .. })
     }

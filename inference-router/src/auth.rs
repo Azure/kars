@@ -58,10 +58,10 @@ impl WorkloadIdentityAuth {
         // Check cache first (keyed by resource scope)
         {
             let cache = self.token_cache.read().await;
-            if let Some(cached) = cache.get(resource) {
-                if cached.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60) {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = cache.get(resource)
+                && cached.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60)
+            {
+                return Ok(cached.access_token.clone());
             }
         }
 

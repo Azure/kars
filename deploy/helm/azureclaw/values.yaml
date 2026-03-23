@@ -4,8 +4,8 @@
 controller:
   image:
     repository: azureclaw.azurecr.io/azureclaw-controller
-    tag: "0.1.0"
-    pullPolicy: IfNotPresent
+    tag: "latest"
+    pullPolicy: Always
   replicas: 2
   resources:
     requests:
@@ -19,8 +19,8 @@ controller:
 inferenceRouter:
   image:
     repository: azureclaw.azurecr.io/azureclaw-inference-router
-    tag: "0.1.0"
-    pullPolicy: IfNotPresent
+    tag: "latest"
+    pullPolicy: Always
   replicas: 2
   resources:
     requests:
@@ -43,7 +43,7 @@ sandbox:
   image:
     repository: azureclaw.azurecr.io/openclaw-sandbox
     tag: "latest"
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   isolation: "enhanced"  # standard | enhanced | confidential
   seccompProfile: "azureclaw-strict"
   # SELinux: empty = compatible with restricted PodSecurity (Approach C).

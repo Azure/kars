@@ -6,7 +6,7 @@
 # (Azure Linux base images are x86_64 only; use --platform on ARM hosts)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
-ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:0.1.0
+ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:latest
 
 # ─── Use pre-built inference router image ────────────────────────────────────
 
