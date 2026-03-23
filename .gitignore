@@ -444,4 +444,4 @@ PLAN.md
 cli/inspect-agt.cjs
 cli/test-agt-mesh*.cjs
 .tmp-*.cjs
-.tmp-*.js
+.tmp-*.js.git-commit-msg
