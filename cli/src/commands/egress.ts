@@ -176,20 +176,31 @@ export function egressCommand(): Command {
 
       // Default: show status
       try {
-        const [blStatus, allowlist, pending] = await Promise.all([
+        const [blStatus, allowlist, pending, learned] = await Promise.all([
           routerGet("/blocklist/status"),
           routerGet("/egress/allowlist"),
           routerGet("/egress/pending"),
+          routerGet("/egress/learned").catch(() => ({ count: 0, domains: [] })),
         ]);
         console.log(chalk.hex("#0078D4")(`\n  Egress Security — '${name}'`));
         console.log(`    Blocklist:      ${blStatus.enabled ? chalk.green("enabled") : chalk.red("disabled")} (${blStatus.domain_count.toLocaleString()} domains)`);
         console.log(`    Learn mode:     ${blStatus.learn_mode ? chalk.green("ON") : chalk.dim("off")}`);
         console.log(`    Allowlist:      ${chalk.white(allowlist.count)} domain(s) approved`);
         console.log(`    Pending:        ${pending.count > 0 ? chalk.yellow(pending.count + " awaiting approval") : chalk.dim("none")}`);
+        if (learned.count > 0) {
+          console.log(`    Learned:        ${chalk.cyan(learned.count)} domain(s) discovered`);
+        }
         console.log();
         if (pending.count > 0) {
           for (const p of pending.pending) {
             console.log(`    ${chalk.yellow("⏳")} ${p.domain}`);
+          }
+          console.log();
+        }
+        if (learned.count > 0 && blStatus.learn_mode) {
+          console.log(chalk.dim(`  Discovered domains (learn mode):`));
+          for (const d of learned.domains) {
+            console.log(`    ${chalk.cyan("◉")} ${d}`);
           }
           console.log();
         }
@@ -198,7 +209,7 @@ export function egressCommand(): Command {
         console.log(chalk.dim(`    azureclaw egress ${name} --approve <domain>      Approve a domain`));
         console.log(chalk.dim(`    azureclaw egress ${name} --deny <domain>         Deny a domain`));
         console.log(chalk.dim(`    azureclaw egress ${name} --allowlist             Show approved domains`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --learn                 Enable learn mode`));
+        console.log(chalk.dim(`    azureclaw egress ${name} --learned               Show discovered domains`));
         console.log();
       } catch (e: any) {
         console.log(chalk.red(`\n  Failed to query status: ${e.message}\n`));
