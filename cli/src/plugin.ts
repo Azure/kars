@@ -71,13 +71,30 @@ async function processTaskWithTools(
       type: "function" as const,
       function: {
         name: "exec_command",
-        description: "Execute a shell command inside the sandbox and return stdout/stderr. Use for system info (uname, hostname, ip addr, cat /etc/os-release, etc.), file operations, or any command-line task.",
+        description: "Execute a shell command inside the sandbox and return stdout/stderr. Use for system info (uname, hostname, ip addr, cat /etc/os-release, etc.), file operations, or any command-line task. NOTE: Direct internet access (curl to external URLs) is blocked — use http_fetch for external HTTP requests.",
         parameters: {
           type: "object",
           properties: {
             command: { type: "string", description: "The shell command to execute" },
           },
           required: ["command"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "http_fetch",
+        description: "Make an HTTP request to an external URL through the security proxy. The request goes through blocklist checking and allowlist enforcement. Use this for any external API calls (Telegram, HackerNews, web APIs, etc.).",
+        parameters: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "The full URL to fetch (e.g., https://api.telegram.org/...)" },
+            method: { type: "string", description: "HTTP method: GET, POST, PUT, DELETE. Default: GET" },
+            headers: { type: "object", description: "Optional HTTP headers as key-value pairs" },
+            body: { type: "string", description: "Optional request body (for POST/PUT)" },
+          },
+          required: ["url"],
         },
       },
     },
@@ -127,9 +144,28 @@ async function processTaskWithTools(
         let result: string;
         try {
           const args = JSON.parse(tc.function.arguments);
-          const cmd = args.command || "";
-          log.info(`AGT sub-agent exec: ${cmd}`);
-          result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+          const fnName = tc.function.name;
+
+          if (fnName === "http_fetch") {
+            // Route through the egress proxy (blocklist + allowlist checked)
+            log.info(`AGT sub-agent http_fetch: ${args.method || "GET"} ${args.url}`);
+            const fetchBody = JSON.stringify({
+              url: args.url,
+              method: args.method || "GET",
+              headers: args.headers || {},
+              body: args.body || "",
+            });
+            const fetchResult = execSync(
+              `curl -s -X POST http://127.0.0.1:8443/egress/fetch -H "Content-Type: application/json" -d '${fetchBody.replace(/'/g, "'\\''")}'`,
+              { timeout: 35000, encoding: "utf8", maxBuffer: 256 * 1024 },
+            ).trim();
+            result = fetchResult;
+          } else {
+            // exec_command
+            const cmd = args.command || "";
+            log.info(`AGT sub-agent exec: ${cmd}`);
+            result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+          }
         } catch (e: any) {
           result = e.stderr || e.stdout || e.message || "Command failed";
         }

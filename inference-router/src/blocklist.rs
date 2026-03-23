@@ -48,6 +48,21 @@ pub struct Blocklist {
     learn_mode: bool,
     /// Domains observed during learn mode (for generating an allowlist later).
     learned_domains: Arc<RwLock<HashSet<String>>>,
+    /// Allowlist: explicitly approved domains for egress proxy.
+    /// Only domains on this list can be fetched via /egress/fetch (unless learn mode is on).
+    allowlist: Arc<RwLock<HashSet<String>>>,
+    /// Pending approval requests: domains the agent tried to reach but aren't allowlisted.
+    pending_approvals: Arc<RwLock<Vec<PendingApproval>>>,
+}
+
+/// A pending egress approval request.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PendingApproval {
+    pub id: String,
+    pub domain: String,
+    pub url: String,
+    pub sandbox: String,
+    pub timestamp: String,
 }
 
 impl Blocklist {
@@ -60,6 +75,8 @@ impl Blocklist {
             enabled: false,
             learn_mode: false,
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
+            allowlist: Arc::new(RwLock::new(HashSet::new())),
+            pending_approvals: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -91,6 +108,8 @@ impl Blocklist {
             enabled: true,
             learn_mode: false,
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
+            allowlist: Arc::new(RwLock::new(HashSet::new())),
+            pending_approvals: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -261,6 +280,97 @@ impl Blocklist {
     pub async fn clear_learned(&self) {
         self.learned_domains.write().await.clear();
     }
+
+    // ── Allowlist (for egress proxy) ──
+
+    /// Check egress access: blocklist → allowlist → pending approval.
+    /// Returns Ok(()) if allowed, Err(reason) if denied.
+    pub async fn check_egress(&self, url: &str, sandbox: &str) -> Result<(), String> {
+        // 1. Blocklist: hard deny
+        let block_result = self.is_blocked(url).await;
+        if block_result.is_blocked() {
+            return Err("Domain blocked by threat intelligence blocklist".into());
+        }
+
+        let domain = extract_domain(url).to_lowercase();
+
+        // 2. Learn mode: allow + record (for discovery)
+        if self.learn_mode {
+            self.record_learned(url).await;
+            return Ok(());
+        }
+
+        // 3. Allowlist: explicitly approved domains pass through
+        {
+            let al = self.allowlist.read().await;
+            if al.contains(&domain) {
+                return Ok(());
+            }
+            // Check parent domains (e.g., allowlisting "telegram.org" covers "api.telegram.org")
+            let mut parts: &str = &domain;
+            while let Some(pos) = parts.find('.') {
+                parts = &parts[pos + 1..];
+                if al.contains(parts) {
+                    return Ok(());
+                }
+            }
+        }
+
+        // 4. Not allowlisted → create pending approval (dedup by domain)
+        {
+            let mut pending = self.pending_approvals.write().await;
+            let already_pending = pending.iter().any(|p| p.domain == domain);
+            if !already_pending {
+                let id = format!("{:x}", md5_hash(&format!("{}{}", domain, sandbox)));
+                pending.push(PendingApproval {
+                    id,
+                    domain: domain.clone(),
+                    url: url.to_string(),
+                    sandbox: sandbox.to_string(),
+                    timestamp: format!("{}Z", std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                });
+            }
+        }
+
+        Err(format!("Domain '{}' not on allowlist — pending operator approval", domain))
+    }
+
+    /// Add a domain to the allowlist.
+    pub async fn allow_domain(&self, domain: &str) {
+        let domain = domain.to_lowercase();
+        self.allowlist.write().await.insert(domain.clone());
+        // Remove from pending approvals
+        self.pending_approvals.write().await.retain(|p| p.domain != domain);
+        tracing::info!(domain = %domain, "Domain added to egress allowlist");
+    }
+
+    /// Remove a domain from the allowlist.
+    pub async fn deny_domain(&self, domain: &str) {
+        let domain = domain.to_lowercase();
+        self.allowlist.write().await.remove(&domain);
+        self.pending_approvals.write().await.retain(|p| p.domain != domain);
+    }
+
+    /// Get the current allowlist.
+    pub async fn get_allowlist(&self) -> Vec<String> {
+        let mut domains: Vec<String> = self.allowlist.read().await.iter().cloned().collect();
+        domains.sort();
+        domains
+    }
+
+    /// Get pending approval requests.
+    pub async fn get_pending_approvals(&self) -> Vec<PendingApproval> {
+        self.pending_approvals.read().await.clone()
+    }
+}
+
+/// Simple hash for generating approval IDs.
+fn md5_hash(input: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    input.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Result of a blocklist check.

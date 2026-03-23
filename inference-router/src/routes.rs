@@ -209,6 +209,13 @@ pub fn agt_routes() -> Router<AppState> {
         // Egress learn mode
         .route("/egress/learned", get(egress_learned))
         .route("/egress/learned/clear", post(egress_learned_clear))
+        // Egress proxy — audited, blocklist-checked external HTTP for the sandbox
+        .route("/egress/fetch", post(egress_fetch))
+        // Egress allowlist management
+        .route("/egress/allowlist", get(egress_allowlist))
+        .route("/egress/approve", post(egress_approve))
+        .route("/egress/deny", post(egress_deny))
+        .route("/egress/pending", get(egress_pending))
         // AGT relay proxy (WebSocket + HTTP registry)
         .route("/agt/relay", get(agt_relay_proxy))
         .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
@@ -1190,6 +1197,177 @@ async fn egress_learned_clear(State(state): State<AppState>) -> impl IntoRespons
         "status": "cleared",
         "learn_mode": state.blocklist.is_learn_mode(),
     }))
+}
+
+/// POST /egress/fetch — audited, allowlist-checked HTTP proxy for sandbox egress.
+///
+/// Security model:
+/// 1. Blocklist → hard deny (threat intelligence)
+/// 2. Allowlist → approved domains pass through
+/// 3. Unknown domain → deny + create pending approval request
+/// 4. Learn mode → log + allow (discovery phase only)
+///
+/// Body: { "url": "https://...", "method": "GET"|"POST"|..., "headers": {}, "body": "..." }
+/// Returns: { "status": <http_code>, "headers": {...}, "body": "..." }
+async fn egress_fetch(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+    let req_body = req.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let req_headers = req.get("headers").and_then(|v| v.as_object());
+
+    if url.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Missing 'url' field"
+        }))).into_response();
+    }
+
+    let sandbox = &state.governance.sandbox_name;
+
+    // Check egress access: blocklist → allowlist → pending
+    if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
+        tracing::warn!(url = %url, reason = %reason, "Egress fetch denied");
+        state.governance.audit.append(
+            &format!("egress:fetch:{}", url),
+            "deny",
+            &reason,
+        ).await;
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "error": reason,
+            "url": url,
+            "action": "Run 'azureclaw egress <name> --pending' to see pending requests, then 'azureclaw egress <name> --approve <domain>' to allow.",
+        }))).into_response();
+    }
+
+    // Record in learn mode
+    state.blocklist.record_learned(url).await;
+
+    // Audit log
+    state.governance.audit.append(
+        &format!("egress:fetch:{}", url),
+        "allow",
+        &format!("{} request to {}", method, url),
+    ).await;
+
+    tracing::info!(url = %url, method = %method, "Egress fetch proxied");
+
+    // Build and send the request
+    let http_method = match method.to_uppercase().as_str() {
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "PATCH" => reqwest::Method::PATCH,
+        "DELETE" => reqwest::Method::DELETE,
+        "HEAD" => reqwest::Method::HEAD,
+        _ => reqwest::Method::GET,
+    };
+
+    let mut request = state.client.request(http_method, url);
+
+    if let Some(headers) = req_headers {
+        for (k, v) in headers {
+            if let Some(val) = v.as_str()
+                && let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+                    request = request.header(name, val);
+                }
+        }
+    }
+
+    if !req_body.is_empty() {
+        request = request.body(req_body.to_string());
+    }
+
+    match request.timeout(std::time::Duration::from_secs(30)).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let resp_headers: serde_json::Map<String, serde_json::Value> = resp.headers()
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.to_str().ok().map(|val| (k.to_string(), serde_json::Value::String(val.to_string())))
+                })
+                .collect();
+            let body = resp.text().await.unwrap_or_default();
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": status,
+                "headers": resp_headers,
+                "body": body,
+            }))).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(url = %url, error = %e, "Egress fetch failed");
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": format!("Request failed: {}", e),
+                "url": url,
+            }))).into_response()
+        }
+    }
+}
+
+/// GET /egress/allowlist — list approved egress domains.
+async fn egress_allowlist(State(state): State<AppState>) -> impl IntoResponse {
+    let domains = state.blocklist.get_allowlist().await;
+    Json(serde_json::json!({
+        "count": domains.len(),
+        "domains": domains,
+    }))
+}
+
+/// GET /egress/pending — list pending approval requests.
+async fn egress_pending(State(state): State<AppState>) -> impl IntoResponse {
+    let pending = state.blocklist.get_pending_approvals().await;
+    Json(serde_json::json!({
+        "count": pending.len(),
+        "pending": pending,
+    }))
+}
+
+/// POST /egress/approve — approve a domain for egress.
+/// Body: { "domain": "api.telegram.org" }
+async fn egress_approve(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    if domain.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Missing 'domain' field"
+        }))).into_response();
+    }
+    state.blocklist.allow_domain(domain).await;
+    state.governance.audit.append(
+        &format!("egress:approve:{}", domain),
+        "approved",
+        &format!("Domain {} added to egress allowlist", domain),
+    ).await;
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "approved",
+        "domain": domain,
+    }))).into_response()
+}
+
+/// POST /egress/deny — deny and remove a pending domain request.
+/// Body: { "domain": "evil.example.com" }
+async fn egress_deny(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    if domain.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Missing 'domain' field"
+        }))).into_response();
+    }
+    state.blocklist.deny_domain(domain).await;
+    state.governance.audit.append(
+        &format!("egress:deny:{}", domain),
+        "denied",
+        &format!("Domain {} denied and removed from pending", domain),
+    ).await;
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "denied",
+        "domain": domain,
+    }))).into_response()
 }
 
 // ==========================================================================
