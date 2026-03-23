@@ -21,6 +21,18 @@ pub struct UpstreamConfig {
     pub sandbox_name: String,
 }
 
+/// Determine the correct token audience for the upstream endpoint.
+/// Foundry project endpoints (services.ai.azure.com/api/projects/) require
+/// the `https://ai.azure.com` audience. Legacy Azure OpenAI endpoints
+/// (openai.azure.com) require `https://cognitiveservices.azure.com`.
+fn token_audience(endpoint: &str) -> &'static str {
+    if endpoint.contains("services.ai.azure.com") && endpoint.contains("/api/projects/") {
+        "https://ai.azure.com"
+    } else {
+        "https://cognitiveservices.azure.com"
+    }
+}
+
 /// Sanitize request headers — strip credentials and hop-by-hop headers,
 /// then inject Azure auth.
 fn build_upstream_headers(
@@ -92,7 +104,7 @@ pub async fn forward(
     let mode = if auth.is_api_key_mode() { "dev" } else { "foundry" };
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = %mode, "Forwarding inference");
 
-    let token = auth.get_token("https://cognitiveservices.azure.com").await
+    let token = auth.get_token(token_audience(&upstream.endpoint)).await
         .context("Failed to acquire auth token")?;
 
     let headers = build_upstream_headers(request_headers, auth, &token)?;
@@ -132,7 +144,7 @@ pub async fn forward_stream(
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
-    let token = auth.get_token("https://cognitiveservices.azure.com").await
+    let token = auth.get_token(token_audience(&upstream.endpoint)).await
         .context("Failed to acquire auth token")?;
     let headers = build_upstream_headers(&request_headers, &auth, &token)?;
 

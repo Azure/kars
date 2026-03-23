@@ -400,6 +400,16 @@ export function upCommand(): Command {
         spinner.text = "Step 7/8: Preparing Helm deployment...";
         const foundryEndpoint = options.foundryEndpoint || "";
 
+        // When using Foundry (no dedicated AOAI), derive the OpenAI inference endpoint
+        // from the Foundry resource name: {name}.services.ai.azure.com → {name}.openai.azure.com
+        if (!openAiEndpoint && foundryEndpoint) {
+          const match = foundryEndpoint.match(/https:\/\/([^.]+)\.services\.ai\.azure\.com/);
+          if (match) {
+            openAiEndpoint = `https://${match[1]}.openai.azure.com`;
+            console.log(`  Derived OpenAI inference endpoint: ${openAiEndpoint}`);
+          }
+        }
+
         // Fix orphaned namespace: label it for Helm adoption if it exists but isn't Helm-managed
         try {
           await execa("kubectl", [
