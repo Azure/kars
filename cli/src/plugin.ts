@@ -426,7 +426,38 @@ const azureClawPlugin = definePluginEntry({
             governance: params.governance !== false,
             trust_threshold: 500,
           });
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+
+          // Auto-wait until the sub-agent is Running (poll spawn_status)
+          const agentName = params.name as string;
+          log.info(`Waiting for sub-agent '${agentName}' to reach Running state...`);
+          let phase = "Pending";
+          for (let i = 0; i < 24; i++) { // 24 × 5s = 120s max
+            await new Promise(r => setTimeout(r, 5000));
+            try {
+              const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}`);
+              phase = status?.phase || "Pending";
+              log.info(`Sub-agent '${agentName}' phase: ${phase} (${i + 1}/24)`);
+              if (phase === "Running") break;
+            } catch {
+              // Status endpoint not ready yet — keep polling
+            }
+          }
+
+          if (phase !== "Running") {
+            return { content: [{ type: "text", text: JSON.stringify({
+              ...result,
+              warning: `Sub-agent created but not yet Running (phase: ${phase}). It may still be booting. Use azureclaw_spawn_status to check.`,
+            }, null, 2) }] };
+          }
+
+          // Give the sub-agent a few more seconds to register with the AGT relay
+          await new Promise(r => setTimeout(r, 5000));
+
+          return { content: [{ type: "text", text: JSON.stringify({
+            ...result,
+            phase: "Running",
+            message: `Sub-agent '${agentName}' is Running and ready for mesh communication. Use azureclaw_mesh_send to send it a task.`,
+          }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Spawn failed: ${e.message}` }] };
         }
