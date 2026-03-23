@@ -41,6 +41,7 @@ let agtTrustStore: any = null;
 let agtAuditLogger: any = null;
 let agtMeshClient: any = null;
 let agtIdentity: any = null;
+let agtInitialized = false; // Singleton guard — only first plugin load creates the mesh client
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
 const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string }> = [];
@@ -53,6 +54,14 @@ const nameToAmid: Map<string, string> = new Map();
 let agtSandboxName: string = "unknown";
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  // Singleton guard — OpenClaw loads the plugin twice (tool registry + agent session).
+  // Only the first load should create the AGT identity and mesh connection to avoid
+  // duplicate messages and wasted relay connections.
+  // Use process env flag since module may be loaded as separate instances.
+  if (agtInitialized || process.env.__AGT_INITIALIZED === '1') return;
+  agtInitialized = true;
+  process.env.__AGT_INITIALIZED = '1';
+
   try {
     const sdk = require("@agentmesh/sdk");
 
@@ -108,12 +117,40 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       log.warn(`AGT mesh connect deferred: ${connErr.message} (will retry on first send)`);
     }
 
-    // Set up KNOCK handler — auto-accept KNOCKs from other AzureClaw agents
-    // The KNOCK protocol gives us policy-gated session establishment:
-    // each agent can evaluate the request before accepting.
+    // Set up KNOCK handler — policy-gated session establishment with trust scoring.
+    // Each agent evaluates the incoming KNOCK before accepting:
+    // - Checks the sender's trust tier (Anonymous=500, Verified=600, Organization=700)
+    // - Evaluates the requested intent against AGT policy
+    // - Rejects agents below the configured trust threshold
+    const AGT_TRUST_THRESHOLD = parseInt(process.env.AGT_TRUST_THRESHOLD || "0", 10); // 0 = accept all (dev)
     agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
-      log.info(`AGT KNOCK from ${fromAmid.slice(0, 12)}... intent=${request?.intent?.capability || '*'}`);
-      // Accept all KNOCKs from azureclaw mesh agents (policy can be tightened later)
+      const intent = request?.intent?.capability || '*';
+      log.info(`AGT KNOCK from ${fromAmid.slice(0, 12)}... intent=${intent}`);
+
+      // Trust score evaluation (when threshold > 0)
+      if (AGT_TRUST_THRESHOLD > 0) {
+        try {
+          const peerInfo = await agtMeshClient.lookup(fromAmid);
+          const trustScore = peerInfo?.trustScore || peerInfo?.reputation || 0;
+          if (trustScore < AGT_TRUST_THRESHOLD) {
+            log.warn(`AGT KNOCK rejected: ${fromAmid.slice(0, 12)} trust=${trustScore} < threshold=${AGT_TRUST_THRESHOLD}`);
+            return { accept: false, reason: `trust_score_${trustScore}_below_${AGT_TRUST_THRESHOLD}` };
+          }
+          log.info(`AGT KNOCK trust OK: ${fromAmid.slice(0, 12)} trust=${trustScore}`);
+        } catch {
+          // Registry lookup failed — accept anyway for mesh agents (trust evaluation best-effort)
+        }
+      }
+
+      // Policy evaluation
+      if (agtPolicy && intent !== '*') {
+        const decision = agtPolicy.evaluate({ action: intent });
+        if (decision && !decision.allowed) {
+          log.warn(`AGT KNOCK rejected by policy: ${fromAmid.slice(0, 12)} intent=${intent}`);
+          return { accept: false, reason: 'policy_denied' };
+        }
+      }
+
       return { accept: true };
     });
 
@@ -133,7 +170,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
 
-      // Auto-reply to task_request messages via AGT relay (bidirectional E2E)
+      // Auto-reply to task_request messages via AGT relay (E2E encrypted)
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         try {
           await agtMeshClient.send(fromAmid, {
@@ -142,8 +179,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             from_agent: agtSandboxName,
             in_reply_to: message?.content || content,
             timestamp: new Date().toISOString(),
-          }, { unencrypted: true }); // Reply unencrypted for now (session is one-way initiator)
-          log.info(`AGT relay: auto-replied to ${fromName} via relay`);
+          });
+          log.info(`AGT relay: auto-replied to ${fromName} via E2E encrypted relay`);
         } catch (replyErr: any) {
           log.warn(`AGT relay: auto-reply failed: ${replyErr.message}`);
         }
@@ -328,7 +365,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_spawn",
       label: "Spawn Sub-Agent",
-      description: "Spawn a secure isolated sub-agent sandbox on AKS. Returns the sub-agent name, namespace, and initial phase. The sub-agent runs in its own K8s namespace with full security controls. Use governance=true for AGT mesh communication.",
+      description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted communication (Signal Protocol). The sub-agent automatically connects to the AGT relay mesh for encrypted inter-agent messaging — no special configuration needed. Use azureclaw_mesh_send to communicate and azureclaw_mesh_inbox to receive replies.",
       parameters: {
         type: "object",
         properties: {
