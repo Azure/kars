@@ -55,6 +55,14 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "plugins": {
     "allow": ["azureclaw"]
   },
+  "channels": {
+    "telegram": {
+      "enabled": TELEGRAM_ENABLED_PLACEHOLDER,
+      "botToken": "${TELEGRAM_BOT_TOKEN:-}",
+      "dmPolicy": "open",
+      "allowFrom": ["*"]
+    }
+  },
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" }
@@ -67,12 +75,20 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
       "mode": "token"
     },
     "controlUi": {
+      "enabled": true,
       "dangerouslyDisableDeviceAuth": true
     }
   }
 }
 EOF
   chmod 600 "$OPENCLAW_CONFIG"
+
+  # Set Telegram enabled based on whether token is provided
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    sed -i 's/TELEGRAM_ENABLED_PLACEHOLDER/true/' "$OPENCLAW_CONFIG"
+  else
+    sed -i 's/TELEGRAM_ENABLED_PLACEHOLDER/false/' "$OPENCLAW_CONFIG"
+  fi
 
   # Set provider credentials via environment (OpenClaw reads these automatically)
   # These are exported so openclaw tui/agent picks them up
@@ -188,6 +204,27 @@ Authentication is handled automatically — no API keys needed.
 ## Health & Metrics
 - `GET /healthz` — readiness check
 - `GET /metrics` — Prometheus metrics (tokens, latency, requests)
+
+## External HTTP Access (Egress Proxy)
+Direct internet access is blocked by security policy. To make external HTTP requests
+(APIs, webhooks, etc.), use the egress proxy which checks the allowlist and blocklist:
+
+- `POST /egress/fetch` — make an external HTTP request
+  Body: `{"url": "https://...", "method": "GET", "headers": {}, "body": ""}`
+  Returns: `{"status": 200, "headers": {...}, "body": "..."}`
+
+If a domain is not on the allowlist, the request is denied and a pending approval is
+created. The operator can approve it with `azureclaw egress <name> --approve <domain>`.
+
+**Example:**
+```bash
+curl -s -X POST http://localhost:8443/egress/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://api.telegram.org/bot.../getMe","method":"GET"}'
+```
+
+**IMPORTANT:** Do NOT use `curl https://...` directly — it will time out.
+Always use `curl http://localhost:8443/egress/fetch` with the target URL in the body.
 TOOLSEOF
 
   cat > "$WORKSPACE_DIR/SOUL.md" << 'EOF'

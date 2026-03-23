@@ -514,8 +514,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
     router_env.push(json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}));
 
-    // Egress learn mode — observe all accessed domains (blocklist still enforced)
-    if spec.network_policy.as_ref().is_some_and(|np| np.learn_egress) {
+    // Egress learn mode — enabled by default so operators can discover required domains.
+    // Blocklist (threat intelligence) is still enforced. Disable with network_policy.learn_egress=false.
+    let learn_egress = spec.network_policy.as_ref().is_none_or(|np| np.learn_egress);
+    if learn_egress {
         router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
     }
 
@@ -548,8 +550,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
+                // Allow reply packets (SYN-ACK etc.) for inbound connections to the
+                // gateway — without this, the WebUX and Telegram channel can't respond.
+                "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                "echo 'egress-guard: UID 1000 restricted to localhost + DNS'"
+                "echo 'egress-guard: UID 1000 restricted to localhost + DNS + inbound replies'"
             )],
             "securityContext": {
                 "runAsUser": 0,
@@ -880,6 +885,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .await?;
 
         // Patch NetworkPolicy to allow ingress on port 8443 for mesh messages
+        // and ports 18789/18791 for the gateway WebUX + WebSocket
         let mesh_ingress_patch = json!({
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
@@ -896,7 +902,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
                         }
                     }],
-                    "ports": [{"port": 8443, "protocol": "TCP"}]
+                    "ports": [
+                        {"port": 8443, "protocol": "TCP"},
+                        {"port": 18789, "protocol": "TCP"},
+                        {"port": 18791, "protocol": "TCP"}
+                    ]
                 }]
             }
         });
