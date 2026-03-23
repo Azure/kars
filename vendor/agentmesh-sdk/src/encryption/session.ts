@@ -242,11 +242,17 @@ export class SessionManager {
     // Generate session ID
     const sessionId = await this.generateSessionId();
 
-    // Initialize Double Ratchet with peer's ephemeral key as initial ratchet key
-    const ratchet = await DoubleRatchetSession.initialize(
+    // Initialize Double Ratchet
+    // Per Signal Protocol: the responder uses the signed prekey as the initial
+    // ratchet keypair (not a fresh one), because the initiator encrypts using
+    // DH(initiator_ratchet, signedPrekey_pub). The responder must decrypt using
+    // DH(signedPrekey_priv, initiator_ratchet_pub) — which requires signedPrekey
+    // to be the responder's ratchet key.
+    const signedPrekeyPublic = this.prekeyManager.getSignedPrekeyPublic(x3dhMessage.signedPrekeyId);
+    const ratchet = await DoubleRatchetSession.initializeResponder(
       x3dhResult.sharedSecret,
-      false, // not initiator
-      x3dhMessage.ephemeralKey // peer's ratchet public key
+      signedPrekeyPrivate,
+      signedPrekeyPublic!,
     );
 
     const info: SessionInfo = {

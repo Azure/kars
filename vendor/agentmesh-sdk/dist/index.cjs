@@ -350,6 +350,16 @@ var PrekeyManager = class {
     return null;
   }
   /**
+   * Get signed prekey public key by ID.
+   */
+  getSignedPrekeyPublic(id) {
+    if (!this.state) return null;
+    if (id === this.state.signedPrekeyId) {
+      return this.state.signedPrekeyPublic;
+    }
+    return null;
+  }
+  /**
    * Get one-time prekey private key by ID.
    */
   getOneTimePrekeyPrivate(id) {
@@ -656,6 +666,29 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
     };
     const session = new _DoubleRatchetSession(state, isInitiator);
     return session;
+  }
+  /**
+   * Initialize a responder session using the signed prekey as the ratchet keypair.
+   *
+   * Per Signal Protocol, the responder's initial ratchet key IS the signed prekey,
+   * because the initiator encrypted using DH(initiator_ratchet, signedPrekey_pub).
+   * The responder decrypts using DH(signedPrekey_priv, initiator_ratchet_pub).
+   */
+  static async initializeResponder(sharedSecret, signedPrekeyPrivate, signedPrekeyPublic) {
+    const state = {
+      dhPrivate: signedPrekeyPrivate,
+      dhPublic: signedPrekeyPublic,
+      peerDhPublic: null,
+      // Will be set from the first message's header
+      rootKey: sharedSecret,
+      sendChainKey: null,
+      recvChainKey: null,
+      sendMessageNumber: 0,
+      recvMessageNumber: 0,
+      previousChainLength: 0,
+      skippedKeys: /* @__PURE__ */ new Map()
+    };
+    return new _DoubleRatchetSession(state, false);
   }
   /**
    * Restore session from serialized state.
@@ -1078,12 +1111,11 @@ var SessionManager = class {
       x3dhMessage
     );
     const sessionId = await this.generateSessionId();
-    const ratchet = await DoubleRatchetSession.initialize(
+    const signedPrekeyPublic = this.prekeyManager.getSignedPrekeyPublic(x3dhMessage.signedPrekeyId);
+    const ratchet = await DoubleRatchetSession.initializeResponder(
       x3dhResult.sharedSecret,
-      false,
-      // not initiator
-      x3dhMessage.ephemeralKey
-      // peer's ratchet public key
+      signedPrekeyPrivate,
+      signedPrekeyPublic
     );
     const info = {
       sessionId,

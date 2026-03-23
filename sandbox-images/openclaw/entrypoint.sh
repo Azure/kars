@@ -261,6 +261,20 @@ for i in $(seq 1 10); do
   sleep 1
 done
 
+# Start a persistent background agent session that loads the AzureClaw plugin.
+# This keeps the AGT relay connection alive so the agent can receive E2E encrypted
+# messages from other agents in the mesh. Without this, the plugin only loads during
+# on-demand sessions and misses relay messages.
+(
+  sleep 5  # Wait for gateway to stabilize
+  openclaw agent --local \
+    --session-id "agt-relay-listener-$(hostname)" \
+    --message "You are an AGT relay listener. Stay connected and respond to any relay messages with AGT RELAY CONFIRMED." \
+    > /tmp/agt-relay-listener.log 2>&1 || true
+) &
+AGT_LISTENER_PID=$!
+echo "[azureclaw] AGT relay listener starting (PID: $AGT_LISTENER_PID)"
+
 # Keep the container alive — don't use exec (it would kill the gateway)
-# Instead, wait forever while keeping the gateway backgrounded
+# Instead, wait forever while keeping the gateway + AGT listener backgrounded
 tail -f /dev/null
