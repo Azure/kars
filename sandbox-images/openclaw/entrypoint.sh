@@ -50,7 +50,6 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
     }
   },
   "tools": {
-    "allow": ["azureclaw"],
     "deny": ["sessions_spawn", "sessions_send"]
   },
   "plugins": {
@@ -105,7 +104,8 @@ You are secure, sandboxed, and connected to Azure AI Foundry.
 
 ## Capabilities
 - You can help with coding, analysis, writing, and general questions
-- You have access to bash, file operations, and git inside the sandbox
+- You have access to shell/exec tools for running commands inside the sandbox
+- You can read files, run system commands (uname, hostname, cat /etc/os-release, etc.)
 - Your workspace is /sandbox — all your files live here
 - Your network access is governed by policy — unauthorized endpoints will be blocked
 
@@ -281,6 +281,24 @@ for i in $(seq 1 10); do
   fi
   sleep 1
 done
+
+# Start the node host — provides shell/exec/filesystem tools to the agent.
+# Without this, the agent only has plugin tools (AzureClaw) and no local execution.
+OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw node run \
+  --host 127.0.0.1 --port 18789 > /tmp/node-host.log 2>&1 &
+NODE_PID=$!
+sleep 2
+if grep -q "connected" /tmp/node-host.log 2>/dev/null; then
+  echo "[azureclaw] Node host running (PID: $NODE_PID) — exec/shell tools available"
+else
+  echo "[azureclaw] Node host starting (PID: $NODE_PID)"
+fi
+
+# Auto-approve all exec requests — no manual approval in headless sandbox.
+# The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
+openclaw approvals set --stdin <<'APPROVALS' > /dev/null 2>&1 || true
+{ "mode": "auto-approve" }
+APPROVALS
 
 # Start a persistent background agent session that loads the AzureClaw plugin.
 # This keeps the AGT relay connection alive so the agent can receive E2E encrypted
