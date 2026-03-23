@@ -230,6 +230,9 @@ the relay sees only encrypted payloads while endpoints see plaintext.
 
 ## Remaining Roadmap
 
+> **Validation report:** All security layers have been validated on a live AKS cluster
+> with captured evidence. See [`docs/security-validation.md`](security-validation.md).
+
 | Feature | Status |
 |---------|--------|
 | Image signing enforcement | Notation signing in CI. Ratify admission controller not auto-deployed. |
