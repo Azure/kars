@@ -53,6 +53,98 @@ const nameToAmid: Map<string, string> = new Map();
 // Stored sandbox name for reconnect attempts
 let agtSandboxName: string = "unknown";
 
+/**
+ * Process a task_request with tool-calling (exec_command).
+ * Runs an LLM loop: the model can call exec_command to run shell commands,
+ * then gets the output back, and continues until it produces a final text response.
+ */
+async function processTaskWithTools(
+  taskContent: any,
+  log: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<string> {
+  const http = await import("node:http");
+  const { execSync } = await import("node:child_process");
+  const model = process.env.MODEL || "gpt-4.1";
+
+  const tools = [
+    {
+      type: "function" as const,
+      function: {
+        name: "exec_command",
+        description: "Execute a shell command inside the sandbox and return stdout/stderr. Use for system info (uname, hostname, ip addr, cat /etc/os-release, etc.), file operations, or any command-line task.",
+        parameters: {
+          type: "object",
+          properties: {
+            command: { type: "string", description: "The shell command to execute" },
+          },
+          required: ["command"],
+        },
+      },
+    },
+  ];
+
+  const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
+    {
+      role: "system",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to exec_command to run shell commands. Use it to answer questions about the system (kernel, IP, hostname, etc.). Be concise and report actual command output.",
+    },
+    {
+      role: "user",
+      content: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
+    },
+  ];
+
+  // Tool-calling loop (max 5 rounds to prevent runaway)
+  for (let round = 0; round < 5; round++) {
+    const postData = JSON.stringify({ model, messages, tools, max_tokens: 2048 });
+    const response = await new Promise<any>((resolve, reject) => {
+      const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+        timeout: 60000,
+      }, (res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        res.on("end", () => {
+          try { resolve(JSON.parse(body)); } catch { reject(new Error(`LLM parse error: ${body.slice(0, 200)}`)); }
+        });
+      });
+      req.on("error", (e) => reject(e));
+      req.on("timeout", () => { req.destroy(); reject(new Error("LLM timeout")); });
+      req.write(postData);
+      req.end();
+    });
+
+    const choice = response?.choices?.[0];
+    if (!choice) throw new Error("No LLM response");
+
+    const msg = choice.message;
+
+    // If the model wants to call tools, execute them and continue
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      messages.push(msg);
+      for (const tc of msg.tool_calls) {
+        let result: string;
+        try {
+          const args = JSON.parse(tc.function.arguments);
+          const cmd = args.command || "";
+          log.info(`AGT sub-agent exec: ${cmd}`);
+          result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+        } catch (e: any) {
+          result = e.stderr || e.stdout || e.message || "Command failed";
+        }
+        messages.push({ role: "tool", tool_call_id: tc.id, content: result });
+      }
+      continue;
+    }
+
+    // No tool calls — return the text response
+    return msg.content || "";
+  }
+
+  return "Sub-agent reached maximum tool-calling rounds without a final response.";
+}
+
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
   // Singleton guard — OpenClaw loads the plugin twice (tool registry + agent session).
   // Only the first load should create the AGT identity and mesh connection to avoid
@@ -170,41 +262,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
 
-      // Process task_request messages: call local LLM via sidecar router and reply via E2E encrypted relay
+      // Process task_request messages: call LLM with tool access and reply via E2E encrypted relay
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
         try {
-          // Call the local inference router (sidecar) to get an LLM response
-          const http = await import("node:http");
-          const llmResponse = await new Promise<string>((resolve, reject) => {
-            const postData = JSON.stringify({
-              model: process.env.MODEL || "gpt-4.1",
-              messages: [
-                { role: "system", content: "You are a helpful sub-agent. Answer the user's request concisely. Do not mention that you are a sub-agent or that this came via a relay." },
-                { role: "user", content: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent) },
-              ],
-              max_tokens: 1024,
-            });
-            const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
-              timeout: 30000,
-            }, (res) => {
-              let body = "";
-              res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-              res.on("end", () => {
-                try {
-                  const parsed = JSON.parse(body);
-                  const answer = parsed?.choices?.[0]?.message?.content || body;
-                  resolve(answer);
-                } catch { resolve(body); }
-              });
-            });
-            req.on("error", (e) => reject(e));
-            req.on("timeout", () => { req.destroy(); reject(new Error("LLM timeout")); });
-            req.write(postData);
-            req.end();
-          });
+          const llmResponse = await processTaskWithTools(taskContent, log);
 
           // Send the LLM response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
@@ -214,7 +276,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             in_reply_to: taskContent,
             timestamp: new Date().toISOString(),
           });
-          log.info(`AGT relay: LLM-processed reply sent to ${fromName} via E2E encrypted relay`);
+          log.info(`AGT relay: tool-enabled reply sent to ${fromName} via E2E encrypted relay`);
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
           try {
