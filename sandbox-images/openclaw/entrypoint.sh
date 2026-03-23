@@ -284,17 +284,15 @@ done
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
 # Without this, the agent only has plugin tools (AzureClaw) and no local execution.
-# Use a unique node-id so it doesn't conflict with the TUI device pairing.
-OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw node run \
+# Give the node host its own HOME so it generates a separate device fingerprint.
+# Without this, it shares the TUI's device ID and blocks TUI pairing (role conflict).
+NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
+mkdir -p /tmp/node-host-home
+HOME=/tmp/node-host-home OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw node run \
   --host 127.0.0.1 --port 18789 \
-  --node-id "node-$(hostname)" > /tmp/node-host.log 2>&1 &
+  --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!
-sleep 2
-if grep -q "connected" /tmp/node-host.log 2>/dev/null; then
-  echo "[azureclaw] Node host running (PID: $NODE_PID) — exec/shell tools available"
-else
-  echo "[azureclaw] Node host starting (PID: $NODE_PID)"
-fi
+echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 
 # Auto-approve all exec requests — no manual approval in headless sandbox.
 # The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
@@ -309,7 +307,7 @@ APPROVALS
 (
   sleep 5  # Wait for gateway to stabilize
   openclaw agent --local \
-    --session-id "agt-relay-listener-$(hostname)" \
+    --session-id "agt-relay-listener-${NODE_HOSTNAME}" \
     --message "You are an AGT relay listener. Stay connected and respond to any relay messages with AGT RELAY CONFIRMED." \
     > /tmp/agt-relay-listener.log 2>&1 || true
 ) &
