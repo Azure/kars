@@ -95,7 +95,7 @@ spec:
     spec:
       containers:
         - name: registry
-          image: azureclawacr.azurecr.io/agentmesh-registry:v0.3.0
+          image: azureclawacr.azurecr.io/agentmesh-registry:v0.3.1-rawts
           ports:
             - containerPort: 8080
           env:
@@ -150,7 +150,7 @@ spec:
     spec:
       containers:
         - name: relay
-          image: azureclawacr.azurecr.io/agentmesh-relay:v0.3.0
+          image: azureclawacr.azurecr.io/agentmesh-relay:v0.3.1-rawts
           ports:
             - containerPort: 8765
           env:

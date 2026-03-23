@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE organizations\n        SET dns_verified = true, root_certificate = $2, verified_at = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d542d1d66797d352cbba8a34efd08bfab396cf11c86430766f7b2276f37afcf2"
+}

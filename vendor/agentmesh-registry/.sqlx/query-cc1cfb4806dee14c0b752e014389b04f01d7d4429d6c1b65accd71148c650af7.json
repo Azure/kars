@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT tag, COUNT(*) as count\n        FROM reputation_feedbacks, UNNEST(tags) as tag\n        WHERE target_amid = $1\n        GROUP BY tag\n        ORDER BY count DESC\n        LIMIT 10\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tag",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "cc1cfb4806dee14c0b752e014389b04f01d7d4429d6c1b65accd71148c650af7"
+}

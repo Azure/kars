@@ -49,6 +49,9 @@ const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; tim
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
 
+// Stored sandbox name for reconnect attempts
+let agtSandboxName: string = "unknown";
+
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
   try {
     const sdk = require("@agentmesh/sdk");
@@ -92,16 +95,27 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // Connect to the mesh — registers with registry + connects to relay.
     // Capabilities include the sandbox name so other agents can discover us.
-    const sandboxName = process.env.SANDBOX_NAME || "unknown";
+    // SANDBOX_NAME is set on inference-router; for openclaw container extract from HOSTNAME.
+    agtSandboxName = process.env.SANDBOX_NAME
+      || (process.env.HOSTNAME ? process.env.HOSTNAME.replace(/-[a-f0-9]+-[a-z0-9]+$/, "") : "unknown");
     try {
       await agtMeshClient.connect({
-        displayName: sandboxName,
-        capabilities: ["azureclaw-agent", "task-execution", sandboxName],
+        displayName: agtSandboxName,
+        capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
       });
       log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
     } catch (connErr: any) {
       log.warn(`AGT mesh connect deferred: ${connErr.message} (will retry on first send)`);
     }
+
+    // Set up KNOCK handler — auto-accept KNOCKs from other AzureClaw agents
+    // The KNOCK protocol gives us policy-gated session establishment:
+    // each agent can evaluate the request before accepting.
+    agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
+      log.info(`AGT KNOCK from ${fromAmid.slice(0, 12)}... intent=${request?.intent?.capability || '*'}`);
+      // Accept all KNOCKs from azureclaw mesh agents (policy can be tightened later)
+      return { accept: true };
+    });
 
     // Set up message handler — stores received messages in the AGT inbox buffer
     agtMeshClient.onMessage((fromAmid: string, message: any) => {
@@ -360,25 +374,30 @@ const azureClawPlugin = definePluginEntry({
 
         // ── Primary path: AGT SDK relay (E2E encrypted) ──
         if (agtMeshClient && agtIdentity) {
+          // Ensure we're connected (reconnect if initial connect was deferred)
+          if (!agtMeshClient.isConnected) {
+            try {
+              log.info("AGT relay: reconnecting before send...");
+              await agtMeshClient.connect({
+                displayName: agtSandboxName,
+                capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
+              });
+              log.info("AGT relay: reconnected successfully");
+            } catch (reconErr: any) {
+              log.warn(`AGT relay: reconnect failed: ${reconErr.message}`);
+            }
+          }
           try {
-            // 1. Discover target agent's AMID via registry search
+            // 1. Discover target agent's AMID via registry search (with retry for boot timing)
             let targetAmid = nameToAmid.get(agentName);
             if (!targetAmid) {
-              // Try SDK search first (uses registry's capability-based search)
-              try {
-                const searchResult = await agtMeshClient.search({ capability: agentName });
-                if (searchResult && searchResult.results && searchResult.results.length > 0) {
-                  const match = searchResult.results.find((r: any) =>
-                    r.displayName === agentName || r.capabilities?.includes(agentName)
-                  ) || searchResult.results[0];
-                  targetAmid = match.amid || match.id;
+              for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
+                if (attempt > 0) {
+                  log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
+                  await new Promise(r => setTimeout(r, 5000));
                 }
-              } catch (searchErr: any) {
-                log.warn(`AGT SDK search for '${agentName}': ${searchErr.message}`);
-              }
 
-              // Fallback: direct registry HTTP search by capability
-              if (!targetAmid) {
+                // Try direct registry HTTP search by capability (most reliable)
                 try {
                   const http = await import("node:http");
                   const regResult: any = await new Promise((resolve, reject) => {
@@ -393,14 +412,14 @@ const azureClawPlugin = definePluginEntry({
                     req.on("error", reject);
                     req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
                   });
-                  if (regResult && Array.isArray(regResult.agents)) {
-                    const match = regResult.agents.find((a: any) =>
-                      a.displayName === agentName || a.capabilities?.includes(agentName)
-                    );
-                    if (match) targetAmid = match.amid;
+                  if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
+                    const match = regResult.results.find((a: any) =>
+                      a.display_name === agentName || a.capabilities?.includes(agentName)
+                    ) || regResult.results[0];
+                    targetAmid = match.amid;
                   }
                 } catch (regErr: any) {
-                  log.warn(`AGT registry HTTP search: ${regErr.message}`);
+                  if (attempt === 0) log.warn(`AGT registry search: ${regErr.message}`);
                 }
               }
 
@@ -412,21 +431,40 @@ const azureClawPlugin = definePluginEntry({
 
             if (targetAmid) {
               // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
-              await agtMeshClient.send(targetAmid, {
-                type: "task_request",
-                content: msgContent,
-                from_agent: process.env.SANDBOX_NAME || "unknown",
-                timestamp: new Date().toISOString(),
-              });
-              log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
-              return { content: [{ type: "text", text: JSON.stringify({
-                status: "delivered_via_agt_relay",
-                to_agent: agentName,
-                to_amid: targetAmid,
-                from_amid: agtIdentity.amid,
-                protocol: "AGT E2E encrypted (Signal Protocol)",
-                message_id: `agt-${Date.now().toString(36)}`,
-              }, null, 2) }] };
+              // Retry loop: target may need time to upload prekeys after registering
+              let sendErr: Error | null = null;
+              for (let sendAttempt = 0; sendAttempt < 6; sendAttempt++) {
+                try {
+                  await agtMeshClient.send(targetAmid, {
+                    type: "task_request",
+                    content: msgContent,
+                    from_agent: process.env.SANDBOX_NAME || "unknown",
+                    timestamp: new Date().toISOString(),
+                  });
+                  sendErr = null;
+                  break;
+                } catch (e: any) {
+                  sendErr = e;
+                  if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/6)...`);
+                    await new Promise(r => setTimeout(r, 5000));
+                  } else {
+                    break; // non-prekey error — don't retry
+                  }
+                }
+              }
+              if (!sendErr) {
+                log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
+                return { content: [{ type: "text", text: JSON.stringify({
+                  status: "delivered_via_agt_relay",
+                  to_agent: agentName,
+                  to_amid: targetAmid,
+                  from_amid: agtIdentity.amid,
+                  protocol: "AGT E2E encrypted (Signal Protocol)",
+                  message_id: `agt-${Date.now().toString(36)}`,
+                }, null, 2) }] };
+              }
+              log.warn(`AGT relay send failed after retries: ${sendErr?.message}, falling back to router`);
             } else {
               log.warn(`AGT relay: target '${agentName}' not found in registry, falling back to router`);
             }
