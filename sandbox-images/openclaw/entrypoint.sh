@@ -64,6 +64,28 @@ fi
 ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 
+# Build models list from FOUNDRY_DEPLOYMENTS (JSON array) or fall back to single MODEL
+MODELS_JSON="[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via AzureClaw)\"}]"
+if [ -n "${FOUNDRY_DEPLOYMENTS:-}" ]; then
+  # Parse deployment names and build models array for openclaw.json
+  _PARSED=$(echo "$FOUNDRY_DEPLOYMENTS" | python3 -c "
+import sys, json
+try:
+    deps = json.load(sys.stdin)
+    models = []
+    for d in deps:
+        name = d.get('name') or d.get('id') or ''
+        if name and 'embedding' not in name.lower():
+            models.append({'id': name, 'name': f'{name} (Azure via AzureClaw)'})
+    if not models:
+        models = [{'id': '${MODEL}', 'name': '${MODEL} (Azure via AzureClaw)'}]
+    print(json.dumps(models))
+except:
+    print('[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via AzureClaw)\"}]')
+" 2>/dev/null)
+  [ -n "$_PARSED" ] && MODELS_JSON="$_PARSED"
+fi
+
 # Use existing gateway token if injected by controller, or generate a new one
 if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
   GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN"
@@ -89,9 +111,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
         "api": "openai-completions",
         "authHeader": false,
         "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
-        "models": [
-          { "id": "${MODEL}", "name": "${MODEL} (Azure via AzureClaw)" }
-        ]
+        "models": ${MODELS_JSON}
       }
     }
   },
