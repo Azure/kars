@@ -141,6 +141,36 @@ export function upCommand(): Command {
         await execa("kubectl", ["rollout", "status", "deployment/azureclaw-controller", "-n", "azureclaw-system", "--timeout=120s"], { stdio: "pipe" }).catch(() => {});
         spin.succeed("Controller restarted");
 
+        // Ensure federated credentials exist for all sandboxes
+        if (ctx.oidcIssuerUrl && ctx.identityName) {
+          spin = ora("Syncing federated credentials for sandboxes...").start();
+          try {
+            const { stdout: sandboxJson } = await execa("kubectl", [
+              "get", "clawsandbox", "-A", "-o", "json",
+            ], { stdio: "pipe", timeout: 15000 });
+            const sandboxes = JSON.parse(sandboxJson).items || [];
+            let created = 0;
+            for (const sb of sandboxes) {
+              const sbName = sb.metadata?.name;
+              if (!sbName) continue;
+              const sbNs = `azureclaw-${sbName}`;
+              await execa("az", [
+                "identity", "federated-credential", "create",
+                "--identity-name", ctx.identityName,
+                "--resource-group", ctx.identityResourceGroup || ctx.resourceGroup,
+                "--name", `azureclaw-${sbName}`,
+                "--issuer", ctx.oidcIssuerUrl,
+                "--subject", `system:serviceaccount:${sbNs}:sandbox`,
+                "--audiences", "api://AzureADTokenExchange",
+                "--output", "none",
+              ], { stdio: "pipe", timeout: 30000 }).then(() => { created++; }).catch(() => {});
+            }
+            spin.succeed(`Federated credentials synced (${created} created, ${sandboxes.length} total)`);
+          } catch {
+            spin.warn("Federated credential sync skipped");
+          }
+        }
+
         console.log(chalk.green("\n  ✓ Fast upgrade complete\n"));
         return;
       }
