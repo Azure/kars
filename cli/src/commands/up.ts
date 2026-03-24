@@ -202,16 +202,16 @@ export function upCommand(): Command {
             name: "backendChoice",
             message: "Azure AI backend:",
             choices: [
-              { name: "Use existing Azure AI Foundry project (Recommended)", value: "foundry" },
-              { name: "Use existing Azure OpenAI endpoint only", value: "openai" },
-              { name: "Deploy new Azure OpenAI resource (adds ~5 min)", value: "deploy" },
+              { name: "Connect to an existing Foundry project (Recommended)", value: "foundry" },
+              { name: "Connect to an existing Azure OpenAI resource (no Foundry)", value: "openai" },
+              { name: "Deploy a new Azure OpenAI resource (adds ~5 min)", value: "deploy" },
             ],
           }]);
           if (backendChoice === "foundry") {
             const { endpoint } = await inquirer.prompt([{
               type: "input" as const,
               name: "endpoint",
-              message: "Foundry project endpoint (services.ai.azure.com/api/projects/...):",
+              message: "Foundry project endpoint (e.g. https://<name>.services.ai.azure.com/api/projects/<project>):",
               validate: (input: string) => {
                 if (!input.startsWith("https://")) return "Must be an https:// URL";
                 if (!input.includes("services.ai.azure.com")) return "Expected services.ai.azure.com URL. For openai.azure.com, choose 'Azure OpenAI endpoint only'.";
