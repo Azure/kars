@@ -1,374 +1,225 @@
-# AzureClaw
+<div align="center">
 
-**Secure runtime for [OpenClaw](https://openclaw.ai) AI agents on Azure.**
+# 🔱 AzureClaw
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+**Secure AI Agent Runtime for Azure**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
 [![CI](https://github.com/Azure/azureclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/Azure/azureclaw/actions/workflows/ci.yml)
+[![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry%20%7C%20Kata-0078D4)](https://azure.microsoft.com)
 
-AzureClaw runs AI agents safely on AKS with defense-in-depth security, zero-credential inference through [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/), and multi-agent governance via [AGT](https://github.com/microsoft/agent-governance-toolkit).
+Run AI agents in Kata Confidential VM sandboxes on AKS with 8 layers of defense-in-depth security.
+Zero-credential inference through Azure AI Foundry. Multi-agent governance via AGT.
 
-> **Alpha** — Interfaces may change. We welcome issues and discussion.
-
----
-
-## What Is AzureClaw?
-
-AzureClaw is the **runtime layer** between [OpenClaw](https://openclaw.ai) (the agent framework) and [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) (managed AI services). It solves one problem: **how do you run AI agents on Azure without giving them the keys to the kingdom?**
-
-Every agent runs in an isolated Kubernetes sandbox with 8 layers of security. The agent can only reach the outside world through a **Rust sidecar proxy** (inference router) that authenticates, filters, rate-limits, and audits every request. When multiple agents need to collaborate, they can opt in to [AGT](https://github.com/microsoft/agent-governance-toolkit)'s **trust-gated mesh** for secure inter-agent communication — no direct network access between sandboxes.
-
-**Three pillars:**
-- **[OpenClaw](https://openclaw.ai)** owns the agent — authoring, orchestration, TUI, skills
-- **[Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/)** provides managed AI services — 200+ models, memory, code interpreter, web search, evaluations
-- **[AGT](https://github.com/microsoft/agent-governance-toolkit)** governs multi-agent behavior — tool-level policy, inter-agent trust, tamper-evident audit
-
-AzureClaw connects them with enterprise-grade security out of the box.
+</div>
 
 ---
 
 ## Architecture
 
 ```
-┌─ AKS Cluster (Azure Linux, Cilium CNI) ─────────────────────────────────────┐
-│                                                                              │
-│  azureclaw-system namespace                                                  │
-│  ┌────────────────────────────────────────────────────┐                       │
-│  │  🦀 Controller (Rust/kube-rs) × 2 replicas         │                       │
-│  │  Watches ClawSandbox CRDs → reconciles sandboxes   │                       │
-│  │  Creates: NS, SA, NetworkPolicy, Deployment,        │                       │
-│  │           Service, ConfigMap (per agent)            │                       │
-│  └────────────────────────────────────────────────────┘                       │
-│  🔒 seccomp DaemonSet (azureclaw-strict on every node)                       │
-│                                                                              │
-│  azureclaw-<agent> namespace (one per sandbox)                               │
-│  ┌────────────────────────────────────────────────────────────────┐           │
-│  │  Pod (2 containers + 1 init)                                   │           │
-│  │                                                                │           │
-│  │  init: egress-guard                                            │           │
-│  │   └─ iptables: UID 1000 → localhost + DNS only                 │           │
-│  │                                                                │           │
-│  │  🦞 openclaw (UID 1000)          ⚡ inference-router (UID 1001)│           │
-│  │  ├─ OpenClaw agent               ├─ IMDS/WI auth (zero keys)  │           │
-│  │  ├─ AzureClaw plugin    ───────► ├─ Content Safety + Shields  ───► ☁️ Foundry
-│  │  │  └─ 9 Foundry skills localhost ├─ Token budgets (429)       │           │
-│  │  │  └─ 9 slash commands  :8443   ├─ 18 Foundry API groups      │           │
-│  │  ├─ Read-only rootfs             ├─ Domain blocklist (auto)    │           │
-│  │  └─ AGT governance (opt-in)      ├─ AGT mesh + trust + audit   │           │
-│  │                                  ├─ Sub-agent spawn (CRD)      │           │
-│  │                                  └─ Prometheus metrics         │           │
-│  │                                                                │           │
-│  ├─ Service: {name}:8443 (K8s DNS for AGT mesh)                  │           │
-│  ├─ NetworkPolicy (default-deny egress + AGT mesh ingress)        │           │
-│  └─ ServiceAccount (Workload Identity)                            │           │
-│                                                                              │
-│  🔗 AGT mesh (opt-in): agent-alpha ◄──K8s DNS──► agent-beta                 │
-│     (trust-gated, audited, routed through inference routers)                 │
-└──────────────────────────────────────────────────────────────────────────────┘
+                 ┌──────────┐
+                 │ User     │
+                 │ TUI / TG │
+                 └────┬─────┘
+                      │
+        ┌─────────────▼──────────────────────────────────────────────┐
+        │  AKS Cluster (Azure Linux · Cilium · Kata VMs)            │
+        │                                                            │
+        │  ┌─ Sandbox Pod (per agent) ────────────────────────────┐  │
+        │  │                                                      │  │
+        │  │  init: egress-guard (iptables)                       │  │
+        │  │   └─ UID 1000 → localhost + DNS only                 │  │
+        │  │                                                      │  │
+        │  │  ┌──────────────┐   localhost   ┌─────────────────┐  │  │
+        │  │  │  OpenClaw    │──────:8443───►│ Inference Router │──┼──┼──► Azure AI Foundry
+        │  │  │  (agent)     │               │ (Rust sidecar)   │  │  │     (200+ models)
+        │  │  │  UID 1000    │               │ UID 1001         │  │  │
+        │  │  └──────────────┘               │                  │  │  │
+        │  │   read-only rootfs              │ • IMDS/WI auth   │  │  │
+        │  │   drop ALL caps                 │ • Content Safety  │  │  │
+        │  │   seccomp strict                │ • Token budgets   │  │  │
+        │  │                                 │ • Domain blocklist│  │  │
+        │  │                                 │ • Egress proxy    │  │  │
+        │  │                                 │ • AGT governance  │  │  │
+        │  │                                 └─────────┬────────┘  │  │
+        │  │  NetworkPolicy: default-deny egress       │           │  │
+        │  └───────────────────────────────────────────┘           │  │
+        │                                              │           │  │
+        │  ┌─ AGT Relay ──────────────────────────┐    │           │  │
+        │  │  agent-alpha ◄──E2E encrypted──► agent-beta           │  │
+        │  │  (Signal Protocol · trust-gated · audited)            │  │
+        │  └───────────────────────────────────────────────────────┘  │
+        │                                                            │
+        │  Controller (Rust/kube-rs) — reconciles ClawSandbox CRDs   │
+        └────────────────────────────────────────────────────────────┘
 ```
 
-### Why These Components?
+---
 
-| Component | Language | Why It Exists |
-|-----------|----------|---------------|
-| **CLI** (`azureclaw`) | TypeScript | Single command to go from zero to production. Provisions AKS, ACR, Key Vault, Foundry, Helm, CRD — or runs locally with Docker. |
-| **Controller** | Rust (kube-rs) | K8s operator that reconciles `ClawSandbox` CRDs into isolated sandboxes with all security controls. Creates namespace, ServiceAccount, NetworkPolicy, Deployment, Service, ConfigMap per agent. |
-| **Inference Router** | Rust (axum) | Per-sandbox sidecar proxy — the **only** network path for the agent. Handles IMDS auth, Content Safety, Prompt Shields, token budgets, SSE streaming, all 18 Foundry API groups, AGT governance (policy, trust, audit, mesh), sub-agent spawn via K8s API. |
-| **OpenClaw Plugin** | TypeScript | Slash commands inside the agent: `/azureclaw-models`, `/azureclaw-security`, `/azureclaw-switch`, `/azureclaw-spawn`, `/azureclaw-spawn-list`, `/azureclaw-spawn-destroy`. Ships 10 Foundry skills. |
+## Key Features
 
-### External Dependencies
+### 🔒 Security (8 layers, always on)
 
-| Dependency | What We Use It For | Link |
-|---|---|---|
-| **[OpenClaw](https://openclaw.ai)** | Open-source AI agent framework — authoring, orchestration, TUI | [GitHub](https://github.com/anthropics/openclaw) |
-| **[Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/)** | 200+ models, Memory Store, Code Interpreter, Web Search, Knowledge, Evaluations — all via Responses API | [Docs](https://learn.microsoft.com/azure/ai-studio/reference/reference-model-inference-api) |
-| **[AGT](https://github.com/microsoft/agent-governance-toolkit)** | Multi-agent governance: tool-level policy, inter-agent trust, tamper-evident audit, mesh communication | [GitHub](https://github.com/microsoft/agent-governance-toolkit) |
+- **Kata Confidential VMs** — per-pod dedicated kernel; container escapes hit a VM boundary
+- **iptables egress guard** — agent UID can only reach `localhost`; all external traffic forced through sidecar
+- **NetworkPolicy** — default-deny egress at the cluster level
+- **Domain blocklist** — 51k+ domains auto-refreshed from OISD + URLhaus every 6h
+- **Egress proxy** — allowlist with approval flow + learn mode for zero-config onboarding
+- **Content Safety + Prompt Shields** — Azure AI Content Safety on every inference call
+- **Seccomp strict** — custom profile, ~150 allowed syscalls
+- **Zero credentials** — agents never see API keys; router authenticates via IMDS/Workload Identity
+
+### 🤖 AI Agent
+
+- **OpenClaw gateway** — TUI + Telegram + Web UI frontends
+- **Sub-agent spawning** — agents create child agents via CRD (isolated, governed)
+- **9 Foundry skills** — memory, code interpreter, web search, knowledge, evaluations, and more
+- **200+ models** — hot-switch between GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc.
+
+### 🏛️ Governance (AGT)
+
+- **Trust scoring** — per-agent scores 0–1000 across 5 tiers (Ed25519 signed)
+- **E2E encryption** — Signal Protocol (X3DH + Double Ratchet) for inter-agent messaging
+- **Policy engine** — YAML-based tool-level allow/deny/approval/rate-limit rules
+- **Audit trail** — hash-chain append-only log with integrity verification
+
+### ⚙️ Operations
+
+- **CLI** — single `azureclaw up` command provisions AKS + ACR + Foundry + sandbox
+- **Web UI** — token-based control interface at `localhost:18789`
+- **Telegram channel** — always-on agent communication
+- **Monitoring** — Prometheus metrics, Log Analytics, eBPF tracing
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
+# 1. Install
 git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm install && npm run build && npm link
 
-# Local (Docker)
-azureclaw onboard            # configure credentials (once)
-azureclaw dev                # start sandbox locally
-azureclaw connect dev-agent  # chat with the agent
-
-# AKS Production
+# 2. Deploy (provisions AKS, ACR, Foundry, sandbox)
 az login
 azureclaw up --name my-agent --model gpt-4.1
+
+# 3. Connect
 azureclaw connect my-agent
+
+# 4. Chat with your agent through the TUI
+🦞 You: Summarize the top HackerNews stories about AI security.
+
+# 5. Review egress activity
+azureclaw egress my-agent --learned
 ```
 
-### Prerequisites
+**Prerequisites:** Node.js 22+ · Azure CLI 2.60+ · Docker (for local dev) · Azure subscription
 
-| Requirement | Details |
-|---|---|
-| **Node.js 22+** | CLI runtime |
-| **Azure CLI 2.60+** | `az login` for authentication |
-| **Docker** | Local dev mode (`azureclaw dev`) |
-| **Azure Subscription** | With permissions to create resource groups |
-
-### Azure Setup (required for AKS deployment)
-
-**Azure AI Foundry project** is required for inference and Foundry services:
-
-1. Create an [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) project (or use an existing one)
-2. Deploy at least one model (e.g., `gpt-4.1`) in the project
-3. Note the **Foundry project endpoint** (e.g., `https://my-resource.services.ai.azure.com/api/projects/my-project`)
-
-**Required Azure RBAC roles** on the identity running `azureclaw up`:
-
-| Role | Scope | Why |
-|---|---|---|
-| **Owner** (recommended) | Resource group | Creates resources + assigns RBAC |
-| *Or* Contributor + User Access Administrator | Resource group | Split create/assign |
-
-The controller automatically assigns these roles to the AKS kubelet identity:
-
-| Role | Purpose |
-|---|---|
-| Cognitive Services OpenAI User | Model inference API access |
-| Cognitive Services User | Content Safety API access |
-| Azure AI User | Memory Store internal model calls |
-| AcrPull | Pull sandbox images from ACR |
-
-For Memory Store to work, `azureclaw up` also grants **Azure AI User** to the Foundry project's managed identity on the resource group (automated via Bicep).
+> For local development without Azure: `azureclaw dev` starts a Docker sandbox with the same security controls.
 
 ---
 
-## Foundry Integration
-
-All [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) services are accessed through the inference router via the **Responses API** — no hosted Foundry agents needed. OpenClaw is the orchestrator; Foundry provides managed AI services.
-
-| Foundry Service | Router Path | What It Does |
-|---|---|---|
-| **Model Catalog (200+)** | `/v1/chat/completions` | GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc. |
-| **Memory Store** | `/memory_stores/*` | Persistent cross-session memory with semantic search |
-| **Code Interpreter** | `/openai/responses` + `code_interpreter` | Python execution for data analysis |
-| **Web Search** | `/openai/responses` + `bing_grounding` | Real-time web grounding with citations |
-| **Memory Search** | `/openai/responses` + `memory_search` | Cross-session memory recall |
-| **Knowledge (Foundry IQ)** | `/openai/responses` + `file_search` | RAG over uploaded documents |
-| **Evaluations** | `/openai/evals`, `/evaluators` | Run evaluations, list evaluators |
-| **Conversations** | `/openai/conversations` | Persistent multi-turn threads |
-| **Deployments** | `/deployments` | Query deployed models + versions |
-
-**9 skills** ship with AzureClaw teaching the agent how to use each service:
-`foundry-memory`, `foundry-code`, `foundry-knowledge`, `foundry-web-search`, `foundry-agents`, `foundry-conversations`, `foundry-evaluations`, `foundry-deployments`, `agt-governance`.
-
----
-
-## AGT Governance
-
-[Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) provides application-layer governance that infrastructure controls can't see (tool calls, inter-agent trust, behavioral audit).
-
-```bash
-azureclaw add my-agent --governance --trust-threshold 700 --policy-profile default
-```
-
-| Capability | How It Works | API |
-|---|---|---|
-| **Policy enforcement** | Evaluate tool calls against YAML policies (allow/deny/approval/rate-limit) | `POST /agt/evaluate` |
-| **Trust scoring** | Per-agent scores 0-1000, 5 tiers, evolve with interaction outcomes | `GET /agt/trust/{agent}` |
-| **Inter-agent mesh** | Trust-gated messaging via K8s DNS (`{agent}.{ns}.svc.cluster.local:8443`) | `POST /agt/mesh/send` |
-| **Tamper-evident audit** | Hash-chain append-only log, integrity verification | `GET /agt/audit/verify` |
-
-**Multi-agent flow:** Agent A → Router A (trust gate + audit) → K8s DNS → Router B (trust gate + audit) → Agent B inbox.
-
-AGT does NOT duplicate infrastructure controls — no network rules, no content safety, no token budgets. See [docs/security.md](docs/security.md) for the overlap resolution.
-
----
-
-## Domain Blocklist
-
-The inference router includes an **auto-refreshing domain blocklist** that blocks requests to known-malicious domains (malware C2, phishing, cryptojacking, reverse shells). Always-on, zero configuration.
-
-| Layer | Freshness | How |
-|---|---|---|
-| **Seed file** | ≤ 24h | GitHub Actions [daily cron](.github/workflows/blocklist-refresh.yml) fetches OISD + URLhaus → auto-commits to `main` |
-| **K8s ConfigMap** | ≤ 6h | CronJob fetches feeds → patches ConfigMap (survives pod restarts) |
-| **In-memory** | ≤ 6h | Router background task fetches OISD + URLhaus directly |
-
-Also blocks:
-- **High-risk TLDs** (.tk, .ml, .ga, .cf, .gq — >80% of phishing campaigns)
-- **Bare IP addresses** (no DNS = suspicious for AI agent traffic)
-- **Subdomain matching** (if `evil.com` is blocked, `sub.evil.com` is too)
-
-```
-GET  /blocklist/status        → domain count + enabled state
-POST /blocklist/check         → test if a domain/URL is blocked
-```
-
-Sources: [OISD](https://oisd.nl/) (curated aggregator), [URLhaus](https://urlhaus.abuse.ch/) (abuse.ch malware URLs).
-
-### Egress Learn Mode
-
-Instead of guessing what domains an agent needs, run it in **learn mode** to discover them automatically:
-
-```bash
-# 1. Deploy with learn mode (blocklist still enforced)
-azureclaw add my-agent --model gpt-4.1 --learn-egress
-
-# 2. Let the agent work normally...
-
-# 3. Review what it accessed
-azureclaw policy learn my-agent
-#   Learned domains:
-#     + lsb-azureai.services.ai.azure.com
-#     + api.github.com
-
-# 4. Approve and lock down (one command)
-azureclaw policy learn my-agent --apply
-#   → Allowlist applied + learn mode disabled
-```
-
-| Layer | Enforcement |
-|---|---|
-| **Known-bad (blocklist)** | Always blocked — learn mode cannot override |
-| **Unknown domains** | Allowed + recorded during learn mode |
-| **After --apply** | Only learned domains allowed |
-
----
-
-## Security
-
-8 infrastructure layers (always on) + AGT governance (opt-in):
-
-| # | Layer | What It Does |
-|---|---|---|
-| 0 | **Azure infra** | NSG, AKS API IP allowlist, DDoS protection |
-| 1 | **Node OS** | Azure Linux, SELinux enforcing, auto-patched |
-| 2 | **Kata VM** | Per-pod dedicated kernel (confidential level only) |
-| 3 | **Container** | Read-only rootfs, non-root, drop ALL capabilities |
-| 4 | **Kernel** | Custom seccomp (~150 allowed syscalls) |
-| 5 | **Network** | iptables UID guard + default-deny NetworkPolicy + domain blocklist |
-| 6 | **Inference** | Content Safety + Prompt Shields + token budgets |
-| 7 | **AGT** | Policy engine + trust scoring + audit log + mesh |
-
-**Zero credentials**: agents never see API keys. Router authenticates via IMDS.
-
-See [docs/security.md](docs/security.md) for details.
-
----
-
-## Isolation Levels
-
-| Level | Runtime | Seccomp | Use Case |
-|---|---|---|---|
-| **standard** | runc | RuntimeDefault | Dev/test |
-| **enhanced** (default) | runc | `azureclaw-strict` | Production |
-| **confidential** | Kata VM | RuntimeDefault | Untrusted code, regulated environments |
-
----
-
-## Examples — Interacting via OpenClaw
-
-All interaction happens through the **OpenClaw agent TUI** — the agent uses Foundry services automatically via skills. No curl needed.
-
-### Memory Store — remember and recall across sessions
-
-```bash
-azureclaw connect my-agent
-```
-```
-🦞 You: Remember that I'm a backend engineer who loves Rust and espresso.
-Agent: I've stored that in your profile.
-
-# Later, in a new session:
-🦞 You: What programming language do I love and what do I drink?
-Agent: You love Rust, and you drink espresso.
-```
-
-### Code Interpreter — run Python for data analysis
-
-```
-🦞 You: Calculate the first 15 prime numbers using Python and show the list.
-Agent: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
-```
-
-### Multi-agent governance — two agents communicate via AGT mesh
-
-```bash
-# Deploy two governed agents
-azureclaw add agent-alpha --model gpt-4.1 --governance --trust-threshold 500
-azureclaw add agent-beta --model gpt-4.1 --governance --trust-threshold 500
-
-# Connect to Alpha and ask it to delegate work to Beta
-azureclaw connect agent-alpha
-```
-```
-🦞 You: Send a task to agent-beta asking it to analyze our cluster security posture.
-Agent: Message sent to agent-beta via AGT mesh (trust score: 500, tier: Standard).
-       Message ID: agent-alpha-69bed776-104adcbe, status: delivered.
-```
-```bash
-# Connect to Beta to see the received task
-azureclaw connect agent-beta
-```
-```
-🦞 You: Check your inbox for messages from other agents.
-Agent: 1 message from agent-alpha:
-       "Please analyze the cluster security posture" (type: task_request)
-```
-
-### Query Foundry deployments
-
-```
-🦞 You: List all deployed AI models in our Foundry project.
-Agent: 4 models deployed:
-       1. gpt-5-mini (OpenAI, v2025-08-07)
-       2. gpt-4.1 (OpenAI, v2025-04-14)
-       3. DeepSeek-V3.2 (DeepSeek, v1)
-       4. text-embedding-3-small (OpenAI, v1)
-```
-
-### Run evaluations
-
-```bash
-azureclaw eval my-agent --list-evaluators
-azureclaw eval my-agent --dataset test.jsonl --evaluator relevance
-```
-
----
-
-## CLI Commands
+## CLI Reference
 
 | Command | Description |
 |---|---|
-| `azureclaw up` | Deploy full AKS stack + first sandbox |
-| `azureclaw add <name>` | Add sandbox (supports `--governance`, `--trust-threshold`, `--policy-profile`, `--learn-egress`) |
-| `azureclaw dev` | Local Docker sandbox (with iptables + seccomp) |
-| `azureclaw connect <name>` | Attach to OpenClaw TUI |
-| `azureclaw status <name>` | Health, model, tokens used |
-| `azureclaw model set <name> <model>` | Hot-switch AI model |
-| `azureclaw eval <name>` | Run Foundry evaluations (`--list-evaluators`, `--dataset`) |
-| `azureclaw policy allow <name> <host>` | Manage network allowlist |
-| `azureclaw policy learn <name>` | Export learned egress domains (`--apply`, `--clear`) |
-| `azureclaw trace <name>` | eBPF tracing |
-| `azureclaw approve --list` | Review pending egress requests |
-| `azureclaw logs <name>` | Stream container logs |
+| `azureclaw up` | Deploy full stack (AKS + ACR + AOAI + sandbox) |
+| `azureclaw connect <name>` | Connect TUI to sandbox |
+| `azureclaw egress <name>` | Manage egress security (`--pending`, `--approve`, `--deny`, `--allowlist`, `--learned`) |
+| `azureclaw approve <name> --list` | Manage tool approvals |
+| `azureclaw model set <name> <model>` | Switch model (hot-swap, no restart) |
+| `azureclaw logs <name>` | View container logs |
 | `azureclaw destroy <name>` | Tear down sandbox or resource group |
+| `azureclaw dev` | Local Docker sandbox |
+| `azureclaw add <name>` | Add sandbox (`--governance`, `--learn-egress`, `--isolation`) |
+| `azureclaw status <name>` | Health, model, tokens used |
+| `azureclaw policy <subcommand>` | Network policy management (`allow`, `deny`, `get`, `learn`, `set`) |
+| `azureclaw trace <name>` | eBPF tracing |
+| `azureclaw eval <name>` | Run Foundry evaluations |
+| `azureclaw onboard` | First-time credential setup |
 
 ---
 
-## Infrastructure
+## Security Model
 
-Provisioned by `azureclaw up` via Bicep:
+Every agent runs in an isolated namespace with 8 defense layers stacked in depth:
 
-| Module | Resources |
+| # | Layer | Control |
+|---|---|---|
+| 0 | **Azure Infra** | NSG, AKS API IP allowlist, DDoS protection |
+| 1 | **Node OS** | Azure Linux, SELinux enforcing, auto-patched |
+| 2 | **Kata VM** | Per-pod dedicated kernel (confidential isolation) |
+| 3 | **Container** | Read-only rootfs, non-root, drop ALL capabilities |
+| 4 | **Kernel** | Custom seccomp profile (~150 allowed syscalls) |
+| 5 | **Network** | iptables UID guard + NetworkPolicy + 51k+ domain blocklist |
+| 6 | **Inference** | Content Safety + Prompt Shields + token budgets |
+| 7 | **Governance** | AGT policy engine + trust scoring + audit log |
+
+> Agents never see API keys. The inference router authenticates to Azure AI Foundry via IMDS/Workload Identity.
+
+See [docs/security.md](docs/security.md) for full details and OWASP LLM Top 10 coverage.
+
+---
+
+## Egress Proxy
+
+All agent network traffic is mediated by the inference router sidecar. Three enforcement modes:
+
+| Mode | Behavior |
 |---|---|
-| `aks.bicep` | AKS (Azure Linux, Cilium, Workload Identity) |
-| `acr.bicep` | Container Registry (Premium, content trust) |
-| `openai.bicep` | Cognitive Services (Entra ID auth only) |
-| `keyvault.bicep` | Key Vault (RBAC, soft-delete) |
-| `monitor.bicep` | Log Analytics + Application Insights |
+| **Blocklist** (always on) | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus |
+| **Allowlist** | Only pre-approved domains permitted |
+| **Learn mode** | Unknown domains allowed + recorded; apply learned set as allowlist when ready |
+
+```bash
+# Deploy with learn mode
+azureclaw add my-agent --model gpt-4.1 --learn-egress
+
+# Review learned domains
+azureclaw egress my-agent --learned
+
+# Lock down to learned set
+azureclaw egress my-agent --apply
+```
+
+See [docs/security.md](docs/security.md) for the egress architecture.
 
 ---
 
-## Development
+## Project Structure
+
+```
+azureclaw/
+├── cli/                  # TypeScript CLI (azureclaw command)
+├── controller/           # Rust K8s operator (ClawSandbox CRDs)
+├── inference-router/     # Rust sidecar proxy (axum)
+├── policy-engine/        # Seccomp profiles & security policies
+├── sandbox-images/       # OpenClaw container images
+├── deploy/               # Bicep IaC, Helm charts, monitoring
+├── docs/                 # Architecture, security, demo guides
+├── examples/             # Sample agents (basic, confidential, multi-tenant)
+├── tests/                # E2E tests (Docker + Kind)
+└── vendor/               # AgentMesh SDK
+```
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, auth flow |
+| [Security](docs/security.md) | 8-layer defense model, OWASP coverage, AGT governance |
+| [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation model |
+| [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
+| [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, test process, and PR guidelines.
 
 ```bash
 make build    # Rust + TypeScript
@@ -376,18 +227,6 @@ make test     # Unit tests
 make lint     # clippy + oxlint
 make images   # Docker images
 ```
-
----
-
-## Documentation
-
-| Doc | Description |
-|---|---|
-| [Architecture](docs/architecture.md) | Component design, CRD schema, Foundry API routes, authentication flow |
-| [Security](docs/security.md) | 8-layer defense-in-depth, OWASP coverage, AGT governance |
-| [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation model |
-| [Demo](docs/DEMO.md) | Multi-agent attack simulation |
-| [Contributing](CONTRIBUTING.md) | Build, test, PR process |
 
 ---
 
