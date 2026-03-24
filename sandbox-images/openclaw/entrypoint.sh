@@ -2,8 +2,30 @@
 # AzureClaw sandbox entrypoint
 # Configures OpenClaw automatically from mounted secrets and env vars.
 # The user never needs to manually configure anything.
+#
+# UID model (mirrors AKS sidecar architecture):
+#   UID 1001 (router)  — inference router, can reach internet
+#   UID 1000 (sandbox) — agent processes, restricted to localhost + DNS
 
 set -e
+
+# ── Egress guard: iptables restricts UID 1000 to localhost + DNS ────────────
+# UID 1001 (inference-router) is unrestricted — it needs internet access for
+# Foundry API calls and blocklist feed updates.
+# ESTABLISHED,RELATED allows response traffic for services accepting incoming
+# connections (gateway Web UI on :18789).
+if command -v iptables >/dev/null 2>&1; then
+  iptables -N AZURECLAW_EGRESS 2>/dev/null || true
+  iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT
+  iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT
+  iptables -A AZURECLAW_EGRESS -p tcp --dport 53 -j ACCEPT
+  iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable
+  iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS
+  echo "[azureclaw] iptables egress guard active (UID 1000 → localhost + DNS only)"
+else
+  echo "[azureclaw] iptables not available — egress guard disabled"
+fi
 
 OPENCLAW_DIR="/sandbox/.openclaw"
 OPENCLAW_CONFIG="$OPENCLAW_DIR/openclaw.json"
@@ -29,8 +51,9 @@ fi
 
 # Only configure if not already done (idempotent)
 if [ ! -f "$OPENCLAW_CONFIG" ]; then
-  # Create OpenClaw directories
+  # Create OpenClaw directories (owned by sandbox user)
   mkdir -p "$OPENCLAW_DIR" "$WORKSPACE_DIR"
+  chown -R sandbox:sandbox "$OPENCLAW_DIR"
 
   # Write openclaw.json (2026.3.x config format — routed through inference router)
   cat > "$OPENCLAW_CONFIG" << EOF
@@ -291,29 +314,38 @@ cat >> /sandbox/.bashrc << RCEOF2
 export OPENCLAW_GATEWAY_TOKEN="${GATEWAY_TOKEN}"
 RCEOF2
 
-# Start AzureClaw inference router — only in dev mode (no sidecar).
+# Ensure all sandbox files are owned by sandbox user (entrypoint runs as root)
+chown -R sandbox:sandbox /sandbox
+
+# Start AzureClaw inference router as UID 1001 (router user) — only in dev mode.
+# UID 1001 is exempt from iptables egress guard, matching the AKS sidecar model
+# where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate sidecar container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+  # Ensure router can write its log file
+  touch /tmp/inference-router.log && chown 1001:1001 /tmp/inference-router.log
   ROUTER_PORT=8443 \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
+  AZURE_OPENAI_API_KEY="$API_KEY" \
   DEFAULT_MODEL="$MODEL" \
   CONTENT_SAFETY_ENABLED=true \
-  azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
+  runuser -u router -- azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
   ROUTER_PID=$!
   sleep 1
-  echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
+  echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443, UID: 1001)"
 else
   echo "[azureclaw] Inference router provided by sidecar (workload-identity mode)"
 fi
 
+# All remaining processes run as UID 1000 (sandbox) — restricted by iptables.
 # Start OpenClaw gateway in the background (needed for TUI)
-OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
+OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" runuser -u sandbox -- openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
 GATEWAY_PID=$!
 
 # Wait for gateway to be ready
 for i in $(seq 1 10); do
   if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
-    echo "[azureclaw] Gateway running (PID: $GATEWAY_PID)"
+    echo "[azureclaw] Gateway running (PID: $GATEWAY_PID, UID: 1000)"
     break
   fi
   sleep 1
@@ -324,16 +356,16 @@ done
 # Give the node host its own HOME so it generates a separate device fingerprint.
 # Without this, it shares the TUI's device ID and blocks TUI pairing (role conflict).
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
-mkdir -p /tmp/node-host-home
-HOME=/tmp/node-host-home OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" openclaw node run \
+mkdir -p /tmp/node-host-home && chown sandbox:sandbox /tmp/node-host-home
+HOME=/tmp/node-host-home OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" runuser -u sandbox -- openclaw node run \
   --host 127.0.0.1 --port 18789 \
   --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!
-echo "[azureclaw] Node host starting (PID: $NODE_PID)"
+echo "[azureclaw] Node host starting (PID: $NODE_PID, UID: 1000)"
 
 # Auto-approve all exec requests — no manual approval in headless sandbox.
 # The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
-openclaw approvals set --stdin <<'APPROVALS' > /dev/null 2>&1 || true
+runuser -u sandbox -- openclaw approvals set --stdin <<'APPROVALS' > /dev/null 2>&1 || true
 { "mode": "auto-approve" }
 APPROVALS
 
@@ -343,7 +375,7 @@ APPROVALS
 # on-demand sessions and misses relay messages.
 (
   sleep 5  # Wait for gateway to stabilize
-  openclaw agent --local \
+  runuser -u sandbox -- openclaw agent --local \
     --session-id "agt-relay-listener-${NODE_HOSTNAME}" \
     --message "You are an AGT relay listener. Stay connected and respond to any relay messages with AGT RELAY CONFIRMED." \
     > /tmp/agt-relay-listener.log 2>&1 || true

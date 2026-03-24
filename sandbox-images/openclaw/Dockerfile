@@ -34,14 +34,19 @@ FROM ${AZURELINUX_BASE}
 # Detect arch for Node.js download
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables && tdnf clean all && \
+    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux && tdnf clean all && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
 
-# Security: create non-root user
+# Security: create non-root user (sandbox=1000) and router user (router=1001)
+# UID separation enables iptables egress guard: UID 1000 is restricted to
+# localhost + DNS, while UID 1001 (router) can reach the internet for
+# Foundry API calls and blocklist feed updates.
 RUN groupadd -g 1000 sandbox && \
-    useradd -u 1000 -g sandbox -m -d /sandbox -s /bin/bash sandbox
+    useradd -u 1000 -g sandbox -m -d /sandbox -s /bin/bash sandbox && \
+    groupadd -g 1001 router && \
+    useradd -u 1001 -g router -M -d /tmp -s /bin/false router
 
 # Set prompt for the sandbox user
 RUN echo 'export PS1="azureclaw@\\h:\\w\\$ "' >> /sandbox/.bashrc
@@ -94,8 +99,10 @@ LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
       org.opencontainers.image.source="https://github.com/Azure/azureclaw" \
       org.opencontainers.image.base.name="azurelinux/base/core:3.0"
 
-# Switch to non-root user
-USER sandbox
+# Entrypoint runs as root to set up iptables and start services under correct UIDs:
+#   UID 1001 (router)  — can reach the internet (Foundry API, blocklist feeds)
+#   UID 1000 (sandbox) — restricted to localhost + DNS by iptables egress guard
+# This mirrors AKS where router is a separate sidecar container.
 WORKDIR /sandbox
 
 # Entrypoint auto-configures OpenClaw, then runs the command
