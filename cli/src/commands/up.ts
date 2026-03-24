@@ -911,7 +911,7 @@ export function upCommand(): Command {
                 "--resource-group", foundryRg,
                 "--query", "[].name",
                 "--output", "json",
-              ], { stdio: "pipe", timeout: 15000 });
+              ], { stdio: "pipe", timeout: 30000 });
               const deps = JSON.parse(stdout || "[]");
               if (Array.isArray(deps) && deps.length > 0) {
                 discoveredDeployments = JSON.stringify(deps);
@@ -921,7 +921,7 @@ export function upCommand(): Command {
           } catch { /* non-critical */ }
         }
         if (discoveredDeployments) {
-          helmArgs.push("--set", `foundry.deployments=${discoveredDeployments}`);
+          helmArgs.push("--set-string", `foundry.deployments=${discoveredDeployments}`);
         }
         stepper.update(`${helmExists ? "Upgrading" : "Installing"} AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });
