@@ -1211,6 +1211,7 @@ const azureClawPlugin = definePluginEntry({
           },
           vector_store_ids: {
             type: "array",
+            items: { type: "string" },
             description: "Optional vector store IDs to search. Omit to search all.",
           },
           model: {
@@ -1279,6 +1280,7 @@ const azureClawPlugin = definePluginEntry({
           query: { type: "string", description: "Search query (for 'search' operation)." },
           items: {
             type: "array",
+            items: { type: "object" },
             description: "Messages to extract memories from (for 'update'). Array of {role, content, type} objects.",
           },
           scope: { type: "string", description: "Memory scope (default: sandbox name). Use to partition memories." },
@@ -1412,7 +1414,7 @@ const azureClawPlugin = definePluginEntry({
           eval_id: { type: "string", description: "Eval ID (for 'run')." },
           name: { type: "string", description: "Eval name (for 'create')." },
           data_source_config: { type: "object", description: "Data source config (for 'create')." },
-          testing_criteria: { type: "array", description: "Testing criteria array (for 'create')." },
+          testing_criteria: { type: "array", items: { type: "object" }, description: "Testing criteria array (for 'create')." },
           run_config: { type: "object", description: "Run configuration (for 'run')." },
         },
         required: ["operation"],
