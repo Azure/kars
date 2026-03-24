@@ -921,7 +921,9 @@ export function upCommand(): Command {
           } catch { /* non-critical */ }
         }
         if (discoveredDeployments) {
-          helmArgs.push("--set-string", `foundry.deployments=${discoveredDeployments}`);
+          // Helm --set treats commas as key separators; escape them
+          const escaped = discoveredDeployments.replace(/,/g, "\\,");
+          helmArgs.push("--set-string", `foundry.deployments=${escaped}`);
         }
         stepper.update(`${helmExists ? "Upgrading" : "Installing"} AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });
