@@ -100,21 +100,22 @@ Zero-credential inference through Azure AI Foundry. Multi-agent governance via A
 git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm install && npm run build && npm link
 
-# 2. Deploy (provisions AKS, ACR, Foundry, sandbox)
-az login
-azureclaw up --name my-agent --model gpt-4.1
+# 2. Deploy — preflight checks tools, prompts for region & subscription
+azureclaw up
 
 # 3. Connect
-azureclaw connect my-agent
+azureclaw connect my-assistant
 
 # 4. Chat with your agent through the TUI
 🦞 You: Summarize the top HackerNews stories about AI security.
 
 # 5. Review egress activity
-azureclaw egress my-agent --learned
+azureclaw egress my-assistant --learned
 ```
 
-**Prerequisites:** Node.js 22+ · Azure CLI 2.60+ · Docker (for local dev) · Azure subscription
+`azureclaw up` runs preflight checks (Azure CLI, kubectl, Helm, subscription, SKU availability), prompts for region and agent name if not provided, then provisions everything end-to-end.
+
+**Prerequisites:** Node.js 22+ · Azure CLI 2.60+ · kubectl · Helm · Azure subscription
 
 > For local development without Azure: `azureclaw dev` starts a Docker sandbox with the same security controls.
 
@@ -125,7 +126,7 @@ azureclaw egress my-agent --learned
 | Command | Description |
 |---|---|
 | **Lifecycle** | |
-| `azureclaw up` | Deploy full stack (AKS + ACR + AOAI + sandbox) |
+| `azureclaw up` | Deploy full stack — preflight checks, interactive prompts, AKS + ACR + AOAI + sandbox |
 | `azureclaw dev` | Local Docker sandbox (same security controls) |
 | `azureclaw add <name>` | Add sandbox (`--governance`, `--learn-egress`, `--isolation`) |
 | `azureclaw destroy <name>` | Tear down sandbox or resource group |
@@ -142,7 +143,7 @@ azureclaw egress my-agent --learned
 | `azureclaw trace <name>` | eBPF tracing |
 | `azureclaw eval <name>` | Run Foundry evaluations |
 
-> **No prerequisite commands.** Both `up` and `dev` prompt for any missing configuration inline.
+> **No prerequisite commands.** Both `up` and `dev` prompt for any missing configuration inline. `up` runs preflight checks (tools, auth, SKU availability) before provisioning.
 
 ---
 

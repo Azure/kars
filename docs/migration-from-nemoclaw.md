@@ -21,12 +21,11 @@
 git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm install && npm run build && npm link
 
-# 2. Deploy (creates AKS cluster + sandbox)
-az login
-azureclaw up --name my-agent --model gpt-4.1
+# 2. Deploy (preflight checks auth + prompts for region/sub)
+azureclaw up
 
 # 3. Connect (same OpenClaw TUI experience)
-azureclaw connect my-agent
+azureclaw connect my-assistant
 ```
 
 ## Key Differences
