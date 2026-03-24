@@ -197,29 +197,23 @@ export function devCommand(): Command {
           image,
         ], { stdio: "pipe" });
 
-        // ── Egress guard: iptables restricts UID 1000 to localhost + DNS ──
-        // Same rules as the AKS egress-guard init container.
-        // UID 1000 (openclaw agent) can only reach localhost and DNS.
-        // UID 1001 (inference-router) can reach the internet for Foundry API.
-        // ESTABLISHED,RELATED allows response traffic for services that accept
-        // incoming connections (gateway on :18789) while still blocking new outbound.
+        // Wait for entrypoint to set up iptables and start services
+        // The entrypoint runs as root and handles:
+        //   - iptables egress guard (UID 1000 → localhost + DNS)
+        //   - inference router as UID 1001 (internet access for Foundry + blocklist)
+        //   - gateway, node host, agent as UID 1000 (restricted)
         let hasIptables = false;
-        try {
-          await execa("docker", [
-            "exec", "-u", "root", containerName, "sh", "-c",
-            [
-              "iptables -N AZURECLAW_EGRESS 2>/dev/null || true",
-              "iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-              "iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT",
-              "iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT",
-              "iptables -A AZURECLAW_EGRESS -p tcp --dport 53 -j ACCEPT",
-              "iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable",
-              "iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS",
-            ].join(" && "),
-          ], { stdio: "pipe" });
-          hasIptables = true;
-        } catch {
-          // iptables not available (e.g., rootless Docker) — fall back to Docker isolation only
+        for (let i = 0; i < 10; i++) {
+          try {
+            const { stdout } = await execa("docker", [
+              "exec", containerName, "sh", "-c",
+              "iptables -L AZURECLAW_EGRESS -n 2>/dev/null | grep -q REJECT",
+            ], { stdio: "pipe" });
+            hasIptables = true;
+            break;
+          } catch {
+            await new Promise(r => setTimeout(r, 1000));
+          }
         }
 
         stepper.done("Sandbox running");
