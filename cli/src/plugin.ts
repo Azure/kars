@@ -422,7 +422,7 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
 
   // Query models via data-plane API (/openai/models) + Foundry resources in parallel
   const [modelsResult, connResult, idxResult] = await Promise.allSettled([
-    _routerCall("GET", `/openai/models?api-version=2024-10-21`),
+    _routerCall("GET", `/v1/models`),
     _routerCall("GET", `/connections?${apiVer}`),
     _routerCall("GET", `/indexes?${apiVer}`),
   ]);
@@ -1498,9 +1498,9 @@ const azureClawPlugin = definePluginEntry({
           const resource = params.resource as string;
 
           if (resource === "models") {
-            // Use /openai/models (data-plane API that works with API key auth)
-            // /deployments is ARM-only and not available on the data plane
-            const result = await routerCall("GET", "/openai/models?api-version=2024-10-21");
+            // Use /v1/models — the router's built-in model listing endpoint
+            // which proxies to Azure OpenAI /openai/models with correct auth
+            const result = await routerCall("GET", "/v1/models");
             const models = result?.data || result?.value || [];
             // Filter to chat-capable models and format concisely
             const chatModels = models
