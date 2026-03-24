@@ -47,11 +47,6 @@ export function devCommand(): Command {
         let image = options.image;
         const { execa } = await import("execa");
         const path = await import("path");
-        const os = await import("os");
-
-        // Azure Linux images are x86_64 only — force platform on ARM hosts
-        const needsCrossBuild = os.arch() !== "x64";
-        const platformArgs = needsCrossBuild ? ["--platform", "linux/amd64"] : [];
 
         // Find repo root
         let repoRoot = process.cwd();
@@ -81,13 +76,13 @@ export function devCommand(): Command {
           } catch {
             stepper.update(`Pulling base image (${baseImage})...`);
             try {
-              await execa("docker", ["pull", ...platformArgs, baseImage], { stdio: "pipe" });
+              await execa("docker", ["pull", baseImage], { stdio: "pipe" });
             } catch {
               stepper.fail("Could not pull base image");
               console.log(chalk.yellow(`
   Failed to pull ${chalk.bold(baseImage)}.
 
-  ${chalk.bold("1.")} Pull manually: ${chalk.cyan(`docker pull --platform linux/amd64 ${baseImage}`)}
+  ${chalk.bold("1.")} Pull manually: ${chalk.cyan(`docker pull ${baseImage}`)}
   ${chalk.bold("2.")} Re-run:        ${chalk.cyan("azureclaw dev")}
 
   Custom registry? ${chalk.cyan(`azureclaw dev --base-image <your-registry>/azurelinux/base/core:3.0`)}
@@ -121,7 +116,7 @@ export function devCommand(): Command {
             stepper.stop();
             console.log(chalk.dim("  Building inference-router (Rust)...\n"));
             await execa("docker", [
-              "build", ...platformArgs,
+              "build",
               "-t", routerImage,
               "-f", routerDockerfile,
               repoRoot,
@@ -133,7 +128,7 @@ export function devCommand(): Command {
           stepper.stop();
           console.log(chalk.dim("  Building sandbox image...\n"));
           await execa("docker", [
-            "build", ...platformArgs,
+            "build",
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
             "-t", "azureclaw-sandbox:dev",
