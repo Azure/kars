@@ -21,6 +21,45 @@ export interface AzureClawConfig {
   foundryProjectEndpoint?: string;
 }
 
+/** Cached deployment context — saved after successful `azureclaw up` */
+export interface DeploymentContext {
+  subscription?: string;
+  region?: string;
+  resourceGroup?: string;
+  aksCluster?: string;
+  acrLoginServer?: string;
+  acrName?: string;
+  keyVaultName?: string;
+  wiClientId?: string;
+  imdsClientId?: string;
+  foundryEndpoint?: string;
+  foundryProjectEndpoint?: string;
+  identityName?: string;
+  identityResourceGroup?: string;
+  oidcIssuerUrl?: string;
+  savedAt?: string;
+}
+
+const CONTEXT_FILE = join(CONFIG_DIR, "context.json");
+
+/** Load cached deployment context from ~/.azureclaw/context.json */
+export function loadContext(): DeploymentContext | null {
+  try {
+    if (!existsSync(CONTEXT_FILE)) return null;
+    return JSON.parse(readFileSync(CONTEXT_FILE, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Save deployment context to ~/.azureclaw/context.json */
+export function saveContext(ctx: DeploymentContext): void {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  ctx.savedAt = new Date().toISOString();
+  writeFileSync(CONTEXT_FILE, JSON.stringify(ctx, null, 2), "utf-8");
+  chmodSync(CONTEXT_FILE, 0o600);
+}
+
 /**
  * Load saved config + credentials from ~/.azureclaw/.
  * Returns null if either is missing or corrupt.

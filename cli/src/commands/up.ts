@@ -2,6 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
+import { saveContext } from "../config.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -1325,6 +1326,25 @@ export function upCommand(): Command {
           section("WebUI");
           console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(webUiUrl)}`);
         }
+
+        // Cache deployment context for subsequent commands (add, status, list, push, etc.)
+        try {
+          saveContext({
+            region: options.region,
+            resourceGroup: rg,
+            aksCluster: `${baseName}-aks`,
+            acrLoginServer,
+            acrName: acrLoginServer.replace(".azurecr.io", ""),
+            keyVaultName: kvName,
+            wiClientId,
+            imdsClientId: imdsClientId || undefined,
+            foundryEndpoint: openAiEndpoint,
+            foundryProjectEndpoint: options.foundryEndpoint || undefined,
+            identityName: `${baseName}-aks-sandbox-wi`,
+            identityResourceGroup: rg,
+            oidcIssuerUrl: oidcIssuer?.trim() || undefined,
+          });
+        } catch { /* non-critical */ }
 
         console.log();
       } catch (error) {

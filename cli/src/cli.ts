@@ -7,6 +7,7 @@ import { connectCommand } from "./commands/connect.js";
 import { statusCommand } from "./commands/status.js";
 import { listCommand } from "./commands/list.js";
 import { logsCommand } from "./commands/logs.js";
+import { pushCommand } from "./commands/push.js";
 import { modelCommand } from "./commands/model.js";
 import { traceCommand } from "./commands/trace.js";
 import { policyCommand } from "./commands/policy.js";
@@ -28,6 +29,7 @@ export function createCli(): Command {
   program.addCommand(upCommand());
   program.addCommand(devCommand());
   program.addCommand(addCommand());
+  program.addCommand(pushCommand());
   program.addCommand(destroyCommand());
 
   // Operations
