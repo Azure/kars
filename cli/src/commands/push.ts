@@ -2,6 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
 import path from "path";
+import fs from "fs";
 import { loadContext } from "../config.js";
 
 export function pushCommand(): Command {
@@ -28,10 +29,10 @@ export function pushCommand(): Command {
       // Find repo root (look for deploy/helm directory)
       let repoRoot = process.cwd();
       for (let i = 0; i < 5; i++) {
-        if (require("fs").existsSync(path.join(repoRoot, "deploy", "helm"))) break;
+        if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
         repoRoot = path.dirname(repoRoot);
       }
-      if (!require("fs").existsSync(path.join(repoRoot, "deploy", "helm"))) {
+      if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
         console.error(chalk.red("\n  Not in an AzureClaw repo. Run from the repo root.\n"));
         process.exit(1);
       }
