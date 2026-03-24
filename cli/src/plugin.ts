@@ -1353,19 +1353,70 @@ const azureClawPlugin = definePluginEntry({
           const store = (params.store_name as string) || "agent-memory";
           const scope = (params.scope as string) || process.env.SANDBOX_NAME || "default";
           const op = params.operation as string;
+          const apiVer = "api-version=2025-11-15-preview";
+
+          // Auto-create memory store if it doesn't exist yet
+          const ensureStore = async () => {
+            try {
+              await routerCall("GET", `/memory_stores/${store}?${apiVer}`);
+            } catch (e: any) {
+              if (e.message?.includes("404") || e.message?.includes("not_found") || e.message?.includes("not found")) {
+                // Pick best available models for the memory store
+                const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
+                const embeddingModel = foundryProject?.deployments?.find(
+                  (d: any) => d.id?.includes("embedding") || d.model?.includes("embedding")
+                )?.id || "text-embedding-3-small";
+                log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
+                await routerCall("POST", `/memory_stores?${apiVer}`, {
+                  name: store,
+                  description: "AzureClaw agent persistent memory",
+                  definition: {
+                    chat_model: chatModel,
+                    embedding_model: embeddingModel,
+                    options: {
+                      user_profile_enabled: true,
+                      user_profile_details: "Store user preferences, decisions, and project context",
+                      chat_summary_enabled: true,
+                    },
+                  },
+                });
+                log.info(`Memory store '${store}' created successfully`);
+              }
+            }
+          };
 
           if (op === "search") {
-            const result = await routerCall("POST", `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`, {
-              scope, query: params.query || "", max_memories: 10,
-            });
-            return { content: [{ type: "text", text: safeJson(result) }] };
+            try {
+              const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, {
+                scope, query: params.query || "", max_memories: 10,
+              });
+              return { content: [{ type: "text", text: safeJson(result) }] };
+            } catch (e: any) {
+              if (e.message?.includes("not found") || e.message?.includes("not_found")) {
+                await ensureStore();
+                return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
+              }
+              throw e;
+            }
           } else if (op === "update") {
-            const result = await routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
-              scope, items: params.items || [],
-            });
-            return { content: [{ type: "text", text: safeJson(result) }] };
+            try {
+              const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
+                scope, items: params.items || [],
+              });
+              return { content: [{ type: "text", text: safeJson(result) }] };
+            } catch (e: any) {
+              if (e.message?.includes("not found") || e.message?.includes("not_found")) {
+                await ensureStore();
+                // Retry after creation
+                const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
+                  scope, items: params.items || [],
+                });
+                return { content: [{ type: "text", text: safeJson(result) }] };
+              }
+              throw e;
+            }
           } else if (op === "delete_scope") {
-            const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?api-version=2025-11-15-preview`, {
+            const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, {
               scope,
             });
             return { content: [{ type: "text", text: `Scope '${scope}' deleted from memory store '${store}'.` }] };
