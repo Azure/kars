@@ -126,12 +126,13 @@ export function upCommand(): Command {
         }
       }
 
-      // ── 3. Interactive prompts for region/name (if defaults) ───────
+      // ── 3. Interactive prompts for region/name/isolation ────────────
       const userProvidedRegion = process.argv.includes("--region");
       const userProvidedName = process.argv.includes("--name");
+      const userProvidedIsolation = process.argv.includes("--isolation");
       const userProvidedRg = process.argv.includes("-g") || process.argv.includes("--resource-group");
 
-      if (!options.dryRun && (!userProvidedRegion || !userProvidedName)) {
+      if (!options.dryRun && (!userProvidedRegion || !userProvidedName || !userProvidedIsolation)) {
         console.log();
 
         if (!userProvidedRegion) {
@@ -176,6 +177,21 @@ export function upCommand(): Command {
             validate: (input: string) => /^[a-z0-9][a-z0-9-]*$/.test(input) || "Lowercase letters, numbers, and hyphens only",
           }]);
           options.name = name;
+        }
+
+        if (!userProvidedIsolation) {
+          const { isolation } = await inquirer.prompt([{
+            type: "list" as const,
+            name: "isolation",
+            message: "Pod isolation level:",
+            choices: [
+              { name: "Enhanced — runc + strict seccomp + read-only rootfs (Recommended)", value: "enhanced" },
+              { name: "Confidential — Kata VM isolation (hardware-backed TEE)", value: "confidential" },
+              { name: "Standard — runc with default seccomp (minimal)", value: "standard" },
+            ],
+            default: options.isolation,
+          }]);
+          options.isolation = isolation;
         }
       }
 
