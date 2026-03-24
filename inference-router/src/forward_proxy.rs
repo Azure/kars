@@ -23,8 +23,10 @@ pub async fn start(addr: &str, blocklist: Blocklist) {
         }
     };
 
-    tracing::info!(addr = %addr, "Forward proxy listening (transparent egress)");
+    let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+    tracing::info!(addr = %addr, sandbox = %sandbox_name, "Forward proxy listening (transparent egress)");
     let blocklist = Arc::new(blocklist);
+    let sandbox_name = Arc::new(sandbox_name);
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -36,15 +38,16 @@ pub async fn start(addr: &str, blocklist: Blocklist) {
         };
 
         let bl = blocklist.clone();
+        let sb = sandbox_name.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &bl).await {
+            if let Err(e) = handle_connection(stream, &bl, &sb).await {
                 tracing::debug!(peer = %peer, error = %e, "Forward proxy connection error");
             }
         });
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist) -> anyhow::Result<()> {
+async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist, sandbox: &str) -> anyhow::Result<()> {
     // Read the initial request line to determine HTTP method.
     // We peek at the first chunk to decide CONNECT vs plain HTTP.
     let mut buf = vec![0u8; 8192];
@@ -71,26 +74,22 @@ async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist) -> anyh
     let target = parts[1];
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        // HTTPS tunneling: target is "host:port"
-        handle_connect(stream, target, request, blocklist).await
+        handle_connect(stream, target, request, blocklist, sandbox).await
     } else {
-        // Plain HTTP proxy or redirected HTTPS (iptables REDIRECT changes destination
-        // but the client thinks it's talking to the real server, so it sends a plain
-        // HTTP request with a relative path, not an absolute URL).
-        handle_http(stream, target, request, n, blocklist).await
+        handle_http(stream, target, request, n, blocklist, sandbox).await
     }
 }
 
 /// Handle HTTP CONNECT (HTTPS tunneling).
 /// The client sends: CONNECT example.com:443 HTTP/1.1
-/// We check the domain against the blocklist, then tunnel bytes bidirectionally.
+/// We run the full egress policy (blocklist → learn → allowlist → pending), then tunnel.
 async fn handle_connect(
     mut stream: TcpStream,
     target: &str,
     _request: &[u8],
     blocklist: &Blocklist,
+    sandbox: &str,
 ) -> anyhow::Result<()> {
-    // Extract domain (strip port)
     let domain = target
         .split(':')
         .next()
@@ -99,12 +98,8 @@ async fn handle_connect(
 
     tracing::debug!(domain = %domain, "CONNECT request");
 
-    // Record domain in learn mode (before blocklist check — record all attempts)
-    blocklist.record_learned(&domain).await;
-
-    // Blocklist check
-    if blocklist.is_blocked(&domain).await.is_blocked() {
-        tracing::warn!(domain = %domain, "CONNECT blocked by egress policy");
+    if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
+        tracing::warn!(domain = %domain, reason = %reason, "CONNECT blocked");
         send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
         return Ok(());
     }
@@ -140,11 +135,12 @@ async fn handle_http(
     request: &[u8],
     request_len: usize,
     blocklist: &Blocklist,
+    sandbox: &str,
 ) -> anyhow::Result<()> {
     // Check if this is a TLS ClientHello (iptables-redirected HTTPS).
     // TLS records start with 0x16 (handshake) 0x03 (TLS version major).
     if request_len > 5 && request[0] == 0x16 && request[1] == 0x03 {
-        return handle_tls_redirect(stream, request, request_len, blocklist).await;
+        return handle_tls_redirect(stream, request, request_len, blocklist, sandbox).await;
     }
 
     // Plain HTTP: extract Host header
@@ -161,10 +157,8 @@ async fn handle_http(
 
     tracing::debug!(domain = %domain, "HTTP proxy request");
 
-    blocklist.record_learned(&domain).await;
-
-    if blocklist.is_blocked(&domain).await.is_blocked() {
-        tracing::warn!(domain = %domain, "HTTP blocked by egress policy");
+    if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
+        tracing::warn!(domain = %domain, reason = %reason, "HTTP blocked");
         send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
         return Ok(());
     }
@@ -202,6 +196,7 @@ async fn handle_tls_redirect(
     initial_data: &[u8],
     data_len: usize,
     blocklist: &Blocklist,
+    sandbox: &str,
 ) -> anyhow::Result<()> {
     let domain = extract_sni(initial_data, data_len)
         .unwrap_or_default()
@@ -209,16 +204,11 @@ async fn handle_tls_redirect(
 
     if domain.is_empty() {
         tracing::debug!("TLS redirect: no SNI found, allowing");
-        // No SNI — can't determine domain. Allow but log.
-        // In practice, modern TLS clients always send SNI.
     } else {
         tracing::debug!(domain = %domain, "TLS redirect (SNI)");
 
-        blocklist.record_learned(&domain).await;
-
-        if blocklist.is_blocked(&domain).await.is_blocked() {
-            tracing::warn!(domain = %domain, "TLS blocked by egress policy (SNI)");
-            // For TLS, we can't send an HTTP response — just close the connection.
+        if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
+            tracing::warn!(domain = %domain, reason = %reason, "TLS blocked (SNI)");
             return Ok(());
         }
     }

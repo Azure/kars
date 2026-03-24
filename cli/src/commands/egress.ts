@@ -15,6 +15,7 @@ export function egressCommand(): Command {
     .option("--approve <domain>", "Approve a domain for egress")
     .option("--deny <domain>", "Deny and remove a pending domain request")
     .option("--allowlist", "Show currently approved domains")
+    .option("--enforce", "Graduate: promote all learned domains to allowlist, switch to enforcement mode")
     .option("--status", "Show blocklist and learn mode status")
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
@@ -94,6 +95,36 @@ export function egressCommand(): Command {
           console.log(chalk.yellow(`\n  ❌ Denied: ${result.domain}\n`));
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to deny: ${e.message}\n`));
+        }
+        return;
+      }
+
+      // Enforce: graduate from learn mode to enforcement
+      if (options.enforce) {
+        try {
+          const result = await routerPost("/egress/enforce", {});
+          if (result.status === "already_enforcing") {
+            console.log(chalk.yellow(`\n  Already in enforcement mode.`));
+            console.log(chalk.dim(`  Allowlist: ${result.allowlist_count} domain(s)\n`));
+          } else {
+            console.log(chalk.green(`\n  🔒 Enforcement mode activated for '${name}'`));
+            console.log(chalk.dim(`     ${result.promoted} learned domain(s) promoted to allowlist`));
+            console.log(chalk.dim(`     ${result.allowlist_count} total domain(s) in allowlist\n`));
+            if (result.allowlist && result.allowlist.length > 0) {
+              for (const domain of result.allowlist) {
+                console.log(`    ${chalk.green("✓")} ${domain}`);
+              }
+              console.log();
+            }
+            console.log(chalk.dim(`  Learn mode is now OFF. Only allowlisted domains will pass.`));
+            console.log(chalk.dim(`  New domains will go to pending approval.\n`));
+            console.log(chalk.dim(`  Commands:`));
+            console.log(chalk.dim(`    azureclaw egress ${name} --pending         Show pending requests`));
+            console.log(chalk.dim(`    azureclaw egress ${name} --approve <domain> Approve a new domain`));
+            console.log(chalk.dim(`    azureclaw egress ${name} --learn           Re-enable learn mode\n`));
+          }
+        } catch (e: any) {
+          console.log(chalk.red(`\n  Failed to enforce: ${e.message}\n`));
         }
         return;
       }
@@ -215,8 +246,11 @@ export function egressCommand(): Command {
             console.log(`    ${chalk.cyan("◉")} ${d}`);
           }
           console.log();
+          console.log(chalk.hex("#0078D4")(`  → Ready to enforce? Run: ${chalk.white(`azureclaw egress ${name} --enforce`)}`));
+          console.log(chalk.dim(`    This promotes ${learned.count} learned domain(s) to allowlist and activates enforcement.\n`));
         }
         console.log(chalk.dim(`  Commands:`));
+        console.log(chalk.dim(`    azureclaw egress ${name} --enforce                Promote learned → allowlist, enforce`));
         console.log(chalk.dim(`    azureclaw egress ${name} --pending               Show pending requests`));
         console.log(chalk.dim(`    azureclaw egress ${name} --approve <domain>      Approve a domain`));
         console.log(chalk.dim(`    azureclaw egress ${name} --deny <domain>         Deny a domain`));
