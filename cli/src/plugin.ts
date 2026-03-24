@@ -773,22 +773,26 @@ const azureClawPlugin = definePluginEntry({
           headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self" } as Record<string, string>,
         };
         if (body) opts.headers["Content-Type"] = "application/json";
+        let settled = false;
+        const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
         const req = http.request(url, opts, (res: any) => {
           let data = "";
           const maxLen = 64 * 1024; // 64 KB safety cap
+          // Must handle response stream errors (e.g. from req.destroy() on timeout)
+          res.on("error", () => {});
           res.on("data", (c: Buffer) => {
             if (data.length < maxLen) data += c.toString();
           });
           res.on("end", () => {
             if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
+              settle(() => reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`)));
               return;
             }
-            try { resolve(JSON.parse(data)); } catch { resolve({ raw: data.slice(0, 2000) }); }
+            settle(() => { try { resolve(JSON.parse(data)); } catch { resolve({ raw: data.slice(0, 2000) }); } });
           });
         });
-        req.on("error", (e: Error) => reject(e));
-        req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
+        req.on("error", (e: Error) => settle(() => reject(e)));
+        req.setTimeout(15000, () => { req.destroy(); settle(() => reject(new Error("timeout"))); });
         if (body) req.write(JSON.stringify(body));
         req.end();
       });
