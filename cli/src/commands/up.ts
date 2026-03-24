@@ -876,9 +876,44 @@ export function upCommand(): Command {
         ];
         if (foundryEndpoint) {
           helmArgs.push("--set", `foundry.endpoint=${foundryEndpoint}`);
+          // If the endpoint is a Foundry project URL, also set it as the project endpoint
+          if (foundryEndpoint.includes("services.ai.azure.com") && foundryEndpoint.includes("/api/projects/")) {
+            helmArgs.push("--set", `foundry.projectEndpoint=${foundryEndpoint}`);
+          }
           if (imdsClientId) {
             helmArgs.push("--set", `foundry.imdsClientId=${imdsClientId}`);
           }
+        }
+
+        // Discover deployed models via Azure CLI (ARM management API)
+        let discoveredDeployments = "";
+        if (foundryEndpoint) {
+          try {
+            const accountName = new URL(foundryEndpoint).hostname.split(".")[0];
+            const { stdout: rgOut } = await execa("az", [
+              "cognitiveservices", "account", "list",
+              "--query", `[?name=='${accountName}'].resourceGroup | [0]`,
+              "--output", "tsv",
+            ], { stdio: "pipe", timeout: 15000 });
+            const foundryRg = rgOut.trim();
+            if (foundryRg) {
+              const { stdout } = await execa("az", [
+                "cognitiveservices", "account", "deployment", "list",
+                "--name", accountName,
+                "--resource-group", foundryRg,
+                "--query", "[].name",
+                "--output", "json",
+              ], { stdio: "pipe", timeout: 15000 });
+              const deps = JSON.parse(stdout || "[]");
+              if (Array.isArray(deps) && deps.length > 0) {
+                discoveredDeployments = JSON.stringify(deps);
+                stepper.detail("ok", `Deployments — ${deps.join(", ")}`);
+              }
+            }
+          } catch { /* non-critical */ }
+        }
+        if (discoveredDeployments) {
+          helmArgs.push("--set", `foundry.deployments=${discoveredDeployments}`);
         }
         stepper.update(`${helmExists ? "Upgrading" : "Installing"} AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });

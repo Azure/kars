@@ -95,7 +95,9 @@ networkPolicy:
 
 # Foundry configuration (set by azureclaw up --foundry-endpoint)
 foundry:
-  endpoint: ""    # e.g. https://my-resource.services.ai.azure.com — set by azureclaw up or --foundry-endpoint
+  endpoint: ""            # e.g. https://my-resource.services.ai.azure.com — AI Services base
+  projectEndpoint: ""     # e.g. https://my-resource.services.ai.azure.com/api/projects/my-project — for Memory, Agents, Indexes
+  deployments: ""         # JSON array of deployment names, e.g. '["gpt-4.1","text-embedding-3-small"]'
 
 # Azure AI Content Safety configuration
 # Used for both Content Safety text analysis and Prompt Shields.
