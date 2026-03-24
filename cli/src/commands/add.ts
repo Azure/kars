@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
+import { loadContext } from "../config.js";
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -126,47 +127,52 @@ export function addCommand(): Command {
         const namespace = `azureclaw-${name}`;
         try {
           spinner.text = "Creating federated credential for sub-agent...";
+          const ctx = loadContext();
 
-          // Discover identity name and resource group from existing controller SA
-          const { stdout: wiClientId } = await execa("kubectl", [
-            "get", "sa", "-n", "azureclaw-system", "azureclaw-controller",
-            "-o", "jsonpath={.metadata.annotations.azure\\.workload\\.identity/client-id}",
-          ], { stdio: "pipe" });
+          // Try cached context first (fast path), fall back to discovery
+          let identityName = ctx?.identityName;
+          let identityRg = ctx?.identityResourceGroup || ctx?.resourceGroup;
+          let issuerUrl = ctx?.oidcIssuerUrl;
 
-          if (wiClientId) {
-            // Find the managed identity resource group and AKS OIDC issuer
-            const { stdout: identityJson } = await execa("az", [
-              "identity", "list",
-              "--query", `[?clientId=='${wiClientId}'].{name:name, rg:resourceGroup}`,
-              "--output", "json",
+          if (!identityName || !identityRg || !issuerUrl) {
+            // Discover from cluster
+            const { stdout: wiClientId } = await execa("kubectl", [
+              "get", "sa", "-n", "azureclaw-system", "azureclaw-controller",
+              "-o", "jsonpath={.metadata.annotations.azure\\.workload\\.identity/client-id}",
             ], { stdio: "pipe" });
-            const identities = JSON.parse(identityJson || "[]");
-            const identity = identities[0];
 
-            if (identity) {
-              // Get AKS OIDC issuer URL
-              const { stdout: aksJson } = await execa("az", [
-                "aks", "list",
-                "--resource-group", identity.rg,
-                "--query", "[0].oidcIssuerProfile.issuerUrl",
-                "--output", "tsv",
+            if (wiClientId) {
+              const { stdout: identityJson } = await execa("az", [
+                "identity", "list",
+                "--query", `[?clientId=='${wiClientId}'].{name:name, rg:resourceGroup}`,
+                "--output", "json",
               ], { stdio: "pipe" });
-              const issuerUrl = aksJson.trim();
+              const identities = JSON.parse(identityJson || "[]");
+              if (identities[0]) {
+                identityName = identities[0].name;
+                identityRg = identities[0].rg;
+              }
 
-              if (issuerUrl) {
-                await execa("az", [
-                  "identity", "federated-credential", "create",
-                  "--name", `azureclaw-${name}`,
-                  "--identity-name", identity.name,
-                  "--resource-group", identity.rg,
-                  "--issuer", issuerUrl,
-                  "--subject", `system:serviceaccount:${namespace}:sandbox`,
-                  "--audience", "api://AzureADTokenExchange",
-                ], { stdio: "pipe" }).catch(() => {
-                  // May already exist
-                });
+              if (identityRg && !issuerUrl) {
+                const { stdout: aksJson } = await execa("az", [
+                  "aks", "list", "--resource-group", identityRg,
+                  "--query", "[0].oidcIssuerProfile.issuerUrl", "--output", "tsv",
+                ], { stdio: "pipe" });
+                issuerUrl = aksJson.trim();
               }
             }
+          }
+
+          if (identityName && identityRg && issuerUrl) {
+            await execa("az", [
+              "identity", "federated-credential", "create",
+              "--name", `azureclaw-${name}`,
+              "--identity-name", identityName,
+              "--resource-group", identityRg,
+              "--issuer", issuerUrl,
+              "--subject", `system:serviceaccount:${namespace}:sandbox`,
+              "--audience", "api://AzureADTokenExchange",
+            ], { stdio: "pipe" }).catch(() => { /* may already exist */ });
           }
         } catch {
           // Non-fatal — federated credential can be created manually
