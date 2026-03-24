@@ -47,6 +47,11 @@ export function devCommand(): Command {
         let image = options.image;
         const { execa } = await import("execa");
         const path = await import("path");
+        const os = await import("os");
+
+        // Azure Linux images are x86_64 only — force platform on ARM hosts
+        const needsCrossBuild = os.arch() !== "x64";
+        const platformArgs = needsCrossBuild ? ["--platform", "linux/amd64"] : [];
 
         // Find repo root
         let repoRoot = process.cwd();
@@ -76,7 +81,7 @@ export function devCommand(): Command {
           } catch {
             stepper.update(`Pulling base image (${baseImage})...`);
             try {
-              await execa("docker", ["pull", "--platform", "linux/amd64", baseImage], { stdio: "pipe" });
+              await execa("docker", ["pull", ...platformArgs, baseImage], { stdio: "pipe" });
             } catch {
               stepper.fail("Could not pull base image");
               console.log(chalk.yellow(`
@@ -113,24 +118,32 @@ export function devCommand(): Command {
 
           if (options.build || !routerExists) {
             stepper.update("Building inference router (Rust — first run takes a few minutes)...");
+            stepper.stop();
+            console.log(chalk.dim("  Building inference-router (Rust)...\n"));
             await execa("docker", [
-              "build", "--platform", "linux/amd64",
+              "build", ...platformArgs,
               "-t", routerImage,
               "-f", routerDockerfile,
               repoRoot,
-            ], { stdio: "pipe" });
+            ], { stdio: "inherit" });
+            console.log();
+            stepper.step("Building sandbox image...");
           }
 
-          stepper.update("Building sandbox image...");
+          stepper.update("Building sandbox image (Node.js + OpenClaw)...");
+          stepper.stop();
+          console.log(chalk.dim("  Building sandbox image...\n"));
           await execa("docker", [
-            "build",
+            "build", ...platformArgs,
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
             "-t", "azureclaw-sandbox:dev",
             "-f", dockerfilePath,
             repoRoot,
-          ], { stdio: "pipe" });
+          ], { stdio: "inherit" });
+          console.log();
           image = "azureclaw-sandbox:dev";
+          stepper.step("Image build complete");
           stepper.done("Sandbox image built");
         } else {
           stepper.done("Sandbox image found");
