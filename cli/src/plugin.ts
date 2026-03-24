@@ -728,20 +728,41 @@ const azureClawPlugin = definePluginEntry({
       const http = await import("node:http");
       const url = `${ROUTER}${path}`;
       return new Promise((resolve, reject) => {
-        const opts: any = { method, timeout: 30000, headers: {} };
+        const opts: any = {
+          method,
+          timeout: 15000,
+          headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self" } as Record<string, string>,
+        };
         if (body) opts.headers["Content-Type"] = "application/json";
         const req = http.request(url, opts, (res: any) => {
           let data = "";
-          res.on("data", (c: Buffer) => { data += c.toString(); });
+          const maxLen = 64 * 1024; // 64 KB safety cap
+          res.on("data", (c: Buffer) => {
+            if (data.length < maxLen) data += c.toString();
+          });
           res.on("end", () => {
-            try { resolve(JSON.parse(data)); } catch { resolve({ raw: data }); }
+            if (res.statusCode && res.statusCode >= 400) {
+              reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
+              return;
+            }
+            try { resolve(JSON.parse(data)); } catch { resolve({ raw: data.slice(0, 2000) }); }
           });
         });
         req.on("error", (e: Error) => reject(e));
-        req.setTimeout(30000, () => { req.destroy(); reject(new Error("timeout")); });
+        req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
         if (body) req.write(JSON.stringify(body));
         req.end();
       });
+    }
+
+    // Safe JSON response for tool output — truncate to avoid blowing WebSocket frames
+    function safeJson(obj: unknown, maxLen = 8000): string {
+      try {
+        const s = JSON.stringify(obj, null, 2);
+        return s.length > maxLen ? s.slice(0, maxLen) + "\n...(truncated)" : s;
+      } catch {
+        return String(obj).slice(0, maxLen);
+      }
     }
 
     // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
@@ -822,7 +843,7 @@ const azureClawPlugin = definePluginEntry({
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const result = await routerCall("GET", `/sandbox/${encodeURIComponent(params.name as string)}/status`);
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Status check failed: ${e.message}` }] };
         }
@@ -1014,7 +1035,7 @@ const azureClawPlugin = definePluginEntry({
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const result = await routerCall("DELETE", `/sandbox/${encodeURIComponent(params.name as string)}`);
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Destroy failed: ${e.message}` }] };
         }
@@ -1029,7 +1050,7 @@ const azureClawPlugin = definePluginEntry({
       async execute(_id: string, _params: Record<string, unknown>) {
         try {
           const result = await routerCall("GET", "/sandbox/list");
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `List failed: ${e.message}` }] };
         }
@@ -1065,7 +1086,7 @@ const azureClawPlugin = definePluginEntry({
             headers: params.headers || {},
             body: params.body || undefined,
           });
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Fetch failed: ${e.message}` }] };
         }
@@ -1298,12 +1319,12 @@ const azureClawPlugin = definePluginEntry({
             const result = await routerCall("POST", `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`, {
               scope, query: params.query || "", max_memories: 10,
             });
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "update") {
             const result = await routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
               scope, items: params.items || [],
             });
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "delete_scope") {
             const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?api-version=2025-11-15-preview`, {
               scope,
@@ -1352,10 +1373,10 @@ const azureClawPlugin = definePluginEntry({
             const result = await routerCall("POST", `/openai/conversations?${apiVer}`, {
               metadata: params.metadata || { user: process.env.SANDBOX_NAME || "agent" },
             });
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "list") {
             const result = await routerCall("GET", `/openai/conversations?${apiVer}`);
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "respond") {
             const result = await routerCall("POST", `/openai/responses?${apiVer}`, {
               model: (params.model as string) || "gpt-4.1",
@@ -1383,7 +1404,7 @@ const azureClawPlugin = definePluginEntry({
                 content: [{ type: "input_text", text: params.message }],
               }],
             });
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "delete") {
             await routerCall("DELETE", `/openai/conversations/${params.conversation_id}?${apiVer}`);
             return { content: [{ type: "text", text: `Conversation ${params.conversation_id} deleted.` }] };
@@ -1426,21 +1447,21 @@ const azureClawPlugin = definePluginEntry({
 
           if (op === "list") {
             const result = await routerCall("GET", `/openai/evals?${apiVer}`);
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "create") {
             const result = await routerCall("POST", `/openai/evals?${apiVer}`, {
               name: params.name,
               data_source_config: params.data_source_config,
               testing_criteria: params.testing_criteria,
             });
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "run") {
             const result = await routerCall("POST", `/openai/evals/${params.eval_id}/runs?${apiVer}`,
               params.run_config || {});
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "list_evaluators") {
             const result = await routerCall("GET", `/evaluators?${apiVer}`);
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           }
           return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
         } catch (e: any) {
@@ -1473,7 +1494,7 @@ const azureClawPlugin = definePluginEntry({
           const resource = params.resource as string;
           const apiVer = "api-version=2025-11-15-preview";
           const result = await routerCall("GET", `/${resource}?${apiVer}`);
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Foundry deployments query failed: ${e.message}` }] };
         }
@@ -1505,10 +1526,10 @@ const azureClawPlugin = definePluginEntry({
           const apiVer = "api-version=2025-11-15-preview";
           if (params.operation === "get" && params.agent_id) {
             const result = await routerCall("GET", `/agents/${params.agent_id}?${apiVer}`);
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            return { content: [{ type: "text", text: safeJson(result) }] };
           }
           const result = await routerCall("GET", `/agents?${apiVer}`);
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Foundry agents query failed: ${e.message}` }] };
         }
