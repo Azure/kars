@@ -24,6 +24,20 @@ else
   IS_ROOT=false
 fi
 
+# ── Pre-create OpenClaw temp directories ────────────────────────────────────
+# OpenClaw requires /tmp/openclaw-{UID} dirs on startup. They must exist, be
+# owned by the running user, and have mode 700 (security check rejects
+# world-writable dirs). Docker --tmpfs /tmp starts empty, so create them here.
+_oc_tmpdir="/tmp/openclaw-$(id -u)"
+mkdir -p "$_oc_tmpdir" && chmod 700 "$_oc_tmpdir"
+if [ "$IS_ROOT" = "true" ]; then
+  # Dev mode: also create dirs for sandbox (1000) and router (1001)
+  for _uid in 1000 1001; do
+    _dir="/tmp/openclaw-${_uid}"
+    mkdir -p "$_dir" && chown "${_uid}:${_uid}" "$_dir" && chmod 700 "$_dir"
+  done
+fi
+
 # ── Egress guard: iptables restricts UID 1000 to localhost + DNS ────────────
 # Only applies when running as root (dev mode). On AKS, the egress-guard init
 # container handles this before the sandbox container starts.
@@ -523,7 +537,8 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate sidecar container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
-  # Ensure router can write its log file
+  # Ensure router can write its log file (remove stale file from previous runs)
+  rm -f /tmp/inference-router.log
   touch /tmp/inference-router.log
   [ "$IS_ROOT" = "true" ] && chown 1001:1001 /tmp/inference-router.log
   # Dev mode: make Docker socket accessible to router (UID 1001) for sub-agent spawning
