@@ -54,7 +54,7 @@ impl AppState {
             .parse::<bool>()
             .unwrap_or(true);
 
-        let mut blocklist = if blocklist_enabled {
+        let blocklist = if blocklist_enabled {
             let seed_path = std::env::var("BLOCKLIST_SEED_PATH")
                 .unwrap_or_else(|_| "/etc/azureclaw/blocklist/domains.txt".into());
             let bl = Blocklist::new(Some(&seed_path)).await;
@@ -207,6 +207,7 @@ pub fn agt_routes() -> Router<AppState> {
         .route("/blocklist/status", get(blocklist_status))
         .route("/blocklist/check", post(blocklist_check))
         // Egress learn mode
+        .route("/egress/learn", post(egress_learn_toggle))
         .route("/egress/learned", get(egress_learned))
         .route("/egress/learned/clear", post(egress_learned_clear))
         // Egress proxy — audited, blocklist-checked external HTTP for the sandbox
@@ -1187,6 +1188,18 @@ async fn egress_learned(State(state): State<AppState>) -> impl IntoResponse {
         "learn_mode": state.blocklist.is_learn_mode(),
         "count": domains.len(),
         "domains": domains,
+    }))
+}
+
+/// POST /egress/learn — toggle learn mode at runtime.
+async fn egress_learn_toggle(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.blocklist.set_learn_mode(enabled);
+    Json(serde_json::json!({
+        "learn_mode": enabled,
     }))
 }
 
