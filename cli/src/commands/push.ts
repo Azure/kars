@@ -12,6 +12,7 @@ export function pushCommand(): Command {
     .description("Build and push images to ACR (uses cached context from last deploy)")
     .option("--acr <name>", "ACR name (default: from last deploy)")
     .option("--only <image>", "Build only one image: controller, router, sandbox, relay, registry")
+    .option("--apply", "Restart deployments after push so pods pick up new images")
     .action(async (options) => {
       const { execa } = await import("execa");
       const blue = chalk.hex("#0078D4");
@@ -111,9 +112,56 @@ export function pushCommand(): Command {
 
       console.log(chalk.green(`\n  ✓ ${targets.length} image(s) pushed to ${acrLoginServer}\n`));
 
-      if (ctx?.aksCluster) {
-        console.log(chalk.dim(`  To redeploy: azureclaw up`));
-        console.log(chalk.dim(`  To restart pods: kubectl rollout restart deployment -n azureclaw-system\n`));
+      // Rollout restart if --apply
+      if (options.apply) {
+        const ns = "azureclaw-system";
+        const deploymentMap: Record<string, string> = {
+          controller: "azureclaw-controller",
+          router: "azureclaw-controller",   // router runs as sidecar in sandbox pods
+          sandbox: "azureclaw-controller",   // controller manages sandbox pods
+        };
+
+        // Restart controller (manages all sandbox pods)
+        const spin = ora("Restarting deployments...").start();
+        try {
+          await execa("kubectl", ["rollout", "restart", "deployment", "azureclaw-controller", "-n", ns], { stdio: "pipe" });
+          spin.text = "Restarted azureclaw-controller";
+
+          // If sandbox/router image changed, also restart all sandbox pods
+          const sandboxImages = ["sandbox", "router"];
+          if (!options.only || sandboxImages.includes(options.only)) {
+            // Delete sandbox pods so controller recreates them with new images
+            await execa("kubectl", [
+              "delete", "pods", "-n", ns,
+              "-l", "azureclaw.azure.com/component=sandbox",
+              "--grace-period=10",
+            ], { stdio: "pipe" }).catch(() => {});
+            // Also restart pods in per-agent namespaces
+            const { stdout: nsLines } = await execa("kubectl", [
+              "get", "namespaces", "-o", "name",
+            ], { stdio: "pipe" });
+            for (const line of nsLines.split("\n")) {
+              const nsName = line.replace("namespace/", "").trim();
+              if (nsName.startsWith("azureclaw-") && nsName !== "azureclaw-system") {
+                await execa("kubectl", [
+                  "delete", "pods", "--all", "-n", nsName, "--grace-period=10",
+                ], { stdio: "pipe" }).catch(() => {});
+              }
+            }
+          }
+
+          // If relay/registry changed, restart agentmesh
+          if (!options.only || options.only === "relay" || options.only === "registry") {
+            await execa("kubectl", ["rollout", "restart", "deployment", "-n", "agentmesh"], { stdio: "pipe" }).catch(() => {});
+          }
+
+          spin.succeed("Deployments restarted — pods will pull new images");
+        } catch (e: any) {
+          spin.fail(`Rollout restart failed: ${e.message?.split("\n")[0]}`);
+        }
+      } else if (ctx?.aksCluster) {
+        console.log(chalk.dim(`  To apply: azureclaw push --apply`));
+        console.log(chalk.dim(`  Or manually: kubectl rollout restart deployment -n azureclaw-system\n`));
       }
     });
 
