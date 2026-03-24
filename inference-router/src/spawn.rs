@@ -12,6 +12,8 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn default_true() -> bool { true }
+
 fn claw_sandbox_api_resource() -> ApiResource {
     ApiResource {
         group: "azureclaw.azure.com".into(),
@@ -29,8 +31,8 @@ pub struct SpawnRequest {
     pub name: String,
     /// Model deployment to use (default: gpt-4.1).
     pub model: Option<String>,
-    /// Enable AGT governance (default: false).
-    #[serde(default)]
+    /// Enable AGT governance (default: true).
+    #[serde(default = "default_true")]
     pub governance: bool,
     /// Trust threshold for AGT mesh (default: 500).
     pub trust_threshold: Option<i32>,
