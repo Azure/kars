@@ -117,25 +117,17 @@ export function addCommand(): Command {
         // Verify cluster is reachable
         await execa("kubectl", ["get", "crd", "clawsandboxes.azureclaw.azure.com"], { stdio: "pipe" });
 
-        // Apply the ClawSandbox CRD
-        await execa("kubectl", ["apply", "-f", "-"], {
-          input: JSON.stringify(sandbox),
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-
-        // Create federated credential for the new sandbox namespace
+        // Create federated credential FIRST (before CRD) so it propagates while pod starts
         const namespace = `azureclaw-${name}`;
         try {
-          spinner.text = "Creating federated credential for sub-agent...";
+          spinner.text = "Creating federated credential...";
           const ctx = loadContext();
 
-          // Try cached context first (fast path), fall back to discovery
           let identityName = ctx?.identityName;
           let identityRg = ctx?.identityResourceGroup || ctx?.resourceGroup;
           let issuerUrl = ctx?.oidcIssuerUrl;
 
           if (!identityName || !identityRg || !issuerUrl) {
-            // Discover from cluster
             const { stdout: wiClientId } = await execa("kubectl", [
               "get", "sa", "-n", "azureclaw-system", "azureclaw-controller",
               "-o", "jsonpath={.metadata.annotations.azure\\.workload\\.identity/client-id}",
@@ -175,10 +167,51 @@ export function addCommand(): Command {
             ], { stdio: "pipe" }).catch(() => { /* may already exist */ });
           }
         } catch {
-          // Non-fatal — federated credential can be created manually
+          // Non-fatal
         }
 
-        spinner.succeed(`Sandbox '${name}' created`);
+        // Now apply the CRD (controller will create pod — fedcred already propagating)
+        spinner.text = `Creating sandbox '${name}'...`;
+        await execa("kubectl", ["apply", "-f", "-"], {
+          input: JSON.stringify(sandbox),
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        // Wait for pod to be ready and WI token to propagate
+        spinner.text = `Waiting for '${name}' to be ready...`;
+        const maxWait = 120; // seconds
+        const start = Date.now();
+        let ready = false;
+        for (let i = 0; i < maxWait / 3; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          spinner.text = `Waiting for '${name}' to be ready... (${elapsed}s)`;
+          try {
+            // Check if pod is running with both containers ready
+            const { stdout: phase } = await execa("kubectl", [
+              "get", "pods", "-n", namespace,
+              "-o", "jsonpath={.items[0].status.containerStatuses[*].ready}",
+            ], { stdio: "pipe", timeout: 5000 });
+            if (!phase.includes("true")) continue;
+
+            // Verify LLM access works (router health + token exchange)
+            const { stdout: healthz } = await execa("kubectl", [
+              "exec", "-n", namespace,
+              "deploy/" + name, "-c", "inference-router",
+              "--", "wget", "-qO-", "--timeout=5", "http://127.0.0.1:8443/healthz",
+            ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
+            if (healthz.includes("ok") || healthz.includes("healthy")) {
+              ready = true;
+              break;
+            }
+          } catch { /* pod not ready yet */ }
+        }
+
+        if (ready) {
+          spinner.succeed(`Sandbox '${name}' ready`);
+        } else {
+          spinner.succeed(`Sandbox '${name}' created (may still be starting)`);
+        }
         console.log(chalk.dim(`  Namespace:  ${namespace}`));
         console.log(chalk.dim(`  Model:      ${options.model}`));
         console.log(chalk.dim(`  Isolation:  ${options.isolation}`));
