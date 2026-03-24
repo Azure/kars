@@ -393,7 +393,15 @@ export function upCommand(): Command {
         }
 
         if (!options.skipInfra) {
-          stepper.step(`Provisioning Azure resources in ${options.region} (takes several minutes)...`);
+          stepper.step(`Provisioning Azure resources in ${options.region}...`);
+          const isolationDesc: Record<string, string> = {
+            standard: "runc + RuntimeDefault seccomp",
+            enhanced: "runc + azureclaw-strict seccomp + read-only rootfs",
+            confidential: "Kata VM isolation (hardware TEE)",
+          };
+          stepper.detail("info", `Isolation: ${isolationDesc[options.isolation] || options.isolation}`);
+          stepper.detail("info", `Resources: AKS + ACR + Key Vault + Azure OpenAI + Monitor`);
+          stepper.detail("info", `This takes 5–10 minutes. Deploying now...`);
           const bicepParams = [
             `location=${options.region}`,
             `baseName=${baseName}`,
@@ -408,27 +416,39 @@ export function upCommand(): Command {
             bicepParams.push("deployAoai=false");
           }
 
-          const { stdout: deployOutput } = await execa("az", [
-            "deployment", "group", "create",
-            "--resource-group", rg,
-            "--template-file", bicepPath,
-            "--parameters", ...bicepParams,
-            "--output", "json",
-            "--query", "properties.outputs",
-          ], { stdio: "pipe" });
+          // Run Bicep deployment with a progress ticker
+          const ticker = setInterval(() => {
+            stepper.update(`Provisioning Azure resources in ${options.region}... (still running)`);
+          }, 30000);
 
-          const outputs = JSON.parse(deployOutput);
-          acrLoginServer = outputs.acrLoginServer.value;
-          openAiEndpoint = outputs.openAiEndpoint.value;
-          wiClientId = outputs.sandboxIdentityClientId.value;
-          kvName = outputs.keyVaultName.value;
+          try {
+            const { stdout: deployOutput } = await execa("az", [
+              "deployment", "group", "create",
+              "--resource-group", rg,
+              "--template-file", bicepPath,
+              "--parameters", ...bicepParams,
+              "--output", "json",
+              "--query", "properties.outputs",
+            ], { stdio: "pipe" });
 
-          stepper.detail("new", `AKS cluster — ${baseName}-aks`);
-          stepper.detail("new", `ACR — ${acrLoginServer}`);
-          stepper.detail("new", `Key Vault — ${kvName}`);
-          stepper.detail("new", `OpenAI — ${openAiEndpoint}`);
+            clearInterval(ticker);
 
-          stepper.done("Azure resources provisioned");
+            const outputs = JSON.parse(deployOutput);
+            acrLoginServer = outputs.acrLoginServer.value;
+            openAiEndpoint = outputs.openAiEndpoint.value;
+            wiClientId = outputs.sandboxIdentityClientId.value;
+            kvName = outputs.keyVaultName.value;
+
+            stepper.detail("new", `AKS cluster — ${baseName}-aks`);
+            stepper.detail("new", `ACR — ${acrLoginServer}`);
+            stepper.detail("new", `Key Vault — ${kvName}`);
+            stepper.detail("new", `OpenAI — ${openAiEndpoint}`);
+
+            stepper.done("Azure resources provisioned");
+          } catch (bicepErr: any) {
+            clearInterval(ticker);
+            throw bicepErr;
+          }
         } else {
           // Read outputs from existing deployment
           stepper.step("Verifying existing infrastructure...");
