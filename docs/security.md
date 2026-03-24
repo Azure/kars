@@ -50,7 +50,7 @@ The seccomp profile is installed on every node via a DaemonSet that writes `azur
 **Three enforcement layers for network control:**
 
 1. **iptables UID-based egress guard** (init container):
-   - Agent (UID 1000): can only reach `localhost` + UDP port 53 (DNS). All other outbound traffic dropped.
+   - Agent (UID 1000): can only reach `localhost` + DNS + reply packets (`ESTABLISHED,RELATED`). All other outbound traffic dropped.
    - Inference router (UID 1001): unrestricted within the pod's NetworkPolicy.
    - Effect: even if an agent exploits a vulnerability, it cannot make arbitrary network connections.
 
@@ -64,8 +64,9 @@ The seccomp profile is installed on every node via a DaemonSet that writes `azur
    - The inference router is the sole egress path for AI model calls
    - Agent cannot bypass the router (iptables + NetworkPolicy + no credentials)
 
-4. **Domain blocklist** (auto-refreshing):
+4. **Domain blocklist + Egress proxy** (auto-refreshing):
    - Blocks known-malicious domains: malware C2, phishing, cryptojacking pools, reverse shell services
+   - **Egress proxy** with allowlist, approval flow, and learn mode — see [egress-proxy.md](egress-proxy.md)
    - Seed file embedded in controller binary, mounted as ConfigMap (`/etc/azureclaw/blocklist/domains.txt`)
    - Router background task refreshes from [OISD](https://oisd.nl/) + [URLhaus](https://urlhaus.abuse.ch/) every 6h
    - K8s CronJob also refreshes the ConfigMap every 6h (defense-in-depth)
@@ -165,7 +166,7 @@ When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://git
 When governance is enabled, the controller (Step 4c) creates:
 - **K8s Service** — `{name}:8443` for mesh DNS routing
 - **ConfigMap** — `agt-policy-{profile}` with policy YAML, mounted at `/etc/agt/policies`
-- **NetworkPolicy ingress** — allows port 8443 from other sandbox namespaces
+- **NetworkPolicy ingress** — allows ports 8443, 18789, 18791 from other sandbox namespaces
 - **Env vars** — `AGT_GOVERNANCE_ENABLED`, `AGT_TRUST_THRESHOLD`, `AGT_MESH_NAMESPACE`, `AGT_POLICY_DIR`
 
 ### Overlap resolution
