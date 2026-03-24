@@ -34,7 +34,7 @@ FROM ${AZURELINUX_BASE}
 # Detect arch for Node.js download
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip curl git shadow-utils ca-certificates && tdnf clean all && \
+    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables && tdnf clean all && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz

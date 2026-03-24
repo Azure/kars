@@ -19,39 +19,59 @@ export function egressCommand(): Command {
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
 
-      const ns = options.namespace || `azureclaw-${name}`;
+      const containerName = `azureclaw-${name}`;
+      const ns = options.namespace || containerName;
 
-      // Find the pod
-      let pod: string;
+      // Detect whether this is a local Docker container or a Kubernetes pod
+      let mode: "docker" | "k8s" = "k8s";
+      let pod = "";
       try {
-        const { stdout } = await execa("kubectl", [
-          "get", "pods", "-n", ns,
-          "-o", `jsonpath={.items[?(@.status.phase=="Running")].metadata.name}`,
+        const { stdout } = await execa("docker", [
+          "inspect", "--format", "{{.State.Running}}", containerName,
         ], { stdio: "pipe" });
-        pod = stdout.trim().split(/\s+/)[0];
-        if (!pod) throw new Error("no pod");
+        if (stdout.trim() === "true") mode = "docker";
       } catch {
-        console.log(chalk.red(`\n  No running pod found for '${name}' in namespace '${ns}'.\n`));
-        return;
+        // No local container — try Kubernetes
       }
 
-      // Helper: call router API inside the pod
+      if (mode === "k8s") {
+        try {
+          const { stdout } = await execa("kubectl", [
+            "get", "pods", "-n", ns,
+            "-o", `jsonpath={.items[?(@.status.phase=="Running")].metadata.name}`,
+          ], { stdio: "pipe" });
+          pod = stdout.trim().split(/\s+/)[0];
+          if (!pod) throw new Error("no pod");
+        } catch {
+          console.log(chalk.red(`\n  No running sandbox found for '${name}' (checked Docker and AKS).\n`));
+          return;
+        }
+      }
+
+      // Helper: call router API — Docker exec or kubectl exec
       async function routerGet(path: string): Promise<any> {
-        const { stdout } = await execa("kubectl", [
-          "exec", "-n", ns, pod, "-c", "inference-router", "--",
-          "curl", "-s", `http://127.0.0.1:8443${path}`,
-        ], { stdio: "pipe" });
+        const args = mode === "docker"
+          ? ["exec", containerName, "curl", "-s", `http://127.0.0.1:8443${path}`]
+          : ["exec", "-n", ns, pod, "-c", "inference-router", "--",
+             "curl", "-s", `http://127.0.0.1:8443${path}`];
+        const bin = mode === "docker" ? "docker" : "kubectl";
+        const { stdout } = await execa(bin, args, { stdio: "pipe" });
         return JSON.parse(stdout);
       }
 
       async function routerPost(path: string, body: object): Promise<any> {
-        const { stdout } = await execa("kubectl", [
-          "exec", "-n", ns, pod, "-c", "inference-router", "--",
-          "curl", "-s", "-X", "POST",
-          "-H", "Content-Type: application/json",
-          "-d", JSON.stringify(body),
-          `http://127.0.0.1:8443${path}`,
-        ], { stdio: "pipe" });
+        const args = mode === "docker"
+          ? ["exec", containerName, "curl", "-s", "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "-d", JSON.stringify(body),
+             `http://127.0.0.1:8443${path}`]
+          : ["exec", "-n", ns, pod, "-c", "inference-router", "--",
+             "curl", "-s", "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "-d", JSON.stringify(body),
+             `http://127.0.0.1:8443${path}`];
+        const bin = mode === "docker" ? "docker" : "kubectl";
+        const { stdout } = await execa(bin, args, { stdio: "pipe" });
         return JSON.parse(stdout);
       }
 
@@ -125,11 +145,7 @@ export function egressCommand(): Command {
       // Enable learn mode
       if (options.learn === true) {
         try {
-          await execa("kubectl", [
-            "set", "env", `deployment/${name}`,
-            "-n", ns, "-c", "inference-router",
-            "EGRESS_LEARN_MODE=true",
-          ], { stdio: "pipe" });
+          await routerPost("/egress/learn", { enabled: true });
           console.log(chalk.green(`\n  ✅ Learn mode enabled for '${name}'.`));
           console.log(chalk.dim(`     All accessed domains will be logged (blocklist still enforced).`));
           console.log(chalk.dim(`     Run ${chalk.white(`azureclaw egress ${name} --learned`)} to see discovered domains.\n`));
@@ -142,11 +158,7 @@ export function egressCommand(): Command {
       // Disable learn mode
       if (options.learn === false && process.argv.includes("--no-learn")) {
         try {
-          await execa("kubectl", [
-            "set", "env", `deployment/${name}`,
-            "-n", ns, "-c", "inference-router",
-            "EGRESS_LEARN_MODE=false",
-          ], { stdio: "pipe" });
+          await routerPost("/egress/learn", { enabled: false });
           console.log(chalk.yellow(`\n  Learn mode disabled for '${name}'.\n`));
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to disable learn mode: ${e.message}\n`));
