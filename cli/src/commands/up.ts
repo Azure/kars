@@ -193,6 +193,28 @@ export function upCommand(): Command {
           }]);
           options.isolation = isolation;
         }
+
+        // Ask about existing Foundry endpoint (skip AOAI deployment if provided)
+        if (!options.foundryEndpoint && !process.argv.includes("--foundry-endpoint")) {
+          const { hasFoundry } = await inquirer.prompt([{
+            type: "list" as const,
+            name: "hasFoundry",
+            message: "Azure AI backend:",
+            choices: [
+              { name: "Use existing Azure AI Foundry / OpenAI endpoint (Recommended if you have one)", value: true },
+              { name: "Deploy new Azure OpenAI resource (adds ~5 min)", value: false },
+            ],
+          }]);
+          if (hasFoundry) {
+            const { endpoint } = await inquirer.prompt([{
+              type: "input" as const,
+              name: "endpoint",
+              message: "Azure AI endpoint URL:",
+              validate: (input: string) => input.startsWith("https://") || "Must be an https:// URL",
+            }]);
+            options.foundryEndpoint = endpoint;
+          }
+        }
       }
 
       const rg = options.resourceGroup || `azureclaw-${options.region}`;
@@ -250,6 +272,11 @@ export function upCommand(): Command {
         };
         checkLine(true, `Region — ${options.region}`);
         checkLine(true, `Isolation — ${isolationLabels[options.isolation] || options.isolation}`);
+        if (options.foundryEndpoint) {
+          checkLine(true, `AI Backend — ${options.foundryEndpoint} (existing)`);
+        } else {
+          checkLine(true, `AI Backend — new Azure OpenAI resource`);
+        }
         checkLine(true, `Resource group — ${rg}`);
         checkLine(true, `Sandbox — ${options.name}`);
 
@@ -417,7 +444,11 @@ export function upCommand(): Command {
             confidential: "Kata VM isolation (hardware TEE)",
           };
           stepper.detail("info", `Isolation: ${isolationDesc[options.isolation] || options.isolation}`);
-          stepper.detail("info", `Resources: AKS + ACR + Key Vault + Azure OpenAI + Monitor`);
+          if (options.foundryEndpoint) {
+            stepper.detail("info", `Resources: AKS + ACR + Key Vault + Monitor (using existing AI endpoint)`);
+          } else {
+            stepper.detail("info", `Resources: AKS + ACR + Key Vault + Azure OpenAI + Monitor`);
+          }
           stepper.detail("info", `This takes 5–10 minutes. Deploying now...`);
           const bicepParams = [
             `location=${options.region}`,
@@ -452,14 +483,18 @@ export function upCommand(): Command {
 
             const outputs = JSON.parse(deployOutput);
             acrLoginServer = outputs.acrLoginServer.value;
-            openAiEndpoint = outputs.openAiEndpoint.value;
+            openAiEndpoint = options.foundryEndpoint || outputs.openAiEndpoint?.value || "";
             wiClientId = outputs.sandboxIdentityClientId.value;
             kvName = outputs.keyVaultName.value;
 
             stepper.detail("new", `AKS cluster — ${baseName}-aks`);
             stepper.detail("new", `ACR — ${acrLoginServer}`);
             stepper.detail("new", `Key Vault — ${kvName}`);
-            stepper.detail("new", `OpenAI — ${openAiEndpoint}`);
+            if (options.foundryEndpoint) {
+              stepper.detail("ok", `AI Backend — ${options.foundryEndpoint} (existing)`);
+            } else {
+              stepper.detail("new", `OpenAI — ${openAiEndpoint}`);
+            }
 
             stepper.done("Azure resources provisioned");
           } catch (bicepErr: any) {
@@ -488,14 +523,18 @@ export function upCommand(): Command {
 
           const outputs = JSON.parse(existingOutput);
           acrLoginServer = outputs.acrLoginServer.value;
-          openAiEndpoint = outputs.openAiEndpoint.value;
+          openAiEndpoint = options.foundryEndpoint || outputs.openAiEndpoint?.value || "";
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
 
           stepper.detail("ok", `AKS cluster — ${baseName}-aks (running)`);
           stepper.detail("ok", `ACR — ${acrLoginServer}`);
           stepper.detail("ok", `Key Vault — ${kvName}`);
-          stepper.detail("ok", `OpenAI — ${openAiEndpoint}`);
+          if (options.foundryEndpoint) {
+            stepper.detail("ok", `AI Backend — ${options.foundryEndpoint} (existing)`);
+          } else {
+            stepper.detail("ok", `OpenAI — ${openAiEndpoint}`);
+          }
           stepper.detail("ok", `Workload Identity — ${wiClientId.slice(0, 8)}...`);
 
           stepper.done("Infrastructure verified (Bicep skipped)");
