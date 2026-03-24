@@ -9,6 +9,11 @@ const DEFAULT_SANDBOX_IMAGE =
 const AZURELINUX_BASE =
   "mcr.microsoft.com/azurelinux/base/core:3.0";
 
+const AGT_NETWORK = "azureclaw-dev";
+const AGT_POSTGRES = "azureclaw-agt-postgres";
+const AGT_RELAY = "azureclaw-agt-relay";
+const AGT_REGISTRY = "azureclaw-agt-registry";
+
 export function devCommand(): Command {
   const cmd = new Command("dev");
 
@@ -34,6 +39,10 @@ export function devCommand(): Command {
       false
     )
     .option(
+      "--no-agt",
+      "Skip AGT relay/registry stack (single-agent only)"
+    )
+    .option(
       "--base-image <image>",
       "Azure Linux base image for building sandbox (override for custom registries)",
       AZURELINUX_BASE
@@ -41,7 +50,7 @@ export function devCommand(): Command {
     .action(async (options) => {
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
-      const stepper = new Stepper({ totalSteps: 3 });
+      const stepper = new Stepper({ totalSteps: !options.agt ? 3 : 4 });
 
       try {
         let image = options.image;
@@ -138,6 +147,27 @@ export function devCommand(): Command {
           console.log();
           image = "azureclaw-sandbox:dev";
           stepper.done("Sandbox image built");
+
+          // Build AGT relay + registry images if --build and AGT is enabled
+          if (options.agt) {
+            stepper.update("Building AGT relay image (Rust)...");
+            stepper.stop();
+            console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
+            await execa("docker", [
+              "build", "-t", "agentmesh-relay:dev",
+              path.join(repoRoot, "vendor/agentmesh-relay"),
+            ], { stdio: "inherit" });
+            console.log();
+
+            stepper.update("Building AGT registry image (Rust + React)...");
+            stepper.stop();
+            console.log(chalk.dim("  Building agentmesh-registry (Rust + React)...\n"));
+            await execa("docker", [
+              "build", "-t", "agentmesh-registry:dev",
+              path.join(repoRoot, "vendor/agentmesh-registry"),
+            ], { stdio: "inherit" });
+            console.log();
+          }
         } else {
           stepper.done("Sandbox image found");
         }
@@ -147,6 +177,97 @@ export function devCommand(): Command {
         const creds = await ensureCredentials();
         stepper.done("Credentials ready");
         const model = options.model !== "gpt-4.1" ? options.model : creds.model;
+
+        // ── AGT infrastructure (relay, registry, postgres) ───────────
+        let agtReady = false;
+        if (options.agt) {
+          stepper.step("Starting AGT infrastructure...");
+
+          // Helper: check if a container exists and is running
+          async function isContainerRunning(name: string): Promise<boolean> {
+            try {
+              const { stdout } = await execa("docker", [
+                "inspect", "-f", "{{.State.Running}}", name,
+              ], { stdio: "pipe" });
+              return stdout.trim() === "true";
+            } catch { return false; }
+          }
+
+          // Create shared Docker network
+          try {
+            await execa("docker", ["network", "create", AGT_NETWORK], { stdio: "pipe" });
+          } catch {
+            // Already exists — fine
+          }
+
+          // Start PostgreSQL (registry backend)
+          if (!(await isContainerRunning(AGT_POSTGRES))) {
+            stepper.update("Starting PostgreSQL...");
+            try { await execa("docker", ["rm", "-f", AGT_POSTGRES], { stdio: "pipe" }); } catch {}
+            await execa("docker", [
+              "run", "-d",
+              "--name", AGT_POSTGRES,
+              "--network", AGT_NETWORK,
+              "-e", "POSTGRES_DB=agentmesh",
+              "-e", "POSTGRES_USER=agentmesh",
+              "-e", "POSTGRES_PASSWORD=agentmesh-dev",
+              "postgres:15-alpine",
+            ], { stdio: "pipe" });
+            // Wait for postgres to accept connections
+            for (let i = 0; i < 15; i++) {
+              try {
+                await execa("docker", [
+                  "exec", AGT_POSTGRES, "pg_isready", "-U", "agentmesh",
+                ], { stdio: "pipe" });
+                break;
+              } catch { await new Promise(r => setTimeout(r, 1000)); }
+            }
+          }
+
+          // Start AGT Relay (WebSocket message relay)
+          if (!(await isContainerRunning(AGT_RELAY))) {
+            stepper.update("Starting AGT relay...");
+            try { await execa("docker", ["rm", "-f", AGT_RELAY], { stdio: "pipe" }); } catch {}
+            await execa("docker", [
+              "run", "-d",
+              "--name", AGT_RELAY,
+              "--network", AGT_NETWORK,
+              "-e", "RUST_LOG=agentmesh_relay=info",
+              "-e", "RELAY_ADDR=0.0.0.0:8765",
+              "agentmesh-relay:dev",
+            ], { stdio: "pipe" });
+          }
+
+          // Start AGT Registry (agent discovery + prekey storage)
+          if (!(await isContainerRunning(AGT_REGISTRY))) {
+            stepper.update("Starting AGT registry...");
+            try { await execa("docker", ["rm", "-f", AGT_REGISTRY], { stdio: "pipe" }); } catch {}
+            await execa("docker", [
+              "run", "-d",
+              "--name", AGT_REGISTRY,
+              "--network", AGT_NETWORK,
+              "-e", `DATABASE_URL=postgres://agentmesh:agentmesh-dev@${AGT_POSTGRES}:5432/agentmesh`,
+              "-e", "HOST=0.0.0.0",
+              "-e", "PORT=8080",
+              "-e", "RUST_LOG=agentmesh_registry=info,actix_web=info",
+              "agentmesh-registry:dev",
+            ], { stdio: "pipe" });
+          }
+
+          // Health check — wait for registry to be ready
+          stepper.update("Waiting for AGT services...");
+          for (let i = 0; i < 15; i++) {
+            try {
+              await execa("docker", [
+                "exec", AGT_REGISTRY, "curl", "-sf", "http://localhost:8080/v1/health",
+              ], { stdio: "pipe" });
+              agtReady = true;
+              break;
+            } catch { await new Promise(r => setTimeout(r, 1000)); }
+          }
+
+          stepper.done(agtReady ? "AGT infrastructure ready (relay + registry + postgres)" : "AGT infrastructure started (health check pending)");
+        }
 
         // ── Container startup ────────────────────────────────────────
         stepper.step("Starting sandbox container...");
@@ -170,11 +291,20 @@ export function devCommand(): Command {
           : [];
 
         stepper.update("Launching container...");
+        // AGT network args: connect sandbox to the shared Docker network
+        // so the router can reach relay/registry by container hostname
+        const networkArgs = options.agt ? ["--network", AGT_NETWORK] : [];
+        const agtEnvArgs = options.agt ? [
+          "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:8765`,
+          "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:8080`,
+        ] : [];
+
         await execa("docker", [
           "run", "-d",
           "--name", containerName,
           "--hostname", options.name,
           ...seccompArgs,
+          ...networkArgs,
           "--read-only",
           // Grant NET_ADMIN for iptables egress guard (same as AKS init container)
           "--cap-add", "NET_ADMIN",
@@ -194,6 +324,7 @@ export function devCommand(): Command {
           "-e", `OPENCLAW_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,
+          ...agtEnvArgs,
           image,
         ], { stdio: "pipe" });
 
@@ -226,6 +357,9 @@ export function devCommand(): Command {
         checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
         checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → localhost + DNS)" : "(not available)"}`);
         checkLine(true, "API key mounted as read-only secret");
+        if (options.agt) {
+          checkLine(agtReady, `AGT mesh ${agtReady ? "(relay + registry + E2E encryption)" : "(starting...)"}`);
+        }
 
         section("Environment");
         kvLine("OS", "Azure Linux 3.0");

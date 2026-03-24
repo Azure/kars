@@ -276,46 +276,48 @@ You are friendly but professional. You get things done.
 EOF
 
   echo "[azureclaw] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
-
-  # Install AzureClaw plugin into OpenClaw's extensions directory
-  if [ -d /opt/azureclaw-plugin ]; then
-    mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
-    cp /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
-    cp /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
-    # Copy built JS/TS output (exclude node_modules — copied separately below)
-    cp -r /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-    cp -r /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-    cp -r /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-    if [ -d /opt/azureclaw-plugin/commands ]; then
-      cp -r /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/"
-    fi
-    # Copy Foundry skills (SKILL.md files)
-    if [ -d /opt/azureclaw-plugin/skills ]; then
-      cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
-      mkdir -p "$WORKSPACE_DIR/skills"
-      cp -r /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
-      echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
-    fi
-    # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
-    if [ -d /opt/azureclaw-plugin/node_modules ]; then
-      cp -r /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
-      echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
-    fi
-    # Copy AGT policies if governance enabled
-    if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
-      mkdir -p "$OPENCLAW_DIR/policies"
-      cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
-      export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
-      echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
-    fi
-    cd /sandbox
-    echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
-  fi
 else
   # Load credentials for existing config
   export AZURE_OPENAI_API_KEY="${API_KEY}"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
   echo "[azureclaw] OpenClaw already configured"
+fi
+
+# Always re-install AzureClaw plugin from the image (plugin code may have changed
+# even though config persists on the volume). This is safe because the plugin
+# directory is small and cp is idempotent.
+if [ -d /opt/azureclaw-plugin ]; then
+  mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
+  cp /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
+  cp /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
+  # Copy built JS/TS output
+  cp -r /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  cp -r /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  cp -r /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  if [ -d /opt/azureclaw-plugin/commands ]; then
+    cp -r /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/"
+  fi
+  # Copy Foundry skills (SKILL.md files)
+  if [ -d /opt/azureclaw-plugin/skills ]; then
+    cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
+    mkdir -p "$WORKSPACE_DIR/skills"
+    cp -r /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+    echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
+  fi
+  # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
+  if [ -d /opt/azureclaw-plugin/node_modules ]; then
+    cp -r /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
+    echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
+  fi
+  # Copy AGT policies if governance enabled
+  if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
+    mkdir -p "$OPENCLAW_DIR/policies"
+    cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
+    export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
+    echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
+  fi
+  cd /sandbox
+  echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
 fi
 
 # Add gateway token to .bashrc so interactive shells have it

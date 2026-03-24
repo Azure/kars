@@ -218,11 +218,13 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     agtIdentity = await sdk.Identity.generate();
     log.info(`AGT identity: ${agtIdentity.amid}`);
 
-    // Create AgentMeshClient — connects to self-hosted relay/registry via router proxy
-    // Router (UID 1001) proxies: /agt/relay → ws://agentmesh-relay:8765
-    //                            /agt/registry/* → http://agentmesh-registry:8080/v1/*
-    const registryUrl = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
-    const relayUrl = process.env.AGT_RELAY_URL || "ws://127.0.0.1:8443/agt/relay";
+    // Create AgentMeshClient — ALWAYS connect through the router proxy.
+    // The plugin (UID 1000) cannot reach external services directly (iptables blocks).
+    // The router (UID 1001) proxies: /agt/relay → relay service, /agt/registry/* → registry service.
+    // On AKS, router reads AGT_RELAY_URL/AGT_REGISTRY_URL to find the services.
+    // In dev, same env vars point to Docker containers on the shared network.
+    const registryUrl = "http://127.0.0.1:8443/agt/registry";
+    const relayUrl = "ws://127.0.0.1:8443/agt/relay";
 
     agtMeshClient = new sdk.AgentMeshClient(agtIdentity, {
       storage: new sdk.MemoryStorage(),

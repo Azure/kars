@@ -63,7 +63,57 @@ export function destroyCommand(): Command {
         return;
       }
 
-      // Single sandbox or all sandboxes
+      // ── Local Docker sandbox ───────────────────────────────────
+      if (name) {
+        const { execa } = await import("execa");
+        const containerName = `azureclaw-${name}`;
+
+        // Check if this is a local Docker container
+        let isLocal = false;
+        try {
+          await execa("docker", ["inspect", containerName], { stdio: "pipe" });
+          isLocal = true;
+        } catch {
+          // Not a local container — fall through to kubectl
+        }
+
+        if (isLocal) {
+          const spinner = ora(`Destroying local sandbox '${name}'...`).start();
+          try {
+            await execa("docker", ["rm", "-f", containerName], { stdio: "pipe" });
+            // Clean up volume
+            await execa("docker", ["volume", "rm", `${containerName}-data`], { stdio: "pipe" }).catch(() => {});
+
+            // Check if any other azureclaw sandbox containers are still running
+            const { stdout: ps } = await execa("docker", [
+              "ps", "--filter", "name=azureclaw-", "--format", "{{.Names}}",
+            ], { stdio: "pipe" });
+            const remaining = ps.split("\n").filter(n =>
+              n.startsWith("azureclaw-") &&
+              !n.startsWith("azureclaw-agt-")
+            );
+
+            if (remaining.length === 0) {
+              // Last sandbox — tear down AGT infrastructure
+              spinner.text = "Stopping AGT infrastructure...";
+              for (const c of ["azureclaw-agt-registry", "azureclaw-agt-relay", "azureclaw-agt-postgres"]) {
+                await execa("docker", ["rm", "-f", c], { stdio: "pipe" }).catch(() => {});
+              }
+              await execa("docker", ["network", "rm", "azureclaw-dev"], { stdio: "pipe" }).catch(() => {});
+            }
+
+            spinner.succeed(`Sandbox '${name}' destroyed`);
+          } catch (error) {
+            spinner.fail("Destroy failed");
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(chalk.red(`\nError: ${message}\n`));
+            process.exit(1);
+          }
+          return;
+        }
+      }
+
+      // ── AKS sandbox (kubectl) ──────────────────────────────────
       const spinner = ora().start();
       try {
         const { execa } = await import("execa");
