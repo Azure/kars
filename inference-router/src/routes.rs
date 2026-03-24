@@ -971,7 +971,7 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
     let in_bytes = inbound_bytes.clone();
 
     // Forward: client → relay (outbound encrypted messages)
-    let client_to_relay = tokio::spawn(async move {
+    let mut client_to_relay = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_rx.next().await {
             let (tung_msg, size) = match msg {
                 Message::Text(ref t) => (
@@ -1017,7 +1017,7 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
     });
 
     // Forward: relay → client (inbound encrypted messages)
-    let relay_to_client = tokio::spawn(async move {
+    let mut relay_to_client = tokio::spawn(async move {
         while let Some(Ok(msg)) = upstream_rx.next().await {
             let (axum_msg, size) = match msg {
                 tungstenite::Message::Text(ref t) => (
@@ -1062,10 +1062,11 @@ async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
         }
     });
 
-    // Wait for either direction to close
+    // Wait for either direction to close, then abort the other to prevent
+    // zombie connections that trigger "Failed to send message: closed connection".
     tokio::select! {
-        _ = client_to_relay => {},
-        _ = relay_to_client => {},
+        _ = &mut client_to_relay => { relay_to_client.abort(); },
+        _ = &mut relay_to_client => { client_to_relay.abort(); },
     }
 
     let out_n = outbound_count.load(Ordering::Relaxed);

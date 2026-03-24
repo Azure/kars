@@ -528,25 +528,31 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // ── Init container: iptables-based per-container egress control ──
         // Since K8s NetworkPolicy operates at pod level (not container level),
         // we use iptables UID-based rules to restrict the openclaw agent
-        // container (UID 1000) to localhost + DNS only. The inference-router
-        // (UID 1001) keeps full network access for Azure endpoint communication.
+        // container (UID 1000) to localhost + DNS only, with a transparent
+        // forward proxy for HTTP/HTTPS egress enforcement and learn mode.
+        //
+        // Filter chain (OUTPUT):
+        //   UID 1000 → allow loopback, DNS, established → DROP everything else
+        //
+        // NAT chain (OUTPUT):
+        //   UID 1000 port 80/443 (not loopback) → REDIRECT to :8444
+        //   The transparent proxy on port 8444 (inference-router, UID 1001):
+        //   - Records every domain for learn mode
+        //   - Enforces blocklist/allowlist per domain
+        //   - Tunnels allowed traffic to the real destination
         //
         // This blocks:
-        //  - IMDS credential theft (169.254.169.254) from the agent container
-        //  - Data exfiltration to any external host from the agent container
-        //  - Lateral movement to other pods from the agent container
+        //  - IMDS credential theft (169.254.169.254)
+        //  - Data exfiltration to any external host
+        //  - Lateral movement to other pods
         //
         // The agent can only reach the inference-router sidecar on localhost:8443.
-        // NOTE: The egress-guard uses the sandbox image which has the inference router.
-        // During sandbox image build, iptables is not pre-installed, so we use the
-        // inference-router image (Azure Linux 3) and install iptables on first boot.
-        // The NetworkPolicy allows DNS egress which lets tdnf work.
-        // However the init container must complete before NetworkPolicy takes effect
-        // on the pod, so download access is available during init.
+        // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
         "initContainers": [{
             "name": "egress-guard",
             "image": &ctx.inference_router_image,
             "command": ["sh", "-c", concat!(
+                // Filter chain: allow localhost, DNS, established — drop everything else
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
@@ -554,7 +560,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 // gateway — without this, the WebUX and Telegram channel can't respond.
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                "echo 'egress-guard: UID 1000 restricted to localhost + DNS + inbound replies'"
+                // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
+                // forward proxy (port 8444) in the inference-router sidecar. This
+                // enables learn mode (domain discovery) and per-domain enforcement.
+                // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
+                // rule above. The proxy (UID 1001) then connects to the real destination.
+                "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
+                "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
+                "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
             )],
             "securityContext": {
                 "runAsUser": 0,
