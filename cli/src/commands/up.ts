@@ -38,6 +38,14 @@ export function upCommand(): Command {
       const { default: inquirer } = await import("inquirer");
       const { execa } = await import("execa");
 
+      // Auto-detect developer mode: if running from the repo (Dockerfile exists), default to --build
+      if (!options.build && !process.argv.includes("--source-acr")) {
+        const repoRoot = new URL("../../..", import.meta.url).pathname;
+        if (existsSync(`${repoRoot}/inference-router/Dockerfile`) || existsSync("inference-router/Dockerfile")) {
+          options.build = true;
+        }
+      }
+
       // ══════════════════════════════════════════════════════════════
       //  PREFLIGHT: validate everything before touching Azure
       // ══════════════════════════════════════════════════════════════
