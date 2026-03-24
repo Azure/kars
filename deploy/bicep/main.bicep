@@ -54,10 +54,13 @@ module acr 'modules/acr.bicep' = {
 
 // ─── Azure Key Vault ────────────────────────────────────────────────────────
 
+// KV names are globally unique — append a deterministic hash of the resource group
+var kvSuffix = take(uniqueString(resourceGroup().id), 6)
+
 module keyVault 'modules/keyvault.bicep' = {
   name: '${baseName}-kv'
   params: {
-    name: '${baseName}-kv'
+    name: '${baseName}-kv-${kvSuffix}'
     location: location
     recover: false
   }
@@ -100,7 +103,7 @@ module aks 'modules/aks.bicep' = {
     logAnalyticsWorkspaceId: monitor.outputs.logAnalyticsWorkspaceId
     acrId: acr.outputs.acrId
     keyVaultName: keyVault.outputs.keyVaultName
-    openAiAccountId: deployAoai ? openAi.outputs.accountId : ''
+    openAiAccountId: openAi.?outputs.accountId ?? ''
     authorizedIpRanges: authorizedIpRanges
     enableKata: enableKata
   }
@@ -112,6 +115,6 @@ output aksClusterName string = aks.outputs.clusterName
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultUri string = keyVault.outputs.vaultUri
 output keyVaultName string = keyVault.outputs.keyVaultName
-output openAiEndpoint string = deployAoai ? openAi.outputs.endpoint : ''
+output openAiEndpoint string = openAi.?outputs.endpoint ?? ''
 output logAnalyticsWorkspaceId string = monitor.outputs.logAnalyticsWorkspaceId
 output sandboxIdentityClientId string = aks.outputs.sandboxIdentityClientId
