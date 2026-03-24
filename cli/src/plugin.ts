@@ -420,25 +420,29 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     indexes: [],
   };
 
-  // Query all three in parallel — non-fatal if any fail
-  const [deployResult, connResult, idxResult] = await Promise.allSettled([
-    _routerCall("GET", `/deployments?${apiVer}`),
+  // Query models via data-plane API (/openai/models) + Foundry resources in parallel
+  const [modelsResult, connResult, idxResult] = await Promise.allSettled([
+    _routerCall("GET", `/openai/models?api-version=2024-10-21`),
     _routerCall("GET", `/connections?${apiVer}`),
     _routerCall("GET", `/indexes?${apiVer}`),
   ]);
 
-  if (deployResult.status === "fulfilled") {
-    const data = deployResult.value?.data || deployResult.value?.value || deployResult.value;
+  if (modelsResult.status === "fulfilled") {
+    const data = modelsResult.value?.data || modelsResult.value?.value || [];
     if (Array.isArray(data)) {
-      foundryProject.deployments = data.map((d: any) => ({
-        id: d.name || d.id || d.deployment_id,
-        model: d.model?.name || d.model || d.name || "unknown",
-        sku: d.sku?.name || d.sku,
-      }));
-      log.info(`Foundry: ${foundryProject.deployments.length} model deployment(s) discovered`);
+      // Filter to chat-capable models only
+      foundryProject.deployments = data
+        .filter((m: any) => m?.capabilities?.chat_completion)
+        .slice(0, 50) // cap at 50 to keep MEMORY.md reasonable
+        .map((m: any) => ({
+          id: m.id || m.name,
+          model: m.id || m.name || "unknown",
+          sku: m.lifecycle_status || m.status,
+        }));
+      log.info(`Foundry: ${foundryProject.deployments.length} chat model(s) discovered`);
     }
   } else {
-    log.warn(`Foundry deployments discovery failed: ${(deployResult as any).reason?.message || "unknown"}`);
+    log.warn(`Foundry models discovery failed: ${(modelsResult as any).reason?.message || "unknown"}`);
   }
 
   if (connResult.status === "fulfilled") {
@@ -1475,16 +1479,16 @@ const azureClawPlugin = definePluginEntry({
       name: "foundry_deployments",
       label: "Foundry Deployments & Connections",
       description:
-        "Query available Azure AI Foundry resources: model deployments, data connections, " +
-        "search indexes, and datasets. Use to discover what models are available, what " +
-        "connections (Bing, Azure AI Search) are configured, and what indexes exist.",
+        "Query available Azure AI Foundry resources: models, connections, " +
+        "search indexes, and datasets. Use 'models' to see all available AI models, " +
+        "'connections' for data connections, 'indexes' for search indexes.",
       parameters: {
         type: "object",
         properties: {
           resource: {
             type: "string",
-            enum: ["deployments", "connections", "indexes", "datasets"],
-            description: "Resource type to query.",
+            enum: ["models", "connections", "indexes", "datasets"],
+            description: "Resource type to query. Use 'models' to list available AI models.",
           },
         },
         required: ["resource"],
@@ -1492,11 +1496,35 @@ const azureClawPlugin = definePluginEntry({
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const resource = params.resource as string;
+
+          if (resource === "models") {
+            // Use /openai/models (data-plane API that works with API key auth)
+            // /deployments is ARM-only and not available on the data plane
+            const result = await routerCall("GET", "/openai/models?api-version=2024-10-21");
+            const models = result?.data || result?.value || [];
+            // Filter to chat-capable models and format concisely
+            const chatModels = models
+              .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference)
+              .map((m: any) => ({
+                id: m.id,
+                status: m.status || m.lifecycle_status,
+                chat: !!m.capabilities?.chat_completion,
+                embeddings: !!m.capabilities?.embeddings,
+                vision: !!m.capabilities?.vision || m.id?.includes("vision"),
+              }));
+            return { content: [{ type: "text", text: safeJson({
+              total_models: models.length,
+              chat_capable: chatModels.length,
+              models: chatModels,
+            }) }] };
+          }
+
+          // Other resources: try Foundry API first, fall back gracefully
           const apiVer = "api-version=2025-11-15-preview";
           const result = await routerCall("GET", `/${resource}?${apiVer}`);
           return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
-          return { content: [{ type: "text", text: `Foundry deployments query failed: ${e.message}` }] };
+          return { content: [{ type: "text", text: `Foundry query failed: ${e.message}` }] };
         }
       },
     });
