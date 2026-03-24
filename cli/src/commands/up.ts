@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import ora from "ora";
 import { existsSync } from "fs";
+import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -70,18 +70,13 @@ export function upCommand(): Command {
         return;
       }
 
-      console.log(blue(`
-  ╔══════════════════════════════════════════════════╗
-  ║           ${bold("AzureClaw")} · Production Deploy           ║
-  ║        Secure AI Agent Runtime on Azure          ║
-  ╚══════════════════════════════════════════════════╝
-`));
+      banner("AzureClaw · Production Deploy", "Secure AI Agent Runtime on Azure");
 
       const rg = options.resourceGroup || `azureclaw-${options.region}`;
       const clusterName = options.clusterName ?? "azureclaw";
       const baseName = clusterName.replace(/-aks$/, "");  // derive from cluster name
       const acrName = baseName.replace(/-/g, "") + "acr";  // ACR names must be alphanumeric
-      const spinner = ora({ color: "cyan" }).start();
+      const stepper = new Stepper({ totalSteps: 8 });
 
       try {
         const { execa } = await import("execa");
@@ -105,31 +100,30 @@ export function upCommand(): Command {
         const helmPath = path.join(repoRoot, "deploy/helm/azureclaw");
 
         if (!existsSync(bicepPath)) {
-          spinner.fail("Bicep template not found");
+          stepper.fail("Bicep template not found");
           console.log(chalk.yellow(`  Expected at: ${bicepPath}`));
           console.log(chalk.yellow(`  Run from the AzureClaw repo root.\n`));
           process.exit(1);
         }
 
         // ── Step 1: Check Azure auth ─────────────────────────────────
-        spinner.text = "Checking Azure credentials...";
+        stepper.step("Checking Azure credentials...");
         try {
           await execa("az", ["account", "show", "--output", "none"], { stdio: "pipe" });
+          stepper.done("Azure credentials verified");
         } catch {
-          spinner.stop();
-          console.log(chalk.yellow("  Not logged in — running az login...\n"));
+          stepper.warn("Not logged in — running az login...");
           await execa("az", ["login"], { stdio: "inherit" });
-          spinner.start();
         }
 
         // ── Step 2: Create resource group ────────────────────────────
-        spinner.text = `Creating resource group '${rg}'...`;
+        stepper.step(`Creating resource group '${rg}'...`);
         await execa("az", [
           "group", "create", "--name", rg, "--location", options.region, "--output", "none",
         ], { stdio: "pipe" });
 
         // ── Step 2b: Detect caller IP for firewall rules ─────────────
-        spinner.text = "Detecting your public IP for firewall rules...";
+        stepper.update("Detecting your public IP for firewall rules...");
         let callerIp: string | null = null;
         try {
           const { stdout: ipOut } = await execa("curl", ["-s", "--max-time", "5", "https://ifconfig.me"], { stdio: "pipe" });
@@ -138,18 +132,20 @@ export function upCommand(): Command {
             callerIp = ip;
           }
         } catch {
-          // Non-fatal: skip IP restriction
+          // Non-fatal — skip IP restriction
         }
 
         // ── Step 2c: Register required preview features ──────────
-        spinner.text = "Registering preview features...";
+        stepper.update("Registering preview features...");
         // EncryptionAtHost is required for clawpool
         await execa("az", [
           "feature", "register",
           "--namespace", "Microsoft.Compute",
           "--name", "EncryptionAtHost",
           "--output", "none",
-        ], { stdio: "pipe" }).catch(() => {});
+        ], { stdio: "pipe" }).catch(() => {
+          // Already registered — OK
+        });
 
         if (options.isolation === "confidential") {
           // Install aks-preview extension for Kata workload runtime
@@ -169,6 +165,8 @@ export function upCommand(): Command {
         await execa("az", ["provider", "register", "-n", "Microsoft.Compute", "--output", "none"], { stdio: "pipe" }).catch(() => {});
         await execa("az", ["provider", "register", "-n", "Microsoft.ContainerService", "--output", "none"], { stdio: "pipe" }).catch(() => {});
 
+        stepper.done(`Resource group '${rg}' ready${callerIp ? ` (IP: ${callerIp})` : ""}`);
+
         // ── Step 3: Deploy Bicep (AKS + ACR + KV + AOAI + Monitor + WI) ─
         let acrLoginServer: string;
         let openAiEndpoint: string;
@@ -183,7 +181,7 @@ export function upCommand(): Command {
               "--query", "provisioningState", "-o", "tsv",
             ], { stdio: "pipe" });
             if (aksCheck.trim() === "Succeeded") {
-              spinner.text = "AKS cluster already exists — skipping Bicep. Reading deployment outputs...";
+              stepper.update("AKS cluster already exists — skipping Bicep. Reading deployment outputs...");
               options.skipInfra = true;
             }
           } catch {
@@ -192,7 +190,7 @@ export function upCommand(): Command {
         }
 
         if (!options.skipInfra) {
-          spinner.text = `Provisioning Azure resources in ${options.region} (this takes several minutes)...`;
+          stepper.step(`Provisioning Azure resources in ${options.region} (takes several minutes)...`);
           const bicepParams = [
             `location=${options.region}`,
             `baseName=${baseName}`,
@@ -222,11 +220,10 @@ export function upCommand(): Command {
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
 
-          spinner.succeed("Azure resources provisioned");
-          spinner.start();
+          stepper.done("Azure resources provisioned");
         } else {
           // Read outputs from existing deployment
-          spinner.text = "Step 2/8: Reading existing deployment outputs (ACR, AOAI, WI, KV)...";
+          stepper.step("Reading existing deployment outputs (ACR, AOAI, WI, KV)...");
           const { stdout: existingOutput } = await execa("az", [
             "deployment", "group", "show",
             "--resource-group", rg,
@@ -249,11 +246,13 @@ export function upCommand(): Command {
           openAiEndpoint = outputs.openAiEndpoint.value;
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
+          stepper.done("Deployment outputs loaded");
         }
 
         // ── Step 3a: Ensure caller IP is in AKS API server authorized ranges ──
+        stepper.step("Configuring network access & firewalls...");
         if (callerIp) {
-          spinner.text = "Step 3/8: Updating AKS API server authorized IPs...";
+          stepper.update("Updating AKS API server authorized IPs...");
           await execa("az", [
             "aks", "update",
             "--name", `${baseName}-aks`,
@@ -261,12 +260,12 @@ export function upCommand(): Command {
             "--api-server-authorized-ip-ranges", `${callerIp}/32`,
             "--output", "none",
           ], { stdio: "pipe" }).catch(() => {
-            // Non-fatal — may already be set or may not have permission
+            // Non-fatal — may already be set
           });
         }
 
         // ── Step 3b: Add AKS egress IP to service firewalls ──────
-        spinner.text = "Step 3/8: Adding AKS egress IP to service firewalls...";
+        stepper.update("Adding AKS egress IP to service firewalls...");
         try {
           // Get AKS egress (outbound) IP
           const { stdout: egressIpId } = await execa("az", [
@@ -310,7 +309,7 @@ export function upCommand(): Command {
         }
 
         // ── Step 3c: Attach ACR to AKS ──────────────────────────────
-        spinner.text = "Step 4/8: Attaching ACR to AKS...";
+        stepper.update("Attaching ACR to AKS...");
         await execa("az", [
           "aks", "update",
           "--name", `${baseName}-aks`,
@@ -321,8 +320,10 @@ export function upCommand(): Command {
           // Already attached — non-fatal
         });
 
+        stepper.done("Network access configured");
+
         // ── Step 4: Get AKS credentials ──────────────────────────────
-        spinner.text = "Step 5/8: Configuring kubectl...";
+        stepper.step("Configuring kubectl...");
         await execa("az", [
           "aks", "get-credentials",
           "--name", `${baseName}-aks`,
@@ -336,11 +337,12 @@ export function upCommand(): Command {
 
         if (options.build) {
           // Developer mode: build locally and push
-          spinner.text = "Step 6/8: Logging into ACR...";
+          stepper.step("Building and pushing images...");
+          stepper.update("Logging into ACR...");
           await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
 
           const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = [], context?: string) => {
-            spinner.text = `Step 6/8: Building ${tag} (this may take a few minutes)...`;
+            stepper.update(`Building ${tag}...`);
             const args = [
               "build", "--platform", "linux/amd64",
               "--provenance=false", "--sbom=false",
@@ -350,7 +352,7 @@ export function upCommand(): Command {
               context ? path.join(repoRoot, context) : repoRoot,
             ];
             await execa("docker", args, { stdio: "pipe" });
-            spinner.text = `Pushing ${tag}...`;
+            stepper.update(`Pushing ${tag}...`);
             await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
           };
 
@@ -366,10 +368,10 @@ export function upCommand(): Command {
           await buildPush("vendor/agentmesh-relay/Dockerfile", "agentmesh-relay:latest", [], "vendor/agentmesh-relay");
           await buildPush("vendor/agentmesh-registry/Dockerfile", "agentmesh-registry:latest", [], "vendor/agentmesh-registry");
 
-          spinner.succeed("Images built and pushed to ACR");
-          spinner.start();
+          stepper.done("Images built and pushed to ACR");
         } else {
           // Customer mode: import pre-built images from source ACR
+          stepper.step("Importing images from source ACR...");
           const sourceAcr = options.sourceAcr;
           const images = [
             { source: `${sourceAcr}/azureclaw-controller:latest`, target: "azureclaw-controller:latest" },
@@ -380,7 +382,7 @@ export function upCommand(): Command {
           ];
 
           for (const img of images) {
-            spinner.text = `Importing ${img.target}...`;
+            stepper.update(`Importing ${img.target}...`);
             await execa("az", [
               "acr", "import",
               "--name", acr,
@@ -392,12 +394,11 @@ export function upCommand(): Command {
             });
           }
 
-          spinner.succeed("Images available in ACR");
-          spinner.start();
+          stepper.done("Images available in ACR");
         }
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
-        spinner.text = "Step 7/8: Preparing Helm deployment...";
+        stepper.step("Deploying Helm chart (controller + CRD + RBAC)...");
         const foundryEndpoint = options.foundryEndpoint || "";
 
         // When using Foundry (no dedicated AOAI), derive the OpenAI inference endpoint
@@ -436,7 +437,7 @@ export function upCommand(): Command {
           ], { stdio: "pipe" });
           if (helmSecrets.trim()) {
             for (const secret of helmSecrets.trim().split(" ")) {
-              spinner.text = "Cleaning stale Helm release...";
+              stepper.update("Cleaning stale Helm release...");
               await execa("kubectl", ["delete", "secret", secret, "-n", "azureclaw-system"], { stdio: "pipe" }).catch(() => {});
             }
           }
@@ -444,7 +445,7 @@ export function upCommand(): Command {
           // No stale secrets — normal
         }
 
-        spinner.text = "Step 7/8: Detecting kubelet managed identity for IMDS auth...";
+        stepper.update("Detecting kubelet managed identity for IMDS auth...");
 
         // Get kubelet MI client ID for IMDS auth (CA-proof)
         let imdsClientId = "";
@@ -469,7 +470,7 @@ export function upCommand(): Command {
             ], { stdio: "pipe" });
             const principalId = kubeletPrincipal.trim().split("\n").pop()?.trim() || "";
             if (principalId) {
-              spinner.text = "Step 7/8: Assigning Cognitive Services roles to kubelet MI (via Bicep)...";
+              stepper.update("Assigning Cognitive Services roles to kubelet MI (via Bicep)...");
               // Assign BOTH roles: Cognitive Services User (control-plane) + OpenAI User (data-plane)
               const bicepRole = [
                 "targetScope = 'subscription'",
@@ -530,11 +531,11 @@ export function upCommand(): Command {
             helmArgs.push("--set", `foundry.imdsClientId=${imdsClientId}`);
           }
         }
-        spinner.text = "Step 7/8: Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...";
+        stepper.update("Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...");
         await execa("helm", helmArgs, { stdio: "pipe" });
 
         // Force rollout when using :latest tags (Helm won't restart pods if spec hash is unchanged)
-        spinner.text = "Rolling out updated controller...";
+        stepper.update("Rolling out updated controller...");
         await execa("kubectl", [
           "rollout", "restart", "deployment/azureclaw-controller",
           "-n", "azureclaw-system",
@@ -545,21 +546,18 @@ export function upCommand(): Command {
           "--timeout=120s",
         ], { stdio: "pipe" }).catch(() => {});
 
-        spinner.succeed("Controller deployed");
-        spinner.start();
+        stepper.done("Controller deployed");
 
         // ── Step 6b: Deploy Inspektor Gadget (eBPF observability) ────
-        spinner.text = "Deploying Inspektor Gadget (eBPF tracing)...";
-        await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {
-          // kubectl-gadget not installed or already deployed — non-fatal
-        });
+        // Non-fatal — kubectl-gadget may not be installed
+        await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {});
 
         // ── Step 6c: Deploy AgentMesh infrastructure (relay + registry) ──
-        spinner.text = "Deploying AgentMesh infrastructure (relay + registry + postgres)...";
+        stepper.step("Deploying AgentMesh infrastructure...");
         const agentmeshManifest = path.join(repoRoot, "deploy", "agentmesh.yaml");
         if (existsSync(agentmeshManifest)) {
           // Import postgres image into ACR (Azure Policy blocks Docker Hub images)
-          spinner.text = "Importing postgres image into ACR...";
+          stepper.update("Importing postgres image into ACR...");
           await execa("az", [
             "acr", "import",
             "--name", acr,
@@ -583,7 +581,7 @@ export function upCommand(): Command {
             await execa("kubectl", ["apply", "-f", tmpManifest], { stdio: "pipe" });
 
             // Wait for AgentMesh pods to be ready
-            spinner.text = "Waiting for AgentMesh pods to be ready...";
+            stepper.update("Waiting for AgentMesh pods to be ready...");
             await execa("kubectl", [
               "wait", "--for=condition=Ready", "pod",
               "-l", "app=agentmesh-relay",
@@ -597,19 +595,20 @@ export function upCommand(): Command {
               "--timeout=180s",
             ], { stdio: "pipe" }).catch(() => {});
 
-            spinner.succeed("AgentMesh infrastructure deployed");
-            spinner.start();
+            stepper.done("AgentMesh infrastructure deployed");
           } finally {
             try { fs.unlinkSync(tmpManifest); } catch { /* noop */ }
           }
+        } else {
+          stepper.warn("AgentMesh manifest not found — skipping");
         }
 
         // ── Step 7: Create ClawSandbox CR ────────────────────────────
+        stepper.step(`Creating sandbox '${options.name}'...`);
         const sandboxNs = `azureclaw-${options.name}`;
-        spinner.text = `Creating sandbox '${options.name}'...`;
 
         // Create federated identity credential for this sandbox's namespace
-        spinner.text = `Setting up Workload Identity for ${sandboxNs}...`;
+        stepper.update(`Setting up Workload Identity for ${sandboxNs}...`);
         const { stdout: oidcIssuer } = await execa("az", [
           "aks", "show",
           "--name", `${baseName}-aks`,
@@ -636,7 +635,7 @@ export function upCommand(): Command {
         //   1. Sandbox WI → Azure AI User on the Foundry AI Services resource (so pods can call APIs)
         //   2. Foundry project MI → Azure AI User on the resource group (so Memory Store can call models internally)
         if (foundryEndpoint) {
-          spinner.text = "Configuring Foundry project RBAC (via Bicep)...";
+          stepper.update("Configuring Foundry project RBAC (via Bicep)...");
           const foundryHost = new URL(foundryEndpoint).hostname;
           // Extract account name: "foo.services.ai.azure.com" → "foo", or "foo.openai.azure.com" → "foo"
           const foundryAccountName = foundryHost.split(".")[0];
@@ -727,7 +726,7 @@ export function upCommand(): Command {
             fs.writeFileSync(tmpBicep, bicepLines.join("\n"));
 
             try {
-              spinner.text = "Deploying Foundry RBAC (Bicep)...";
+              stepper.update("Deploying Foundry RBAC (Bicep)...");
               await execa("az", [
                 "deployment", "group", "create",
                 "--resource-group", foundryRg,
@@ -791,7 +790,7 @@ export function upCommand(): Command {
           }
         }
 
-        spinner.text = `Creating sandbox '${options.name}'...`;
+        stepper.update(`Creating sandbox '${options.name}'...`);
         const sandboxManifest = {
           apiVersion: "azureclaw.azure.com/v1alpha1",
           kind: "ClawSandbox",
@@ -830,7 +829,7 @@ export function upCommand(): Command {
         });
 
         // ── Step 8: Wait for sandbox ─────────────────────────────────
-        spinner.text = "Waiting for sandbox to start...";
+        stepper.step("Waiting for sandbox to start...");
         await execa("kubectl", [
           "wait",
           "--for=jsonpath={.status.phase}=Running",
@@ -841,11 +840,8 @@ export function upCommand(): Command {
           // Timeout OK — image pull may be slow on first deploy
         });
 
-        spinner.succeed("Ready!");
-
-        // ── Step 9: Extract gateway token and start port-forward ─────
-        spinner.start();
-        spinner.text = "Setting up WebUI access...";
+        // Extract gateway token and start port-forward
+        stepper.update("Setting up WebUI access...");
         let gatewayToken = "";
         let webUiUrl = "";
         try {
@@ -877,59 +873,58 @@ export function upCommand(): Command {
             webUiUrl = `http://localhost:18789/#token=${gatewayToken}`;
           }
 
-          spinner.succeed("WebUI accessible");
+          stepper.done("Sandbox running");
         } catch {
-          spinner.warn("WebUI port-forward failed (run manually: kubectl port-forward -n " + sandboxNs + " deploy/" + options.name + " 18789:18789)");
+          stepper.warn("Sandbox running but WebUI port-forward failed");
         }
 
+        stepper.summary();
+
         // ── Summary ──────────────────────────────────────────────────
-        console.log(blue(`\n  ── Deployment ────────────────────────────────────`));
-        console.log(`  Sandbox      ${bold(options.name)}`);
-        console.log(`  Model        ${bold(options.model)} (Azure OpenAI, Entra ID auth)`);
         const isolationDesc: Record<string, string> = {
           standard: "standard (runc + RuntimeDefault)",
           enhanced: "enhanced (runc + azureclaw-strict seccomp)",
           confidential: "confidential (Kata VM isolation)",
         };
-        console.log(`  Isolation    ${bold(isolationDesc[options.isolation] || options.isolation)}`);
-        console.log(`  Region       ${bold(options.region)}`);
-        console.log(`  Cluster      ${bold(`${baseName}-aks`)}`);
-        console.log(`  ACR          ${bold(acrLoginServer)}`);
-        console.log(`  Key Vault    ${bold(kvName)}`);
-        console.log(`  AOAI         ${bold(openAiEndpoint)}`);
-        console.log(`  Auth         ${bold("Workload Identity (no API keys)")}`);
 
-        console.log(blue(`\n  ── Security ──────────────────────────────────────`));
-        console.log(`  ${chalk.green("✓")} Azure Policy for Kubernetes (governance)`);
-        console.log(`  ${chalk.green("✓")} Cilium CNI + NetworkPolicy (default-deny egress)`);
-        console.log(`  ${chalk.green("✓")} Workload Identity (Entra ID, no keys on cluster)`);
-        console.log(`  ${chalk.green("✓")} Key Vault CSI driver (secret rotation)`);
-        console.log(`  ${chalk.green("✓")} OIDC issuer enabled`);
-        console.log(`  ${chalk.green("✓")} Read-only rootfs, non-root, seccomp`);
-        console.log(`  ${chalk.green("✓")} Inference router: Content Safety + Prompt Shields`);
+        section("Deployment");
+        kvLine("Sandbox", options.name);
+        kvLine("Model", `${options.model} (Azure OpenAI, Entra ID auth)`);
+        kvLine("Isolation", isolationDesc[options.isolation] || options.isolation);
+        kvLine("Region", options.region);
+        kvLine("Cluster", `${baseName}-aks`);
+        kvLine("ACR", acrLoginServer);
+        kvLine("Key Vault", kvName);
+        kvLine("AOAI", openAiEndpoint);
+
+        section("Security");
+        checkLine(true, "Cilium CNI + NetworkPolicy (default-deny egress)");
+        checkLine(true, "Workload Identity (Entra ID, no API keys)");
+        checkLine(true, "Read-only rootfs, non-root, seccomp");
+        checkLine(true, "Inference router: Content Safety + Prompt Shields");
+        checkLine(true, "Egress proxy with domain allowlist + blocklist (51k+)");
         if (options.isolation === "confidential") {
-          console.log(`  ${chalk.green("✓")} Kata VM isolation (pod sandboxing)`);
+          checkLine(true, "Kata VM isolation (pod sandboxing)");
         }
 
-        console.log(blue(`\n  ── Commands ──────────────────────────────────────`));
+        section("Commands");
         console.log(`  Connect:     ${chalk.cyan(`azureclaw connect ${options.name}`)}`);
         console.log(`  Status:      ${chalk.cyan(`azureclaw status ${options.name}`)}`);
         console.log(`  Logs:        ${chalk.cyan(`azureclaw logs ${options.name} -f`)}`);
-        console.log(`  Costs:       ${chalk.cyan(`azureclaw costs ${options.name}`)}`);
-        console.log(`  kubectl:     ${chalk.cyan(`kubectl get clawsandbox -n azureclaw-system`)}`);
+        console.log(`  Egress:      ${chalk.cyan(`azureclaw egress ${options.name}`)}`);
 
         if (webUiUrl) {
-          console.log(blue(`\n  ── WebUI ─────────────────────────────────────────`));
+          section("WebUI");
           console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(webUiUrl)}`);
-          console.log(chalk.dim(`    Port-forward active on localhost:18789`));
         }
 
         console.log();
       } catch (error) {
-        spinner.fail("Deployment failed");
+        stepper.stop();
+        console.error(chalk.red(`\n  Deployment failed`));
         const message =
           error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`\nError: ${message}\n`));
+        console.error(chalk.red(`  ${message}\n`));
 
         // Helpful diagnostics
         if (message.includes("EncryptionAtHost")) {

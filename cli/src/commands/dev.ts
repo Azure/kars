@@ -1,9 +1,9 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import ora from "ora";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -43,18 +43,9 @@ export function devCommand(): Command {
       AZURELINUX4_BASE
     )
     .action(async (options) => {
-      const blue = chalk.hex("#0078D4"); // Azure blue
-      const dim = chalk.dim;
-      const bold = chalk.bold;
+      banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
-      console.log(blue(`
-  ╔══════════════════════════════════════════════════╗
-  ║           ${bold("AzureClaw")} · Local Sandbox              ║
-  ║        Secure AI Agent Runtime on Azure          ║
-  ╚══════════════════════════════════════════════════╝
-`));
-
-      const spinner = ora({ color: "cyan" }).start();
+      const stepper = new Stepper({ totalSteps: 4 });
 
       try {
         let image = options.image;
@@ -68,9 +59,10 @@ export function devCommand(): Command {
         }
 
         // ── Image resolution ─────────────────────────────────────────
+        stepper.step("Resolving sandbox image...");
         let imageExists = false;
         if (!options.build) {
-          spinner.text = "Checking for sandbox image...";
+          stepper.update("Checking for sandbox image...");
           try {
             await execa("docker", ["image", "inspect", image], { stdio: "pipe" });
             imageExists = true;
@@ -84,7 +76,7 @@ export function devCommand(): Command {
           try {
             await execa("docker", ["image", "inspect", baseImage], { stdio: "pipe" });
           } catch {
-            spinner.fail(`Azure Linux base image not found`);
+            stepper.fail(`Azure Linux base image not found`);
             console.log(chalk.yellow(`
   The AzureClaw sandbox requires the Azure Linux 3 base image.
   This is a limited-availability image — request access first:
@@ -100,7 +92,7 @@ export function devCommand(): Command {
 
           const dockerfilePath = path.join(repoRoot, "sandbox-images/openclaw/Dockerfile");
           if (!existsSync(dockerfilePath)) {
-            spinner.fail("Dockerfile not found");
+            stepper.fail("Dockerfile not found");
             console.log(chalk.yellow(`
   Run from the AzureClaw repo root:
     ${chalk.cyan("git clone https://github.com/Azure/azureclaw.git && cd azureclaw")}
@@ -109,7 +101,7 @@ export function devCommand(): Command {
             process.exit(1);
           }
 
-          spinner.text = "Building sandbox image (first run takes a few minutes)...";
+          stepper.update("Building sandbox image (first run takes a few minutes)...");
           await execa("docker", [
             "build",
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
@@ -118,12 +110,13 @@ export function devCommand(): Command {
             repoRoot,
           ], { stdio: "pipe" });
           image = "azureclaw-sandbox:dev";
-          spinner.succeed("Sandbox image built");
+          stepper.done("Sandbox image built");
         } else {
-          spinner.succeed("Sandbox image found");
+          stepper.done("Sandbox image found");
         }
 
         // ── Load config from ~/.azureclaw/ ──────────────────────────
+        stepper.step("Loading configuration...");
         let config: Record<string, string> = {};
         let hasCredentials = false;
 
@@ -139,11 +132,12 @@ export function devCommand(): Command {
         }
 
         if (!config.endpoint || !hasCredentials) {
-          spinner.stop();
-          console.log(chalk.yellow(`  No configuration found. Run ${chalk.cyan("azureclaw onboard")} first to set up your Azure OpenAI credentials.\n`));
+          stepper.fail("No configuration found");
+          console.log(chalk.yellow(`  Run ${chalk.cyan("azureclaw onboard")} first to set up your Azure OpenAI credentials.\n`));
           process.exit(1);
         }
 
+        stepper.done("Configuration loaded");
         const model = options.model !== "gpt-4.1" ? options.model : (config.model || "gpt-4.1");
 
         // ── Container startup ────────────────────────────────────────
@@ -166,7 +160,7 @@ export function devCommand(): Command {
           ? ["--security-opt", `seccomp=${seccompPath}`]
           : [];
 
-        spinner.start("Starting sandbox...");
+        stepper.step("Starting sandbox...");
         await execa("docker", [
           "run", "-d",
           "--name", containerName,
@@ -216,35 +210,25 @@ export function devCommand(): Command {
           // iptables not available (e.g., rootless Docker) — fall back to Docker isolation only
         }
 
-        spinner.succeed("Sandbox running");
+        stepper.done("Sandbox running");
 
         // ── Security status ──────────────────────────────────────────
-        console.log(blue(`\n  ── Security ──────────────────────────────────────`));
-        console.log(`  ${chalk.green("✓")} Read-only root filesystem`);
-        console.log(`  ${chalk.green("✓")} Non-root user (sandbox:1000)`);
-        console.log(`  ${chalk.green("✓")} All root privileges removed`);
-        console.log(`  ${hasSeccomp ? chalk.green("✓") : chalk.yellow("○")} seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
-        console.log(`  ${hasIptables ? chalk.green("✓") : chalk.yellow("○")} iptables egress guard ${hasIptables ? "(UID 1000 → localhost + DNS only)" : "(not available)"}`);
-        console.log(`  ${chalk.green("✓")} Writable paths: /sandbox, /tmp only`);
-        console.log(`  ${chalk.green("✓")} tmpfs /tmp (noexec, 1GB limit)`);
-        console.log(`  ${chalk.green("✓")} API key mounted as read-only secret (/run/secrets/)`);
+        section("Security");
+        checkLine(true, "Read-only root filesystem");
+        checkLine(true, "Non-root user (sandbox:1000)");
+        checkLine(true, "All root privileges removed");
+        checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
+        checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → localhost + DNS)" : "(not available)"}`);
+        checkLine(true, "API key mounted as read-only secret");
 
-        console.log(blue(`\n  ── Inference ─────────────────────────────────────`));
-        console.log(`  ${chalk.green("✓")} Rust inference router (port 8443)`);
-        console.log(`  ${chalk.green("✓")} All model calls routed through router`);
-        console.log(`  ${chalk.green("✓")} Token counting + latency metrics enabled`);
-        console.log(`  ${chalk.green("✓")} Prometheus metrics: http://localhost:8443/metrics`);
+        section("Environment");
+        kvLine("OS", "Azure Linux 3.0");
+        kvLine("OpenClaw", "2026.3.13");
+        kvLine("Model", `${model} (Azure OpenAI)`);
+        kvLine("Endpoint", config.endpoint);
+        kvLine("Policy", `${options.policy} preset`);
+        kvLine("Sandbox", options.name);
 
-        // ── Environment info ─────────────────────────────────────────
-        console.log(blue(`\n  ── Environment ───────────────────────────────────`));
-        console.log(`  OS:       ${bold("Azure Linux 3.0")}`);
-        console.log(`  OpenClaw: ${bold("2026.3.13")}`);
-        console.log(`  Model:    ${bold(model)} (Azure OpenAI)`);
-        console.log(`  Endpoint: ${bold(config.endpoint)}`);
-        console.log(`  Policy:   ${bold(options.policy)} preset`);
-        console.log(`  Sandbox:  ${bold(options.name)}`);
-
-        // ── Next steps ───────────────────────────────────────────────
         // Get the gateway token for web UI
         let gatewayToken = "";
         try {
@@ -256,7 +240,7 @@ export function devCommand(): Command {
           // Token not available yet
         }
 
-        console.log(blue(`\n  ── Commands ──────────────────────────────────────`));
+        section("Commands");
         console.log(`  Connect:  ${chalk.cyan(`azureclaw connect ${options.name}`)}`);
         console.log(`  Shell:    ${chalk.cyan(`azureclaw connect ${options.name} --shell`)}`);
         console.log(`  Status:   ${chalk.cyan(`azureclaw status ${options.name}`)}`);
@@ -264,13 +248,14 @@ export function devCommand(): Command {
         if (gatewayToken) {
           console.log(`  Web UI:   ${chalk.cyan(`http://localhost:18789/#token=${gatewayToken}`)}`);
         }
-        console.log(dim(`\n  Production: azureclaw up (deploys to AKS)`));
+        console.log(chalk.dim(`\n  Production: azureclaw up (deploys to AKS)`));
         console.log();
       } catch (error) {
-        spinner.fail("Local sandbox failed to start");
+        stepper.stop();
+        console.error(chalk.red(`\n  Local sandbox failed to start`));
         const message =
           error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`\nError: ${message}\n`));
+        console.error(chalk.red(`  ${message}\n`));
         process.exit(1);
       }
     });
