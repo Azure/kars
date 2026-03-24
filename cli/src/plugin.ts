@@ -53,6 +53,18 @@ const nameToAmid: Map<string, string> = new Map();
 // Stored sandbox name for reconnect attempts
 let agtSandboxName: string = "unknown";
 
+// ---------------------------------------------------------------------------
+// Foundry project discovery state
+// ---------------------------------------------------------------------------
+interface FoundryProjectInfo {
+  endpoint: string;
+  deployments: Array<{ id: string; model: string; sku?: string }>;
+  connections: Array<{ name: string; type: string }>;
+  indexes: Array<{ name: string }>;
+}
+let foundryProject: FoundryProjectInfo | null = null;
+let foundryInitialized = false;
+
 /**
  * Process a task_request with tool-calling (exec_command).
  * Runs an LLM loop: the model can call exec_command to run shell commands,
@@ -237,14 +249,27 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // SANDBOX_NAME is set on inference-router; for openclaw container extract from HOSTNAME.
     agtSandboxName = process.env.SANDBOX_NAME
       || (process.env.HOSTNAME ? process.env.HOSTNAME.replace(/-[a-f0-9]+-[a-z0-9]+$/, "") : "unknown");
-    try {
-      await agtMeshClient.connect({
-        displayName: agtSandboxName,
-        capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
-      });
-      log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
-    } catch (connErr: any) {
-      log.warn(`AGT mesh connect deferred: ${connErr.message} (will retry on first send)`);
+
+    // Retry connection with exponential backoff — relay/registry may not be ready yet.
+    let connected = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        await agtMeshClient.connect({
+          displayName: agtSandboxName,
+          capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
+        });
+        log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
+        connected = true;
+        break;
+      } catch (connErr: any) {
+        const delay = attempt * 2;
+        if (attempt < 5) {
+          log.warn(`AGT mesh connect attempt ${attempt}/5 failed: ${connErr.message} — retrying in ${delay}s`);
+          await new Promise(r => setTimeout(r, delay * 1000));
+        } else {
+          log.warn(`AGT mesh connect failed after 5 attempts: ${connErr.message}. Mesh tools will be unavailable.`);
+        }
+      }
     }
 
     // Set up KNOCK handler — policy-gated session establishment with trust scoring.
@@ -330,15 +355,210 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
-    log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit, mesh ACTIVE (relay path for inter-agent comms)`);
+    log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit${connected ? ", mesh ACTIVE" : ", mesh OFFLINE (relay unreachable)"}`);
   } catch (e: any) {
-    log.warn(`AGT SDK not available: ${e.message}. Using router-native governance.`);
+    // Distinguish module-not-found from other errors
+    const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
+    if (isModuleError) {
+      log.warn(`AGT SDK not installed: ${e.message}. Install @agentmesh/sdk to enable inter-agent communication.`);
+    } else {
+      log.warn(`AGT SDK init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// OpenClaw Plugin SDK types (stubs — only available at runtime via host)
+// Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
 // ---------------------------------------------------------------------------
+
+const ROUTER_BASE = "http://127.0.0.1:8443";
+
+async function _routerCall(method: string, path: string, body?: unknown): Promise<any> {
+  const http = await import("node:http");
+  const url = new URL(path, ROUTER_BASE);
+  return new Promise((resolve, reject) => {
+    const opts: any = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method,
+      headers: { "x-azureclaw-sandbox": "self" } as Record<string, string>,
+    };
+    if (body) {
+      opts.headers["content-type"] = "application/json";
+    }
+    const req = http.request(opts, (res: any) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Foundry project discovery — query deployments, connections, indexes at init
+// ---------------------------------------------------------------------------
+
+async function initFoundry(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (foundryInitialized || process.env.__FOUNDRY_INITIALIZED === '1') return;
+  foundryInitialized = true;
+  process.env.__FOUNDRY_INITIALIZED = '1';
+
+  const apiVer = "api-version=2025-11-15-preview";
+  const endpoint = process.env.FOUNDRY_PROJECT_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || "";
+
+  foundryProject = {
+    endpoint,
+    deployments: [],
+    connections: [],
+    indexes: [],
+  };
+
+  // Query all three in parallel — non-fatal if any fail
+  const [deployResult, connResult, idxResult] = await Promise.allSettled([
+    _routerCall("GET", `/deployments?${apiVer}`),
+    _routerCall("GET", `/connections?${apiVer}`),
+    _routerCall("GET", `/indexes?${apiVer}`),
+  ]);
+
+  if (deployResult.status === "fulfilled") {
+    const data = deployResult.value?.data || deployResult.value?.value || deployResult.value;
+    if (Array.isArray(data)) {
+      foundryProject.deployments = data.map((d: any) => ({
+        id: d.name || d.id || d.deployment_id,
+        model: d.model?.name || d.model || d.name || "unknown",
+        sku: d.sku?.name || d.sku,
+      }));
+      log.info(`Foundry: ${foundryProject.deployments.length} model deployment(s) discovered`);
+    }
+  } else {
+    log.warn(`Foundry deployments discovery failed: ${(deployResult as any).reason?.message || "unknown"}`);
+  }
+
+  if (connResult.status === "fulfilled") {
+    const data = connResult.value?.data || connResult.value?.value || connResult.value;
+    if (Array.isArray(data)) {
+      foundryProject.connections = data.map((c: any) => ({
+        name: c.name || c.id,
+        type: c.type || c.connection_type || c.category || "unknown",
+      }));
+      log.info(`Foundry: ${foundryProject.connections.length} connection(s) discovered`);
+    }
+  }
+
+  if (idxResult.status === "fulfilled") {
+    const data = idxResult.value?.data || idxResult.value?.value || idxResult.value;
+    if (Array.isArray(data)) {
+      foundryProject.indexes = data.map((i: any) => ({
+        name: i.name || i.id,
+      }));
+      log.info(`Foundry: ${foundryProject.indexes.length} search index(es) discovered`);
+    }
+  }
+
+  if (foundryProject.deployments.length > 0) {
+    log.info(`Foundry models: ${foundryProject.deployments.map(d => d.id).join(", ")}`);
+  }
+
+  // Write Foundry context to MEMORY.md so the agent knows what's available
+  try {
+    const fs = await import("node:fs");
+    const memoryDir = "/sandbox/.openclaw/workspace/memory";
+    const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
+    fs.mkdirSync(memoryDir, { recursive: true });
+
+    const sections: string[] = ["# AzureClaw Environment\n"];
+
+    if (endpoint) {
+      sections.push(`## Connected Foundry Project\n\nEndpoint: \`${endpoint}\`\n`);
+    }
+
+    if (foundryProject.deployments.length > 0) {
+      sections.push("## Available Model Deployments\n");
+      for (const d of foundryProject.deployments) {
+        sections.push(`- **${d.id}** — model: ${d.model}${d.sku ? ` (${d.sku})` : ""}`);
+      }
+      sections.push("");
+    }
+
+    if (foundryProject.connections.length > 0) {
+      sections.push("## Configured Connections\n");
+      for (const c of foundryProject.connections) {
+        sections.push(`- **${c.name}** — type: ${c.type}`);
+      }
+      sections.push("");
+    }
+
+    if (foundryProject.indexes.length > 0) {
+      sections.push("## Search Indexes (RAG)\n");
+      for (const i of foundryProject.indexes) {
+        sections.push(`- **${i.name}**`);
+      }
+      sections.push("");
+    }
+
+    sections.push(
+      "## Available Tools\n",
+      "- `foundry_code_execute` — Python code execution (server-side, data science libraries)",
+      "- `foundry_web_search` — Real-time web search via Bing grounding",
+      "- `foundry_file_search` — RAG over vector stores / Azure AI Search indexes",
+      "- `foundry_memory` — Persistent semantic memory (cross-session, cross-agent)",
+      "- `foundry_conversations` — Persistent multi-turn conversations",
+      "- `foundry_evaluations` — Model quality testing",
+      "- `foundry_deployments` — Discover models, connections, indexes",
+      "- `foundry_agents` — List Foundry-hosted agents",
+      "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
+      "- `azureclaw_spawn` / `azureclaw_mesh_send` / `azureclaw_mesh_inbox` — Multi-agent orchestration with E2E encryption",
+      "",
+    );
+
+    // Write (or replace) the environment section at the top of MEMORY.md
+    let existingMemory = "";
+    try { existingMemory = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
+    const envMarker = "# AzureClaw Environment";
+    const endMarker = "\n---\n";
+    const envSection = sections.join("\n") + endMarker;
+
+    if (existingMemory.includes(envMarker)) {
+      // Replace existing environment section
+      const start = existingMemory.indexOf(envMarker);
+      const end = existingMemory.indexOf(endMarker, start);
+      const before = existingMemory.slice(0, start);
+      const after = end >= 0 ? existingMemory.slice(end + endMarker.length) : "";
+      fs.writeFileSync(memoryFile, envSection + after);
+    } else {
+      fs.writeFileSync(memoryFile, envSection + existingMemory);
+    }
+    log.info("Foundry project context written to MEMORY.md");
+  } catch (e: any) {
+    log.warn(`Failed to write Foundry context to MEMORY.md: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Background Foundry Memory sync — persist conversation summaries
+// ---------------------------------------------------------------------------
+
+async function syncToFoundryMemory(
+  content: string,
+  log: { info: (m: string) => void; warn: (m: string) => void },
+) {
+  try {
+    const scope = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+    await _routerCall("POST", "/memory_stores/agent-memory:update_memories?api-version=2025-11-15-preview", {
+      scope,
+      items: [{ role: "assistant", content, type: "message" }],
+    });
+  } catch {
+    // Best effort — don't disrupt agent workflow
+  }
+}
 
 interface OpenClawConfig {
   [key: string]: unknown;
@@ -469,10 +689,34 @@ const azureClawPlugin = definePluginEntry({
     const config = getPluginConfig(api);
     const log = api.logger;
 
-    log.info(`AzureClaw plugin loaded (model: ${config.model})`);
+    // ── Startup banner ─────────────────────────────────────────────────
+    const foundryEndpoint = process.env.FOUNDRY_PROJECT_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || "";
+    const projectName = foundryEndpoint
+      ? foundryEndpoint.replace(/^https?:\/\//, "").replace(/\..*$/, "")
+      : "direct";
+    const sandbox = process.env.SANDBOX_NAME || process.env.HOSTNAME || "local";
+
+    log.info([
+      "",
+      "  ╔══════════════════════════════════════════════════════════╗",
+      "  ║  🔒 AzureClaw — Secure AI Agent Runtime                 ║",
+      "  ╠══════════════════════════════════════════════════════════╣",
+      `  ║  Sandbox:  ${(sandbox).padEnd(43)}║`,
+      `  ║  Model:    ${(config.model).padEnd(43)}║`,
+      `  ║  Foundry:  ${(projectName).padEnd(43)}║`,
+      "  ║                                                          ║",
+      "  ║  Security: kata-vm · seccomp · rootfs-ro · uid-guard     ║",
+      "  ║  Egress:   blocklist · allowlist · learn · pending        ║",
+      "  ║  Comms:    Signal Protocol E2E · AGT mesh                 ║",
+      "  ╚══════════════════════════════════════════════════════════╝",
+      "",
+    ].join("\n"));
 
     // Initialize AGT SDK (identity, policy, trust, audit, mesh)
     initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
+
+    // Initialize Foundry project discovery (models, connections, indexes)
+    initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
 
     // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
     // These are first-class tools the LLM can call directly.
@@ -828,24 +1072,478 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
+    // ── Foundry Code Interpreter: server-side Python execution ──────────
+    // Runs in Azure AI Foundry's managed sandbox with pre-installed data
+    // science libraries (pandas, numpy, matplotlib, etc.). No egress needed.
+    api.registerTool({
+      name: "foundry_code_execute",
+      label: "Foundry Code Interpreter",
+      description:
+        "Execute Python code server-side via Azure AI Foundry's code_interpreter. " +
+        "Has pandas, numpy, matplotlib, scipy pre-installed. Use for data analysis, " +
+        "charts, complex math, and file processing. Runs in a managed Foundry sandbox " +
+        "(not the local sandbox). No egress policy needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          input: {
+            type: "string",
+            description: "Natural language instruction or Python code to execute. " +
+              "The model will write and run Python code to fulfill the request.",
+          },
+          model: {
+            type: "string",
+            description: "Model to use (default: gpt-4.1). Must support code_interpreter.",
+          },
+        },
+        required: ["input"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+            model: (params.model as string) || "gpt-4.1",
+            input: params.input,
+            tools: [{ type: "code_interpreter", container: { type: "auto" } }],
+            store: false,
+          });
+          // Extract text output from Responses API format
+          const output = result.output || result;
+          const textParts: string[] = [];
+          if (Array.isArray(output)) {
+            for (const item of output) {
+              if (item.type === "message" && item.content) {
+                for (const c of item.content) {
+                  if (c.type === "output_text" || c.type === "text") textParts.push(c.text);
+                }
+              } else if (item.type === "code_interpreter_call") {
+                textParts.push(`\`\`\`python\n${item.code}\n\`\`\`\nOutput: ${item.output || "(no output)"}`);
+              }
+            }
+          }
+          return {
+            content: [{
+              type: "text",
+              text: textParts.length > 0 ? textParts.join("\n\n") : JSON.stringify(output, null, 2),
+            }],
+          };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry code execution failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry Web Search: real-time Bing-grounded search ──────────────
+    // Server-side web search via Bing grounding — no egress policy needed.
+    // Results include inline URL citations.
+    api.registerTool({
+      name: "foundry_web_search",
+      label: "Foundry Web Search",
+      description:
+        "Search the web in real-time via Azure AI Foundry's Bing grounding. " +
+        "Returns answers with inline URL citations. Runs server-side — no egress " +
+        "policy exceptions needed. Use for current events, news, recent changes, " +
+        "verifying facts, or any query needing up-to-date information.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The search query or question to look up on the web.",
+          },
+          model: {
+            type: "string",
+            description: "Model to use (default: gpt-4.1).",
+          },
+        },
+        required: ["query"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+            model: (params.model as string) || "gpt-4.1",
+            input: params.query,
+            tools: [{
+              type: "bing_grounding",
+              bing_grounding: {
+                search_configurations: [{ project_connection_id: "/connections/bing" }],
+              },
+            }],
+            store: false,
+          });
+          const output = result.output || result;
+          const textParts: string[] = [];
+          if (Array.isArray(output)) {
+            for (const item of output) {
+              if (item.type === "message" && item.content) {
+                for (const c of item.content) {
+                  if (c.type === "output_text" || c.type === "text") textParts.push(c.text);
+                }
+              }
+            }
+          }
+          return {
+            content: [{
+              type: "text",
+              text: textParts.length > 0 ? textParts.join("\n\n") : JSON.stringify(output, null, 2),
+            }],
+          };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry web search failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry File Search: RAG over uploaded documents ─────────────────
+    // Knowledge retrieval from vector stores via Foundry's file_search tool.
+    api.registerTool({
+      name: "foundry_file_search",
+      label: "Foundry File Search (RAG)",
+      description:
+        "Search uploaded documents and knowledge bases via Azure AI Foundry's file_search. " +
+        "Performs retrieval-augmented generation (RAG) over vector stores. Use when the user " +
+        "asks about content in uploaded documents, project files, or configured knowledge bases.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The question or search query to find in documents.",
+          },
+          vector_store_ids: {
+            type: "array",
+            description: "Optional vector store IDs to search. Omit to search all.",
+          },
+          model: {
+            type: "string",
+            description: "Model to use (default: gpt-4.1).",
+          },
+        },
+        required: ["query"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const fileSearchTool: any = { type: "file_search" };
+          if (params.vector_store_ids) {
+            fileSearchTool.file_search = { vector_store_ids: params.vector_store_ids };
+          }
+          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+            model: (params.model as string) || "gpt-4.1",
+            input: params.query,
+            tools: [fileSearchTool],
+            store: false,
+          });
+          const output = result.output || result;
+          const textParts: string[] = [];
+          if (Array.isArray(output)) {
+            for (const item of output) {
+              if (item.type === "message" && item.content) {
+                for (const c of item.content) {
+                  if (c.type === "output_text" || c.type === "text") textParts.push(c.text);
+                }
+              } else if (item.type === "file_search_call" && item.results) {
+                for (const r of item.results) {
+                  textParts.push(`[${r.filename || "source"}] ${r.text || ""}`);
+                }
+              }
+            }
+          }
+          return {
+            content: [{
+              type: "text",
+              text: textParts.length > 0 ? textParts.join("\n\n") : JSON.stringify(output, null, 2),
+            }],
+          };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry file search failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry Memory: persistent semantic memory store ────────────────
+    api.registerTool({
+      name: "foundry_memory",
+      label: "Foundry Memory Store",
+      description:
+        "Manage persistent agent memory via Azure AI Foundry Memory Store. " +
+        "Store facts, preferences, and context that persists across conversations. " +
+        "Supports semantic search over stored memories. Use when the agent needs to " +
+        "remember user preferences, past decisions, or project context.",
+      parameters: {
+        type: "object",
+        properties: {
+          operation: {
+            type: "string",
+            enum: ["search", "update", "delete_scope"],
+            description: "Operation: 'search' to find memories, 'update' to store new memories, 'delete_scope' to clear a scope.",
+          },
+          query: { type: "string", description: "Search query (for 'search' operation)." },
+          items: {
+            type: "array",
+            description: "Messages to extract memories from (for 'update'). Array of {role, content, type} objects.",
+          },
+          scope: { type: "string", description: "Memory scope (default: sandbox name). Use to partition memories." },
+          store_name: { type: "string", description: "Memory store name (default: 'agent-memory')." },
+        },
+        required: ["operation"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const store = (params.store_name as string) || "agent-memory";
+          const scope = (params.scope as string) || process.env.SANDBOX_NAME || "default";
+          const op = params.operation as string;
+
+          if (op === "search") {
+            const result = await routerCall("POST", `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`, {
+              scope, query: params.query || "", max_memories: 10,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "update") {
+            const result = await routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
+              scope, items: params.items || [],
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "delete_scope") {
+            const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?api-version=2025-11-15-preview`, {
+              scope,
+            });
+            return { content: [{ type: "text", text: `Scope '${scope}' deleted from memory store '${store}'.` }] };
+          }
+          return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry memory failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry Conversations: persistent multi-turn state ──────────────
+    api.registerTool({
+      name: "foundry_conversations",
+      label: "Foundry Conversations",
+      description:
+        "Manage persistent conversations via Azure AI Foundry. Create, list, " +
+        "continue, and delete conversations that maintain full message history " +
+        "server-side. Use for long-running multi-turn interactions that need to " +
+        "survive session restarts.",
+      parameters: {
+        type: "object",
+        properties: {
+          operation: {
+            type: "string",
+            enum: ["create", "list", "respond", "add_message", "delete"],
+            description: "Operation to perform on conversations.",
+          },
+          conversation_id: { type: "string", description: "Conversation ID (for respond/add_message/delete)." },
+          input: { type: "string", description: "User input (for 'respond' — generates AI response in conversation context)." },
+          message: { type: "string", description: "Message text to add (for 'add_message')." },
+          role: { type: "string", description: "Message role: 'user' or 'assistant' (for 'add_message', default: 'user')." },
+          metadata: { type: "object", description: "Metadata for new conversation (for 'create')." },
+          model: { type: "string", description: "Model to use for responses (default: gpt-4.1)." },
+        },
+        required: ["operation"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const op = params.operation as string;
+          const apiVer = "api-version=2025-11-15-preview";
+
+          if (op === "create") {
+            const result = await routerCall("POST", `/openai/conversations?${apiVer}`, {
+              metadata: params.metadata || { user: process.env.SANDBOX_NAME || "agent" },
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "list") {
+            const result = await routerCall("GET", `/openai/conversations?${apiVer}`);
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "respond") {
+            const result = await routerCall("POST", `/openai/responses?${apiVer}`, {
+              model: (params.model as string) || "gpt-4.1",
+              input: params.input,
+              conversation: params.conversation_id,
+              store: true,
+            });
+            const output = result.output || result;
+            const textParts: string[] = [];
+            if (Array.isArray(output)) {
+              for (const item of output) {
+                if (item.type === "message" && item.content) {
+                  for (const c of item.content) {
+                    if (c.type === "output_text" || c.type === "text") textParts.push(c.text);
+                  }
+                }
+              }
+            }
+            return { content: [{ type: "text", text: textParts.length > 0 ? textParts.join("\n\n") : JSON.stringify(output, null, 2) }] };
+          } else if (op === "add_message") {
+            const result = await routerCall("POST", `/openai/conversations/${params.conversation_id}/items?${apiVer}`, {
+              items: [{
+                type: "message",
+                role: (params.role as string) || "user",
+                content: [{ type: "input_text", text: params.message }],
+              }],
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "delete") {
+            await routerCall("DELETE", `/openai/conversations/${params.conversation_id}?${apiVer}`);
+            return { content: [{ type: "text", text: `Conversation ${params.conversation_id} deleted.` }] };
+          }
+          return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry conversations failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry Evaluations: model quality testing ──────────────────────
+    api.registerTool({
+      name: "foundry_evaluations",
+      label: "Foundry Evaluations",
+      description:
+        "Create and run model quality evaluations via Azure AI Foundry Evals API. " +
+        "Test model outputs against criteria (string checks, model-graded, etc.). " +
+        "Use when you need to benchmark model performance or validate output quality.",
+      parameters: {
+        type: "object",
+        properties: {
+          operation: {
+            type: "string",
+            enum: ["list", "create", "run", "list_evaluators"],
+            description: "Operation: 'list' evals, 'create' a new eval, 'run' an eval, or 'list_evaluators'.",
+          },
+          eval_id: { type: "string", description: "Eval ID (for 'run')." },
+          name: { type: "string", description: "Eval name (for 'create')." },
+          data_source_config: { type: "object", description: "Data source config (for 'create')." },
+          testing_criteria: { type: "array", description: "Testing criteria array (for 'create')." },
+          run_config: { type: "object", description: "Run configuration (for 'run')." },
+        },
+        required: ["operation"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const op = params.operation as string;
+          const apiVer = "api-version=2025-11-15-preview";
+
+          if (op === "list") {
+            const result = await routerCall("GET", `/openai/evals?${apiVer}`);
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "create") {
+            const result = await routerCall("POST", `/openai/evals?${apiVer}`, {
+              name: params.name,
+              data_source_config: params.data_source_config,
+              testing_criteria: params.testing_criteria,
+            });
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "run") {
+            const result = await routerCall("POST", `/openai/evals/${params.eval_id}/runs?${apiVer}`,
+              params.run_config || {});
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          } else if (op === "list_evaluators") {
+            const result = await routerCall("GET", `/evaluators?${apiVer}`);
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          }
+          return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry evaluations failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry Deployments: discover available models and connections ───
+    api.registerTool({
+      name: "foundry_deployments",
+      label: "Foundry Deployments & Connections",
+      description:
+        "Query available Azure AI Foundry resources: model deployments, data connections, " +
+        "search indexes, and datasets. Use to discover what models are available, what " +
+        "connections (Bing, Azure AI Search) are configured, and what indexes exist.",
+      parameters: {
+        type: "object",
+        properties: {
+          resource: {
+            type: "string",
+            enum: ["deployments", "connections", "indexes", "datasets"],
+            description: "Resource type to query.",
+          },
+        },
+        required: ["resource"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const resource = params.resource as string;
+          const apiVer = "api-version=2025-11-15-preview";
+          const result = await routerCall("GET", `/${resource}?${apiVer}`);
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry deployments query failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // ── Foundry Agents: list and query Foundry-hosted agents ────────────
+    api.registerTool({
+      name: "foundry_agents",
+      label: "Foundry Agents",
+      description:
+        "List and query Azure AI Foundry hosted agents. Discover available agents, " +
+        "their capabilities, and configurations. These are server-side Foundry agents " +
+        "(different from AzureClaw sub-agent sandboxes).",
+      parameters: {
+        type: "object",
+        properties: {
+          operation: {
+            type: "string",
+            enum: ["list", "get"],
+            description: "Operation: 'list' all agents or 'get' a specific agent.",
+          },
+          agent_id: { type: "string", description: "Agent ID (for 'get')." },
+        },
+        required: ["operation"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const apiVer = "api-version=2025-11-15-preview";
+          if (params.operation === "get" && params.agent_id) {
+            const result = await routerCall("GET", `/agents/${params.agent_id}?${apiVer}`);
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          }
+          const result = await routerCall("GET", `/agents?${apiVer}`);
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry agents query failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    log.info("Foundry tools registered: foundry_code_execute, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
+
     // ── Register Azure AI Foundry as a model provider ───────────────────
+    // Use dynamically discovered deployments when available, fall back to defaults
+    const defaultModels = [
+      { id: "gpt-4.1", label: "GPT-4.1 (Azure)", contextWindow: 1047576, maxOutput: 32768 },
+      { id: "gpt-5-mini", label: "GPT-5 Mini (Azure)", contextWindow: 1047576, maxOutput: 32768 },
+      { id: "gpt-4o", label: "GPT-4o (Azure)", contextWindow: 128000, maxOutput: 16384 },
+      { id: "DeepSeek-V3.2", label: "DeepSeek V3.2 (Foundry)", contextWindow: 131072, maxOutput: 8192 },
+      { id: "Phi-4", label: "Phi-4 (Microsoft)", contextWindow: 16384, maxOutput: 16384 },
+      { id: "Meta-Llama-3.1-405B-Instruct", label: "Llama 3.1 405B (Meta)", contextWindow: 131072, maxOutput: 8192 },
+      { id: "o3-mini", label: "o3-mini (Azure)", contextWindow: 200000, maxOutput: 100000 },
+    ];
+
+    // If Foundry discovery populated deployments, build models from those
+    const chatModels = (foundryProject?.deployments?.length)
+      ? foundryProject.deployments.map(d => ({
+          id: d.id,
+          label: `${d.model || d.id} (Azure Foundry)`,
+          contextWindow: 128000,
+          maxOutput: 16384,
+        }))
+      : defaultModels;
+
     api.registerProvider({
       id: "azure-openai",
       label: "Azure AI Foundry (via AzureClaw)",
       docsPath: "https://github.com/Azure/azureclaw",
       aliases: ["azure", "azureclaw", "foundry"],
       envVars: ["AZURE_OPENAI_API_KEY"],
-      models: {
-        chat: [
-          { id: "gpt-4.1", label: "GPT-4.1 (Azure)", contextWindow: 1047576, maxOutput: 32768 },
-          { id: "gpt-5-mini", label: "GPT-5 Mini (Azure)", contextWindow: 1047576, maxOutput: 32768 },
-          { id: "gpt-4o", label: "GPT-4o (Azure)", contextWindow: 128000, maxOutput: 16384 },
-          { id: "DeepSeek-V3.2", label: "DeepSeek V3.2 (Foundry)", contextWindow: 131072, maxOutput: 8192 },
-          { id: "Phi-4", label: "Phi-4 (Microsoft)", contextWindow: 16384, maxOutput: 16384 },
-          { id: "Meta-Llama-3.1-405B-Instruct", label: "Llama 3.1 405B (Meta)", contextWindow: 131072, maxOutput: 8192 },
-          { id: "o3-mini", label: "o3-mini (Azure)", contextWindow: 200000, maxOutput: 100000 },
-        ],
-      },
+      models: { chat: chatModels },
       auth: [
         {
           type: "api-key",
