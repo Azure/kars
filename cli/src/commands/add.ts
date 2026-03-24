@@ -15,7 +15,8 @@ export function addCommand(): Command {
     .option("--agent-instructions <instructions>", "System prompt for Foundry agent")
     .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
     .option("--image <image>", "Custom sandbox image (default: from Helm values)")
-    .option("--governance", "Enable AGT governance (tool policy, trust, audit)", false)
+    .option("--governance", "Enable AGT governance (tool policy, trust, audit)", true)
+    .option("--no-governance", "Disable AGT governance")
     .option("--trust-threshold <score>", "AGT trust threshold (0-1000, default: 500)", "500")
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
     .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
@@ -124,28 +125,51 @@ export function addCommand(): Command {
         // Create federated credential for the new sandbox namespace
         const namespace = `azureclaw-${name}`;
         try {
-          const { stdout: aksOidc } = await execa("kubectl", [
+          spinner.text = "Creating federated credential for sub-agent...";
+
+          // Discover identity name and resource group from existing controller SA
+          const { stdout: wiClientId } = await execa("kubectl", [
             "get", "sa", "-n", "azureclaw-system", "azureclaw-controller",
             "-o", "jsonpath={.metadata.annotations.azure\\.workload\\.identity/client-id}",
           ], { stdio: "pipe" });
 
-          if (aksOidc) {
-            spinner.text = "Creating federated credential...";
-            // Best-effort — may already exist or may not have permissions
-            await execa("az", [
-              "identity", "federated-credential", "create",
-              "--name", `azureclaw-${name}`,
-              "--identity-name", "azureclaw-identity",
-              "--resource-group", "azureclaw-eastus2",
-              "--issuer", "$(az aks show -g azureclaw-eastus2 -n azureclaw --query oidcIssuerProfile.issuerUrl -o tsv)",
-              "--subject", `system:serviceaccount:${namespace}:sandbox`,
-              "--audience", "api://AzureADTokenExchange",
-            ], { stdio: "pipe", shell: true }).catch(() => {
-              // Non-fatal — controller creates SA, but federated cred may need manual creation
-            });
+          if (wiClientId) {
+            // Find the managed identity resource group and AKS OIDC issuer
+            const { stdout: identityJson } = await execa("az", [
+              "identity", "list",
+              "--query", `[?clientId=='${wiClientId}'].{name:name, rg:resourceGroup}`,
+              "--output", "json",
+            ], { stdio: "pipe" });
+            const identities = JSON.parse(identityJson || "[]");
+            const identity = identities[0];
+
+            if (identity) {
+              // Get AKS OIDC issuer URL
+              const { stdout: aksJson } = await execa("az", [
+                "aks", "list",
+                "--resource-group", identity.rg,
+                "--query", "[0].oidcIssuerProfile.issuerUrl",
+                "--output", "tsv",
+              ], { stdio: "pipe" });
+              const issuerUrl = aksJson.trim();
+
+              if (issuerUrl) {
+                await execa("az", [
+                  "identity", "federated-credential", "create",
+                  "--name", `azureclaw-${name}`,
+                  "--identity-name", identity.name,
+                  "--resource-group", identity.rg,
+                  "--issuer", issuerUrl,
+                  "--subject", `system:serviceaccount:${namespace}:sandbox`,
+                  "--audience", "api://AzureADTokenExchange",
+                ], { stdio: "pipe" }).catch(() => {
+                  // May already exist
+                });
+              }
+            }
           }
         } catch {
-          // Non-fatal
+          // Non-fatal — federated credential can be created manually
         }
 
         spinner.succeed(`Sandbox '${name}' created`);
