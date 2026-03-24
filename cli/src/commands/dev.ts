@@ -235,13 +235,16 @@ export function devCommand(): Command {
         kvLine("Policy", `${options.policy} preset`);
         kvLine("Sandbox", options.name);
 
-        // Get the gateway token for web UI
+        // Get the gateway token for web UI — extract from .bashrc since the entrypoint
+        // writes it there and docker exec as root won't source sandbox's login profile.
         let gatewayToken = "";
         try {
           const { stdout: tokenOut } = await execa("docker", [
-            "exec", containerName, "bash", "-lc", "echo $OPENCLAW_GATEWAY_TOKEN",
+            "exec", containerName, "grep", "-oP", "OPENCLAW_GATEWAY_TOKEN=\"\\K[^\"]+",
+            "/sandbox/.bashrc",
           ], { stdio: "pipe" });
-          gatewayToken = tokenOut.trim();
+          // Take the last line (multiple starts may append duplicates)
+          gatewayToken = tokenOut.trim().split("\n").pop() || "";
         } catch {
           // Token not available yet
         }
@@ -253,9 +256,11 @@ export function devCommand(): Command {
         console.log(`  Stop:     ${chalk.cyan(`azureclaw destroy ${options.name}`)}`);
         if (gatewayToken) {
           const url = `http://localhost:18789/#token=${gatewayToken}`;
-          // OSC 8 hyperlink: makes URL clickable in modern terminals (iTerm2, macOS Terminal, VS Code, etc.)
-          const link = `\u001B]8;;${url}\u001B\\${url}\u001B]8;;\u001B\\`;
-          console.log(`  Web UI:   ${chalk.cyan(link)}`);
+          // OSC 8 hyperlink: makes URL clickable in modern terminals.
+          // Color codes must be INSIDE the hyperlink (between the two OSC 8 markers),
+          // not wrapping the entire sequence — otherwise terminals can't parse it.
+          const link = `\u001B]8;;${url}\u0007${chalk.cyan(url)}\u001B]8;;\u0007`;
+          console.log(`  Web UI:   ${link}`);
         }
         console.log(chalk.dim(`\n  Production: azureclaw up (deploys to AKS)`));
         console.log();
