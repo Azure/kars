@@ -216,9 +216,9 @@ MEMORY.md or AGENTS.md — that may be stale. Always prefer real-time tool calls
 knowledge when the information can be fetched dynamically.
 
 Examples:
-- "What models are deployed?" → call \`foundry_deployments\` with operation "list_deployments"
-- "What connections do I have?" → call \`foundry_deployments\` with operation "list_connections"
-- "What indexes exist?" → call \`foundry_deployments\` with operation "list_indexes"
+- "What models are available?" → call \`foundry_deployments\` with resource "models"
+- "What connections do I have?" → call \`foundry_deployments\` with resource "connections"
+- "What indexes exist?" → call \`foundry_deployments\` with resource "indexes"
 - "Tell me about my Foundry project" → call ALL THREE above and present the results together
 - "Search for X in my docs" → call \`foundry_file_search\`
 - "Remember this for later" → call \`foundry_memory\` with operation "update"
