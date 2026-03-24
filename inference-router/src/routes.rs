@@ -530,11 +530,13 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         }
     };
 
-    let resp = state.client
-        .get(&models_url)
-        .header("authorization", format!("Bearer {token}"))
-        .send()
-        .await;
+    let mut req = state.client.get(&models_url);
+    if state.auth.is_api_key_mode() {
+        req = req.header("api-key", &token);
+    } else {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    let resp = req.send().await;
 
     match resp {
         Ok(r) => {
@@ -574,11 +576,13 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
         }
     };
 
-    let resp = state.client
-        .get(&deployments_url)
-        .header("authorization", format!("Bearer {token}"))
-        .send()
-        .await;
+    let mut req = state.client.get(&deployments_url);
+    if state.auth.is_api_key_mode() {
+        req = req.header("api-key", &token);
+    } else {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    let resp = req.send().await;
 
     match resp {
         Ok(r) => {
