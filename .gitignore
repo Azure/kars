@@ -420,6 +420,8 @@ FodyWeavers.xsd
 # Rust
 target/
 Cargo.lock
+# Vendor lockfiles needed for reproducible Docker builds
+!vendor/*/Cargo.lock
 
 # Node
 node_modules/
