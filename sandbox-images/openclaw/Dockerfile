@@ -1,9 +1,9 @@
 # AzureClaw OpenClaw Sandbox Image
 # Based on Azure Linux 3 for a Microsoft-maintained, hardened container base.
 # This same image runs locally (azureclaw dev) and on AKS (azureclaw up).
+# Multi-arch: builds natively on both x86_64 and ARM64.
 #
-# Build: docker build --platform linux/amd64 -f sandbox-images/openclaw/Dockerfile .
-# (Azure Linux base images are x86_64 only; use --platform on ARM hosts)
+# Build: docker build -f sandbox-images/openclaw/Dockerfile .
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
 ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:latest
@@ -16,9 +16,11 @@ FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 
 FROM ${AZURELINUX_BASE} AS builder
 
-# Install Node.js 22 LTS (OpenClaw requires 22+, AL3 only has v20)
-RUN tdnf install -y tar gzip ca-certificates curl git && tdnf clean all
-RUN curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.gz -o /tmp/node.tar.gz && \
+# Detect arch for Node.js download (x64 or arm64)
+ARG TARGETARCH
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
+    tdnf install -y tar gzip ca-certificates curl git && tdnf clean all && \
+    curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
 
@@ -29,9 +31,11 @@ RUN npm install -g openclaw@latest
 
 FROM ${AZURELINUX_BASE}
 
-# Install Node.js 22 LTS runtime and minimal tools
-RUN tdnf install -y tar gzip curl git shadow-utils ca-certificates && tdnf clean all
-RUN curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.gz -o /tmp/node.tar.gz && \
+# Detect arch for Node.js download
+ARG TARGETARCH
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
+    tdnf install -y tar gzip curl git shadow-utils ca-certificates && tdnf clean all && \
+    curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
 
