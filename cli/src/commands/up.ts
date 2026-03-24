@@ -694,8 +694,19 @@ export function upCommand(): Command {
               context ? path.join(repoRoot, context) : repoRoot,
             ];
             await execa("docker", args, { stdio: "pipe" });
-            stepper.update(`Pushing ${tag}...`);
-            await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
+            // Push with retry — ACR tokens/connections can go stale after long builds
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                stepper.update(`Pushing ${tag}${attempt > 1 ? ` (retry ${attempt}/3)` : ""}...`);
+                if (attempt > 1) await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
+                await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
+                break;
+              } catch (e: any) {
+                if (attempt === 3) throw e;
+                stepper.update(`Push ${tag} failed, retrying...`);
+                await new Promise(r => setTimeout(r, 5000));
+              }
+            }
           };
 
           await buildPush("controller/Dockerfile", "azureclaw-controller:latest");
