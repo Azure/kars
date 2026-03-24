@@ -113,6 +113,7 @@ pub fn inference_routes() -> Router<AppState> {
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/models", get(list_models))
+        .route("/v1/deployments", get(list_deployments))
 }
 
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
@@ -511,7 +512,8 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         .or_else(|| state.config.foundry_endpoint.clone())
         .unwrap_or_default();
 
-    let models_url = format!("{}/openai/v1/models", endpoint.trim_end_matches('/'));
+    // Azure OpenAI uses /openai/models?api-version=... (NOT /openai/v1/models)
+    let models_url = format!("{}/openai/models?api-version=2024-10-21", endpoint.trim_end_matches('/'));
 
     // Get token — use correct audience for Foundry project vs legacy AOAI
     let audience = if endpoint.contains("services.ai.azure.com") && endpoint.contains("/api/projects/") {
@@ -543,6 +545,50 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         Err(e) => {
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
                 "error": {"message": format!("Failed to list models: {e}"), "type": "proxy_error"}
+            }))).into_response()
+        }
+    }
+}
+
+/// List deployed models (not the full catalog).
+/// For Foundry/AI Services endpoints, /openai/deployments is available on the data plane.
+/// For legacy Azure OpenAI, this may return 404 — callers should fall back to /v1/models.
+async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
+    let endpoint = state.config.azure_openai_endpoint.clone()
+        .or_else(|| state.config.foundry_endpoint.clone())
+        .unwrap_or_default();
+
+    let deployments_url = format!("{}/openai/deployments?api-version=2024-10-21", endpoint.trim_end_matches('/'));
+
+    let audience = if endpoint.contains("services.ai.azure.com") {
+        "https://ai.azure.com"
+    } else {
+        "https://cognitiveservices.azure.com"
+    };
+    let token = match state.auth.get_token(audience).await {
+        Ok(t) => t,
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
+            }))).into_response();
+        }
+    };
+
+    let resp = state.client
+        .get(&deployments_url)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let body = r.bytes().await.unwrap_or_default();
+            (status, Body::from(body)).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                "error": {"message": format!("Failed to list deployments: {e}"), "type": "proxy_error"}
             }))).into_response()
         }
     }
