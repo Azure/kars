@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
         .merge(routes::spawn_routes())
         .merge(routes::health_routes())
         .merge(routes::metrics_routes())
+        .merge(routes::admin_routes())
         .with_state(state)
         // Rate limit: max 64 concurrent requests (prevents DoS from compromised agent)
         .layer(tower::limit::ConcurrencyLimitLayer::new(64));

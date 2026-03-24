@@ -32,6 +32,8 @@ pub struct AppState {
     pub budget: TokenBudgetTracker,
     pub governance: Arc<GovernanceState>,
     pub blocklist: Blocklist,
+    /// Live model override (set via /admin/model). Takes priority over config.default_model.
+    pub model_override: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -87,6 +89,7 @@ impl AppState {
             budget,
             governance: Arc::new(GovernanceState::new(&sandbox_name)),
             blocklist,
+            model_override: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -98,9 +101,14 @@ impl AppState {
             .or_else(|| self.config.foundry_endpoint.clone())
             .unwrap_or_default();
 
+        // Live model override takes priority over config default
+        let deployment = self.model_override.read().ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| self.config.default_model.clone());
+
         UpstreamConfig {
             endpoint,
-            deployment: self.config.default_model.clone(),
+            deployment,
             sandbox_name: sandbox_name.to_string(),
         }
     }
@@ -187,6 +195,12 @@ pub fn health_routes() -> Router<AppState> {
 /// Prometheus metrics endpoint.
 pub fn metrics_routes() -> Router<AppState> {
     Router::new().route("/metrics", get(metrics))
+}
+
+/// Admin routes — live configuration (localhost only, for dev mode model switching).
+pub fn admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/model", get(admin_get_model).put(admin_set_model))
 }
 
 /// AGT governance routes — policy evaluation, trust, audit, inter-agent mesh.
@@ -504,6 +518,38 @@ async fn metrics() -> String {
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap_or_default()
+}
+
+/// GET /admin/model — show current model
+async fn admin_get_model(State(state): State<AppState>) -> impl IntoResponse {
+    let current = state.model_override.read().ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| state.config.default_model.clone());
+    Json(serde_json::json!({ "model": current, "default": state.config.default_model }))
+}
+
+/// PUT /admin/model — switch model live (body: {"model": "gpt-5-mini"})
+async fn admin_set_model(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let model = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(String::from));
+
+    match model {
+        Some(m) => {
+            let prev = state.model_override.read().ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| state.config.default_model.clone());
+            if let Ok(mut guard) = state.model_override.write() {
+                *guard = Some(m.clone());
+            }
+            tracing::info!(from = %prev, to = %m, "Model switched via /admin/model");
+            Json(serde_json::json!({ "model": m, "previous": prev }))
+        }
+        None => Json(serde_json::json!({ "error": "body must contain {\"model\": \"<name>\"}" })),
+    }
 }
 
 /// GET /v1/models — list available models from the OpenAI endpoint.
