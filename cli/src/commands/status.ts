@@ -21,13 +21,26 @@ export function statusCommand(): Command {
         ], { stdio: "pipe" });
 
         const info = JSON.parse(inspectJson);
-        const running = info.State?.Running === true;
+        const dockerRunning = info.State?.Running === true;
         const startedAt = info.State?.StartedAt;
         const image = info.Config?.Image || "unknown";
         const readOnly = info.HostConfig?.ReadonlyRootfs === true;
         const model = (info.Config?.Env || [])
           .find((e: string) => e.startsWith("OPENCLAW_MODEL="))
           ?.split("=")[1] || "gpt-4.1";
+
+        // Docker says running — verify the inference router is actually responsive
+        let running = dockerRunning;
+        if (dockerRunning) {
+          try {
+            await execa("docker", [
+              "exec", containerName, "curl", "-sf", "--max-time", "3",
+              "http://127.0.0.1:8443/healthz",
+            ], { stdio: "pipe" });
+          } catch {
+            running = false; // container is up but router isn't responding
+          }
+        }
         const seccomp = info.HostConfig?.SecurityOpt
           ?.some((s: string) => s.includes("seccomp")) || false;
         const hostname = info.Config?.Hostname || name;
@@ -47,7 +60,7 @@ export function statusCommand(): Command {
   ╚══════════════════════════════════════════════════╝
 `));
         console.log(`  Sandbox:       ${chalk.bold(name)}`);
-        console.log(`  Status:        ${running ? chalk.green("● Running") : chalk.red("● Stopped")}`);
+        console.log(`  Status:        ${running ? chalk.green("● Running") : dockerRunning ? chalk.yellow("● Unhealthy (container up, router down)") : chalk.red("● Stopped")}`);
         console.log(`  Uptime:        ${uptime}`);
         console.log(`  Image:         ${image}`);
         console.log(`  Model:         ${chalk.bold(model)} (Azure OpenAI)`);

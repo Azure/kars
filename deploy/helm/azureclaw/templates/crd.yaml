@@ -153,6 +153,10 @@ spec:
                     approvalRequired:
                       type: boolean
                       default: true
+                    learnEgress:
+                      type: boolean
+                      default: false
+                      description: "Enable egress learn mode: observe all accessed domains (blocklist still enforced)"
                     allowedEndpoints:
                       type: array
                       items:
