@@ -9,7 +9,6 @@ import { logsCommand } from "./commands/logs.js";
 import { modelCommand } from "./commands/model.js";
 import { traceCommand } from "./commands/trace.js";
 import { policyCommand } from "./commands/policy.js";
-import { approveCommand } from "./commands/approve.js";
 import { egressCommand } from "./commands/egress.js";
 import { destroyCommand } from "./commands/destroy.js";
 import { evalCommand } from "./commands/eval.js";
@@ -24,23 +23,26 @@ export function createCli(): Command {
     )
     .version("0.1.0-alpha.1");
 
-  // Primary commands
+  // Lifecycle
+  program.addCommand(onboardCommand());
   program.addCommand(upCommand());
   program.addCommand(devCommand());
   program.addCommand(addCommand());
-  program.addCommand(onboardCommand());
+  program.addCommand(destroyCommand());
 
-  // Sandbox commands
+  // Operations
   program.addCommand(connectCommand());
   program.addCommand(statusCommand());
   program.addCommand(logsCommand());
+
+  // Configuration
   program.addCommand(modelCommand());
-  program.addCommand(traceCommand());
   program.addCommand(policyCommand());
-  program.addCommand(approveCommand());
   program.addCommand(egressCommand());
+
+  // Observability
+  program.addCommand(traceCommand());
   program.addCommand(evalCommand());
-  program.addCommand(destroyCommand());
 
   return program;
 }
