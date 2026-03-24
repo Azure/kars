@@ -217,6 +217,7 @@ pub fn agt_routes() -> Router<AppState> {
         .route("/egress/approve", post(egress_approve))
         .route("/egress/deny", post(egress_deny))
         .route("/egress/pending", get(egress_pending))
+        .route("/egress/enforce", post(egress_enforce))
         // AGT relay proxy (WebSocket + HTTP registry)
         .route("/agt/relay", get(agt_relay_proxy))
         .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
@@ -1381,6 +1382,51 @@ async fn egress_deny(
     (StatusCode::OK, Json(serde_json::json!({
         "status": "denied",
         "domain": domain,
+    }))).into_response()
+}
+
+/// POST /egress/enforce — graduate from learn mode to enforcement.
+/// Promotes all learned domains into the allowlist, disables learn mode,
+/// and clears the learned set. After this, only allowlisted and non-blocklisted
+/// domains pass through. New domains go to pending approval.
+async fn egress_enforce(State(state): State<AppState>) -> impl IntoResponse {
+    let learned = state.blocklist.get_learned_domains().await;
+    if learned.is_empty() && !state.blocklist.is_learn_mode() {
+        return (StatusCode::OK, Json(serde_json::json!({
+            "status": "already_enforcing",
+            "learn_mode": false,
+            "allowlist_count": state.blocklist.get_allowlist().await.len(),
+        }))).into_response();
+    }
+
+    // Promote each learned domain to the allowlist
+    for domain in &learned {
+        state.blocklist.allow_domain(domain).await;
+    }
+
+    // Disable learn mode and clear the learned set
+    state.blocklist.set_learn_mode(false);
+    state.blocklist.clear_learned().await;
+
+    let allowlist = state.blocklist.get_allowlist().await;
+
+    state.governance.audit.append(
+        "egress:enforce",
+        "enforced",
+        &format!("Graduated to enforcement: {} learned domains promoted to allowlist ({} total)", learned.len(), allowlist.len()),
+    ).await;
+
+    tracing::info!(
+        promoted = learned.len(),
+        total_allowlist = allowlist.len(),
+        "Egress enforcement activated — learned domains promoted to allowlist"
+    );
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "enforcing",
+        "promoted": learned.len(),
+        "allowlist_count": allowlist.len(),
+        "allowlist": allowlist,
     }))).into_response()
 }
 
