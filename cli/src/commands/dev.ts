@@ -255,7 +255,10 @@ export function devCommand(): Command {
         console.log(`  Status:   ${chalk.cyan(`azureclaw status ${options.name}`)}`);
         console.log(`  Stop:     ${chalk.cyan(`azureclaw destroy ${options.name}`)}`);
         if (gatewayToken) {
-          console.log(`  Web UI:   ${chalk.cyan(`http://localhost:18789/#token=${gatewayToken}`)}`);
+          const url = `http://localhost:18789/#token=${gatewayToken}`;
+          // OSC 8 hyperlink: makes URL clickable in modern terminals (iTerm2, macOS Terminal, VS Code, etc.)
+          const link = `\u001B]8;;${url}\u001B\\${url}\u001B]8;;\u001B\\`;
+          console.log(`  Web UI:   ${chalk.cyan(link)}`);
         }
         console.log(chalk.dim(`\n  Production: azureclaw up (deploys to AKS)`));
         console.log();
