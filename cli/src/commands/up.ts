@@ -117,10 +117,22 @@ export function upCommand(): Command {
         }
 
         // ── Step 2: Create resource group ────────────────────────────
-        stepper.step(`Creating resource group '${rg}'...`);
+        stepper.step(`Setting up resource group '${rg}'...`);
+
+        // Check if RG already exists
+        let rgExists = false;
+        try {
+          const { stdout: rgCheck } = await execa("az", [
+            "group", "show", "--name", rg, "--query", "properties.provisioningState", "-o", "tsv",
+          ], { stdio: "pipe" });
+          if (rgCheck.trim() === "Succeeded") rgExists = true;
+        } catch { /* doesn't exist */ }
+
         await execa("az", [
           "group", "create", "--name", rg, "--location", options.region, "--output", "none",
         ], { stdio: "pipe" });
+        stepper.detail(rgExists ? "ok" : "new", `Resource group '${rg}' — ${rgExists ? "exists" : "created"}`);
+
 
         // ── Step 2b: Detect caller IP for firewall rules ─────────────
         stepper.update("Detecting your public IP for firewall rules...");
@@ -130,9 +142,10 @@ export function upCommand(): Command {
           const ip = ipOut.trim();
           if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
             callerIp = ip;
+            stepper.detail("ok", `Public IP detected — ${ip}`);
           }
         } catch {
-          // Non-fatal — skip IP restriction
+          stepper.detail("skip", "Public IP detection — skipped (offline?)");
         }
 
         // ── Step 2c: Register required preview features ──────────
@@ -181,7 +194,6 @@ export function upCommand(): Command {
               "--query", "provisioningState", "-o", "tsv",
             ], { stdio: "pipe" });
             if (aksCheck.trim() === "Succeeded") {
-              stepper.update("AKS cluster already exists — skipping Bicep. Reading deployment outputs...");
               options.skipInfra = true;
             }
           } catch {
@@ -220,10 +232,15 @@ export function upCommand(): Command {
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
 
+          stepper.detail("new", `AKS cluster — ${baseName}-aks`);
+          stepper.detail("new", `ACR — ${acrLoginServer}`);
+          stepper.detail("new", `Key Vault — ${kvName}`);
+          stepper.detail("new", `OpenAI — ${openAiEndpoint}`);
+
           stepper.done("Azure resources provisioned");
         } else {
           // Read outputs from existing deployment
-          stepper.step("Reading existing deployment outputs (ACR, AOAI, WI, KV)...");
+          stepper.step("Verifying existing infrastructure...");
           const { stdout: existingOutput } = await execa("az", [
             "deployment", "group", "show",
             "--resource-group", rg,
@@ -246,7 +263,14 @@ export function upCommand(): Command {
           openAiEndpoint = outputs.openAiEndpoint.value;
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
-          stepper.done("Deployment outputs loaded");
+
+          stepper.detail("ok", `AKS cluster — ${baseName}-aks (running)`);
+          stepper.detail("ok", `ACR — ${acrLoginServer}`);
+          stepper.detail("ok", `Key Vault — ${kvName}`);
+          stepper.detail("ok", `OpenAI — ${openAiEndpoint}`);
+          stepper.detail("ok", `Workload Identity — ${wiClientId.slice(0, 8)}...`);
+
+          stepper.done("Infrastructure verified (Bicep skipped)");
         }
 
         // ── Step 3a: Ensure caller IP is in AKS API server authorized ranges ──
@@ -259,8 +283,10 @@ export function upCommand(): Command {
             "--resource-group", rg,
             "--api-server-authorized-ip-ranges", `${callerIp}/32`,
             "--output", "none",
-          ], { stdio: "pipe" }).catch(() => {
-            // Non-fatal — may already be set
+          ], { stdio: "pipe" }).then(() => {
+            stepper.detail("ok", `AKS API server — ${callerIp}/32 authorized`);
+          }).catch(() => {
+            stepper.detail("ok", `AKS API server — IP already authorized`);
           });
         }
 
@@ -291,7 +317,11 @@ export function upCommand(): Command {
                 "--name", acrName,
                 "--ip-address", aksEgress,
                 "--output", "none",
-              ], { stdio: "pipe" }).catch(() => {});
+              ], { stdio: "pipe" }).then(() => {
+                stepper.detail("ok", `ACR firewall — ${aksEgress} allowed`);
+              }).catch(() => {
+                stepper.detail("ok", `ACR firewall — already configured`);
+              });
               // Add AKS egress to AOAI firewall (only when AOAI is deployed in this RG)
               if (!options.foundryEndpoint) {
                 await execa("az", [
@@ -300,7 +330,11 @@ export function upCommand(): Command {
                   "--resource-group", rg,
                   "--ip-address", aksEgress,
                   "--output", "none",
-                ], { stdio: "pipe" }).catch(() => {});
+                ], { stdio: "pipe" }).then(() => {
+                  stepper.detail("ok", `AOAI firewall — ${aksEgress} allowed`);
+                }).catch(() => {
+                  stepper.detail("ok", `AOAI firewall — already configured`);
+                });
               }
             }
           }
@@ -316,8 +350,10 @@ export function upCommand(): Command {
           "--resource-group", rg,
           "--attach-acr", acrName,
           "--output", "none",
-        ], { stdio: "pipe" }).catch(() => {
-          // Already attached — non-fatal
+        ], { stdio: "pipe" }).then(() => {
+          stepper.detail("ok", `ACR attachment — ${acrName} → AKS`);
+        }).catch(() => {
+          stepper.detail("ok", `ACR attachment — already attached`);
         });
 
         stepper.done("Network access configured");
@@ -389,8 +425,10 @@ export function upCommand(): Command {
               "--source", img.source,
               "--image", img.target,
               "--force",
-            ], { stdio: "pipe" }).catch(() => {
-              // Image may already exist — non-fatal
+            ], { stdio: "pipe" }).then(() => {
+              stepper.detail("ok", img.target);
+            }).catch(() => {
+              stepper.detail("skip", `${img.target} — import failed (may already exist)`);
             });
           }
 
@@ -399,6 +437,17 @@ export function upCommand(): Command {
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         stepper.step("Deploying Helm chart (controller + CRD + RBAC)...");
+
+        // Check if Helm release already exists
+        let helmExists = false;
+        try {
+          const { stdout: helmStatus } = await execa("helm", [
+            "status", "azureclaw", "-n", "azureclaw-system", "-o", "json",
+          ], { stdio: "pipe" });
+          const status = JSON.parse(helmStatus);
+          if (status.info?.status === "deployed") helmExists = true;
+        } catch { /* not installed */ }
+
         const foundryEndpoint = options.foundryEndpoint || "";
 
         // When using Foundry (no dedicated AOAI), derive the OpenAI inference endpoint
@@ -531,8 +580,9 @@ export function upCommand(): Command {
             helmArgs.push("--set", `foundry.imdsClientId=${imdsClientId}`);
           }
         }
-        stepper.update("Installing AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...");
+        stepper.update(`${helmExists ? "Upgrading" : "Installing"} AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });
+        stepper.detail(helmExists ? "ok" : "new", `Helm release — ${helmExists ? "upgraded" : "installed"}`);
 
         // Force rollout when using :latest tags (Helm won't restart pods if spec hash is unchanged)
         stepper.update("Rolling out updated controller...");
@@ -546,7 +596,7 @@ export function upCommand(): Command {
           "--timeout=120s",
         ], { stdio: "pipe" }).catch(() => {});
 
-        stepper.done("Controller deployed");
+        stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
 
         // ── Step 6b: Deploy Inspektor Gadget (eBPF observability) ────
         // Non-fatal — kubectl-gadget may not be installed
@@ -626,8 +676,10 @@ export function upCommand(): Command {
           "--subject", `system:serviceaccount:${sandboxNs}:sandbox`,
           "--audiences", "api://AzureADTokenExchange",
           "--output", "none",
-        ], { stdio: "pipe" }).catch(() => {
-          // Already exists — non-fatal
+        ], { stdio: "pipe" }).then(() => {
+          stepper.detail("new", `Federated credential — ${sandboxNs}:sandbox`);
+        }).catch(() => {
+          stepper.detail("ok", `Federated credential — already exists`);
         });
 
         // Grant RBAC roles on Foundry resource via Bicep (if --foundry-endpoint provided)

@@ -93,6 +93,19 @@ export class Stepper {
     console.log(`${this.prefix()} ${chalk.dim("○")} ${chalk.dim(text)} ${chalk.dim("[skipped]")}`);
   }
 
+  /** Print an indented detail line within the current step (sub-item status) */
+  detail(icon: "ok" | "skip" | "new" | "info", text: string): void {
+    this.spinner.stop();
+    const icons = {
+      ok:   chalk.green("✓"),
+      skip: chalk.dim("○"),
+      new:  chalk.cyan("✦"),
+      info: chalk.dim("·"),
+    };
+    console.log(`           ${icons[icon]} ${text}`);
+    this.spinner.start(this.spinner.text);
+  }
+
   /** Print overall summary */
   summary(): void {
     const totalMs = Date.now() - this.overallStart;
