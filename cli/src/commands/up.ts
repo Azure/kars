@@ -29,7 +29,8 @@ export function upCommand(): Command {
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
-    .option("--foundry-endpoint <url>", "Existing Foundry/AI Services endpoint (skip AOAI deployment)")
+    .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
+    .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
     .option("--dry-run", "Show what would be done without executing", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
@@ -196,23 +197,48 @@ export function upCommand(): Command {
 
         // Ask about existing Foundry endpoint (skip AOAI deployment if provided)
         if (!options.foundryEndpoint && !process.argv.includes("--foundry-endpoint")) {
-          const { hasFoundry } = await inquirer.prompt([{
+          const { backendChoice } = await inquirer.prompt([{
             type: "list" as const,
-            name: "hasFoundry",
+            name: "backendChoice",
             message: "Azure AI backend:",
             choices: [
-              { name: "Use existing Azure AI Foundry / OpenAI endpoint (Recommended if you have one)", value: true },
-              { name: "Deploy new Azure OpenAI resource (adds ~5 min)", value: false },
+              { name: "Use existing Azure AI Foundry project (Recommended)", value: "foundry" },
+              { name: "Use existing Azure OpenAI endpoint only", value: "openai" },
+              { name: "Deploy new Azure OpenAI resource (adds ~5 min)", value: "deploy" },
             ],
           }]);
-          if (hasFoundry) {
+          if (backendChoice === "foundry") {
             const { endpoint } = await inquirer.prompt([{
               type: "input" as const,
               name: "endpoint",
-              message: "Azure AI endpoint URL:",
-              validate: (input: string) => input.startsWith("https://") || "Must be an https:// URL",
+              message: "Foundry project endpoint (services.ai.azure.com/api/projects/...):",
+              validate: (input: string) => {
+                if (!input.startsWith("https://")) return "Must be an https:// URL";
+                if (!input.includes("services.ai.azure.com")) return "Expected services.ai.azure.com URL. For openai.azure.com, choose 'Azure OpenAI endpoint only'.";
+                return true;
+              },
             }]);
             options.foundryEndpoint = endpoint;
+            // Derive OpenAI inference endpoint from Foundry resource name
+            const match = endpoint.match(/https:\/\/([^.]+)\.services\.ai\.azure\.com/);
+            if (match && !options.openaiEndpoint) {
+              options.openaiEndpoint = `https://${match[1]}.openai.azure.com`;
+              console.log(chalk.dim(`  → Derived OpenAI inference endpoint: ${options.openaiEndpoint}`));
+            }
+          } else if (backendChoice === "openai") {
+            const { endpoint } = await inquirer.prompt([{
+              type: "input" as const,
+              name: "endpoint",
+              message: "Azure OpenAI endpoint (*.openai.azure.com):",
+              validate: (input: string) => {
+                if (!input.startsWith("https://")) return "Must be an https:// URL";
+                if (!input.includes("openai.azure.com")) return "Expected openai.azure.com URL. For Foundry, choose the Foundry option.";
+                return true;
+              },
+            }]);
+            // Treat as the inference endpoint, not a Foundry project
+            options.openaiEndpoint = endpoint.replace(/\/openai\/v1\/?$/, "");
+            options.foundryEndpoint = endpoint.replace(/\/openai\/v1\/?$/, "");
           }
         }
       }
@@ -272,8 +298,13 @@ export function upCommand(): Command {
         };
         checkLine(true, `Region — ${options.region}`);
         checkLine(true, `Isolation — ${isolationLabels[options.isolation] || options.isolation}`);
-        if (options.foundryEndpoint) {
-          checkLine(true, `AI Backend — ${options.foundryEndpoint} (existing)`);
+        if (options.foundryEndpoint && options.foundryEndpoint.includes("services.ai.azure.com")) {
+          checkLine(true, `Foundry — ${options.foundryEndpoint}`);
+          if (options.openaiEndpoint) {
+            checkLine(true, `OpenAI — ${options.openaiEndpoint} (derived)`);
+          }
+        } else if (options.foundryEndpoint || options.openaiEndpoint) {
+          checkLine(true, `AI Backend — ${options.openaiEndpoint || options.foundryEndpoint} (existing)`);
         } else {
           checkLine(true, `AI Backend — new Azure OpenAI resource`);
         }
@@ -717,8 +748,10 @@ export function upCommand(): Command {
 
         const foundryEndpoint = options.foundryEndpoint || "";
 
-        // When using Foundry (no dedicated AOAI), derive the OpenAI inference endpoint
-        // from the Foundry resource name: {name}.services.ai.azure.com → {name}.openai.azure.com
+        // Use explicitly provided OpenAI endpoint, or derive from Foundry resource name
+        if (!openAiEndpoint && options.openaiEndpoint) {
+          openAiEndpoint = options.openaiEndpoint;
+        }
         if (!openAiEndpoint && foundryEndpoint) {
           const match = foundryEndpoint.match(/https:\/\/([^.]+)\.services\.ai\.azure\.com/);
           if (match) {
