@@ -790,7 +790,41 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list");
+    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, http_fetch");
+
+    // ── http_fetch: routed through the inference router's egress proxy ──
+    // The sandbox (UID 1000) cannot reach the internet directly (iptables).
+    // This tool routes requests through the router (UID 1001) which enforces
+    // blocklist, allowlist, and learn mode before proxying the request.
+    api.registerTool({
+      name: "http_fetch",
+      label: "HTTP Fetch (Egress Proxy)",
+      description:
+        "Make an HTTP request to an external URL. The request is routed through the AzureClaw security proxy which enforces blocklist (51K+ malicious domains blocked), allowlist, and learn mode. Use this for ANY external API call (Telegram, HackerNews, web APIs, etc.). Direct internet access via curl/fetch is blocked by the egress guard.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "The full URL to fetch (e.g., https://api.telegram.org/bot.../getMe)" },
+          method: { type: "string", description: "HTTP method: GET, POST, PUT, DELETE. Default: GET" },
+          headers: { type: "object", description: "Optional HTTP headers as key-value pairs" },
+          body: { type: "string", description: "Optional request body (for POST/PUT)" },
+        },
+        required: ["url"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const result = await routerCall("POST", "/egress/fetch", {
+            url: params.url,
+            method: (params.method as string) || "GET",
+            headers: params.headers || {},
+            body: params.body || undefined,
+          });
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Fetch failed: ${e.message}` }] };
+        }
+      },
+    });
 
     // ── Register Azure AI Foundry as a model provider ───────────────────
     api.registerProvider({
