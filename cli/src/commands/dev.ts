@@ -357,7 +357,7 @@ export function devCommand(): Command {
         checkLine(true, "Non-root user (sandbox:1000)");
         checkLine(true, "All root privileges removed");
         checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
-        checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → localhost + DNS)" : "(not available)"}`);
+        checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → transparent proxy)" : "(not available)"}`);
         checkLine(true, "API key mounted as read-only secret");
         if (options.agt) {
           checkLine(agtReady, `AGT mesh ${agtReady ? "(relay + registry + E2E encryption)" : "(starting...)"}`);

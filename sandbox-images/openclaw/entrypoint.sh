@@ -28,14 +28,26 @@ fi
 # Only applies when running as root (dev mode). On AKS, the egress-guard init
 # container handles this before the sandbox container starts.
 if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
+  # Filter table: allow established, localhost, DNS — reject everything else
   iptables -N AZURECLAW_EGRESS 2>/dev/null || true
   iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
   iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT
   iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT
   iptables -A AZURECLAW_EGRESS -p tcp --dport 53 -j ACCEPT
+  # Allow traffic to the forward proxy port (redirected packets go to localhost)
+  iptables -A AZURECLAW_EGRESS -p tcp --dport 8444 -j ACCEPT
   iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable
   iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS
-  echo "[azureclaw] iptables egress guard active (UID 1000 → localhost + DNS only)"
+
+  # NAT table: redirect HTTP/HTTPS from UID 1000 to the transparent forward proxy.
+  # The proxy enforces blocklist, allowlist, and learn mode on every request.
+  # Inference (localhost:8443) is unaffected — loopback traffic is ACCEPTed above.
+  iptables -t nat -N AZURECLAW_REDIRECT 2>/dev/null || true
+  iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 80  -j REDIRECT --to-port 8444
+  iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 443 -j REDIRECT --to-port 8444
+  iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT
+
+  echo "[azureclaw] iptables egress guard active (UID 1000 → transparent proxy on :8444)"
 fi
 
 OPENCLAW_DIR="/sandbox/.openclaw"

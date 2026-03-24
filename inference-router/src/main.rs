@@ -18,6 +18,7 @@ mod auth;
 mod blocklist;
 mod budget;
 mod config;
+mod forward_proxy;
 mod governance;
 mod proxy;
 mod routes;
@@ -43,6 +44,9 @@ async fn main() -> Result<()> {
     let config = config::Config::from_env()?;
     let state = routes::AppState::new(&config).await?;
 
+    // Clone blocklist for the forward proxy before state is moved into the router.
+    let proxy_blocklist = state.blocklist.clone();
+
     let app = Router::new()
         .merge(routes::inference_routes())
         .merge(routes::foundry_agent_routes())
@@ -57,6 +61,17 @@ async fn main() -> Result<()> {
 
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Listening on {addr}");
+
+    // Start the transparent forward proxy on a separate port.
+    // iptables REDIRECT sends TCP 80/443 from UID 1000 here for blocklist enforcement.
+    let proxy_port = std::env::var("FORWARD_PROXY_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(8444);
+    let proxy_addr = format!("0.0.0.0:{proxy_port}");
+    tokio::spawn(async move {
+        forward_proxy::start(&proxy_addr, proxy_blocklist).await;
+    });
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app)
