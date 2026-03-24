@@ -352,6 +352,7 @@ export function devCommand(): Command {
           "-p", "18789:18789",
           "-e", `OPENCLAW_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
+          ...(creds.foundryProjectEndpoint ? ["-e", `FOUNDRY_PROJECT_ENDPOINT=${creds.foundryProjectEndpoint}`] : []),
           ...(discoveredDeployments ? ["-e", `FOUNDRY_DEPLOYMENTS=${discoveredDeployments}`] : []),
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,
           // Learn mode on by default in dev — records all egress domains for review
