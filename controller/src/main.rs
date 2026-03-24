@@ -11,6 +11,7 @@
 //! Built with kube-rs (CNCF Sandbox).
 
 mod crd;
+mod fedcred;
 mod reconciler;
 
 use anyhow::Result;
