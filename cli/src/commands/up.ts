@@ -514,7 +514,7 @@ export function upCommand(): Command {
 
             const outputs = JSON.parse(deployOutput);
             acrLoginServer = outputs.acrLoginServer.value;
-            openAiEndpoint = options.foundryEndpoint || outputs.openAiEndpoint?.value || "";
+            openAiEndpoint = options.openaiEndpoint || outputs.openAiEndpoint?.value || options.foundryEndpoint || "";
             wiClientId = outputs.sandboxIdentityClientId.value;
             kvName = outputs.keyVaultName.value;
 
@@ -554,7 +554,7 @@ export function upCommand(): Command {
 
           const outputs = JSON.parse(existingOutput);
           acrLoginServer = outputs.acrLoginServer.value;
-          openAiEndpoint = options.foundryEndpoint || outputs.openAiEndpoint?.value || "";
+          openAiEndpoint = options.openaiEndpoint || outputs.openAiEndpoint?.value || options.foundryEndpoint || "";
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
 
