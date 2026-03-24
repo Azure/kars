@@ -18,6 +18,7 @@ export interface AzureClawConfig {
   endpoint: string;
   model: string;
   apiKey: string;
+  foundryProjectEndpoint?: string;
 }
 
 /**
@@ -30,7 +31,7 @@ export function loadConfig(): AzureClawConfig | null {
     const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
     const apiKey = readFileSync(CREDENTIALS_FILE, "utf-8").trim();
     if (!config.endpoint || !apiKey) return null;
-    return { endpoint: config.endpoint, model: config.model || "gpt-4.1", apiKey };
+    return { endpoint: config.endpoint, model: config.model || "gpt-4.1", apiKey, foundryProjectEndpoint: config.foundryProjectEndpoint };
   } catch {
     return null;
   }
@@ -114,14 +115,37 @@ export async function promptAndSaveCredentials(options?: {
     }
   }
 
+  // Auto-derive Foundry project endpoint from OpenAI endpoint hostname
+  // e.g. https://foo.openai.azure.com → https://foo.services.ai.azure.com
+  let foundryProjectEndpoint = "";
+  const hostname = new URL(answers.endpoint).hostname;
+  const accountName = hostname.split(".")[0];
+  if (hostname.endsWith(".openai.azure.com") || hostname.endsWith(".services.ai.azure.com")) {
+    const { default: inquirerFoundry } = await import("inquirer");
+    const foundryAnswer = await inquirerFoundry.prompt([
+      {
+        type: "input",
+        name: "foundryProjectEndpoint",
+        message: "Foundry project endpoint (optional, for memory/agents/indexes):",
+        default: existing?.foundryProjectEndpoint || `https://${accountName}.services.ai.azure.com/api/projects/YOUR_PROJECT`,
+        filter: (input: string) => input.replace(/\/+$/, ""),
+      },
+    ]);
+    if (foundryAnswer.foundryProjectEndpoint && !foundryAnswer.foundryProjectEndpoint.includes("YOUR_PROJECT")) {
+      foundryProjectEndpoint = foundryAnswer.foundryProjectEndpoint;
+    }
+  }
+
   // Save
   mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify({ endpoint: answers.endpoint, model: answers.model, version: "0.1.0-alpha.1" }, null, 2), "utf-8");
+  const configObj: Record<string, string> = { endpoint: answers.endpoint, model: answers.model, version: "0.1.0-alpha.1" };
+  if (foundryProjectEndpoint) configObj.foundryProjectEndpoint = foundryProjectEndpoint;
+  writeFileSync(CONFIG_FILE, JSON.stringify(configObj, null, 2), "utf-8");
   chmodSync(CONFIG_FILE, 0o600);
   writeFileSync(CREDENTIALS_FILE, answers.apiKey, "utf-8");
   chmodSync(CREDENTIALS_FILE, 0o600);
 
-  return { endpoint: answers.endpoint, model: answers.model, apiKey: answers.apiKey };
+  return { endpoint: answers.endpoint, model: answers.model, apiKey: answers.apiKey, foundryProjectEndpoint: foundryProjectEndpoint || undefined };
 }
 
 /**
