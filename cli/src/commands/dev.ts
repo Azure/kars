@@ -41,7 +41,7 @@ export function devCommand(): Command {
     .action(async (options) => {
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
-      const stepper = new Stepper({ totalSteps: 4 });
+      const stepper = new Stepper({ totalSteps: 3 });
 
       try {
         let image = options.image;
@@ -127,7 +127,6 @@ export function devCommand(): Command {
               repoRoot,
             ], { stdio: "inherit" });
             console.log();
-            stepper.step("Building sandbox image...");
           }
 
           stepper.update("Building sandbox image (Node.js + OpenClaw)...");
@@ -143,7 +142,6 @@ export function devCommand(): Command {
           ], { stdio: "inherit" });
           console.log();
           image = "azureclaw-sandbox:dev";
-          stepper.step("Image build complete");
           stepper.done("Sandbox image built");
         } else {
           stepper.done("Sandbox image found");
@@ -176,7 +174,7 @@ export function devCommand(): Command {
           ? ["--security-opt", `seccomp=${seccompPath}`]
           : [];
 
-        stepper.step("Starting sandbox...");
+        stepper.update("Launching container...");
         await execa("docker", [
           "run", "-d",
           "--name", containerName,
