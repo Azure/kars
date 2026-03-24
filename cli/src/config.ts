@@ -1,6 +1,6 @@
 /**
  * Shared credential management for AzureClaw CLI.
- * Used by `dev` (auto-prompts if missing) and `onboard` (explicit reconfigure).
+ * Used by `dev` (auto-prompts if missing) and `credentials` (explicit reconfigure).
  */
 
 import chalk from "chalk";

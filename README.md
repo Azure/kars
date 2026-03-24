@@ -124,20 +124,25 @@ azureclaw egress my-agent --learned
 
 | Command | Description |
 |---|---|
+| **Lifecycle** | |
 | `azureclaw up` | Deploy full stack (AKS + ACR + AOAI + sandbox) |
-| `azureclaw connect <name>` | Connect TUI to sandbox |
-| `azureclaw egress <name>` | Manage egress security (`--pending`, `--approve`, `--deny`, `--allowlist`, `--learned`) |
-| `azureclaw approve <name> --list` | Manage tool approvals |
-| `azureclaw model set <name> <model>` | Switch model (hot-swap, no restart) |
-| `azureclaw logs <name>` | View container logs |
-| `azureclaw destroy <name>` | Tear down sandbox or resource group |
-| `azureclaw dev` | Local Docker sandbox |
+| `azureclaw dev` | Local Docker sandbox (same security controls) |
 | `azureclaw add <name>` | Add sandbox (`--governance`, `--learn-egress`, `--isolation`) |
+| `azureclaw destroy <name>` | Tear down sandbox or resource group |
+| **Operations** | |
+| `azureclaw connect <name>` | Connect TUI to sandbox |
 | `azureclaw status <name>` | Health, model, tokens used |
+| `azureclaw logs <name>` | View container logs |
+| **Configuration** | |
+| `azureclaw credentials` | Set or update Azure OpenAI credentials |
+| `azureclaw model set <name> <model>` | Switch model (hot-swap, no restart) |
 | `azureclaw policy <subcommand>` | Network policy management (`allow`, `deny`, `get`, `learn`, `set`) |
+| `azureclaw egress <name>` | Manage egress security (`--pending`, `--approve`, `--deny`, `--allowlist`, `--learned`) |
+| **Observability** | |
 | `azureclaw trace <name>` | eBPF tracing |
 | `azureclaw eval <name>` | Run Foundry evaluations |
-| `azureclaw onboard` | First-time credential setup |
+
+> **No prerequisite commands.** Both `up` and `dev` prompt for any missing configuration inline.
 
 ---
 

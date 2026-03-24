@@ -54,7 +54,7 @@ make push                 # pushes to configured ACR
 ### Local E2E
 
 ```bash
-azureclaw onboard         # configure Azure OpenAI (once)
+azureclaw credentials     # configure Azure OpenAI (or just run `dev`/`up` — prompts inline)
 azureclaw dev             # start local sandbox
 azureclaw connect dev-agent
 azureclaw destroy dev-agent
