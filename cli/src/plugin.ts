@@ -416,9 +416,10 @@ async function _routerCall(method: string, path: string, body?: unknown): Promis
 // ---------------------------------------------------------------------------
 
 async function initFoundry(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  if (foundryInitialized || process.env.__FOUNDRY_INITIALIZED === '1') return;
+  // Allow re-initialization per session (register() is called once per session)
+  // Only guard within the same register() call to prevent double-init
+  if (foundryInitialized) return;
   foundryInitialized = true;
-  process.env.__FOUNDRY_INITIALIZED = '1';
 
   const apiVer = "api-version=2025-11-15-preview";
   const endpoint = process.env.FOUNDRY_PROJECT_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || "";
@@ -770,6 +771,9 @@ const azureClawPlugin = definePluginEntry({
       "  ╚══════════════════════════════════════════════════════════╝",
       "",
     ].join("\n"));
+
+    // Reset per-session initialization guards so new sessions rediscover state
+    foundryInitialized = false;
 
     // Initialize AGT SDK (identity, policy, trust, audit, mesh)
     initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
@@ -1442,10 +1446,18 @@ const azureClawPlugin = definePluginEntry({
               return { content: [{ type: "text", text: safeJson(result) }] };
             } catch (e: any) {
               if (e.message?.includes("not found") || e.message?.includes("not_found")) {
-                await ensureStore();
-                return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
+                try {
+                  await ensureStore();
+                  // Retry search after store creation
+                  const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
+                  return { content: [{ type: "text", text: safeJson(result) }] };
+                } catch {
+                  return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
+                }
               }
-              throw e;
+              // Don't crash session on memory errors — return graceful message
+              log.warn(`Memory search failed: ${e.message}`);
+              return { content: [{ type: "text", text: `Memory search failed: ${e.message}. The memory service may still be initializing.` }] };
             }
           } else if (op === "update") {
             const body = {
@@ -1471,12 +1483,18 @@ const azureClawPlugin = definePluginEntry({
               return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
             } catch (e: any) {
               if (e.message?.includes("not found") || e.message?.includes("not_found")) {
-                await ensureStore();
-                const result = await doUpdate();
-                const status = result?.status || "submitted";
-                return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
+                try {
+                  await ensureStore();
+                  const result = await doUpdate();
+                  const status = result?.status || "submitted";
+                  return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
+                } catch (retryErr: any) {
+                  log.warn(`Memory update failed after store creation: ${retryErr.message}`);
+                  return { content: [{ type: "text", text: `Memory update failed: ${retryErr.message}` }] };
+                }
               }
-              throw e;
+              log.warn(`Memory update failed: ${e.message}`);
+              return { content: [{ type: "text", text: `Memory update failed: ${e.message}. The memory service may still be initializing.` }] };
             }
           } else if (op === "delete_scope") {
             const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, { scope });
