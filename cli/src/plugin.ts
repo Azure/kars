@@ -1353,12 +1353,29 @@ const azureClawPlugin = definePluginEntry({
           const text = (params.text as string) || "";
           const apiVer = "api-version=2025-11-15-preview";
 
-          // Build Foundry-format conversation item from simple text
-          const makeItem = (role: string, content: string) => ({
+          // Build Foundry-format conversation item (same for both update and search)
+          const makeItem = (content: string) => ({
             type: "message",
-            role,
+            role: "user",
             content: [{ type: "input_text", text: content }],
           });
+
+          // Poll an update operation until complete (LRO)
+          const pollUpdate = async (updateId: string, maxWaitMs = 60000) => {
+            const start = Date.now();
+            while (Date.now() - start < maxWaitMs) {
+              await new Promise(r => setTimeout(r, 2000));
+              try {
+                const status = await routerCall("GET", `/memory_stores/${store}/updates/${updateId}?${apiVer}`);
+                const state = status?.status || status?.state;
+                if (state === "completed" || state === "succeeded") return status;
+                if (state === "failed" || state === "error") throw new Error(`Memory update failed: ${safeJson(status)}`);
+              } catch (e: any) {
+                if (!e.message?.includes("404")) throw e;
+              }
+            }
+            return { status: "timeout", message: "Memory update still processing. It will complete in the background." };
+          };
 
           // Auto-create memory store if it doesn't exist yet
           const ensureStore = async () => {
@@ -1393,7 +1410,7 @@ const azureClawPlugin = definePluginEntry({
           if (op === "search") {
             const body = {
               scope,
-              items: [makeItem("user", text)],
+              items: [makeItem(text)],
               options: { max_memories: 10 },
             };
             try {
@@ -1409,17 +1426,31 @@ const azureClawPlugin = definePluginEntry({
           } else if (op === "update") {
             const body = {
               scope,
-              items: [makeItem("user", text)],
+              items: [makeItem(text)],
               update_delay: 0,
             };
-            try {
+            const doUpdate = async () => {
               const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, body);
-              return { content: [{ type: "text", text: safeJson(result) }] };
+              // update_memories is a LRO — log completion in background, don't block chat
+              const updateId = result?.update_id || result?.id;
+              if (updateId && (result?.status === "queued" || result?.status === "running")) {
+                pollUpdate(updateId).then(
+                  (r) => log.info(`Memory update ${updateId} completed: ${JSON.stringify(r?.memory_operations?.length ?? 0)} ops`),
+                  (e) => log.warn(`Memory update ${updateId} failed: ${e.message}`),
+                );
+              }
+              return result;
+            };
+            try {
+              const result = await doUpdate();
+              const status = result?.status || "submitted";
+              return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
             } catch (e: any) {
               if (e.message?.includes("not found") || e.message?.includes("not_found")) {
                 await ensureStore();
-                const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, body);
-                return { content: [{ type: "text", text: safeJson(result) }] };
+                const result = await doUpdate();
+                const status = result?.status || "submitted";
+                return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
               }
               throw e;
             }
