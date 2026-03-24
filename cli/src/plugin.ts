@@ -420,29 +420,46 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     indexes: [],
   };
 
-  // Query models via data-plane API (/openai/models) + Foundry resources in parallel
-  const [modelsResult, connResult, idxResult] = await Promise.allSettled([
+  // Query deployed models via /openai/deployments (Foundry data plane) with /openai/models fallback,
+  // plus Foundry project resources in parallel
+  const [deploymentsResult, modelsResult, connResult, idxResult] = await Promise.allSettled([
+    _routerCall("GET", `/v1/deployments`),
     _routerCall("GET", `/v1/models`),
     _routerCall("GET", `/connections?${apiVer}`),
     _routerCall("GET", `/indexes?${apiVer}`),
   ]);
 
-  if (modelsResult.status === "fulfilled") {
-    const data = modelsResult.value?.data || modelsResult.value?.value || [];
-    if (Array.isArray(data)) {
-      // Filter to chat-capable models only
-      foundryProject.deployments = data
-        .filter((m: any) => m?.capabilities?.chat_completion)
-        .slice(0, 50) // cap at 50 to keep MEMORY.md reasonable
-        .map((m: any) => ({
-          id: m.id || m.name,
-          model: m.id || m.name || "unknown",
-          sku: m.lifecycle_status || m.status,
-        }));
-      log.info(`Foundry: ${foundryProject.deployments.length} chat model(s) discovered`);
-    }
+  // Prefer /v1/deployments (actual deployed models), fall back to /v1/models (catalog)
+  const deploymentsData = deploymentsResult.status === "fulfilled"
+    ? (deploymentsResult.value?.data || deploymentsResult.value?.value || [])
+    : [];
+  const modelsData = modelsResult.status === "fulfilled"
+    ? (modelsResult.value?.data || modelsResult.value?.value || [])
+    : [];
+
+  if (Array.isArray(deploymentsData) && deploymentsData.length > 0) {
+    // Deployments endpoint returned results — use these (they're the user's actual deployments)
+    foundryProject.deployments = deploymentsData
+      .slice(0, 50)
+      .map((d: any) => ({
+        id: d.id || d.name || d.deployment_id,
+        model: d.model || d.properties?.model?.name || d.id || "unknown",
+        sku: d.sku?.name || d.properties?.provisioningState || d.status || "active",
+      }));
+    log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) discovered via /deployments`);
+  } else if (Array.isArray(modelsData) && modelsData.length > 0) {
+    // Fall back to models catalog — filter to chat-capable
+    foundryProject.deployments = modelsData
+      .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference || m?.id)
+      .slice(0, 50)
+      .map((m: any) => ({
+        id: m.id || m.name,
+        model: m.id || m.name || "unknown",
+        sku: m.lifecycle_status || m.status || "available",
+      }));
+    log.info(`Foundry: ${foundryProject.deployments.length} model(s) discovered via /models catalog`);
   } else {
-    log.warn(`Foundry models discovery failed: ${(modelsResult as any).reason?.message || "unknown"}`);
+    log.warn(`Foundry models discovery failed: deployments=${(deploymentsResult as any).reason?.message || "empty"}, models=${(modelsResult as any).reason?.message || "empty"}`);
   }
 
   if (connResult.status === "fulfilled") {
@@ -1498,24 +1515,31 @@ const azureClawPlugin = definePluginEntry({
           const resource = params.resource as string;
 
           if (resource === "models") {
-            // Use /v1/models — the router's built-in model listing endpoint
-            // which proxies to Azure OpenAI /openai/models with correct auth
-            const result = await routerCall("GET", "/v1/models");
-            const models = result?.data || result?.value || [];
-            // Filter to chat-capable models and format concisely
-            const chatModels = models
-              .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference)
-              .map((m: any) => ({
-                id: m.id,
-                status: m.status || m.lifecycle_status,
-                chat: !!m.capabilities?.chat_completion,
-                embeddings: !!m.capabilities?.embeddings,
-                vision: !!m.capabilities?.vision || m.id?.includes("vision"),
-              }));
+            // Try /v1/deployments first (actual deployed models), then /v1/models (catalog)
+            let deployments: any[] = [];
+            let source = "deployments";
+            try {
+              const depResult = await routerCall("GET", "/v1/deployments");
+              deployments = depResult?.data || depResult?.value || [];
+            } catch { /* fall through to models */ }
+
+            if (!Array.isArray(deployments) || deployments.length === 0) {
+              source = "models_catalog";
+              const result = await routerCall("GET", "/v1/models");
+              deployments = result?.data || result?.value || [];
+            }
+
+            const models = Array.isArray(deployments) ? deployments.map((m: any) => ({
+              id: m.id || m.name || m.deployment_id,
+              model: m.model || m.properties?.model?.name || m.id,
+              status: m.status || m.properties?.provisioningState || m.lifecycle_status || "active",
+              sku: m.sku?.name || "",
+            })) : [];
+
             return { content: [{ type: "text", text: safeJson({
-              total_models: models.length,
-              chat_capable: chatModels.length,
-              models: chatModels,
+              source,
+              total: models.length,
+              models,
             }) }] };
           }
 
