@@ -594,19 +594,48 @@ async fn foundry_proxy(
     // Forward the request path + query string to Foundry
     let path = uri.path();
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let upstream_url = format!("{}{}{}", endpoint.trim_end_matches('/'), path, query);
+
+    // Detect whether this is a Foundry project endpoint (services.ai.azure.com or ai.azure.com)
+    // vs a plain Azure OpenAI endpoint (openai.azure.com). The URL rewriting and auth
+    // audience differ between the two.
+    let is_foundry_project = endpoint.contains("services.ai.azure.com")
+        || endpoint.contains("ai.azure.com") && !endpoint.contains("openai.azure.com");
+    let is_azure_openai = endpoint.contains("openai.azure.com");
+
+    // For plain Azure OpenAI, management APIs live under /openai/ prefix and need
+    // a different api-version. Rewrite paths that don't already have the prefix.
+    let (upstream_path, upstream_query) = if is_azure_openai && !path.starts_with("/openai/") {
+        // /deployments → /openai/deployments, /connections → not available (skip)
+        let aoai_path = format!("/openai{}", path);
+        // Replace Foundry api-version with Azure OpenAI compatible one
+        let aoai_query = if query.contains("api-version=") {
+            query.replace("api-version=2025-11-15-preview", "api-version=2024-10-21")
+        } else {
+            "?api-version=2024-10-21".to_string()
+        };
+        (aoai_path, aoai_query)
+    } else {
+        (path.to_string(), query)
+    };
+
+    let upstream_url = format!("{}{}{}", endpoint.trim_end_matches('/'), upstream_path, upstream_query);
 
     tracing::info!(
         sandbox = %sandbox_name,
         method = %method,
-        path = %path,
+        path = %upstream_path,
+        is_foundry = %is_foundry_project,
         "Proxying Foundry Agent API"
     );
 
-    // Foundry Agent API (project endpoints at services.ai.azure.com) requires
-    // https://ai.azure.com audience, unlike inference endpoints which use
-    // https://cognitiveservices.azure.com
-    let token = match state.auth.get_token("https://ai.azure.com").await {
+    // Foundry project endpoints (services.ai.azure.com) require https://ai.azure.com audience.
+    // Plain Azure OpenAI endpoints require https://cognitiveservices.azure.com audience.
+    let audience = if is_foundry_project {
+        "https://ai.azure.com"
+    } else {
+        "https://cognitiveservices.azure.com"
+    };
+    let token = match state.auth.get_token(audience).await {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Foundry proxy auth failed: {e}");
@@ -615,6 +644,9 @@ async fn foundry_proxy(
             }))).into_response();
         }
     };
+
+    // For Azure OpenAI endpoints with API key auth (dev mode), use api-key header
+    let use_api_key_header = is_azure_openai && state.auth.is_api_key_mode();
 
     // Build upstream request — strip sandbox headers, inject auth
     let mut upstream_headers = HeaderMap::new();
@@ -626,10 +658,17 @@ async fn foundry_proxy(
             _ => { upstream_headers.insert(name.clone(), value.clone()); }
         }
     }
-    upstream_headers.insert(
-        "authorization",
-        axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
-    );
+    if use_api_key_header {
+        upstream_headers.insert(
+            "api-key",
+            axum::http::HeaderValue::from_str(&token).unwrap(),
+        );
+    } else {
+        upstream_headers.insert(
+            "authorization",
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+    }
     upstream_headers.entry("content-type")
         .or_insert(axum::http::HeaderValue::from_static("application/json"));
 
