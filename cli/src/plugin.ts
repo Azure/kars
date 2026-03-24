@@ -610,9 +610,10 @@ async function syncToFoundryMemory(
   log: { info: (m: string) => void; warn: (m: string) => void },
 ) {
   try {
-    const scope = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-    await _routerCall("POST", "/memory_stores/agent-memory:update_memories?api-version=2025-11-15-preview", {
-      scope,
+    const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+    const store = `memory-${agentName}`;
+    await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
+      scope: agentName,
       items: [{ role: "assistant", content, type: "message" }],
     });
   } catch {
@@ -1369,14 +1370,15 @@ const azureClawPlugin = definePluginEntry({
             description: "For 'update': the fact or preference to remember (e.g. 'User prefers dark roast coffee'). For 'search': the query to find relevant memories (e.g. 'coffee preferences').",
           },
           scope: { type: "string", description: "Memory scope (default: sandbox name). Use to partition memories by user." },
-          store_name: { type: "string", description: "Memory store name (default: 'agent-memory')." },
+          store_name: { type: "string", description: "Memory store name (default: 'memory-{agent}')." },
         },
         required: ["operation", "text"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
-          const store = (params.store_name as string) || "agent-memory";
-          const scope = (params.scope as string) || process.env.SANDBOX_NAME || "default";
+          const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+          const store = (params.store_name as string) || `memory-${agentName}`;
+          const scope = (params.scope as string) || agentName;
           const op = params.operation as string;
           const text = (params.text as string) || "";
           const apiVer = "api-version=2025-11-15-preview";
