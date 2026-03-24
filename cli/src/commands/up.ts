@@ -200,9 +200,19 @@ export function upCommand(): Command {
       // ── 4. SKU availability check ──────────────────────────────────
       if (!options.dryRun && !options.skipInfra) {
         console.log();
+        console.log(chalk.dim(`  Checking VM SKU availability in ${options.region}...\n`));
+
+        // System pool is always D4s_v5. Agent pool depends on isolation level:
+        // - standard/enhanced: D4s_v5 (general purpose, works with runc)
+        // - confidential: Standard_DC4as_v5 (AMD SEV-SNP, required for Kata CC)
+        const agentSku = options.isolation === "confidential" ? "Standard_DC4as_v5" : "Standard_D4s_v5";
+        const agentLabel = options.isolation === "confidential"
+          ? `AKS Kata pool (DC4as_v5 — confidential compute)`
+          : `AKS agent pool (D4s_v5)`;
+
         const skuChecks = [
           { sku: "Standard_D4s_v5", label: "AKS system pool (D4s_v5)" },
-          { sku: "Standard_D4s_v5", label: "AKS agent pool (D4s_v5)" },
+          { sku: agentSku, label: agentLabel },
         ];
         let skuOk = true;
         for (const check of skuChecks) {
@@ -233,8 +243,15 @@ export function upCommand(): Command {
         }
 
         // Quick check: can we create resources in this sub+region?
+        const isolationLabels: Record<string, string> = {
+          standard: "Standard (runc)",
+          enhanced: "Enhanced (runc + strict seccomp + ro-rootfs)",
+          confidential: "Confidential (Kata VM)",
+        };
         checkLine(true, `Region — ${options.region}`);
+        checkLine(true, `Isolation — ${isolationLabels[options.isolation] || options.isolation}`);
         checkLine(true, `Resource group — ${rg}`);
+        checkLine(true, `Sandbox — ${options.name}`);
 
         console.log(chalk.green(`\n  ✓ Preflight passed — ready to deploy\n`));
       }
