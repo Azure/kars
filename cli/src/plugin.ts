@@ -1857,12 +1857,16 @@ const azureClawPlugin = definePluginEntry({
           const available = foundryProject?.deployments?.map(d => d.id).join(", ") || "unknown";
           return { text: `Usage: /azureclaw-switch <model-name>\nAvailable: ${available}` };
         }
-        // Update env var so the inference router uses the new model
+        // Update both the plugin config and the inference router
         process.env.OPENCLAW_MODEL = model;
         config.model = model;
-        return {
-          text: `Switched to **${model}**. The new model takes effect on the next request.`,
-        };
+        try {
+          const result = await routerCall("PUT", "/admin/model", { model });
+          const prev = (result as any)?.previous || "unknown";
+          return { text: `Switched from **${prev}** → **${model}**. Takes effect on next request.` };
+        } catch {
+          return { text: `Plugin updated to **${model}**, but router admin endpoint not available. Model may need a restart.` };
+        }
       },
     });
 
