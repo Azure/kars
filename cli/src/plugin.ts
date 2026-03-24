@@ -1327,33 +1327,38 @@ const azureClawPlugin = definePluginEntry({
       description:
         "Manage persistent agent memory via Azure AI Foundry Memory Store. " +
         "Store facts, preferences, and context that persists across conversations. " +
-        "Supports semantic search over stored memories. Use when the agent needs to " +
-        "remember user preferences, past decisions, or project context.",
+        "Supports semantic search over stored memories.",
       parameters: {
         type: "object",
         properties: {
           operation: {
             type: "string",
             enum: ["search", "update", "delete_scope"],
-            description: "Operation: 'search' to find memories, 'update' to store new memories, 'delete_scope' to clear a scope.",
+            description: "Operation: 'search' to find relevant memories, 'update' to store new facts/preferences, 'delete_scope' to clear all memories in a scope.",
           },
-          query: { type: "string", description: "Search query (for 'search' operation)." },
-          items: {
-            type: "array",
-            items: { type: "object" },
-            description: "Messages to extract memories from (for 'update'). Array of {role, content, type} objects.",
+          text: {
+            type: "string",
+            description: "For 'update': the fact or preference to remember (e.g. 'User prefers dark roast coffee'). For 'search': the query to find relevant memories (e.g. 'coffee preferences').",
           },
-          scope: { type: "string", description: "Memory scope (default: sandbox name). Use to partition memories." },
+          scope: { type: "string", description: "Memory scope (default: sandbox name). Use to partition memories by user." },
           store_name: { type: "string", description: "Memory store name (default: 'agent-memory')." },
         },
-        required: ["operation"],
+        required: ["operation", "text"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const store = (params.store_name as string) || "agent-memory";
           const scope = (params.scope as string) || process.env.SANDBOX_NAME || "default";
           const op = params.operation as string;
+          const text = (params.text as string) || "";
           const apiVer = "api-version=2025-11-15-preview";
+
+          // Build Foundry-format conversation item from simple text
+          const makeItem = (role: string, content: string) => ({
+            type: "message",
+            role,
+            content: [{ type: "input_text", text: content }],
+          });
 
           // Auto-create memory store if it doesn't exist yet
           const ensureStore = async () => {
@@ -1361,7 +1366,6 @@ const azureClawPlugin = definePluginEntry({
               await routerCall("GET", `/memory_stores/${store}?${apiVer}`);
             } catch (e: any) {
               if (e.message?.includes("404") || e.message?.includes("not_found") || e.message?.includes("not found")) {
-                // Pick best available models for the memory store
                 const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
                 const embeddingModel = foundryProject?.deployments?.find(
                   (d: any) => d.id?.includes("embedding") || d.model?.includes("embedding")
@@ -1387,10 +1391,13 @@ const azureClawPlugin = definePluginEntry({
           };
 
           if (op === "search") {
+            const body = {
+              scope,
+              items: [makeItem("user", text)],
+              options: { max_memories: 10 },
+            };
             try {
-              const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, {
-                scope, query: params.query || "", max_memories: 10,
-              });
+              const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
               return { content: [{ type: "text", text: safeJson(result) }] };
             } catch (e: any) {
               if (e.message?.includes("not found") || e.message?.includes("not_found")) {
@@ -1400,26 +1407,24 @@ const azureClawPlugin = definePluginEntry({
               throw e;
             }
           } else if (op === "update") {
+            const body = {
+              scope,
+              items: [makeItem("user", text)],
+              update_delay: 0,
+            };
             try {
-              const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
-                scope, items: params.items || [],
-              });
+              const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, body);
               return { content: [{ type: "text", text: safeJson(result) }] };
             } catch (e: any) {
               if (e.message?.includes("not found") || e.message?.includes("not_found")) {
                 await ensureStore();
-                // Retry after creation
-                const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
-                  scope, items: params.items || [],
-                });
+                const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, body);
                 return { content: [{ type: "text", text: safeJson(result) }] };
               }
               throw e;
             }
           } else if (op === "delete_scope") {
-            const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, {
-              scope,
-            });
+            const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, { scope });
             return { content: [{ type: "text", text: `Scope '${scope}' deleted from memory store '${store}'.` }] };
           }
           return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
@@ -1844,22 +1849,19 @@ const azureClawPlugin = definePluginEntry({
     // ── /azureclaw-switch — switch model live ─────────────────────────────
     api.registerCommand({
       name: "azureclaw-switch",
-      description: "Switch AI model (e.g. /azureclaw-switch Phi-4)",
+      description: "Switch AI model (e.g. /azureclaw-switch gpt-5-mini)",
       acceptsArgs: true,
       handler: async (ctx) => {
         const model = ctx.args?.trim();
         if (!model) {
-          return { text: "Usage: /azureclaw-switch <model-name>\nExample: /azureclaw-switch DeepSeek-V3.2" };
+          const available = foundryProject?.deployments?.map(d => d.id).join(", ") || "unknown";
+          return { text: `Usage: /azureclaw-switch <model-name>\nAvailable: ${available}` };
         }
+        // Update env var so the inference router uses the new model
+        process.env.OPENCLAW_MODEL = model;
+        config.model = model;
         return {
-          text: [
-            `Switching to **${model}**...`,
-            "",
-            "From the host CLI, run:",
-            `\`azureclaw model set ${config.sandboxName} ${model}\``,
-            "",
-            "The model switch takes effect on the next request.",
-          ].join("\n"),
+          text: `Switched to **${model}**. The new model takes effect on the next request.`,
         };
       },
     });
