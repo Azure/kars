@@ -1,17 +1,13 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
+import { ensureCredentials, CREDENTIALS_FILE } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
 const AZURELINUX4_BASE =
   "azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0";
-const CONFIG_DIR = join(homedir(), ".azureclaw");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-const CREDENTIALS_FILE = join(CONFIG_DIR, "credentials");
 
 export function devCommand(): Command {
   const cmd = new Command("dev");
@@ -115,32 +111,14 @@ export function devCommand(): Command {
           stepper.done("Sandbox image found");
         }
 
-        // ── Load config from ~/.azureclaw/ ──────────────────────────
-        stepper.step("Loading configuration...");
-        let config: Record<string, string> = {};
-        let hasCredentials = false;
-
-        if (existsSync(CONFIG_FILE)) {
-          try {
-            config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
-          } catch {
-            // Corrupt config
-          }
-        }
-        if (existsSync(CREDENTIALS_FILE)) {
-          hasCredentials = true;
-        }
-
-        if (!config.endpoint || !hasCredentials) {
-          stepper.fail("No configuration found");
-          console.log(chalk.yellow(`  Run ${chalk.cyan("azureclaw onboard")} first to set up your Azure OpenAI credentials.\n`));
-          process.exit(1);
-        }
-
-        stepper.done("Configuration loaded");
-        const model = options.model !== "gpt-4.1" ? options.model : (config.model || "gpt-4.1");
+        // ── Load or prompt for credentials ──────────────────────────
+        stepper.step("Loading credentials...");
+        const creds = await ensureCredentials();
+        stepper.done("Credentials ready");
+        const model = options.model !== "gpt-4.1" ? options.model : creds.model;
 
         // ── Container startup ────────────────────────────────────────
+        stepper.step("Starting sandbox container...");
         const containerName = `azureclaw-${options.name}`;
 
         // Clean up any previous instance
@@ -183,7 +161,7 @@ export function devCommand(): Command {
           "--tmpfs", "/root:ro,size=0",
           "-p", "18789:18789",
           "-e", `OPENCLAW_MODEL=${model}`,
-          "-e", `AZURE_OPENAI_ENDPOINT=${config.endpoint}`,
+          "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,
           image,
         ], { stdio: "pipe" });
@@ -225,7 +203,7 @@ export function devCommand(): Command {
         kvLine("OS", "Azure Linux 3.0");
         kvLine("OpenClaw", "2026.3.13");
         kvLine("Model", `${model} (Azure OpenAI)`);
-        kvLine("Endpoint", config.endpoint);
+        kvLine("Endpoint", creds.endpoint);
         kvLine("Policy", `${options.policy} preset`);
         kvLine("Sandbox", options.name);
 
