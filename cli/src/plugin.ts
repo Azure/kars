@@ -429,37 +429,55 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     _routerCall("GET", `/indexes?${apiVer}`),
   ]);
 
-  // Prefer /v1/deployments (actual deployed models), fall back to /v1/models (catalog)
-  const deploymentsData = deploymentsResult.status === "fulfilled"
-    ? (deploymentsResult.value?.data || deploymentsResult.value?.value || [])
-    : [];
-  const modelsData = modelsResult.status === "fulfilled"
-    ? (modelsResult.value?.data || modelsResult.value?.value || [])
-    : [];
+  // Priority: 1) FOUNDRY_DEPLOYMENTS env var (from CLI discovery)
+  //           2) /v1/deployments (data-plane API, works on AI Services)
+  //           3) /v1/models (full catalog, always works)
+  const envDeployments = process.env.FOUNDRY_DEPLOYMENTS;
+  if (envDeployments) {
+    try {
+      const deps = JSON.parse(envDeployments);
+      if (Array.isArray(deps) && deps.length > 0) {
+        foundryProject.deployments = deps.map((d: any) =>
+          typeof d === "string"
+            ? { id: d, model: d, sku: "active" }
+            : { id: d.id || d.name, model: d.model || d.id || d.name || "unknown", sku: d.sku || "active" }
+        );
+        log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) from FOUNDRY_DEPLOYMENTS env`);
+      }
+    } catch { /* ignore parse error */ }
+  }
 
-  if (Array.isArray(deploymentsData) && deploymentsData.length > 0) {
-    // Deployments endpoint returned results — use these (they're the user's actual deployments)
-    foundryProject.deployments = deploymentsData
-      .slice(0, 50)
-      .map((d: any) => ({
-        id: d.id || d.name || d.deployment_id,
-        model: d.model || d.properties?.model?.name || d.id || "unknown",
-        sku: d.sku?.name || d.properties?.provisioningState || d.status || "active",
-      }));
-    log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) discovered via /deployments`);
-  } else if (Array.isArray(modelsData) && modelsData.length > 0) {
-    // Fall back to models catalog — filter to chat-capable
-    foundryProject.deployments = modelsData
-      .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference || m?.id)
-      .slice(0, 50)
-      .map((m: any) => ({
-        id: m.id || m.name,
-        model: m.id || m.name || "unknown",
-        sku: m.lifecycle_status || m.status || "available",
-      }));
-    log.info(`Foundry: ${foundryProject.deployments.length} model(s) discovered via /models catalog`);
-  } else {
-    log.warn(`Foundry models discovery failed: deployments=${(deploymentsResult as any).reason?.message || "empty"}, models=${(modelsResult as any).reason?.message || "empty"}`);
+  if (foundryProject.deployments.length === 0) {
+    const deploymentsData = deploymentsResult.status === "fulfilled"
+      ? (deploymentsResult.value?.data || deploymentsResult.value?.value || [])
+      : [];
+    const modelsData = modelsResult.status === "fulfilled"
+      ? (modelsResult.value?.data || modelsResult.value?.value || [])
+      : [];
+
+    if (Array.isArray(deploymentsData) && deploymentsData.length > 0) {
+      foundryProject.deployments = deploymentsData
+        .slice(0, 50)
+        .map((d: any) => ({
+          id: d.id || d.name || d.deployment_id,
+          model: d.model || d.properties?.model?.name || d.id || "unknown",
+          sku: d.sku?.name || d.properties?.provisioningState || d.status || "active",
+        }));
+      log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) discovered via /deployments`);
+    } else if (Array.isArray(modelsData) && modelsData.length > 0) {
+      // Fall back to models catalog — filter to chat-capable
+      foundryProject.deployments = modelsData
+        .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference || m?.id)
+        .slice(0, 50)
+        .map((m: any) => ({
+          id: m.id || m.name,
+          model: m.id || m.name || "unknown",
+          sku: m.lifecycle_status || m.status || "available",
+        }));
+      log.info(`Foundry: ${foundryProject.deployments.length} model(s) discovered via /models catalog`);
+    } else {
+      log.warn(`Foundry models discovery failed: deployments=${(deploymentsResult as any).reason?.message || "empty"}, models=${(modelsResult as any).reason?.message || "empty"}`);
+    }
   }
 
   if (connResult.status === "fulfilled") {
