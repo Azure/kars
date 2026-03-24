@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { saveContext } from "../config.js";
+import { saveContext, loadContext } from "../config.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -33,11 +33,117 @@ export function upCommand(): Command {
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
     .option("--dry-run", "Show what would be done without executing", false)
+    .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
       const bold = chalk.bold;
       const { default: inquirer } = await import("inquirer");
       const { execa } = await import("execa");
+      const ora = (await import("ora")).default;
+      const path = await import("path");
+      const fs = await import("fs");
+
+      // ── FAST UPGRADE PATH ──────────────────────────────────────────
+      // Skip all prompts and infra — just re-run Helm with cached context
+      if (options.upgrade) {
+        const ctx = loadContext();
+        if (!ctx?.acrLoginServer || !ctx?.aksCluster || !ctx?.resourceGroup) {
+          console.error(chalk.red("\n  No cached deployment context. Run 'azureclaw up' first (without --upgrade).\n"));
+          process.exit(1);
+        }
+
+        console.log(blue("\n  AzureClaw · Fast Upgrade\n"));
+
+        // Connect to AKS
+        let spin = ora("Connecting to AKS...").start();
+        await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
+        spin.succeed("AKS connected");
+
+        // Find Helm chart
+        let repoRoot = process.cwd();
+        for (let i = 0; i < 5; i++) {
+          if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
+          repoRoot = path.dirname(repoRoot);
+        }
+        const helmPath = path.join(repoRoot, "deploy", "helm", "azureclaw");
+
+        // Build Helm args from cached context
+        const openAiEndpoint = ctx.foundryEndpoint || "";
+        const helmArgs = [
+          "upgrade", "--install", "azureclaw", helmPath,
+          "--namespace", "azureclaw-system",
+          "--create-namespace",
+          "--set", `controller.image.repository=${ctx.acrLoginServer}/azureclaw-controller`,
+          "--set", `controller.image.tag=latest`,
+          "--set", `inferenceRouter.image.repository=${ctx.acrLoginServer}/azureclaw-inference-router`,
+          "--set", `inferenceRouter.image.tag=latest`,
+          "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
+          "--set", `sandbox.image.repository=${ctx.acrLoginServer}/openclaw-sandbox`,
+          "--set", `sandbox.image.tag=latest`,
+          "--set", `azure.workloadIdentity.clientId=${ctx.wiClientId || ""}`,
+          "--set", `azure.keyVaultCsi.keyVaultName=${ctx.keyVaultName || ""}`,
+          "--wait",
+          "--timeout", "5m",
+        ];
+        if (ctx.foundryEndpoint) {
+          helmArgs.push("--set", `foundry.endpoint=${ctx.foundryEndpoint}`);
+        }
+        if (ctx.foundryProjectEndpoint) {
+          helmArgs.push("--set", `foundry.projectEndpoint=${ctx.foundryProjectEndpoint}`);
+        }
+        if (ctx.imdsClientId) {
+          helmArgs.push("--set", `foundry.imdsClientId=${ctx.imdsClientId}`);
+        }
+        // Fedcred config for controller auto-creation
+        if (ctx.oidcIssuerUrl) {
+          try {
+            const { stdout: subId } = await execa("az", ["account", "show", "--query", "id", "--output", "tsv"], { stdio: "pipe", timeout: 10000 });
+            helmArgs.push(
+              "--set", `fedcred.subscriptionId=${subId.trim()}`,
+              "--set", `fedcred.identityName=${ctx.identityName || ""}`,
+              "--set", `fedcred.identityResourceGroup=${ctx.identityResourceGroup || ctx.resourceGroup}`,
+              "--set", `fedcred.oidcIssuerUrl=${ctx.oidcIssuerUrl}`,
+            );
+          } catch { /* non-critical */ }
+        }
+        // Discover deployments
+        try {
+          const accountName = ctx.foundryEndpoint ? new URL(ctx.foundryEndpoint).hostname.split(".")[0] : "";
+          if (accountName) {
+            const { stdout: rgOut } = await execa("az", [
+              "cognitiveservices", "account", "list",
+              "--query", `[?name=='${accountName}'].resourceGroup | [0]`,
+              "--output", "tsv",
+            ], { stdio: "pipe", timeout: 15000 });
+            const foundryRg = rgOut.trim();
+            if (foundryRg) {
+              const { stdout } = await execa("az", [
+                "cognitiveservices", "account", "deployment", "list",
+                "--name", accountName, "--resource-group", foundryRg,
+                "--query", "[].name", "--output", "json",
+              ], { stdio: "pipe", timeout: 30000 });
+              const deps = JSON.parse(stdout || "[]");
+              if (Array.isArray(deps) && deps.length > 0) {
+                const escaped = JSON.stringify(deps).replace(/,/g, "\\,");
+                helmArgs.push("--set-string", `foundry.deployments=${escaped}`);
+              }
+            }
+          }
+        } catch { /* non-critical */ }
+
+        spin = ora("Upgrading Helm release...").start();
+        await execa("helm", helmArgs, { stdio: "pipe" });
+        spin.succeed("Helm upgraded");
+
+        // Rollout restart
+        spin = ora("Restarting controller...").start();
+        await execa("kubectl", ["rollout", "restart", "deployment/azureclaw-controller", "-n", "azureclaw-system"], { stdio: "pipe" }).catch(() => {});
+        await execa("kubectl", ["rollout", "status", "deployment/azureclaw-controller", "-n", "azureclaw-system", "--timeout=120s"], { stdio: "pipe" }).catch(() => {});
+        spin.succeed("Controller restarted");
+
+        console.log(chalk.green("\n  ✓ Fast upgrade complete\n"));
+        return;
+      }
 
       // Auto-detect developer mode: if running from the repo (Dockerfile exists), default to --build
       if (!options.build && !process.argv.includes("--source-acr")) {
