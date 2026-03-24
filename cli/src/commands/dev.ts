@@ -92,6 +92,7 @@ export function devCommand(): Command {
           }
 
           const dockerfilePath = path.join(repoRoot, "sandbox-images/openclaw/Dockerfile");
+          const routerDockerfile = path.join(repoRoot, "inference-router/Dockerfile");
           if (!existsSync(dockerfilePath)) {
             stepper.fail("Dockerfile not found");
             console.log(chalk.yellow(`
@@ -102,10 +103,29 @@ export function devCommand(): Command {
             process.exit(1);
           }
 
-          stepper.update("Building sandbox image (first run takes a few minutes)...");
+          // Build inference router locally (sandbox Dockerfile needs it)
+          const routerImage = "azureclaw-inference-router:dev";
+          let routerExists = false;
+          try {
+            await execa("docker", ["image", "inspect", routerImage], { stdio: "pipe" });
+            routerExists = true;
+          } catch { /* not built yet */ }
+
+          if (options.build || !routerExists) {
+            stepper.update("Building inference router (Rust — first run takes a few minutes)...");
+            await execa("docker", [
+              "build", "--platform", "linux/amd64",
+              "-t", routerImage,
+              "-f", routerDockerfile,
+              repoRoot,
+            ], { stdio: "pipe" });
+          }
+
+          stepper.update("Building sandbox image...");
           await execa("docker", [
             "build",
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
+            "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
             "-t", "azureclaw-sandbox:dev",
             "-f", dockerfilePath,
             repoRoot,
