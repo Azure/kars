@@ -180,49 +180,32 @@ export function devCommand(): Command {
 
         // ── Discover deployed models from Azure endpoint ─────────────
         let discoveredDeployments = "";
+        // Discover deployed models via Azure CLI (ARM management API — only reliable way).
+        // Data-plane /openai/deployments always returns 404; skip it.
         try {
-          const ep = creds.endpoint.replace(/\/+$/, "");
-          const res = await fetch(
-            `${ep}/openai/deployments?api-version=2024-10-21`,
-            { headers: { "api-key": creds.apiKey }, signal: AbortSignal.timeout(8000) }
-          );
-          if (res.ok) {
-            const json = await res.json() as { data?: Array<{ id?: string; model?: string }> };
-            const deps = (json.data || []).map((d: any) => d.id || d.model).filter(Boolean);
-            if (deps.length > 0) {
+          const accountName = new URL(creds.endpoint).hostname.split(".")[0];
+          const { stdout: rgOut } = await execa("az", [
+            "cognitiveservices", "account", "list",
+            "--query", `[?name=='${accountName}'].resourceGroup | [0]`,
+            "--output", "tsv",
+          ], { stdio: "pipe", timeout: 15000 });
+          const rg = rgOut.trim();
+          if (rg) {
+            const { stdout } = await execa("az", [
+              "cognitiveservices", "account", "deployment", "list",
+              "--name", accountName,
+              "--resource-group", rg,
+              "--query", "[].{name:name, model:properties.model.name}",
+              "--output", "json",
+            ], { stdio: "pipe", timeout: 30000 });
+            const deps = JSON.parse(stdout || "[]");
+            if (Array.isArray(deps) && deps.length > 0) {
               discoveredDeployments = JSON.stringify(deps);
-              stepper.done(`Discovered ${deps.length} deployment(s): ${deps.join(", ")}`);
+              const names = deps.map((d: any) => d.name || d).slice(0, 10);
+              stepper.done(`Discovered ${deps.length} deployment(s): ${names.join(", ")}${deps.length > 10 ? "..." : ""}`);
             }
           }
-        } catch { /* non-critical — plugin will fall back to models catalog */ }
-
-        // If data-plane listing didn't work, try Azure CLI as fallback
-        if (!discoveredDeployments) {
-          try {
-            const accountName = new URL(creds.endpoint).hostname.split(".")[0];
-            // Find the resource group for this account
-            const { stdout: rgOut } = await execa("az", [
-              "cognitiveservices", "account", "list",
-              "--query", `[?name=='${accountName}'].resourceGroup | [0]`,
-              "--output", "tsv",
-            ], { stdio: "pipe", timeout: 15000 });
-            const rg = rgOut.trim();
-            if (rg) {
-              const { stdout } = await execa("az", [
-                "cognitiveservices", "account", "deployment", "list",
-                "--name", accountName,
-                "--resource-group", rg,
-                "--query", "[].name",
-                "--output", "json",
-              ], { stdio: "pipe", timeout: 15000 });
-              const deps = JSON.parse(stdout || "[]");
-              if (Array.isArray(deps) && deps.length > 0) {
-                discoveredDeployments = JSON.stringify(deps);
-                stepper.done(`Discovered ${deps.length} deployment(s) via Azure CLI: ${deps.join(", ")}`);
-              }
-            }
-          } catch { /* Azure CLI might not be logged in or account not found */ }
-        }
+        } catch { /* Azure CLI might not be logged in or account not found */ }
 
         // ── AGT infrastructure (relay, registry, postgres) ───────────
         let agtReady = false;
