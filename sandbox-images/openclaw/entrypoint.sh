@@ -320,12 +320,11 @@ if [ -d /opt/azureclaw-plugin ]; then
   echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
 fi
 
-# Add gateway token to .bashrc so interactive shells have it
-cat >> /sandbox/.bashrc << RCEOF2
-
-# AzureClaw: Gateway auth
-export OPENCLAW_GATEWAY_TOKEN="${GATEWAY_TOKEN}"
-RCEOF2
+# Write gateway token to .bashrc (remove any stale tokens from prior runs first)
+sed -i '/OPENCLAW_GATEWAY_TOKEN/d' /sandbox/.bashrc
+echo "export OPENCLAW_GATEWAY_TOKEN=\"${GATEWAY_TOKEN}\"" >> /sandbox/.bashrc
+# Also write to a dedicated file so dev.ts can read it without parsing .bashrc
+echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 
 # Ensure all sandbox files are owned by sandbox user
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /sandbox
