@@ -139,14 +139,26 @@ async function processTaskWithTools(
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(postData),
+          "x-azureclaw-sandbox": process.env.SANDBOX_NAME || process.env.HOSTNAME || "unknown",
+        },
         timeout: 60000,
       }, (res) => {
         let body = "";
         res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
         res.on("end", () => {
-          try { resolve(JSON.parse(body)); } catch { reject(new Error(`LLM parse error: ${body.slice(0, 200)}`)); }
+          try {
+            const parsed = JSON.parse(body);
+            if (res.statusCode && res.statusCode >= 400) {
+              reject(new Error(`LLM HTTP ${res.statusCode}: ${body.slice(0, 300)}`));
+            } else {
+              resolve(parsed);
+            }
+          } catch { reject(new Error(`LLM parse error: ${body.slice(0, 200)}`)); }
         });
+        res.on("error", () => {});
       });
       req.on("error", (e) => reject(e));
       req.on("timeout", () => { req.destroy(); reject(new Error("LLM timeout")); });
