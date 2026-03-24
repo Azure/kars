@@ -1371,6 +1371,7 @@ const azureClawPlugin = definePluginEntry({
                   name: store,
                   description: "AzureClaw agent persistent memory",
                   definition: {
+                    kind: "default",
                     chat_model: chatModel,
                     embedding_model: embeddingModel,
                     options: {
