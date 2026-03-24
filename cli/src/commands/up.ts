@@ -1266,11 +1266,27 @@ export function upCommand(): Command {
               // Non-fatal
             }
 
+            // Get the AKS kubelet managed identity principal ID (used by IMDS for sub-agents)
+            let kubeletMiPrincipalId = "";
+            try {
+              const { stdout: kubePid } = await execa("az", [
+                "aks", "show",
+                "--name", `${baseName}-aks`,
+                "--resource-group", rg,
+                "--query", "identityProfile.kubeletidentity.objectId",
+                "--output", "tsv",
+              ], { stdio: "pipe" });
+              kubeletMiPrincipalId = kubePid.trim().split("\n").pop()?.trim() || "";
+            } catch {
+              // Non-fatal — older AKS may not expose this
+            }
+
             // Build Bicep that assigns roles via deployment (bypasses CLI conditional access)
             const bicepLines = [
               "targetScope = 'resourceGroup'",
               "param sandboxWiPrincipalId string",
               "param projectMiPrincipalId string",
+              "param kubeletMiPrincipalId string",
               `param foundryAccountName string = '${foundryAccountName}'`,
               "",
               "// Azure AI User role ID — has Microsoft.CognitiveServices/* wildcard data actions",
@@ -1313,6 +1329,17 @@ export function upCommand(): Command {
               "    principalType: 'ServicePrincipal'",
               "  }",
               "}",
+              "",
+              "// 3. Kubelet MI → Cognitive Services OpenAI User (IMDS fallback for spawned sub-agents)",
+              "resource kubeletOpenAiRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(kubeletMiPrincipalId)) {",
+              "  name: guid(aiServices.id, kubeletMiPrincipalId, 'cog-svc-openai-user')",
+              "  scope: aiServices",
+              "  properties: {",
+              "    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cogSvcOpenAiUser)",
+              "    principalId: kubeletMiPrincipalId",
+              "    principalType: 'ServicePrincipal'",
+              "  }",
+              "}",
             ];
 
             const fs = await import("fs");
@@ -1328,6 +1355,7 @@ export function upCommand(): Command {
                 "--parameters",
                 `sandboxWiPrincipalId=${sandboxWiPrincipalId}`,
                 `projectMiPrincipalId=${projectMiPrincipalId}`,
+                `kubeletMiPrincipalId=${kubeletMiPrincipalId}`,
                 "--output", "none",
               ], { stdio: "pipe" });
             } catch {
