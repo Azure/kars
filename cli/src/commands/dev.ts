@@ -324,6 +324,8 @@ export function devCommand(): Command {
           "-e", `OPENCLAW_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,
+          // Learn mode on by default in dev — records all egress domains for review
+          "-e", "EGRESS_LEARN_MODE=true",
           ...agtEnvArgs,
           image,
         ], { stdio: "pipe" });
@@ -369,18 +371,20 @@ export function devCommand(): Command {
         kvLine("Policy", `${options.policy} preset`);
         kvLine("Sandbox", options.name);
 
-        // Get the gateway token for web UI — extract from .bashrc since the entrypoint
-        // writes it there and docker exec as root won't source sandbox's login profile.
+        // Read the gateway token from a dedicated file written by the entrypoint.
+        // Poll because the entrypoint writes it after config + plugin install.
         let gatewayToken = "";
-        try {
-          const { stdout: tokenOut } = await execa("docker", [
-            "exec", containerName, "grep", "-oP", "OPENCLAW_GATEWAY_TOKEN=\"\\K[^\"]+",
-            "/sandbox/.bashrc",
-          ], { stdio: "pipe" });
-          // Take the last line (multiple starts may append duplicates)
-          gatewayToken = tokenOut.trim().split("\n").pop() || "";
-        } catch {
-          // Token not available yet
+        for (let i = 0; i < 15; i++) {
+          try {
+            const { stdout: tokenOut } = await execa("docker", [
+              "exec", containerName, "cat", "/tmp/gateway-token",
+            ], { stdio: "pipe" });
+            gatewayToken = tokenOut.trim();
+            if (gatewayToken) break;
+          } catch {
+            // Not written yet
+          }
+          await new Promise(r => setTimeout(r, 1000));
         }
 
         section("Commands");
@@ -390,11 +394,9 @@ export function devCommand(): Command {
         console.log(`  Stop:     ${chalk.cyan(`azureclaw destroy ${options.name}`)}`);
         if (gatewayToken) {
           const url = `http://localhost:18789/#token=${gatewayToken}`;
-          // OSC 8 hyperlink: makes URL clickable in modern terminals.
-          // Color codes must be INSIDE the hyperlink (between the two OSC 8 markers),
-          // not wrapping the entire sequence — otherwise terminals can't parse it.
-          const link = `\u001B]8;;${url}\u0007${chalk.cyan(url)}\u001B]8;;\u0007`;
-          console.log(`  Web UI:   ${link}`);
+          // Print URL without chalk formatting — terminals auto-detect http:// links.
+          // Chalk ANSI codes break terminal URL detection in most emulators.
+          console.log(`  Web UI:   ${url}`);
         }
         console.log(chalk.dim(`\n  Production: azureclaw up (deploys to AKS)`));
         console.log();
