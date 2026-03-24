@@ -6,8 +6,8 @@ import { ensureCredentials, CREDENTIALS_FILE } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
-const AZURELINUX4_BASE =
-  "azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0";
+const AZURELINUX_BASE =
+  "mcr.microsoft.com/azurelinux/base/core:3.0";
 
 export function devCommand(): Command {
   const cmd = new Command("dev");
@@ -36,7 +36,7 @@ export function devCommand(): Command {
     .option(
       "--base-image <image>",
       "Azure Linux base image for building sandbox (override for custom registries)",
-      AZURELINUX4_BASE
+      AZURELINUX_BASE
     )
     .action(async (options) => {
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
@@ -63,27 +63,32 @@ export function devCommand(): Command {
             await execa("docker", ["image", "inspect", image], { stdio: "pipe" });
             imageExists = true;
           } catch {
-            // Not found
+            // Not found — will build
           }
         }
 
         if (options.build || !imageExists) {
           const baseImage = options.baseImage;
+
+          // Check if base image exists locally, pull if not
           try {
             await execa("docker", ["image", "inspect", baseImage], { stdio: "pipe" });
           } catch {
-            stepper.fail(`Azure Linux base image not found`);
-            console.log(chalk.yellow(`
-  The AzureClaw sandbox requires the Azure Linux 3 base image.
-  This is a limited-availability image — request access first:
+            stepper.update(`Pulling base image (${baseImage})...`);
+            try {
+              await execa("docker", ["pull", "--platform", "linux/amd64", baseImage], { stdio: "pipe" });
+            } catch {
+              stepper.fail("Could not pull base image");
+              console.log(chalk.yellow(`
+  Failed to pull ${chalk.bold(baseImage)}.
 
-  ${chalk.bold("1.")} Request access: ${chalk.cyan("https://eng.ms/docs/products/azure-linux/overview/AzureLinux4Alpha1")}
-  ${chalk.bold("2.")} Pull the image: ${chalk.cyan(`docker pull ${baseImage}`)}
-  ${chalk.bold("3.")} Re-run:         ${chalk.cyan("azureclaw dev")}
+  ${chalk.bold("1.")} Pull manually: ${chalk.cyan(`docker pull --platform linux/amd64 ${baseImage}`)}
+  ${chalk.bold("2.")} Re-run:        ${chalk.cyan("azureclaw dev")}
 
-  Custom registry? ${chalk.cyan(`azureclaw dev --base-image <your-registry>/azurelinux/base/core:4.0`)}
+  Custom registry? ${chalk.cyan(`azureclaw dev --base-image <your-registry>/azurelinux/base/core:3.0`)}
 `));
-            process.exit(1);
+              process.exit(1);
+            }
           }
 
           const dockerfilePath = path.join(repoRoot, "sandbox-images/openclaw/Dockerfile");
