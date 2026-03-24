@@ -179,7 +179,7 @@ When a user starts a new conversation, you MUST include ALL of the following in 
 Do NOT skip any of these items — they are required for security transparency:
 
 1. **Header**: "🔒 AzureClaw Sandbox — Secure AI Runtime on Azure"
-2. **Foundry Project**: Show the connected project: \`${FOUNDRY_PROJECT_ENDPOINT:-Not configured (Azure OpenAI direct)}\`
+2. **Foundry Project**: Show the connected project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
 3. **Model**: Show the active model: \`${MODEL}\`
 4. **Sandbox ID**: Show the sandbox name: \`\${HOSTNAME:-dev}\`
 5. **Security summary**: Mention that the environment is sandboxed (isolated container, read-only rootfs, seccomp, egress policy, Content Safety + Prompt Shields)
@@ -328,7 +328,7 @@ You run inside an isolated, hardened container on Azure Linux. Your inference is
 through the AzureClaw inference router which provides Content Safety, Prompt Shields,
 token budgets, and egress control.
 
-**Connected project**: ${FOUNDRY_PROJECT_ENDPOINT:-Azure OpenAI (direct)}
+**Connected project**: ${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}
 **Primary model**: ${MODEL}
 
 When greeting users for the first time, be warm and welcoming. Briefly mention you're
