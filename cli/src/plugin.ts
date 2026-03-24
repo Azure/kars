@@ -29,6 +29,16 @@ try {
   definePluginEntry = (def: any) => def;
 }
 
+// Prevent unhandled rejections from crashing the process.
+// The read-only rootfs causes EPERM in chokidar file watchers — those
+// are non-fatal but show up as unhandled rejections that kill Node.
+process.on("unhandledRejection", (reason: any) => {
+  const msg = reason?.message || String(reason);
+  // EPERM from file watchers on read-only rootfs — harmless, suppress
+  if (msg.includes("EPERM") && msg.includes("watch")) return;
+  console.error("[azureclaw] Unhandled rejection (suppressed crash):", msg);
+});
+
 // ---------------------------------------------------------------------------
 // AGT SDK — AgentMesh (amitayks/agentmesh)
 // Full E2E encrypted inter-agent communication via self-hosted relay/registry.
@@ -506,11 +516,13 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
   }
 
   // Write Foundry context to MEMORY.md so the agent knows what's available
+  // Write to /tmp/ first, then rename — avoids triggering chokidar mid-write
   try {
     const fs = await import("node:fs");
     const memoryDir = "/sandbox/.openclaw/workspace/memory";
     const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
-    fs.mkdirSync(memoryDir, { recursive: true });
+    const tmpFile = "/tmp/azureclaw-MEMORY.md";
+    try { fs.mkdirSync(memoryDir, { recursive: true }); } catch { /* read-only fs */ }
 
     const sections: string[] = ["# AzureClaw Environment\n"];
 
@@ -564,15 +576,23 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     const endMarker = "\n---\n";
     const envSection = sections.join("\n") + endMarker;
 
+    let content: string;
     if (existingMemory.includes(envMarker)) {
-      // Replace existing environment section
       const start = existingMemory.indexOf(envMarker);
       const end = existingMemory.indexOf(endMarker, start);
       const before = existingMemory.slice(0, start);
       const after = end >= 0 ? existingMemory.slice(end + endMarker.length) : "";
-      fs.writeFileSync(memoryFile, envSection + after);
+      content = envSection + after;
     } else {
-      fs.writeFileSync(memoryFile, envSection + existingMemory);
+      content = envSection + existingMemory;
+    }
+    // Write to /tmp/ first, then atomic rename — reduces chokidar watcher churn
+    fs.writeFileSync(tmpFile, content);
+    try {
+      fs.renameSync(tmpFile, memoryFile);
+    } catch {
+      // rename across filesystems fails — fall back to direct write
+      fs.writeFileSync(memoryFile, content);
     }
     log.info("Foundry project context written to MEMORY.md");
   } catch (e: any) {
@@ -1892,9 +1912,53 @@ const azureClawPlugin = definePluginEntry({
           const available = foundryProject?.deployments?.map(d => d.id).join(", ") || "unknown";
           return { text: `Usage: /azureclaw-switch <model-name>\nAvailable: ${available}` };
         }
-        // Update both the plugin config and the inference router
+        // Update plugin env + inference router
         process.env.OPENCLAW_MODEL = model;
         config.model = model;
+
+        // Update OpenClaw's model config files so session_status accepts the new model
+        try {
+          const fs = await import("node:fs");
+          const modelsPath = "/sandbox/.openclaw/agents/main/agent/models.json";
+          const oclawPath = "/sandbox/.openclaw/openclaw.json";
+          const sandbox = process.env.HOSTNAME || "dev-agent";
+
+          // Build models array with all deployments + the new model
+          const allModels = new Set<string>();
+          allModels.add(model);
+          if (foundryProject?.deployments) {
+            for (const d of foundryProject.deployments) {
+              if (!d.id.includes("embedding")) allModels.add(d.id);
+            }
+          }
+          const modelsArr = [...allModels].map(id => ({
+            id, name: `${id} (Azure via AzureClaw)`, reasoning: false,
+            input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 200000, maxTokens: 8192, api: "openai-completions",
+          }));
+
+          // Update models.json
+          try {
+            const mj = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
+            if (mj.providers?.["azure-openai"]) {
+              mj.providers["azure-openai"].models = modelsArr;
+            }
+            fs.writeFileSync(modelsPath, JSON.stringify(mj, null, 2));
+          } catch { /* non-critical */ }
+
+          // Update openclaw.json — both models list and default primary
+          try {
+            const oc = JSON.parse(fs.readFileSync(oclawPath, "utf8"));
+            if (oc.models?.providers?.["azure-openai"]) {
+              oc.models.providers["azure-openai"].models = modelsArr.map(m => ({ id: m.id, name: m.name }));
+            }
+            if (oc.agents?.defaults?.model) {
+              oc.agents.defaults.model.primary = `azure-openai/${model}`;
+            }
+            fs.writeFileSync(oclawPath, JSON.stringify(oc, null, 2));
+          } catch { /* non-critical */ }
+        } catch { /* read-only fs — skip config update */ }
+
         try {
           const result = await routerCall("PUT", "/admin/model", { model });
           const prev = (result as any)?.previous || "unknown";
