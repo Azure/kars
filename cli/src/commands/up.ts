@@ -34,10 +34,197 @@ export function upCommand(): Command {
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
       const bold = chalk.bold;
+      const { default: inquirer } = await import("inquirer");
+      const { execa } = await import("execa");
+
+      // ══════════════════════════════════════════════════════════════
+      //  PREFLIGHT: validate everything before touching Azure
+      // ══════════════════════════════════════════════════════════════
+
+      if (!options.dryRun) {
+        banner("AzureClaw · Preflight Check", "Validating environment before deployment");
+      }
+
+      // ── 1. Check required CLI tools ────────────────────────────────
+      const tools: { cmd: string; args: string[]; label: string; required: boolean }[] = [
+        { cmd: "az", args: ["--version"], label: "Azure CLI", required: true },
+        { cmd: "kubectl", args: ["version", "--client", "--short"], label: "kubectl", required: true },
+        { cmd: "helm", args: ["version", "--short"], label: "Helm", required: true },
+        { cmd: "docker", args: ["info", "--format", "{{.ServerVersion}}"], label: "Docker", required: options.build },
+      ];
+
+      if (!options.dryRun) {
+        let allToolsOk = true;
+        for (const tool of tools) {
+          try {
+            await execa(tool.cmd, tool.args, { stdio: "pipe", timeout: 10000 });
+            checkLine(true, `${tool.label} — found`);
+          } catch {
+            if (tool.required) {
+              checkLine(false, `${tool.label} — ${chalk.red("not found")} (required)`);
+              allToolsOk = false;
+            } else {
+              checkLine(false, `${tool.label} — not found (optional${tool.cmd === "docker" ? ", needed for --build" : ""})`);
+            }
+          }
+        }
+        if (!allToolsOk) {
+          console.log(chalk.red("\n  Missing required tools. Install them and try again.\n"));
+          process.exit(1);
+        }
+      }
+
+      // ── 2. Azure auth + subscription ───────────────────────────────
+      if (!options.dryRun) {
+        let isLoggedIn = false;
+        try {
+          await execa("az", ["account", "show", "--output", "none"], { stdio: "pipe" });
+          isLoggedIn = true;
+        } catch { /* not logged in */ }
+
+        if (!isLoggedIn) {
+          console.log(chalk.yellow("\n  Not logged into Azure. Opening browser for login...\n"));
+          await execa("az", ["login"], { stdio: "inherit" });
+        }
+
+        // Get current subscription
+        const { stdout: subJson } = await execa("az", [
+          "account", "show", "--output", "json",
+        ], { stdio: "pipe" });
+        const currentSub = JSON.parse(subJson);
+
+        // List all subscriptions to check for multiples
+        const { stdout: subsJson } = await execa("az", [
+          "account", "list", "--query", "[?state=='Enabled']", "--output", "json",
+        ], { stdio: "pipe" });
+        const subs = JSON.parse(subsJson) as { id: string; name: string; isDefault: boolean }[];
+
+        if (subs.length > 1) {
+          // Multiple subscriptions — let user confirm or pick
+          const subChoices = subs.map((s) => ({
+            name: `${s.name} (${s.id.slice(0, 8)}...)${s.isDefault ? chalk.dim(" ← default") : ""}`,
+            value: s.id,
+          }));
+
+          const { subId } = await inquirer.prompt([{
+            type: "list",
+            name: "subId",
+            message: "Which Azure subscription?",
+            choices: subChoices,
+            default: currentSub.id,
+          }]);
+
+          if (subId !== currentSub.id) {
+            await execa("az", ["account", "set", "--subscription", subId], { stdio: "pipe" });
+            const selected = subs.find((s) => s.id === subId);
+            checkLine(true, `Subscription — ${selected?.name || subId}`);
+          } else {
+            checkLine(true, `Subscription — ${currentSub.name}`);
+          }
+        } else {
+          checkLine(true, `Subscription — ${currentSub.name}`);
+        }
+      }
+
+      // ── 3. Interactive prompts for region/name (if defaults) ───────
+      const userProvidedRegion = process.argv.includes("--region");
+      const userProvidedName = process.argv.includes("--name");
+      const userProvidedRg = process.argv.includes("-g") || process.argv.includes("--resource-group");
+
+      if (!options.dryRun && (!userProvidedRegion || !userProvidedName)) {
+        console.log();
+
+        if (!userProvidedRegion) {
+          const { region } = await inquirer.prompt([{
+            type: "list" as const,
+            name: "region",
+            message: "Azure region:",
+            choices: [
+              { name: "East US 2 (Recommended)", value: "eastus2" },
+              { name: "West US 3", value: "westus3" },
+              { name: "Central US", value: "centralus" },
+              { name: "West Europe", value: "westeurope" },
+              { name: "North Europe", value: "northeurope" },
+              { name: "UK South", value: "uksouth" },
+              { name: "Southeast Asia", value: "southeastasia" },
+              { name: "Australia East", value: "australiaeast" },
+              new inquirer.Separator(),
+              { name: "Other (type region name)", value: "__other__" },
+            ],
+            default: options.region,
+          }]);
+
+          if (region === "__other__") {
+            const { customRegion } = await inquirer.prompt([{
+              type: "input" as const,
+              name: "customRegion",
+              message: "Enter Azure region name:",
+              validate: (input: string) => input.length > 0 || "Region is required",
+            }]);
+            options.region = customRegion;
+          } else {
+            options.region = region;
+          }
+        }
+
+        if (!userProvidedName) {
+          const { name } = await inquirer.prompt([{
+            type: "input" as const,
+            name: "name",
+            message: "Sandbox agent name:",
+            default: options.name,
+            validate: (input: string) => /^[a-z0-9][a-z0-9-]*$/.test(input) || "Lowercase letters, numbers, and hyphens only",
+          }]);
+          options.name = name;
+        }
+      }
+
+      const rg = options.resourceGroup || `azureclaw-${options.region}`;
+
+      // ── 4. SKU availability check ──────────────────────────────────
+      if (!options.dryRun && !options.skipInfra) {
+        console.log();
+        const skuChecks = [
+          { sku: "Standard_D4s_v5", label: "AKS system pool (D4s_v5)" },
+          { sku: "Standard_D4s_v5", label: "AKS agent pool (D4s_v5)" },
+        ];
+        let skuOk = true;
+        for (const check of skuChecks) {
+          try {
+            const { stdout: skuJson } = await execa("az", [
+              "vm", "list-skus",
+              "--location", options.region,
+              "--size", check.sku,
+              "--query", "[0].restrictions",
+              "--output", "json",
+            ], { stdio: "pipe", timeout: 15000 });
+            const restrictions = JSON.parse(skuJson || "[]");
+            const blocked = restrictions.some((r: { type: string }) => r.type === "Location");
+            if (blocked) {
+              checkLine(false, `${check.label} — ${chalk.red("not available")} in ${options.region}`);
+              skuOk = false;
+            } else {
+              checkLine(true, `${check.label} — available`);
+            }
+          } catch {
+            checkLine(false, `${check.label} — ${chalk.yellow("could not verify")} (continuing)`);
+          }
+        }
+        if (!skuOk) {
+          console.log(chalk.yellow(`\n  Some VM SKUs are not available in ${options.region}.`));
+          console.log(chalk.yellow(`  Try a different region: ${chalk.cyan("azureclaw up --region westus3")}\n`));
+          process.exit(1);
+        }
+
+        // Quick check: can we create resources in this sub+region?
+        checkLine(true, `Region — ${options.region}`);
+        checkLine(true, `Resource group — ${rg}`);
+
+        console.log(chalk.green(`\n  ✓ Preflight passed — ready to deploy\n`));
+      }
 
       // ── Dry-run mode: just print the plan ──────────────────────────
       if (options.dryRun) {
-        const rg = options.resourceGroup || `azureclaw-${options.region}`;
         const isolationDesc: Record<string, string> = {
           standard: "standard (runc + RuntimeDefault seccomp)",
           enhanced: "enhanced (runc + azureclaw-strict seccomp)",
@@ -72,14 +259,12 @@ export function upCommand(): Command {
 
       banner("AzureClaw · Production Deploy", "Secure AI Agent Runtime on Azure");
 
-      const rg = options.resourceGroup || `azureclaw-${options.region}`;
       const clusterName = options.clusterName ?? "azureclaw";
-      const baseName = clusterName.replace(/-aks$/, "");  // derive from cluster name
-      const acrName = baseName.replace(/-/g, "") + "acr";  // ACR names must be alphanumeric
-      const stepper = new Stepper({ totalSteps: 8 });
+      const baseName = clusterName.replace(/-aks$/, "");
+      const acrName = baseName.replace(/-/g, "") + "acr";
+      const stepper = new Stepper({ totalSteps: 7 });
 
       try {
-        const { execa } = await import("execa");
         const path = await import("path");
         const { fileURLToPath } = await import("url");
 
@@ -106,17 +291,7 @@ export function upCommand(): Command {
           process.exit(1);
         }
 
-        // ── Step 1: Check Azure auth ─────────────────────────────────
-        stepper.step("Checking Azure credentials...");
-        try {
-          await execa("az", ["account", "show", "--output", "none"], { stdio: "pipe" });
-          stepper.done("Azure credentials verified");
-        } catch {
-          stepper.warn("Not logged in — running az login...");
-          await execa("az", ["login"], { stdio: "inherit" });
-        }
-
-        // ── Step 2: Create resource group ────────────────────────────
+        // ── Step 1: Create resource group ────────────────────────────
         stepper.step(`Setting up resource group '${rg}'...`);
 
         // Check if RG already exists
