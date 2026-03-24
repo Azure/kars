@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -45,7 +46,7 @@ pub struct Blocklist {
     enabled: bool,
     /// Learn mode: log all accessed domains instead of relying on a static allowlist.
     /// Blocklist (known-bad) is STILL enforced in learn mode.
-    learn_mode: bool,
+    learn_mode: Arc<AtomicBool>,
     /// Domains observed during learn mode (for generating an allowlist later).
     learned_domains: Arc<RwLock<HashSet<String>>>,
     /// Allowlist: explicitly approved domains for egress proxy.
@@ -73,7 +74,7 @@ impl Blocklist {
             high_risk_tlds_enabled: false,
             ip_direct_blocked: false,
             enabled: false,
-            learn_mode: false,
+            learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
             pending_approvals: Arc::new(RwLock::new(Vec::new())),
@@ -106,7 +107,7 @@ impl Blocklist {
             high_risk_tlds_enabled: true,
             ip_direct_blocked: true,
             enabled: true,
-            learn_mode: false,
+            learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
             pending_approvals: Arc::new(RwLock::new(Vec::new())),
@@ -240,23 +241,24 @@ impl Blocklist {
         self.domains.read().await.len()
     }
 
-    /// Enable learn mode. Blocklist still enforced, but unknown domains are
-    /// allowed through and recorded for later review.
-    pub fn set_learn_mode(&mut self, enabled: bool) {
-        self.learn_mode = enabled;
+    /// Enable or disable learn mode at runtime.
+    pub fn set_learn_mode(&self, enabled: bool) {
+        self.learn_mode.store(enabled, Ordering::Relaxed);
         if enabled {
             tracing::info!("Egress learn mode enabled — logging all accessed domains (blocklist still enforced)");
+        } else {
+            tracing::info!("Egress learn mode disabled");
         }
     }
 
     /// Returns whether learn mode is active.
     pub fn is_learn_mode(&self) -> bool {
-        self.learn_mode
+        self.learn_mode.load(Ordering::Relaxed)
     }
 
     /// Record a domain as observed during learn mode.
     pub async fn record_learned(&self, domain: &str) {
-        if self.learn_mode {
+        if self.is_learn_mode() {
             let domain = extract_domain(domain).to_lowercase();
             if !domain.is_empty() && is_valid_domain(&domain) {
                 self.learned_domains.write().await.insert(domain);
@@ -295,7 +297,7 @@ impl Blocklist {
         let domain = extract_domain(url).to_lowercase();
 
         // 2. Learn mode: allow + record (for discovery)
-        if self.learn_mode {
+        if self.is_learn_mode() {
             self.record_learned(url).await;
             return Ok(());
         }
