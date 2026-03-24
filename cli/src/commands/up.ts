@@ -59,11 +59,24 @@ export function upCommand(): Command {
         await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
         spin.succeed("AKS connected");
 
-        // Find Helm chart
+        // Find Helm chart — try cwd, then walk up, then try relative to CLI source
         let repoRoot = process.cwd();
         for (let i = 0; i < 5; i++) {
           if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
           repoRoot = path.dirname(repoRoot);
+        }
+        if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
+          // Try relative to the CLI package itself
+          const cliDir = new URL("../../..", import.meta.url).pathname;
+          repoRoot = cliDir;
+          for (let i = 0; i < 3; i++) {
+            if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
+            repoRoot = path.dirname(repoRoot);
+          }
+        }
+        if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
+          console.error(chalk.red("\n  Helm chart not found. Run from the AzureClaw repo directory.\n"));
+          process.exit(1);
         }
         const helmPath = path.join(repoRoot, "deploy", "helm", "azureclaw");
 
