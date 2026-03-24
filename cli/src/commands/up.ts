@@ -48,7 +48,7 @@ export function upCommand(): Command {
       // ── 1. Check required CLI tools ────────────────────────────────
       const tools: { cmd: string; args: string[]; label: string; required: boolean }[] = [
         { cmd: "az", args: ["--version"], label: "Azure CLI", required: true },
-        { cmd: "kubectl", args: ["version", "--client", "--short"], label: "kubectl", required: true },
+        { cmd: "kubectl", args: ["version", "--client"], label: "kubectl", required: true },
         { cmd: "helm", args: ["version", "--short"], label: "Helm", required: true },
         { cmd: "docker", args: ["info", "--format", "{{.ServerVersion}}"], label: "Docker", required: options.build },
       ];
