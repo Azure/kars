@@ -25,6 +25,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 
 use crate::crd::{ClawSandbox, SandboxConfig};
+use crate::fedcred::{FedCredConfig, FedCredManager};
 
 /// Build pod security context, conditionally including SELinux options and
 /// choosing between RuntimeDefault and Localhost seccomp profiles.
@@ -105,6 +106,9 @@ struct Context {
     imds_client_id: String,
     /// Azure AI Content Safety endpoint — injected via CONTENT_SAFETY_ENDPOINT env
     content_safety_endpoint: String,
+    /// Federated credential manager — creates Azure AD fedcreds for sub-agent namespaces.
+    /// None if required env vars (AZURE_SUBSCRIPTION_ID, IDENTITY_NAME, etc.) are missing.
+    fedcred: Option<FedCredManager>,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -141,6 +145,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             Ok(_) => tracing::info!("ClusterRoleBinding {crb_name} deleted"),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {}
             Err(e) => tracing::warn!(error = %e, "Failed to delete ClusterRoleBinding {crb_name}"),
+        }
+
+        // Clean up the Azure federated identity credential
+        if let Some(ref fedcred) = ctx.fedcred {
+            if let Err(e) = fedcred.delete_federated_credential(&name).await {
+                tracing::warn!(sandbox = %name, "Federated credential cleanup failed (non-fatal): {e}");
+            }
         }
 
         // Remove the finalizer so K8s can complete CRD deletion
@@ -246,6 +257,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             &Patch::Apply(sa),
         )
         .await?;
+
+    // ── Step 2b: Create Azure federated identity credential ──────────────
+    // Maps system:serviceaccount:{namespace}:sandbox → managed identity so
+    // Workload Identity token exchange works for this sub-agent.
+    if let Some(ref fedcred) = ctx.fedcred {
+        if let Err(e) = fedcred.ensure_federated_credential(&name, &sandbox_ns).await {
+            tracing::warn!(sandbox = %name, "Federated credential creation failed (non-fatal): {e}");
+        }
+    }
 
     // ── Step 2a: Grant sandbox SA permission to spawn sub-agents ─────────
     // Bind the sandbox SA to the azureclaw-sandbox-spawner ClusterRole so
@@ -1153,6 +1173,22 @@ pub async fn run(client: Client) -> Result<()> {
         tracing::info!("IMDS auth enabled with kubelet MI: {imds_client_id}");
     }
 
+    // Initialize federated credential manager (if env vars are configured)
+    let fedcred = FedCredConfig::from_env().map(|cfg| {
+        tracing::info!(
+            identity = %cfg.identity_name,
+            rg = %cfg.identity_resource_group,
+            "Federated credential manager enabled — will auto-create fedcreds for sub-agents",
+        );
+        FedCredManager::new(cfg)
+    });
+    if fedcred.is_none() {
+        tracing::warn!(
+            "Federated credential manager disabled — set AZURE_SUBSCRIPTION_ID, IDENTITY_NAME, \
+             IDENTITY_RESOURCE_GROUP, OIDC_ISSUER_URL to enable automatic fedcred creation"
+        );
+    }
+
     let ctx = Arc::new(Context {
         client,
         wi_client_id,
@@ -1163,6 +1199,7 @@ pub async fn run(client: Client) -> Result<()> {
         foundry_project_endpoint,
         imds_client_id,
         content_safety_endpoint,
+        fedcred,
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

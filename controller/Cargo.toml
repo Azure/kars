@@ -30,3 +30,6 @@ prometheus.workspace = true
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+
+# HTTP client for Azure ARM API (federated credential creation)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

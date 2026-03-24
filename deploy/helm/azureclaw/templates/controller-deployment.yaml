@@ -52,6 +52,16 @@ spec:
               value: {{ .Values.foundry.imdsClientId | default "" | quote }}
             - name: CONTENT_SAFETY_ENDPOINT
               value: {{ .Values.contentSafety.endpoint | default .Values.foundry.endpoint | default "" | quote }}
+            {{- if .Values.fedcred }}
+            - name: AZURE_SUBSCRIPTION_ID
+              value: {{ .Values.fedcred.subscriptionId | default "" | quote }}
+            - name: IDENTITY_NAME
+              value: {{ .Values.fedcred.identityName | default "" | quote }}
+            - name: IDENTITY_RESOURCE_GROUP
+              value: {{ .Values.fedcred.identityResourceGroup | default "" | quote }}
+            - name: OIDC_ISSUER_URL
+              value: {{ .Values.fedcred.oidcIssuerUrl | default "" | quote }}
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

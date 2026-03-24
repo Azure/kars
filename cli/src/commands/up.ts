@@ -937,6 +937,29 @@ export function upCommand(): Command {
           const escaped = discoveredDeployments.replace(/,/g, "\\,");
           helmArgs.push("--set-string", `foundry.deployments=${escaped}`);
         }
+
+        // Pass federated credential config so controller can auto-create fedcreds for sub-agents
+        try {
+          const { stdout: oidcIssuerUrl } = await execa("az", [
+            "aks", "show",
+            "--name", `${baseName}-aks`,
+            "--resource-group", rg,
+            "--query", "oidcIssuerProfile.issuerUrl",
+            "--output", "tsv",
+          ], { stdio: "pipe", timeout: 15000 });
+          const { stdout: subIdRaw } = await execa("az", [
+            "account", "show", "--query", "id", "--output", "tsv",
+          ], { stdio: "pipe", timeout: 10000 });
+          if (oidcIssuerUrl.trim() && subIdRaw.trim()) {
+            helmArgs.push(
+              "--set", `fedcred.subscriptionId=${subIdRaw.trim()}`,
+              "--set", `fedcred.identityName=${baseName}-aks-sandbox-wi`,
+              "--set", `fedcred.identityResourceGroup=${rg}`,
+              "--set", `fedcred.oidcIssuerUrl=${oidcIssuerUrl.trim()}`,
+            );
+          }
+        } catch { /* non-critical — controller will log warning */ }
+
         stepper.update(`${helmExists ? "Upgrading" : "Installing"} AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });
         stepper.detail(helmExists ? "ok" : "new", `Helm release — ${helmExists ? "upgraded" : "installed"}`);
