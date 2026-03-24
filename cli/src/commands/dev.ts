@@ -201,12 +201,15 @@ export function devCommand(): Command {
         // Same rules as the AKS egress-guard init container.
         // UID 1000 (openclaw agent) can only reach localhost and DNS.
         // UID 1001 (inference-router) can reach the internet for Foundry API.
+        // ESTABLISHED,RELATED allows response traffic for services that accept
+        // incoming connections (gateway on :18789) while still blocking new outbound.
         let hasIptables = false;
         try {
           await execa("docker", [
             "exec", "-u", "root", containerName, "sh", "-c",
             [
               "iptables -N AZURECLAW_EGRESS 2>/dev/null || true",
+              "iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
               "iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT",
               "iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT",
               "iptables -A AZURECLAW_EGRESS -p tcp --dport 53 -j ACCEPT",
