@@ -3,15 +3,15 @@ import chalk from "chalk";
 import { banner, section } from "../stepper.js";
 import { promptAndSaveCredentials, CONFIG_FILE, CREDENTIALS_FILE } from "../config.js";
 
-export function onboardCommand(): Command {
-  const cmd = new Command("onboard");
+export function credentialsCommand(): Command {
+  const cmd = new Command("credentials");
 
   cmd
     .description(
-      "Reconfigure Azure OpenAI credentials (endpoint, API key, model)"
+      "Set or update Azure OpenAI credentials (endpoint, API key, model)"
     )
     .action(async () => {
-      banner("AzureClaw · Configure Credentials", "Secure AI Agent Runtime on Azure");
+      banner("AzureClaw · Credentials", "Secure AI Agent Runtime on Azure");
 
       const creds = await promptAndSaveCredentials();
 
@@ -25,7 +25,7 @@ export function onboardCommand(): Command {
       section("Next Steps");
       console.log(`  Dev:       ${chalk.cyan("azureclaw dev")}`);
       console.log(`  Prod:      ${chalk.cyan("azureclaw up")}`);
-      console.log(`  Re-run:    ${chalk.cyan("azureclaw onboard")}`);
+      console.log(`  Re-run:    ${chalk.cyan("azureclaw credentials")}`);
       console.log();
     });
 

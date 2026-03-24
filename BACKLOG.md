@@ -8,7 +8,7 @@
 
 | Area | What works |
 |------|-----------|
-| **CLI** | 13 commands: `up`, `add`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `approve`, `eval`, `onboard`, `destroy`. `add` supports `--governance`, `--trust-threshold`, `--policy-profile`, `--agent-tools`. |
+| **CLI** | 13 commands: `up`, `add`, `dev`, `connect`, `status`, `logs`, `model`, `trace`, `policy`, `credentials`, `eval`, `egress`, `destroy`. `add` supports `--governance`, `--trust-threshold`, `--policy-profile`, `--agent-tools`. |
 | **Controller** | Rust/kube-rs operator. Reconciles ClawSandbox → NS, SA, NetworkPolicy, Deployment, Service, ConfigMap. 3 isolation levels. AGT: Service (mesh DNS), ConfigMap (policy), volume mount, mesh ingress. Azure Services RBAC annotations. 9 unit tests. |
 | **Inference Router** | Rust/axum sidecar. 40+ routes, 18 Foundry API groups. SSE streaming. Content Safety + Prompt Shields. Token budgets (429). IMDS/WI auth. Auto-refreshing domain blocklist (OISD + URLhaus, 6h refresh). AGT module: PolicyEngine, TrustStore, AuditLog, MeshInbox. 9 `/agt/*` endpoints. |
 | **Foundry Integration** | All services via Responses API — no hosted agents. 18 API groups E2E tested: memory_stores, agents, evaluators, evaluationrules, indexes, connections, deployments, datasets, insights, openai/*, knowledgebases, redTeams, schedules, evaluationtaxonomies. |

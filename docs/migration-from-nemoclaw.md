@@ -4,7 +4,7 @@
 
 | NemoClaw | AzureClaw |
 |---|---|
-| `nemoclaw onboard` | `azureclaw onboard` |
+| `nemoclaw onboard` | `azureclaw credentials` (or just run `azureclaw dev` — prompts inline) |
 | `nemoclaw <name> connect` | `azureclaw connect <name>` |
 | `nemoclaw <name> status` | `azureclaw status <name>` |
 | OpenShell sandbox | AKS pod (ClawSandbox CRD) |

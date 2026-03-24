@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { upCommand } from "./commands/up.js";
 import { devCommand } from "./commands/dev.js";
 import { addCommand } from "./commands/add.js";
-import { onboardCommand } from "./commands/onboard.js";
+import { credentialsCommand } from "./commands/credentials.js";
 import { connectCommand } from "./commands/connect.js";
 import { statusCommand } from "./commands/status.js";
 import { logsCommand } from "./commands/logs.js";
@@ -24,7 +24,6 @@ export function createCli(): Command {
     .version("0.1.0-alpha.1");
 
   // Lifecycle
-  program.addCommand(onboardCommand());
   program.addCommand(upCommand());
   program.addCommand(devCommand());
   program.addCommand(addCommand());
@@ -36,6 +35,7 @@ export function createCli(): Command {
   program.addCommand(logsCommand());
 
   // Configuration
+  program.addCommand(credentialsCommand());
   program.addCommand(modelCommand());
   program.addCommand(policyCommand());
   program.addCommand(egressCommand());
