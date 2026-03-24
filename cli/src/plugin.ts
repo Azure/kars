@@ -1533,7 +1533,17 @@ const azureClawPlugin = definePluginEntry({
           const resource = params.resource as string;
 
           if (resource === "models") {
-            // Try /v1/deployments first (actual deployed models), then /v1/models (catalog)
+            // Priority: 1) pre-discovered deployments (from FOUNDRY_DEPLOYMENTS env / initFoundry)
+            //           2) /v1/deployments data-plane (usually 404 — no Azure API)
+            //           3) /v1/models catalog fallback
+            if (foundryProject?.deployments && foundryProject.deployments.length > 0) {
+              return { content: [{ type: "text", text: safeJson({
+                source: "discovered_deployments",
+                total: foundryProject.deployments.length,
+                models: foundryProject.deployments,
+              }) }] };
+            }
+
             let deployments: any[] = [];
             let source = "deployments";
             try {
