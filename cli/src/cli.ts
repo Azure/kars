@@ -14,6 +14,7 @@ import { policyCommand } from "./commands/policy.js";
 import { egressCommand } from "./commands/egress.js";
 import { destroyCommand } from "./commands/destroy.js";
 import { evalCommand } from "./commands/eval.js";
+import { operatorCommand } from "./commands/operator.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -47,6 +48,7 @@ export function createCli(): Command {
   // Observability
   program.addCommand(traceCommand());
   program.addCommand(evalCommand());
+  program.addCommand(operatorCommand());
 
   return program;
 }
