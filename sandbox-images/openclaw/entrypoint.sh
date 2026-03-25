@@ -424,6 +424,13 @@ if [ -d /opt/azureclaw-plugin ]; then
     cp -r /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
     echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
   fi
+  # Copy pre-installed ClawHub skills (from Docker build)
+  if [ -d /opt/clawhub-skills ] && [ "$(ls -A /opt/clawhub-skills 2>/dev/null)" ]; then
+    mkdir -p "$WORKSPACE_DIR/skills"
+    cp -r /opt/clawhub-skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+    CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
+    echo "[azureclaw] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
+  fi
   # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
   if [ -d /opt/azureclaw-plugin/node_modules ]; then
     cp -r /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"

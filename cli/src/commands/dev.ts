@@ -42,6 +42,11 @@ export function devCommand(): Command {
       "--no-agt",
       "Skip AGT relay/registry stack (single-agent only)"
     )
+    .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
+    .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
+    .option("--slack-token <token>", "Slack bot OAuth token")
+    .option("--discord-token <token>", "Discord bot token")
+    .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
     .option(
       "--base-image <image>",
       "Azure Linux base image for building sandbox (override for custom registries)",
@@ -358,6 +363,11 @@ export function devCommand(): Command {
           // Learn mode on by default in dev — records all egress domains for review
           "-e", "EGRESS_LEARN_MODE=true",
           ...agtEnvArgs,
+          // Channel tokens: CLI flags take priority, fall back to host env vars
+          ...((options.telegramToken || process.env.TELEGRAM_BOT_TOKEN) ? ["-e", `TELEGRAM_BOT_TOKEN=${options.telegramToken || process.env.TELEGRAM_BOT_TOKEN}`] : []),
+          ...((options.slackToken || process.env.SLACK_BOT_TOKEN) ? ["-e", `SLACK_BOT_TOKEN=${options.slackToken || process.env.SLACK_BOT_TOKEN}`] : []),
+          ...((options.discordToken || process.env.DISCORD_BOT_TOKEN) ? ["-e", `DISCORD_BOT_TOKEN=${options.discordToken || process.env.DISCORD_BOT_TOKEN}`] : []),
+          ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
           image,
         ], { stdio: "pipe" });
 
@@ -367,14 +377,32 @@ export function devCommand(): Command {
         //   - inference router as UID 1001 (internet access for Foundry + blocklist)
         //   - gateway, node host, agent as UID 1000 (restricted)
         let hasIptables = false;
-        for (let i = 0; i < 10; i++) {
+        let gatewayHealthy = false;
+        let routerHealthy = false;
+        for (let i = 0; i < 15; i++) {
           try {
-            const { stdout } = await execa("docker", [
-              "exec", containerName, "sh", "-c",
-              "iptables -L AZURECLAW_EGRESS -n 2>/dev/null | grep -q REJECT",
-            ], { stdio: "pipe" });
-            hasIptables = true;
-            break;
+            if (!hasIptables) {
+              await execa("docker", [
+                "exec", containerName, "sh", "-c",
+                "iptables -L AZURECLAW_EGRESS -n 2>/dev/null | grep -q REJECT",
+              ], { stdio: "pipe" });
+              hasIptables = true;
+            }
+            if (!gatewayHealthy) {
+              await execa("docker", [
+                "exec", containerName, "sh", "-c",
+                "wget -qO- --timeout=2 http://127.0.0.1:18789/healthz 2>/dev/null || curl -sf --max-time 2 http://127.0.0.1:18789/healthz 2>/dev/null",
+              ], { stdio: "pipe" });
+              gatewayHealthy = true;
+            }
+            if (!routerHealthy) {
+              await execa("docker", [
+                "exec", containerName, "sh", "-c",
+                "wget -qO- --timeout=2 http://127.0.0.1:8443/healthz 2>/dev/null || curl -sf --max-time 2 http://127.0.0.1:8443/healthz 2>/dev/null",
+              ], { stdio: "pipe" });
+              routerHealthy = true;
+            }
+            if (hasIptables && gatewayHealthy && routerHealthy) break;
           } catch {
             await new Promise(r => setTimeout(r, 1000));
           }
@@ -394,6 +422,10 @@ export function devCommand(): Command {
           checkLine(agtReady, `AGT mesh ${agtReady ? "(relay + registry + E2E encryption)" : "(starting...)"}`);
         }
 
+        section("Services");
+        checkLine(gatewayHealthy, `OpenClaw gateway ${gatewayHealthy ? "(ready)" : "(starting...)"}`);
+        checkLine(routerHealthy, `Inference router ${routerHealthy ? "(ready)" : "(starting...)"}`);
+
         section("Environment");
         kvLine("OS", "Azure Linux 3.0");
         kvLine("OpenClaw", "2026.3.13");
@@ -401,6 +433,12 @@ export function devCommand(): Command {
         kvLine("Endpoint", creds.endpoint);
         kvLine("Policy", `${options.policy} preset`);
         kvLine("Sandbox", options.name);
+        if (options.channels) {
+          kvLine("Channels", options.channels);
+        }
+        if (options.skills) {
+          kvLine("Skills", options.skills);
+        }
 
         // Read the gateway token from a dedicated file written by the entrypoint.
         // Poll because the entrypoint writes it after config + plugin install.

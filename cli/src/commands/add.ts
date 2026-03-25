@@ -20,6 +20,11 @@ export function addCommand(): Command {
     .option("--no-governance", "Disable AGT governance")
     .option("--trust-threshold <score>", "AGT trust threshold (0-1000, default: 500)", "500")
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
+    .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
+    .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
+    .option("--slack-token <token>", "Slack bot OAuth token")
+    .option("--discord-token <token>", "Discord bot token")
+    .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
     .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
@@ -102,6 +107,57 @@ export function addCommand(): Command {
         np.learnEgress = true;
       }
 
+      // Channel configuration — map channels to env vars and secrets.
+      // Channel domains are NOT auto-added to the egress allowlist — they go through
+      // the learn→approve flow so operators can see and approve each domain explicitly.
+      const channelTokenFlags: Record<string, string> = {
+        telegram: "telegramToken",
+        slack: "slackToken",
+        discord: "discordToken",
+      };
+      const channelEnvVars: Record<string, string> = {
+        telegram: "TELEGRAM_BOT_TOKEN",
+        slack: "SLACK_BOT_TOKEN",
+        discord: "DISCORD_BOT_TOKEN",
+        whatsapp: "WHATSAPP_ENABLED",
+      };
+      const knownChannels = new Set(["telegram", "slack", "discord", "whatsapp"]);
+
+      if (options.channels) {
+        const channels = options.channels.split(",").map((c: string) => c.trim().toLowerCase());
+        const envSecrets: Record<string, string> = {};
+
+        for (const channel of channels) {
+          if (!knownChannels.has(channel)) {
+            console.error(chalk.yellow(`  ⚠ Unknown channel '${channel}' — skipping`));
+            continue;
+          }
+          // Map channel token flags to env var names
+          const tokenFlag = channelTokenFlags[channel];
+          if (tokenFlag && options[tokenFlag]) {
+            envSecrets[channelEnvVars[channel]] = options[tokenFlag];
+          } else if (channel === "whatsapp") {
+            envSecrets[channelEnvVars[channel]] = "true";
+          } else if (tokenFlag && !options[tokenFlag]) {
+            console.error(chalk.yellow(`  ⚠ Channel '${channel}' enabled but no --${channel}-token provided`));
+          }
+        }
+
+        // Store channel env vars for secret creation
+        (sandbox.spec as Record<string, unknown>).channels = {
+          enabled: channels,
+          envSecrets,
+        };
+      }
+
+      // Skills configuration
+      if (options.skills) {
+        const skills = options.skills.split(",").map((s: string) => s.trim());
+        (sandbox.spec as Record<string, unknown>).skills = {
+          activated: skills,
+        };
+      }
+
       const yaml = JSON.stringify(sandbox, null, 2);
 
       if (options.dryRun) {
@@ -172,6 +228,27 @@ export function addCommand(): Command {
 
         // Now apply the CRD (controller will create pod — fedcred already propagating)
         spinner.text = `Creating sandbox '${name}'...`;
+
+        // Create K8s secret for channel tokens if any channels configured
+        const channelsSpec = (sandbox.spec as Record<string, unknown>).channels as { envSecrets?: Record<string, string> } | undefined;
+        if (channelsSpec?.envSecrets && Object.keys(channelsSpec.envSecrets).length > 0) {
+          spinner.text = "Creating channel credential secret...";
+          try {
+            // Ensure namespace exists
+            await execa("kubectl", ["create", "namespace", namespace], { stdio: "pipe" }).catch(() => {});
+            const secretArgs = ["create", "secret", "generic", `${name}-channels`, "-n", namespace];
+            for (const [envVar, value] of Object.entries(channelsSpec.envSecrets)) {
+              secretArgs.push(`--from-literal=${envVar}=${value}`);
+            }
+            await execa("kubectl", secretArgs, { stdio: "pipe" }).catch(() => {
+              // May already exist — update it
+              return execa("kubectl", [...secretArgs.slice(0, 2), "replace", ...secretArgs.slice(3)], { stdio: "pipe" });
+            });
+          } catch {
+            // Non-fatal — controller can still create pod without channel tokens
+          }
+        }
+        spinner.text = `Creating sandbox '${name}'...`;
         await execa("kubectl", ["apply", "-f", "-"], {
           input: JSON.stringify(sandbox),
           stdio: ["pipe", "pipe", "pipe"],
@@ -215,6 +292,12 @@ export function addCommand(): Command {
         console.log(chalk.dim(`  Namespace:  ${namespace}`));
         console.log(chalk.dim(`  Model:      ${options.model}`));
         console.log(chalk.dim(`  Isolation:  ${options.isolation}`));
+        if (options.channels) {
+          console.log(chalk.dim(`  Channels:   ${options.channels}`));
+        }
+        if (options.skills) {
+          console.log(chalk.dim(`  Skills:     ${options.skills}`));
+        }
         console.log(chalk.dim(`  Status:     kubectl get clawsandbox ${name} -n azureclaw-system`));
         console.log(chalk.dim(`  Connect:    azureclaw connect ${name}`));
         console.log(chalk.dim(`  Remove:     azureclaw destroy ${name}\n`));
