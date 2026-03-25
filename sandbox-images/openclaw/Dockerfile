@@ -27,6 +27,14 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 # Install OpenClaw
 RUN npm install -g openclaw@latest
 
+# Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
+# AzureClaw's runtime security (egress guard, Content Safety, read-only rootfs)
+# provides defense-in-depth even if a skill is compromised.
+RUN openclaw skills install summarize 2>/dev/null || true && \
+    openclaw skills install browser 2>/dev/null || true && \
+    openclaw skills install multi-search-engine 2>/dev/null || true && \
+    openclaw skills install proactive-agent 2>/dev/null || true
+
 # ─── Runtime Stage ────────────────────────────────────────────────────────────
 
 FROM ${AZURELINUX_BASE}
@@ -34,10 +42,16 @@ FROM ${AZURELINUX_BASE}
 # Detect arch for Node.js download
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux && tdnf clean all && \
+    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux && tdnf clean all && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
+
+# Install GitHub CLI (enables github skill)
+RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v2.88.1/gh_2.88.1_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 && \
+    rm /tmp/gh.tar.gz
 
 # Security: create non-root user (sandbox=1000) and router user (router=1001)
 # UID separation enables iptables egress guard: UID 1000 is restricted to
@@ -54,6 +68,9 @@ RUN echo 'export PS1="azureclaw@\\h:\\w\\$ "' >> /sandbox/.bashrc
 # Copy OpenClaw from builder (npm global root is /usr/local/lib/node_modules)
 COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+
+# Copy pre-installed ClawHub skills from builder (installed via openclaw skills install)
+COPY --from=builder /root/.openclaw/workspace/skills/ /opt/clawhub-skills/
 
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
