@@ -55,6 +55,7 @@ interface EgressDomain {
   domain: string;
   sandbox: string;
   namespace: string;
+  state: "learned" | "approved";
 }
 
 /** Security state polled from a single sandbox's router + k8s objects. */
@@ -167,7 +168,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     fg: "white",
     label: " Egress  [a]pprove [d]eny [e]nforce ",
     columnSpacing: 1,
-    columnWidth: [28, 20],
+    columnWidth: [3, 40],
     interactive: true,
     style: {
       border: { fg: "yellow" },
@@ -201,11 +202,26 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   // ── State ─────────────────────────────────────────────────────────
 
   let sandboxes: SandboxInfo[] = [];
-  let egressDomains: EgressDomain[] = [];
+  let egressByAgent: Map<string, EgressDomain[]> = new Map();
   let securityStates: Map<string, SecurityState> = new Map();
   let focusedPanel: "agents" | "egress" = "agents";
   let refreshCount = 0;
   let isRefreshing = false;
+
+  /** Egress domains for the currently selected agent. */
+  function selectedEgressDomains(): EgressDomain[] {
+    const idx = (agentTable as any).rows?.selected ?? 0;
+    const sb = sandboxes[idx];
+    if (!sb) return [];
+    return egressByAgent.get(sb.name) || [];
+  }
+
+  /** Total egress domain count across all agents. */
+  function totalEgressCount(): number {
+    let n = 0;
+    for (const domains of egressByAgent.values()) n += domains.length;
+    return n;
+  }
 
   const sparkData: number[] = new Array(30).fill(0);
 
@@ -306,16 +322,48 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   }
 
   async function fetchEgressDomains(sb: SandboxInfo): Promise<EgressDomain[]> {
+    if (!sb.podName) return [];
+    const routerCurl = (path: string) => execa("kubectl", kctl([
+      "exec", "-n", sb.namespace, sb.podName,
+      "-c", "inference-router", "--",
+      "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+    ], kubeContext), { stdio: "pipe" });
+
     try {
-      const { stdout } = await execa("kubectl", kctl([
-        "exec", "-n", sb.namespace, sb.podName,
-        "-c", "inference-router", "--",
-        "curl", "-s", "--max-time", "3", "http://localhost:8443/egress/learned",
-      ], kubeContext), { stdio: "pipe" });
-      const data = JSON.parse(stdout);
-      return (data.domains || []).map((d: string) => ({
-        domain: d, sandbox: sb.name, namespace: sb.namespace,
-      }));
+      const [learnedRes, allowRes] = await Promise.allSettled([
+        routerCurl("/egress/learned"),
+        routerCurl("/egress/allowlist"),
+      ]);
+
+      const learnedDomains: Set<string> = new Set();
+      const approvedDomains: Set<string> = new Set();
+
+      if (learnedRes.status === "fulfilled") {
+        const data = JSON.parse((learnedRes.value as any).stdout);
+        for (const d of (data.domains || [])) learnedDomains.add(d);
+      }
+      if (allowRes.status === "fulfilled") {
+        const data = JSON.parse((allowRes.value as any).stdout);
+        for (const d of (data.domains || [])) approvedDomains.add(d);
+      }
+
+      // Merge: domains in allowlist are "approved", rest are "learned" (pending)
+      const results: EgressDomain[] = [];
+      const allDomains = new Set([...learnedDomains, ...approvedDomains]);
+      for (const d of allDomains) {
+        results.push({
+          domain: d,
+          sandbox: sb.name,
+          namespace: sb.namespace,
+          state: approvedDomains.has(d) ? "approved" : "learned",
+        });
+      }
+      // Sort: pending first, then approved
+      results.sort((a, b) => {
+        if (a.state !== b.state) return a.state === "learned" ? -1 : 1;
+        return a.domain.localeCompare(b.domain);
+      });
+      return results;
     } catch {
       return [];
     }
@@ -523,7 +571,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     const ctx = `{gray-fg}${clusterName}{/}`;
     header.setContent(
       ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ` +
-      `${healthSummary()}  │  ${egressDomains.length} domain(s)  │  {gray-fg}${now}{/}`,
+      `${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`,
     );
   }
 
@@ -623,11 +671,20 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
     });
 
-    // Egress table
-    const egressData = egressDomains.map((d) => [d.domain, d.sandbox]);
+    // Egress table — filtered to selected agent, with status indicator
+    const domains = selectedEgressDomains();
+    const egressData = domains.map((d) => {
+      const tag = d.state === "approved" ? "✓" : "P";
+      return [tag, d.domain];
+    });
+    const selAgent = sandboxes[(agentTable as any).rows?.selected ?? 0];
+    const egressLabel = selAgent
+      ? ` Egress: ${selAgent.name}  [a]pprove [d]eny [e]nforce `
+      : " Egress  [a]pprove [d]eny [e]nforce ";
+    (egressTable as any).setLabel(egressLabel);
     (egressTable as any).setData({
-      headers: ["Domain", "Agent"],
-      data: egressData.length > 0 ? egressData : [["(none)", ""]],
+      headers: ["", "Domain"],
+      data: egressData.length > 0 ? egressData : [["", "(no domains)"]],
     });
 
     // Security panel (follows agent selection)
@@ -644,7 +701,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       ? "{cyan-fg}{bold}[Agents]{/bold}{/}  {gray-fg}Egress{/}"
       : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
     statusBar.setContent(
-      ` ${focusTag}  │  [Tab] Focus  [↑↓] Nav  [a] Approve  [d] Deny  [e] Enforce  ` +
+      ` ${focusTag}  │  [Tab] Focus  [↑↓] Nav  [a] Approve  [A] All  [d] Deny  [e] Enforce  ` +
       `[n] Spawn  [m] Model  [l] Logs  [x] Del  [r] Refresh  [q] Quit`,
     );
 
@@ -678,7 +735,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         Promise.all(running.map((s) => fetchSecurityState(s))),
       ]);
 
-      egressDomains = egressResults.flat();
+      egressByAgent = new Map();
+      for (let i = 0; i < running.length; i++) {
+        egressByAgent.set(running[i].name, egressResults[i]);
+      }
       securityStates = new Map();
       for (const sec of secResults) {
         securityStates.set(sec.sandbox, sec);
@@ -690,7 +750,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
       refreshCount++;
       activityLog.log(
-        `{cyan-fg}↻{/} #${refreshCount}  ${sandboxes.length} agent(s)  ${egressDomains.length} domain(s)`,
+        `{cyan-fg}↻{/} #${refreshCount}  ${sandboxes.length} agent(s)  ${totalEgressCount()} domain(s)`,
       );
     } catch (e: any) {
       activityLog.log(`{red-fg}✗ Refresh:{/} ${e.message?.substring(0, 50)}`);
@@ -707,7 +767,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     return focusedPanel === "agents" ? agentTable : egressTable;
   }
   function getActiveList(): any[] {
-    return focusedPanel === "agents" ? sandboxes : egressDomains;
+    return focusedPanel === "agents" ? sandboxes : selectedEgressDomains();
   }
   function moveSelection(delta: number) {
     const table = getActiveTable();
@@ -718,8 +778,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     const current = rows.selected ?? 0;
     const next = Math.max(0, Math.min(list.length - 1, current + delta));
     rows.select(next);
-    // Update security panel when agent selection changes
-    if (focusedPanel === "agents") renderSecurity();
+    // Update security + egress panels when agent selection changes
+    if (focusedPanel === "agents") render();
     screen.render();
   }
 
@@ -744,16 +804,36 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // Egress actions
   screen.key(["a"], async () => {
-    if (focusedPanel !== "egress" || egressDomains.length === 0) return;
+    if (focusedPanel !== "egress") return;
+    const domains = selectedEgressDomains();
+    if (domains.length === 0) return;
     const idx = (egressTable as any).rows?.selected ?? 0;
-    const domain = egressDomains[idx];
-    if (domain) { await approveDomain(domain); await refresh(); }
+    const domain = domains[idx];
+    if (domain && domain.state === "learned") {
+      await approveDomain(domain);
+      await refresh();
+    }
   });
   screen.key(["d"], async () => {
-    if (focusedPanel !== "egress" || egressDomains.length === 0) return;
+    if (focusedPanel !== "egress") return;
+    const domains = selectedEgressDomains();
+    if (domains.length === 0) return;
     const idx = (egressTable as any).rows?.selected ?? 0;
-    const domain = egressDomains[idx];
-    if (domain) { await denyDomain(domain); await refresh(); }
+    const domain = domains[idx];
+    if (domain && domain.state === "learned") {
+      await denyDomain(domain);
+      await refresh();
+    }
+  });
+  // Approve all learned domains for selected agent
+  screen.key(["S-a"], async () => {
+    const domains = selectedEgressDomains().filter((d) => d.state === "learned");
+    if (domains.length === 0) return;
+    const sb = sandboxes[(agentTable as any).rows?.selected ?? 0];
+    activityLog.log(`{cyan-fg}⏳ Approving ${domains.length} domain(s) for {bold}${sb?.name}{/bold}...{/}`);
+    screen.render();
+    for (const d of domains) { await approveDomain(d); }
+    await refresh();
   });
   screen.key(["e"], async () => {
     if (sandboxes.length === 0) return;
