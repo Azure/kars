@@ -204,6 +204,26 @@ EOF
     CHANNELS_CONFIG="\"_placeholder\": false"
   fi
 
+  # Third-party plugins: auto-enable when API keys are present.
+  # OpenClaw reads the env vars directly for auth — we just need to register them
+  # in plugins.allow + plugins.entries so the gateway loads them.
+  for plugin_pair in \
+    "brave:BRAVE_API_KEY" \
+    "tavily:TAVILY_API_KEY" \
+    "exa:EXA_API_KEY" \
+    "firecrawl:FIRECRAWL_API_KEY" \
+    "perplexity:PERPLEXITY_API_KEY" \
+    "openai:OPENAI_API_KEY"; do
+    plugin_id="${plugin_pair%%:*}"
+    env_var="${plugin_pair##*:}"
+    eval env_val="\${${env_var}:-}"
+    if [ -n "$env_val" ]; then
+      PLUGINS_LIST="${PLUGINS_LIST}, \"${plugin_id}\""
+      [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+      PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"${plugin_id}\": { \"enabled\": true }"
+    fi
+  done
+
   sed -i "s|PLUGINS_ALLOW_PLACEHOLDER|${PLUGINS_LIST}|" "$OPENCLAW_CONFIG"
   sed -i "s|PLUGINS_ENTRIES_PLACEHOLDER|${PLUGINS_ENTRIES}|" "$OPENCLAW_CONFIG"
   sed -i "s|CHANNELS_PLACEHOLDER|${CHANNELS_CONFIG}|" "$OPENCLAW_CONFIG"
@@ -214,6 +234,9 @@ EOF
   # These are exported so openclaw tui/agent picks them up
   export AZURE_OPENAI_API_KEY="${API_KEY}"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
+
+  # AGT governance is always active in AzureClaw sandboxes (enables agt-governance skill)
+  export AGT_GOVERNANCE_ENABLED=true
 
   # Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
   FOUNDRY_PROJECT_ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT:-}"
