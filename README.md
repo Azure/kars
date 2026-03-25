@@ -73,6 +73,9 @@ Zero-credential inference through Azure AI Foundry. Multi-agent governance via A
 ### 🤖 AI Agent
 
 - **OpenClaw gateway** — TUI + Telegram + Web UI frontends
+- **Messaging channels** — Telegram, Slack, Discord, WhatsApp (auto-configured)
+- **Third-party plugins** — Brave, Tavily, Exa, Firecrawl (API key → auto-enabled)
+- **Foundry web search** — Bing Grounding via Responses API (zero-config)
 - **Sub-agent spawning** — agents create child agents via CRD (isolated, governed)
 - **9 Foundry skills** — memory, code interpreter, web search, knowledge, evaluations, and more
 - **200+ models** — hot-switch between GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc.
@@ -119,6 +122,23 @@ azureclaw egress my-assistant --learned
 
 > For local development without Azure: `azureclaw dev` starts a Docker sandbox with the same security controls.
 
+### Local Development
+
+```bash
+# Local development (Docker, no Azure needed)
+azureclaw dev
+
+# With Telegram channel
+azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
+
+# With third-party search plugins
+azureclaw dev --brave-api-key "KEY" --tavily-api-key "KEY"
+
+# With Foundry web search (auto-discovers Bing connection)
+# Requires: Bing Grounding resource connected to your Foundry project
+azureclaw dev --build
+```
+
 ---
 
 ## CLI Reference
@@ -127,8 +147,8 @@ azureclaw egress my-assistant --learned
 |---|---|
 | **Lifecycle** | |
 | `azureclaw up` | Deploy full stack — preflight checks, interactive prompts, AKS + ACR + AOAI + sandbox |
-| `azureclaw dev` | Local Docker sandbox (same security controls) |
-| `azureclaw add <name>` | Add sandbox (`--governance`, `--learn-egress`, `--isolation`) |
+| `azureclaw dev` | Local Docker sandbox (same security controls). Flags: `--channels telegram,slack,discord`, `--telegram-token`, `--slack-token`, `--discord-token`, `--brave-api-key`, `--tavily-api-key`, `--exa-api-key`, `--firecrawl-api-key`, `--perplexity-api-key`, `--openai-api-key` |
+| `azureclaw add <name>` | Add sandbox (`--governance`, `--learn-egress`, `--isolation`). Same channel/plugin flags as `dev`; credentials stored as K8s secrets |
 | `azureclaw destroy <name>` | Tear down sandbox or resource group |
 | **Operations** | |
 | `azureclaw connect <name>` | Connect TUI to sandbox |
@@ -193,6 +213,57 @@ See [docs/security.md](docs/security.md) for the egress architecture.
 
 ---
 
+## Channels & Plugins
+
+### Messaging Channels
+
+Connect your agent to messaging platforms. Channels are configured via CLI flags and auto-enabled at startup.
+
+| Channel | Flag | Credential |
+|---------|------|-----------|
+| Telegram | `--channels telegram` | `--telegram-token` (from BotFather) |
+| Slack | `--channels slack` | `--slack-token` (Bot OAuth token) |
+| Discord | `--channels discord` | `--discord-token` |
+| WhatsApp | `--channels whatsapp` | QR code pairing at runtime |
+
+```bash
+# AKS deployment with Telegram
+azureclaw add my-agent --channels telegram --telegram-token "BOT_TOKEN" --learn-egress
+
+# Local development
+azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
+```
+
+On AKS, channel tokens are stored as K8s secrets and injected into the sandbox pod automatically.
+
+### Third-Party Plugins
+
+Enable search and scraping plugins by providing their API keys. The sandbox auto-activates plugins when their keys are present.
+
+| Plugin | Flag | Env Var |
+|--------|------|---------|
+| Brave Search | `--brave-api-key` | `BRAVE_API_KEY` |
+| Tavily | `--tavily-api-key` | `TAVILY_API_KEY` |
+| Exa | `--exa-api-key` | `EXA_API_KEY` |
+| Firecrawl | `--firecrawl-api-key` | `FIRECRAWL_API_KEY` |
+| Perplexity | `--perplexity-api-key` | `PERPLEXITY_API_KEY` |
+| OpenAI | `--openai-api-key` | `OPENAI_API_KEY` |
+
+### Foundry Web Search (Bing Grounding)
+
+Built-in web search via Azure AI Foundry's Responses API with Bing Grounding. **No API key needed** — uses the Foundry project's Bing connection, auto-discovered at runtime.
+
+**Setup:**
+1. Create a [Grounding with Bing Search](https://portal.azure.com/#create/Microsoft.BingGroundingSearch) resource
+2. Add it as a connection in your Foundry project (Portal → Project → Connected resources)
+3. The `foundry_web_search` tool auto-discovers the connection — zero config
+
+> Override: set `BING_CONNECTION_ID` env var with the full resource ID.
+
+See [docs/channels-plugins.md](docs/channels-plugins.md) for full details.
+
+---
+
 ## Project Structure
 
 ```
@@ -219,6 +290,8 @@ azureclaw/
 | [Security](docs/security.md) | 8-layer defense model, OWASP coverage, AGT governance |
 | [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation model |
 | [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
+| [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
+| [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode |
 | [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
 
 ---
