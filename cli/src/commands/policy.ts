@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
+import { getAdminToken, withAdminAuth } from "../router-admin.js";
 
 export function policyCommand(): Command {
   const cmd = new Command("policy");
@@ -154,10 +155,11 @@ export function policyCommand(): Command {
           return;
         }
 
-        // Use kubectl exec to curl the router from inside the pod
+        // Use kubectl exec to curl the router from inside the pod (via inference-router container)
+        const adminToken = await getAdminToken(namespace);
         const { stdout } = await execa("kubectl", [
-          "exec", "-n", namespace, podName, "-c", "openclaw", "--",
-          "curl", "-sf", "http://localhost:8443/egress/learned",
+          "exec", "-n", namespace, podName, "-c", "inference-router", "--",
+          ...withAdminAuth(["curl", "-sf", "http://localhost:8443/egress/learned"], adminToken),
         ], { stdio: "pipe" });
 
         const data = JSON.parse(stdout);
@@ -206,8 +208,8 @@ export function policyCommand(): Command {
         // Clear learned domains if requested
         if (options.clear) {
           await execa("kubectl", [
-            "exec", "-n", namespace, podName, "-c", "openclaw", "--",
-            "curl", "-sf", "-X", "POST", "http://localhost:8443/egress/learned/clear",
+            "exec", "-n", namespace, podName, "-c", "inference-router", "--",
+            ...withAdminAuth(["curl", "-sf", "-X", "POST", "http://localhost:8443/egress/learned/clear"], adminToken),
           ], { stdio: "pipe" });
           console.log(chalk.dim("  Learned domains cleared.\n"));
         }
