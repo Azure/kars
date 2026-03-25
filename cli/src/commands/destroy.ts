@@ -97,7 +97,8 @@ export function destroyCommand(): Command {
               // Last sandbox — tear down AGT infrastructure
               spinner.text = "Stopping AGT infrastructure...";
               for (const c of ["azureclaw-agt-registry", "azureclaw-agt-relay", "azureclaw-agt-postgres"]) {
-                await execa("docker", ["rm", "-f", c], { stdio: "pipe" }).catch(() => {});
+                // -v removes anonymous volumes attached to the container (e.g. postgres data)
+                await execa("docker", ["rm", "-fv", c], { stdio: "pipe" }).catch(() => {});
               }
               await execa("docker", ["network", "rm", "azureclaw-dev"], { stdio: "pipe" }).catch(() => {});
             }

@@ -17,6 +17,7 @@
         "fchmod", "fchmodat", "fchown", "fchownat", "fcntl", "fdatasync",
         "flock", "fstat", "fstatfs", "fsync", "ftruncate", "futex",
         "getcwd", "getdents", "getdents64", "getegid", "geteuid",
+        "inotify_init", "inotify_init1", "inotify_add_watch", "inotify_rm_watch",
         "getgid", "getgroups", "getpeername", "getpgid", "getpgrp",
         "getpid", "getppid", "getpriority", "getrandom", "getresgid",
         "getresuid", "getrlimit", "getrusage", "getsid", "getsockname",

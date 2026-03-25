@@ -72,6 +72,9 @@ RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/open
 # Copy pre-installed ClawHub skills from builder (installed via openclaw skills install)
 COPY --from=builder /root/.openclaw/workspace/skills/ /opt/clawhub-skills/
 
+# Proxy bootstrap — preloaded by NODE_OPTIONS to set undici global dispatcher
+COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.js
+
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
 
