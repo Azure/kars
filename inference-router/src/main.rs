@@ -27,7 +27,8 @@ mod metrics;
 mod spawn;
 
 use anyhow::Result;
-use axum::Router;
+use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};
+use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -47,18 +48,48 @@ async fn main() -> Result<()> {
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
 
-    let app = Router::new()
-        .merge(routes::inference_routes())
-        .merge(routes::foundry_agent_routes())
-        .merge(routes::foundry_standalone_routes())
-        .merge(routes::agt_routes())
-        .merge(routes::spawn_routes())
-        .merge(routes::health_routes())
-        .merge(routes::metrics_routes())
-        .merge(routes::admin_routes())
-        .with_state(state)
-        // Rate limit: max 64 concurrent requests (prevents DoS from compromised agent)
-        .layer(tower::limit::ConcurrencyLimitLayer::new(64));
+    // Read admin token for protecting sensitive endpoints.
+    // If ADMIN_TOKEN is set, /admin/*, /egress/*, /sandbox/*, and sensitive /agt/* endpoints
+    // require Authorization: Bearer <token>. If unset, these endpoints are unrestricted
+    // (backwards-compatible for local dev).
+    let admin_token: Option<Arc<String>> = std::env::var("ADMIN_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(Arc::new);
+
+    let app = {
+        // Public routes — no admin token required (health, metrics, inference, Foundry proxies, mesh)
+        let public = Router::new()
+            .merge(routes::inference_routes())
+            .merge(routes::foundry_agent_routes())
+            .merge(routes::foundry_standalone_routes())
+            .merge(routes::health_routes())
+            .merge(routes::metrics_routes())
+            .merge(routes::mesh_routes());
+
+        // Protected routes — require admin token when configured
+        let protected = Router::new()
+            .merge(routes::admin_routes())
+            .merge(routes::egress_routes())
+            .merge(routes::spawn_routes())
+            .merge(routes::sensitive_agt_routes());
+
+        let protected = if let Some(ref token) = admin_token {
+            let token = token.clone();
+            protected.layer(axum::middleware::from_fn(move |req, next| {
+                let token = token.clone();
+                admin_auth_middleware(token, req, next)
+            }))
+        } else {
+            tracing::warn!("ADMIN_TOKEN not set — sensitive endpoints are unauthenticated");
+            protected
+        };
+
+        public
+            .merge(protected)
+            .with_state(state)
+            .layer(tower::limit::ConcurrencyLimitLayer::new(64))
+    };
 
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Listening on {addr}");
@@ -69,13 +100,16 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8444);
-    let proxy_addr = format!("0.0.0.0:{proxy_port}");
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
     tokio::spawn(async move {
         forward_proxy::start(&proxy_addr, proxy_blocklist).await;
     });
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
@@ -99,5 +133,53 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
+    }
+}
+
+/// Middleware that gates protected endpoints for non-localhost callers.
+///
+/// - Localhost (127.0.0.1 / ::1) → always allowed (agent + kubectl exec are same-pod)
+/// - Non-localhost → requires `Authorization: Bearer <ADMIN_TOKEN>` (cross-pod mesh traffic)
+///
+/// This ensures the agent process can call /egress/fetch, /sandbox/spawn, etc. without a token,
+/// while preventing other pods in the cluster from calling sensitive endpoints without auth.
+async fn admin_auth_middleware(
+    expected_token: Arc<String>,
+    req: Request,
+    next: Next,
+) -> impl IntoResponse {
+    // Allow all localhost connections without auth — same pod is trusted.
+    if let Some(connect_info) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        && connect_info.0.ip().is_loopback()
+    {
+        return next.run(req).await.into_response();
+    }
+
+    // Non-localhost: require bearer token
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(value) if value.starts_with("Bearer ") => {
+            let provided = &value[7..];
+            if provided == expected_token.as_str() {
+                next.run(req).await.into_response()
+            } else {
+                tracing::warn!(
+                    path = %req.uri().path(),
+                    "Admin auth: invalid token from non-localhost"
+                );
+                (StatusCode::UNAUTHORIZED, "Invalid admin token").into_response()
+            }
+        }
+        _ => {
+            tracing::warn!(
+                path = %req.uri().path(),
+                "Admin auth: non-localhost request without token"
+            );
+            (StatusCode::UNAUTHORIZED, "Admin token required for non-localhost access").into_response()
+        }
     }
 }

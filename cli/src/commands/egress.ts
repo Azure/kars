@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import chalk from "chalk";
+import { getAdminToken, withAdminAuth } from "../router-admin.js";
 
 export function egressCommand(): Command {
   const cmd = new Command("egress");
@@ -49,30 +50,33 @@ export function egressCommand(): Command {
         }
       }
 
+      // Read admin token for authenticated router calls (AKS only)
+      const adminToken = mode === "k8s" ? await getAdminToken(ns) : "";
+
       // Helper: call router API — Docker exec or kubectl exec
       async function routerGet(path: string): Promise<any> {
-        const args = mode === "docker"
+        let curlArgs = mode === "docker"
           ? ["exec", containerName, "curl", "-s", `http://127.0.0.1:8443${path}`]
           : ["exec", "-n", ns, pod, "-c", "inference-router", "--",
-             "curl", "-s", `http://127.0.0.1:8443${path}`];
+             ...withAdminAuth(["curl", "-s", `http://127.0.0.1:8443${path}`], adminToken)];
         const bin = mode === "docker" ? "docker" : "kubectl";
-        const { stdout } = await execa(bin, args, { stdio: "pipe" });
+        const { stdout } = await execa(bin, curlArgs, { stdio: "pipe" });
         return JSON.parse(stdout);
       }
 
       async function routerPost(path: string, body: object): Promise<any> {
-        const args = mode === "docker"
+        let curlArgs = mode === "docker"
           ? ["exec", containerName, "curl", "-s", "-X", "POST",
              "-H", "Content-Type: application/json",
              "-d", JSON.stringify(body),
              `http://127.0.0.1:8443${path}`]
           : ["exec", "-n", ns, pod, "-c", "inference-router", "--",
-             "curl", "-s", "-X", "POST",
+             ...withAdminAuth(["curl", "-s", "-X", "POST",
              "-H", "Content-Type: application/json",
              "-d", JSON.stringify(body),
-             `http://127.0.0.1:8443${path}`];
+             `http://127.0.0.1:8443${path}`], adminToken)];
         const bin = mode === "docker" ? "docker" : "kubectl";
-        const { stdout } = await execa(bin, args, { stdio: "pipe" });
+        const { stdout } = await execa(bin, curlArgs, { stdio: "pipe" });
         return JSON.parse(stdout);
       }
 
