@@ -8,8 +8,8 @@
 [![CI](https://github.com/Azure/azureclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/Azure/azureclaw/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry%20%7C%20Kata-0078D4)](https://azure.microsoft.com)
 
-Run AI agents in Kata Confidential VM sandboxes on AKS with 8 layers of defense-in-depth security.<br>
-Zero-credential inference through Azure AI Foundry. Multi-agent governance via AGT.
+Run AI agents in hardened sandboxes on AKS with defense-in-depth security.<br>
+Zero-credential inference through Azure AI Foundry. Optional Kata VM isolation. Multi-agent governance via AGT.
 
 </div>
 
@@ -17,7 +17,7 @@ Zero-credential inference through Azure AI Foundry. Multi-agent governance via A
 
 ## What is AzureClaw?
 
-AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside its own Kata Confidential VM on AKS — isolated at the hypervisor level — with a Rust sidecar that handles all external access. Agents never see API keys, every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
+AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside a hardened sandbox on AKS — with a Rust sidecar that mediates all external access. Agents never see Azure credentials (the sidecar authenticates via Workload Identity), every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. For maximum isolation, upgrade to Kata Confidential VMs — per-pod dedicated kernels where container escapes hit a hardware boundary. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
 
 ---
 
@@ -30,21 +30,20 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
                  └────┬─────┘
                       │
         ┌─────────────▼──────────────────────────────────────────────┐
-        │  AKS Cluster (Azure Linux · Cilium · Kata VMs)            │
+        │  AKS Cluster (Azure Linux · Cilium)                        │
         │                                                            │
         │  ┌─ Sandbox Pod (per agent) ────────────────────────────┐  │
         │  │                                                      │  │
         │  │  init: egress-guard (iptables)                       │  │
-        │  │   └─ UID 1000 → localhost + DNS only                 │  │
+        │  │   └─ agent process → localhost + DNS only             │  │
         │  │                                                      │  │
         │  │  ┌──────────────┐   localhost   ┌─────────────────┐  │  │
         │  │  │  OpenClaw    │──────:8443───►│ Inference Router │──┼──┼──► Azure AI Foundry
         │  │  │  (agent)     │               │ (Rust sidecar)   │  │  │     (200+ models)
-        │  │  │  UID 1000    │               │ UID 1001         │  │  │
         │  │  └──────────────┘               │                  │  │  │
-        │  │   read-only rootfs              │ • IMDS/WI auth   │  │  │
+        │  │   read-only rootfs              │ • WI/IMDS auth   │  │  │
         │  │   drop ALL caps                 │ • Content Safety  │  │  │
-        │  │   seccomp strict                │ • Token budgets   │  │  │
+        │  │   no Azure credentials          │ • Token budgets   │  │  │
         │  │                                 │ • Domain blocklist│  │  │
         │  │                                 │ • Egress proxy    │  │  │
         │  │                                 │ • AGT governance  │  │  │
@@ -65,16 +64,26 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 
 ## Key Features
 
-### 🔒 Security (8 layers, always on)
+### 🔒 Security (defense-in-depth)
 
-- **Kata Confidential VMs** — per-pod dedicated kernel; container escapes hit a VM boundary
-- **iptables egress guard** — agent UID can only reach `localhost`; all external traffic forced through sidecar
+**Always on (all isolation levels):**
+
+- **iptables egress guard** — agent process can only reach `localhost`; all external traffic forced through sidecar
 - **NetworkPolicy** — default-deny egress at the cluster level
+- **Read-only rootfs** — non-root, drop ALL capabilities, no privilege escalation
 - **Domain blocklist** — 51k+ domains auto-refreshed from OISD + URLhaus every 6h
-- **Egress proxy** — allowlist with approval flow + learn mode for zero-config onboarding
 - **Content Safety + Prompt Shields** — Azure AI Content Safety on every inference call
-- **Seccomp strict** — custom profile, ~150 allowed syscalls
-- **Zero credentials** — agents never see API keys; router authenticates via IMDS/Workload Identity
+- **Zero Azure credentials** — agents never see Azure auth tokens; the sidecar authenticates via IMDS/Workload Identity
+
+**Per isolation level (`--isolation`):**
+
+| Level | Runtime | What it adds |
+|-------|---------|-------------|
+| `standard` | runc | Kernel-default seccomp filter |
+| `enhanced` (default) | runc | Custom strict seccomp profile (~219 allowed syscalls) |
+| `confidential` | Kata VM | Per-pod dedicated kernel on AMD SEV-SNP hardware — container escapes hit a VM boundary |
+
+> **Note on plugin credentials:** Channel tokens (Telegram, Slack) and third-party API keys (Brave, Tavily) are accessible to the agent process — plugins need them to function. However, the agent cannot exfiltrate them: iptables blocks all outbound traffic except through the governed sidecar. Azure auth tokens remain isolated in the sidecar at all times.
 
 ### 🤖 AI Agent
 
@@ -106,47 +115,44 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 
 ### Prerequisites
 
-Node.js 22+ · Azure CLI 2.60+ · kubectl · Helm · Azure subscription
+Node.js 22+ · Docker (for local dev) · Azure CLI 2.60+ · kubectl · Helm (for AKS)
 
-### Production (AKS)
+### Try It Locally (Docker)
+
+No Azure subscription needed — start a sandbox in seconds:
 
 ```bash
 # 1. Install
 git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm install && npm run build && npm link
 
-# 2. Deploy (preflight checks, prompts for region & subscription)
+# 2. Start a local agent
+azureclaw dev
+
+# 3. Chat through the TUI
+🦞 You: What's the latest news about AI security?
+
+# 4. Add a Telegram channel
+azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
+
+# 5. Add third-party search plugins
+azureclaw dev --brave-api-key "KEY" --tavily-api-key "KEY"
+```
+
+### Deploy to AKS (Production)
+
+```bash
+# Full stack deploy — prompts for region & subscription
 azureclaw up
 
-# 3. Connect to your agent
+# Connect to your agent
 azureclaw connect my-assistant
 
-# 4. Chat through the TUI
-🦞 You: Summarize the top HackerNews stories about AI security.
-
-# 5. Review egress activity
+# Review egress activity
 azureclaw egress my-assistant --learned
 ```
 
 `azureclaw up` runs preflight checks (Azure CLI, kubectl, Helm, subscription, SKU availability), prompts for region and agent name, then provisions everything end-to-end.
-
-### Local Development (Docker)
-
-No Azure subscription needed. Same security model, runs locally:
-
-```bash
-# Basic — starts a Docker sandbox
-azureclaw dev
-
-# With a messaging channel
-azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
-
-# With third-party search plugins
-azureclaw dev --brave-api-key "KEY" --tavily-api-key "KEY"
-
-# Build sandbox image locally (required for Foundry Bing search)
-azureclaw dev --build
-```
 
 ### Add Agents
 
@@ -221,20 +227,35 @@ These flags are shared across `dev`, `add`, and `credentials update`:
 
 ## Security Model
 
-Every agent runs in an isolated namespace with 8 defense layers stacked in depth:
+Every sandbox runs in its own namespace with defense layers stacked in depth. Some layers are always active; others depend on the isolation level you choose.
 
-| # | Layer | Control |
+### Always Active
+
+| Layer | Control |
+|---|---|
+| **Container hardening** | Read-only rootfs, non-root, drop ALL capabilities, no privilege escalation |
+| **iptables egress guard** | Agent process restricted to localhost + DNS; all internet traffic goes through sidecar |
+| **NetworkPolicy** | Default-deny egress at the Kubernetes level (Cilium-enforced) |
+| **Domain blocklist** | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus every 6h |
+| **Inference safety** | Content Safety + Prompt Shields on every request + per-agent token budgets |
+| **Zero Azure credentials** | Agent never sees Azure auth tokens — sidecar authenticates via IMDS/Workload Identity |
+
+### Per Isolation Level
+
+| Level | Runtime | Security posture |
 |---|---|---|
-| 0 | **Azure Infra** | NSG, AKS API IP allowlist, DDoS protection |
-| 1 | **Node OS** | Azure Linux, SELinux enforcing, auto-patched |
-| 2 | **Kata VM** | Per-pod dedicated kernel (confidential isolation) |
-| 3 | **Container** | Read-only rootfs, non-root, drop ALL capabilities |
-| 4 | **Kernel** | Custom seccomp profile (~219 allowed syscalls) |
-| 5 | **Network** | iptables UID guard + NetworkPolicy + 51k+ domain blocklist |
-| 6 | **Inference** | Content Safety + Prompt Shields + token budgets |
-| 7 | **Governance** | AGT policy engine + trust scoring + audit log |
+| `standard` | runc | Kernel-default seccomp, shared node pool |
+| `enhanced` (**default**) | runc | Custom strict seccomp (~219 syscalls), shared node pool |
+| `confidential` | Kata VM | Per-pod dedicated kernel on AMD SEV-SNP hardware; container escapes hit a VM boundary; dedicated node pool |
 
-> Agents never see API keys. The inference router authenticates to Azure AI Foundry via IMDS/Workload Identity. Every inference request passes through Azure AI Content Safety and Prompt Shields before reaching the model.
+### Credential Compartmentalization
+
+| Credential type | Where it lives | Agent can see it? |
+|---|---|---|
+| Azure auth tokens (IMDS, WI) | Sidecar only (projected file) | ❌ No — iptables blocks IMDS, file permissions enforce separation |
+| Azure OpenAI API key | Sidecar only (`/run/secrets/`) | ❌ No — mounted only in sidecar container |
+| Plugin API keys (Brave, Tavily, etc.) | Agent env vars | ✅ Yes — plugins need them. Agent cannot exfiltrate: egress blocked by iptables |
+| Channel tokens (Telegram, Slack) | Agent env vars | ✅ Yes — channels need them. Same egress protection applies |
 
 See [docs/security.md](docs/security.md) for full details and OWASP LLM Top 10 coverage.
 
@@ -274,6 +295,21 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 
 ---
 
+## Documentation
+
+| Document | Description |
+|---|---|
+| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, auth flow |
+| [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations |
+| [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
+| [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode, approval flow |
+| [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
+| [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation, credential and channel separation |
+| [Security Validation](docs/security-validation.md) | Live cluster evidence for every security layer |
+| [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
+
+---
+
 ## Egress Proxy
 
 All agent network traffic is mediated by the inference router sidecar:
@@ -290,8 +326,6 @@ azureclaw egress my-agent --learned                      # review discovered dom
 azureclaw egress my-agent --enforce                      # lock down to learned set
 ```
 
-See [docs/egress-proxy.md](docs/egress-proxy.md) for the full egress architecture.
-
 ---
 
 ## Project Structure
@@ -306,25 +340,10 @@ azureclaw/
 ├── sandbox-images/       # OpenClaw container images
 ├── deploy/               # Bicep IaC, Helm charts, monitoring
 ├── docs/                 # Architecture, security, demo guides
-├── examples/             # Sample agents (basic, confidential, multi-tenant)
+├── examples/             # Sample agents (basic, confidential, telegram)
 ├── tests/                # E2E tests (Docker + Kind)
-└── vendor/               # AgentMesh SDK
+└── vendor/               # AgentMesh SDK (8 vendor bug fixes)
 ```
-
----
-
-## Documentation
-
-| Document | Description |
-|---|---|
-| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, auth flow |
-| [Security](docs/security.md) | 8-layer defense model, OWASP coverage, threat mitigations |
-| [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
-| [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode |
-| [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
-| [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation model |
-| [Security Validation](docs/security-validation.md) | Penetration testing and validation results |
-| [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
 
 ---
 

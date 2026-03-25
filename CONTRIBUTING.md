@@ -19,7 +19,7 @@ make lint     # clippy + oxlint
 | `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs into sandboxes |
 | `inference-router/` | Rust (axum) | Per-sandbox sidecar — auth, safety, budgets, 18 Foundry APIs, AGT governance |
 | `cli/` | TypeScript | 15+ CLI commands + OpenClaw plugin + 9 Foundry skills |
-| `cli/skills/` | Markdown | 9 SKILL.md files teaching the agent to use Foundry services |
+| `cli/skills/` | Markdown | 10 SKILL.md files teaching the agent to use Foundry services |
 | `cli/policies/` | YAML | AGT policy profiles (shell-safety, approval, rate-limit) |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
