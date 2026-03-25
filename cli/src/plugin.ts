@@ -1260,13 +1260,27 @@ const azureClawPlugin = definePluginEntry({
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
+          // Connection ID: env var override → auto-discover first GroundingWithBingSearch connection.
+          // The Responses API requires the FULL resource ID, not short /connections/name.
+          let connId = process.env.BING_CONNECTION_ID;
+          if (!connId) {
+            try {
+              const conns = await routerCall("GET", "/connections?api-version=2025-05-15-preview");
+              const bingConn = (conns.value || conns || []).find(
+                (c: any) => c.type === "GroundingWithBingSearch" ||
+                  c.properties?.category === "GroundingWithBingSearch"
+              );
+              if (bingConn) connId = bingConn.id; // full resource ID
+            } catch { /* fall through to default */ }
+          }
+
           const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
             model: (params.model as string) || "gpt-4.1",
             input: params.query,
             tools: [{
               type: "bing_grounding",
               bing_grounding: {
-                search_configurations: [{ project_connection_id: "/connections/bing" }],
+                search_configurations: [{ project_connection_id: connId }],
               },
             }],
             store: false,
