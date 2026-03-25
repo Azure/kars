@@ -1564,7 +1564,8 @@ const azureClawPlugin = definePluginEntry({
               const conns = await routerCall("GET", "/connections?api-version=2025-05-15-preview");
               const bingConn = (conns.value || conns || []).find(
                 (c: any) => c.type === "GroundingWithBingSearch" ||
-                  c.properties?.category === "GroundingWithBingSearch"
+                  c.properties?.category === "GroundingWithBingSearch" ||
+                  c.metadata?.type === "bing_grounding"
               );
               if (bingConn) connId = bingConn.id; // full resource ID
             } catch { /* fall through to default */ }
