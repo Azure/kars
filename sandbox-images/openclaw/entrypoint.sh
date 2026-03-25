@@ -119,15 +119,10 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
     "deny": ["sessions_spawn", "sessions_send"]
   },
   "plugins": {
-    "allow": ["azureclaw"]
+    "allow": [PLUGINS_ALLOW_PLACEHOLDER]
   },
   "channels": {
-    "telegram": {
-      "enabled": TELEGRAM_ENABLED_PLACEHOLDER,
-      "botToken": "${TELEGRAM_BOT_TOKEN:-}",
-      "dmPolicy": "open",
-      "allowFrom": ["*"]
-    }
+    CHANNELS_PLACEHOLDER
   },
   "agents": {
     "defaults": {
@@ -158,12 +153,49 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
 EOF
   chmod 600 "$OPENCLAW_CONFIG"
 
-  # Set Telegram enabled based on whether token is provided
+  # Build plugins allow list and channels config dynamically from env vars
+  PLUGINS_LIST='"azureclaw"'
+  CHANNELS_CONFIG=""
+
+  # Telegram (built into OpenClaw core, uses grammY)
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    sed -i 's/TELEGRAM_ENABLED_PLACEHOLDER/true/' "$OPENCLAW_CONFIG"
-  else
-    sed -i 's/TELEGRAM_ENABLED_PLACEHOLDER/false/' "$OPENCLAW_CONFIG"
+    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/telegram\""
+    CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"] }"
   fi
+
+  # WhatsApp (built-in, uses Baileys — QR pairing at runtime)
+  if [ -n "${WHATSAPP_ENABLED:-}" ]; then
+    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/whatsapp\""
+    WA_EXTRA=""
+    [ -n "${CHANNELS_CONFIG}" ] && WA_EXTRA=", "
+    CHANNELS_CONFIG="${CHANNELS_CONFIG}${WA_EXTRA}\"whatsapp\": { \"dmPolicy\": \"pairing\", \"allowFrom\": [\"*\"] }"
+  fi
+
+  # Slack (built-in, uses Bolt)
+  if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/slack\""
+    SLACK_EXTRA=""
+    [ -n "${CHANNELS_CONFIG}" ] && SLACK_EXTRA=", "
+    CHANNELS_CONFIG="${CHANNELS_CONFIG}${SLACK_EXTRA}\"slack\": { \"botToken\": \"${SLACK_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"] }"
+  fi
+
+  # Discord (built-in, uses discord.js)
+  if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/discord\""
+    DISC_EXTRA=""
+    [ -n "${CHANNELS_CONFIG}" ] && DISC_EXTRA=", "
+    CHANNELS_CONFIG="${CHANNELS_CONFIG}${DISC_EXTRA}\"discord\": { \"botToken\": \"${DISCORD_BOT_TOKEN}\", \"dmPolicy\": \"pairing\", \"allowFrom\": [\"*\"] }"
+  fi
+
+  # Default: no channels configured
+  if [ -z "${CHANNELS_CONFIG}" ]; then
+    CHANNELS_CONFIG="\"_placeholder\": false"
+  fi
+
+  sed -i "s|PLUGINS_ALLOW_PLACEHOLDER|${PLUGINS_LIST}|" "$OPENCLAW_CONFIG"
+  sed -i "s|CHANNELS_PLACEHOLDER|${CHANNELS_CONFIG}|" "$OPENCLAW_CONFIG"
+  # Remove placeholder if no channels
+  sed -i '/"_placeholder": false/d' "$OPENCLAW_CONFIG"
 
   # Set provider credentials via environment (OpenClaw reads these automatically)
   # These are exported so openclaw tui/agent picks them up
