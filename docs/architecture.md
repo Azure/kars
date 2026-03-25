@@ -76,7 +76,7 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 | Level | RuntimeClass | seccomp | Node Pool |
 |-------|-------------|---------|-----------|
 | standard | (default runc) | RuntimeDefault | `sandbox` |
-| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (~150 syscalls) | `sandbox` |
+| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (~219 syscalls) | `sandbox` |
 | confidential | `kata-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
 
 ### Inference Router (Rust, axum sidecar)
@@ -107,8 +107,9 @@ Runs as UID 1000 (all outbound blocked by iptables except localhost + DNS + ESTA
 - **Gateway** on port 18789 — WebSocket + Control UI
 - **TUI** on port 18791
 - **Plugin:** AzureClaw tools (`spawn`, `mesh`, `http_fetch`), provider `azure-openai` routing to `localhost:8443`
-- **Channels:** Telegram, WhatsApp (via `/egress/fetch` proxy)
+- **Channels:** Telegram, Slack, Discord, WhatsApp (via `/egress/fetch` proxy)
 - **Filesystem:** Read-only rootfs, writable `/sandbox` + `/tmp` (emptyDir, `/tmp` is tmpfs 1Gi)
+- **Explicit proxy:** `proxy-bootstrap.js` is preloaded via `NODE_OPTIONS="--require ..."` before any OpenClaw code runs. It sets undici's `EnvHttpProxyAgent` as the global fetch dispatcher so all outbound HTTP/HTTPS requests (Telegram polling, model pricing, etc.) honor `HTTPS_PROXY`/`NO_PROXY` env vars.
 
 ### Egress Guard (init container)
 
@@ -285,3 +286,102 @@ All endpoints served by the inference router on `:8443`.
 | GET | `/healthz` | Liveness probe |
 | GET | `/readyz` | Deep readiness (token + Content Safety) |
 | GET | `/metrics` | Prometheus metrics |
+
+---
+
+## Channels Architecture
+
+Messaging channels (Telegram, Slack, Discord, WhatsApp) connect to the agent through the gateway running inside the sandbox. All channel traffic flows through the egress proxy — the agent has no direct network access.
+
+```
+                  Telegram API ◄──┐
+                  Slack API    ◄──┤
+                  Discord API  ◄──┤  Egress proxy (/egress/fetch)
+                  WhatsApp     ◄──┘       ▲
+                                          │
+┌─ Sandbox Pod ──────────────────────────────────────────────────┐
+│                                                                │
+│  openclaw (UID 1000)              inference-router (UID 1001)  │
+│  ┌──────────────────┐            ┌──────────────────────┐      │
+│  │ Gateway :18789   │            │ /egress/fetch        │      │
+│  │  ├─ Telegram     │──http_fetch──►│ blocklist → allow │      │
+│  │  ├─ Slack        │            │  → learn/pending     │      │
+│  │  ├─ Discord      │            └──────────────────────┘      │
+│  │  └─ WhatsApp     │                                          │
+│  └──────────────────┘                                          │
+└────────────────────────────────────────────────────────────────┘
+```
+
+Channels are enabled via CLI flags (e.g., `--channels telegram --telegram-token "..."`) which inject environment variables into the pod. The entrypoint reads these at startup and configures the gateway adapters automatically. See [channels-plugins.md](channels-plugins.md) for setup details.
+
+---
+
+## Plugin Auto-Discovery
+
+The sandbox entrypoint (`sandbox-images/openclaw/entrypoint.sh`) auto-discovers plugins from environment variables at startup. No manual configuration files are needed.
+
+**Discovery flow:**
+
+1. CLI flags (e.g., `--brave-api-key`) or env vars (e.g., `BRAVE_API_KEY`) are set
+2. On AKS, the CLI stores these as K8s secrets; the controller mounts them via `envFrom`
+3. At pod startup, the entrypoint iterates through known plugin/env-var pairs
+4. For each set env var, the plugin is added to `plugins.allow` and `plugins.entries` in the OpenClaw config
+5. The gateway loads only the enabled plugins
+
+**Plugin mapping:**
+
+| Plugin ID | Environment Variable | CLI Flag |
+|-----------|---------------------|----------|
+| `brave` | `BRAVE_API_KEY` | `--brave-api-key` |
+| `tavily` | `TAVILY_API_KEY` | `--tavily-api-key` |
+| `exa` | `EXA_API_KEY` | `--exa-api-key` |
+| `firecrawl` | `FIRECRAWL_API_KEY` | `--firecrawl-api-key` |
+| `perplexity` | `PERPLEXITY_API_KEY` | `--perplexity-api-key` |
+| `openai` | `OPENAI_API_KEY` | `--openai-api-key` |
+
+Source: `sandbox-images/openclaw/entrypoint.sh` (plugin loop at lines 200–233)
+
+---
+
+## Foundry Integration
+
+### Bing Grounding (Web Search)
+
+The `foundry_web_search` tool uses Azure AI Foundry's Responses API with Bing Grounding. Unlike third-party plugins, it requires **no API key** — it auto-discovers the Bing connection from the Foundry project at runtime via Workload Identity.
+
+**Setup:** Create a Bing Grounding resource in Azure Portal → connect it to your Foundry project → deploy. The tool appears automatically.
+
+**Manual override:** If auto-discovery fails (e.g., multiple Bing connections), set `BING_CONNECTION_ID` explicitly.
+
+See [channels-plugins.md](channels-plugins.md#foundry-web-search-bing-grounding) for detailed setup instructions.
+
+---
+
+## Credentials Secret Pattern
+
+Channel tokens and plugin API keys follow a consistent pattern from CLI to running pod:
+
+```
+CLI flag (--telegram-token)
+    │
+    ▼
+K8s Secret (azureclaw-<name>/channel-telegram-token)
+    │
+    ▼
+envFrom in pod spec (controller injects all secrets)
+    │
+    ▼
+entrypoint.sh reads env vars → configures channels/plugins
+    │
+    ▼
+Agent process (never sees raw credentials)
+```
+
+| Step | Component | What Happens |
+|------|-----------|-------------|
+| 1 | `azureclaw add` | CLI creates K8s secrets in `azureclaw-<name>` namespace |
+| 2 | Controller | Mounts secrets as env vars via `envFrom` in the pod spec |
+| 3 | Entrypoint | Reads env vars, configures `openclaw.json`, enables channels/plugins |
+| 4 | Agent | Interacts with pre-configured channels — never handles raw tokens |
+
+Credentials are **namespace-scoped** — each sandbox's secrets are isolated. Use `azureclaw credentials update <name>` to rotate credentials on a running sandbox (updates the K8s secret and triggers a rolling restart).

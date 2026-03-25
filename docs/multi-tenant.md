@@ -33,6 +33,49 @@ azureclaw-tenant-c        # Tenant C sandbox pod + NetworkPolicy + ServiceAccoun
 - **No container escape** — seccomp + read-only rootfs + non-root + drop ALL + optional Kata VM
 - **No shared inference state** — each sandbox has its own router process with independent token tracking
 
+### Credentials Isolation
+
+Each sandbox stores channel tokens and plugin API keys in its own namespace as K8s secrets. Secrets are created by `azureclaw add` and mounted via `envFrom` — they are never shared across namespaces.
+
+```
+azureclaw-tenant-a/
+  ├─ channel-telegram-token    # Tenant A's Telegram bot
+  ├─ plugin-brave-api-key      # Tenant A's Brave key
+  └─ ...
+
+azureclaw-tenant-b/
+  ├─ channel-slack-token       # Tenant B's Slack bot
+  ├─ plugin-tavily-api-key     # Tenant B's Tavily key
+  └─ ...
+```
+
+Use `azureclaw credentials update <name>` to rotate credentials for a specific sandbox without affecting others. See [channels-plugins.md](channels-plugins.md#rotating-credentials) for details.
+
+### Channel Isolation
+
+Each sandbox gets its own channel instance — there is no shared bot or message bus:
+
+| Resource | Isolation |
+|----------|-----------|
+| Telegram bot | Each sandbox uses its own BotFather token; separate polling loop |
+| Slack app | Each sandbox uses its own `xoxb-` token; separate WebSocket connection |
+| Discord bot | Each sandbox uses its own bot token; separate gateway session |
+| WhatsApp | Each sandbox pairs its own QR code session |
+
+This means Tenant A's Telegram bot is completely independent of Tenant B's — different tokens, different chat histories, different message streams.
+
+### Network Isolation
+
+Three layers enforce network boundaries between tenants:
+
+| Layer | Enforcement | Scope |
+|-------|------------|-------|
+| **iptables** | UID-based egress rules (init container) | Per-container — agent (UID 1000) restricted to localhost + DNS |
+| **NetworkPolicy** | Default-deny egress per namespace | Per-namespace — blocks all cross-namespace traffic |
+| **Cilium CNI** | Pod-level enforcement on AKS | Cluster-wide — NetworkPolicy backed by eBPF |
+
+Cross-namespace traffic is blocked by default. The only exception is AGT mesh traffic (port 8443) when governance is enabled — this requires an explicit ingress NetworkPolicy created by the controller.
+
 ## Usage
 
 ```bash

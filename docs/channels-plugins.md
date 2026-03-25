@@ -112,10 +112,10 @@ Built-in web search powered by Azure AI Foundry's Responses API with Bing Ground
 ### Setup
 
 1. **Create a Bing Grounding resource:**
-   Go to [Grounding with Bing Search](https://portal.azure.com/#create/Microsoft.BingGroundingSearch) in the Azure Portal and create the resource.
+   Go to [Grounding with Bing Search](https://portal.azure.com/#create/Microsoft.BingGroundingSearch) in the Azure Portal and create the resource. In the portal, you'll see a resource creation blade with fields for Subscription, Resource Group, Name, and Region. The resource type is **Grounding with Bing Search** under the **AI + Machine Learning** category.
 
 2. **Connect to your Foundry project:**
-   In the Azure AI Foundry portal, navigate to your project → **Connected resources** → add the Bing Grounding resource.
+   In the [Azure AI Foundry portal](https://ai.azure.com), navigate to your project → **Management** → **Connected resources** → **+ New connection** → select the Bing Grounding resource you created. The connected resources list will show the Bing connection with its resource ID and status.
 
 3. **Deploy your agent:**
    The `foundry_web_search` tool auto-discovers the Bing connection at startup — zero config needed.
@@ -153,11 +153,34 @@ azureclaw dev
 When deploying to AKS with `azureclaw add`, channel tokens and plugin API keys are stored as Kubernetes secrets in the agent's namespace:
 
 ```
-<agent-name>/channel-telegram-token
-<agent-name>/plugin-brave-api-key
-<agent-name>/plugin-tavily-api-key
-...
+CLI (azureclaw add --telegram-token "...")
+    │
+    ▼
+K8s Secret (azureclaw-<name>/channel-telegram-token)
+    │
+    ▼
+Controller mounts via envFrom in pod spec
+    │
+    ▼
+entrypoint.sh reads env vars → configures channels/plugins
+    │
+    ▼
+Agent process (pre-configured, never sees raw tokens)
 ```
+
+Secret naming convention:
+
+| Credential Type | Secret Name |
+|----------------|-------------|
+| Telegram token | `channel-telegram-token` |
+| Slack token | `channel-slack-token` |
+| Discord token | `channel-discord-token` |
+| Brave API key | `plugin-brave-api-key` |
+| Tavily API key | `plugin-tavily-api-key` |
+| Exa API key | `plugin-exa-api-key` |
+| Firecrawl API key | `plugin-firecrawl-api-key` |
+| Perplexity API key | `plugin-perplexity-api-key` |
+| OpenAI API key | `plugin-openai-api-key` |
 
 These secrets are:
 - **Created automatically** by the CLI during `azureclaw add`
@@ -165,14 +188,22 @@ These secrets are:
 - **Never exposed** to the agent process — the entrypoint reads them and configures channels/plugins before handing off to the agent
 - **Scoped to the agent namespace** — other agents cannot access them
 
-To rotate a credential:
+### Rotating Credentials
+
+Use `azureclaw credentials update` to rotate tokens on a running sandbox:
 
 ```bash
-# Update the secret and restart the pod
-azureclaw add my-agent --telegram-token "NEW_TOKEN"
+# Update a single credential
+azureclaw credentials update my-agent --telegram-token "NEW_TOKEN"
+
+# Update multiple credentials at once
+azureclaw credentials update my-agent --telegram-token "NEW" --brave-api-key "NEW"
+
+# Update without restarting the pod (apply on next restart)
+azureclaw credentials update my-agent --telegram-token "NEW" --no-restart
 ```
 
-The controller detects the secret change and performs a rolling restart of the sandbox pod.
+The command updates the K8s secret and triggers a rolling restart of the sandbox pod (unless `--no-restart` is passed).
 
 ---
 
@@ -187,3 +218,53 @@ The sandbox entrypoint (`sandbox-images/entrypoint.sh`) handles channel and plug
 5. **Starts the agent** — hands off to OpenClaw with all channels and plugins configured
 
 No manual configuration files needed — everything is driven by environment variables.
+
+---
+
+## Troubleshooting
+
+### Channel Issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Telegram bot not responding | Token invalid or bot not started | Verify token with `curl https://api.telegram.org/bot<TOKEN>/getMe` |
+| Telegram `409 Conflict` | Another instance polling the same bot | Stop other instances; only one poller per bot token |
+| Slack messages not received | Missing scopes | Add `chat:write`, `app_mentions:read`, `im:history` in Slack App config |
+| Slack `invalid_auth` | Token revoked or wrong workspace | Reinstall the Slack app and use the new `xoxb-` token |
+| Discord bot offline | Missing `MESSAGE_CONTENT` intent | Enable it in Discord Developer Portal → Bot → Privileged Gateway Intents |
+| WhatsApp QR not appearing | Console output buffered | Check gateway logs: `kubectl logs <pod> -c openclaw` |
+| Channel traffic blocked | Domain not on egress allowlist | Run `azureclaw egress <name> --learned` and approve channel API domains |
+
+### Plugin Issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Plugin tool not available | API key env var not set | Verify with `kubectl exec <pod> -c openclaw -- env \| grep API_KEY` |
+| Plugin returns errors | Invalid API key | Use `azureclaw credentials update <name> --brave-api-key "NEW_KEY"` |
+| Plugin works locally but not on AKS | Secret not mounted | Check secret exists: `kubectl get secret -n azureclaw-<name>` |
+| Multiple plugins conflicting | N/A — plugins are independent | Each plugin registers its own tool; no conflicts expected |
+
+### Foundry Bing Search Issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `foundry_web_search` tool not available | No Bing connection in Foundry project | Add Bing Grounding as a connected resource in the Foundry portal |
+| `ConnectionNotFound` error | Connection ID mismatch or multiple connections | Set `BING_CONNECTION_ID` explicitly |
+| `AuthorizationFailed` | Workload Identity missing permissions | Ensure the managed identity has `Cognitive Services User` role on the Bing resource |
+| Search returns empty results | Bing resource inactive | Verify the connection is active in the Foundry portal |
+
+### General Debugging
+
+```bash
+# Check which channels and plugins are active
+kubectl logs <pod> -c openclaw -n azureclaw-<name> | head -50
+
+# Check env vars injected into the sandbox
+kubectl exec <pod> -c openclaw -n azureclaw-<name> -- env | sort
+
+# View entrypoint auto-configuration output
+kubectl logs <pod> -c openclaw -n azureclaw-<name> | grep -E "(channel|plugin|bing)"
+
+# Rotate a credential and restart
+azureclaw credentials update <name> --telegram-token "NEW_TOKEN"
+```

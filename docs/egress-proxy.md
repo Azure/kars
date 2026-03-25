@@ -31,7 +31,13 @@ This blocks:
 - **Data exfiltration** to any external host
 - **Lateral movement** to other pods in the cluster
 
-### Layer 2: Egress Proxy (Application Level)
+### Layer 2: Forward Proxy (Explicit Mode)
+
+The sandbox uses `proxy-bootstrap.js` (preloaded via `NODE_OPTIONS="--require ..."`) to set undici's `EnvHttpProxyAgent` as the global fetch dispatcher. This ensures all outbound HTTP/HTTPS requests from the Node.js process honor `HTTPS_PROXY` and `NO_PROXY` environment variables — providing an explicit (forward) proxy path through the inference-router.
+
+This complements the iptables transparent proxy rules (which redirect UID 1000 traffic on ports 80/443 to `localhost:8444`). Both paths enforce the same blocklist, allowlist, and learn-mode policies.
+
+### Layer 3: Egress Proxy (Application Level)
 
 When an agent needs to make an external HTTP request, it uses the `http_fetch`
 tool which sends a `POST` to `localhost:8443/egress/fetch`. The inference-router
@@ -179,6 +185,18 @@ Key properties:
 - Parent domain matching: blocking `example.com` also blocks `sub.example.com`
 - Max 500,000 domains per feed (memory safety limit)
 - **Always enforced**, even when learn mode is on
+
+### Auto-Refresh
+
+The blocklist stays current through multiple refresh mechanisms:
+
+| Mechanism | Frequency | Source |
+|-----------|-----------|--------|
+| Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [URLhaus](https://urlhaus.abuse.ch/) |
+| K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/azureclaw/blocklist/domains.txt` |
+| GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
+
+**Safe refresh:** If all upstream feeds fail, the previous entries are preserved — no wipe-on-failure. The router logs a warning and retries on the next cycle.
 
 ## Agent Integration
 

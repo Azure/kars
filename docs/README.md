@@ -1,29 +1,32 @@
 # AzureClaw Documentation
 
 ## Getting Started
-- [Quick Start](../README.md#quick-start)
-- [Architecture](architecture.md)
-- [Deployment Guide](deployment.md)
+
+- [Quick Start](../README.md#quick-start) — Install, deploy, connect in 5 minutes
+- [Architecture](architecture.md) — System overview, components, CRD schema, API endpoints
 
 ## Security
-- [Security Model](security.md) — 8-layer defense-in-depth
-- [Network Egress & Proxy](egress-proxy.md) — Allowlist, approval flow, learn mode
-- [E2E Encryption](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging
-- [Security Validation](security-validation.md) — Live cluster evidence
 
-## Operations
-- [CLI Reference](cli-reference.md)
-- [Egress Management](egress-proxy.md#operator-workflow)
-- [WebUX Access](webux.md)
-- [Monitoring](../deploy/monitoring/dashboards.md)
+- [Security Model](security.md) — 10-layer defense-in-depth (8 infra + 2 behavioral)
+- [Network Egress & Proxy](egress-proxy.md) — Blocklist, allowlist, approval flow, learn mode
+- [E2E Encryption Proof](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging with traffic capture evidence
+- [Security Validation](security-validation.md) — Live cluster evidence for every security layer
 
 ## Agent Capabilities
-- [Channels & Plugins](channels-plugins.md) — Telegram, Slack, Discord, search plugins, Foundry Bing
 
-## Agent Development
-- [Multi-Tenant Isolation](multi-tenant.md)
-- [Sub-Agent Spawning](sub-agents.md)
-- [Foundry Skills](skills.md)
+- [Channels & Plugins](channels-plugins.md) — Telegram, Slack, Discord, WhatsApp, search plugins, Foundry Bing Grounding
+- [Architecture — Foundry Integration](architecture.md#foundry-standalone-apis-18-api-groups-imds-auth) — Responses API, Memory Store, Foundry IQ
 
-## Demos
-- [Claw Shield Demo](DEMO.md)
+## Operations
+
+- [Egress Management](egress-proxy.md#operator-workflow) — Learn → review → approve → lock down
+- [Multi-Tenant Isolation](multi-tenant.md) — Per-namespace security boundaries
+
+## Demos & Examples
+
+- [ClawShield Demo](DEMO.md) — Full walkthrough with screenshots
+- [Example Agents](../examples/) — `basic-agent`, `confidential-agent`, `demo-clawshield`
+
+## Migration
+
+- [Migration from NemoClaw](migration-from-nemoclaw.md) — What changed and how to migrate
