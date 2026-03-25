@@ -114,6 +114,10 @@ export function addCommand(): Command {
         np.learnEgress = true;
       }
 
+      // Channel and plugin credentials — stored in K8s secret, NOT in CRD spec.
+      // The entrypoint reads env vars and auto-configures channels/plugins.
+      let channelEnvSecrets: Record<string, string> = {};
+
       // Channel configuration — map channels to env vars and secrets.
       // Channel domains are NOT auto-added to the egress allowlist — they go through
       // the learn→approve flow so operators can see and approve each domain explicitly.
@@ -150,11 +154,8 @@ export function addCommand(): Command {
           }
         }
 
-        // Store channel env vars for secret creation
-        (sandbox.spec as Record<string, unknown>).channels = {
-          enabled: channels,
-          envSecrets,
-        };
+        // Store for secret creation (NOT in CRD spec — entrypoint reads env vars)
+        channelEnvSecrets = envSecrets;
       }
 
       // Third-party plugin API keys — stored in the same K8s secret as channel tokens.
@@ -168,26 +169,15 @@ export function addCommand(): Command {
         openai:     { flag: "openaiApiKey",     env: "OPENAI_API_KEY" },
       };
       const pluginSecrets: Record<string, string> = {};
-      const enabledPlugins: string[] = [];
-      for (const [pluginId, { flag, env }] of Object.entries(pluginKeyFlags)) {
+      for (const [, { flag, env }] of Object.entries(pluginKeyFlags)) {
         if (options[flag]) {
           pluginSecrets[env] = options[flag];
-          enabledPlugins.push(pluginId);
         }
       }
-      if (enabledPlugins.length > 0) {
-        (sandbox.spec as Record<string, unknown>).plugins = {
-          enabled: enabledPlugins,
-          envSecrets: pluginSecrets,
-        };
-      }
 
-      // Skills configuration
+      // Skills — just log for now (entrypoint activates pre-installed skills)
       if (options.skills) {
-        const skills = options.skills.split(",").map((s: string) => s.trim());
-        (sandbox.spec as Record<string, unknown>).skills = {
-          activated: skills,
-        };
+        console.log(chalk.dim(`  Skills: ${options.skills}`));
       }
 
       const yaml = JSON.stringify(sandbox, null, 2);
@@ -262,11 +252,9 @@ export function addCommand(): Command {
         spinner.text = `Creating sandbox '${name}'...`;
 
         // Create K8s secret for channel tokens and plugin API keys
-        const channelsSpec = (sandbox.spec as Record<string, unknown>).channels as { envSecrets?: Record<string, string> } | undefined;
-        const pluginsSpec = (sandbox.spec as Record<string, unknown>).plugins as { envSecrets?: Record<string, string> } | undefined;
         const allSecrets = {
-          ...(channelsSpec?.envSecrets || {}),
-          ...(pluginsSpec?.envSecrets || {}),
+          ...channelEnvSecrets,
+          ...pluginSecrets,
         };
         if (Object.keys(allSecrets).length > 0) {
           spinner.text = "Creating credential secret...";
@@ -290,6 +278,31 @@ export function addCommand(): Command {
           input: JSON.stringify(sandbox),
           stdio: ["pipe", "pipe", "pipe"],
         });
+
+        // Inject credential secret as env vars into the sandbox container.
+        // The controller doesn't know about channel/plugin secrets — we patch
+        // the deployment to mount them via envFrom after the CRD creates it.
+        if (Object.keys(allSecrets).length > 0) {
+          spinner.text = "Injecting credentials into sandbox...";
+          // Wait for the deployment to exist (controller creates it from CRD)
+          for (let attempt = 0; attempt < 20; attempt++) {
+            try {
+              await execa("kubectl", [
+                "get", "deploy", name, "-n", namespace,
+              ], { stdio: "pipe", timeout: 5000 });
+              break;
+            } catch { await new Promise(r => setTimeout(r, 3000)); }
+          }
+          try {
+            await execa("kubectl", [
+              "patch", "deployment", name, "-n", namespace,
+              "--type=json",
+              `-p=[{"op":"add","path":"/spec/template/spec/containers/0/envFrom","value":[{"secretRef":{"name":"${name}-credentials"}}]}]`,
+            ], { stdio: "pipe" });
+          } catch {
+            // Non-fatal — user can manually patch
+          }
+        }
 
         // Wait for pod to be ready and WI token to propagate
         spinner.text = `Waiting for '${name}' to be ready...`;
