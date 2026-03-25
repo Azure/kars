@@ -8,10 +8,16 @@
 [![CI](https://github.com/Azure/azureclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/Azure/azureclaw/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry%20%7C%20Kata-0078D4)](https://azure.microsoft.com)
 
-Run AI agents in Kata Confidential VM sandboxes on AKS with 8 layers of defense-in-depth security.
+Run AI agents in Kata Confidential VM sandboxes on AKS with 8 layers of defense-in-depth security.<br>
 Zero-credential inference through Azure AI Foundry. Multi-agent governance via AGT.
 
 </div>
+
+---
+
+## What is AzureClaw?
+
+AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside its own Kata Confidential VM on AKS — isolated at the hypervisor level — with a Rust sidecar that handles all external access. Agents never see API keys, every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
 
 ---
 
@@ -72,13 +78,13 @@ Zero-credential inference through Azure AI Foundry. Multi-agent governance via A
 
 ### 🤖 AI Agent
 
-- **OpenClaw gateway** — TUI + Telegram + Web UI frontends
-- **Messaging channels** — Telegram, Slack, Discord, WhatsApp (auto-configured)
-- **Third-party plugins** — Brave, Tavily, Exa, Firecrawl (API key → auto-enabled)
-- **Foundry web search** — Bing Grounding via Responses API (zero-config)
+- **Messaging channels** — Telegram, Slack, Discord, WhatsApp (auto-configured via CLI flags)
+- **Third-party plugins** — Brave, Tavily, Exa, Firecrawl, Perplexity (API key → auto-enabled)
+- **Foundry web search** — Bing Grounding via Responses API (zero-config, no API key needed)
 - **Sub-agent spawning** — agents create child agents via CRD (isolated, governed)
-- **9 Foundry skills** — memory, code interpreter, web search, knowledge, evaluations, and more
+- **10 Foundry skills** — memory, code interpreter, web search, knowledge, evaluations, and more
 - **200+ models** — hot-switch between GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc.
+- **Multi-frontend** — TUI, Telegram, Web UI at `localhost:18789`
 
 ### 🏛️ Governance (AGT)
 
@@ -89,54 +95,80 @@ Zero-credential inference through Azure AI Foundry. Multi-agent governance via A
 
 ### ⚙️ Operations
 
-- **CLI** — single `azureclaw up` command provisions AKS + ACR + Foundry + sandbox
-- **Web UI** — token-based control interface at `localhost:18789`
-- **Telegram channel** — always-on agent communication
-- **Monitoring** — Prometheus metrics, Log Analytics, eBPF tracing
+- **One-command deploy** — `azureclaw up` provisions AKS + ACR + Foundry + sandbox end-to-end
+- **Credential management** — `azureclaw credentials update` rotates tokens for running sandboxes
+- **Image pipeline** — `azureclaw push` builds and pushes images to ACR with optional rollout
+- **Monitoring** — Prometheus metrics, Log Analytics, eBPF tracing via `azureclaw trace`
 
 ---
 
 ## Quick Start
+
+### Prerequisites
+
+Node.js 22+ · Azure CLI 2.60+ · kubectl · Helm · Azure subscription
+
+### Production (AKS)
 
 ```bash
 # 1. Install
 git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm install && npm run build && npm link
 
-# 2. Deploy — preflight checks tools, prompts for region & subscription
+# 2. Deploy (preflight checks, prompts for region & subscription)
 azureclaw up
 
-# 3. Connect
+# 3. Connect to your agent
 azureclaw connect my-assistant
 
-# 4. Chat with your agent through the TUI
+# 4. Chat through the TUI
 🦞 You: Summarize the top HackerNews stories about AI security.
 
 # 5. Review egress activity
 azureclaw egress my-assistant --learned
 ```
 
-`azureclaw up` runs preflight checks (Azure CLI, kubectl, Helm, subscription, SKU availability), prompts for region and agent name if not provided, then provisions everything end-to-end.
+`azureclaw up` runs preflight checks (Azure CLI, kubectl, Helm, subscription, SKU availability), prompts for region and agent name, then provisions everything end-to-end.
 
-**Prerequisites:** Node.js 22+ · Azure CLI 2.60+ · kubectl · Helm · Azure subscription
+### Local Development (Docker)
 
-> For local development without Azure: `azureclaw dev` starts a Docker sandbox with the same security controls.
-
-### Local Development
+No Azure subscription needed. Same security model, runs locally:
 
 ```bash
-# Local development (Docker, no Azure needed)
+# Basic — starts a Docker sandbox
 azureclaw dev
 
-# With Telegram channel
+# With a messaging channel
 azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
 
 # With third-party search plugins
 azureclaw dev --brave-api-key "KEY" --tavily-api-key "KEY"
 
-# With Foundry web search (auto-discovers Bing connection)
-# Requires: Bing Grounding resource connected to your Foundry project
+# Build sandbox image locally (required for Foundry Bing search)
 azureclaw dev --build
+```
+
+### Add Agents
+
+```bash
+# Add a governed agent with Telegram and egress learning
+azureclaw add research-bot \
+  --model gpt-4.1 \
+  --channels telegram --telegram-token "BOT_TOKEN" \
+  --governance --learn-egress
+
+# Add a minimal agent
+azureclaw add helper --model gpt-5-mini --isolation confidential
+```
+
+### Update Credentials
+
+Rotate channel tokens or plugin API keys on running sandboxes without redeploying:
+
+```bash
+azureclaw credentials update my-agent \
+  --telegram-token "NEW_TOKEN" \
+  --brave-api-key "NEW_KEY"
 ```
 
 ---
@@ -146,24 +178,44 @@ azureclaw dev --build
 | Command | Description |
 |---|---|
 | **Lifecycle** | |
-| `azureclaw up` | Deploy full stack — preflight checks, interactive prompts, AKS + ACR + AOAI + sandbox |
-| `azureclaw dev` | Local Docker sandbox (same security controls). Flags: `--channels telegram,slack,discord`, `--telegram-token`, `--slack-token`, `--discord-token`, `--brave-api-key`, `--tavily-api-key`, `--exa-api-key`, `--firecrawl-api-key`, `--perplexity-api-key`, `--openai-api-key` |
-| `azureclaw add <name>` | Add sandbox (`--governance`, `--learn-egress`, `--isolation`). Same channel/plugin flags as `dev`; credentials stored as K8s secrets |
-| `azureclaw destroy <name>` | Tear down sandbox or resource group |
+| `azureclaw up` | Deploy full stack — preflight, AKS + ACR + Foundry + sandbox |
+| `azureclaw dev` | Local Docker sandbox with same security controls |
+| `azureclaw add <name>` | Add sandbox to existing cluster |
+| `azureclaw destroy [name]` | Tear down sandbox or entire resource group (`--all`) |
+| `azureclaw push` | Build and push images to ACR (`--only`, `--apply`) |
 | **Operations** | |
-| `azureclaw connect <name>` | Connect TUI to sandbox |
+| `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) |
 | `azureclaw status <name>` | Health, model, tokens used |
-| `azureclaw logs <name>` | View container logs |
+| `azureclaw list` | All sandboxes across Docker and AKS |
+| `azureclaw logs <name>` | Stream logs (`-f`, `--service router\|gateway\|openclaw`) |
 | **Configuration** | |
-| `azureclaw credentials` | Set or update Azure OpenAI credentials |
+| `azureclaw credentials` | Set Azure OpenAI credentials (interactive) |
+| `azureclaw credentials update <name>` | Rotate channel/plugin keys on running sandbox |
 | `azureclaw model set <name> <model>` | Switch model (hot-swap, no restart) |
-| `azureclaw policy <subcommand>` | Network policy management (`allow`, `deny`, `get`, `learn`, `set`) |
-| `azureclaw egress <name>` | Manage egress security (`--pending`, `--approve`, `--deny`, `--allowlist`, `--learned`) |
+| `azureclaw model get <name>` | Show current model |
+| `azureclaw model list [name]` | List available Foundry models |
+| `azureclaw policy allow <name> <host>` | Add allowed egress endpoint |
+| `azureclaw policy get <name>` | Show active policy |
+| `azureclaw policy deny <name> <host>` | Remove allowed endpoint |
+| `azureclaw egress <name>` | Egress management (`--learned`, `--pending`, `--approve`, `--enforce`) |
 | **Observability** | |
-| `azureclaw trace <name>` | eBPF tracing |
-| `azureclaw eval <name>` | Run Foundry evaluations |
+| `azureclaw trace <name>` | eBPF tracing (`--network`, `--dns`, `--files`, `--exec`) |
+| `azureclaw eval <name>` | Run Foundry evaluations against agent |
 
-> **No prerequisite commands.** Both `up` and `dev` prompt for any missing configuration inline. `up` runs preflight checks (tools, auth, SKU availability) before provisioning.
+### Common Flags
+
+These flags are shared across `dev`, `add`, and `credentials update`:
+
+| Flag | Description |
+|---|---|
+| `--channels telegram,slack,discord,whatsapp` | Enable messaging channels |
+| `--telegram-token`, `--slack-token`, `--discord-token` | Channel credentials |
+| `--brave-api-key`, `--tavily-api-key`, `--exa-api-key` | Search plugins |
+| `--firecrawl-api-key`, `--perplexity-api-key`, `--openai-api-key` | Additional plugins |
+| `--governance` / `--no-governance` | AGT governance (trust, policy, audit) |
+| `--learn-egress` | Enable egress learn mode |
+| `--isolation standard\|enhanced\|confidential` | Pod isolation level |
+| `--model <model>` | AI model (default: `gpt-4.1`) |
 
 ---
 
@@ -177,39 +229,14 @@ Every agent runs in an isolated namespace with 8 defense layers stacked in depth
 | 1 | **Node OS** | Azure Linux, SELinux enforcing, auto-patched |
 | 2 | **Kata VM** | Per-pod dedicated kernel (confidential isolation) |
 | 3 | **Container** | Read-only rootfs, non-root, drop ALL capabilities |
-| 4 | **Kernel** | Custom seccomp profile (~150 allowed syscalls) |
+| 4 | **Kernel** | Custom seccomp profile (~219 allowed syscalls) |
 | 5 | **Network** | iptables UID guard + NetworkPolicy + 51k+ domain blocklist |
 | 6 | **Inference** | Content Safety + Prompt Shields + token budgets |
 | 7 | **Governance** | AGT policy engine + trust scoring + audit log |
 
-> Agents never see API keys. The inference router authenticates to Azure AI Foundry via IMDS/Workload Identity.
+> Agents never see API keys. The inference router authenticates to Azure AI Foundry via IMDS/Workload Identity. Every inference request passes through Azure AI Content Safety and Prompt Shields before reaching the model.
 
 See [docs/security.md](docs/security.md) for full details and OWASP LLM Top 10 coverage.
-
----
-
-## Egress Proxy
-
-All agent network traffic is mediated by the inference router sidecar. Three enforcement modes:
-
-| Mode | Behavior |
-|---|---|
-| **Blocklist** (always on) | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus |
-| **Allowlist** | Only pre-approved domains permitted |
-| **Learn mode** | Unknown domains allowed + recorded; apply learned set as allowlist when ready |
-
-```bash
-# Deploy with learn mode
-azureclaw add my-agent --model gpt-4.1 --learn-egress
-
-# Review learned domains
-azureclaw egress my-agent --learned
-
-# Lock down to learned set
-azureclaw egress my-agent --apply
-```
-
-See [docs/security.md](docs/security.md) for the egress architecture.
 
 ---
 
@@ -217,50 +244,53 @@ See [docs/security.md](docs/security.md) for the egress architecture.
 
 ### Messaging Channels
 
-Connect your agent to messaging platforms. Channels are configured via CLI flags and auto-enabled at startup.
-
 | Channel | Flag | Credential |
 |---------|------|-----------|
-| Telegram | `--channels telegram` | `--telegram-token` (from BotFather) |
-| Slack | `--channels slack` | `--slack-token` (Bot OAuth token) |
+| Telegram | `--channels telegram` | `--telegram-token` (BotFather) |
+| Slack | `--channels slack` | `--slack-token` (Bot OAuth) |
 | Discord | `--channels discord` | `--discord-token` |
 | WhatsApp | `--channels whatsapp` | QR code pairing at runtime |
-
-```bash
-# AKS deployment with Telegram
-azureclaw add my-agent --channels telegram --telegram-token "BOT_TOKEN" --learn-egress
-
-# Local development
-azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
-```
 
 On AKS, channel tokens are stored as K8s secrets and injected into the sandbox pod automatically.
 
 ### Third-Party Plugins
 
-Enable search and scraping plugins by providing their API keys. The sandbox auto-activates plugins when their keys are present.
+| Plugin | Flag |
+|--------|------|
+| Brave Search | `--brave-api-key` |
+| Tavily | `--tavily-api-key` |
+| Exa | `--exa-api-key` |
+| Firecrawl | `--firecrawl-api-key` |
+| Perplexity | `--perplexity-api-key` |
+| OpenAI | `--openai-api-key` |
 
-| Plugin | Flag | Env Var |
-|--------|------|---------|
-| Brave Search | `--brave-api-key` | `BRAVE_API_KEY` |
-| Tavily | `--tavily-api-key` | `TAVILY_API_KEY` |
-| Exa | `--exa-api-key` | `EXA_API_KEY` |
-| Firecrawl | `--firecrawl-api-key` | `FIRECRAWL_API_KEY` |
-| Perplexity | `--perplexity-api-key` | `PERPLEXITY_API_KEY` |
-| OpenAI | `--openai-api-key` | `OPENAI_API_KEY` |
+Plugins auto-activate when their API key is present. No additional configuration needed.
 
 ### Foundry Web Search (Bing Grounding)
 
-Built-in web search via Azure AI Foundry's Responses API with Bing Grounding. **No API key needed** — uses the Foundry project's Bing connection, auto-discovered at runtime.
+Built-in web search via Azure AI Foundry's Responses API. **No API key needed** — auto-discovers the Foundry project's Bing connection at runtime.
 
-**Setup:**
-1. Create a [Grounding with Bing Search](https://portal.azure.com/#create/Microsoft.BingGroundingSearch) resource
-2. Add it as a connection in your Foundry project (Portal → Project → Connected resources)
-3. The `foundry_web_search` tool auto-discovers the connection — zero config
+See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 
-> Override: set `BING_CONNECTION_ID` env var with the full resource ID.
+---
 
-See [docs/channels-plugins.md](docs/channels-plugins.md) for full details.
+## Egress Proxy
+
+All agent network traffic is mediated by the inference router sidecar:
+
+| Mode | Behavior |
+|---|---|
+| **Blocklist** (always on) | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus |
+| **Allowlist** | Only pre-approved domains permitted |
+| **Learn mode** | Unknown domains allowed + recorded; promote to allowlist when ready |
+
+```bash
+azureclaw add my-agent --model gpt-4.1 --learn-egress  # deploy with learn mode
+azureclaw egress my-agent --learned                      # review discovered domains
+azureclaw egress my-agent --enforce                      # lock down to learned set
+```
+
+See [docs/egress-proxy.md](docs/egress-proxy.md) for the full egress architecture.
 
 ---
 
@@ -269,6 +299,7 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for full details.
 ```
 azureclaw/
 ├── cli/                  # TypeScript CLI (azureclaw command)
+│   └── skills/           # Foundry skill definitions (10 skills)
 ├── controller/           # Rust K8s operator (ClawSandbox CRDs)
 ├── inference-router/     # Rust sidecar proxy (axum)
 ├── policy-engine/        # Seccomp profiles & security policies
@@ -287,11 +318,12 @@ azureclaw/
 | Document | Description |
 |---|---|
 | [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, auth flow |
-| [Security](docs/security.md) | 8-layer defense model, OWASP coverage, AGT governance |
-| [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation model |
-| [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
+| [Security](docs/security.md) | 8-layer defense model, OWASP coverage, threat mitigations |
 | [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
 | [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode |
+| [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
+| [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation model |
+| [Security Validation](docs/security-validation.md) | Penetration testing and validation results |
 | [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
 
 ---
@@ -311,4 +343,4 @@ make images   # Docker images
 
 ## License
 
-[MIT](LICENSE) · [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/)
+[MIT](LICENSE) · [Code of Conduct](CODE_OF_CONDUCT.md)

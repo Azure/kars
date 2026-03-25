@@ -1,0 +1,79 @@
+# AzureClaw Example: Telegram-Connected Agent
+#
+# Deploys an OpenClaw agent with Telegram channel integration.
+# The agent responds to Telegram messages and optionally uses Bing web search
+# (auto-discovered via Foundry /connections API when Bing Grounding is connected).
+#
+# Channel pattern:
+#   CLI flag (--telegram-token) → env var (TELEGRAM_BOT_TOKEN)
+#     → entrypoint.sh auto-config → plugins.allow + plugins.entries + channels.telegram
+#
+# Credentials are stored in a K8s secret named "telegram-agent-credentials"
+# and mounted via envFrom (optional: true). Create with:
+#   azureclaw credentials update telegram-agent --telegram-token "YOUR_TOKEN"
+#
+# Or deploy via CLI (creates the secret automatically):
+#   azureclaw add telegram-agent --channels telegram --telegram-token "YOUR_TOKEN"
+
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: telegram-agent
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/channels: telegram
+spec:
+  openclaw:
+    version: "2026.3.13"
+    image: azureclaw.azurecr.io/openclaw-sandbox:latest
+    config:
+      agent:
+        model: "azure/gpt-4.1"
+
+  sandbox:
+    isolation: "enhanced"
+    seccompProfile: "azureclaw-strict"
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+
+  inference:
+    provider: "azure-openai"
+    model: "gpt-4.1"
+    contentSafety: true
+    promptShields: true
+    tokenBudget:
+      daily: 500000
+      perRequest: 128000
+
+  # Egress rules — Telegram Bot API + optional Bing search
+  networkPolicy:
+    defaultDeny: true
+    approvalRequired: true
+    allowedEndpoints:
+      # Telegram Bot API (required for channel)
+      - host: "api.telegram.org"
+        port: 443
+        methods: ["GET", "POST"]
+      # GitHub (common for agent tools)
+      - host: "github.com"
+        port: 443
+        methods: ["GET"]
+      - host: "api.github.com"
+        port: 443
+        methods: ["GET"]
+
+  azureServices:
+    - service: ai-foundry
+      permissions: [inference, evaluate]
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

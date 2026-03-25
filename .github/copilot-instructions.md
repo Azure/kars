@@ -127,6 +127,36 @@ Two identities matter:
 
 Token audience must be `https://ai.azure.com/` (not `cognitiveservices.azure.com`).
 
+## Channel / Plugin Pattern
+
+Channels and third-party plugins follow the same flow:
+
+```
+CLI flag → Docker env var → entrypoint.sh auto-config → plugins.allow + plugins.entries
+```
+
+- **Channels** (Telegram, Slack, Discord, WhatsApp): CLI flag sets env var (e.g., `TELEGRAM_BOT_TOKEN`). `entrypoint.sh` reads it and builds the `channels.*` block + registers in `plugins.allow` + `plugins.entries`.
+- **Plugins** (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI): CLI flag sets env var (e.g., `BRAVE_API_KEY`). `entrypoint.sh` registers the plugin in `plugins.allow` + `plugins.entries`. OpenClaw reads the env var directly for auth.
+
+### Credentials Secret Convention
+
+Credentials are stored in a K8s secret named `<name>-credentials` in namespace `azureclaw-<name>`. The controller mounts it via `envFrom` with `optional: true` — pods start even without the secret. Update with `azureclaw credentials update <name> --telegram-token <token>`.
+
+### Foundry Bing Web Search
+
+Bing Grounding is auto-discovered via the Foundry `/connections` API. The router uses the full resource ID (not just the connection name) when calling the Bing search tool. No manual config is needed when a Bing Grounding resource is connected to the Foundry project.
+
+### Deploying Plugin Changes
+
+After modifying the sandbox image (entrypoint, plugins, skills):
+```bash
+azureclaw push --only sandbox --apply   # build, push to ACR, restart pods
+```
+
+### Node.js 22 Proxy Issue
+
+Node.js 22's built-in `fetch()` ignores `HTTPS_PROXY`. The sandbox uses `proxy-bootstrap.js` to explicitly configure an HTTPS agent when `HTTPS_PROXY` is set. If you see network timeouts in environments with a proxy, check that `proxy-bootstrap.js` is loaded via `--require` or `NODE_OPTIONS`.
+
 ## Common Issues
 
 | Symptom | Cause | Fix |
@@ -138,3 +168,4 @@ Token audience must be `https://ai.azure.com/` (not `cognitiveservices.azure.com
 | Sub-agent doesn't receive relay messages | No background agent session | Check `entrypoint.sh` relay listener |
 | Old image served despite `:latest` push | AKS node cache | Use `imagePullPolicy: Always` or restart pods |
 | "Invalid character" in base64 | `x25519:`/`ed25519:` key prefix | Apply vendored base64Decode fix |
+| Node.js 22 fetch ignores HTTPS_PROXY | Built-in fetch doesn't use proxy env | Load `proxy-bootstrap.js` via `NODE_OPTIONS` |
