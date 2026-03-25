@@ -123,6 +123,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   },
   "channels": {
     "telegram": {
+      "type": "telegram",
       "enabled": TELEGRAM_ENABLED_PLACEHOLDER,
       "botToken": "${TELEGRAM_BOT_TOKEN:-}",
       "dmPolicy": "open",
