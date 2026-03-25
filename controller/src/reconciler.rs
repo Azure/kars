@@ -610,6 +610,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "imagePullPolicy": pull_policy,
                             "ports": [{"containerPort": 18789, "name": "gateway"}],
                             "env": openclaw_env,
+                            "envFrom": [
+                                {"secretRef": {"name": format!("{}-credentials", name), "optional": true}}
+                            ],
                             "securityContext": {
                                 "runAsUser": 1000,
                                 "allowPrivilegeEscalation": sandbox_config.allow_privilege_escalation,

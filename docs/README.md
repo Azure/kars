@@ -17,6 +17,9 @@
 - [WebUX Access](webux.md)
 - [Monitoring](../deploy/monitoring/dashboards.md)
 
+## Agent Capabilities
+- [Channels & Plugins](channels-plugins.md) — Telegram, Slack, Discord, search plugins, Foundry Bing
+
 ## Agent Development
 - [Multi-Tenant Isolation](multi-tenant.md)
 - [Sub-Agent Spawning](sub-agents.md)

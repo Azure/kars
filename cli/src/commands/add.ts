@@ -279,30 +279,9 @@ export function addCommand(): Command {
           stdio: ["pipe", "pipe", "pipe"],
         });
 
-        // Inject credential secret as env vars into the sandbox container.
-        // The controller doesn't know about channel/plugin secrets — we patch
-        // the deployment to mount them via envFrom after the CRD creates it.
-        if (Object.keys(allSecrets).length > 0) {
-          spinner.text = "Injecting credentials into sandbox...";
-          // Wait for the deployment to exist (controller creates it from CRD)
-          for (let attempt = 0; attempt < 20; attempt++) {
-            try {
-              await execa("kubectl", [
-                "get", "deploy", name, "-n", namespace,
-              ], { stdio: "pipe", timeout: 5000 });
-              break;
-            } catch { await new Promise(r => setTimeout(r, 3000)); }
-          }
-          try {
-            await execa("kubectl", [
-              "patch", "deployment", name, "-n", namespace,
-              "--type=json",
-              `-p=[{"op":"add","path":"/spec/template/spec/containers/0/envFrom","value":[{"secretRef":{"name":"${name}-credentials"}}]}]`,
-            ], { stdio: "pipe" });
-          } catch {
-            // Non-fatal — user can manually patch
-          }
-        }
+        // The controller auto-mounts <name>-credentials secret via envFrom (optional: true).
+        // If the secret exists, env vars are injected into the sandbox container at startup.
+        // No deployment patching needed — the controller handles it natively.
 
         // Wait for pod to be ready and WI token to propagate
         spinner.text = `Waiting for '${name}' to be ready...`;
