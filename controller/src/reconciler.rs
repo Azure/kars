@@ -359,6 +359,62 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // ── Step 2b: Generate per-sandbox admin token for router ───────────
+    //
+    // Protects sensitive router endpoints (/admin/*, /egress/*, /sandbox/*, /agt/audit, etc.)
+    // Only mounted in the inference-router container — the agent (openclaw) never sees it.
+    let admin_token = {
+        let existing = secret_api.get_opt("router-admin-token").await?;
+        if let Some(ref s) = existing {
+            s.data
+                .as_ref()
+                .and_then(|d| d.get("token"))
+                .and_then(|v| String::from_utf8(v.0.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    let admin_token = if admin_token.is_empty() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let mut token = String::with_capacity(64);
+        for _ in 0..8 {
+            let s = RandomState::new();
+            let mut h = s.build_hasher();
+            h.write_u64(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64);
+            token.push_str(&format!("{:016x}", h.finish()));
+        }
+        token.truncate(64);
+        token
+    } else {
+        admin_token
+    };
+    let admin_secret: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "router-admin-token",
+            "namespace": sandbox_ns,
+            "labels": {
+                "azureclaw.azure.com/sandbox": name
+            }
+        },
+        "stringData": {
+            "token": admin_token
+        }
+    }))?;
+    secret_api
+        .patch(
+            "router-admin-token",
+            &PatchParams::apply("azureclaw-controller").force(),
+            &Patch::Apply(admin_secret),
+        )
+        .await?;
+
     // ── Step 3: Apply default-deny NetworkPolicy + allowlist ─────────────
     //
     // Pod-level NetworkPolicy controls what the entire pod can reach.
@@ -523,6 +579,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
         json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
         json!({"name": "SANDBOX_NAME", "value": &name}),
+        json!({"name": "ADMIN_TOKEN", "value": &admin_token}),
         json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
     ];
     router_env.extend(router_agt_env);

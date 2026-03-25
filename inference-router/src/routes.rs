@@ -203,8 +203,8 @@ pub fn admin_routes() -> Router<AppState> {
         .route("/admin/model", get(admin_get_model).put(admin_set_model))
 }
 
-/// AGT governance routes — policy evaluation, trust, audit, inter-agent mesh.
-pub fn agt_routes() -> Router<AppState> {
+/// AGT governance routes that expose sensitive data — require admin token.
+pub fn sensitive_agt_routes() -> Router<AppState> {
     Router::new()
         // Policy evaluation
         .route("/agt/evaluate", post(agt_evaluate))
@@ -214,30 +214,37 @@ pub fn agt_routes() -> Router<AppState> {
         // Audit log
         .route("/agt/audit", get(agt_audit))
         .route("/agt/audit/verify", get(agt_audit_verify))
+        // Status (exposes trust scores, audit entries, inbox count)
+        .route("/agt/status", get(agt_status))
+}
+
+/// AGT mesh + relay routes — public (protected by E2E encryption + NetworkPolicy).
+pub fn mesh_routes() -> Router<AppState> {
+    Router::new()
         // Inter-agent mesh
         .route("/agt/mesh/send", post(agt_mesh_send))
         .route("/agt/mesh/inbox", get(agt_mesh_inbox))
         .route("/agt/mesh/receive", post(agt_mesh_receive))
-        // Blocklist
+        // AGT relay proxy (WebSocket + HTTP registry)
+        .route("/agt/relay", get(agt_relay_proxy))
+        .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
+        // Blocklist (read-only, informational)
         .route("/blocklist/status", get(blocklist_status))
         .route("/blocklist/check", post(blocklist_check))
-        // Egress learn mode
+}
+
+/// Egress management routes — require admin token (approve, deny, enforce, learn).
+pub fn egress_routes() -> Router<AppState> {
+    Router::new()
         .route("/egress/learn", post(egress_learn_toggle))
         .route("/egress/learned", get(egress_learned))
         .route("/egress/learned/clear", post(egress_learned_clear))
-        // Egress proxy — audited, blocklist-checked external HTTP for the sandbox
         .route("/egress/fetch", post(egress_fetch))
-        // Egress allowlist management
         .route("/egress/allowlist", get(egress_allowlist))
         .route("/egress/approve", post(egress_approve))
         .route("/egress/deny", post(egress_deny))
         .route("/egress/pending", get(egress_pending))
         .route("/egress/enforce", post(egress_enforce))
-        // AGT relay proxy (WebSocket + HTTP registry)
-        .route("/agt/relay", get(agt_relay_proxy))
-        .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
-        // Status
-        .route("/agt/status", get(agt_status))
 }
 
 /// POST /v1/chat/completions — the primary inference endpoint.
