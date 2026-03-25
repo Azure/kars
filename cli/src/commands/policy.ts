@@ -126,11 +126,17 @@ export function policyCommand(): Command {
 
   cmd
     .command("learn")
-    .description("Export learned egress domains from a sandbox running in learn mode")
+    .description("[DEPRECATED] Use 'azureclaw egress <name> --learned' instead")
     .argument("<name>", "Sandbox name")
     .option("--apply", "Apply learned domains as the sandbox allowlist", false)
     .option("--clear", "Clear learned domains after export", false)
     .action(async (name: string, options) => {
+      console.log(chalk.yellow("\n  ⚠ 'policy learn' is deprecated. Use these instead:"));
+      console.log(chalk.dim("    View learned domains:  azureclaw egress " + name + " --learned"));
+      console.log(chalk.dim("    Apply as allowlist:    azureclaw egress " + name + " --enforce"));
+      console.log(chalk.dim("    Approve a domain:      azureclaw egress " + name + " --approve <domain>\n"));
+
+      // Still execute for backward compat
       const { execa } = await import("execa");
       const namespace = `azureclaw-${name}`;
       const spinner = ora(`Fetching learned domains from '${name}'...`).start();
