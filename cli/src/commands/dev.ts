@@ -47,6 +47,13 @@ export function devCommand(): Command {
     .option("--slack-token <token>", "Slack bot OAuth token")
     .option("--discord-token <token>", "Discord bot token")
     .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
+    // Third-party plugin API keys (search, scraping, LLM providers)
+    .option("--brave-api-key <key>", "Brave Search API key")
+    .option("--tavily-api-key <key>", "Tavily search API key")
+    .option("--exa-api-key <key>", "Exa search API key")
+    .option("--firecrawl-api-key <key>", "Firecrawl web scraping API key")
+    .option("--perplexity-api-key <key>", "Perplexity API key")
+    .option("--openai-api-key <key>", "OpenAI API key (for dual-provider setups)")
     .option(
       "--base-image <image>",
       "Azure Linux base image for building sandbox (override for custom registries)",
@@ -368,6 +375,13 @@ export function devCommand(): Command {
           ...((options.slackToken || process.env.SLACK_BOT_TOKEN) ? ["-e", `SLACK_BOT_TOKEN=${options.slackToken || process.env.SLACK_BOT_TOKEN}`] : []),
           ...((options.discordToken || process.env.DISCORD_BOT_TOKEN) ? ["-e", `DISCORD_BOT_TOKEN=${options.discordToken || process.env.DISCORD_BOT_TOKEN}`] : []),
           ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
+          // Third-party plugin API keys: CLI flags take priority, fall back to host env vars
+          ...((options.braveApiKey || process.env.BRAVE_API_KEY) ? ["-e", `BRAVE_API_KEY=${options.braveApiKey || process.env.BRAVE_API_KEY}`] : []),
+          ...((options.tavilyApiKey || process.env.TAVILY_API_KEY) ? ["-e", `TAVILY_API_KEY=${options.tavilyApiKey || process.env.TAVILY_API_KEY}`] : []),
+          ...((options.exaApiKey || process.env.EXA_API_KEY) ? ["-e", `EXA_API_KEY=${options.exaApiKey || process.env.EXA_API_KEY}`] : []),
+          ...((options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY) ? ["-e", `FIRECRAWL_API_KEY=${options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY}`] : []),
+          ...((options.perplexityApiKey || process.env.PERPLEXITY_API_KEY) ? ["-e", `PERPLEXITY_API_KEY=${options.perplexityApiKey || process.env.PERPLEXITY_API_KEY}`] : []),
+          ...((options.openaiApiKey || process.env.OPENAI_API_KEY) ? ["-e", `OPENAI_API_KEY=${options.openaiApiKey || process.env.OPENAI_API_KEY}`] : []),
           image,
         ], { stdio: "pipe" });
 

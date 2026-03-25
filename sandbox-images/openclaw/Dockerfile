@@ -53,6 +53,13 @@ RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";;
     tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/gh.tar.gz
 
+# Install ripgrep (enables session-logs skill)
+RUN RG_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64-unknown-linux-gnu";; *) echo "x86_64-unknown-linux-musl";; esac) && \
+    curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${RG_ARCH}.tar.gz" -o /tmp/rg.tar.gz && \
+    tar xzf /tmp/rg.tar.gz -C /tmp && \
+    cp /tmp/ripgrep-*/rg /usr/local/bin/ && \
+    rm -rf /tmp/rg.tar.gz /tmp/ripgrep-*
+
 # Security: create non-root user (sandbox=1000) and router user (router=1001)
 # UID separation enables iptables egress guard: UID 1000 is restricted to
 # localhost + DNS, while UID 1001 (router) can reach the internet for

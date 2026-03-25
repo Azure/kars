@@ -25,6 +25,13 @@ export function addCommand(): Command {
     .option("--slack-token <token>", "Slack bot OAuth token")
     .option("--discord-token <token>", "Discord bot token")
     .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
+    // Third-party plugin API keys (stored as K8s secrets on AKS)
+    .option("--brave-api-key <key>", "Brave Search API key")
+    .option("--tavily-api-key <key>", "Tavily search API key")
+    .option("--exa-api-key <key>", "Exa search API key")
+    .option("--firecrawl-api-key <key>", "Firecrawl web scraping API key")
+    .option("--perplexity-api-key <key>", "Perplexity API key")
+    .option("--openai-api-key <key>", "OpenAI API key (for dual-provider setups)")
     .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
@@ -150,6 +157,31 @@ export function addCommand(): Command {
         };
       }
 
+      // Third-party plugin API keys — stored in the same K8s secret as channel tokens.
+      // The entrypoint auto-enables plugins when their env var is present.
+      const pluginKeyFlags: Record<string, { flag: string; env: string }> = {
+        brave:      { flag: "braveApiKey",      env: "BRAVE_API_KEY" },
+        tavily:     { flag: "tavilyApiKey",     env: "TAVILY_API_KEY" },
+        exa:        { flag: "exaApiKey",        env: "EXA_API_KEY" },
+        firecrawl:  { flag: "firecrawlApiKey",  env: "FIRECRAWL_API_KEY" },
+        perplexity: { flag: "perplexityApiKey", env: "PERPLEXITY_API_KEY" },
+        openai:     { flag: "openaiApiKey",     env: "OPENAI_API_KEY" },
+      };
+      const pluginSecrets: Record<string, string> = {};
+      const enabledPlugins: string[] = [];
+      for (const [pluginId, { flag, env }] of Object.entries(pluginKeyFlags)) {
+        if (options[flag]) {
+          pluginSecrets[env] = options[flag];
+          enabledPlugins.push(pluginId);
+        }
+      }
+      if (enabledPlugins.length > 0) {
+        (sandbox.spec as Record<string, unknown>).plugins = {
+          enabled: enabledPlugins,
+          envSecrets: pluginSecrets,
+        };
+      }
+
       // Skills configuration
       if (options.skills) {
         const skills = options.skills.split(",").map((s: string) => s.trim());
@@ -229,15 +261,20 @@ export function addCommand(): Command {
         // Now apply the CRD (controller will create pod — fedcred already propagating)
         spinner.text = `Creating sandbox '${name}'...`;
 
-        // Create K8s secret for channel tokens if any channels configured
+        // Create K8s secret for channel tokens and plugin API keys
         const channelsSpec = (sandbox.spec as Record<string, unknown>).channels as { envSecrets?: Record<string, string> } | undefined;
-        if (channelsSpec?.envSecrets && Object.keys(channelsSpec.envSecrets).length > 0) {
-          spinner.text = "Creating channel credential secret...";
+        const pluginsSpec = (sandbox.spec as Record<string, unknown>).plugins as { envSecrets?: Record<string, string> } | undefined;
+        const allSecrets = {
+          ...(channelsSpec?.envSecrets || {}),
+          ...(pluginsSpec?.envSecrets || {}),
+        };
+        if (Object.keys(allSecrets).length > 0) {
+          spinner.text = "Creating credential secret...";
           try {
             // Ensure namespace exists
             await execa("kubectl", ["create", "namespace", namespace], { stdio: "pipe" }).catch(() => {});
-            const secretArgs = ["create", "secret", "generic", `${name}-channels`, "-n", namespace];
-            for (const [envVar, value] of Object.entries(channelsSpec.envSecrets)) {
+            const secretArgs = ["create", "secret", "generic", `${name}-credentials`, "-n", namespace];
+            for (const [envVar, value] of Object.entries(allSecrets)) {
               secretArgs.push(`--from-literal=${envVar}=${value}`);
             }
             await execa("kubectl", secretArgs, { stdio: "pipe" }).catch(() => {
@@ -245,7 +282,7 @@ export function addCommand(): Command {
               return execa("kubectl", [...secretArgs.slice(0, 2), "replace", ...secretArgs.slice(3)], { stdio: "pipe" });
             });
           } catch {
-            // Non-fatal — controller can still create pod without channel tokens
+            // Non-fatal — controller can still create pod without credential secret
           }
         }
         spinner.text = `Creating sandbox '${name}'...`;
