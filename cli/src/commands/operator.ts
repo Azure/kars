@@ -135,8 +135,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // Rows 1–4: Agent table (full width)
   const agentTable = grid.set(1, 0, 4, 12, contrib.table, {
-    keys: true,
-    vi: true,
+    keys: false,
+    vi: false,
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
@@ -162,8 +162,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // Rows 5–9: Egress table (cols 4–8)
   const egressTable = grid.set(5, 4, 5, 4, contrib.table, {
-    keys: true,
-    vi: true,
+    keys: false,
+    vi: false,
     fg: "white",
     label: " Egress  [a]pprove [d]eny [e]nforce ",
     columnSpacing: 1,
