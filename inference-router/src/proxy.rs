@@ -129,9 +129,11 @@ pub async fn forward(
 }
 
 /// Forward a streaming (SSE) inference request. Returns a byte stream
-/// that can be piped directly to the axum response body for low TTFT.
+/// that intercepts SSE chunks to extract token usage from the final chunk.
 ///
-/// Takes owned values to satisfy 'static lifetime for streaming body.
+/// Injects `stream_options.include_usage = true` so Azure OpenAI sends
+/// a terminal chunk with `usage` data. The wrapper stream records latency
+/// and token metrics transparently.
 pub async fn forward_stream(
     auth: Arc<WorkloadIdentityAuth>,
     client: Client,
@@ -140,13 +142,18 @@ pub async fn forward_stream(
     request_headers: HeaderMap,
     request_body: Bytes,
 ) -> Result<(StatusCode, HeaderMap, impl futures::Stream<Item = Result<Bytes, reqwest::Error>>)> {
-    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, request_body)?;
+    // Inject stream_options.include_usage into request body so the final
+    // SSE chunk contains a `usage` object with token counts.
+    let body_with_usage = inject_stream_usage(request_body);
+    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
     let token = auth.get_token(token_audience(&upstream.endpoint)).await
         .context("Failed to acquire auth token")?;
     let headers = build_upstream_headers(&request_headers, &auth, &token)?;
+
+    let start = Instant::now();
 
     let response = client
         .post(&upstream_url)
@@ -159,13 +166,74 @@ pub async fn forward_stream(
     let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
 
-    // Record request metric (token metrics come from final SSE chunk with usage)
+    // Record request count immediately
     let status_label = if status.is_success() { "ok" } else { "error" };
     metrics::INFERENCE_REQUESTS
         .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, status_label])
         .inc();
 
-    Ok((status, response_headers, response.bytes_stream()))
+    // Wrap the byte stream to intercept the final SSE chunk for token metrics
+    let sandbox_name = upstream.sandbox_name.clone();
+    let model = upstream.deployment.clone();
+    let inner = response.bytes_stream();
+
+    use futures::StreamExt;
+    let metered = inner.map(move |chunk| {
+        if let Ok(ref bytes) = chunk {
+            // SSE chunks look like: "data: {json}\n\n"
+            // The final usage chunk contains "usage":{"prompt_tokens":...}
+            let text = String::from_utf8_lossy(bytes);
+            for line in text.split('\n') {
+                let line = line.trim();
+                if !line.starts_with("data: ") || line == "data: [DONE]" {
+                    continue;
+                }
+                let json_str = &line[6..];
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
+                    && let Some(usage) = v.get("usage")
+                {
+                        // Record latency (stream complete)
+                        let latency = start.elapsed();
+                        metrics::INFERENCE_LATENCY
+                            .with_label_values(&[&sandbox_name, &model])
+                            .observe(latency.as_secs_f64());
+                        // Record token usage
+                        if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                            metrics::TOKENS_USED
+                                .with_label_values(&[&sandbox_name, &model, "input"])
+                                .inc_by(input as u64);
+                        }
+                        if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                            metrics::TOKENS_USED
+                                .with_label_values(&[&sandbox_name, &model, "output"])
+                                .inc_by(output as u64);
+                        }
+                }
+            }
+        }
+        chunk
+    });
+
+    Ok((status, response_headers, metered))
+}
+
+/// Inject `stream_options: { include_usage: true }` into the request body
+/// so Azure OpenAI includes token usage in the final SSE chunk.
+fn inject_stream_usage(body: Bytes) -> Bytes {
+    if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body)
+        && let Some(obj) = json.as_object_mut()
+    {
+        let opts = obj
+            .entry("stream_options")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(opts_obj) = opts.as_object_mut() {
+            opts_obj.insert("include_usage".to_string(), serde_json::json!(true));
+        }
+        if let Ok(bytes) = serde_json::to_vec(&json) {
+            return Bytes::from(bytes);
+        }
+    }
+    body
 }
 
 /// Build the upstream URL and optionally inject model into request body.
