@@ -119,7 +119,8 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
     "deny": ["sessions_spawn", "sessions_send"]
   },
   "plugins": {
-    "allow": [PLUGINS_ALLOW_PLACEHOLDER]
+    "allow": [PLUGINS_ALLOW_PLACEHOLDER],
+    "entries": {PLUGINS_ENTRIES_PLACEHOLDER}
   },
   "channels": {
     CHANNELS_PLACEHOLDER
@@ -153,38 +154,49 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
 EOF
   chmod 600 "$OPENCLAW_CONFIG"
 
-  # Build plugins allow list and channels config dynamically from env vars
+  # Build channels config dynamically from env vars.
+  # Built-in channel extensions need BOTH:
+  #   1. A channel block in channels.* with credentials
+  #   2. An entry in plugins.allow so the gateway loads the extension
   PLUGINS_LIST='"azureclaw"'
+  PLUGINS_ENTRIES=""
   CHANNELS_CONFIG=""
 
   # Telegram (built into OpenClaw core, uses grammY)
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/telegram\""
     CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"] }"
+    PLUGINS_LIST="${PLUGINS_LIST}, \"telegram\""
+    PLUGINS_ENTRIES="\"telegram\": { \"enabled\": true }"
   fi
 
   # WhatsApp (built-in, uses Baileys — QR pairing at runtime)
   if [ -n "${WHATSAPP_ENABLED:-}" ]; then
-    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/whatsapp\""
     WA_EXTRA=""
     [ -n "${CHANNELS_CONFIG}" ] && WA_EXTRA=", "
     CHANNELS_CONFIG="${CHANNELS_CONFIG}${WA_EXTRA}\"whatsapp\": { \"dmPolicy\": \"pairing\", \"allowFrom\": [\"*\"] }"
+    PLUGINS_LIST="${PLUGINS_LIST}, \"whatsapp\""
+    [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+    PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"whatsapp\": { \"enabled\": true }"
   fi
 
   # Slack (built-in, uses Bolt)
   if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
-    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/slack\""
     SLACK_EXTRA=""
     [ -n "${CHANNELS_CONFIG}" ] && SLACK_EXTRA=", "
     CHANNELS_CONFIG="${CHANNELS_CONFIG}${SLACK_EXTRA}\"slack\": { \"botToken\": \"${SLACK_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"] }"
+    PLUGINS_LIST="${PLUGINS_LIST}, \"slack\""
+    [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+    PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"slack\": { \"enabled\": true }"
   fi
 
   # Discord (built-in, uses discord.js)
   if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
-    PLUGINS_LIST="${PLUGINS_LIST}, \"@openclaw/discord\""
     DISC_EXTRA=""
     [ -n "${CHANNELS_CONFIG}" ] && DISC_EXTRA=", "
     CHANNELS_CONFIG="${CHANNELS_CONFIG}${DISC_EXTRA}\"discord\": { \"botToken\": \"${DISCORD_BOT_TOKEN}\", \"dmPolicy\": \"pairing\", \"allowFrom\": [\"*\"] }"
+    PLUGINS_LIST="${PLUGINS_LIST}, \"discord\""
+    [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+    PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"discord\": { \"enabled\": true }"
   fi
 
   # Default: no channels configured
@@ -193,6 +205,7 @@ EOF
   fi
 
   sed -i "s|PLUGINS_ALLOW_PLACEHOLDER|${PLUGINS_LIST}|" "$OPENCLAW_CONFIG"
+  sed -i "s|PLUGINS_ENTRIES_PLACEHOLDER|${PLUGINS_ENTRIES}|" "$OPENCLAW_CONFIG"
   sed -i "s|CHANNELS_PLACEHOLDER|${CHANNELS_CONFIG}|" "$OPENCLAW_CONFIG"
   # Remove placeholder if no channels
   sed -i '/"_placeholder": false/d' "$OPENCLAW_CONFIG"
@@ -478,7 +491,17 @@ else
 fi
 
 # Start OpenClaw gateway in the background (needed for TUI)
-OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
+# Set HTTP(S)_PROXY so Node.js uses the forward proxy for outbound connections.
+# Transparent TLS tunneling (iptables REDIRECT → SNI extraction) is unreliable
+# in Docker's userspace networking; explicit CONNECT proxy mode is robust.
+#
+# The --require preload script forces undici's EnvHttpProxyAgent as the global
+# dispatcher BEFORE any OpenClaw code runs, ensuring Telegram polling, model
+# pricing, and all outbound fetches honour the proxy from the first request.
+HTTPS_PROXY="http://127.0.0.1:8444" HTTP_PROXY="http://127.0.0.1:8444" \
+  NO_PROXY="127.0.0.1,localhost" \
+  NODE_OPTIONS="--require /usr/local/lib/proxy-bootstrap.js" \
+  OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
 GATEWAY_PID=$!
 
 # Wait for gateway to be ready
