@@ -82,6 +82,7 @@ impl FedCredManager {
     }
 
     /// Get an ARM access token, using cache if available (tokens valid ~1h, refresh at 50min).
+    /// Tries WI token exchange first, falls back to IMDS (kubelet MI).
     async fn get_arm_token(&self) -> Result<String, String> {
         // Check cache
         {
@@ -93,7 +94,55 @@ impl FedCredManager {
             }
         }
 
-        // Exchange projected SA token for ARM token
+        // Try WI token exchange first
+        match self.wi_arm_token().await {
+            Ok(token) => return self.cache_token(token).await,
+            Err(wi_err) => {
+                tracing::warn!("WI ARM token failed ({wi_err}), trying IMDS fallback");
+            }
+        }
+
+        // Fallback: IMDS (kubelet managed identity)
+        let imds_client_id = std::env::var("IMDS_CLIENT_ID").unwrap_or_default();
+        let mut url = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com".to_string();
+        if !imds_client_id.is_empty() {
+            url.push_str(&format!("&client_id={imds_client_id}"));
+        }
+
+        let resp = self.http
+            .get(&url)
+            .header("Metadata", "true")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| format!("IMDS ARM token request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("IMDS ARM token failed: {}", &body[..body.len().min(300)]));
+        }
+
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| format!("IMDS ARM token parse failed: {e}"))?;
+        let token = body["access_token"]
+            .as_str()
+            .ok_or_else(|| "No access_token in IMDS response".to_string())?
+            .to_string();
+
+        tracing::info!("ARM token acquired via IMDS fallback");
+        self.cache_token(token).await
+    }
+
+    async fn cache_token(&self, token: String) -> Result<String, String> {
+        let mut cached = self.cached_token.write().await;
+        *cached = Some(CachedToken {
+            token: token.clone(),
+            acquired_at: std::time::Instant::now(),
+        });
+        Ok(token)
+    }
+
+    async fn wi_arm_token(&self) -> Result<String, String> {
         let sa_token = tokio::fs::read_to_string(&self.config.token_file)
             .await
             .map_err(|e| format!("Failed to read projected token at {}: {e}", self.config.token_file))?;
@@ -127,15 +176,6 @@ impl FedCredManager {
             .json()
             .await
             .map_err(|e| format!("Failed to parse token response: {e}"))?;
-
-        // Cache the token
-        {
-            let mut cached = self.cached_token.write().await;
-            *cached = Some(CachedToken {
-                token: token_resp.access_token.clone(),
-                acquired_at: std::time::Instant::now(),
-            });
-        }
 
         Ok(token_resp.access_token)
     }
