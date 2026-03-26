@@ -166,7 +166,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [3, 30, 2, 16, 14, 6, 6],
+    columnWidth: [3, 42, 16, 14, 10, 6, 6],
     interactive: true,
     style: {
       border: { fg: "cyan" },
@@ -996,13 +996,16 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
                     s.health === "down" ? "●" :
                     s.health === "pending" ? "◌" : "?";
       const restartStr = s.restarts > 0 ? ` R:${s.restarts}` : "";
-      // Tree prefix: sub-agents get └─ indent
-      const prefix = s.role === "sub-agent" ? "└ " : "";
-      const roleTag = s.role === "sub-agent" ? "⤷" : "◆";
-      return [hIcon, `${prefix}${s.name}`, roleTag, `${s.status}${restartStr}`, s.model, s.channels, s.age];
+      // Tree prefix: sub-agents show parent relationship
+      let displayName = s.name;
+      if (s.role === "sub-agent") {
+        const shortParent = s.parent.length > 16 ? s.parent.substring(0, 16) + ".." : s.parent;
+        displayName = `└ ${s.name} (sub:${shortParent})`;
+      }
+      return [hIcon, displayName, `${s.status}${restartStr}`, s.model, s.isolation, s.channels, s.age];
     });
     (agentTable as any).setData({
-      headers: [" ", "Name", "", "Status", "Model", "Ch", "Age"],
+      headers: [" ", "Name", "Status", "Model", "Isolation", "Ch", "Age"],
       data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
     });
 
