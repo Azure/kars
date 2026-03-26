@@ -184,19 +184,19 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     padding: { left: 1 },
   });
 
-  // Rows 5–9: Egress table (cols 4–8)
-  const egressTable = grid.set(5, 4, 5, 4, contrib.table, {
+  // Rows 5–9: Egress list (cols 4–8) — uses blessed.list for colored tags
+  const egressList = grid.set(5, 4, 5, 4, blessed.list, {
     keys: false,
     vi: false,
-    fg: "white",
+    tags: true,
     label: " Egress  [a]pprove [d]eny [e]nforce ",
-    columnSpacing: 1,
-    columnWidth: [3, 40],
     interactive: true,
+    mouse: true,
+    scrollable: true,
     style: {
       border: { fg: "yellow" },
-      header: { fg: "yellow", bold: true },
-      cell: { selected: { bg: "yellow", fg: "black" } },
+      fg: "white",
+      selected: { bg: "yellow", fg: "black" },
     },
   });
 
@@ -225,7 +225,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   // ── Cluster Health Overlay (hidden by default) ──────────────────
 
   // Agent-detail panels (the bottom row: security, egress, log, sparkline)
-  const agentDetailPanels = [securityBox, egressTable, activityLog, sparkline];
+  const agentDetailPanels = [securityBox, egressList, activityLog, sparkline];
 
   // Cluster overlay: node table (left) + cluster info (right)
   const clusterNodeBox = blessed.box({
@@ -979,21 +979,27 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
     });
 
-    // Egress table — filtered to selected agent, with status indicator
+    // Egress list — filtered to selected agent, colored by status
     const domains = selectedEgressDomains();
-    const egressData = domains.map((d) => {
-      const tag = d.state === "approved" ? "✓" : "P";
-      return [tag, d.domain];
+    const pendingCount = domains.filter((d) => d.state === "learned").length;
+    const approvedCount = domains.filter((d) => d.state === "approved").length;
+    const egressItems = domains.map((d) => {
+      if (d.state === "approved") {
+        return `{green-fg}✓ A{/green-fg} ${d.domain}`;
+      }
+      return `{yellow-fg}● P{/yellow-fg} ${d.domain}`;
     });
     const selAgent = sandboxes[(agentTable as any).rows?.selected ?? 0];
     const egressLabel = selAgent
-      ? ` Egress: ${selAgent.name}  [a]pprove [d]eny [e]nforce `
-      : " Egress  [a]pprove [d]eny [e]nforce ";
-    (egressTable as any).setLabel(egressLabel);
-    (egressTable as any).setData({
-      headers: ["", "Domain"],
-      data: egressData.length > 0 ? egressData : [["", "(no domains)"]],
-    });
+      ? ` Egress: ${selAgent.name} `
+      : " Egress ";
+    const legend = pendingCount > 0 || approvedCount > 0
+      ? `{yellow-fg}●P{/}=${pendingCount} {green-fg}✓A{/}=${approvedCount}`
+      : "";
+    (egressList as any).setLabel(`${egressLabel} ${legend} `);
+    (egressList as any).setItems(
+      egressItems.length > 0 ? egressItems : ["{gray-fg}(no domains){/}"],
+    );
 
     // Security panel (follows agent selection)
     renderSecurity();
@@ -1025,10 +1031,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     // Focus border color
     if (focusedPanel === "agents") {
       (agentTable as any).style.border.fg = "cyan";
-      (egressTable as any).style.border.fg = "gray";
+      (egressList as any).style.border.fg = "gray";
     } else {
       (agentTable as any).style.border.fg = "gray";
-      (egressTable as any).style.border.fg = "yellow";
+      (egressList as any).style.border.fg = "yellow";
     }
 
     screen.render();
@@ -1083,20 +1089,20 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   // ── Navigation ────────────────────────────────────────────────────
 
   function getActiveTable(): any {
-    return focusedPanel === "agents" ? agentTable : egressTable;
+    return focusedPanel === "agents" ? agentTable : egressList;
   }
   function getActiveList(): any[] {
     return focusedPanel === "agents" ? sandboxes : selectedEgressDomains();
   }
   function moveSelection(delta: number) {
-    const table = getActiveTable();
+    const widget = getActiveTable();
     const list = getActiveList();
     if (list.length === 0) return;
-    const rows = (table as any).rows;
-    if (!rows) return;
-    const current = rows.selected ?? 0;
+    // contrib.table uses .rows sub-widget; blessed.list has .selected directly
+    const target = (widget as any).rows || widget;
+    const current = target.selected ?? 0;
     const next = Math.max(0, Math.min(list.length - 1, current + delta));
-    rows.select(next);
+    target.select(next);
     // Update security + egress panels when agent selection changes
     if (focusedPanel === "agents") render();
     screen.render();
@@ -1112,8 +1118,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   screen.key(["tab"], () => {
     focusedPanel = focusedPanel === "agents" ? "egress" : "agents";
-    const table = getActiveTable();
-    if ((table as any).rows) (table as any).rows.focus();
+    const widget = getActiveTable();
+    const target = (widget as any).rows || widget;
+    target.focus();
     render();
   });
 
@@ -1132,7 +1139,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     if (focusedPanel !== "egress") return;
     const domains = selectedEgressDomains();
     if (domains.length === 0) return;
-    const idx = (egressTable as any).rows?.selected ?? 0;
+    const idx = (egressList as any).selected ?? 0;
     const domain = domains[idx];
     if (domain && domain.state === "learned") {
       await approveDomain(domain);
@@ -1144,7 +1151,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       // Deny selected domain
       const domains = selectedEgressDomains();
       if (domains.length === 0) return;
-      const idx = (egressTable as any).rows?.selected ?? 0;
+      const idx = (egressList as any).selected ?? 0;
       const domain = domains[idx];
       if (domain && domain.state === "learned") {
         await denyDomain(domain);
