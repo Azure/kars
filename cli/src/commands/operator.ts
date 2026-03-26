@@ -756,11 +756,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     const h = sandboxes.filter((s) => s.health === "healthy").length;
     const d = sandboxes.filter((s) => s.health === "degraded").length;
     const x = sandboxes.filter((s) => s.health === "down").length;
-    const parts = [`${total} agent(s)`];
-    if (h > 0) parts.push(`{green-fg}${h}✓{/}`);
-    if (d > 0) parts.push(`{yellow-fg}${d}!{/}`);
-    if (x > 0) parts.push(`{red-fg}${x}✗{/}`);
-    return parts.join(" ");
+    const parts: string[] = [];
+    if (h > 0) parts.push(`{green-fg}${h} healthy{/}`);
+    if (d > 0) parts.push(`{yellow-fg}${d} degraded{/}`);
+    if (x > 0) parts.push(`{red-fg}${x} down{/}`);
+    return `${total} agent${total === 1 ? "" : "s"} (${parts.join(", ")})`;
   }
 
   function renderHeader() {
@@ -778,23 +778,27 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       clusterTag = `${apiTag} API  {${nColor}-fg}${readyNodes}/${totalNodes}{/} nodes  │  `;
     }
 
-    const viewLabel = viewMode === "cluster" ? "  {blue-fg}{bold}[CLUSTER VIEW]{/bold}{/}  │  " : "";
-    const raw =
-      ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}` +
-      `${clusterTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`;
+    const viewLabel = viewMode === "cluster" ? "{blue-fg}{bold}[CLUSTER]{/bold}{/}  │  " : "";
+    const title = ` ${spin}{bold}AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}`;
+    const stats = `${clusterTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`;
+    const shortStats = `${healthSummary()}  │  {gray-fg}${now}{/}`;
 
-    // Strip blessed tags to measure visible width, then truncate to prevent
-    // overflow wrapping into the row below.
-    const visible = raw.replace(/\{[^}]*\}/g, "");
-    const maxW = (screen.width as number) - 2; // account for border
-    if (visible.length > maxW) {
-      // Rebuild a shorter version: just title + cluster + time
-      header.setContent(
-        ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}` +
-        `${healthSummary()}  │  {gray-fg}${now}{/}`,
-      );
+    // Measure visible width (strip blessed tags, account for double-wide emoji)
+    const visWidth = (s: string) => {
+      const plain = s.replace(/\{[^}]*\}/g, "");
+      // Each emoji/surrogate pair occupies ~2 columns
+      let w = 0;
+      for (const ch of plain) {
+        w += ch.codePointAt(0)! > 0xffff ? 2 : 1;
+      }
+      return w;
+    };
+    const maxW = (screen.width as number) - 2;
+    const full = title + stats;
+    if (visWidth(full) > maxW) {
+      header.setContent(title + shortStats);
     } else {
-      header.setContent(raw);
+      header.setContent(full);
     }
   }
 
