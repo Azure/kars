@@ -341,9 +341,10 @@ export function devCommand(): Command {
           "-e", "AGT_GOVERNANCE_ENABLED=true",
         ] : [];
 
-        // Dev mode: mount Docker socket so sub-agents can be spawned as sibling containers
+        // Dev mode: mount Docker socket so sub-agents can be spawned as sibling containers.
+        // Not :ro — entrypoint chmod's it so the router (UID 1001) can use the Docker API.
         const dockerSockArgs = options.agt ? [
-          "-v", "/var/run/docker.sock:/var/run/docker.sock:ro",
+          "-v", "/var/run/docker.sock:/var/run/docker.sock",
         ] : [];
 
         await execa("docker", [
