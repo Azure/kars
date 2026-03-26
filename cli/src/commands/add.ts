@@ -230,7 +230,7 @@ export function addCommand(): Command {
                 "--node-vm-size", "Standard_D4as_v6",
                 "--os-sku", "AzureLinux",
                 "--workload-runtime", "KataMshvVmIsolation",
-                "--node-labels", "azureclaw.azure.com/pool=sandbox-kata",
+                "--labels", "azureclaw.azure.com/pool=sandbox-kata",
                 "--node-taints", "azureclaw.azure.com/sandbox=true:NoSchedule",
               ], { stdio: "pipe", timeout: 600_000 });
               kataSpinner.succeed("Kata nodepool provisioned");
