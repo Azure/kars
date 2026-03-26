@@ -176,8 +176,8 @@ async function processTaskWithTools(
     },
   ];
 
-  // Tool-calling loop (max 5 rounds to prevent runaway)
-  for (let round = 0; round < 5; round++) {
+  // Tool-calling loop (max 10 rounds to prevent runaway)
+  for (let round = 0; round < 10; round++) {
     const postData = JSON.stringify({ model, messages, tools, max_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
@@ -245,10 +245,12 @@ async function processTaskWithTools(
               // Discover Bing connection
               let connId: string | undefined;
               try {
-                const connsRaw = execSync(
-                  'curl -s http://127.0.0.1:8443/connections?api-version=2025-05-15-preview',
-                  { timeout: 10000, encoding: "utf8" },
-                );
+                const connsRaw = await new Promise<string>((resolve, reject) => {
+                  const r = http.get("http://127.0.0.1:8443/connections?api-version=2025-05-15-preview", { timeout: 10000 }, (res) => {
+                    let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                  });
+                  r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+                });
                 const conns = JSON.parse(connsRaw);
                 const bingConn = (conns.value || conns || []).find(
                   (c: any) => c.type === "GroundingWithBingSearch" || c.properties?.category === "GroundingWithBingSearch"
@@ -280,29 +282,45 @@ async function processTaskWithTools(
                 store: false,
               };
             }
-            const bodyStr = JSON.stringify(reqBody);
-            const foundryResult = execSync(
-              `curl -s -X POST 'http://127.0.0.1:8443/openai/responses?api-version=2025-11-15-preview' -H 'Content-Type: application/json' -d '${bodyStr.replace(/'/g, "'\\''")}'`,
-              { timeout: 60000, encoding: "utf8", maxBuffer: 256 * 1024 },
-            ).trim();
+            // Use Node HTTP instead of curl to avoid shell escaping issues
+            const foundryResult = await new Promise<string>((resolve, reject) => {
+              const postBody = JSON.stringify(reqBody);
+              const req = http.request("http://127.0.0.1:8443/openai/responses?api-version=2025-11-15-preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
+                timeout: 60000,
+              }, (res) => {
+                let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+              });
+              req.on("error", reject);
+              req.on("timeout", () => { req.destroy(); reject(new Error("Foundry API timeout")); });
+              req.write(postBody);
+              req.end();
+            });
             // Extract text from Responses API output
             try {
               const parsed = JSON.parse(foundryResult);
-              const output = parsed.output || parsed;
-              if (Array.isArray(output)) {
-                const texts = output
-                  .filter((item: any) => item.type === "message" && item.content)
-                  .flatMap((item: any) => item.content)
-                  .filter((c: any) => c.type === "output_text" || c.type === "text")
-                  .map((c: any) => c.text)
-                  .filter(Boolean);
-                result = texts.join("\n") || foundryResult;
+              if (parsed.error) {
+                result = `Foundry API error: ${JSON.stringify(parsed.error)}`;
+                log.warn(`AGT sub-agent ${fnName} error: ${result}`);
               } else {
-                result = foundryResult;
+                const output = parsed.output || parsed;
+                if (Array.isArray(output)) {
+                  const texts = output
+                    .filter((item: any) => item.type === "message" && item.content)
+                    .flatMap((item: any) => item.content)
+                    .filter((c: any) => c.type === "output_text" || c.type === "text")
+                    .map((c: any) => c.text)
+                    .filter(Boolean);
+                  result = texts.join("\n") || foundryResult;
+                } else {
+                  result = foundryResult;
+                }
               }
             } catch {
               result = foundryResult;
             }
+            log.info(`AGT sub-agent ${fnName} result: ${result.slice(0, 200)}`);
           } else {
             // exec_command
             const cmd = args.command || "";
