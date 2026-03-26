@@ -216,6 +216,8 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/audit/verify", get(agt_audit_verify))
         // Status (exposes trust scores, audit entries, inbox count)
         .route("/agt/status", get(agt_status))
+        // Registry reputation (proxied from agentmesh-registry)
+        .route("/agt/reputation", get(agt_reputation))
 }
 
 /// AGT mesh + relay routes — public (protected by E2E encryption + NetworkPolicy).
@@ -1073,6 +1075,51 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         "blocklist_domains": blocklist_len,
         "egress_learn_mode": state.blocklist.is_learn_mode(),
         "egress_learned_domains": state.blocklist.learned_count().await,
+    }))
+}
+
+/// GET /agt/reputation — fetch this agent's reputation from the AgentMesh registry.
+/// Returns the registry-computed score (session history, peer feedback, tier bonus)
+/// alongside the local trust store snapshot.
+async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
+    let registry_url = std::env::var("AGT_REGISTRY_URL")
+        .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
+
+    let amid = &state.governance.sandbox_name;
+    let url = format!(
+        "{}/registry/reputation/score?amid={}",
+        registry_url.trim_end_matches('/'),
+        amid
+    );
+
+    // Fetch registry reputation (best-effort, 3s timeout)
+    let registry = match state.client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            resp.json::<serde_json::Value>().await.ok()
+        }
+        Ok(resp) => {
+            tracing::debug!(status = %resp.status(), "Registry reputation lookup returned non-200");
+            None
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Registry reputation lookup failed");
+            None
+        }
+    };
+
+    // Local trust store snapshot
+    let local_trust = state.governance.trust.all_agents().await;
+
+    Json(serde_json::json!({
+        "amid": amid,
+        "registry": registry,
+        "local_trust": local_trust,
+        "default_score": state.governance.trust.default_score,
     }))
 }
 

@@ -87,6 +87,15 @@ interface SecurityState {
   agtTrustScores: { agent: string; score: number; tier: string }[];
   agtRelayConnected: boolean;
   agtRegistryAgents: number;
+  // Registry reputation (from agentmesh-registry)
+  agtReputation: {
+    score: number;       // 0.0–1.0 composite
+    tier: string;
+    completionRate: number;
+    totalSessions: number;
+    feedbackCount: number;
+    avgFeedback: number;
+  } | null;
   // Prometheus metrics
   totalRequests: number;
   errorRequests: number;
@@ -486,6 +495,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       agtTrustScores: [],
       agtRelayConnected: false,
       agtRegistryAgents: 0,
+      agtReputation: null,
       totalRequests: 0,
       errorRequests: 0,
       inputTokens: 0,
@@ -525,6 +535,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       routerExec("/metrics"),
       // 7: /agt/audit (last entries)
       routerExec("/agt/audit"),
+      // 8: /agt/reputation (registry + local trust)
+      routerExec("/agt/reputation"),
     ]);
 
     // NetworkPolicy
@@ -623,6 +635,35 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
           if (result) parts.push(`→ ${result}`);
           return ts ? `${ts} ${parts.join(" ")}` : parts.join(" ");
         });
+      } catch { /* parse fail */ }
+    }
+
+    // /agt/reputation — registry score + local trust
+    if (checks[8].status === "fulfilled") {
+      try {
+        const rep = JSON.parse((checks[8].value as any).stdout);
+        // Registry reputation (from agentmesh-registry Postgres)
+        if (rep.registry) {
+          const r = rep.registry;
+          state.agtReputation = {
+            score: r.score ?? 0,
+            tier: r.tier || "unknown",
+            completionRate: r.completion_rate ?? 0,
+            totalSessions: r.total_sessions ?? 0,
+            feedbackCount: r.feedback_count ?? 0,
+            avgFeedback: r.average_feedback ?? 0,
+          };
+        }
+        // Local trust store (from router in-memory)
+        const local = rep.local_trust || [];
+        if (local.length > 0) {
+          state.agtTrustScores = local.map((a: any) => ({
+            agent: a.agent_id || a.name || "unknown",
+            score: a.score ?? 0,
+            tier: a.tier || (a.score >= 800 ? "Sovereign" : a.score >= 600 ? "Verified" : a.score >= 400 ? "Known" : "Anonymous"),
+          }));
+          state.agtRegistryAgents = local.length;
+        }
       } catch { /* parse fail */ }
     }
 
@@ -961,8 +1002,23 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents} known`,
     ];
 
+    // Registry reputation score (from agentmesh-registry)
+    if (sec.agtReputation) {
+      const r = sec.agtReputation;
+      const pct = (r.score * 100).toFixed(0);
+      const c = r.score >= 0.7 ? "green" : r.score >= 0.5 ? "yellow" : "red";
+      lines.push(`{bold}Reputation{/} {gray-fg}(registry){/}`);
+      lines.push(` {${c}-fg}${pct}%{/} ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
+      if (r.totalSessions > 0) {
+        lines.push(` Completion ${(r.completionRate * 100).toFixed(0)}%  Avg ${r.avgFeedback.toFixed(2)}`);
+      }
+    } else {
+      lines.push(`{gray-fg}Reputation  registry unreachable{/}`);
+    }
+
+    // Local trust store (router in-memory, per-interaction)
     if (sec.agtTrustScores.length > 0) {
-      lines.push("{bold}Trust{/}");
+      lines.push(`{bold}Local Trust{/} {gray-fg}(router){/}`);
       for (const t of sec.agtTrustScores) {
         const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
         lines.push(` {${c}-fg}${t.score}{/} ${t.tier} ${t.agent.substring(0, 18)}`);
