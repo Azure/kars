@@ -25,6 +25,7 @@
  *   m         — switch model for selected agent
  *   l         — tail logs for selected agent
  *   x         — delete selected agent (with confirmation)
+ *   c         — toggle cluster health view
  *   r         — refresh now
  *   q / Esc   — quit
  */
@@ -84,6 +85,28 @@ interface SecurityState {
   inputTokens: number;
   outputTokens: number;
   avgLatencyMs: number;
+}
+
+interface NodeInfo {
+  name: string;
+  pool: string;
+  status: string;
+  version: string;
+  cpuCores: string;
+  cpuPct: string;
+  memBytes: string;
+  memPct: string;
+  os: string;
+  runtime: string;
+}
+
+interface ClusterHealth {
+  apiLatencyMs: number;
+  apiReachable: boolean;
+  nodes: NodeInfo[];
+  quotas: { namespace: string; cpuUsed: string; cpuHard: string; memUsed: string; memHard: string }[];
+  pvcs: { namespace: string; name: string; phase: string; size: string }[];
+  warnings: { time: string; reason: string; object: string; message: string }[];
 }
 
 // ── Command ─────────────────────────────────────────────────────────
@@ -199,11 +222,41 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     style: { fg: "white", bg: "default" },
   });
 
+  // ── Cluster Health Overlay (hidden by default) ──────────────────
+
+  // Agent-detail panels (the bottom row: security, egress, log, sparkline)
+  const agentDetailPanels = [securityBox, egressTable, activityLog, sparkline];
+
+  // Cluster overlay: node table (left) + cluster info (right)
+  const clusterNodeBox = blessed.box({
+    parent: screen, hidden: true,
+    top: "42%", left: 0, width: "66%", height: "42%",
+    tags: true, scrollable: true, alwaysScroll: true, mouse: true,
+    label: " 🖥  Nodes ",
+    border: { type: "line" },
+    style: { border: { fg: "blue" }, fg: "white" },
+    padding: { left: 1 },
+  });
+
+  const clusterInfoBox = blessed.box({
+    parent: screen, hidden: true,
+    top: "42%", left: "66%", width: "34%", height: "42%",
+    tags: true, scrollable: true, alwaysScroll: true, mouse: true,
+    label: " ⚡ Cluster Status ",
+    border: { type: "line" },
+    style: { border: { fg: "blue" }, fg: "white" },
+    padding: { left: 1 },
+  });
+
+  const clusterPanels = [clusterNodeBox, clusterInfoBox];
+
   // ── State ─────────────────────────────────────────────────────────
 
   let sandboxes: SandboxInfo[] = [];
   let egressByAgent: Map<string, EgressDomain[]> = new Map();
   let securityStates: Map<string, SecurityState> = new Map();
+  let clusterData: ClusterHealth | null = null;
+  let viewMode: "agents" | "cluster" = "agents";
   let focusedPanel: "agents" | "egress" = "agents";
   let refreshCount = 0;
   let isRefreshing = false;
@@ -490,6 +543,119 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     return state;
   }
 
+  // ── Cluster Health ────────────────────────────────────────────────
+
+  async function fetchClusterHealth(): Promise<ClusterHealth> {
+    const result: ClusterHealth = {
+      apiLatencyMs: -1, apiReachable: false,
+      nodes: [], quotas: [], pvcs: [], warnings: [],
+    };
+
+    // All queries in parallel
+    const [apiRes, nodesRes, topRes, quotaRes, pvcRes, eventsRes] = await Promise.allSettled([
+      // 0: API server latency
+      (async () => {
+        const start = Date.now();
+        await execa("kubectl", kctl(["get", "ns", "--no-headers"], kubeContext),
+          { stdio: "pipe", timeout: 10000 });
+        return Date.now() - start;
+      })(),
+      // 1: Node info
+      execa("kubectl", kctl([
+        "get", "nodes", "-o",
+        `jsonpath={range .items[*]}{.metadata.name}|{.metadata.labels.agentpool}|` +
+        `{.status.conditions[?(@.type=="Ready")].status}|{.status.nodeInfo.kubeletVersion}|` +
+        `{.status.nodeInfo.osImage}|{.status.nodeInfo.containerRuntimeVersion}{\"\\n\"}{end}`,
+      ], kubeContext), { stdio: "pipe" }),
+      // 2: kubectl top nodes
+      execa("kubectl", kctl(["top", "nodes", "--no-headers"], kubeContext),
+        { stdio: "pipe", timeout: 10000 }),
+      // 3: Resource quotas
+      execa("kubectl", kctl([
+        "get", "resourcequotas", "-A", "-o",
+        `jsonpath={range .items[*]}{.metadata.namespace}|{.status.used.cpu}|{.status.hard.cpu}|` +
+        `{.status.used.memory}|{.status.hard.memory}{\"\\n\"}{end}`,
+      ], kubeContext), { stdio: "pipe" }),
+      // 4: PVCs
+      execa("kubectl", kctl([
+        "get", "pvc", "-A", "-o",
+        `jsonpath={range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|` +
+        `{.spec.resources.requests.storage}{\"\\n\"}{end}`,
+      ], kubeContext), { stdio: "pipe" }),
+      // 5: Warning events
+      execa("kubectl", kctl([
+        "get", "events", "-A", "--field-selector", "type=Warning",
+        "--sort-by=.lastTimestamp", "-o",
+        `jsonpath={range .items[-8:]}{.lastTimestamp}|{.reason}|` +
+        `{.involvedObject.kind}/{.involvedObject.name}|{.message}{\"\\n\"}{end}`,
+      ], kubeContext), { stdio: "pipe" }),
+    ]);
+
+    // Parse API latency
+    if (apiRes.status === "fulfilled") {
+      result.apiLatencyMs = apiRes.value as number;
+      result.apiReachable = true;
+    }
+
+    // Parse nodes
+    if (nodesRes.status === "fulfilled") {
+      const topMap = new Map<string, { cpu: string; cpuPct: string; mem: string; memPct: string }>();
+      if (topRes.status === "fulfilled") {
+        for (const line of (topRes.value as any).stdout.trim().split("\n").filter(Boolean)) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 5) {
+            topMap.set(parts[0], { cpu: parts[1], cpuPct: parts[2], mem: parts[3], memPct: parts[4] });
+          }
+        }
+      }
+
+      for (const line of (nodesRes.value as any).stdout.trim().split("\n").filter(Boolean)) {
+        const [name, pool, ready, version, os, runtime] = line.split("|");
+        if (!name) continue;
+        const top = topMap.get(name);
+        result.nodes.push({
+          name, pool: pool || "-",
+          status: ready === "True" ? "Ready" : "NotReady",
+          version: version || "-",
+          cpuCores: top?.cpu || "-", cpuPct: top?.cpuPct || "-",
+          memBytes: top?.mem || "-", memPct: top?.memPct || "-",
+          os: os || "-", runtime: runtime || "-",
+        });
+      }
+    }
+
+    // Parse quotas
+    if (quotaRes.status === "fulfilled") {
+      for (const line of (quotaRes.value as any).stdout.trim().split("\n").filter(Boolean)) {
+        const [ns, cpuUsed, cpuHard, memUsed, memHard] = line.split("|");
+        if (ns) result.quotas.push({ namespace: ns, cpuUsed: cpuUsed || "0", cpuHard: cpuHard || "-", memUsed: memUsed || "0", memHard: memHard || "-" });
+      }
+    }
+
+    // Parse PVCs
+    if (pvcRes.status === "fulfilled") {
+      for (const line of (pvcRes.value as any).stdout.trim().split("\n").filter(Boolean)) {
+        const [ns, name, phase, size] = line.split("|");
+        if (ns) result.pvcs.push({ namespace: ns, name: name || "-", phase: phase || "Unknown", size: size || "-" });
+      }
+    }
+
+    // Parse warnings
+    if (eventsRes.status === "fulfilled") {
+      for (const line of (eventsRes.value as any).stdout.trim().split("\n").filter(Boolean)) {
+        const [time, reason, object, ...rest] = line.split("|");
+        if (reason) result.warnings.push({
+          time: time ? timeSince(new Date(time)) : "-",
+          reason: reason || "-",
+          object: (object || "-").substring(0, 40),
+          message: (rest.join("|") || "").substring(0, 60),
+        });
+      }
+    }
+
+    return result;
+  }
+
   // ── Actions ───────────────────────────────────────────────────────
 
   async function approveDomain(domain: EgressDomain) {
@@ -569,9 +735,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     const now = new Date().toLocaleTimeString();
     const spin = isRefreshing ? `{cyan-fg}${spinFrames[spinIdx]}{/} ` : "";
     const ctx = `{gray-fg}${clusterName}{/}`;
+
+    // Cluster health indicator
+    let clusterTag = "";
+    if (clusterData) {
+      const readyNodes = clusterData.nodes.filter((n) => n.status === "Ready").length;
+      const totalNodes = clusterData.nodes.length;
+      const nColor = readyNodes === totalNodes ? "green" : readyNodes > 0 ? "yellow" : "red";
+      const apiTag = clusterData.apiReachable ? "{green-fg}●{/}" : "{red-fg}●{/}";
+      clusterTag = `${apiTag} API  {${nColor}-fg}${readyNodes}/${totalNodes}{/} nodes  │  `;
+    }
+
+    const viewLabel = viewMode === "cluster" ? "  {blue-fg}{bold}[CLUSTER VIEW]{/bold}{/}  │  " : "";
     header.setContent(
-      ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ` +
-      `${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`,
+      ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}` +
+      `${clusterTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`,
     );
   }
 
@@ -656,8 +834,138 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     securityBox.setContent(lines.join("\n"));
   }
 
+  function renderCluster() {
+    if (!clusterData) {
+      clusterNodeBox.setContent(" {gray-fg}Loading cluster data...{/}");
+      clusterInfoBox.setContent(" {gray-fg}Loading...{/}");
+      return;
+    }
+
+    const c = clusterData;
+
+    // ── Node table ──
+    const readyCount = c.nodes.filter((n) => n.status === "Ready").length;
+    const totalNodes = c.nodes.length;
+    const nodeColor = readyCount === totalNodes ? "green" : readyCount > 0 ? "yellow" : "red";
+    clusterNodeBox.setLabel(` 🖥  Nodes  {${nodeColor}-fg}${readyCount}/${totalNodes} Ready{/} `);
+
+    // Build per-pool summary
+    const pools = new Map<string, NodeInfo[]>();
+    for (const n of c.nodes) {
+      const p = n.pool || "default";
+      if (!pools.has(p)) pools.set(p, []);
+      pools.get(p)!.push(n);
+    }
+
+    const nodeLines: string[] = [];
+    for (const [pool, nodes] of pools) {
+      const poolReady = nodes.filter((n) => n.status === "Ready").length;
+      const poolColor = poolReady === nodes.length ? "green" : "yellow";
+      nodeLines.push(`{bold}{underline}Pool: ${pool}{/}  {${poolColor}-fg}${poolReady}/${nodes.length} Ready{/}`);
+      nodeLines.push("");
+
+      // Column headers
+      nodeLines.push(` {cyan-fg}${"Node".padEnd(38)} ${"Status".padEnd(10)} ${"CPU".padEnd(12)} ${"Memory".padEnd(12)} Version{/}`);
+
+      for (const n of nodes) {
+        const dot = n.status === "Ready" ? "{green-fg}●{/}" : "{red-fg}●{/}";
+        const shortName = n.name.length > 36 ? n.name.substring(0, 36) + ".." : n.name;
+
+        // CPU bar
+        const cpuNum = parseInt(n.cpuPct, 10);
+        const cpuBar = !isNaN(cpuNum) ? makeBar(cpuNum) : n.cpuPct;
+
+        // Mem bar
+        const memNum = parseInt(n.memPct, 10);
+        const memBar = !isNaN(memNum) ? makeBar(memNum) : n.memPct;
+
+        nodeLines.push(` ${dot} ${shortName.padEnd(37)} ${n.status.padEnd(10)} ${cpuBar.padEnd(12)} ${memBar.padEnd(12)} ${n.version}`);
+      }
+      nodeLines.push("");
+    }
+
+    clusterNodeBox.setContent(nodeLines.join("\n"));
+
+    // ── Cluster info ──
+    const apiColor = !c.apiReachable ? "red" : c.apiLatencyMs < 1000 ? "green" : "yellow";
+    const apiLabel = !c.apiReachable ? "unreachable" : `${c.apiLatencyMs}ms`;
+
+    const infoLines: string[] = [
+      `{bold}{underline}API Server{/}`,
+      ` Health     {${apiColor}-fg}● ${apiLabel}{/}`,
+      "",
+      `{bold}{underline}Resources{/}`,
+    ];
+
+    // Aggregate CPU/mem from top data
+    let totalCpuMilli = 0;
+    let totalMemMi = 0;
+    for (const n of c.nodes) {
+      const cpuStr = n.cpuCores;
+      if (cpuStr.endsWith("m")) totalCpuMilli += parseInt(cpuStr, 10) || 0;
+      const memStr = n.memBytes;
+      if (memStr.endsWith("Mi")) totalMemMi += parseInt(memStr, 10) || 0;
+    }
+    infoLines.push(
+      ` CPU Used   ${totalCpuMilli}m (${c.nodes.length > 0 ? (c.nodes.reduce((s, n) => s + (parseInt(n.cpuPct, 10) || 0), 0) / c.nodes.length).toFixed(0) : 0}% avg)`,
+      ` Mem Used   ${(totalMemMi / 1024).toFixed(1)}Gi (${c.nodes.length > 0 ? (c.nodes.reduce((s, n) => s + (parseInt(n.memPct, 10) || 0), 0) / c.nodes.length).toFixed(0) : 0}% avg)`,
+    );
+
+    // Quotas
+    if (c.quotas.length > 0) {
+      infoLines.push("", `{bold}{underline}Quotas{/}`);
+      for (const q of c.quotas) {
+        infoLines.push(` ${q.namespace}`);
+        if (q.cpuHard !== "-") infoLines.push(`   CPU  ${q.cpuUsed}/${q.cpuHard}`);
+        if (q.memHard !== "-") infoLines.push(`   Mem  ${q.memUsed}/${q.memHard}`);
+      }
+    }
+
+    // PVCs
+    if (c.pvcs.length > 0) {
+      const bound = c.pvcs.filter((p) => p.phase === "Bound").length;
+      const pending = c.pvcs.filter((p) => p.phase === "Pending").length;
+      const pvColor = pending > 0 ? "yellow" : "green";
+      infoLines.push("", `{bold}{underline}Storage{/}`);
+      infoLines.push(` PVCs  {${pvColor}-fg}${bound} bound{/}${pending > 0 ? ` {yellow-fg}${pending} pending{/}` : ""} / ${c.pvcs.length} total`);
+    }
+
+    // Warnings
+    if (c.warnings.length > 0) {
+      infoLines.push("", `{bold}{underline}⚠  Recent Warnings{/}`);
+      for (const w of c.warnings.slice(-6)) {
+        const color = ["BackOff", "OOMKilled", "ImagePullBackOff", "Evicted", "NodeNotReady"].includes(w.reason) ? "red" : "yellow";
+        infoLines.push(` {${color}-fg}${w.reason}{/} ${w.object}`);
+        infoLines.push(`   {gray-fg}${w.message} (${w.time} ago){/}`);
+      }
+    } else {
+      infoLines.push("", `{green-fg}✓ No warnings{/}`);
+    }
+
+    clusterInfoBox.setContent(infoLines.join("\n"));
+  }
+
+  /** Render a small bar chart: ██░░ 34% */
+  function makeBar(pct: number): string {
+    const width = 6;
+    const filled = Math.round((pct / 100) * width);
+    const color = pct > 80 ? "red" : pct > 50 ? "yellow" : "green";
+    const bar = "█".repeat(filled) + "░".repeat(width - filled);
+    return `{${color}-fg}${bar}{/} ${pct}%`;
+  }
+
   function render() {
-    // Agent table
+    // Toggle panel visibility based on view mode
+    if (viewMode === "cluster") {
+      for (const p of agentDetailPanels) (p as any).hide();
+      for (const p of clusterPanels) (p as any).show();
+      renderCluster();
+    } else {
+      for (const p of clusterPanels) (p as any).hide();
+      for (const p of agentDetailPanels) (p as any).show();
+    }
+
+    // Agent table (always visible)
     const agentData = sandboxes.map((s) => {
       const hIcon = s.health === "healthy" ? "●" :
                     s.health === "degraded" ? "●" :
@@ -697,13 +1005,22 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     renderHeader();
 
     // Status bar
-    const focusTag = focusedPanel === "agents"
-      ? "{cyan-fg}{bold}[Agents]{/bold}{/}  {gray-fg}Egress{/}"
-      : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
-    statusBar.setContent(
-      ` ${focusTag}  │  [Tab] Focus  [↑↓] Nav  [a] Approve  [A] All  [d] Deny  [e] Enforce  ` +
-      `[n] Spawn  [m] Model  [l] Logs  [x] Del  [r] Refresh  [q] Quit`,
-    );
+    const viewTag = viewMode === "cluster"
+      ? "{blue-fg}{bold}[Cluster]{/bold}{/}"
+      : "{gray-fg}Cluster{/}";
+    if (viewMode === "agents") {
+      const focusTag = focusedPanel === "agents"
+        ? "{cyan-fg}{bold}[Agents]{/bold}{/}  {gray-fg}Egress{/}"
+        : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
+      statusBar.setContent(
+        ` ${focusTag}  ${viewTag}  │  [Tab] Focus  [c] Cluster  [↑↓] Nav  [a] Approve  [A] All  ` +
+        `[e] Enforce  [n] Spawn  [x] Del  [r] Refresh  [q] Quit`,
+      );
+    } else {
+      statusBar.setContent(
+        ` ${viewTag}  │  [c] Back to Agents  [r] Refresh  [q] Quit`,
+      );
+    }
 
     // Focus border color
     if (focusedPanel === "agents") {
@@ -728,11 +1045,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     try {
       sandboxes = await fetchSandboxes();
 
-      // Parallel: egress + security for all running sandboxes
+      // Parallel: egress + security + cluster for all running sandboxes
       const running = sandboxes.filter((s) => s.podName);
-      const [egressResults, secResults] = await Promise.all([
+      const [egressResults, secResults, cluster] = await Promise.all([
         Promise.all(running.map((s) => fetchEgressDomains(s))),
         Promise.all(running.map((s) => fetchSecurityState(s))),
+        fetchClusterHealth(),
       ]);
 
       egressByAgent = new Map();
@@ -743,6 +1061,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       for (const sec of secResults) {
         securityStates.set(sec.sandbox, sec);
       }
+      clusterData = cluster;
 
       // Sparkline
       sparkData.push(sandboxes.length);
@@ -801,6 +1120,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   screen.key(["up", "k"], () => moveSelection(-1));
   screen.key(["down", "j"], () => moveSelection(1));
   screen.key(["r"], async () => { await refresh(); });
+
+  // Cluster view toggle
+  screen.key(["c"], () => {
+    viewMode = viewMode === "agents" ? "cluster" : "agents";
+    render();
+  });
 
   // Egress actions
   screen.key(["a"], async () => {
