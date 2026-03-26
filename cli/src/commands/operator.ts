@@ -135,9 +135,10 @@ export function operatorCommand(): Command {
     .description("Live operator dashboard — manage all sandboxes from one screen")
     .option("--refresh <seconds>", "Auto-refresh interval", "10")
     .option("--context <name>", "Kubernetes context to use")
+    .option("--dev", "Dev mode — discover Docker containers instead of K8s pods")
     .action(async (options) => {
       const refreshInterval = parseInt(options.refresh, 10) * 1000;
-      await startDashboard(refreshInterval, options.context);
+      await startDashboard(refreshInterval, options.context, !!options.dev);
     });
 
   return cmd;
@@ -148,15 +149,17 @@ function kctl(args: string[], context?: string): string[] {
   return context ? ["--context", context, ...args] : args;
 }
 
-async function startDashboard(refreshInterval: number, kubeContext?: string) {
+async function startDashboard(refreshInterval: number, kubeContext?: string, devMode = false) {
   // ── Resolve cluster ───────────────────────────────────────────────
-  let clusterName = "unknown";
-  try {
-    const { stdout } = await execa("kubectl", kctl([
-      "config", "current-context",
-    ], kubeContext), { stdio: "pipe" });
-    clusterName = stdout.trim();
-  } catch { /* offline */ }
+  let clusterName = devMode ? "docker (dev)" : "unknown";
+  if (!devMode) {
+    try {
+      const { stdout } = await execa("kubectl", kctl([
+        "config", "current-context",
+      ], kubeContext), { stdio: "pipe" });
+      clusterName = stdout.trim();
+    } catch { /* offline */ }
+  }
 
   const screen = blessed.screen({
     smartCSR: true,
@@ -319,6 +322,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   // ── Data fetching ─────────────────────────────────────────────────
 
   async function fetchSandboxes(): Promise<SandboxInfo[]> {
+    if (devMode) return fetchSandboxesDocker();
     try {
       const { stdout } = await execa("kubectl", kctl([
         "get", "clawsandbox", "-A", "-o", "json",
@@ -421,13 +425,92 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     }
   }
 
+  async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
+    try {
+      const { stdout } = await execa("docker", [
+        "ps", "-a", "--format",
+        "{{.Names}}|{{.Status}}|{{.Label \"azureclaw.parent\"}}|{{.Label \"azureclaw.spawned-by\"}}|{{.CreatedAt}}",
+        "--filter", "name=azureclaw-",
+      ], { stdio: "pipe" });
+
+      const results: SandboxInfo[] = [];
+      for (const line of stdout.split("\n").filter(Boolean)) {
+        const [containerName, status, parent, , createdAt] = line.split("|");
+        if (!containerName?.startsWith("azureclaw-")) continue;
+        // Skip AGT infrastructure containers
+        if (containerName.includes("agt-postgres") || containerName.includes("agt-relay") || containerName.includes("agt-registry")) continue;
+
+        const name = containerName.replace(/^azureclaw-/, "");
+        const isUp = status?.startsWith("Up") ?? false;
+        const health: HealthState = isUp ? "healthy" : "down";
+        const podStatus = isUp ? "Running" : "Exited";
+        const role: "controller" | "sub-agent" = parent ? "sub-agent" : "controller";
+
+        let age = "-";
+        if (createdAt) {
+          const d = new Date(createdAt);
+          if (!isNaN(d.getTime())) age = timeSince(d);
+        }
+
+        // Probe model from router
+        let model = "gpt-4.1";
+        if (isUp) {
+          try {
+            const { stdout: readyz } = await execa("docker", [
+              "exec", containerName, "curl", "-s", "--max-time", "2", "http://localhost:8443/readyz",
+            ], { stdio: "pipe" });
+            const r = JSON.parse(readyz);
+            if (r.model) model = r.model;
+          } catch { /* probe fail */ }
+        }
+
+        results.push({
+          name,
+          namespace: containerName,
+          status: podStatus,
+          health,
+          model,
+          isolation: "standard",
+          channels: "-",
+          age,
+          podName: containerName,
+          restarts: 0,
+          role,
+          parent: parent || "",
+        });
+      }
+
+      // Tree ordering: controllers first, sub-agents after their parent
+      const controllers = results.filter((s) => s.role === "controller").sort((a, b) => a.name.localeCompare(b.name));
+      const subAgents = results.filter((s) => s.role === "sub-agent");
+      const tree: SandboxInfo[] = [];
+      for (const ctrl of controllers) {
+        tree.push(ctrl);
+        tree.push(...subAgents.filter((s) => s.parent === ctrl.name));
+      }
+      const placed = new Set(tree.map((s) => s.name));
+      for (const s of subAgents) {
+        if (!placed.has(s.name)) tree.push(s);
+      }
+
+      return tree;
+    } catch {
+      return [];
+    }
+  }
+
   async function fetchEgressDomains(sb: SandboxInfo): Promise<EgressDomain[]> {
     if (!sb.podName) return [];
-    const routerCurl = (path: string) => execa("kubectl", kctl([
-      "exec", "-n", sb.namespace, sb.podName,
-      "-c", "inference-router", "--",
-      "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
-    ], kubeContext), { stdio: "pipe" });
+    const routerCurl = devMode
+      ? (path: string) => execa("docker", [
+          "exec", sb.podName!,
+          "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        ], { stdio: "pipe" })
+      : (path: string) => execa("kubectl", kctl([
+          "exec", "-n", sb.namespace, sb.podName!,
+          "-c", "inference-router", "--",
+          "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        ], kubeContext), { stdio: "pipe" });
 
     try {
       const [learnedRes, allowRes] = await Promise.allSettled([
@@ -505,24 +588,28 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
     if (!sb.podName) return state;
 
-    const routerExec = (path: string) => execa("kubectl", kctl([
-      "exec", "-n", sb.namespace, sb.podName,
-      "-c", "inference-router", "--",
-      "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
-    ], kubeContext), { stdio: "pipe" });
+    const routerExec = devMode
+      ? (path: string) => execa("docker", [
+          "exec", sb.podName!,
+          "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        ], { stdio: "pipe" })
+      : (path: string) => execa("kubectl", kctl([
+          "exec", "-n", sb.namespace, sb.podName!,
+          "-c", "inference-router", "--",
+          "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        ], kubeContext), { stdio: "pipe" });
 
     // Run all checks in parallel
+    // In dev mode, skip K8s-only checks (NetworkPolicy, admin token)
+    const k8sCheck = (args: string[]) => devMode
+      ? Promise.reject("dev-mode")
+      : execa("kubectl", kctl(args, kubeContext), { stdio: "pipe" });
+
     const checks = await Promise.allSettled([
-      // 0: NetworkPolicy
-      execa("kubectl", kctl([
-        "get", "networkpolicy", "sandbox-policy", "-n", sb.namespace,
-        "-o", "name",
-      ], kubeContext), { stdio: "pipe" }),
-      // 1: Admin token secret
-      execa("kubectl", kctl([
-        "get", "secret", "router-admin-token", "-n", sb.namespace,
-        "-o", "name",
-      ], kubeContext), { stdio: "pipe" }),
+      // 0: NetworkPolicy (K8s only)
+      k8sCheck(["get", "networkpolicy", "sandbox-policy", "-n", sb.namespace, "-o", "name"]),
+      // 1: Admin token secret (K8s only)
+      k8sCheck(["get", "secret", "router-admin-token", "-n", sb.namespace, "-o", "name"]),
       // 2: /readyz (body, not just status code)
       routerExec("/readyz"),
       // 3: /blocklist/status
@@ -677,6 +764,29 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       apiLatencyMs: -1, apiReachable: false,
       nodes: [], quotas: [], pvcs: [], warnings: [],
     };
+
+    if (devMode) {
+      result.apiReachable = true;
+      result.apiLatencyMs = 0;
+      try {
+        const { stdout } = await execa("docker", ["info", "--format", "{{.NCPU}}|{{.MemTotal}}|{{.ServerVersion}}"], { stdio: "pipe" });
+        const [cpus, mem, version] = stdout.trim().split("|");
+        const memGb = (parseInt(mem || "0", 10) / 1073741824).toFixed(1);
+        result.nodes = [{
+          name: "docker-host",
+          pool: "local",
+          status: "Ready",
+          version: version || "",
+          cpuCores: `${cpus}`,
+          cpuPct: "-",
+          memBytes: `${memGb}Gi`,
+          memPct: "-",
+          os: "Docker",
+          runtime: `docker://${version || ""}`,
+        }];
+      } catch { /* docker info fail */ }
+      return result;
+    }
 
     // All queries in parallel
     const [apiRes, nodesRes, topRes, quotaRes, pvcRes, eventsRes] = await Promise.allSettled([
@@ -1491,8 +1601,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         return;
       }
 
-      // Pre-flight: check for Kata nodepool when confidential
-      if (state.isolation === "confidential") {
+      // Pre-flight: check for Kata nodepool when confidential (K8s only)
+      if (!devMode && state.isolation === "confidential") {
         try {
           const { stdout } = await execa("kubectl", kctl([
             "get", "nodes", "-l", "azureclaw.azure.com/pool=sandbox-kata", "--no-headers",
@@ -1505,12 +1615,23 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         }
       }
 
-      const args = ["add", state.name.trim(), "--model", state.model, "--isolation", state.isolation];
-      if (state.learnEgress) args.push("--learn-egress");
-      if (state.channel) {
-        args.push("--channels", state.channel);
-        if (state.channel === "telegram" && state.telegramToken) {
-          args.push("--telegram-token", state.telegramToken);
+      let args: string[];
+      if (devMode) {
+        args = ["dev", "--name", state.name.trim(), "--model", state.model];
+        if (state.channel) {
+          args.push("--channels", state.channel);
+          if (state.channel === "telegram" && state.telegramToken) {
+            args.push("--telegram-token", state.telegramToken);
+          }
+        }
+      } else {
+        args = ["add", state.name.trim(), "--model", state.model, "--isolation", state.isolation];
+        if (state.learnEgress) args.push("--learn-egress");
+        if (state.channel) {
+          args.push("--channels", state.channel);
+          if (state.channel === "telegram" && state.telegramToken) {
+            args.push("--telegram-token", state.telegramToken);
+          }
         }
       }
       activityLog.log(`{cyan-fg}⏳ Spawning {bold}${state.name}{/bold} (${state.model}, ${state.isolation})...{/}`);
@@ -1681,7 +1802,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
           activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold}...{/}`);
           screen.render();
           try {
-            await execa("azureclaw", ["destroy", sb.name, "--yes"], { stdio: "pipe" });
+            if (devMode) {
+              await execa("docker", ["rm", "-f", sb.podName!], { stdio: "pipe" });
+            } else {
+              await execa("azureclaw", ["destroy", sb.name, "--yes"], { stdio: "pipe" });
+            }
             activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
           } catch (e: any) {
             activityLog.log(`{red-fg}✗ Destroy fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
@@ -1737,11 +1862,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     // Use spawnSync to block — avoids any async blessed interference.
     // Launch openclaw tui directly — quit the TUI to return to operator.
     const { spawnSync } = await import("child_process");
-    const result = spawnSync("kubectl", [
-      "exec", "-it", "-n", sb.namespace,
-      `deploy/${sb.name}`, "-c", "openclaw",
-      "--", "openclaw", "tui",
-    ], {
+    const connectCmd = devMode ? "docker" : "kubectl";
+    const connectArgs = devMode
+      ? ["exec", "-it", sb.podName!, "openclaw", "tui"]
+      : ["exec", "-it", "-n", sb.namespace, `deploy/${sb.name}`, "-c", "openclaw", "--", "openclaw", "tui"];
+    const result = spawnSync(connectCmd, connectArgs, {
       stdio: "inherit",
       env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
     });
