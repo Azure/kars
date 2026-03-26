@@ -82,6 +82,11 @@ interface SecurityState {
   agtAuditIntegrity: boolean;
   agtKnownAgents: number;
   agtTrustThreshold: number;
+  // AGT detail — populated from /agt/audit, /agt/trust, relay/registry logs
+  agtRecentAudit: string[];     // last few audit entries
+  agtTrustScores: { agent: string; score: number; tier: string }[];
+  agtRelayConnected: boolean;
+  agtRegistryAgents: number;
   // Prometheus metrics
   totalRequests: number;
   errorRequests: number;
@@ -168,7 +173,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [3, 42, 16, 14, 10, 6, 6],
+    columnWidth: [3, 38, 14, 14, 14, 6, 8],
     interactive: true,
     style: {
       border: { fg: "cyan" },
@@ -475,6 +480,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       agtAuditIntegrity: false,
       agtKnownAgents: 0,
       agtTrustThreshold: 0,
+      agtRecentAudit: [],
+      agtTrustScores: [],
+      agtRelayConnected: false,
+      agtRegistryAgents: 0,
       totalRequests: 0,
       errorRequests: 0,
       inputTokens: 0,
@@ -512,6 +521,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       routerExec("/egress/allowlist"),
       // 6: /metrics (Prometheus text)
       routerExec("/metrics"),
+      // 7: /agt/audit (last entries)
+      routerExec("/agt/audit"),
+      // 8: /agt/trust (trust scores)
+      routerExec("/agt/trust"),
     ]);
 
     // NetworkPolicy
@@ -569,6 +582,36 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       const latSum = sumPrometheusCounter(metricsText, "azureclaw_inference_latency_seconds_sum");
       const latCount = sumPrometheusCounter(metricsText, "azureclaw_inference_latency_seconds_count");
       state.avgLatencyMs = latCount > 0 ? Math.round((latSum / latCount) * 1000) : 0;
+    }
+
+    // /agt/audit — extract last few entries
+    if (checks[7].status === "fulfilled") {
+      try {
+        const audit = JSON.parse((checks[7].value as any).stdout);
+        const entries = Array.isArray(audit) ? audit : audit.entries || [];
+        state.agtRecentAudit = entries.slice(-5).map((e: any) => {
+          const action = e.action || e.type || "unknown";
+          const agent = e.agent_id || e.agent || "";
+          const tool = e.tool || "";
+          const result = e.result || e.decision || "";
+          const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "";
+          return `${ts} ${action}${tool ? ` [${tool}]` : ""}${agent ? ` ${agent.substring(0, 12)}` : ""} → ${result}`;
+        });
+      } catch { /* parse fail */ }
+    }
+
+    // /agt/trust — extract trust scores
+    if (checks[8].status === "fulfilled") {
+      try {
+        const trust = JSON.parse((checks[8].value as any).stdout);
+        const agents = Array.isArray(trust) ? trust : trust.agents || [];
+        state.agtTrustScores = agents.map((a: any) => ({
+          agent: a.agent_id || a.name || "unknown",
+          score: a.score ?? a.trust_score ?? 0,
+          tier: a.tier || (a.score >= 800 ? "T1" : a.score >= 600 ? "T2" : a.score >= 400 ? "T3" : a.score >= 200 ? "T4" : "T5"),
+        }));
+        state.agtRegistryAgents = agents.length;
+      } catch { /* parse fail */ }
     }
 
     return state;
@@ -876,8 +919,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         `{bold}{underline}AGT Governance{/}`,
         ` Status        ${ok(sec.agtEnabled)} enabled`,
         ` Audit Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "COMPROMISED"}`,
-        ` Known Agents  ${sec.agtKnownAgents}`,
+        ` Known Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents}`,
       );
+      if (sec.agtTrustScores.length > 0) {
+        lines.push(` {bold}Trust Scores{/}`);
+        for (const t of sec.agtTrustScores) {
+          const tColor = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
+          lines.push(`   {${tColor}-fg}${t.score}{/} ${t.tier} ${t.agent.substring(0, 20)}`);
+        }
+      }
+      if (sec.agtRecentAudit.length > 0) {
+        lines.push(` {bold}Recent Audit{/}`);
+        for (const entry of sec.agtRecentAudit) {
+          lines.push(`   {gray-fg}${entry}{/}`);
+        }
+      }
     }
 
     securityBox.setContent(lines.join("\n"));
