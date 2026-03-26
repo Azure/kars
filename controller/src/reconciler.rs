@@ -1258,22 +1258,6 @@ pub async fn run(client: Client) -> Result<()> {
         );
     }
 
-    // Ensure managed identity has RBAC roles on the Foundry resource at startup.
-    // Idempotent — only creates assignments that don't already exist.
-    if let Some(ref fm) = fedcred {
-        let rbac_endpoint = if !foundry_endpoint.is_empty() {
-            &foundry_endpoint
-        } else {
-            &foundry_project_endpoint
-        };
-        if !rbac_endpoint.is_empty() {
-            match fm.ensure_role_assignments(rbac_endpoint).await {
-                Ok(()) => tracing::info!("RBAC role assignments verified on Foundry resource"),
-                Err(e) => tracing::warn!("RBAC role assignment check failed (non-fatal): {e}"),
-            }
-        }
-    }
-
     let ctx = Arc::new(Context {
         client,
         wi_client_id,

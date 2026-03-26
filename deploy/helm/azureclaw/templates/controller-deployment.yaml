@@ -59,8 +59,6 @@ spec:
               value: {{ .Values.fedcred.identityName | default "" | quote }}
             - name: IDENTITY_RESOURCE_GROUP
               value: {{ .Values.fedcred.identityResourceGroup | default "" | quote }}
-            - name: FOUNDRY_RESOURCE_GROUP
-              value: {{ .Values.fedcred.foundryResourceGroup | default .Values.fedcred.identityResourceGroup | default "" | quote }}
             - name: OIDC_ISSUER_URL
               value: {{ .Values.fedcred.oidcIssuerUrl | default "" | quote }}
             {{- end }}
