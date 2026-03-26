@@ -104,13 +104,30 @@ async function delegateToNativeAgent(
     "--message", taskText,
     "--session-id", sessionId,
     "--timeout", "300",
+    "--json",
   ], {
     timeout: 330_000, // 5.5 min hard kill (slightly above --timeout 300)
     maxBuffer: 2 * 1024 * 1024, // 2 MB output buffer
     env: process.env,
   });
 
-  const response = stdout.trim();
+  // stdout contains plugin log lines followed by a JSON object.
+  // Extract the JSON by finding the last top-level { ... } block.
+  const jsonMatch = stdout.match(/\n(\{[\s\S]*\})\s*$/);
+  if (jsonMatch) {
+    try {
+      const result = JSON.parse(jsonMatch[1]);
+      const text = result?.reply?.text || result?.text || "";
+      if (text) {
+        log.info(`Native agent responded (${text.length} chars, session: ${sessionId})`);
+        return text;
+      }
+    } catch { /* fall through to raw output */ }
+  }
+
+  // Fallback: strip plugin log lines (prefixed with "[") and return raw text
+  const lines = stdout.split("\n").filter((l: string) => !l.startsWith("[plugins]") && !l.startsWith("[") && l.trim());
+  const response = lines.join("\n").trim();
   if (!response) {
     log.warn(`Native agent returned empty response. stderr: ${(stderr || "").slice(0, 500)}`);
     throw new Error("Native agent returned empty response");
