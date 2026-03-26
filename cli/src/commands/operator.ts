@@ -50,6 +50,8 @@ interface SandboxInfo {
   age: string;
   podName: string;
   restarts: number;
+  role: "controller" | "sub-agent";
+  parent: string;  // parent agent name (empty if controller)
 }
 
 interface EgressDomain {
@@ -164,7 +166,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [3, 28, 16, 16, 12, 8, 6],
+    columnWidth: [3, 30, 2, 16, 14, 6, 6],
     interactive: true,
     style: {
       border: { fg: "cyan" },
@@ -300,18 +302,26 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   async function fetchSandboxes(): Promise<SandboxInfo[]> {
     try {
       const { stdout } = await execa("kubectl", kctl([
-        "get", "clawsandbox", "-A",
-        "-o", `jsonpath={range .items[*]}{.metadata.name}|{.metadata.namespace}|{.status.phase}|{.spec.inference.model}|{.spec.sandbox.isolation}|{.metadata.creationTimestamp}{\"\\n\"}{end}`,
+        "get", "clawsandbox", "-A", "-o", "json",
       ], kubeContext), { stdio: "pipe" });
 
+      const data = JSON.parse(stdout);
+      const items: any[] = data.items || [];
       const results: SandboxInfo[] = [];
-      for (const line of stdout.trim().split("\n").filter(Boolean)) {
-        const parts = line.split("|");
-        const [name, , phase, model, isolation, created] = parts;
+
+      for (const item of items) {
+        const name: string = item.metadata?.name || "";
         if (!name) continue;
+        const phase: string = item.status?.phase || "Unknown";
+        const model: string = item.spec?.inference?.model || "gpt-4.1";
+        const isolation: string = item.spec?.sandbox?.isolation || "enhanced";
+        const created: string = item.metadata?.creationTimestamp || "";
+        const labels: Record<string, string> = item.metadata?.labels || {};
+        const parentLabel = labels["azureclaw.azure.com/parent"] || "";
+        const role: "controller" | "sub-agent" = parentLabel ? "sub-agent" : "controller";
 
         const sandboxNs = `azureclaw-${name}`;
-        let podStatus = phase || "Unknown";
+        let podStatus = phase;
         let podName = "";
         let channels = "";
         let health: HealthState = "pending";
@@ -364,10 +374,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
         results.push({
           name, namespace: sandboxNs, status: podStatus,
-          health, model: model || "gpt-4.1", isolation: isolation || "enhanced",
+          health, model, isolation,
           channels, age, podName, restarts,
+          role, parent: parentLabel,
         });
       }
+
+      // Sort: controllers first, then sub-agents grouped under their parent
+      results.sort((a, b) => {
+        if (a.role !== b.role) return a.role === "controller" ? -1 : 1;
+        if (a.role === "sub-agent" && b.role === "sub-agent") {
+          if (a.parent !== b.parent) return a.parent.localeCompare(b.parent);
+        }
+        return a.name.localeCompare(b.name);
+      });
+
       return results;
     } catch {
       return [];
@@ -720,15 +741,18 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   const ok = (v: boolean) => v ? "{green-fg}●{/}" : "{red-fg}●{/}";
 
   function healthSummary(): string {
+    const controllers = sandboxes.filter((s) => s.role === "controller").length;
+    const subAgents = sandboxes.filter((s) => s.role === "sub-agent").length;
     const h = sandboxes.filter((s) => s.health === "healthy").length;
     const d = sandboxes.filter((s) => s.health === "degraded").length;
     const x = sandboxes.filter((s) => s.health === "down").length;
     const parts: string[] = [];
-    if (h > 0) parts.push(`{green-fg}${h} healthy{/}`);
-    if (d > 0) parts.push(`{yellow-fg}${d} degraded{/}`);
-    if (x > 0) parts.push(`{red-fg}${x} down{/}`);
-    if (parts.length === 0) return "{gray-fg}no agents{/}";
-    return parts.join("  ");
+    parts.push(`◆${controllers} ⤷${subAgents}`);
+    if (h > 0) parts.push(`{green-fg}${h}✓{/}`);
+    if (d > 0) parts.push(`{yellow-fg}${d}!{/}`);
+    if (x > 0) parts.push(`{red-fg}${x}✗{/}`);
+    if (sandboxes.length === 0) return "{gray-fg}no agents{/}";
+    return parts.join(" ");
   }
 
   function renderHeader() {
@@ -965,17 +989,20 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       for (const p of agentDetailPanels) (p as any).show();
     }
 
-    // Agent table (always visible)
+    // Agent table (always visible) — with tree hierarchy
     const agentData = sandboxes.map((s) => {
       const hIcon = s.health === "healthy" ? "●" :
                     s.health === "degraded" ? "●" :
                     s.health === "down" ? "●" :
                     s.health === "pending" ? "◌" : "?";
       const restartStr = s.restarts > 0 ? ` R:${s.restarts}` : "";
-      return [hIcon, s.name, `${s.status}${restartStr}`, s.model, s.isolation, s.channels, s.age];
+      // Tree prefix: sub-agents get └─ indent
+      const prefix = s.role === "sub-agent" ? "└ " : "";
+      const roleTag = s.role === "sub-agent" ? "⤷" : "◆";
+      return [hIcon, `${prefix}${s.name}`, roleTag, `${s.status}${restartStr}`, s.model, s.channels, s.age];
     });
     (agentTable as any).setData({
-      headers: [" ", "Name", "Status", "Model", "Isolation", "Ch", "Age"],
+      headers: [" ", "Name", "", "Status", "Model", "Ch", "Age"],
       data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
     });
 
