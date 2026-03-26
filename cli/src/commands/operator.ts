@@ -87,6 +87,7 @@ interface SecurityState {
   agtTrustScores: { agent: string; score: number; tier: string }[];
   agtRelayConnected: boolean;
   agtRegistryAgents: number;
+  agtAmid: string;  // cryptographic identity from registry
   // Registry reputation (from agentmesh-registry)
   agtReputation: {
     score: number;       // 0.0–1.0 composite
@@ -578,6 +579,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       agtTrustScores: [],
       agtRelayConnected: false,
       agtRegistryAgents: 0,
+      agtAmid: "",
       agtReputation: null,
       totalRequests: 0,
       errorRequests: 0,
@@ -729,6 +731,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (checks[8].status === "fulfilled") {
       try {
         const rep = JSON.parse((checks[8].value as any).stdout);
+        // AMID (cryptographic identity from registry lookup)
+        if (rep.amid) state.agtAmid = rep.amid;
         // Registry reputation (from agentmesh-registry Postgres)
         if (rep.registry) {
           const r = rep.registry;
@@ -1107,7 +1111,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     }
 
     const lines: string[] = [
-      `{bold}${sb.name}{/}`,
+      `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid.substring(0, 12)}…{/}` : ""),
       ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
       ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents} known`,
     ];
