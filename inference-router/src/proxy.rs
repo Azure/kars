@@ -62,7 +62,7 @@ fn build_upstream_headers(
 fn record_metrics(upstream: &UpstreamConfig, status: StatusCode, latency: std::time::Duration, response_body: &[u8]) {
     let status_label = if status.is_success() { "ok" } else { "error" };
     metrics::INFERENCE_REQUESTS
-        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, status_label])
+        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, &status_label.to_string()])
         .inc();
     metrics::INFERENCE_LATENCY
         .with_label_values(&[&upstream.sandbox_name, &upstream.deployment])
@@ -73,12 +73,12 @@ fn record_metrics(upstream: &UpstreamConfig, status: StatusCode, latency: std::t
     {
         if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
             metrics::TOKENS_USED
-                .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "input"])
+                .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, &"input".to_string()])
                 .inc_by(input as u64);
         }
         if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
             metrics::TOKENS_USED
-                .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, "output"])
+                .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, &"output".to_string()])
                 .inc_by(output as u64);
         }
     }
@@ -169,7 +169,7 @@ pub async fn forward_stream(
     // Record request count immediately
     let status_label = if status.is_success() { "ok" } else { "error" };
     metrics::INFERENCE_REQUESTS
-        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, status_label])
+        .with_label_values(&[&upstream.sandbox_name, &upstream.deployment, &status_label.to_string()])
         .inc();
 
     // Wrap the byte stream to intercept the final SSE chunk for token metrics
@@ -200,12 +200,12 @@ pub async fn forward_stream(
                         // Record token usage
                         if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
                             metrics::TOKENS_USED
-                                .with_label_values(&[&sandbox_name, &model, "input"])
+                                .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
                                 .inc_by(input as u64);
                         }
                         if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
                             metrics::TOKENS_USED
-                                .with_label_values(&[&sandbox_name, &model, "output"])
+                                .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
                                 .inc_by(output as u64);
                         }
                 }

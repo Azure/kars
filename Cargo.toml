@@ -41,7 +41,7 @@ jsonwebtoken = "10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 opentelemetry = "0.28"
-prometheus = "0.13"
+prometheus = "0.14"
 
 # Error handling
 thiserror = "2"

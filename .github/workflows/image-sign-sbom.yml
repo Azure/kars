@@ -12,8 +12,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  id-token: write  # Required for Notation signing with OIDC
 
 env:
   REGISTRY: azureclawacr.azurecr.io
@@ -23,6 +21,10 @@ jobs:
   build-sign-sbom:
     name: Build, Sign & SBOM
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # Required for Notation signing with OIDC
     strategy:
       matrix:
         component:
@@ -33,20 +35,20 @@ jobs:
             dockerfile: inference-router/Dockerfile
             image: azureclaw-inference-router
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to ACR
-        uses: azure/docker-login@v2
+        uses: azure/docker-login@15c4aadf093404726ab2ff205b2cdd33fa6d054c # v2
         with:
           login-server: ${{ env.REGISTRY }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ${{ matrix.component.dockerfile }}
@@ -62,26 +64,26 @@ jobs:
 
       # ─── SBOM Generation ─────────────────────────────────────────────
       - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ${{ env.REGISTRY }}/${{ matrix.component.image }}:${{ env.VERSION }}
           format: spdx-json
           output-file: sbom-${{ matrix.component.name }}.spdx.json
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom-${{ matrix.component.name }}
           path: sbom-${{ matrix.component.name }}.spdx.json
 
       # ─── Image Signing with Notation ──────────────────────────────────
       - name: Install Notation
-        uses: notaryproject/notation-action/setup@v1
+        uses: notaryproject/notation-action/setup@b6fee73110795d6793253c673bd723f12bcf9bbb # v1
         with:
           version: "1.2.0"
 
       - name: Sign image with Notation
-        uses: notaryproject/notation-action/sign@v1
+        uses: notaryproject/notation-action/sign@b6fee73110795d6793253c673bd723f12bcf9bbb # v1
         with:
           plugin_name: azure-kv
           plugin_url: https://github.com/Azure/notation-azure-kv/releases/download/v1.2.0/notation-azure-kv_1.2.0_linux_amd64.tar.gz
