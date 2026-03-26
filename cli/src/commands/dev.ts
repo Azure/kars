@@ -244,7 +244,7 @@ export function devCommand(): Command {
           // Start PostgreSQL (registry backend)
           if (!(await isContainerRunning(AGT_POSTGRES))) {
             stepper.update("Starting PostgreSQL...");
-            try { await execa("docker", ["rm", "-f", AGT_POSTGRES], { stdio: "pipe" }); } catch {}
+            try { await execa("docker", ["rm", "-fv", AGT_POSTGRES], { stdio: "pipe" }); } catch {}
             await execa("docker", [
               "run", "-d",
               "--name", AGT_POSTGRES,

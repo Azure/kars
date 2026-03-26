@@ -101,6 +101,21 @@ export function destroyCommand(): Command {
                 await execa("docker", ["rm", "-fv", c], { stdio: "pipe" }).catch(() => {});
               }
               await execa("docker", ["network", "rm", "azureclaw-dev"], { stdio: "pipe" }).catch(() => {});
+              // Clean up any remaining sub-agent containers and their volumes
+              const { stdout: allCs } = await execa("docker", [
+                "ps", "-a", "--filter", "name=azureclaw-", "--format", "{{.Names}}",
+              ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+              for (const c of allCs.split("\n").filter(Boolean)) {
+                await execa("docker", ["rm", "-fv", c], { stdio: "pipe" }).catch(() => {});
+                await execa("docker", ["volume", "rm", `${c}-data`], { stdio: "pipe" }).catch(() => {});
+              }
+              // Prune dangling volumes left by previous postgres/sub-agent containers
+              await execa("docker", ["volume", "ls", "-q", "--filter", "dangling=true"], { stdio: "pipe" })
+                .then(async ({ stdout }) => {
+                  for (const v of stdout.split("\n").filter(Boolean)) {
+                    await execa("docker", ["volume", "rm", v], { stdio: "pipe" }).catch(() => {});
+                  }
+                }).catch(() => {});
             }
 
             spinner.succeed(`Sandbox '${name}' destroyed`);
