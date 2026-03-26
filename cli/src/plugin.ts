@@ -120,12 +120,55 @@ async function processTaskWithTools(
         },
       },
     },
+    {
+      type: "function" as const,
+      function: {
+        name: "foundry_web_search",
+        description: "Search the web in real-time via Azure AI Foundry's Bing grounding. Returns answers with inline URL citations. Runs server-side — no egress policy exceptions needed. Use for current events, news, recent changes, verifying facts, or any query needing up-to-date information.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The search query or question to look up on the web." },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "foundry_code_execute",
+        description: "Execute Python code server-side via Azure AI Foundry's code_interpreter. Has pandas, numpy, matplotlib, scipy pre-installed. Use for data analysis, charts, complex math, and file processing.",
+        parameters: {
+          type: "object",
+          properties: {
+            code: { type: "string", description: "Python code to execute." },
+          },
+          required: ["code"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "foundry_file_search",
+        description: "Search uploaded documents and knowledge bases via Azure AI Foundry's file_search. Use for RAG over vector stores or Azure AI Search indexes.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The search query." },
+            vector_store_ids: { type: "array", items: { type: "string" }, description: "Optional vector store IDs to search." },
+          },
+          required: ["query"],
+        },
+      },
+    },
   ];
 
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to exec_command to run shell commands. Use it to answer questions about the system (kernel, IP, hostname, etc.). Be concise and report actual command output.",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_file_search: search documents and knowledge bases\nUse the appropriate tool for each task. Be concise and report actual results.",
     },
     {
       role: "user",
@@ -194,6 +237,72 @@ async function processTaskWithTools(
               { timeout: 35000, encoding: "utf8", maxBuffer: 256 * 1024 },
             ).trim();
             result = fetchResult;
+          } else if (fnName === "foundry_web_search" || fnName === "foundry_code_execute" || fnName === "foundry_file_search") {
+            // Route through the inference router → Foundry Responses API
+            log.info(`AGT sub-agent ${fnName}: ${JSON.stringify(args).slice(0, 200)}`);
+            let reqBody: any;
+            if (fnName === "foundry_web_search") {
+              // Discover Bing connection
+              let connId: string | undefined;
+              try {
+                const connsRaw = execSync(
+                  'curl -s http://127.0.0.1:8443/connections?api-version=2025-05-15-preview',
+                  { timeout: 10000, encoding: "utf8" },
+                );
+                const conns = JSON.parse(connsRaw);
+                const bingConn = (conns.value || conns || []).find(
+                  (c: any) => c.type === "GroundingWithBingSearch" || c.properties?.category === "GroundingWithBingSearch"
+                );
+                if (bingConn) connId = bingConn.id;
+              } catch { /* fall through */ }
+              reqBody = {
+                model: model,
+                input: args.query,
+                tools: [{ type: "bing_grounding", bing_grounding: { search_configurations: [{ project_connection_id: connId }] } }],
+                store: false,
+              };
+            } else if (fnName === "foundry_code_execute") {
+              reqBody = {
+                model: model,
+                input: args.code,
+                tools: [{ type: "code_interpreter", container: { type: "auto" } }],
+                instructions: "Execute the provided Python code and return the output.",
+                store: false,
+              };
+            } else {
+              // foundry_file_search
+              const fileSearchTool: any = { type: "file_search" };
+              if (args.vector_store_ids?.length) fileSearchTool.file_search = { vector_store_ids: args.vector_store_ids };
+              reqBody = {
+                model: model,
+                input: args.query,
+                tools: [fileSearchTool],
+                store: false,
+              };
+            }
+            const bodyStr = JSON.stringify(reqBody);
+            const foundryResult = execSync(
+              `curl -s -X POST 'http://127.0.0.1:8443/openai/responses?api-version=2025-11-15-preview' -H 'Content-Type: application/json' -d '${bodyStr.replace(/'/g, "'\\''")}'`,
+              { timeout: 60000, encoding: "utf8", maxBuffer: 256 * 1024 },
+            ).trim();
+            // Extract text from Responses API output
+            try {
+              const parsed = JSON.parse(foundryResult);
+              const output = parsed.output || parsed;
+              if (Array.isArray(output)) {
+                const texts = output
+                  .filter((item: any) => item.type === "message" && item.content)
+                  .flatMap((item: any) => item.content)
+                  .filter((c: any) => c.type === "output_text" || c.type === "text")
+                  .map((c: any) => c.text)
+                  .filter(Boolean);
+                result = texts.join("\n") || foundryResult;
+              } else {
+                result = foundryResult;
+              }
+            } catch {
+              result = foundryResult;
+            }
           } else {
             // exec_command
             const cmd = args.command || "";
