@@ -999,8 +999,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       // Tree prefix: sub-agents show parent relationship
       let displayName = s.name;
       if (s.role === "sub-agent") {
-        const shortParent = s.parent.length > 16 ? s.parent.substring(0, 16) + ".." : s.parent;
-        displayName = `└ ${s.name} (sub:${shortParent})`;
+        displayName = `└ ${s.name} (sub-agent)`;
       }
       return [hIcon, displayName, `${s.status}${restartStr}`, s.model, s.isolation, s.channels, s.age];
     });
