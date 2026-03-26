@@ -22,7 +22,9 @@ AzureClaw implements defense-in-depth: eight infrastructure layers (always on) p
 - Each pod runs in a dedicated lightweight VM (Cloud Hypervisor) with its own kernel
 - Container escape attacks are trapped inside the VM boundary
 - Requires `--isolation confidential` and a dedicated Kata node pool (`katapool`)
-- AKS preview feature: `KataVMIsolationPreview`
+- RuntimeClass: `kata-mshv-vm-isolation` (AKS naming convention)
+- **Isolation inheritance**: sub-agents spawned by a confidential parent automatically inherit confidential isolation — downgrading is blocked
+- Auto-provisioning: `azureclaw add --isolation confidential` will offer to create a Kata nodepool if none exists
 
 ### Layer 3: Container Hardening
 Applied to every sandbox pod:

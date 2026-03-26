@@ -77,7 +77,7 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 |-------|-------------|---------|-----------|
 | standard | (default runc) | RuntimeDefault | `sandbox` |
 | enhanced (default) | (default runc) | Localhost `azureclaw-strict` (~219 syscalls) | `sandbox` |
-| confidential | `kata-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
+| confidential | `kata-mshv-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
 
 ### Inference Router (Rust, axum sidecar)
 
