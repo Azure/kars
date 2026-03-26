@@ -264,6 +264,11 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
 
 /// Get status of a specific sub-agent sandbox.
 pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
+    // Dev mode: query Docker Engine API instead of K8s
+    if std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true" {
+        return get_sandbox_status_docker(name).await;
+    }
+
     let client = Client::try_default().await.map_err(|e| format!("K8s client error: {e}"))?;
 
     let namespace = std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
@@ -458,6 +463,41 @@ async fn create_sandbox_docker(
             "Sub-agent '{}' spawned as Docker container (model: {}, governance: {}). Use AGT mesh to communicate.",
             req.name, model, req.governance
         )),
+    })
+}
+
+/// Get sub-agent status in dev mode (Docker container inspect).
+async fn get_sandbox_status_docker(name: &str) -> Result<SpawnResponse, String> {
+    let container_name = if name.starts_with("azureclaw-") {
+        name.to_string()
+    } else {
+        format!("azureclaw-{}", name)
+    };
+
+    let resp = docker_api("GET", &format!("/containers/{}/json", container_name), None).await
+        .map_err(|e| format!("Container '{}' not found: {}", name, e))?;
+
+    let info: serde_json::Value = serde_json::from_str(&resp)
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    let state = info.get("State")
+        .and_then(|s| s.get("Status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+
+    let phase = match state {
+        "running" => "Running",
+        "exited" => "Exited",
+        "created" => "Created",
+        _ => state,
+    };
+
+    Ok(SpawnResponse {
+        status: "ok".into(),
+        name: name.to_string(),
+        namespace: Some(container_name),
+        phase: Some(phase.to_string()),
+        message: None,
     })
 }
 
