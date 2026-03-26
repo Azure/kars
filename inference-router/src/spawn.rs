@@ -333,6 +333,87 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
 }
 
 // ── Docker dev-mode spawning ────────────────────────────────────────────────
+//
+// In dev mode the router runs inside the sandbox container which has no docker
+// CLI. We talk to the Docker Engine API via the mounted Unix socket using curl.
+
+/// Build a Docker Engine API JSON body for container creation.
+fn docker_create_body(
+    container_name: &str,
+    req: &SpawnRequest,
+    parent_name: &str,
+) -> serde_json::Value {
+    let model = req.model.as_deref().unwrap_or("gpt-4.1");
+    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
+    let relay_url = std::env::var("AGT_RELAY_URL").unwrap_or_default();
+    let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
+    let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
+    let image = std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
+
+    let mut env = vec![
+        format!("OPENCLAW_MODEL={}", model),
+        format!("AZURE_OPENAI_ENDPOINT={}", endpoint),
+        format!("SANDBOX_NAME={}", req.name),
+        "AZURECLAW_DEV_MODE=true".to_string(),
+        format!("DOCKER_NETWORK={}", network),
+        "EGRESS_LEARN_MODE=true".to_string(),
+    ];
+
+    if req.governance && !relay_url.is_empty() {
+        env.push(format!("AGT_RELAY_URL={}", relay_url));
+        env.push(format!("AGT_REGISTRY_URL={}", registry_url));
+        env.push("AGT_GOVERNANCE_ENABLED=true".to_string());
+        env.push(format!("AGT_TRUST_THRESHOLD={}", req.trust_threshold.unwrap_or(500)));
+    }
+
+    let mut labels = serde_json::Map::new();
+    labels.insert("azureclaw.parent".into(), serde_json::json!(parent_name));
+    labels.insert("azureclaw.spawned-by".into(), serde_json::json!("agent"));
+
+    serde_json::json!({
+        "Image": image,
+        "Hostname": req.name,
+        "Env": env,
+        "Labels": labels,
+        "HostConfig": {
+            "ReadonlyRootfs": true,
+            "CapAdd": ["NET_ADMIN"],
+            "Tmpfs": { "/tmp": "rw,noexec,nosuid,size=512m" },
+            "Binds": [
+                "/run/secrets/azure-openai-key:/run/secrets/azure-openai-key:ro",
+                "/var/run/docker.sock:/var/run/docker.sock:ro",
+                format!("{}-data:/sandbox", container_name),
+            ],
+            "NetworkMode": network,
+        },
+    })
+}
+
+/// Call Docker Engine API via curl --unix-socket.
+async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+    let mut args = vec![
+        "--unix-socket".to_string(), "/var/run/docker.sock".into(),
+        "-s".into(), "-S".into(),
+        "-X".into(), method.into(),
+    ];
+    if body.is_some() {
+        args.extend(["-H".into(), "Content-Type: application/json".into()]);
+        args.extend(["-d".into(), body.unwrap().into()]);
+    }
+    args.push(format!("http://localhost{}", path));
+
+    let output = tokio::process::Command::new("curl")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("curl failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Docker API error: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
 
 /// Spawn a sub-agent as a sibling Docker container (dev mode only).
 async fn create_sandbox_docker(
@@ -341,69 +422,30 @@ async fn create_sandbox_docker(
 ) -> Result<SpawnResponse, String> {
     let container_name = format!("azureclaw-{}", req.name);
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
-    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
-    let relay_url = std::env::var("AGT_RELAY_URL").unwrap_or_default();
-    let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
-    let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
-    let image = std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
 
     // Remove existing container if any
-    let _ = tokio::process::Command::new("docker")
-        .args(["rm", "-f", &container_name])
-        .output()
-        .await;
+    let _ = docker_api("DELETE", &format!("/containers/{}?force=true", container_name), None).await;
 
-    let mut args = vec![
-        "run".to_string(), "-d".to_string(),
-        "--name".into(), container_name.clone(),
-        "--hostname".into(), req.name.clone(),
-        "--network".into(), network.clone(),
-        "--read-only".into(),
-        "--cap-add".into(), "NET_ADMIN".into(),
-        "--tmpfs".into(), "/tmp:rw,noexec,nosuid,size=512m".into(),
-        "-v".into(), format!("{}-data:/sandbox", container_name),
-        // Copy the API key mount from our own container
-        "-v".into(), "/run/secrets/azure-openai-key:/run/secrets/azure-openai-key:ro".into(),
-        // Docker socket for sub-sub-agent spawning
-        "-v".into(), "/var/run/docker.sock:/var/run/docker.sock:ro".into(),
-        // Environment
-        "-e".into(), format!("OPENCLAW_MODEL={}", model),
-        "-e".into(), format!("AZURE_OPENAI_ENDPOINT={}", endpoint),
-        "-e".into(), format!("SANDBOX_NAME={}", req.name),
-        "-e".into(), "AZURECLAW_DEV_MODE=true".into(),
-        "-e".into(), format!("DOCKER_NETWORK={}", network),
-        "-e".into(), "EGRESS_LEARN_MODE=true".into(),
-    ];
+    // Create container
+    let body = docker_create_body(&container_name, req, parent_name);
+    let body_str = serde_json::to_string(&body).map_err(|e| format!("JSON error: {e}"))?;
+    let create_resp = docker_api(
+        "POST",
+        &format!("/containers/create?name={}", container_name),
+        Some(&body_str),
+    ).await?;
 
-    // AGT environment
-    if req.governance && !relay_url.is_empty() {
-        args.extend([
-            "-e".into(), format!("AGT_RELAY_URL={}", relay_url),
-            "-e".into(), format!("AGT_REGISTRY_URL={}", registry_url),
-            "-e".into(), "AGT_GOVERNANCE_ENABLED=true".into(),
-            "-e".into(), format!("AGT_TRUST_THRESHOLD={}", req.trust_threshold.unwrap_or(500)),
-        ]);
+    // Parse response for container ID
+    let resp: serde_json::Value = serde_json::from_str(&create_resp)
+        .map_err(|e| format!("Docker create parse error: {e} — response: {create_resp}"))?;
+
+    if let Some(msg) = resp.get("message").and_then(|m| m.as_str()) {
+        return Err(format!("Docker create failed: {}", msg));
     }
 
-    // Parent label (as container label for discoverability)
-    args.extend([
-        "--label".into(), format!("azureclaw.parent={}", parent_name),
-        "--label".into(), "azureclaw.spawned-by=agent".into(),
-    ]);
-
-    args.push(image);
-
-    let output = tokio::process::Command::new("docker")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("docker run failed: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(parent = %parent_name, child = %req.name, "Docker spawn failed: {}", stderr);
-        return Err(format!("Docker spawn failed: {}", stderr.trim()));
-    }
+    // Start container
+    docker_api("POST", &format!("/containers/{}/start", container_name), None).await
+        .map_err(|e| format!("Docker start failed: {e}"))?;
 
     tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent container spawned (dev mode)");
     Ok(SpawnResponse {
@@ -420,24 +462,26 @@ async fn create_sandbox_docker(
 
 /// List sub-agents in dev mode (Docker containers with parent label).
 pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntry>, String> {
-    let output = tokio::process::Command::new("docker")
-        .args([
-            "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Label \"azureclaw.parent\"}}",
-            "--filter", &format!("label=azureclaw.parent={}", parent_name),
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("docker ps failed: {e}"))?;
+    let filter = format!(r#"{{"label":["azureclaw.parent={}"]}}"#, parent_name);
+    // URL-encode the filter JSON (only special chars that appear in our filter)
+    let encoded = filter.replace('{', "%7B").replace('}', "%7D")
+        .replace('[', "%5B").replace(']', "%5D")
+        .replace('"', "%22").replace('=', "%3D");
+    let resp = docker_api("GET", &format!("/containers/json?all=true&filters={}", encoded), None).await?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let entries: Vec<SubAgentEntry> = stdout.lines().filter_map(|line| {
-        let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() < 2 { return None; }
-        let name = parts[0].strip_prefix("azureclaw-").unwrap_or(parts[0]).to_string();
-        let phase = if parts[1].starts_with("Up") { "Running" } else { "Stopped" };
+    let containers: Vec<serde_json::Value> = serde_json::from_str(&resp)
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    let entries = containers.iter().filter_map(|c| {
+        let names = c.get("Names")?.as_array()?;
+        let raw_name = names.first()?.as_str()?.trim_start_matches('/');
+        let name = raw_name.strip_prefix("azureclaw-").unwrap_or(raw_name).to_string();
+        let state = c.get("State")?.as_str().unwrap_or("unknown");
+        let phase = if state == "running" { "Running" } else { "Stopped" };
+
         Some(SubAgentEntry {
             name,
-            namespace: Some(parts[0].to_string()),
+            namespace: Some(raw_name.to_string()),
             phase: Some(phase.to_string()),
             model: None,
             governance: true,
@@ -451,27 +495,24 @@ pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntr
 pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<SpawnResponse, String> {
     let container_name = format!("azureclaw-{}", name);
 
-    // Verify parent label
-    let output = tokio::process::Command::new("docker")
-        .args(["inspect", "--format", "{{.Config.Labels}}", &container_name])
-        .output()
-        .await
-        .map_err(|e| format!("docker inspect failed: {e}"))?;
+    // Verify parent label via inspect
+    let inspect = docker_api("GET", &format!("/containers/{}/json", container_name), None).await
+        .map_err(|_| format!("Container '{}' not found", name))?;
 
-    let labels = String::from_utf8_lossy(&output.stdout);
-    if !labels.contains(&format!("azureclaw.parent:{}", parent_name)) {
+    let info: serde_json::Value = serde_json::from_str(&inspect)
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    let labels = info.pointer("/Config/Labels");
+    let actual_parent = labels
+        .and_then(|l| l.get("azureclaw.parent"))
+        .and_then(|v| v.as_str());
+
+    if actual_parent != Some(parent_name) {
         return Err(format!("Container '{}' was not spawned by '{}'", name, parent_name));
     }
 
-    let rm = tokio::process::Command::new("docker")
-        .args(["rm", "-f", &container_name])
-        .output()
-        .await
-        .map_err(|e| format!("docker rm failed: {e}"))?;
-
-    if !rm.status.success() {
-        return Err(format!("Failed to delete container: {}", String::from_utf8_lossy(&rm.stderr)));
-    }
+    docker_api("DELETE", &format!("/containers/{}?force=true", container_name), None).await
+        .map_err(|e| format!("Failed to delete: {e}"))?;
 
     tracing::info!(parent = %parent_name, child = %name, "Sub-agent container deleted (dev mode)");
     Ok(SpawnResponse {
