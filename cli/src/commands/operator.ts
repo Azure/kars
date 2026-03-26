@@ -1375,21 +1375,27 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
       // Parallel: egress + security + cluster for all running sandboxes
       const running = sandboxes.filter((s) => s.podName);
-      const [egressResults, secResults, cluster] = await Promise.all([
-        Promise.all(running.map((s) => fetchEgressDomains(s))),
-        Promise.all(running.map((s) => fetchSecurityState(s))),
+      const [egressSettled, secSettled, clusterSettled] = await Promise.allSettled([
+        Promise.allSettled(running.map((s) => fetchEgressDomains(s))),
+        Promise.allSettled(running.map((s) => fetchSecurityState(s))),
         fetchClusterHealth(),
       ]);
 
       egressByAgent = new Map();
-      for (let i = 0; i < running.length; i++) {
-        egressByAgent.set(running[i].name, egressResults[i]);
+      if (egressSettled.status === "fulfilled") {
+        for (let i = 0; i < running.length; i++) {
+          const r = egressSettled.value[i];
+          if (r.status === "fulfilled") egressByAgent.set(running[i].name, r.value);
+        }
       }
       securityStates = new Map();
-      for (const sec of secResults) {
-        securityStates.set(sec.sandbox, sec);
+      if (secSettled.status === "fulfilled") {
+        for (let i = 0; i < running.length; i++) {
+          const r = secSettled.value[i];
+          if (r.status === "fulfilled") securityStates.set(r.value.sandbox, r.value);
+        }
       }
-      clusterData = cluster;
+      clusterData = clusterSettled.status === "fulfilled" ? clusterSettled.value : null;
 
       refreshCount++;
       activityLog.log(
