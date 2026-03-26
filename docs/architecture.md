@@ -81,7 +81,7 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 
 **Isolation inheritance:** The controller exports `SANDBOX_ISOLATION` as an environment variable into every pod. When a sub-agent is spawned via `/sandbox/spawn`, the inference router reads the parent's isolation level from this env var and applies it as the default for the child. Downgrading from `confidential` to a lower isolation level is blocked — the spawn request returns an error.
 
-**Kata auto-provisioning:** `azureclaw add --isolation confidential` checks for a Kata-capable nodepool. If none exists, it offers to provision one automatically via `az aks nodepool add` with `--workload-runtime KataMshvVmIsolation`, SKU `Standard_D4as_v6`, and appropriate labels/taints.
+**Kata auto-provisioning:** `azureclaw add --isolation confidential` checks for a Kata-capable nodepool. If none exists, it offers to provision one automatically via `az aks nodepool add` with `--workload-runtime KataVmIsolation`, SKU `Standard_D4as_v6`, and appropriate labels/taints.
 
 ### Inference Router (Rust, axum sidecar)
 
