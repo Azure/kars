@@ -458,7 +458,16 @@ async fn embeddings(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    let upstream = state.upstream_config(sandbox_name);
+    // Embeddings need a different deployment than chat — extract model from request body
+    let mut upstream = state.upstream_config(sandbox_name);
+    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
+        if let Some(model) = body_json.get("model").and_then(|m| m.as_str()) {
+            // Strip "azure/" or "azure-openai/" prefix if present
+            let clean = model.trim_start_matches("azure/").trim_start_matches("azure-openai/");
+            upstream.deployment = clean.to_string();
+        }
+    }
+
     match proxy::forward(
         &state.auth,
         &state.client,
