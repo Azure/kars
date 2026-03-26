@@ -1211,6 +1211,46 @@ export function upCommand(): Command {
           stepper.detail("ok", `Federated credential — already exists`);
         });
 
+        // Ensure controller SA has a fedcred too (so it can get ARM tokens via WI to create sandbox fedcreds)
+        await execa("az", [
+          "identity", "federated-credential", "create",
+          "--identity-name", `${baseName}-aks-sandbox-wi`,
+          "--resource-group", rg,
+          "--name", `azureclaw-controller-sa`,
+          "--issuer", oidcIssuer.trim(),
+          "--subject", `system:serviceaccount:azureclaw-system:azureclaw-controller`,
+          "--audiences", "api://AzureADTokenExchange",
+          "--output", "none",
+        ], { stdio: "pipe" }).then(() => {
+          stepper.detail("new", `Federated credential — controller SA`);
+        }).catch(() => {
+          // Already exists — fine
+        });
+
+        // Grant the sandbox MI "Managed Identity Contributor" on itself so the controller
+        // can create/delete fedcreds for dynamically spawned sandboxes
+        try {
+          const miScope = `/subscriptions/${subIdRaw.trim()}/resourceGroups/${rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${baseName}-aks-sandbox-wi`;
+          const { stdout: miPid } = await execa("az", [
+            "identity", "show",
+            "--name", `${baseName}-aks-sandbox-wi`,
+            "--resource-group", rg,
+            "--query", "principalId",
+            "--output", "tsv",
+          ], { stdio: "pipe" });
+          await execa("az", [
+            "role", "assignment", "create",
+            "--assignee-object-id", miPid.trim(),
+            "--assignee-principal-type", "ServicePrincipal",
+            "--role", "Managed Identity Contributor",
+            "--scope", miScope,
+            "--output", "none",
+          ], { stdio: "pipe" });
+          stepper.detail("new", `MI Contributor — self-scoped for fedcred management`);
+        } catch {
+          // Already exists or user lacks Owner — non-fatal
+        }
+
         // Grant RBAC roles on Foundry resource via Bicep (if --foundry-endpoint provided)
         // Two assignments needed:
         //   1. Sandbox WI → Azure AI User on the Foundry AI Services resource (so pods can call APIs)
