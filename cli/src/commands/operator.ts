@@ -1014,7 +1014,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
       statusBar.setContent(
         ` ${focusTag}  ${viewTag}  │  [Tab] Focus  [c] Cluster  [↑↓] Nav  [a] Approve  [A] All  ` +
-        `[e] Enforce  [n] Spawn  [x] Del  [r] Refresh  [q] Quit`,
+        `[d] Del/Deny  [e] Enforce  [n] Spawn  [r] Refresh  [q] Quit`,
       );
     } else {
       statusBar.setContent(
@@ -1140,14 +1140,19 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     }
   });
   screen.key(["d"], async () => {
-    if (focusedPanel !== "egress") return;
-    const domains = selectedEgressDomains();
-    if (domains.length === 0) return;
-    const idx = (egressTable as any).rows?.selected ?? 0;
-    const domain = domains[idx];
-    if (domain && domain.state === "learned") {
-      await denyDomain(domain);
-      await refresh();
+    if (focusedPanel === "egress") {
+      // Deny selected domain
+      const domains = selectedEgressDomains();
+      if (domains.length === 0) return;
+      const idx = (egressTable as any).rows?.selected ?? 0;
+      const domain = domains[idx];
+      if (domain && domain.state === "learned") {
+        await denyDomain(domain);
+        await refresh();
+      }
+    } else {
+      // Delete selected agent
+      deleteSelectedAgent();
     }
   });
   // Approve all learned domains for selected agent
@@ -1252,7 +1257,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   });
 
   // Delete
-  screen.key(["x"], () => {
+  function deleteSelectedAgent() {
     if (sandboxes.length === 0) return;
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
@@ -1277,7 +1282,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       }
       await refresh();
     });
-  });
+  }
+
+  screen.key(["x"], () => deleteSelectedAgent());
 
   // ── Boot ──────────────────────────────────────────────────────────
 
