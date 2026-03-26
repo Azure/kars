@@ -107,12 +107,11 @@ impl FedCredManager {
         let resp = self.http
             .post(&url)
             .form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+                ("grant_type", "client_credentials"),
                 ("client_id", &self.config.client_id),
                 ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
                 ("client_assertion", sa_token.trim()),
                 ("scope", "https://management.azure.com/.default"),
-                ("requested_token_use", "on_behalf_of"),
             ])
             .send()
             .await
