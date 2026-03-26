@@ -33,4 +33,3 @@ anyhow.workspace = true
 
 # HTTP client for Azure ARM API (federated credential creation)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-uuid = { version = "1.22.0", features = ["v5"] }
