@@ -89,9 +89,7 @@ async function delegateToNativeAgent(
   fromAgent: string,
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<string> {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileAsync = promisify(execFile);
+  const { spawn } = await import("node:child_process");
 
   // Stable session ID per sender → maintains conversation context across tasks
   const sessionId = `agt-task-${fromAgent}`;
@@ -99,42 +97,57 @@ async function delegateToNativeAgent(
 
   log.info(`Delegating task to native OpenClaw agent (session: ${sessionId})`);
 
-  const { stdout, stderr } = await execFileAsync("openclaw", [
-    "agent",
-    "--message", taskText,
-    "--session-id", sessionId,
-    "--timeout", "300",
-    "--json",
-  ], {
-    timeout: 330_000, // 5.5 min hard kill (slightly above --timeout 300)
-    maxBuffer: 2 * 1024 * 1024, // 2 MB output buffer
-    env: process.env,
-  });
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn("openclaw", [
+      "agent",
+      "--message", taskText,
+      "--session-id", sessionId,
+      "--timeout", "300",
+      "--json",
+    ], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 
-  // stdout contains plugin log lines followed by a JSON object.
-  // Extract the JSON by finding the last top-level { ... } block.
-  const jsonMatch = stdout.match(/\n(\{[\s\S]*\})\s*$/);
-  if (jsonMatch) {
-    try {
-      const result = JSON.parse(jsonMatch[1]);
-      const text = result?.reply?.text || result?.text || "";
-      if (text) {
-        log.info(`Native agent responded (${text.length} chars, session: ${sessionId})`);
-        return text;
+    const chunks: Buffer[] = [];
+    // OpenClaw writes all output (plugin logs + JSON result) to stderr
+    child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 330_000);
+
+    child.on("close", () => {
+      clearTimeout(timer);
+      const output = Buffer.concat(chunks).toString("utf-8");
+
+      // Extract the JSON response by finding the last top-level { ... } block
+      const jsonMatch = output.match(/\n(\{[\s\S]*\})\s*$/);
+      if (jsonMatch) {
+        try {
+          const result = JSON.parse(jsonMatch[1]);
+          const text = result?.reply?.text || result?.text || "";
+          if (text) {
+            log.info(`Native agent responded (${text.length} chars, session: ${sessionId})`);
+            return resolve(text);
+          }
+        } catch { /* fall through */ }
       }
-    } catch { /* fall through to raw output */ }
-  }
 
-  // Fallback: strip plugin log lines (prefixed with "[") and return raw text
-  const lines = stdout.split("\n").filter((l: string) => !l.startsWith("[plugins]") && !l.startsWith("[") && l.trim());
-  const response = lines.join("\n").trim();
-  if (!response) {
-    log.warn(`Native agent returned empty response. stderr: ${(stderr || "").slice(0, 500)}`);
-    throw new Error("Native agent returned empty response");
-  }
+      // Fallback: strip log lines and return raw text
+      const lines = output.split("\n").filter((l: string) =>
+        !l.startsWith("[plugins]") && !l.startsWith("[") && l.trim());
+      const response = lines.join("\n").trim();
+      if (response) {
+        log.info(`Native agent responded (${response.length} chars, session: ${sessionId})`);
+        return resolve(response);
+      }
 
-  log.info(`Native agent responded (${response.length} chars, session: ${sessionId})`);
-  return response;
+      log.warn(`Native agent returned empty response (${output.length} bytes captured)`);
+      reject(new Error("Native agent returned empty response"));
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
 }
 
 /**
