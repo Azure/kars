@@ -353,6 +353,7 @@ fn docker_create_body(
     let relay_url = std::env::var("AGT_RELAY_URL").unwrap_or_default();
     let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
     let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
+    let foundry_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
     let image = std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
 
     let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
@@ -366,6 +367,10 @@ fn docker_create_body(
         format!("DOCKER_NETWORK={}", network),
         "EGRESS_LEARN_MODE=true".to_string(),
     ];
+
+    if !foundry_endpoint.is_empty() {
+        env.push(format!("FOUNDRY_PROJECT_ENDPOINT={}", foundry_endpoint));
+    }
 
     if req.governance && !relay_url.is_empty() {
         env.push(format!("AGT_RELAY_URL={}", relay_url));
