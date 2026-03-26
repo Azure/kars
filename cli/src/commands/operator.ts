@@ -1567,16 +1567,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     process.on("SIGINT", sigintHandler);
 
     // Use spawnSync to block — avoids any async blessed interference.
-    // Drop into bash with session context — user can run openclaw tui,
-    // openclaw agent, or any other command interactively.
+    // Launch openclaw tui directly — quit the TUI to return to operator.
     const { spawnSync } = await import("child_process");
     const result = spawnSync("kubectl", [
       "exec", "-it", "-n", sb.namespace,
       `deploy/${sb.name}`, "-c", "openclaw",
-      "--", "/bin/bash", "-c",
-      `echo -e "\\033[36m  Connected to \\033[1m${sb.name}\\033[0m\\033[36m (${sb.isolation}, ${sb.model})\\033[0m"; ` +
-      `echo -e "\\033[90m  Type 'openclaw tui' for chat, 'exit' to return\\033[0m\\n"; ` +
-      `exec /bin/bash --login`,
+      "--", "openclaw", "tui",
     ], {
       stdio: "inherit",
       env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
