@@ -157,6 +157,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   // Row 0: Header
   const header = grid.set(0, 0, 1, 12, blessed.box, {
     tags: true,
+    wrap: false,
     style: { fg: "white", bold: true },
   });
 
@@ -778,10 +779,23 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     }
 
     const viewLabel = viewMode === "cluster" ? "  {blue-fg}{bold}[CLUSTER VIEW]{/bold}{/}  │  " : "";
-    header.setContent(
+    const raw =
       ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}` +
-      `${clusterTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`,
-    );
+      `${clusterTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`;
+
+    // Strip blessed tags to measure visible width, then truncate to prevent
+    // overflow wrapping into the row below.
+    const visible = raw.replace(/\{[^}]*\}/g, "");
+    const maxW = (screen.width as number) - 2; // account for border
+    if (visible.length > maxW) {
+      // Rebuild a shorter version: just title + cluster + time
+      header.setContent(
+        ` ${spin}{bold}🔱 AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}` +
+        `${healthSummary()}  │  {gray-fg}${now}{/}`,
+      );
+    } else {
+      header.setContent(raw);
+    }
   }
 
   function renderSecurity() {
