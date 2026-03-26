@@ -73,7 +73,7 @@ pub(crate) fn build_pod_security_context(cfg: &SandboxConfig) -> serde_json::Val
 ///   confidential → Kata VM isolation on katapool
 pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'static str) {
     match isolation {
-        "confidential" => (Some("kata-mshv-vm-isolation"), "sandbox-kata"),
+        "confidential" => (Some("kata-vm-isolation"), "sandbox-kata"),
         _ => (None, "sandbox"), // standard + enhanced both on clawpool
     }
 }
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn isolation_scheduling_confidential() {
         let (runtime, pool) = isolation_scheduling("confidential");
-        assert_eq!(runtime, Some("kata-mshv-vm-isolation"));
+        assert_eq!(runtime, Some("kata-vm-isolation"));
         assert_eq!(pool, "sandbox-kata");
     }
 
