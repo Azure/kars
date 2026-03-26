@@ -347,6 +347,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         const sandboxNs = `azureclaw-${name}`;
         let podStatus = phase;
         let podName = "";
+        let podCreated = "";
         let channels = "";
         let health: HealthState = "pending";
         let restarts = 0;
@@ -371,6 +372,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             const pod = sorted[0];
             const isTerminating = !!pod.metadata?.deletionTimestamp;
             podName = pod.metadata?.name || "";
+            podCreated = pod.metadata?.creationTimestamp || "";
             const pPhase = isTerminating ? "Terminating" : (pod.status?.phase || "Unknown");
             const statuses: any[] = pod.status?.containerStatuses || [];
             const readyCount = statuses.filter((c: any) => c.ready).length;
@@ -407,8 +409,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         } catch { channels = "-"; }
 
         let age = "-";
-        if (created) {
-          const d = new Date(created);
+        // Use pod creation time (reflects restarts), fall back to CRD creation
+        const ageSource = podCreated || created;
+        if (ageSource) {
+          const d = new Date(ageSource);
           if (!isNaN(d.getTime())) age = timeSince(d);
         }
 
