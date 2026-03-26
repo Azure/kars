@@ -1318,7 +1318,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
           activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold}...{/}`);
           screen.render();
           try {
-            await execa("azureclaw", ["destroy", sb.name], { stdio: "pipe" });
+            await execa("azureclaw", ["destroy", sb.name, "-y"], { stdio: "pipe" });
             activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
           } catch (e: any) {
             activityLog.log(`{red-fg}✗ Destroy fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
