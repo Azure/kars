@@ -1013,7 +1013,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         lines.push(` Completion ${(r.completionRate * 100).toFixed(0)}%  Avg ${r.avgFeedback.toFixed(2)}`);
       }
     } else {
-      lines.push(`{gray-fg}Reputation  registry unreachable{/}`);
+      lines.push(`{gray-fg}Reputation  not yet registered{/}`);
     }
 
     // Local trust store (router in-memory, per-interaction)

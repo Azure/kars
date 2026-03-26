@@ -338,6 +338,12 @@ export function devCommand(): Command {
         const agtEnvArgs = options.agt ? [
           "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:8765`,
           "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:8080`,
+          "-e", "AGT_GOVERNANCE_ENABLED=true",
+        ] : [];
+
+        // Dev mode: mount Docker socket so sub-agents can be spawned as sibling containers
+        const dockerSockArgs = options.agt ? [
+          "-v", "/var/run/docker.sock:/var/run/docker.sock:ro",
         ] : [];
 
         await execa("docker", [
@@ -354,6 +360,7 @@ export function devCommand(): Command {
           "-v", `${containerName}-data:/sandbox`,
           // Mount API key as read-only secret (never as env var)
           "-v", `${CREDENTIALS_FILE}:/run/secrets/azure-openai-key:ro`,
+          ...dockerSockArgs,
           // Hide unnecessary filesystem paths
           "--tmpfs", "/boot:ro,size=0",
           "--tmpfs", "/home:ro,size=0",
@@ -364,6 +371,9 @@ export function devCommand(): Command {
           "-p", "18789:18789",
           "-e", `OPENCLAW_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
+          "-e", `SANDBOX_NAME=${options.name}`,
+          "-e", "AZURECLAW_DEV_MODE=true",
+          "-e", `DOCKER_NETWORK=${AGT_NETWORK}`,
           ...(creds.foundryProjectEndpoint ? ["-e", `FOUNDRY_PROJECT_ENDPOINT=${creds.foundryProjectEndpoint}`] : []),
           ...(discoveredDeployments ? ["-e", `FOUNDRY_DEPLOYMENTS=${discoveredDeployments}`] : []),
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,

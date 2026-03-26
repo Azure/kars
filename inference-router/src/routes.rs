@@ -1087,7 +1087,7 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 
     let amid = &state.governance.sandbox_name;
     let url = format!(
-        "{}/registry/reputation/score?amid={}",
+        "{}/v1/registry/reputation/score?amid={}",
         registry_url.trim_end_matches('/'),
         amid
     );
@@ -1660,8 +1660,15 @@ async fn sandbox_spawn(
 /// GET /sandbox/list — list sub-agents spawned by this sandbox.
 async fn sandbox_list(State(_state): State<AppState>) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
 
-    match spawn::list_sandboxes(&parent_name).await {
+    let result = if is_dev {
+        spawn::list_sandboxes_docker(&parent_name).await
+    } else {
+        spawn::list_sandboxes(&parent_name).await
+    };
+
+    match result {
         Ok(entries) => Json(serde_json::json!({
             "parent": parent_name,
             "count": entries.len(),
@@ -1693,8 +1700,15 @@ async fn sandbox_delete(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
 
-    match spawn::delete_sandbox(&parent_name, &name).await {
+    let result = if is_dev {
+        spawn::delete_sandbox_docker(&parent_name, &name).await
+    } else {
+        spawn::delete_sandbox(&parent_name, &name).await
+    };
+
+    match result {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
         Err(msg) => (
             StatusCode::FORBIDDEN,
