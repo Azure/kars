@@ -150,6 +150,31 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
   }
 }
 
+// Controller SA fedcred — lets the controller get ARM tokens via WI to create sandbox fedcreds
+resource controllerFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+  parent: sandboxIdentity
+  name: 'azureclaw-controller-sa'
+  properties: {
+    issuer: aks.properties.oidcIssuerProfile.issuerURL
+    subject: 'system:serviceaccount:azureclaw-system:azureclaw-controller'
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+  }
+  dependsOn: [federatedCredential]
+}
+
+// Grant sandbox MI "Managed Identity Contributor" on itself — controller can create/delete fedcreds
+resource miContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sandboxIdentity.id, sandboxIdentity.id, 'mi-contributor')
+  scope: sandboxIdentity
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59')  // Managed Identity Contributor
+    principalId: sandboxIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // ─── RBAC Role Assignments ──────────────────────────────────────────────────
 
 // Grant AKS kubelet pull access to ACR
