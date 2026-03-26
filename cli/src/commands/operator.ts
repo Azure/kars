@@ -1321,6 +1321,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         activityLog.log("{red-fg}✗ No name provided{/}");
         return;
       }
+
+      // Pre-flight: check for Kata nodepool when confidential
+      if (state.isolation === "confidential") {
+        try {
+          const { stdout } = await execa("kubectl", kctl([
+            "get", "nodes", "-l", "azureclaw.azure.com/pool=sandbox-kata", "--no-headers",
+          ], kubeContext), { stdio: "pipe" });
+          if (!stdout.trim()) throw new Error("no kata nodes");
+        } catch {
+          activityLog.log("{red-fg}✗ No Kata nodepool found — cannot spawn confidential agent{/}");
+          activityLog.log("{yellow-fg}  Run: az aks nodepool add --workload-runtime KataMshvVmIsolation{/}");
+          return;
+        }
+      }
+
       const args = ["add", state.name.trim(), "--model", state.model, "--isolation", state.isolation];
       if (state.learnEgress) args.push("--learn-egress");
       if (state.channel) {
