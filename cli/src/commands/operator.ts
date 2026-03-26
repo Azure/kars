@@ -1286,7 +1286,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       screen.render();
     }
 
-    function close() { dialogOpen = false; dialog.destroy(); screen.render(); }
+    function close() { dialog.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50); }
 
     function startEdit(field: "name" | "model" | "telegramToken") {
       state.editing = true;
@@ -1417,7 +1417,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     inputBox.focus();
     screen.render();
     inputBox.on("submit", async (value: string) => {
-      dialogOpen = false; inputBox.destroy(); screen.render();
+      inputBox.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50);
       const model = value.trim();
       if (!model) return;
       activityLog.log(`{cyan-fg}⏳ ${sb.name} → ${model}...{/}`);
@@ -1430,7 +1430,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       }
       await refresh();
     });
-    inputBox.on("cancel", () => { dialogOpen = false; inputBox.destroy(); screen.render(); });
+    inputBox.on("cancel", () => { inputBox.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50); });
   });
 
   // Logs
@@ -1500,7 +1500,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       screen.render();
     }
 
-    const cleanup = () => { dialogOpen = false; dialog.destroy(); screen.render(); };
+    const cleanup = () => { dialog.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50); };
 
     const onKey = async (_ch: any, key: any) => {
       if (key.name === "left" || key.name === "right" || key.name === "tab") {
