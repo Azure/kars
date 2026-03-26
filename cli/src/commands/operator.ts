@@ -1559,21 +1559,36 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       process.stdin.resume();
     }
 
-    // Use spawnSync to block — avoids any async blessed interference
+    // Persistent session ID — reconnecting resumes the same conversation
+    const sessionId = `operator-${sb.name}`;
+
+    // Ignore SIGINT in parent so Ctrl+C only reaches the child
+    const sigintHandler = () => {};
+    process.on("SIGINT", sigintHandler);
+
+    // Use spawnSync to block — avoids any async blessed interference.
+    // Run openclaw in interactive agent mode with a stable session ID
+    // so the conversation persists across connect/disconnect cycles.
     const { spawnSync } = await import("child_process");
     const result = spawnSync("kubectl", [
       "exec", "-it", "-n", sb.namespace,
       `deploy/${sb.name}`, "-c", "openclaw",
-      "--", "openclaw", "tui",
+      "--", "openclaw", "agent", "--local",
+      "--session-id", sessionId,
     ], {
       stdio: "inherit",
       env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
     });
 
+    // Restore SIGINT handling
+    process.removeListener("SIGINT", sigintHandler);
+
     // Restore blessed terminal state
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
     }
+    // Reset terminal to clean state before re-entering blessed
+    process.stdout.write("\x1b[?25l\x1b[?1049h"); // hide cursor + alt buffer
     screen.program.alternateBuffer();
     try { screen.program.lrestoreCursor("operator"); } catch {}
     screen.program.hideCursor();
@@ -1583,8 +1598,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     render();
     screen.render();
 
-    if (result.status === 0) {
-      activityLog.log(`{green-fg}↩ Back from ${sb.name}{/}`);
+    if (result.status === 0 || result.signal === "SIGINT") {
+      activityLog.log(`{green-fg}↩ Back from ${sb.name} (session: ${sessionId}){/}`);
     } else {
       activityLog.log(`{red-fg}✗ Connection to ${sb.name} failed{/}`);
     }
