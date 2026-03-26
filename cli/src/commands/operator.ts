@@ -525,8 +525,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       routerExec("/metrics"),
       // 7: /agt/audit (last entries)
       routerExec("/agt/audit"),
-      // 8: /agt/trust (trust scores)
-      routerExec("/agt/trust"),
     ]);
 
     // NetworkPolicy
@@ -553,7 +551,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       } catch { /* parse fail */ }
     }
 
-    // agt/status
+    // agt/status — includes trust_states and inbox count
     if (checks[4].status === "fulfilled") {
       try {
         const agt = JSON.parse((checks[4].value as any).stdout);
@@ -561,6 +559,24 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         state.agtAuditEntries = agt.audit_entries || 0;
         state.agtAuditIntegrity = agt.audit_integrity ?? false;
         state.agtKnownAgents = agt.known_agents || 0;
+        // Trust states from /agt/status response
+        const ts = agt.trust_states || [];
+        state.agtTrustScores = ts.map((a: any) => ({
+          agent: a.agent_id || a.name || "unknown",
+          score: a.score ?? 0,
+          tier: a.tier || (a.score >= 800 ? "Sovereign" : a.score >= 600 ? "Verified" : a.score >= 400 ? "Known" : a.score >= 200 ? "Observed" : "Anonymous"),
+        }));
+        state.agtRegistryAgents = ts.length;
+        // If no trust states but governance is enabled, show self
+        if (state.agtEnabled && ts.length === 0) {
+          const threshold = agt.trust_threshold ?? 500;
+          state.agtTrustScores = [{
+            agent: agt.sandbox || sb.name,
+            score: 500,
+            tier: "Known (self)",
+          }];
+          state.agtRegistryAgents = 1;
+        }
       } catch { /* parse fail */ }
     }
 
@@ -607,20 +623,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
           if (result) parts.push(`→ ${result}`);
           return ts ? `${ts} ${parts.join(" ")}` : parts.join(" ");
         });
-      } catch { /* parse fail */ }
-    }
-
-    // /agt/trust — extract trust scores
-    if (checks[8].status === "fulfilled") {
-      try {
-        const trust = JSON.parse((checks[8].value as any).stdout);
-        const agents = Array.isArray(trust) ? trust : trust.agents || [];
-        state.agtTrustScores = agents.map((a: any) => ({
-          agent: a.agent_id || a.name || "unknown",
-          score: a.score ?? a.trust_score ?? 0,
-          tier: a.tier || (a.score >= 800 ? "T1" : a.score >= 600 ? "T2" : a.score >= 400 ? "T3" : a.score >= 200 ? "T4" : "T5"),
-        }));
-        state.agtRegistryAgents = agents.length;
       } catch { /* parse fail */ }
     }
 

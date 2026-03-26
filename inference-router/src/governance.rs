@@ -328,6 +328,18 @@ impl TrustStore {
     pub async fn all_agents(&self) -> Vec<TrustState> {
         self.agents.read().await.values().cloned().collect()
     }
+
+    /// Synchronously seed an agent with the default score (used at startup).
+    pub fn seed_agent(&mut self, agent_id: &str) {
+        let state = TrustState {
+            agent_id: agent_id.to_string(),
+            score: self.default_score,
+            tier: TrustTier::from_score(self.default_score),
+            interactions: 0,
+            last_interaction: None,
+        };
+        self.agents.get_mut().insert(agent_id.to_string(), state);
+    }
 }
 
 // ── Audit Log ───────────────────────────────────────────────────────────────
@@ -505,6 +517,15 @@ impl GovernanceState {
             policy.load_from_env();
             tracing::info!(sandbox = %sandbox_name, "AGT governance ENABLED");
         }
+
+        let trust = {
+            let mut t = trust;
+            // Seed self agent so /agt/status always shows at least one trust entry
+            if enabled {
+                t.seed_agent(sandbox_name);
+            }
+            t
+        };
 
         Self {
             enabled,
