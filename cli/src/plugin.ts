@@ -76,9 +76,54 @@ let foundryProject: FoundryProjectInfo | null = null;
 let foundryInitialized = false;
 
 /**
- * Process a task_request with tool-calling (exec_command).
- * Runs an LLM loop: the model can call exec_command to run shell commands,
- * then gets the output back, and continues until it produces a final text response.
+ * Delegate a task to the native OpenClaw agent loop running in the Gateway.
+ * This gives the sub-agent access to ALL OpenClaw tools (exec, process, web_search,
+ * web_fetch, browser, cron, read/write, etc.) plus all AzureClaw plugin skills
+ * (foundry_memory, foundry_web_search, foundry_code, etc.).
+ *
+ * The task is sent via `openclaw agent --message` which goes through the Gateway's
+ * full agent pipeline (AGENTS.md, SOUL.md, TOOLS.md, skills, tool policy, etc.).
+ */
+async function delegateToNativeAgent(
+  taskContent: string,
+  fromAgent: string,
+  log: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<string> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+
+  // Stable session ID per sender → maintains conversation context across tasks
+  const sessionId = `agt-task-${fromAgent}`;
+  const taskText = typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent);
+
+  log.info(`Delegating task to native OpenClaw agent (session: ${sessionId})`);
+
+  const { stdout, stderr } = await execFileAsync("openclaw", [
+    "agent",
+    "--message", taskText,
+    "--session-id", sessionId,
+    "--timeout", "300",
+  ], {
+    timeout: 330_000, // 5.5 min hard kill (slightly above --timeout 300)
+    maxBuffer: 2 * 1024 * 1024, // 2 MB output buffer
+    env: process.env,
+  });
+
+  const response = stdout.trim();
+  if (!response) {
+    log.warn(`Native agent returned empty response. stderr: ${(stderr || "").slice(0, 500)}`);
+    throw new Error("Native agent returned empty response");
+  }
+
+  log.info(`Native agent responded (${response.length} chars, session: ${sessionId})`);
+  return response;
+}
+
+/**
+ * Fallback: process a task_request with a limited tool-calling loop.
+ * Used when native delegation fails (e.g., Gateway not running).
+ * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_tokens.
  */
 async function processTaskWithTools(
   taskContent: any,
@@ -577,13 +622,22 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
 
-      // Process task_request messages: call LLM with tool access and reply via E2E encrypted relay
+      // Process task_request messages: delegate to native OpenClaw agent for full tool access,
+      // with fallback to the limited processTaskWithTools loop if native delegation fails.
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
         try {
-          const llmResponse = await processTaskWithTools(taskContent, log);
+          let llmResponse: string;
+          try {
+            // Primary: delegate to native OpenClaw agent (full toolset)
+            llmResponse = await delegateToNativeAgent(taskContent, fromName, log);
+          } catch (nativeErr: any) {
+            // Fallback: limited tool-calling loop (6 tools, 10 rounds)
+            log.warn(`Native delegation failed (${nativeErr.message}), falling back to processTaskWithTools`);
+            llmResponse = await processTaskWithTools(taskContent, log);
+          }
 
-          // Send the LLM response back via E2E encrypted relay
+          // Send the response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
             content: llmResponse,
@@ -591,7 +645,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             in_reply_to: taskContent,
             timestamp: new Date().toISOString(),
           });
-          log.info(`AGT relay: tool-enabled reply sent to ${fromName} via E2E encrypted relay`);
+          log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
           try {
@@ -602,7 +656,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               timestamp: new Date().toISOString(),
             });
           } catch { /* best effort */ }
-          log.warn(`AGT relay: LLM reply failed: ${replyErr.message}`);
+          log.warn(`AGT relay: task processing failed: ${replyErr.message}`);
         }
       }
     });
@@ -1262,7 +1316,7 @@ const azureClawPlugin = definePluginEntry({
                 const messageId = `agt-${Date.now().toString(36)}`;
 
                 // Auto-wait for reply: poll agtInbox for a response from this agent
-                const waitMaxMs = 90_000; // 90 seconds max
+                const waitMaxMs = 330_000; // 5.5 minutes — native delegation can take up to 5 min
                 const pollIntervalMs = 2_000;
                 const waitStart = Date.now();
                 let replyContent: string | null = null;
