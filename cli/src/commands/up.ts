@@ -1230,7 +1230,10 @@ export function upCommand(): Command {
         // Grant the sandbox MI "Managed Identity Contributor" on itself so the controller
         // can create/delete fedcreds for dynamically spawned sandboxes
         try {
-          const miScope = `/subscriptions/${subIdRaw.trim()}/resourceGroups/${rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${baseName}-aks-sandbox-wi`;
+          const { stdout: subIdForMi } = await execa("az", [
+            "account", "show", "--query", "id", "--output", "tsv",
+          ], { stdio: "pipe", timeout: 10000 });
+          const miScope = `/subscriptions/${subIdForMi.trim()}/resourceGroups/${rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${baseName}-aks-sandbox-wi`;
           const { stdout: miPid } = await execa("az", [
             "identity", "show",
             "--name", `${baseName}-aks-sandbox-wi`,
