@@ -502,7 +502,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   [ "$IS_ROOT" = "true" ] && chown 1001:1001 /tmp/inference-router.log
   # Dev mode: make Docker socket accessible to router (UID 1001) for sub-agent spawning
   if [ -S /var/run/docker.sock ] && [ "$IS_ROOT" = "true" ]; then
-    chmod 666 /var/run/docker.sock
+    chmod 666 /var/run/docker.sock || true
   fi
   ROUTER_PORT=8443 \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
