@@ -21,7 +21,7 @@ All requests: `http://localhost:8443` with `?api-version=2025-11-15-preview`. Au
 ```bash
 curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4.1","input":"What are the latest Azure AI Foundry announcements?","tools":[{"type":"bing_grounding","bing_grounding":{"search_configurations":[{"project_connection_id":"/connections/bing"}]}}],"store":false}'
+  -d '{"model":"gpt-4.1","input":"What are the latest Azure AI Foundry announcements?","tools":[{"type":"bing_grounding","bing_grounding":{"search_configurations":[{"project_connection_id":"AUTO_DISCOVERED_AT_RUNTIME"}]}}],"store":false}'
 ```
 
 The response includes the answer with inline URL citations.

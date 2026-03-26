@@ -324,7 +324,7 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 
 | Document | Description |
 |---|---|
-| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, auth flow |
+| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, operator dashboard, auth flow |
 | [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations |
 | [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
 | [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode, approval flow |

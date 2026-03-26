@@ -79,6 +79,10 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 | enhanced (default) | (default runc) | Localhost `azureclaw-strict` (~219 syscalls) | `sandbox` |
 | confidential | `kata-mshv-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
 
+**Isolation inheritance:** The controller exports `SANDBOX_ISOLATION` as an environment variable into every pod. When a sub-agent is spawned via `/sandbox/spawn`, the inference router reads the parent's isolation level from this env var and applies it as the default for the child. Downgrading from `confidential` to a lower isolation level is blocked — the spawn request returns an error.
+
+**Kata auto-provisioning:** `azureclaw add --isolation confidential` checks for a Kata-capable nodepool. If none exists, it offers to provision one automatically via `az aks nodepool add` with `--workload-runtime KataMshvVmIsolation`, SKU `Standard_D4as_v6`, and appropriate labels/taints.
+
 ### Inference Router (Rust, axum sidecar)
 
 Per-sandbox sidecar on port 8443. Runs as UID 1001 (unrestricted network). The agent (UID 1000) can only reach `localhost:8443` — the router is the sole external path.
@@ -90,6 +94,8 @@ Agent → Token budget check (429) → Content Safety (fail-open)
       → Prompt Shields (fail-open) → IMDS/WI token (cached per scope)
       → Forward to Azure OpenAI / Foundry → Extract usage → Prometheus metrics → Agent
 ```
+
+**Embedding model routing:** The `/v1/embeddings` endpoint extracts the `model` field from the request body (e.g., `text-embedding-3-small`) and routes to that specific deployment. This prevents embedding requests from being sent to the default chat model, which would fail. Both AKS (Workload Identity) and dev (API key) code paths handle this.
 
 **Egress proxy pipeline:** `POST /egress/fetch`
 
@@ -385,3 +391,68 @@ Agent process (never sees raw credentials)
 | 4 | Agent | Interacts with pre-configured channels — never handles raw tokens |
 
 Credentials are **namespace-scoped** — each sandbox's secrets are isolated. Use `azureclaw credentials update <name>` to rotate credentials on a running sandbox (updates the K8s secret and triggers a rolling restart).
+
+---
+
+## Operator Dashboard
+
+`azureclaw operator` launches a terminal-based management UI (built with blessed/blessed-contrib) that provides a live view of all agents in the cluster.
+
+### Architecture
+
+```
+┌─ Terminal (blessed TUI) ──────────────────────────────────────────────┐
+│                                                                       │
+│  Agent List Panel        Security Panel      Activity Panel           │
+│  ┌───────────────┐       ┌─────────────┐     ┌─────────────┐         │
+│  │ ● agent-1     │       │ Isolation   │     │ ✓ Approved  │         │
+│  │ └ sub-agent-1 │       │ Seccomp     │     │ ↻ Refreshed │         │
+│  │ ● agent-2     │       │ Egress mode │     │ ✗ Denied    │         │
+│  └───────┬───────┘       └─────────────┘     └─────────────┘         │
+│          │                                                            │
+│  Egress Panel             Keybindings Panel                           │
+│  ┌───────────────┐       ┌──────────────────────────────────┐         │
+│  │ ●P pending    │       │ [Enter] Connect  [n] Spawn       │         │
+│  │ ✓A approved   │       │ [a] Approve  [d] Delete/Deny     │         │
+│  │ ✗D denied     │       │ [m] Model    [e] Enforce egress  │         │
+│  └───────────────┘       └──────────────────────────────────┘         │
+│                                                                       │
+│  ┌─ Enter key ──────────────────────────────────────────────┐         │
+│  │  spawnSync("openclaw", ["tui", ...])                     │         │
+│  │  Blocks Node.js event loop entirely                      │         │
+│  │  Terminal buffer: normalBuffer() → child → alternateBuffer()       │
+│  └──────────────────────────────────────────────────────────┘         │
+└───────────────────────────────────────────────────────────────────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+    K8s API              kubectl exec         kubectl port-forward
+   (list CRDs,          (connect to pod)      (gateway/TUI access)
+    CRUD sandboxes)
+```
+
+### Features
+
+| Feature | Key | Description |
+|---------|-----|-------------|
+| Agent list | `↑↓` | Hierarchical view — parent agents + indented sub-agents |
+| Connect | `Enter` | Shell out to `openclaw tui` with persistent session ID |
+| Spawn agent | `n` | Multi-step wizard (name, model, isolation, governance) |
+| Delete agent | `d` | Confirmation dialog + CRD deletion |
+| Switch model | `m` | Hot-swap model on running agent (no restart) |
+| Approve egress | `a` / `Shift+A` | Approve single / all pending domains |
+| Deny egress | `d` (egress panel) | Deny pending domain request |
+| Enforce egress | `e` | Lock down to learned domain set |
+| Cluster health | `c` | Node count, API server status, resource usage |
+| Logs | `l` | Stream agent logs |
+| Refresh | `r` | Manual refresh |
+
+### Connect Shell-Out
+
+Pressing `Enter` on an agent uses `spawnSync` to launch `openclaw tui` with `stdio: "inherit"`. This blocks the Node.js event loop entirely, ensuring blessed doesn't interfere with the child process's terminal. The operator:
+
+1. Saves cursor position and switches to the normal terminal buffer
+2. Disables raw mode on stdin
+3. Runs `openclaw tui` synchronously with a persistent session ID (`operator-{agentName}`)
+4. Restores raw mode, alternate buffer, and cursor position on return
+
+SIGINT (Ctrl+C) is trapped during the child process so it only terminates the TUI session, not the operator itself.
