@@ -191,34 +191,59 @@ export function addCommand(): Command {
 
       // Pre-flight: check for Kata nodepool when confidential isolation is requested
       if (options.isolation === "confidential") {
+        let kataReady = false;
         try {
           const { stdout } = await execa("kubectl", [
             "get", "nodes", "-l", "azureclaw.azure.com/pool=sandbox-kata",
             "--no-headers",
           ], { stdio: "pipe" });
-          const nodeCount = stdout.trim().split("\n").filter(Boolean).length;
-          if (nodeCount === 0) throw new Error("no nodes");
-        } catch {
-          console.error(chalk.red("\n✗ No Kata nodepool found."));
-          console.error(chalk.dim("  Confidential isolation requires a nodepool with workloadRuntime: KataMshvVmIsolation"));
-          console.error(chalk.dim("  and label azureclaw.azure.com/pool=sandbox-kata.\n"));
+          kataReady = stdout.trim().split("\n").filter(Boolean).length > 0;
+        } catch { /* no nodes */ }
 
+        if (!kataReady) {
           const ctx = loadContext();
           if (ctx?.aksCluster && ctx?.resourceGroup) {
-            console.error(chalk.yellow("  To provision one, run:"));
-            console.error(chalk.cyan(`    az aks nodepool add \\`));
-            console.error(chalk.cyan(`      --resource-group ${ctx.resourceGroup} \\`));
-            console.error(chalk.cyan(`      --cluster-name ${ctx.aksCluster} \\`));
-            console.error(chalk.cyan(`      --name katapool --node-count 1 \\`));
-            console.error(chalk.cyan(`      --node-vm-size Standard_D4as_v6 \\`));
-            console.error(chalk.cyan(`      --os-sku AzureLinux \\`));
-            console.error(chalk.cyan(`      --workload-runtime KataMshvVmIsolation \\`));
-            console.error(chalk.cyan(`      --node-labels azureclaw.azure.com/pool=sandbox-kata \\`));
-            console.error(chalk.cyan(`      --node-taints azureclaw.azure.com/sandbox=true:NoSchedule`));
+            console.log(chalk.yellow("\n⚠  No Kata nodepool found."));
+            console.log(chalk.dim("  Confidential isolation requires a nodepool with Kata VM runtime.\n"));
+
+            const { default: inquirer } = await import("inquirer");
+            const { provision } = await inquirer.prompt([{
+              type: "confirm",
+              name: "provision",
+              message: `Provision a Kata nodepool on ${ctx.aksCluster}? (takes ~3-5 min)`,
+              default: true,
+            }]);
+
+            if (!provision) {
+              console.log(chalk.dim("Aborted."));
+              process.exit(0);
+            }
+
+            const kataSpinner = ora("Provisioning Kata nodepool (Standard_D4as_v6, AzureLinux)...").start();
+            try {
+              await execa("az", [
+                "aks", "nodepool", "add",
+                "--resource-group", ctx.resourceGroup,
+                "--cluster-name", ctx.aksCluster,
+                "--name", "katapool",
+                "--node-count", "1",
+                "--node-vm-size", "Standard_D4as_v6",
+                "--os-sku", "AzureLinux",
+                "--workload-runtime", "KataMshvVmIsolation",
+                "--node-labels", "azureclaw.azure.com/pool=sandbox-kata",
+                "--node-taints", "azureclaw.azure.com/sandbox=true:NoSchedule",
+              ], { stdio: "pipe", timeout: 600_000 });
+              kataSpinner.succeed("Kata nodepool provisioned");
+            } catch (e: any) {
+              kataSpinner.fail("Failed to provision Kata nodepool");
+              console.error(chalk.red(e.stderr?.substring(0, 200) || e.message));
+              process.exit(1);
+            }
           } else {
-            console.error(chalk.dim("  Run 'azureclaw up --isolation confidential' or add a katapool manually."));
+            console.error(chalk.red("\n✗ No Kata nodepool found and no cached cluster context."));
+            console.error(chalk.dim("  Run 'azureclaw up --isolation confidential' first, or provision a katapool manually."));
+            process.exit(1);
           }
-          process.exit(1);
         }
       }
 
