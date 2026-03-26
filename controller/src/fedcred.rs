@@ -17,6 +17,7 @@ pub struct FedCredConfig {
     pub client_id: String,
     pub identity_name: String,
     pub identity_resource_group: String,
+    pub foundry_resource_group: String,
     pub oidc_issuer_url: String,
     pub token_file: String,
     pub authority_host: String,
@@ -31,6 +32,8 @@ impl FedCredConfig {
         let client_id = std::env::var("AZURE_CLIENT_ID").ok()?;
         let identity_name = std::env::var("IDENTITY_NAME").ok()?;
         let identity_resource_group = std::env::var("IDENTITY_RESOURCE_GROUP").ok()?;
+        let foundry_resource_group = std::env::var("FOUNDRY_RESOURCE_GROUP")
+            .unwrap_or_else(|_| identity_resource_group.clone());
         let oidc_issuer_url = std::env::var("OIDC_ISSUER_URL").ok()?;
         let token_file = std::env::var("AZURE_FEDERATED_TOKEN_FILE")
             .unwrap_or_else(|_| "/var/run/secrets/azure/tokens/azure-identity-token".into());
@@ -43,6 +46,7 @@ impl FedCredConfig {
             client_id,
             identity_name,
             identity_resource_group,
+            foundry_resource_group,
             oidc_issuer_url,
             token_file,
             authority_host,
@@ -222,5 +226,114 @@ impl FedCredManager {
             let body = resp.text().await.unwrap_or_default();
             Err(format!("Failed to delete federated credential ({status}): {}", &body[..body.len().min(300)]))
         }
+    }
+
+    /// Ensure the managed identity has the required RBAC roles on the Foundry resource.
+    /// Called once at controller startup. Idempotent — uses deterministic GUIDs.
+    ///
+    /// Assigns:
+    /// - Azure AI User (53ca6127...) — wildcard CognitiveServices data actions
+    /// - Cognitive Services OpenAI User (5e0bd9bd...) — explicit chat completions
+    pub async fn ensure_role_assignments(&self, foundry_endpoint: &str) -> Result<(), String> {
+        // Derive Foundry account name from endpoint URL
+        // e.g. https://azureclaw-foundry-services.services.ai.azure.com/api/projects/azureclaw
+        //   → account name: azureclaw-foundry-services
+        let account_name = foundry_endpoint
+            .trim_start_matches("https://")
+            .split('.')
+            .next()
+            .ok_or_else(|| format!("Cannot parse Foundry account name from: {foundry_endpoint}"))?;
+
+        // Get the managed identity's principal (object) ID
+        let token = self.get_arm_token().await?;
+        let identity_url = format!(
+            "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{}?api-version=2023-01-31",
+            self.config.subscription_id,
+            self.config.identity_resource_group,
+            self.config.identity_name,
+        );
+
+        let resp = self.http
+            .get(&identity_url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| format!("ARM GET identity failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Failed to get managed identity: {}", &body[..body.len().min(300)]));
+        }
+
+        let identity: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse identity response: {e}"))?;
+        let principal_id = identity["properties"]["principalId"]
+            .as_str()
+            .ok_or_else(|| "Managed identity has no principalId".to_string())?;
+
+        // Build the scope: /subscriptions/.../resourceGroups/.../providers/Microsoft.CognitiveServices/accounts/{name}
+        let scope = format!(
+            "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.CognitiveServices/accounts/{}",
+            self.config.subscription_id,
+            self.config.foundry_resource_group,
+            account_name,
+        );
+
+        // Role definitions to assign
+        let roles = [
+            ("53ca6127-db72-4b80-b1b0-d745d6d5456d", "Azure AI User"),
+            ("5e0bd9bd-7b93-4f28-af87-19fc36ad61bd", "Cognitive Services OpenAI User"),
+        ];
+
+        for (role_id, role_name) in &roles {
+            // Deterministic GUID based on scope + principal + role
+            let assignment_name = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("{scope}/{principal_id}/{role_id}").as_bytes(),
+            );
+
+            let url = format!(
+                "https://management.azure.com{}/providers/Microsoft.Authorization/roleAssignments/{}?api-version=2022-04-01",
+                scope, assignment_name,
+            );
+
+            let body = serde_json::json!({
+                "properties": {
+                    "roleDefinitionId": format!("/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}", self.config.subscription_id, role_id),
+                    "principalId": principal_id,
+                    "principalType": "ServicePrincipal",
+                }
+            });
+
+            let token = self.get_arm_token().await?;
+            let resp = self.http
+                .put(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("ARM PUT role assignment failed: {e}"))?;
+
+            let status = resp.status();
+            if status.is_success() {
+                tracing::info!(
+                    role = %role_name,
+                    principal = %principal_id,
+                    "Role assignment created: {role_name} on {account_name}",
+                );
+            } else if status.as_u16() == 409 {
+                tracing::debug!(role = %role_name, "Role assignment already exists");
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    role = %role_name,
+                    status = %status,
+                    "Failed to create role assignment: {}",
+                    &body[..body.len().min(300)]
+                );
+            }
+        }
+
+        Ok(())
     }
 }
