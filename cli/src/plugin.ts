@@ -1060,7 +1060,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). The sub-agent will auto-process the task with its AI model and send the result back to your inbox. Wait for the sub-agent to be Running first.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Automatically waits up to 90 seconds for the sub-agent's reply and returns it inline. If no reply arrives within the wait window, check azureclaw_mesh_inbox later. Wait for the sub-agent to be Running first.",
       parameters: {
         type: "object",
         properties: {
@@ -1156,14 +1156,45 @@ const azureClawPlugin = definePluginEntry({
               }
               if (!sendErr) {
                 log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
-                return { content: [{ type: "text", text: JSON.stringify({
-                  status: "delivered_via_agt_relay",
+                const messageId = `agt-${Date.now().toString(36)}`;
+
+                // Auto-wait for reply: poll agtInbox for a response from this agent
+                const waitMaxMs = 90_000; // 90 seconds max
+                const pollIntervalMs = 2_000;
+                const waitStart = Date.now();
+                let replyContent: string | null = null;
+                log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+
+                while (Date.now() - waitStart < waitMaxMs) {
+                  // Check inbox for a reply from this target
+                  const replyIdx = agtInbox.findIndex(
+                    (m) => m.from_amid === targetAmid || m.from_agent === agentName,
+                  );
+                  if (replyIdx >= 0) {
+                    const reply = agtInbox.splice(replyIdx, 1)[0];
+                    replyContent = typeof reply.content === "string"
+                      ? reply.content
+                      : JSON.stringify(reply.content);
+                    log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - waitStart) / 1000).toFixed(1)}s`);
+                    break;
+                  }
+                  await new Promise((r) => setTimeout(r, pollIntervalMs));
+                }
+
+                const result: any = {
+                  status: replyContent ? "delivered_and_replied" : "delivered_via_agt_relay",
                   to_agent: agentName,
                   to_amid: targetAmid,
                   from_amid: agtIdentity.amid,
                   protocol: "AGT E2E encrypted (Signal Protocol)",
-                  message_id: `agt-${Date.now().toString(36)}`,
-                }, null, 2) }] };
+                  message_id: messageId,
+                };
+                if (replyContent) {
+                  result.reply = replyContent;
+                } else {
+                  result.note = "No reply within 90s — use azureclaw_mesh_inbox to check later.";
+                }
+                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
               }
               log.warn(`AGT relay send failed after retries: ${sendErr?.message}, falling back to router`);
             } else {
