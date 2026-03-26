@@ -229,7 +229,7 @@ export function addCommand(): Command {
                 "--node-count", "1",
                 "--node-vm-size", "Standard_D4as_v6",
                 "--os-sku", "AzureLinux",
-                "--workload-runtime", "KataMshvVmIsolation",
+                "--workload-runtime", "KataVmIsolation",
                 "--labels", "azureclaw.azure.com/pool=sandbox-kata",
                 "--node-taints", "azureclaw.azure.com/sandbox=true:NoSchedule",
               ], { stdio: "pipe", timeout: 600_000 });

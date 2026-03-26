@@ -1350,7 +1350,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
           if (!stdout.trim()) throw new Error("no kata nodes");
         } catch {
           activityLog.log("{red-fg}✗ No Kata nodepool found — cannot spawn confidential agent{/}");
-          activityLog.log("{yellow-fg}  Run: az aks nodepool add --workload-runtime KataMshvVmIsolation{/}");
+          activityLog.log("{yellow-fg}  Run: az aks nodepool add --workload-runtime KataVmIsolation{/}");
           return;
         }
       }
