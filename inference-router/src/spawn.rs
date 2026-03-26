@@ -355,9 +355,12 @@ fn docker_create_body(
     let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let image = std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
 
+    let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
+
     let mut env = vec![
         format!("OPENCLAW_MODEL={}", model),
         format!("AZURE_OPENAI_ENDPOINT={}", endpoint),
+        format!("AZURE_OPENAI_API_KEY={}", api_key),
         format!("SANDBOX_NAME={}", req.name),
         "AZURECLAW_DEV_MODE=true".to_string(),
         format!("DOCKER_NETWORK={}", network),
@@ -385,7 +388,6 @@ fn docker_create_body(
             "CapAdd": ["NET_ADMIN"],
             "Tmpfs": { "/tmp": "rw,noexec,nosuid,size=512m" },
             "Binds": [
-                "/run/secrets/azure-openai-key:/run/secrets/azure-openai-key:ro",
                 "/var/run/docker.sock:/var/run/docker.sock",
                 format!("{}-data:/sandbox", container_name),
             ],
