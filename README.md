@@ -24,40 +24,40 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 ## Architecture
 
 ```
-                 ┌──────────┐
-                 │ User     │
-                 │ TUI / TG │
-                 └────┬─────┘
-                      │
-        ┌─────────────▼──────────────────────────────────────────────┐
-        │  AKS Cluster (Azure Linux · Cilium)                        │
-        │                                                            │
-        │  ┌─ Sandbox Pod (per agent) ────────────────────────────┐  │
-        │  │                                                      │  │
-        │  │  init: egress-guard (iptables)                       │  │
-        │  │   └─ agent process → localhost + DNS only             │  │
-        │  │                                                      │  │
-        │  │  ┌──────────────┐   localhost   ┌─────────────────┐  │  │
-        │  │  │  OpenClaw    │──────:8443───►│ Inference Router │──┼──┼──► Azure AI Foundry
-        │  │  │  (agent)     │               │ (Rust sidecar)   │  │  │     (200+ models)
-        │  │  └──────────────┘               │                  │  │  │
-        │  │   read-only rootfs              │ • WI/IMDS auth   │  │  │
-        │  │   drop ALL caps                 │ • Content Safety  │  │  │
-        │  │   no Azure credentials          │ • Token budgets   │  │  │
-        │  │                                 │ • Domain blocklist│  │  │
-        │  │                                 │ • Egress proxy    │  │  │
-        │  │                                 │ • AGT governance  │  │  │
-        │  │                                 └─────────┬────────┘  │  │
-        │  │  NetworkPolicy: default-deny egress       │           │  │
-        │  └───────────────────────────────────────────┘           │  │
-        │                                              │           │  │
-        │  ┌─ AGT Relay ──────────────────────────┐    │           │  │
-        │  │  agent-alpha ◄──E2E encrypted──► agent-beta           │  │
-        │  │  (Signal Protocol · trust-gated · audited)            │  │
-        │  └───────────────────────────────────────────────────────┘  │
-        │                                                            │
-        │  Controller (Rust/kube-rs) — reconciles ClawSandbox CRDs   │
-        └────────────────────────────────────────────────────────────┘
+                    ┌──────────┐
+                    │ User     │
+                    │ TUI / TG │
+                    └────┬─────┘
+                         │
+   ┌─────────────────────▼───────────────────────────────────────────────────┐
+   │  AKS Cluster (Azure Linux · Cilium)                                     │
+   │                                                                         │
+   │  ┌─ Sandbox Pod (per agent) ─────────────────────────────────────────┐  │
+   │  │                                                                   │  │
+   │  │  init: egress-guard (iptables)                                    │  │
+   │  │   └─ agent process → localhost + DNS only                         │  │
+   │  │                                                                   │  │
+   │  │  ┌──────────────┐   localhost    ┌──────────────────┐             │  │
+   │  │  │  OpenClaw    │──────:8443────►│ Inference Router  │────────────┼──┼──► Azure AI Foundry
+   │  │  │  (agent)     │               │ (Rust sidecar)    │            │  │     (200+ models)
+   │  │  └──────────────┘               │                   │            │  │
+   │  │   read-only rootfs              │ • WI/IMDS auth    │            │  │
+   │  │   drop ALL caps                 │ • Content Safety   │            │  │
+   │  │   no Azure credentials          │ • Token budgets    │            │  │
+   │  │                                 │ • Domain blocklist │            │  │
+   │  │                                 │ • Egress proxy     │            │  │
+   │  │                                 │ • AGT governance   │            │  │
+   │  │                                 └───────────────────┘             │  │
+   │  │  NetworkPolicy: default-deny egress                               │  │
+   │  └───────────────────────────────────────────────────────────────────┘  │
+   │                                                                         │
+   │  ┌─ AGT Relay ───────────────────────────────────────────────────────┐  │
+   │  │  agent-alpha ◄──E2E encrypted──► agent-beta                       │  │
+   │  │  (Signal Protocol · trust-gated · audited)                        │  │
+   │  └───────────────────────────────────────────────────────────────────┘  │
+   │                                                                         │
+   │  Controller (Rust/kube-rs) — reconciles ClawSandbox CRDs               │
+   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
