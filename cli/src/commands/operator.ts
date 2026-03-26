@@ -25,6 +25,7 @@
  *   m         — switch model for selected agent
  *   l         — tail logs for selected agent
  *   x         — delete selected agent (with confirmation)
+ *   Enter     — connect to selected agent (shell session)
  *   c         — toggle cluster health view
  *   r         — refresh now
  *   q / Esc   — quit
@@ -32,6 +33,7 @@
 
 import { Command } from "commander";
 import { execa } from "execa";
+import { spawn as nodeSpawn } from "child_process";
 import blessed from "blessed";
 import contrib from "blessed-contrib";
 
@@ -1054,7 +1056,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         ? "{cyan-fg}{bold}[Agents]{/bold}{/}  {gray-fg}Egress{/}"
         : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
       statusBar.setContent(
-        ` ${focusTag}  ${viewTag}  │  [Tab] Focus  [c] Cluster  [↑↓] Nav  [a] Approve  [A] All  ` +
+        ` ${focusTag}  ${viewTag}  │  [Tab] Focus  [↑↓] Nav  [Enter] Connect  [c] Cluster  [a] Approve  [A] All  ` +
         `[d] Del/Deny  [e] Enforce  [n] Spawn  [r] Refresh  [q] Quit`,
       );
     } else {
@@ -1535,6 +1537,70 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   }
 
   screen.key(["x"], () => deleteSelectedAgent());
+
+  // ── Connect to agent (Enter) ──────────────────────────────────────
+  async function connectToAgent() {
+    if (dialogOpen) return;
+    if (focusedPanel !== "agents") return;
+    const idx = (agentTable as any).rows?.selected ?? 0;
+    const sb = sandboxes[idx];
+    if (!sb) return;
+
+    dialogOpen = true;
+
+    // Suspend blessed — switch to normal terminal buffer
+    screen.program.normalBuffer();
+    screen.program.showCursor();
+    // @ts-ignore — program internal
+    if (screen.program.input?.setRawMode) screen.program.input.setRawMode(false);
+
+    process.stdout.write(`\x1b[2J\x1b[H`); // clear screen
+    process.stdout.write(
+      `\x1b[36m  Connected to \x1b[1m${sb.name}\x1b[0m\x1b[36m` +
+      ` (${sb.isolation}, ${sb.model})\x1b[0m\n` +
+      `\x1b[90m  Chat:    openclaw tui\n` +
+      `  Message: openclaw agent --local -m "hello"\n` +
+      `  Return:  type "exit"\x1b[0m\n\n`
+    );
+
+    const child = nodeSpawn("kubectl", [
+      "exec", "-it", "-n", sb.namespace,
+      `deploy/${sb.name}`, "-c", "openclaw",
+      "--", "/bin/bash", "--login",
+    ], {
+      stdio: "inherit",
+      env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
+    });
+
+    child.on("exit", () => {
+      // Resume blessed — switch back to alternate buffer
+      // @ts-ignore
+      if (screen.program.input?.setRawMode) screen.program.input.setRawMode(true);
+      screen.program.alternateBuffer();
+      screen.program.hideCursor();
+      screen.alloc();
+      dialogOpen = false;
+      render();
+      screen.render();
+
+      activityLog.log(`{green-fg}↩ Back from ${sb.name}{/}`);
+      screen.render();
+    });
+
+    child.on("error", (err) => {
+      process.stdout.write(`\x1b[31m  Failed to connect: ${err.message}\x1b[0m\n`);
+      // @ts-ignore
+      if (screen.program.input?.setRawMode) screen.program.input.setRawMode(true);
+      screen.program.alternateBuffer();
+      screen.program.hideCursor();
+      screen.alloc();
+      dialogOpen = false;
+      render();
+      screen.render();
+    });
+  }
+
+  screen.key(["enter"], () => connectToAgent());
 
   // ── Boot ──────────────────────────────────────────────────────────
 
