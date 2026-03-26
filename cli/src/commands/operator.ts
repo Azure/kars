@@ -1269,26 +1269,75 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
     if (!sb) return;
-    const confirmBox = blessed.question({
+
+    // Custom confirm dialog with selectable buttons
+    const dialog = blessed.box({
       parent: screen, top: "center", left: "center",
-      width: 56, height: 5,
+      width: 52, height: 7,
       border: { type: "line" },
       style: { border: { fg: "red" }, fg: "white", bg: "black" },
       label: " ⚠  Confirm Delete ",
+      tags: true,
     });
-    confirmBox.ask(`Delete ${sb.name}?`, async (_err: any, answer: string) => {
-      confirmBox.destroy(); screen.render();
-      if (!answer) return;
-      activityLog.log(`{red-fg}🗑  Deleting {bold}${sb.name}{/bold}...{/}`);
+    blessed.box({
+      parent: dialog, top: 0, left: 2, width: 46, height: 1,
+      tags: true, style: { fg: "white", bg: "black" },
+      content: `Destroy agent {bold}${sb.name}{/bold}?`,
+    });
+
+    let selected = 0; // 0 = Yes, 1 = Cancel
+    const btnYes = blessed.button({
+      parent: dialog, top: 2, left: 8, width: 12, height: 1,
+      content: "  [ Yes ]  ", tags: true, mouse: true,
+      style: { fg: "white", bg: "red", focus: { bg: "red", fg: "white", bold: true } },
+    });
+    const btnCancel = blessed.button({
+      parent: dialog, top: 2, left: 28, width: 14, height: 1,
+      content: "  [ Cancel ]  ", tags: true, mouse: true,
+      style: { fg: "white", bg: "gray", focus: { bg: "gray", fg: "white", bold: true } },
+    });
+
+    function updateButtons() {
+      btnYes.style.bg = selected === 0 ? "red" : "black";
+      btnYes.style.bold = selected === 0;
+      btnCancel.style.bg = selected === 1 ? "gray" : "black";
+      btnCancel.style.bold = selected === 1;
       screen.render();
-      try {
-        await execa("azureclaw", ["rm", sb.name], { stdio: "pipe" });
-        activityLog.log(`{green-fg}✓ Deleted{/} ${sb.name}`);
-      } catch (e: any) {
-        activityLog.log(`{red-fg}✗ Delete fail:{/} ${(e.stderr || e.message)?.substring(0, 50)}`);
+    }
+
+    const cleanup = () => { dialog.destroy(); screen.render(); };
+
+    const onKey = async (_ch: any, key: any) => {
+      if (key.name === "left" || key.name === "right" || key.name === "tab") {
+        selected = selected === 0 ? 1 : 0;
+        updateButtons();
+      } else if (key.name === "return" || key.name === "enter") {
+        screen.removeListener("keypress", onKey);
+        cleanup();
+        if (selected === 0) {
+          activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold}...{/}`);
+          screen.render();
+          try {
+            await execa("azureclaw", ["destroy", sb.name], { stdio: "pipe" });
+            activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
+          } catch (e: any) {
+            activityLog.log(`{red-fg}✗ Destroy fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
+          }
+          await refresh();
+        }
+      } else if (key.name === "escape" || key.name === "q") {
+        screen.removeListener("keypress", onKey);
+        cleanup();
       }
-      await refresh();
-    });
+    };
+
+    screen.on("keypress", onKey);
+    btnYes.on("press", () => { selected = 0; onKey(null, { name: "return" }); });
+    btnCancel.on("press", () => { selected = 1; onKey(null, { name: "return" }); });
+
+    updateButtons();
+    btnYes.focus();
+    screen.render();
   }
 
   screen.key(["x"], () => deleteSelectedAgent());
