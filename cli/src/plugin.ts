@@ -1137,7 +1137,42 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, http_fetch");
+    api.registerTool({
+      name: "azureclaw_discover",
+      label: "Discover Agents",
+      description: "Search the AgentMesh registry for other agents by name or capability. Returns their AMID, display name, tier, capabilities, and reputation score. Use this to find agents to communicate with via azureclaw_mesh_send or azureclaw_relay.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Agent name or capability to search for. Use '*' to list all known agents." },
+        },
+        required: ["query"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        const query = (params.query as string) || "*";
+        try {
+          const searchUrl = query === "*"
+            ? "/agt/registry/registry/search?capability=azureclaw-agent"
+            : `/agt/registry/registry/search?capability=${encodeURIComponent(query)}`;
+          const result = await routerCall("GET", searchUrl);
+          const agents = (result as any)?.results || [];
+          const summary = agents.map((a: any) => ({
+            amid: a.amid,
+            name: a.display_name,
+            tier: a.tier,
+            capabilities: a.capabilities,
+            reputation: a.reputation_score,
+            status: a.status,
+            last_seen: a.last_seen,
+          }));
+          return { content: [{ type: "text", text: safeJson({ agents: summary, count: summary.length }) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Discovery failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, http_fetch");
 
     // ── http_fetch: routed through the inference router's egress proxy ──
     // The sandbox (UID 1000) cannot reach the internet directly (iptables).
