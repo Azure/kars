@@ -749,17 +749,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   const ok = (v: boolean) => v ? "{green-fg}●{/}" : "{red-fg}●{/}";
 
   function healthSummary(): string {
-    const controllers = sandboxes.filter((s) => s.role === "controller").length;
-    const subAgents = sandboxes.filter((s) => s.role === "sub-agent").length;
+    const total = sandboxes.length;
+    if (total === 0) return "{gray-fg}no agents{/}";
     const h = sandboxes.filter((s) => s.health === "healthy").length;
     const d = sandboxes.filter((s) => s.health === "degraded").length;
     const x = sandboxes.filter((s) => s.health === "down").length;
-    const parts: string[] = [];
-    parts.push(`◆${controllers} ⤷${subAgents}`);
+    const parts = [`${total} agent(s)`];
     if (h > 0) parts.push(`{green-fg}${h}✓{/}`);
     if (d > 0) parts.push(`{yellow-fg}${d}!{/}`);
     if (x > 0) parts.push(`{red-fg}${x}✗{/}`);
-    if (sandboxes.length === 0) return "{gray-fg}no agents{/}";
     return parts.join(" ");
   }
 
@@ -1226,175 +1224,158 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   screen.key(["n"], () => {
     if (dialogOpen) return;
     dialogOpen = true;
-    const spawnState = {
+
+    const state = {
       name: "", model: "gpt-4.1", isolation: "enhanced",
-      channels: "" as string, telegramToken: "", learnEgress: true,
-      step: 0,
+      channel: "", telegramToken: "", learnEgress: true,
+      cursor: 0, editing: false,
+    };
+
+    const isoOpts = ["enhanced", "standard", "confidential"];
+    const chOpts = ["", "telegram", "slack", "discord"];
+    const chLabels: Record<string, string> = { "": "(none)", telegram: "telegram", slack: "slack", discord: "discord" };
+    const fields = () => {
+      const f = ["name", "model", "isolation", "channel"];
+      if (state.channel === "telegram") f.push("tgtoken");
+      f.push("egress", "launch");
+      return f;
     };
 
     const dialog = blessed.box({
       parent: screen, top: "center", left: "center",
-      width: 62, height: 18,
+      width: 62, height: 16,
       border: { type: "line" },
       style: { border: { fg: "cyan" }, fg: "white", bg: "black" },
       label: " 🚀 Spawn New Agent ",
       tags: true,
     });
 
-    const formContent = blessed.box({
-      parent: dialog, top: 0, left: 1, width: 58, height: 14,
+    const formBox = blessed.box({
+      parent: dialog, top: 0, left: 1, width: 58, height: 12,
       tags: true, style: { fg: "white", bg: "black" },
     });
 
-    const inputField = blessed.textbox({
-      parent: dialog, top: 13, left: 1, width: 58, height: 1,
-      style: { fg: "white", bg: "black", focus: { bg: "blue" } },
+    const editBox = blessed.textbox({
+      parent: dialog, bottom: 0, left: 1, width: 58, height: 1,
+      style: { fg: "white", bg: "blue" },
       inputOnFocus: true,
     });
+    editBox.hide();
 
-    const isolationOpts = ["enhanced", "standard", "confidential"];
-    const channelOpts = ["(none)", "telegram", "slack", "discord"];
-
-    function renderForm() {
+    function draw() {
+      const ff = fields();
       const lines: string[] = [];
-      const mark = (step: number) => spawnState.step === step ? "{cyan-fg}▸{/}" : " ";
-
-      lines.push(`${mark(0)} {bold}Name:{/}       ${spawnState.name || "{gray-fg}(enter name){/}"}`);
-      lines.push(`${mark(1)} {bold}Model:{/}      ${spawnState.model}`);
-      lines.push(`${mark(2)} {bold}Isolation:{/}  ${spawnState.isolation}  {gray-fg}[←→ to change]{/}`);
-      lines.push(`${mark(3)} {bold}Channel:{/}    ${spawnState.channels || "(none)"}  {gray-fg}[←→ to change]{/}`);
-      if (spawnState.channels === "telegram") {
-        lines.push(`${mark(4)} {bold}TG Token:{/}  ${spawnState.telegramToken ? "***" + spawnState.telegramToken.slice(-6) : "{gray-fg}(enter token){/}"}`);
+      for (let i = 0; i < ff.length; i++) {
+        const sel = state.cursor === i ? "{cyan-fg}▸{/}" : " ";
+        const f = ff[i];
+        if (f === "name") {
+          lines.push(`${sel} {bold}Name:{/}       ${state.name || "{gray-fg}(press Enter to type){/}"}`);
+        } else if (f === "model") {
+          lines.push(`${sel} {bold}Model:{/}      ${state.model || "{gray-fg}(press Enter to type){/}"}`);
+        } else if (f === "isolation") {
+          lines.push(`${sel} {bold}Isolation:{/}  {green-fg}${state.isolation}{/}  {gray-fg}←→{/}`);
+        } else if (f === "channel") {
+          lines.push(`${sel} {bold}Channel:{/}    ${chLabels[state.channel] || "(none)"}  {gray-fg}←→{/}`);
+        } else if (f === "tgtoken") {
+          const masked = state.telegramToken ? "●●●●" + state.telegramToken.slice(-4) : "{gray-fg}(press Enter to type){/}";
+          lines.push(`${sel} {bold}TG Token:{/}  ${masked}`);
+        } else if (f === "egress") {
+          const val = state.learnEgress ? "{green-fg}learn mode{/}" : "{yellow-fg}deny all{/}";
+          lines.push(`${sel} {bold}Egress:{/}     ${val}  {gray-fg}←→{/}`);
+        } else if (f === "launch") {
+          lines.push("");
+          lines.push(`${sel} {cyan-fg}{bold}[ 🚀 Launch ]{/}`);
+        }
       }
-      lines.push(`${mark(5)} {bold}Egress:{/}     ${spawnState.learnEgress ? "{green-fg}learn mode{/}" : "{yellow-fg}deny all{/}"}  {gray-fg}[←→ to toggle]{/}`);
-      lines.push("");
-      lines.push("{gray-fg}↑↓ Navigate fields  │  Enter = edit/next  │  Esc = cancel{/}");
-      lines.push("{gray-fg}Tab = skip to launch │  ←→ = cycle options{/}");
-      lines.push("");
-      lines.push("{cyan-fg}{bold}[Launch]{/}  {gray-fg}Enter on last field or Tab to launch{/}");
-
-      formContent.setContent(lines.join("\n"));
+      lines.push("", "{gray-fg}↑↓ move  Enter edit/select  ←→ cycle  Esc cancel{/}");
+      formBox.setContent(lines.join("\n"));
       screen.render();
     }
 
-    function cleanup() { dialogOpen = false; dialog.destroy(); screen.render(); }
+    function close() { dialogOpen = false; dialog.destroy(); screen.render(); }
 
-    function cycleOption(delta: number) {
-      if (spawnState.step === 2) {
-        const idx = isolationOpts.indexOf(spawnState.isolation);
-        spawnState.isolation = isolationOpts[(idx + delta + isolationOpts.length) % isolationOpts.length];
-      } else if (spawnState.step === 3) {
-        const idx = channelOpts.indexOf(spawnState.channels || "(none)");
-        const next = channelOpts[(idx + delta + channelOpts.length) % channelOpts.length];
-        spawnState.channels = next === "(none)" ? "" : next;
-      } else if (spawnState.step === 5) {
-        spawnState.learnEgress = !spawnState.learnEgress;
-      }
-      renderForm();
+    function startEdit(field: "name" | "model" | "telegramToken") {
+      state.editing = true;
+      editBox.show();
+      editBox.setValue(state[field]);
+      editBox.focus();
+      screen.render();
+      editBox.readInput((_err: any, value?: string) => {
+        if (value !== undefined) state[field] = value.trim();
+        state.editing = false;
+        editBox.hide();
+        // Advance cursor to next field
+        const ff = fields();
+        if (state.cursor < ff.length - 1) state.cursor++;
+        draw();
+      });
     }
 
-    const maxStep = () => spawnState.channels === "telegram" ? 5 : 4;
-    // Map visible step to actual step (skip telegram token if not needed)
-    const effectiveStep = () => {
-      if (spawnState.step >= 4 && spawnState.channels !== "telegram") return spawnState.step + 1;
-      return spawnState.step;
-    };
-
     async function launch() {
-      cleanup();
-      if (!spawnState.name.trim()) {
+      close();
+      if (!state.name.trim()) {
         activityLog.log("{red-fg}✗ No name provided{/}");
         return;
       }
-      const args = ["add", spawnState.name.trim(), "--model", spawnState.model, "--isolation", spawnState.isolation];
-      if (spawnState.learnEgress) args.push("--learn-egress");
-      if (spawnState.channels) {
-        args.push("--channels", spawnState.channels);
-        if (spawnState.channels === "telegram" && spawnState.telegramToken) {
-          args.push("--telegram-token", spawnState.telegramToken);
+      const args = ["add", state.name.trim(), "--model", state.model, "--isolation", state.isolation];
+      if (state.learnEgress) args.push("--learn-egress");
+      if (state.channel) {
+        args.push("--channels", state.channel);
+        if (state.channel === "telegram" && state.telegramToken) {
+          args.push("--telegram-token", state.telegramToken);
         }
       }
-      activityLog.log(`{cyan-fg}⏳ Spawning {bold}${spawnState.name}{/bold} (${spawnState.model}, ${spawnState.isolation})...{/}`);
+      activityLog.log(`{cyan-fg}⏳ Spawning {bold}${state.name}{/bold} (${state.model}, ${state.isolation})...{/}`);
       screen.render();
       try {
         await execa("azureclaw", args, { stdio: "pipe" });
-        activityLog.log(`{green-fg}✓ Spawned{/} ${spawnState.name}`);
+        activityLog.log(`{green-fg}✓ Spawned{/} ${state.name}`);
       } catch (e: any) {
         activityLog.log(`{red-fg}✗ Spawn fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
       }
       await refresh();
     }
 
-    function promptTextInput(field: "name" | "model" | "telegramToken") {
-      const labels: Record<string, string> = { name: "Name", model: "Model", telegramToken: "Telegram Token" };
-      inputField.setValue(spawnState[field]);
-      inputField.focus();
-      screen.render();
-      inputField.readInput((_err: any, value?: string) => {
-        if (value) spawnState[field] = value.trim();
-        renderForm();
-      });
-    }
-
     const onKey = (_ch: any, key: any) => {
+      if (state.editing) return; // textbox handles its own input
+      const ff = fields();
+      const f = ff[state.cursor];
       if (key.name === "escape") {
         screen.removeListener("keypress", onKey);
-        cleanup();
+        close();
       } else if (key.name === "up") {
-        spawnState.step = Math.max(0, spawnState.step - 1);
-        // Skip telegram token step if not telegram
-        if (spawnState.step === 4 && spawnState.channels !== "telegram") spawnState.step = 3;
-        renderForm();
+        state.cursor = Math.max(0, state.cursor - 1);
+        draw();
       } else if (key.name === "down") {
-        spawnState.step = Math.min(maxStep(), spawnState.step + 1);
-        if (spawnState.step === 4 && spawnState.channels !== "telegram") spawnState.step = 5;
-        renderForm();
-      } else if (key.name === "left") {
-        cycleOption(-1);
-      } else if (key.name === "right") {
-        cycleOption(1);
-      } else if (key.name === "tab") {
-        screen.removeListener("keypress", onKey);
-        launch();
+        state.cursor = Math.min(ff.length - 1, state.cursor + 1);
+        draw();
+      } else if (key.name === "left" || key.name === "right") {
+        const d = key.name === "left" ? -1 : 1;
+        if (f === "isolation") {
+          const i = isoOpts.indexOf(state.isolation);
+          state.isolation = isoOpts[(i + d + isoOpts.length) % isoOpts.length];
+        } else if (f === "channel") {
+          const i = chOpts.indexOf(state.channel);
+          state.channel = chOpts[(i + d + chOpts.length) % chOpts.length];
+        } else if (f === "egress") {
+          state.learnEgress = !state.learnEgress;
+        }
+        draw();
       } else if (key.name === "return" || key.name === "enter") {
-        const s = spawnState.step;
-        if (s === 0) {
-          screen.removeListener("keypress", onKey);
-          promptTextInput("name");
-          inputField.once("action", () => {
-            screen.on("keypress", onKey);
-            spawnState.step = 1;
-            renderForm();
-          });
-        } else if (s === 1) {
-          screen.removeListener("keypress", onKey);
-          promptTextInput("model");
-          inputField.once("action", () => {
-            screen.on("keypress", onKey);
-            spawnState.step = 2;
-            renderForm();
-          });
-        } else if (s === 4 && spawnState.channels === "telegram") {
-          screen.removeListener("keypress", onKey);
-          promptTextInput("telegramToken");
-          inputField.once("action", () => {
-            screen.on("keypress", onKey);
-            spawnState.step = 5;
-            renderForm();
-          });
-        } else if (s >= maxStep()) {
-          screen.removeListener("keypress", onKey);
-          launch();
-        } else {
-          spawnState.step++;
-          if (spawnState.step === 4 && spawnState.channels !== "telegram") spawnState.step = 5;
-          renderForm();
+        if (f === "name") startEdit("name");
+        else if (f === "model") startEdit("model");
+        else if (f === "tgtoken") startEdit("telegramToken");
+        else if (f === "launch") { screen.removeListener("keypress", onKey); launch(); }
+        else {
+          // Cycle fields advance on Enter too
+          state.cursor = Math.min(ff.length - 1, state.cursor + 1);
+          draw();
         }
       }
     };
 
     screen.on("keypress", onKey);
-    renderForm();
+    draw();
   });
 
   // Model switch
