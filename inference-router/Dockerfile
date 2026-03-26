@@ -25,6 +25,7 @@ RUN cargo build --release --package azureclaw-inference-router
 # ─── Runtime ──────────────────────────────────────────────────────────────────
 
 FROM ${AZURELINUX_BASE}
+ARG VERSION=0.1.0
 
 RUN tdnf install -y ca-certificates shadow-utils iptables && tdnf clean all
 
