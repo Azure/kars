@@ -400,7 +400,8 @@ async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<Stri
         args.extend(["-H".into(), "Content-Type: application/json".into()]);
         args.extend(["-d".into(), body.unwrap().into()]);
     }
-    args.push(format!("http://localhost{}", path));
+    // The hostname is ignored when using --unix-socket; "docker" is just a placeholder
+    args.push(format!("http://docker/v1.41{}", path));
 
     let output = tokio::process::Command::new("curl")
         .args(&args)
