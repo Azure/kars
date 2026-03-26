@@ -33,7 +33,6 @@
 
 import { Command } from "commander";
 import { execa } from "execa";
-import { spawn as nodeSpawn } from "child_process";
 import blessed from "blessed";
 import contrib from "blessed-contrib";
 
@@ -1548,56 +1547,48 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
     dialogOpen = true;
 
-    // Suspend blessed — switch to normal terminal buffer
+    // Save blessed terminal state and fully leave the alternate screen
+    try { screen.program.lsaveCursor("operator"); } catch {}
     screen.program.normalBuffer();
     screen.program.showCursor();
-    // @ts-ignore — program internal
-    if (screen.program.input?.setRawMode) screen.program.input.setRawMode(false);
+    screen.program.flush();
 
-    process.stdout.write(`\x1b[2J\x1b[H`); // clear screen
-    process.stdout.write(
-      `\x1b[36m  Connected to \x1b[1m${sb.name}\x1b[0m\x1b[36m` +
-      ` (${sb.isolation}, ${sb.model})\x1b[0m\n` +
-      `\x1b[90m  Chat:    openclaw tui\n` +
-      `  Message: openclaw agent --local -m "hello"\n` +
-      `  Return:  type "exit"\x1b[0m\n\n`
-    );
+    // Give up raw mode so the child process gets clean stdin
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false);
+      process.stdin.resume();
+    }
 
-    const child = nodeSpawn("kubectl", [
+    // Use spawnSync to block — avoids any async blessed interference
+    const { spawnSync } = await import("child_process");
+    const result = spawnSync("kubectl", [
       "exec", "-it", "-n", sb.namespace,
       `deploy/${sb.name}`, "-c", "openclaw",
-      "--", "/bin/bash", "--login",
+      "--", "openclaw", "tui",
     ], {
       stdio: "inherit",
       env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
     });
 
-    child.on("exit", () => {
-      // Resume blessed — switch back to alternate buffer
-      // @ts-ignore
-      if (screen.program.input?.setRawMode) screen.program.input.setRawMode(true);
-      screen.program.alternateBuffer();
-      screen.program.hideCursor();
-      screen.alloc();
-      dialogOpen = false;
-      render();
-      screen.render();
+    // Restore blessed terminal state
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+    screen.program.alternateBuffer();
+    try { screen.program.lrestoreCursor("operator"); } catch {}
+    screen.program.hideCursor();
+    screen.program.flush();
+    screen.alloc();
+    dialogOpen = false;
+    render();
+    screen.render();
 
+    if (result.status === 0) {
       activityLog.log(`{green-fg}↩ Back from ${sb.name}{/}`);
-      screen.render();
-    });
-
-    child.on("error", (err) => {
-      process.stdout.write(`\x1b[31m  Failed to connect: ${err.message}\x1b[0m\n`);
-      // @ts-ignore
-      if (screen.program.input?.setRawMode) screen.program.input.setRawMode(true);
-      screen.program.alternateBuffer();
-      screen.program.hideCursor();
-      screen.alloc();
-      dialogOpen = false;
-      render();
-      screen.render();
-    });
+    } else {
+      activityLog.log(`{red-fg}✗ Connection to ${sb.name} failed{/}`);
+    }
+    screen.render();
   }
 
   screen.key(["enter"], () => connectToAgent());
