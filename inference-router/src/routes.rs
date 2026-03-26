@@ -1085,38 +1085,61 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
-    let amid = &state.governance.sandbox_name;
-    let url = format!(
-        "{}/v1/registry/reputation/score?amid={}",
-        registry_url.trim_end_matches('/'),
-        amid
-    );
+    let sandbox_name = &state.governance.sandbox_name;
+    let base = registry_url.trim_end_matches('/');
 
-    // Fetch registry reputation (best-effort, 3s timeout)
-    let registry = match state.client
-        .get(&url)
+    // Step 1: Look up our AMID by searching for our sandbox name as a capability.
+    // The plugin registers with capabilities: ["azureclaw-agent", "task-execution", sandbox_name]
+    let amid = match state.client
+        .get(&format!("{}/v1/registry/search?capability={}", base, sandbox_name))
         .timeout(std::time::Duration::from_secs(3))
         .send()
         .await
     {
         Ok(resp) if resp.status().is_success() => {
-            resp.json::<serde_json::Value>().await.ok()
+            resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+                // Pick the most recently seen agent matching our name
+                v.get("results")?.as_array()?
+                    .iter()
+                    .filter(|a| a.get("display_name").and_then(|n| n.as_str()) == Some(sandbox_name))
+                    .max_by_key(|a| a.get("last_seen").and_then(|t| t.as_str()).unwrap_or("").to_string())
+                    .and_then(|a| a.get("amid").and_then(|v| v.as_str()).map(String::from))
+            })
         }
-        Ok(resp) => {
-            tracing::debug!(status = %resp.status(), "Registry reputation lookup returned non-200");
-            None
+        _ => None,
+    };
+
+    // Step 2: If we found our AMID, fetch reputation score
+    let registry = if let Some(ref agent_amid) = amid {
+        match state.client
+            .get(&format!("{}/v1/registry/reputation/score?amid={}", base, agent_amid))
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                resp.json::<serde_json::Value>().await.ok()
+            }
+            Ok(resp) => {
+                tracing::debug!(status = %resp.status(), "Registry reputation lookup returned non-200");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "Registry reputation lookup failed");
+                None
+            }
         }
-        Err(e) => {
-            tracing::debug!(error = %e, "Registry reputation lookup failed");
-            None
-        }
+    } else {
+        tracing::debug!(sandbox = %sandbox_name, "Agent not found in registry — not yet registered");
+        None
     };
 
     // Local trust store snapshot
     let local_trust = state.governance.trust.all_agents().await;
 
     Json(serde_json::json!({
-        "amid": amid,
+        "amid": amid.as_deref().unwrap_or(sandbox_name),
+        "sandbox": sandbox_name,
         "registry": registry,
         "local_trust": local_trust,
         "default_score": state.governance.trust.default_score,
