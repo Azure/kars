@@ -27,11 +27,13 @@ pub struct WorkloadIdentityAuth {
 
 impl WorkloadIdentityAuth {
     pub fn new() -> Self {
-        // Try to load API key from secret mount (dev mode)
+        // Try to load API key from secret mount (dev mode), then env var (sub-agent)
         let api_key = std::fs::read_to_string("/run/secrets/azure-openai-key")
             .ok()
+            .or_else(|| std::fs::read_to_string("/tmp/azure-openai-key").ok())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("AZURE_OPENAI_API_KEY").ok().filter(|s| !s.is_empty()));
 
         if api_key.is_some() {
             tracing::info!("Auth mode: API key from /run/secrets/ (dev mode)");

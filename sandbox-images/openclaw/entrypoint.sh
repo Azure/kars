@@ -54,10 +54,16 @@ OPENCLAW_DIR="/sandbox/.openclaw"
 OPENCLAW_CONFIG="$OPENCLAW_DIR/openclaw.json"
 WORKSPACE_DIR="/sandbox/.openclaw/workspace"
 
-# Read API key from mounted secret
+# Read API key from mounted secret or env var (sub-agents get it via env)
 API_KEY=""
 if [ -f /run/secrets/azure-openai-key ]; then
   API_KEY=$(cat /run/secrets/azure-openai-key)
+elif [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
+  API_KEY="$AZURE_OPENAI_API_KEY"
+  # Write to the secret path so the inference router can read it
+  mkdir -p /run/secrets 2>/dev/null || true
+  echo -n "$API_KEY" > /run/secrets/azure-openai-key 2>/dev/null || \
+    echo -n "$API_KEY" > /tmp/azure-openai-key 2>/dev/null
 fi
 
 # Get config from env vars (set by azureclaw dev/up)
