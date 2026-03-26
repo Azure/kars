@@ -262,6 +262,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   let focusedPanel: "agents" | "egress" = "agents";
   let refreshCount = 0;
   let isRefreshing = false;
+  let dialogOpen = false;
 
   /** Egress domains for the currently selected agent. */
   function selectedEgressDomains(): EgressDomain[] {
@@ -1131,6 +1132,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     return focusedPanel === "agents" ? sandboxes : selectedEgressDomains();
   }
   function moveSelection(delta: number) {
+    if (dialogOpen) return;
     const widget = getActiveTable();
     const list = getActiveList();
     if (list.length === 0) return;
@@ -1153,6 +1155,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
   });
 
   screen.key(["tab"], () => {
+    if (dialogOpen) return;
     focusedPanel = focusedPanel === "agents" ? "egress" : "agents";
     const widget = getActiveTable();
     const target = (widget as any).rows || widget;
@@ -1162,16 +1165,18 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   screen.key(["up", "k"], () => moveSelection(-1));
   screen.key(["down", "j"], () => moveSelection(1));
-  screen.key(["r"], async () => { await refresh(); });
+  screen.key(["r"], async () => { if (!dialogOpen) await refresh(); });
 
   // Cluster view toggle
   screen.key(["c"], () => {
+    if (dialogOpen) return;
     viewMode = viewMode === "agents" ? "cluster" : "agents";
     render();
   });
 
   // Egress actions
   screen.key(["a"], async () => {
+    if (dialogOpen) return;
     if (focusedPanel !== "egress") return;
     const domains = selectedEgressDomains();
     if (domains.length === 0) return;
@@ -1183,6 +1188,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     }
   });
   screen.key(["d"], async () => {
+    if (dialogOpen) return;
     if (focusedPanel === "egress") {
       // Deny selected domain
       const domains = selectedEgressDomains();
@@ -1209,6 +1215,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     await refresh();
   });
   screen.key(["e"], async () => {
+    if (dialogOpen) return;
     if (sandboxes.length === 0) return;
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
@@ -1217,6 +1224,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // Spawn — multi-step wizard
   screen.key(["n"], () => {
+    if (dialogOpen) return;
+    dialogOpen = true;
     const spawnState = {
       name: "", model: "gpt-4.1", isolation: "enhanced",
       channels: "" as string, telegramToken: "", learnEgress: true,
@@ -1268,7 +1277,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       screen.render();
     }
 
-    function cleanup() { dialog.destroy(); screen.render(); }
+    function cleanup() { dialogOpen = false; dialog.destroy(); screen.render(); }
 
     function cycleOption(delta: number) {
       if (spawnState.step === 2) {
@@ -1390,7 +1399,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // Model switch
   screen.key(["m"], () => {
+    if (dialogOpen) return;
     if (sandboxes.length === 0) return;
+    dialogOpen = true;
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
     if (!sb) return;
@@ -1405,7 +1416,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     inputBox.focus();
     screen.render();
     inputBox.on("submit", async (value: string) => {
-      inputBox.destroy(); screen.render();
+      dialogOpen = false; inputBox.destroy(); screen.render();
       const model = value.trim();
       if (!model) return;
       activityLog.log(`{cyan-fg}⏳ ${sb.name} → ${model}...{/}`);
@@ -1418,11 +1429,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       }
       await refresh();
     });
-    inputBox.on("cancel", () => { inputBox.destroy(); screen.render(); });
+    inputBox.on("cancel", () => { dialogOpen = false; inputBox.destroy(); screen.render(); });
   });
 
   // Logs
   screen.key(["l"], async () => {
+    if (dialogOpen) return;
     if (sandboxes.length === 0) return;
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
@@ -1445,10 +1457,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // Delete
   function deleteSelectedAgent() {
+    if (dialogOpen) return;
     if (sandboxes.length === 0) return;
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
     if (!sb) return;
+    dialogOpen = true;
 
     // Custom confirm dialog with selectable buttons
     const dialog = blessed.box({
@@ -1485,7 +1499,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       screen.render();
     }
 
-    const cleanup = () => { dialog.destroy(); screen.render(); };
+    const cleanup = () => { dialogOpen = false; dialog.destroy(); screen.render(); };
 
     const onKey = async (_ch: any, key: any) => {
       if (key.name === "left" || key.name === "right" || key.name === "tab") {
