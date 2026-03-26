@@ -182,19 +182,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     },
   });
 
-  // Rows 5–9: Security panel (cols 0–3)
-  const securityBox = grid.set(5, 0, 5, 4, blessed.box, {
+  // Rows 5–9: Security panel (cols 0–5) — wider for AGT governance detail
+  const securityBox = grid.set(5, 0, 5, 5, blessed.box, {
     tags: true,
-    label: " 🔒 Security Controls ",
+    label: " 🔒 Security Controls  [scroll: mouse/pgup/pgdn] ",
     scrollable: true,
     alwaysScroll: true,
     mouse: true,
+    keys: true,
+    scrollbar: { ch: "│", style: { fg: "magenta" } },
     style: { border: { fg: "magenta" }, fg: "white" },
     padding: { left: 1 },
   });
 
-  // Rows 5–9: Egress list (cols 4–8) — uses blessed.list for colored tags
-  const egressList = grid.set(5, 4, 5, 4, blessed.list, {
+  // Rows 5–9: Egress list (cols 5–8) — uses blessed.list for colored tags
+  const egressList = grid.set(5, 5, 5, 3, blessed.list, {
     keys: false,
     vi: false,
     tags: true,
@@ -594,8 +596,16 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
           const agent = e.agent_id || e.agent || "";
           const tool = e.tool || "";
           const result = e.result || e.decision || "";
-          const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "";
-          return `${ts} ${action}${tool ? ` [${tool}]` : ""}${agent ? ` ${agent.substring(0, 12)}` : ""} → ${result}`;
+          let ts = "";
+          if (e.timestamp) {
+            const d = new Date(e.timestamp);
+            ts = isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
+          }
+          const parts = [action];
+          if (tool) parts.push(`[${tool}]`);
+          if (agent) parts.push(agent.substring(0, 16));
+          if (result) parts.push(`→ ${result}`);
+          return ts ? `${ts} ${parts.join(" ")}` : parts.join(" ");
         });
       } catch { /* parse fail */ }
     }
