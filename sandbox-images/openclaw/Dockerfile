@@ -5,7 +5,7 @@
 #
 # Build: docker build -f sandbox-images/openclaw/Dockerfile .
 
-ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:a452d39c91576f5a2c983c7d3b62521fabd08e16b4a7237e24bf2be3b06e1651
 ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:latest
 
 # ─── Use pre-built inference router image ────────────────────────────────────
