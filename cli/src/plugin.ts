@@ -152,14 +152,29 @@ async function processTaskWithTools(
       type: "function" as const,
       function: {
         name: "foundry_file_search",
-        description: "Search uploaded documents and knowledge bases via Azure AI Foundry's file_search. Use for RAG over vector stores or Azure AI Search indexes.",
+        description: "Search uploaded documents and knowledge bases via Azure AI Foundry's file_search. Requires vector_store_ids — use foundry_memory instead for general memory/knowledge storage.",
         parameters: {
           type: "object",
           properties: {
             query: { type: "string", description: "The search query." },
-            vector_store_ids: { type: "array", items: { type: "string" }, description: "Optional vector store IDs to search." },
+            vector_store_ids: { type: "array", items: { type: "string" }, description: "Vector store IDs to search (required)." },
           },
-          required: ["query"],
+          required: ["query", "vector_store_ids"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "foundry_memory",
+        description: "Persistent agent memory via Azure AI Foundry Memory Store. Store facts, preferences, and context that persists across sessions. Use 'search' to recall, 'update' to store new knowledge.",
+        parameters: {
+          type: "object",
+          properties: {
+            operation: { type: "string", enum: ["search", "update"], description: "Operation: 'search' to find relevant memories, 'update' to store new facts." },
+            text: { type: "string", description: "For 'update': the fact to remember. For 'search': the query to find relevant memories." },
+          },
+          required: ["operation", "text"],
         },
       },
     },
@@ -168,7 +183,7 @@ async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_file_search: search documents and knowledge bases\nUse the appropriate tool for each task. Be concise and report actual results.",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_file_search: search documents in vector stores (requires vector_store_ids)\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. Be concise and report actual results.",
     },
     {
       role: "user",
@@ -272,13 +287,11 @@ async function processTaskWithTools(
                 store: false,
               };
             } else {
-              // foundry_file_search
-              const fileSearchTool: any = { type: "file_search" };
-              if (args.vector_store_ids?.length) fileSearchTool.file_search = { vector_store_ids: args.vector_store_ids };
+              // foundry_file_search — vector_store_ids is now required
               reqBody = {
                 model: model,
                 input: args.query,
-                tools: [fileSearchTool],
+                tools: [{ type: "file_search", file_search: { vector_store_ids: args.vector_store_ids } }],
                 store: false,
               };
             }
@@ -321,6 +334,96 @@ async function processTaskWithTools(
               result = foundryResult;
             }
             log.info(`AGT sub-agent ${fnName} result: ${result.slice(0, 200)}`);
+          } else if (fnName === "foundry_memory") {
+            // Route through the inference router → Foundry Memory Store API
+            log.info(`AGT sub-agent foundry_memory: ${args.operation} — ${(args.text as string || "").slice(0, 100)}`);
+            const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+            const store = `memory-${agentName}`;
+            const scope = agentName;
+            const apiVer = "api-version=2025-11-15-preview";
+            const makeItem = (content: string) => ({
+              type: "message", role: "user",
+              content: [{ type: "input_text", text: content }],
+            });
+
+            let memPath: string;
+            let memBody: any;
+            if (args.operation === "update") {
+              memPath = `/memory_stores/${store}:update_memories?${apiVer}`;
+              memBody = { scope, items: [makeItem(args.text as string)], update_delay: 0 };
+            } else {
+              memPath = `/memory_stores/${store}:search_memories?${apiVer}`;
+              memBody = { scope, items: [makeItem(args.text as string)], options: { max_memories: 10 } };
+            }
+
+            const memResult = await new Promise<string>((resolve, reject) => {
+              const postBody = JSON.stringify(memBody);
+              const req = http.request(`http://127.0.0.1:8443${memPath}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
+                timeout: 30000,
+              }, (res) => {
+                let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+              });
+              req.on("error", reject);
+              req.on("timeout", () => { req.destroy(); reject(new Error("Memory API timeout")); });
+              req.write(postBody);
+              req.end();
+            });
+
+            try {
+              const parsed = JSON.parse(memResult);
+              if (parsed.error) {
+                // Auto-create store on not_found, then retry
+                if ((parsed.error.code === "not_found" || parsed.error.message?.includes("not found")) && args.operation === "update") {
+                  log.info(`Creating memory store '${store}'...`);
+                  const chatModel = process.env.OPENCLAW_MODEL || model;
+                  const createBody = JSON.stringify({
+                    name: store,
+                    description: "AzureClaw sub-agent persistent memory",
+                    definition: { kind: "default", chat_model: chatModel, embedding_model: "text-embedding-3-small",
+                      options: { user_profile_enabled: true, chat_summary_enabled: true } },
+                  });
+                  await new Promise<void>((resolve, reject) => {
+                    const req = http.request(`http://127.0.0.1:8443/memory_stores?${apiVer}`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(createBody) },
+                      timeout: 15000,
+                    }, (res) => { let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve()); });
+                    req.on("error", reject);
+                    req.write(createBody);
+                    req.end();
+                  });
+                  // Retry the original operation
+                  const retryResult = await new Promise<string>((resolve, reject) => {
+                    const postBody = JSON.stringify(memBody);
+                    const req = http.request(`http://127.0.0.1:8443${memPath}`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
+                      timeout: 30000,
+                    }, (res) => { let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body)); });
+                    req.on("error", reject);
+                    req.write(postBody);
+                    req.end();
+                  });
+                  result = retryResult;
+                } else {
+                  result = `Memory error: ${JSON.stringify(parsed.error)}`;
+                }
+              } else {
+                if (args.operation === "update") {
+                  result = `Memory updated successfully (id: ${parsed.update_id || parsed.id || "ok"})`;
+                } else {
+                  const memories = parsed.memories || [];
+                  result = memories.length > 0
+                    ? memories.map((m: any) => `[${m.score?.toFixed(2) || "?"}] ${m.content || m.text || JSON.stringify(m)}`).join("\n")
+                    : "No relevant memories found.";
+                }
+              }
+            } catch {
+              result = memResult;
+            }
+            log.info(`AGT sub-agent foundry_memory result: ${result.slice(0, 200)}`);
           } else {
             // exec_command
             const cmd = args.command || "";
