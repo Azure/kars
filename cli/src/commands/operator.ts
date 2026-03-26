@@ -182,21 +182,19 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     },
   });
 
-  // Rows 5–9: Security panel (cols 0–5) — wider for AGT governance detail
-  const securityBox = grid.set(5, 0, 5, 5, blessed.box, {
+  // Rows 5–9: Security panel (cols 0–3)
+  const securityBox = grid.set(5, 0, 5, 4, blessed.box, {
     tags: true,
-    label: " 🔒 Security Controls  [scroll: mouse/pgup/pgdn] ",
+    label: " 🔒 Security Controls ",
     scrollable: true,
     alwaysScroll: true,
     mouse: true,
-    keys: true,
-    scrollbar: { ch: "│", style: { fg: "magenta" } },
     style: { border: { fg: "magenta" }, fg: "white" },
     padding: { left: 1 },
   });
 
-  // Rows 5–9: Egress list (cols 5–8) — uses blessed.list for colored tags
-  const egressList = grid.set(5, 5, 5, 3, blessed.list, {
+  // Rows 5–9: Egress list (cols 4–8) — uses blessed.list for colored tags
+  const egressList = grid.set(5, 4, 5, 4, blessed.list, {
     keys: false,
     vi: false,
     tags: true,
@@ -211,8 +209,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     },
   });
 
-  // Rows 5–7: Activity log (cols 8–11)
-  const activityLog = grid.set(5, 8, 3, 4, contrib.log, {
+  // Rows 5–6: Activity log (cols 8–11)
+  const activityLog = grid.set(5, 8, 2, 4, contrib.log, {
     fg: "green",
     label: " Log ",
     tags: true,
@@ -220,11 +218,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     bufferLength: 80,
   });
 
-  // Rows 8–9: Sparkline (cols 8–11)
-  const sparkline = grid.set(8, 8, 2, 4, contrib.sparkline, {
-    label: " Activity ",
+  // Rows 7–9: AGT Governance panel (cols 8–11)
+  const agtPanel = grid.set(7, 8, 3, 4, blessed.box, {
     tags: true,
-    style: { fg: "cyan", border: { fg: "cyan" } },
+    label: " 🛡  AGT Governance ",
+    scrollable: true,
+    alwaysScroll: true,
+    mouse: true,
+    style: { border: { fg: "blue" }, fg: "white" },
+    padding: { left: 1 },
   });
 
   // Rows 10–11: Status bar
@@ -235,8 +237,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
   // ── Cluster Health Overlay (hidden by default) ──────────────────
 
-  // Agent-detail panels (the bottom row: security, egress, log, sparkline)
-  const agentDetailPanels = [securityBox, egressList, activityLog, sparkline];
+  // Agent-detail panels (the bottom row: security, egress, log, AGT)
+  const agentDetailPanels = [securityBox, egressList, activityLog, agtPanel];
 
   // Cluster overlay: node table (left) + cluster info (right)
   const clusterNodeBox = blessed.box({
@@ -287,8 +289,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     for (const domains of egressByAgent.values()) n += domains.length;
     return n;
   }
-
-  const sparkData: number[] = new Array(30).fill(0);
 
   // Spinner
   const spinFrames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -926,27 +926,57 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     if (sec.agtEnabled) {
       lines.push(
         "",
-        `{bold}{underline}AGT Governance{/}`,
-        ` Status        ${ok(sec.agtEnabled)} enabled`,
-        ` Audit Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "COMPROMISED"}`,
-        ` Known Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents}`,
+        `{bold}{underline}AGT{/}`,
+        ` ${ok(sec.agtEnabled)} enabled  │  see AGT panel →`,
       );
-      if (sec.agtTrustScores.length > 0) {
-        lines.push(` {bold}Trust Scores{/}`);
-        for (const t of sec.agtTrustScores) {
-          const tColor = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
-          lines.push(`   {${tColor}-fg}${t.score}{/} ${t.tier} ${t.agent.substring(0, 20)}`);
-        }
-      }
-      if (sec.agtRecentAudit.length > 0) {
-        lines.push(` {bold}Recent Audit{/}`);
-        for (const entry of sec.agtRecentAudit) {
-          lines.push(`   {gray-fg}${entry}{/}`);
-        }
-      }
     }
 
     securityBox.setContent(lines.join("\n"));
+  }
+
+  function renderAGT() {
+    const idx = (agentTable as any).rows?.selected ?? 0;
+    const sb = sandboxes[idx];
+    if (!sb) {
+      agtPanel.setContent("{gray-fg}No agent selected{/}");
+      return;
+    }
+
+    const sec = securityStates.get(sb.name);
+    if (!sec) {
+      agtPanel.setContent(`{bold}${sb.name}{/}\n{gray-fg}Polling...{/}`);
+      return;
+    }
+
+    if (!sec.agtEnabled) {
+      agtPanel.setContent("{gray-fg}AGT not enabled{/}\n{gray-fg}Use --governance flag{/}");
+      return;
+    }
+
+    const lines: string[] = [
+      `{bold}${sb.name}{/}`,
+      ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
+      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents} known`,
+    ];
+
+    if (sec.agtTrustScores.length > 0) {
+      lines.push("{bold}Trust{/}");
+      for (const t of sec.agtTrustScores) {
+        const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
+        lines.push(` {${c}-fg}${t.score}{/} ${t.tier} ${t.agent.substring(0, 18)}`);
+      }
+    }
+
+    if (sec.agtRecentAudit.length > 0) {
+      lines.push("{bold}Audit{/}");
+      for (const entry of sec.agtRecentAudit) {
+        lines.push(` {gray-fg}${entry}{/}`);
+      }
+    } else {
+      lines.push("{gray-fg}No audit entries yet{/}");
+    }
+
+    agtPanel.setContent(lines.join("\n"));
   }
 
   function renderCluster() {
@@ -1124,8 +1154,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
     // Security panel (follows agent selection)
     renderSecurity();
 
-    // Sparkline
-    sparkline.setData(["Agents"], [sparkData]);
+    // AGT Governance panel
+    renderAGT();
 
     // Header
     renderHeader();
@@ -1188,10 +1218,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
         securityStates.set(sec.sandbox, sec);
       }
       clusterData = cluster;
-
-      // Sparkline
-      sparkData.push(sandboxes.length);
-      if (sparkData.length > 30) sparkData.shift();
 
       refreshCount++;
       activityLog.log(
