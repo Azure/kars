@@ -357,9 +357,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           ], kubeContext), { stdio: "pipe", timeout: 15000 });
           const pods = JSON.parse(podJson);
           if (pods.items?.length > 0) {
-            const pod = pods.items[0];
+            // Pick the best pod: Running > Pending > Terminating
+            const sorted = [...pods.items].sort((a: any, b: any) => {
+              const order = (p: any) => {
+                if (p.metadata?.deletionTimestamp) return 3; // Terminating
+                const phase = p.status?.phase || "";
+                if (phase === "Running") return 0;
+                if (phase === "Pending") return 1;
+                return 2;
+              };
+              return order(a) - order(b);
+            });
+            const pod = sorted[0];
+            const isTerminating = !!pod.metadata?.deletionTimestamp;
             podName = pod.metadata?.name || "";
-            const pPhase = pod.status?.phase || "Unknown";
+            const pPhase = isTerminating ? "Terminating" : (pod.status?.phase || "Unknown");
             const statuses: any[] = pod.status?.containerStatuses || [];
             const readyCount = statuses.filter((c: any) => c.ready).length;
             const totalCount = statuses.length;
@@ -370,11 +382,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
               c.state?.waiting?.reason === "CrashLoopBackOff" ||
               c.state?.waiting?.reason === "Error",
             );
-            if (hasCrash || pPhase === "Failed") health = "down";
+            if (isTerminating) health = "degraded";
+            else if (hasCrash || pPhase === "Failed") health = "down";
             else if (readyCount === totalCount && totalCount > 0) health = "healthy";
             else if (readyCount > 0) health = "degraded";
             else if (pPhase === "Pending") health = "pending";
             else health = "unknown";
+
+            // Don't try kubectl exec on unreachable pods
+            if (isTerminating || pPhase === "Pending" || readyCount === 0) podName = "";
           }
         } catch { /* no pod */ }
 
