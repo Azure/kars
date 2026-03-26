@@ -189,6 +189,39 @@ export function addCommand(): Command {
         return;
       }
 
+      // Pre-flight: check for Kata nodepool when confidential isolation is requested
+      if (options.isolation === "confidential") {
+        try {
+          const { stdout } = await execa("kubectl", [
+            "get", "nodes", "-l", "azureclaw.azure.com/pool=sandbox-kata",
+            "--no-headers",
+          ], { stdio: "pipe" });
+          const nodeCount = stdout.trim().split("\n").filter(Boolean).length;
+          if (nodeCount === 0) throw new Error("no nodes");
+        } catch {
+          console.error(chalk.red("\n✗ No Kata nodepool found."));
+          console.error(chalk.dim("  Confidential isolation requires a nodepool with workloadRuntime: KataMshvVmIsolation"));
+          console.error(chalk.dim("  and label azureclaw.azure.com/pool=sandbox-kata.\n"));
+
+          const ctx = loadContext();
+          if (ctx?.aksCluster && ctx?.resourceGroup) {
+            console.error(chalk.yellow("  To provision one, run:"));
+            console.error(chalk.cyan(`    az aks nodepool add \\`));
+            console.error(chalk.cyan(`      --resource-group ${ctx.resourceGroup} \\`));
+            console.error(chalk.cyan(`      --cluster-name ${ctx.aksCluster} \\`));
+            console.error(chalk.cyan(`      --name katapool --node-count 1 \\`));
+            console.error(chalk.cyan(`      --node-vm-size Standard_D4as_v6 \\`));
+            console.error(chalk.cyan(`      --os-sku AzureLinux \\`));
+            console.error(chalk.cyan(`      --workload-runtime KataMshvVmIsolation \\`));
+            console.error(chalk.cyan(`      --node-labels azureclaw.azure.com/pool=sandbox-kata \\`));
+            console.error(chalk.cyan(`      --node-taints azureclaw.azure.com/sandbox=true:NoSchedule`));
+          } else {
+            console.error(chalk.dim("  Run 'azureclaw up --isolation confidential' or add a katapool manually."));
+          }
+          process.exit(1);
+        }
+      }
+
       const spinner = ora(`Creating sandbox '${name}' (${options.isolation}, ${options.model})...`).start();
 
       try {
