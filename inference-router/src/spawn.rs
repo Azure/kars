@@ -96,7 +96,16 @@ pub async fn create_sandbox(
     );
 
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
-    let isolation = req.isolation.as_deref().unwrap_or("enhanced");
+    let parent_isolation = std::env::var("SANDBOX_ISOLATION").unwrap_or_else(|_| "enhanced".into());
+    let isolation = req.isolation.as_deref().unwrap_or(&parent_isolation);
+
+    // Prevent downgrading from confidential parent
+    if parent_isolation == "confidential" && isolation != "confidential" {
+        return Err(format!(
+            "Cannot spawn '{}' sub-agent from confidential parent — sub-agents must also be confidential",
+            isolation,
+        ));
+    }
 
     // Build spec
     let mut spec = serde_json::json!({

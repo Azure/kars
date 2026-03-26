@@ -579,6 +579,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
         json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
         json!({"name": "SANDBOX_NAME", "value": &name}),
+        json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
         json!({"name": "ADMIN_TOKEN", "value": &admin_token}),
         json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
     ];
