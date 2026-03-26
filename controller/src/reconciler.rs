@@ -102,6 +102,8 @@ struct Context {
     foundry_endpoint: String,
     /// Foundry project endpoint for standalone APIs (Memory Store, IQ, agents)
     foundry_project_endpoint: String,
+    /// JSON array of deployed model names — injected via FOUNDRY_DEPLOYMENTS env
+    foundry_deployments: String,
     /// Kubelet MI client ID for IMDS fallback — injected via IMDS_CLIENT_ID env
     imds_client_id: String,
     /// Azure AI Content Safety endpoint — injected via CONTENT_SAFETY_ENDPOINT env
@@ -534,6 +536,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
     if !ctx.foundry_project_endpoint.is_empty() {
         openclaw_env.push(json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}));
+    }
+    // Foundry deployments list (so plugin shows only deployed models, not full catalog)
+    if !ctx.foundry_deployments.is_empty() {
+        openclaw_env.push(json!({"name": "FOUNDRY_DEPLOYMENTS", "value": &ctx.foundry_deployments}));
     }
     // Inject Foundry Agent ID if set in status (for tools needing agent runs)
     if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone())
@@ -1214,6 +1220,8 @@ pub async fn run(client: Client) -> Result<()> {
         .unwrap_or_default();
     let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT")
         .unwrap_or_default();
+    let foundry_deployments = std::env::var("FOUNDRY_DEPLOYMENTS")
+        .unwrap_or_default();
     let imds_client_id = std::env::var("IMDS_CLIENT_ID")
         .unwrap_or_default();
     // Content Safety endpoint — defaults to Foundry endpoint if not set separately,
@@ -1250,6 +1258,22 @@ pub async fn run(client: Client) -> Result<()> {
         );
     }
 
+    // Ensure managed identity has RBAC roles on the Foundry resource at startup.
+    // Idempotent — only creates assignments that don't already exist.
+    if let Some(ref fm) = fedcred {
+        let rbac_endpoint = if !foundry_endpoint.is_empty() {
+            &foundry_endpoint
+        } else {
+            &foundry_project_endpoint
+        };
+        if !rbac_endpoint.is_empty() {
+            match fm.ensure_role_assignments(rbac_endpoint).await {
+                Ok(()) => tracing::info!("RBAC role assignments verified on Foundry resource"),
+                Err(e) => tracing::warn!("RBAC role assignment check failed (non-fatal): {e}"),
+            }
+        }
+    }
+
     let ctx = Arc::new(Context {
         client,
         wi_client_id,
@@ -1258,6 +1282,7 @@ pub async fn run(client: Client) -> Result<()> {
         openai_endpoint,
         foundry_endpoint,
         foundry_project_endpoint,
+        foundry_deployments,
         imds_client_id,
         content_safety_endpoint,
         fedcred,
