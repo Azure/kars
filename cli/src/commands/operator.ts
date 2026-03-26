@@ -1255,13 +1255,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
       tags: true, style: { fg: "white", bg: "black" },
     });
 
-    const editBox = blessed.textbox({
-      parent: dialog, bottom: 0, left: 1, width: 58, height: 1,
-      style: { fg: "white", bg: "blue" },
-      inputOnFocus: true,
-    });
-    editBox.hide();
-
     function draw() {
       const ff = fields();
       const lines: string[] = [];
@@ -1296,19 +1289,30 @@ async function startDashboard(refreshInterval: number, kubeContext?: string) {
 
     function startEdit(field: "name" | "model" | "telegramToken") {
       state.editing = true;
-      editBox.show();
-      editBox.setValue(state[field]);
-      editBox.focus();
+      // Create a fresh textbox each time (blessed reuses are buggy)
+      const input = blessed.textbox({
+        parent: dialog, bottom: 0, left: 1, width: 58, height: 1,
+        style: { fg: "white", bg: "blue" },
+        inputOnFocus: true,
+        keys: true,
+        vi: false,
+      });
+      input.setValue(state[field]);
+      input.focus();
       screen.render();
-      editBox.readInput((_err: any, value?: string) => {
-        if (value !== undefined) state[field] = value.trim();
+
+      const finish = (value?: string) => {
+        if (value) state[field] = value.trim();
         state.editing = false;
-        editBox.hide();
-        // Advance cursor to next field
+        input.destroy();
         const ff = fields();
         if (state.cursor < ff.length - 1) state.cursor++;
         draw();
-      });
+      };
+
+      input.on("submit", (value: string) => finish(value));
+      input.on("cancel", () => finish());
+      input.readInput(() => {});
     }
 
     async function launch() {
