@@ -105,6 +105,7 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 ### ⚙️ Operations
 
 - **One-command deploy** — `azureclaw up` provisions AKS + ACR + Foundry + sandbox end-to-end
+- **Operator dashboard** — `azureclaw operator` launches a live TUI for managing all agents
 - **Credential management** — `azureclaw credentials update` rotates tokens for running sandboxes
 - **Image pipeline** — `azureclaw push` builds and pushes images to ACR with optional rollout
 - **Monitoring** — Prometheus metrics, Log Analytics, eBPF tracing via `azureclaw trace`
@@ -163,9 +164,32 @@ azureclaw add research-bot \
   --channels telegram --telegram-token "BOT_TOKEN" \
   --governance --learn-egress
 
-# Add a minimal agent
+# Add a confidential agent (auto-provisions Kata nodepool if needed)
 azureclaw add helper --model gpt-5-mini --isolation confidential
 ```
+
+### Operator Dashboard
+
+```bash
+azureclaw operator
+```
+
+Live TUI for managing all agents across your cluster:
+
+```
+┌─────────────── 🔱 AzureClaw Operator │ azureclaw-aks │ ● API 5/5 ──┐
+│ ● research-bot    Running   gpt-4.1     enhanced   tg    2h         │
+│ └ kernel-checker  Running   gpt-5-mini  enhanced          45m       │
+│ ● helper          Running   gpt-5-mini  confidential      30m       │
+├── Security ────────┬── Egress ──────────┬── Activity ────────────────┤
+│ Isolation enhanced │ ●P api.openai.com  │ ✓ Approved 3 domains      │
+│ Seccomp   strict   │ ✓A graph.microsoft │ ↻ Refreshed 3 agents      │
+├────────────────────┴────────────────────┴────────────────────────────┤
+│ [Tab] Focus [↑↓] Nav [Enter] Connect [c] Cluster [n] Spawn [q] Quit│
+└─────────────────────────────────────────────────────────────────────-┘
+```
+
+**Keyboard:** `Enter` connect to agent TUI · `Tab` switch panels · `a` approve egress · `Shift+A` approve all · `d` delete/deny · `e` enforce egress · `n` spawn agent · `m` switch model · `c` cluster health · `l` logs · `r` refresh · `q` quit
 
 ### Update Credentials
 
@@ -190,6 +214,7 @@ azureclaw credentials update my-agent \
 | `azureclaw destroy [name]` | Tear down sandbox or entire resource group (`--all`) |
 | `azureclaw push` | Build and push images to ACR (`--only`, `--apply`) |
 | **Operations** | |
+| `azureclaw operator` | Live TUI dashboard — agents, egress, security, cluster health |
 | `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) |
 | `azureclaw status <name>` | Health, model, tokens used |
 | `azureclaw list` | All sandboxes across Docker and AKS |
@@ -246,7 +271,7 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 |---|---|---|
 | `standard` | runc | Kernel-default seccomp, shared node pool |
 | `enhanced` (**default**) | runc | Custom strict seccomp (~219 syscalls), shared node pool |
-| `confidential` | Kata VM | Per-pod dedicated kernel on AMD SEV-SNP hardware; container escapes hit a VM boundary; dedicated node pool |
+| `confidential` | Kata VM | Per-pod dedicated kernel on AMD SEV-SNP hardware; container escapes hit a VM boundary; dedicated node pool; isolation inherited by sub-agents |
 
 ### Credential Compartmentalization
 
