@@ -77,7 +77,7 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 |-------|-------------|---------|-----------|
 | standard | (default runc) | RuntimeDefault | `sandbox` |
 | enhanced (default) | (default runc) | Localhost `azureclaw-strict` (~219 syscalls) | `sandbox` |
-| confidential | `kata-mshv-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
+| confidential | `kata-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
 
 **Isolation inheritance:** The controller exports `SANDBOX_ISOLATION` as an environment variable into every pod. When a sub-agent is spawned via `/sandbox/spawn`, the inference router reads the parent's isolation level from this env var and applies it as the default for the child. Downgrading from `confidential` to a lower isolation level is blocked — the spawn request returns an error.
 
