@@ -354,7 +354,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         try {
           const { stdout: podJson } = await execa("kubectl", kctl([
             "get", "pods", "-n", sandboxNs, "-o", "json",
-          ], kubeContext), { stdio: "pipe" });
+          ], kubeContext), { stdio: "pipe", timeout: 15000 });
           const pods = JSON.parse(podJson);
           if (pods.items?.length > 0) {
             const pod = pods.items[0];
@@ -382,7 +382,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           const { stdout: secretOut } = await execa("kubectl", kctl([
             "get", "secret", `${name}-credentials`, "-n", sandboxNs,
             "-o", "jsonpath={.data}",
-          ], kubeContext), { stdio: "pipe" });
+          ], kubeContext), { stdio: "pipe", timeout: 10000 });
           const chs: string[] = [];
           if (secretOut.includes("TELEGRAM")) chs.push("TG");
           if (secretOut.includes("SLACK")) chs.push("SL");
@@ -511,7 +511,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           "exec", "-n", sb.namespace, sb.podName!,
           "-c", "inference-router", "--",
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
-        ], kubeContext), { stdio: "pipe" });
+        ], kubeContext), { stdio: "pipe", timeout: 10000 });
 
     try {
       const [learnedRes, allowRes] = await Promise.allSettled([
@@ -599,13 +599,13 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           "exec", "-n", sb.namespace, sb.podName!,
           "-c", "inference-router", "--",
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
-        ], kubeContext), { stdio: "pipe" });
+        ], kubeContext), { stdio: "pipe", timeout: 10000 });
 
     // Run all checks in parallel
     // In dev mode, skip K8s-only checks (NetworkPolicy, admin token)
     const k8sCheck = (args: string[]) => devMode
       ? Promise.reject("dev-mode")
-      : execa("kubectl", kctl(args, kubeContext), { stdio: "pipe" });
+      : execa("kubectl", kctl(args, kubeContext), { stdio: "pipe", timeout: 10000 });
 
     const checks = await Promise.allSettled([
       // 0: NetworkPolicy (K8s only)
