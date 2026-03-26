@@ -381,7 +381,7 @@ fn docker_create_body(
             "Tmpfs": { "/tmp": "rw,noexec,nosuid,size=512m" },
             "Binds": [
                 "/run/secrets/azure-openai-key:/run/secrets/azure-openai-key:ro",
-                "/var/run/docker.sock:/var/run/docker.sock:ro",
+                "/var/run/docker.sock:/var/run/docker.sock",
                 format!("{}-data:/sandbox", container_name),
             ],
             "NetworkMode": network,
