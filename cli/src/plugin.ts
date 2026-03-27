@@ -1399,7 +1399,24 @@ const azureClawPlugin = definePluginEntry({
           }
 
           // Give the sub-agent a few more seconds to register with the AGT relay
-          await new Promise(r => setTimeout(r, 5000));
+          await new Promise(r => setTimeout(r, 3000));
+
+          // Pre-discover the sub-agent's AMID so mesh_send doesn't need to search
+          if (agtMeshClient) {
+            try {
+              const searchResult = await routerCall("GET",
+                `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
+              const agents = searchResult?.results || [];
+              const match = agents.find((a: any) =>
+                a.display_name === agentName || a.capabilities?.includes(agentName)
+              );
+              if (match?.amid) {
+                nameToAmid.set(agentName, match.amid);
+                amidToName.set(match.amid, agentName);
+                log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
+              }
+            } catch { /* best effort — mesh_send will retry */ }
+          }
 
           return { content: [{ type: "text", text: JSON.stringify({
             ...result,
@@ -1471,7 +1488,7 @@ const azureClawPlugin = definePluginEntry({
               for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
                 if (attempt > 0) {
                   log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
-                  await new Promise(r => setTimeout(r, 5000));
+                  await new Promise(r => setTimeout(r, 2000));
                 }
 
                 // Try direct registry HTTP search by capability (most reliable)
@@ -1510,7 +1527,7 @@ const azureClawPlugin = definePluginEntry({
               // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
               // Retry loop: target may need time to upload prekeys after registering
               let sendErr: Error | null = null;
-              for (let sendAttempt = 0; sendAttempt < 6; sendAttempt++) {
+              for (let sendAttempt = 0; sendAttempt < 8; sendAttempt++) {
                 try {
                   await agtMeshClient.send(targetAmid, {
                     type: "task_request",
@@ -1523,8 +1540,8 @@ const azureClawPlugin = definePluginEntry({
                 } catch (e: any) {
                   sendErr = e;
                   if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
-                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/6)...`);
-                    await new Promise(r => setTimeout(r, 5000));
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/8)...`);
+                    await new Promise(r => setTimeout(r, 2000));
                   } else {
                     break; // non-prekey error — don't retry
                   }
@@ -1536,7 +1553,7 @@ const azureClawPlugin = definePluginEntry({
 
                 // Auto-wait for reply: poll agtInbox for a response from this agent
                 const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
-                const pollIntervalMs = 2_000;
+                const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
                 const waitStart = Date.now();
                 let replyContent: string | null = null;
                 log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
