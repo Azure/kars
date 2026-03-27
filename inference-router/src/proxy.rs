@@ -113,6 +113,7 @@ pub async fn forward(
         .request(method, &upstream_url)
         .headers(headers)
         .body(body)
+        .timeout(std::time::Duration::from_secs(120))
         .send()
         .await
         .context("Foundry upstream request failed")?;
@@ -159,6 +160,7 @@ pub async fn forward_stream(
         .post(&upstream_url)
         .headers(headers)
         .body(body)
+        .timeout(std::time::Duration::from_secs(120))
         .send()
         .await
         .context("Streaming upstream request failed")?;
