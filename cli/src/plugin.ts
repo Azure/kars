@@ -54,7 +54,7 @@ let agtIdentity: any = null;
 let agtInitialized = false; // Singleton guard — only first plugin load creates the mesh client
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
-const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string }> = [];
+const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string }> = [];
 
 // AGT reconnect & heartbeat state
 let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
@@ -103,6 +103,52 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
     });
   } catch (e: any) {
     console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}: ${e.message}`);
+  }
+}
+
+// Record a completed mesh session in the AGT registry so reputation/session counters update.
+// Calls POST /registry/reputation/session through the router's registry proxy.
+async function recordMeshSession(
+  targetAmid: string,
+  sessionId: string,
+  intent: string,
+  outcome: "success" | "failed" | "timeout",
+  startedAt: string,
+) {
+  if (!agtIdentity || !agtMeshClient) return;
+  try {
+    const [timestamp, signature] = await agtIdentity.signTimestamp();
+    const http = await import("node:http");
+    // Use the router's registry proxy (plugin can only reach localhost:8443)
+    // Route: /agt/registry/{path} → {AGT_REGISTRY_URL}/v1/{path}
+    const body = JSON.stringify({
+      session_id: sessionId,
+      initiator_amid: agtIdentity.amid,
+      receiver_amid: targetAmid,
+      intent,
+      outcome,
+      started_at: startedAt,
+      reporter_amid: agtIdentity.amid,
+      timestamp,
+      signature,
+    });
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request("http://127.0.0.1:8443/agt/registry/registry/reputation/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 5000,
+      }, (res: any) => {
+        res.resume();
+        res.on("end", () => resolve());
+      });
+      req.on("error", reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+      req.write(body);
+      req.end();
+    });
+    console.log(`[azureclaw] recordMeshSession: ${outcome} for ${sessionId}`);
+  } catch (e: any) {
+    console.error(`[azureclaw] recordMeshSession failed: ${e.message}`);
   }
 }
 
@@ -735,7 +781,33 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Set up message handler — stores received messages in the AGT inbox buffer
     // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
     agtMeshClient.onMessage(async (fromAmid: string, message: any) => {
-      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      // Resolve sender name — check local cache first, then look up via registry
+      let fromName = amidToName.get(fromAmid) || "";
+      if (!fromName && message?.from_agent) {
+        fromName = message.from_agent;
+        amidToName.set(fromAmid, fromName);
+        nameToAmid.set(fromName, fromAmid);
+      }
+      if (!fromName) {
+        // Try registry lookup by AMID
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get(`http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${fromAmid}`, (res) => {
+              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+            });
+            req.on("error", reject);
+            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          if (parsed.display_name) {
+            fromName = parsed.display_name;
+            amidToName.set(fromAmid, fromName);
+            nameToAmid.set(fromName, fromAmid);
+          }
+        } catch { /* best effort */ }
+      }
+      if (!fromName) fromName = fromAmid.slice(0, 12);
       const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
       const entry = {
         from_amid: fromAmid,
@@ -774,9 +846,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
           // Submit positive reputation after successful task completion
           try {
-            const sessionId = `task-${Date.now().toString(36)}`;
-            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["task_completed"]);
+            const sessionId = crypto.randomUUID();
+            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["reliable"]);
             pushTrustToRouter(fromName, 0.8);
+            recordMeshSession(fromAmid, sessionId, "task_request", "success", new Date().toISOString());
             log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         } catch (replyErr: any) {
@@ -792,9 +865,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           log.warn(`AGT relay: task processing failed: ${replyErr.message}`);
           // Submit negative reputation on failure
           try {
-            const sessionId = `task-${Date.now().toString(36)}`;
-            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["task_failed"]);
+            const sessionId = crypto.randomUUID();
+            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["unreliable"]);
             pushTrustToRouter(fromName, 0.3);
+            recordMeshSession(fromAmid, sessionId, "task_request", "failed", new Date().toISOString());
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
@@ -1549,7 +1623,8 @@ const azureClawPlugin = definePluginEntry({
               }
               if (!sendErr) {
                 log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
-                const messageId = `agt-${Date.now().toString(36)}`;
+                const messageId = crypto.randomUUID();
+                const sendStart = new Date().toISOString();
 
                 // Auto-wait for reply: poll agtInbox for a response from this agent
                 const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
@@ -1559,10 +1634,21 @@ const azureClawPlugin = definePluginEntry({
                 log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
 
                 while (Date.now() - waitStart < waitMaxMs) {
-                  // Check inbox for a reply from this target
-                  const replyIdx = agtInbox.findIndex(
-                    (m) => m.from_amid === targetAmid || m.from_agent === agentName,
-                  );
+                  // Check inbox for a reply from this target, skipping protocol messages
+                  const replyIdx = agtInbox.findIndex((m) => {
+                    if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
+                    // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                    const mt = m.message_type || "";
+                    if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                    // Also check content for JSON protocol messages
+                    if (typeof m.content === "string") {
+                      try {
+                        const parsed = JSON.parse(m.content);
+                        if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                      } catch { /* not JSON, treat as real content */ }
+                    }
+                    return true;
+                  });
                   if (replyIdx >= 0) {
                     const reply = agtInbox.splice(replyIdx, 1)[0];
                     replyContent = typeof reply.content === "string"
@@ -1570,6 +1656,14 @@ const azureClawPlugin = definePluginEntry({
                       : JSON.stringify(reply.content);
                     log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - waitStart) / 1000).toFixed(1)}s`);
                     break;
+                  }
+                  // Drain protocol messages to keep inbox clean
+                  for (let i = agtInbox.length - 1; i >= 0; i--) {
+                    const m = agtInbox[i];
+                    if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
+                        (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                      agtInbox.splice(i, 1);
+                    }
                   }
                   await new Promise((r) => setTimeout(r, pollIntervalMs));
                 }
@@ -1586,8 +1680,9 @@ const azureClawPlugin = definePluginEntry({
                   result.reply = replyContent;
                   // Submit positive reputation — peer completed the task
                   try {
-                    await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["task_responded"]);
+                    await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
                     pushTrustToRouter(agentName, 0.9);
+                    recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
                     log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
                   } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
                 } else {
@@ -2838,11 +2933,12 @@ const azureClawPlugin = definePluginEntry({
               `  Audit logger: ${auditStatus}`,
               "",
               "**Infrastructure Layer** (Rust router):",
-              `  Governance: ${parsed.governance_enabled ? "enabled" : "disabled"}`,
-              `  Sandbox: ${parsed.sandbox_name}`,
-              `  Trust threshold: ${parsed.trust_threshold}`,
+              `  Governance: ${parsed.enabled ? "enabled" : "disabled"}`,
+              `  Sandbox: ${parsed.sandbox}`,
               `  Audit entries: ${parsed.audit_entries}`,
-              `  Mesh inbox: ${parsed.mesh_inbox_count} messages`,
+              `  Mesh inbox: ${parsed.inbox_messages} messages`,
+              `  Mesh sessions: ${parsed.mesh_sessions ?? 0}  sent: ${parsed.mesh_messages_sent ?? 0}  recv: ${parsed.mesh_messages_received ?? 0}`,
+              `  Trust updates: ${parsed.trust_updates ?? 0}  total interactions: ${parsed.total_interactions ?? 0}`,
               parsed.blocklist_domains ? `  Blocklist: ${parsed.blocklist_domains} domains` : "",
               "",
               "**Overlap resolution:**",

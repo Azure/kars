@@ -149,9 +149,12 @@ COPY cli/policies/ /opt/azureclaw-plugin/policies/
 # Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm install --omit=dev --ignore-scripts 2>/dev/null || true
 # Install vendored SDK with its dependencies (libsodium-wrappers etc.)
-COPY vendor/agentmesh-sdk/package.json /opt/azureclaw-vendored-sdk/package.json
+COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
+COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
 COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
-RUN cd /opt/azureclaw-vendored-sdk && npm install --omit=dev --ignore-scripts 2>/dev/null || true
+RUN cd /opt/azureclaw-vendored-sdk && npm install --ignore-scripts 2>/dev/null || true && \
+    npx tsup 2>/dev/null || echo "SDK build skipped (using pre-built dist)" && \
+    npm prune --omit=dev 2>/dev/null || true
 # Overlay vendored SDK into plugin node_modules (patched dist + deps)
 RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
     cp -r /opt/azureclaw-vendored-sdk/dist /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
