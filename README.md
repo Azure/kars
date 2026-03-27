@@ -210,6 +210,7 @@ azureclaw credentials update my-agent \
 |---|---|
 | **Lifecycle** | |
 | `azureclaw up` | Deploy full stack — preflight, AKS + ACR + Foundry + sandbox |
+| `azureclaw up --upgrade` | Fast upgrade — reuse cached context, Helm + RBAC + fedcred sync |
 | `azureclaw dev` | Local Docker sandbox with same security controls |
 | `azureclaw add <name>` | Add sandbox to existing cluster |
 | `azureclaw destroy [name]` | Tear down sandbox or entire resource group (`--all`) |
