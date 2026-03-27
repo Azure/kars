@@ -1247,7 +1247,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Automatically waits up to 90 seconds for the sub-agent's reply and returns it inline. If no reply arrives within the wait window, check azureclaw_mesh_inbox later. Wait for the sub-agent to be Running first.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Automatically waits up to 5.5 minutes for the sub-agent's reply and returns it inline. If no reply arrives within the wait window, check azureclaw_mesh_inbox later. Wait for the sub-agent to be Running first.",
       parameters: {
         type: "object",
         properties: {
@@ -1379,7 +1379,7 @@ const azureClawPlugin = definePluginEntry({
                 if (replyContent) {
                   result.reply = replyContent;
                 } else {
-                  result.note = "No reply within 90s — use azureclaw_mesh_inbox to check later.";
+                  result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
                 }
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
               }
