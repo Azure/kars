@@ -312,25 +312,21 @@ impl TrustStore {
         }
     }
 
-    /// Get trust state for an agent (creates with default if unknown).
+    /// Get trust state for an agent. Returns default if unknown (does NOT persist
+    /// the default — only record_success/failure/update_trust create entries).
     pub async fn get_trust(&self, agent_id: &str) -> TrustState {
         let agents = self.agents.read().await;
         if let Some(state) = agents.get(agent_id) {
             return state.clone();
         }
-        drop(agents);
 
-        let state = TrustState {
+        TrustState {
             agent_id: agent_id.to_string(),
             score: self.default_score,
             tier: TrustTier::from_score(self.default_score),
             interactions: 0,
             last_interaction: None,
-        };
-
-        let mut agents = self.agents.write().await;
-        agents.insert(agent_id.to_string(), state.clone());
-        state
+        }
     }
 
     /// Check if an agent is trusted enough for communication.
@@ -639,12 +635,31 @@ impl GovernanceState {
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 fn chrono_now() -> String {
-    // Simple ISO 8601 timestamp without chrono dependency
+    // ISO 8601 UTC timestamp — must be parseable by JavaScript's Date()
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs();
-    // Approximate ISO format
-    format!("{}Z", secs)
+    // Convert epoch seconds to YYYY-MM-DDTHH:MM:SSZ
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since 1970-01-01 → year/month/day (civil calendar)
+    // Algorithm from Howard Hinnant's date library (public domain)
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d_val = doy - (153 * mp + 2) / 5 + 1;
+    let m_val = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y_val = if m_val <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y_val, m_val, d_val, hours, minutes, seconds)
 }
 
 fn sha256_hex(input: &str) -> String {

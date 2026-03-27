@@ -145,7 +145,7 @@ COPY cli/dist/ /opt/azureclaw-plugin/
 COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
-COPY sandbox-images/openclaw/agt-relay-listener.js /opt/azureclaw-plugin/agt-relay-listener.js
+
 
 # Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm install --omit=dev --ignore-scripts 2>/dev/null || true
