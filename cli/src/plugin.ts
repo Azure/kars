@@ -72,6 +72,7 @@ let agtSandboxName: string = "unknown";
 
 // Push trust updates to the router's local TrustStore (POST /agt/trust).
 // This syncs the plugin's reputation observations with the router for /agt/status display.
+// Also writes an audit chain entry on the router side.
 async function pushTrustToRouter(agentId: string, scoreDelta: number) {
   try {
     const http = await import("node:http");
@@ -80,15 +81,29 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
       score: Math.round(500 + scoreDelta * 500), // 0.0-1.0 → 0-1000 scale
       interactions: 1,
     });
-    const req = http.request("http://127.0.0.1:8443/agt/trust", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-      timeout: 5000,
-    }, () => {});
-    req.on("error", () => {});
-    req.write(body);
-    req.end();
-  } catch { /* best effort */ }
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request("http://127.0.0.1:8443/agt/trust", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 5000,
+      }, (res: any) => {
+        res.resume();
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+          } else {
+            resolve();
+          }
+        });
+      });
+      req.on("error", reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+      req.write(body);
+      req.end();
+    });
+  } catch (e: any) {
+    console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}: ${e.message}`);
+  }
 }
 
 // Attempt to reconnect the AGT mesh client after a disconnect.
@@ -602,13 +617,11 @@ async function processTaskWithTools(
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  // Singleton guard — OpenClaw loads the plugin twice (tool registry + agent session).
-  // Only the first load should create the AGT identity and mesh connection to avoid
-  // duplicate messages and wasted relay connections.
-  // Use process env flag since module may be loaded as separate instances.
-  if (agtInitialized || process.env.__AGT_INITIALIZED === '1') return;
+  // Singleton guard — only one mesh connection per module instance.
+  // Don't use process.env flag: OpenClaw's gateway hot-restart resets module state
+  // but inherits env vars, causing initAGT to be skipped with a null agtMeshClient.
+  if (agtInitialized && agtMeshClient) return;
   agtInitialized = true;
-  process.env.__AGT_INITIALIZED = '1';
 
   try {
     const sdk: any = await import("@agentmesh/sdk");
@@ -765,7 +778,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["task_completed"]);
             pushTrustToRouter(fromName, 0.8);
             log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
-          } catch { /* best effort — don't fail the task reply */ }
+          } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
           try {
@@ -782,7 +795,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             const sessionId = `task-${Date.now().toString(36)}`;
             await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["task_failed"]);
             pushTrustToRouter(fromName, 0.3);
-          } catch { /* best effort */ }
+          } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
     });
@@ -1559,7 +1572,7 @@ const azureClawPlugin = definePluginEntry({
                     await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["task_responded"]);
                     pushTrustToRouter(agentName, 0.9);
                     log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
-                  } catch { /* best effort */ }
+                  } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
                 } else {
                   result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
                 }
