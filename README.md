@@ -90,8 +90,9 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 - **Messaging channels** — Telegram, Slack, Discord, WhatsApp (auto-configured via CLI flags)
 - **Third-party plugins** — Brave, Tavily, Exa, Firecrawl, Perplexity (API key → auto-enabled)
 - **Foundry web search** — Bing Grounding via Responses API (zero-config, no API key needed)
-- **Sub-agent spawning** — agents create child agents via CRD (isolated, governed)
+- **Sub-agent spawning** — agents create child agents via CRD (isolated, governed, full tool access via native delegation)
 - **10 Foundry skills** — memory, code interpreter, web search, knowledge, evaluations, and more
+- **Python 3** — pandas, numpy, matplotlib, requests, httpx, beautifulsoup4, and more pre-installed
 - **200+ models** — hot-switch between GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc.
 - **Multi-frontend** — TUI, Telegram, Web UI at `localhost:18789`
 

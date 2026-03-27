@@ -30,7 +30,8 @@
 │  │   ├─ Gateway :18789 (WebSocket + Control UI)                     │     │
 │  │   ├─ TUI :18791                                                  │     │
 │  │   ├─ Read-only rootfs, writable /sandbox + /tmp                  │     │
-│  │   ├─ AzureClaw plugin (tools: spawn, mesh, http_fetch)           │     │
+│  │   ├─ AzureClaw plugin (tools: spawn, mesh, Foundry, http_fetch)   │     │
+│  │   ├─ Python 3 (pandas, numpy, matplotlib, requests, httpx)       │     │
 │  │   └─ All external access → localhost:8443 only                   │     │
 │  │                                                                  │     │
 │  │  container: inference-router (UID 1001, unrestricted network)    │     │
@@ -112,7 +113,9 @@ Runs as UID 1000 (all outbound blocked by iptables except localhost + DNS + ESTA
 
 - **Gateway** on port 18789 — WebSocket + Control UI
 - **TUI** on port 18791
-- **Plugin:** AzureClaw tools (`spawn`, `mesh`, `http_fetch`), provider `azure-openai` routing to `localhost:8443`
+- **Plugin:** AzureClaw tools (`spawn`, `mesh`, `Foundry`, `http_fetch`), provider `azure-openai` routing to `localhost:8443`
+- **Native delegation:** Sub-agent tasks received via AGT mesh are delegated to the full OpenClaw agent loop (`openclaw agent --message`), giving sub-agents access to all registered tools (Foundry, exec, web_search, etc.)
+- **Python 3:** Pre-installed with pandas, numpy, matplotlib, seaborn, requests, httpx, beautifulsoup4, aiohttp, websockets, rich, tabulate
 - **Channels:** Telegram, Slack, Discord, WhatsApp (via `/egress/fetch` proxy)
 - **Filesystem:** Read-only rootfs, writable `/sandbox` + `/tmp` (emptyDir, `/tmp` is tmpfs 1Gi)
 - **Explicit proxy:** `proxy-bootstrap.js` is preloaded via `NODE_OPTIONS="--require ..."` before any OpenClaw code runs. It sets undici's `EnvHttpProxyAgent` as the global fetch dispatcher so all outbound HTTP/HTTPS requests (Telegram polling, model pricing, etc.) honor `HTTPS_PROXY`/`NO_PROXY` env vars.
