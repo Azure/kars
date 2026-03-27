@@ -220,7 +220,7 @@ fn parse_duration(s: &str) -> u64 {
 // ── Trust Scoring ───────────────────────────────────────────────────────────
 
 /// Trust tier based on score.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TrustTier {
     VerifiedPartner,  // 900-1000
     Trusted,          // 700-899
@@ -242,7 +242,7 @@ impl TrustTier {
 }
 
 /// Per-agent trust state.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustState {
     pub agent_id: String,
     pub score: u32,
@@ -252,10 +252,12 @@ pub struct TrustState {
 }
 
 /// Trust store — tracks trust scores for known agents.
+/// Persists to /tmp/agt-trust-store.json so scores survive pod restarts.
 pub struct TrustStore {
     agents: RwLock<HashMap<String, TrustState>>,
     pub default_score: u32,
     threshold: u32,
+    persist_path: Option<String>,
 }
 
 impl TrustStore {
@@ -264,6 +266,7 @@ impl TrustStore {
             agents: RwLock::new(HashMap::new()),
             default_score,
             threshold,
+            persist_path: None,
         }
     }
 
@@ -272,7 +275,41 @@ impl TrustStore {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(500);
-        Self::new(500, threshold)
+        let persist_path = Some("/tmp/agt-trust-store.json".to_string());
+        let mut store = Self {
+            agents: RwLock::new(HashMap::new()),
+            default_score: 500,
+            threshold,
+            persist_path,
+        };
+        store.load_from_disk();
+        store
+    }
+
+    /// Load persisted trust state from disk (best-effort).
+    fn load_from_disk(&mut self) {
+        if let Some(path) = &self.persist_path {
+            if let Ok(data) = std::fs::read_to_string(path) {
+                if let Ok(states) = serde_json::from_str::<Vec<TrustState>>(&data) {
+                    let mut agents = HashMap::new();
+                    for state in states {
+                        agents.insert(state.agent_id.clone(), state);
+                    }
+                    self.agents = RwLock::new(agents);
+                }
+            }
+        }
+    }
+
+    /// Persist trust state to disk (best-effort, async-safe).
+    async fn save_to_disk(&self) {
+        if let Some(path) = &self.persist_path {
+            let agents = self.agents.read().await;
+            let states: Vec<&TrustState> = agents.values().collect();
+            if let Ok(json) = serde_json::to_string(&states) {
+                let _ = tokio::fs::write(path, json).await;
+            }
+        }
     }
 
     /// Get trust state for an agent (creates with default if unknown).
@@ -311,6 +348,8 @@ impl TrustStore {
             state.interactions += 1;
             state.last_interaction = Some(chrono_now());
         }
+        drop(agents);
+        self.save_to_disk().await;
     }
 
     /// Record a failed/suspicious interaction (decreases trust).
@@ -322,6 +361,8 @@ impl TrustStore {
             state.interactions += 1;
             state.last_interaction = Some(chrono_now());
         }
+        drop(agents);
+        self.save_to_disk().await;
     }
 
     /// Get all trust states.
