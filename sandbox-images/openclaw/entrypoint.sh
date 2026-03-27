@@ -148,6 +148,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" },
+      "timeoutSeconds": 300,
       "memorySearch": {
         "enabled": true,
         "provider": "openai",
@@ -302,7 +303,7 @@ Never omit the Foundry project line even if it says "Not configured".
 - You can help with coding, analysis, writing, and general questions
 - You have access to shell/exec tools for running commands inside the sandbox
 - You can read files, run system commands (uname, hostname, cat /etc/os-release, etc.)
-- **Python 3** is installed with: pandas, numpy, matplotlib, seaborn, requests, httpx, beautifulsoup4, aiohttp, websockets, rich, tabulate
+- **Python 3** is installed with: pandas, numpy, scipy, sympy, matplotlib, seaborn, requests, httpx, beautifulsoup4, lxml, cssselect, aiohttp, websockets, rich, tabulate, pdfplumber, pypdf, python-docx, openpyxl, python-pptx, Pillow, jinja2, pydantic, jsonpath-ng, xmltodict, markdown, html2text, chardet, python-dateutil, pyyaml, toml, python-dotenv, sqlalchemy, cryptography, tiktoken, dnspython, networkx, geopy, ftfy, unidecode, qrcode, fpdf2
 - Your workspace is /sandbox — all your files live here
 - Your network access is governed by policy — unauthorized endpoints will be blocked
 
@@ -352,7 +353,7 @@ When you receive a task from another agent via the AGT mesh, execute it using yo
 toolset. Prioritize these Foundry-powered tools for the best results:
 
 - **Research & current data**: Use \`web_search\` and \`web_fetch\` for live information
-- **Data analysis**: Use \`foundry_code_execute\` for Python data processing (pandas, numpy, matplotlib)
+- **Data analysis**: Use \`foundry_code_execute\` for Python data processing (pandas, numpy, matplotlib, scipy)
 - **Knowledge recall**: Use \`foundry_memory\` to search for relevant context, and store findings
 - **Document search**: Use \`foundry_file_search\` for vector store lookups
 - **Long-running work**: Use \`process\` for background tasks, \`exec\` for shell commands
@@ -595,7 +596,7 @@ done
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
 mkdir -p /tmp/node-host-home
 [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home
-HOME=/tmp/node-host-home OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
+HOME=/tmp/node-host-home AGT_SKIP_INIT=1 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
   --host 127.0.0.1 --port 18789 \
   --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!
@@ -603,24 +604,19 @@ echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 
 # Auto-approve all exec requests — no manual approval in headless sandbox.
 # The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
-$AS_SANDBOX openclaw approvals set --stdin <<'APPROVALS' > /dev/null 2>&1 || true
-{ "mode": "auto-approve" }
-APPROVALS
-
-# Start a persistent background agent session that loads the AzureClaw plugin.
-# This keeps the AGT relay connection alive so the agent can receive E2E encrypted
-# messages from other agents in the mesh. Without this, the plugin only loads during
-# on-demand sessions and misses relay messages.
+# Use timeout to prevent hanging (the command sometimes blocks on gateway connection).
+# Run in background so the entrypoint continues to the relay listener section.
 (
-  sleep 5  # Wait for gateway to stabilize
-  $AS_SANDBOX openclaw agent --local \
-    --session-id "agt-relay-listener-${NODE_HOSTNAME}" \
-    --message "You are an AGT relay listener. Stay connected and respond to any relay messages with AGT RELAY CONFIRMED." \
-    > /tmp/agt-relay-listener.log 2>&1 || true
+  sleep 2  # Give gateway a moment to stabilize
+  echo '{ "mode": "auto-approve" }' | AGT_SKIP_INIT=1 timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
 ) &
-AGT_LISTENER_PID=$!
-echo "[azureclaw] AGT relay listener starting (PID: $AGT_LISTENER_PID)"
+
+# The AGT relay listener is NOT needed as a separate process.
+# The plugin running inside the gateway already handles incoming mesh messages:
+#   - plugin.ts onMessage → delegateToNativeAgent → openclaw agent --message
+#   - The plugin's mesh connection stays alive as long as the gateway runs.
+#   - delegateToNativeAgent spawns openclaw agent sessions on the SAME gateway (no conflicts).
 
 # Keep the container alive — don't use exec (it would kill the gateway)
-# Instead, wait forever while keeping the gateway + AGT listener backgrounded
+# Instead, wait forever while keeping the gateway backgrounded
 tail -f /dev/null

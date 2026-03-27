@@ -51,10 +51,17 @@ let agtTrustStore: any = null;
 let agtAuditLogger: any = null;
 let agtMeshClient: any = null;
 let agtIdentity: any = null;
-let agtInitialized = false; // Singleton guard — only first plugin load creates the mesh client
+let agtInitialized = false; // Module-level guard (supplemented by process-level guard below)
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
-const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string }> = [];
+const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string }> = [];
+
+// AGT reconnect & heartbeat state
+let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
+let agtHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let agtInboxNotifyTimer: ReturnType<typeof setInterval> | null = null;
+let agtConnected = false;
+let agtSdk: any = null; // cached SDK module for reconnect
 
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
@@ -63,9 +70,144 @@ const nameToAmid: Map<string, string> = new Map();
 // Stored sandbox name for reconnect attempts
 let agtSandboxName: string = "unknown";
 
-// ---------------------------------------------------------------------------
-// Foundry project discovery state
-// ---------------------------------------------------------------------------
+// Push trust updates to the router's local TrustStore (POST /agt/trust).
+// This syncs the plugin's reputation observations with the router for /agt/status display.
+// Also writes an audit chain entry on the router side.
+async function pushTrustToRouter(agentId: string, scoreDelta: number) {
+  try {
+    const http = await import("node:http");
+    const body = JSON.stringify({
+      agent_id: agentId,
+      score: Math.round(500 + scoreDelta * 500), // 0.0-1.0 → 0-1000 scale
+      interactions: 1,
+    });
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request("http://127.0.0.1:8443/agt/trust", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 5000,
+      }, (res: any) => {
+        res.resume();
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+          } else {
+            resolve();
+          }
+        });
+      });
+      req.on("error", reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+      req.write(body);
+      req.end();
+    });
+  } catch (e: any) {
+    console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}: ${e.message}`);
+  }
+}
+
+// Record a completed mesh session in the AGT registry so reputation/session counters update.
+// Calls POST /registry/reputation/session through the router's registry proxy.
+async function recordMeshSession(
+  targetAmid: string,
+  sessionId: string,
+  intent: string,
+  outcome: "success" | "failed" | "timeout",
+  startedAt: string,
+) {
+  if (!agtIdentity || !agtMeshClient) return;
+  try {
+    const [timestamp, signature] = await agtIdentity.signTimestamp();
+    const http = await import("node:http");
+    // Use the router's registry proxy (plugin can only reach localhost:8443)
+    // Route: /agt/registry/{path} → {AGT_REGISTRY_URL}/v1/{path}
+    const body = JSON.stringify({
+      session_id: sessionId,
+      initiator_amid: agtIdentity.amid,
+      receiver_amid: targetAmid,
+      intent,
+      outcome,
+      started_at: startedAt,
+      reporter_amid: agtIdentity.amid,
+      timestamp,
+      signature,
+    });
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request("http://127.0.0.1:8443/agt/registry/registry/reputation/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 5000,
+      }, (res: any) => {
+        res.resume();
+        res.on("end", () => resolve());
+      });
+      req.on("error", reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+      req.write(body);
+      req.end();
+    });
+    console.log(`[azureclaw] recordMeshSession: ${outcome} for ${sessionId}`);
+  } catch (e: any) {
+    console.error(`[azureclaw] recordMeshSession failed: ${e.message}`);
+  }
+}
+
+// Attempt to reconnect the AGT mesh client after a disconnect.
+async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (!agtMeshClient || agtConnected) return;
+  try {
+    await agtMeshClient.connect({
+      displayName: agtSandboxName,
+      capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
+    });
+    agtConnected = true;
+    log.info("AGT mesh reconnected successfully");
+  } catch (e: any) {
+    log.warn(`AGT mesh reconnect failed: ${e.message}`);
+  }
+}
+
+// Write unread inbox messages to a file the LLM can see in its context.
+// This is the key mechanism to keep conversations "lively" — the agent sees
+// pending messages in MEMORY.md without needing to manually call mesh_inbox.
+async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (agtInbox.length === 0) return;
+  try {
+    const fs = await import("node:fs/promises");
+    const memPath = process.env.MEMORY_FILE_PATH || "/home/user/MEMORY.md";
+    const INBOX_MARKER = "<!-- AGT_INBOX_START -->";
+    const INBOX_END = "<!-- AGT_INBOX_END -->";
+
+    let existing = "";
+    try { existing = await fs.readFile(memPath, "utf-8"); } catch { return; }
+
+    // Build inbox section with pending messages (don't drain — just preview)
+    const preview = agtInbox.slice(0, 10).map((m, i) =>
+      `${i + 1}. **${m.from_agent}** (${m.timestamp}): ${String(m.content).slice(0, 300)}`
+    ).join("\n");
+    const section = [
+      INBOX_MARKER,
+      "",
+      `## 📬 Unread Mesh Messages (${agtInbox.length})`,
+      "",
+      `> You have ${agtInbox.length} unread message(s) from sub-agents. Call \`azureclaw_mesh_inbox\` to read and respond.`,
+      "",
+      preview,
+      "",
+      INBOX_END,
+    ].join("\n");
+
+    // Replace existing inbox section or append
+    if (existing.includes(INBOX_MARKER)) {
+      const re = new RegExp(`${INBOX_MARKER}[\\s\\S]*?${INBOX_END}`, "m");
+      existing = existing.replace(re, section);
+    } else {
+      existing = existing + "\n\n" + section;
+    }
+    await fs.writeFile(memPath, existing, "utf-8");
+    log.info(`AGT inbox: wrote ${agtInbox.length} pending message(s) to MEMORY.md`);
+  } catch { /* best effort */ }
+}
 interface FoundryProjectInfo {
   endpoint: string;
   deployments: Array<{ id: string; model: string; sku?: string }>;
@@ -97,6 +239,9 @@ async function delegateToNativeAgent(
 
   log.info(`Delegating task to native OpenClaw agent (session: ${sessionId})`);
 
+  const fs = await import("node:fs");
+  try { fs.mkdirSync("/tmp/agt-delegate-home", { recursive: true }); } catch {}
+
   return new Promise<string>((resolve, reject) => {
     const child = spawn("openclaw", [
       "agent",
@@ -104,14 +249,23 @@ async function delegateToNativeAgent(
       "--session-id", sessionId,
       "--timeout", "300",
       "--json",
-    ], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    ], {
+      env: {
+        ...process.env,
+        // Separate HOME so the agent gets its own device fingerprint and doesn't
+        // conflict with the node host's "node" role pairing.
+        HOME: "/tmp/agt-delegate-home",
+        AGT_SKIP_INIT: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     const chunks: Buffer[] = [];
     // OpenClaw writes all output (plugin logs + JSON result) to stderr
     child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
     child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
 
-    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 330_000);
+    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 120_000);
 
     child.on("close", () => {
       clearTimeout(timer);
@@ -258,7 +412,7 @@ async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_file_search: search documents in vector stores (requires vector_store_ids)\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. Be concise and report actual results.",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores, manage vector stores and files\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- foundry_conversations: persistent multi-turn dialogues (create, respond, get history)\n- foundry_evaluations: benchmark model quality (create, run, check results)\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. Be concise and report actual results.",
     },
     {
       role: "user",
@@ -521,16 +675,49 @@ async function processTaskWithTools(
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  // Singleton guard — OpenClaw loads the plugin twice (tool registry + agent session).
-  // Only the first load should create the AGT identity and mesh connection to avoid
-  // duplicate messages and wasted relay connections.
-  // Use process env flag since module may be loaded as separate instances.
-  if (agtInitialized || process.env.__AGT_INITIALIZED === '1') return;
-  agtInitialized = true;
-  process.env.__AGT_INITIALIZED = '1';
+  // Node hosts don't participate in the mesh — skip entirely.
+  if (process.env.AGT_SKIP_INIT === "1") return;
 
+  // Process-level singleton — the gateway loads this plugin in 5 parallel contexts.
+  // Use a synchronous lock (set BEFORE any async work) to prevent race conditions.
+  const AGT_CLIENT_KEY = Symbol.for("agt-mesh-client");
+  const AGT_IDENTITY_KEY = Symbol.for("agt-identity");
+  const AGT_LOCK_KEY = Symbol.for("agt-init-lock");
+  const AGT_PROMISE_KEY = Symbol.for("agt-init-promise");
+
+  // Fast path: already initialized in another context
+  const existingClient = (process as any)[AGT_CLIENT_KEY];
+  if (existingClient) {
+    agtMeshClient = existingClient;
+    agtIdentity = (process as any)[AGT_IDENTITY_KEY];
+    agtInitialized = true;
+    return;
+  }
+
+  // Synchronous lock — first caller wins, others wait for the promise
+  if ((process as any)[AGT_LOCK_KEY]) {
+    // Another context is initializing — wait for it to finish
+    const pending = (process as any)[AGT_PROMISE_KEY];
+    if (pending) await pending;
+    const client = (process as any)[AGT_CLIENT_KEY];
+    if (client) {
+      agtMeshClient = client;
+      agtIdentity = (process as any)[AGT_IDENTITY_KEY];
+      agtInitialized = true;
+    }
+    return;
+  }
+  (process as any)[AGT_LOCK_KEY] = true; // Synchronous — prevents all other callers
+
+  // Module-level fallback guard (for hot-restart where process persists)
+  if (agtInitialized && agtMeshClient) return;
+
+  // Create and store the init promise BEFORE any async work so other contexts
+  // that check AGT_LOCK_KEY can always await it (fixes race where pending was undefined).
+  const initPromise = (async () => {
   try {
     const sdk: any = await import("@agentmesh/sdk");
+    agtSdk = sdk;
 
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
@@ -587,6 +774,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         });
         log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
         connected = true;
+        agtConnected = true;
         break;
       } catch (connErr: any) {
         const delay = attempt * 2;
@@ -598,6 +786,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
     }
+
+    // Store on process for cross-context singleton access
+    (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
+    (process as any)[Symbol.for("agt-identity")] = agtIdentity;
 
     // Set up KNOCK handler — policy-gated session establishment with trust scoring.
     // Each agent evaluates the incoming KNOCK before accepting:
@@ -613,7 +805,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (AGT_TRUST_THRESHOLD > 0) {
         try {
           const peerInfo = await agtMeshClient.lookup(fromAmid);
-          const trustScore = peerInfo?.trustScore || peerInfo?.reputation || 0;
+          const trustScore = peerInfo?.reputationScore ?? 0;
           if (trustScore < AGT_TRUST_THRESHOLD) {
             log.warn(`AGT KNOCK rejected: ${fromAmid.slice(0, 12)} trust=${trustScore} < threshold=${AGT_TRUST_THRESHOLD}`);
             return { accept: false, reason: `trust_score_${trustScore}_below_${AGT_TRUST_THRESHOLD}` };
@@ -639,7 +831,33 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Set up message handler — stores received messages in the AGT inbox buffer
     // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
     agtMeshClient.onMessage(async (fromAmid: string, message: any) => {
-      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      // Resolve sender name — check local cache first, then look up via registry
+      let fromName = amidToName.get(fromAmid) || "";
+      if (!fromName && message?.from_agent) {
+        fromName = message.from_agent;
+        amidToName.set(fromAmid, fromName);
+        nameToAmid.set(fromName, fromAmid);
+      }
+      if (!fromName) {
+        // Try registry lookup by AMID
+        try {
+          const http = await import("node:http");
+          const body = await new Promise<string>((resolve, reject) => {
+            const req = http.get(`http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${fromAmid}`, (res) => {
+              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+            });
+            req.on("error", reject);
+            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
+          });
+          const parsed = JSON.parse(body);
+          if (parsed.display_name) {
+            fromName = parsed.display_name;
+            amidToName.set(fromAmid, fromName);
+            nameToAmid.set(fromName, fromAmid);
+          }
+        } catch { /* best effort */ }
+      }
+      if (!fromName) fromName = fromAmid.slice(0, 12);
       const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
       const entry = {
         from_amid: fromAmid,
@@ -676,6 +894,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             timestamp: new Date().toISOString(),
           });
           log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
+          // Submit positive reputation after successful task completion
+          try {
+            const sessionId = crypto.randomUUID();
+            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["reliable"]);
+            pushTrustToRouter(fromName, 0.8);
+            recordMeshSession(fromAmid, sessionId, "task_request", "success", new Date().toISOString());
+            log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
+          } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
           try {
@@ -687,11 +913,57 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             });
           } catch { /* best effort */ }
           log.warn(`AGT relay: task processing failed: ${replyErr.message}`);
+          // Submit negative reputation on failure
+          try {
+            const sessionId = crypto.randomUUID();
+            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["unreliable"]);
+            pushTrustToRouter(fromName, 0.3);
+            recordMeshSession(fromAmid, sessionId, "task_request", "failed", new Date().toISOString());
+          } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
     });
 
+    // ── Disconnect handler + auto-reconnect ──────────────────────────────
+    // If the WS connection drops (relay restart, network blip), try to reconnect.
+    if (agtMeshClient.onDisconnect) {
+      agtMeshClient.onDisconnect(() => {
+        agtConnected = false;
+        log.warn("AGT mesh disconnected — will attempt reconnect in 15s");
+      });
+    }
+
+    // Reconnect timer: every 30s, check if disconnected and try to reconnect.
+    // Also serves as a keep-alive — if the SDK exposes a ping, use it.
+    if (agtReconnectTimer) clearInterval(agtReconnectTimer);
+    agtReconnectTimer = setInterval(async () => {
+      if (!agtConnected && agtMeshClient) {
+        await agtReconnect(log);
+      }
+      // Heartbeat: ping the relay proxy to keep the connection warm
+      try {
+        const http = await import("node:http");
+        const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
+        req.on("error", () => {});
+        req.end();
+      } catch { /* best effort */ }
+    }, 30_000);
+    // Don't let the timer prevent process exit
+    if (agtReconnectTimer.unref) agtReconnectTimer.unref();
+
+    // ── Inbox notification timer ─────────────────────────────────────────
+    // Every 10s, if there are unread messages, write a notification section
+    // into MEMORY.md so the LLM sees them in its context window without
+    // needing to manually call mesh_inbox. This is what keeps conversations
+    // "lively" — the agent is proactively told it has messages to process.
+    if (agtInboxNotifyTimer) clearInterval(agtInboxNotifyTimer);
+    agtInboxNotifyTimer = setInterval(() => {
+      notifyInboxToMemory(log).catch(() => {});
+    }, 10_000);
+    if (agtInboxNotifyTimer.unref) agtInboxNotifyTimer.unref();
+
     log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit${connected ? ", mesh ACTIVE" : ", mesh OFFLINE (relay unreachable)"}`);
+    log.info("AGT timers started: reconnect (30s), inbox notify (10s)");
   } catch (e: any) {
     // Distinguish module-not-found from other errors
     const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
@@ -701,6 +973,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       log.warn(`AGT SDK init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
     }
   }
+  })(); // end of init IIFE
+  // Promise is stored on process BEFORE the IIFE body runs (line below runs
+  // synchronously because the IIFE returns a pending Promise immediately).
+  (process as any)[Symbol.for("agt-init-promise")] = initPromise;
+  await initPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -884,11 +1161,12 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     sections.push(
       "## Available Tools\n",
       "- `foundry_code_execute` — Python code execution (server-side, data science libraries)",
+      "- `foundry_image_generation` — Generate images from text prompts (gpt-image-1)",
       "- `foundry_web_search` — Real-time web search via Bing grounding",
-      "- `foundry_file_search` — RAG over vector stores / Azure AI Search indexes",
+      "- `foundry_file_search` — RAG over vector stores + vector store CRUD + file upload",
       "- `foundry_memory` — Persistent semantic memory (cross-session, cross-agent)",
-      "- `foundry_conversations` — Persistent multi-turn conversations",
-      "- `foundry_evaluations` — Model quality testing",
+      "- `foundry_conversations` — Persistent multi-turn conversations (get/create/respond/list/delete)",
+      "- `foundry_evaluations` — Model quality testing and benchmarking",
       "- `foundry_deployments` — Discover models, connections, indexes",
       "- `foundry_agents` — List Foundry-hosted agents",
       "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
@@ -922,6 +1200,46 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       fs.writeFileSync(memoryFile, content);
     }
     log.info("Foundry project context written to MEMORY.md");
+
+    // Recall prior context from Foundry memory store on startup
+    try {
+      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+      const store = `memory-${agentName}`;
+      const recallResult = await _routerCall(
+        "POST",
+        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
+        { query: "key facts, user preferences, prior context, recent work", max_memories: 10 },
+      );
+      const memories = recallResult?.memories || recallResult?.value || [];
+      if (Array.isArray(memories) && memories.length > 0) {
+        const recallSection = [
+          "\n## Prior Context (Foundry Memory)\n",
+          "_Recalled from persistent memory store on startup:_\n",
+        ];
+        for (const m of memories) {
+          const text = m?.content || m?.text || "";
+          const kind = m?.kind || m?.type || "memory";
+          if (text) recallSection.push(`- [${kind}] ${text}`);
+        }
+        recallSection.push("");
+        // Append recall section to MEMORY.md (before the user content separator)
+        let current = "";
+        try { current = fs.readFileSync(memoryFile, "utf8"); } catch { /* */ }
+        const recallMarker = "## Prior Context (Foundry Memory)";
+        if (!current.includes(recallMarker)) {
+          // Insert right before the --- separator
+          const sepIdx = current.indexOf("\n---\n");
+          if (sepIdx >= 0) {
+            const updated = current.slice(0, sepIdx) + recallSection.join("\n") + current.slice(sepIdx);
+            fs.writeFileSync(tmpFile, updated);
+            try { fs.renameSync(tmpFile, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); }
+          }
+        }
+        log.info(`Foundry memory: recalled ${memories.length} memories on startup`);
+      }
+    } catch {
+      // First boot or no memory store yet — silently skip
+    }
   } catch (e: any) {
     log.warn(`Failed to write Foundry context to MEMORY.md: ${e.message}`);
   }
@@ -1114,14 +1432,14 @@ const azureClawPlugin = definePluginEntry({
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
     const ROUTER = "http://127.0.0.1:8443";
-    async function routerCall(method: string, path: string, body?: unknown): Promise<any> {
+    async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
       const http = await import("node:http");
       const url = `${ROUTER}${path}`;
       return new Promise((resolve, reject) => {
         const opts: any = {
           method,
           timeout: 15000,
-          headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self" } as Record<string, string>,
+          headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
         };
         if (body) opts.headers["Content-Type"] = "application/json";
         let settled = false;
@@ -1210,7 +1528,24 @@ const azureClawPlugin = definePluginEntry({
           }
 
           // Give the sub-agent a few more seconds to register with the AGT relay
-          await new Promise(r => setTimeout(r, 5000));
+          await new Promise(r => setTimeout(r, 3000));
+
+          // Pre-discover the sub-agent's AMID so mesh_send doesn't need to search
+          if (agtMeshClient) {
+            try {
+              const searchResult = await routerCall("GET",
+                `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
+              const agents = searchResult?.results || [];
+              const match = agents.find((a: any) =>
+                a.display_name === agentName || a.capabilities?.includes(agentName)
+              );
+              if (match?.amid) {
+                nameToAmid.set(agentName, match.amid);
+                amidToName.set(match.amid, agentName);
+                log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
+              }
+            } catch { /* best effort — mesh_send will retry */ }
+          }
 
           return { content: [{ type: "text", text: JSON.stringify({
             ...result,
@@ -1277,12 +1612,13 @@ const azureClawPlugin = definePluginEntry({
           }
           try {
             // 1. Discover target agent's AMID via registry search (with retry for boot timing)
-            let targetAmid = nameToAmid.get(agentName);
-            if (!targetAmid) {
-              for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
-                if (attempt > 0) {
+            // Always do a fresh registry lookup — the sub-agent's relay listener restarts
+            // create new AMID identities, so cached AMIDs go stale quickly.
+            let targetAmid: string | undefined;
+            for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
+              if (attempt > 0) {
                   log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
-                  await new Promise(r => setTimeout(r, 5000));
+                  await new Promise(r => setTimeout(r, 2000));
                 }
 
                 // Try direct registry HTTP search by capability (most reliable)
@@ -1301,9 +1637,15 @@ const azureClawPlugin = definePluginEntry({
                     req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
                   });
                   if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
-                    const match = regResult.results.find((a: any) =>
-                      a.display_name === agentName || a.capabilities?.includes(agentName)
-                    ) || regResult.results[0];
+                    // Prefer online agents, then most recently seen
+                    const sorted = regResult.results
+                      .filter((a: any) => a.display_name === agentName || a.capabilities?.includes(agentName))
+                      .sort((a: any, b: any) => {
+                        if (a.status === "online" && b.status !== "online") return -1;
+                        if (b.status === "online" && a.status !== "online") return 1;
+                        return (b.last_seen || "").localeCompare(a.last_seen || "");
+                      });
+                    const match = sorted[0] || regResult.results[0];
                     targetAmid = match.amid;
                   }
                 } catch (regErr: any) {
@@ -1315,13 +1657,12 @@ const azureClawPlugin = definePluginEntry({
                 nameToAmid.set(agentName, targetAmid);
                 amidToName.set(targetAmid, agentName);
               }
-            }
 
             if (targetAmid) {
               // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
               // Retry loop: target may need time to upload prekeys after registering
               let sendErr: Error | null = null;
-              for (let sendAttempt = 0; sendAttempt < 6; sendAttempt++) {
+              for (let sendAttempt = 0; sendAttempt < 8; sendAttempt++) {
                 try {
                   await agtMeshClient.send(targetAmid, {
                     type: "task_request",
@@ -1334,8 +1675,8 @@ const azureClawPlugin = definePluginEntry({
                 } catch (e: any) {
                   sendErr = e;
                   if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
-                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/6)...`);
-                    await new Promise(r => setTimeout(r, 5000));
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/8)...`);
+                    await new Promise(r => setTimeout(r, 2000));
                   } else {
                     break; // non-prekey error — don't retry
                   }
@@ -1343,20 +1684,32 @@ const azureClawPlugin = definePluginEntry({
               }
               if (!sendErr) {
                 log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
-                const messageId = `agt-${Date.now().toString(36)}`;
+                const messageId = crypto.randomUUID();
+                const sendStart = new Date().toISOString();
 
                 // Auto-wait for reply: poll agtInbox for a response from this agent
-                const waitMaxMs = 330_000; // 5.5 minutes — native delegation can take up to 5 min
-                const pollIntervalMs = 2_000;
+                const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
+                const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
                 const waitStart = Date.now();
                 let replyContent: string | null = null;
                 log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
 
                 while (Date.now() - waitStart < waitMaxMs) {
-                  // Check inbox for a reply from this target
-                  const replyIdx = agtInbox.findIndex(
-                    (m) => m.from_amid === targetAmid || m.from_agent === agentName,
-                  );
+                  // Check inbox for a reply from this target, skipping protocol messages
+                  const replyIdx = agtInbox.findIndex((m) => {
+                    if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
+                    // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                    const mt = m.message_type || "";
+                    if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                    // Also check content for JSON protocol messages
+                    if (typeof m.content === "string") {
+                      try {
+                        const parsed = JSON.parse(m.content);
+                        if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                      } catch { /* not JSON, treat as real content */ }
+                    }
+                    return true;
+                  });
                   if (replyIdx >= 0) {
                     const reply = agtInbox.splice(replyIdx, 1)[0];
                     replyContent = typeof reply.content === "string"
@@ -1364,6 +1717,14 @@ const azureClawPlugin = definePluginEntry({
                       : JSON.stringify(reply.content);
                     log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - waitStart) / 1000).toFixed(1)}s`);
                     break;
+                  }
+                  // Drain protocol messages to keep inbox clean
+                  for (let i = agtInbox.length - 1; i >= 0; i--) {
+                    const m = agtInbox[i];
+                    if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
+                        (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                      agtInbox.splice(i, 1);
+                    }
                   }
                   await new Promise((r) => setTimeout(r, pollIntervalMs));
                 }
@@ -1378,6 +1739,13 @@ const azureClawPlugin = definePluginEntry({
                 };
                 if (replyContent) {
                   result.reply = replyContent;
+                  // Submit positive reputation — peer completed the task
+                  try {
+                    await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
+                    pushTrustToRouter(agentName, 0.9);
+                    recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
+                    log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
+                  } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
                 } else {
                   result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
                 }
@@ -1418,6 +1786,22 @@ const azureClawPlugin = definePluginEntry({
         try {
           // Collect messages from both sources
           const agtMessages = agtInbox.splice(0, agtInbox.length); // drain AGT buffer
+
+          // Clear the MEMORY.md inbox notification since we've drained messages
+          if (agtMessages.length > 0) {
+            try {
+              const fs = await import("node:fs/promises");
+              const memPath = process.env.MEMORY_FILE_PATH || "/home/user/MEMORY.md";
+              const INBOX_MARKER = "<!-- AGT_INBOX_START -->";
+              const INBOX_END = "<!-- AGT_INBOX_END -->";
+              let mem = await fs.readFile(memPath, "utf-8");
+              if (mem.includes(INBOX_MARKER)) {
+                const re = new RegExp(`\\n*${INBOX_MARKER}[\\s\\S]*?${INBOX_END}\\n*`, "m");
+                mem = mem.replace(re, "\n");
+                await fs.writeFile(memPath, mem, "utf-8");
+              }
+            } catch { /* best effort */ }
+          }
 
           // Also get any router-level messages (fallback / auto-reply)
           let routerMessages: any[] = [];
@@ -1613,6 +1997,69 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
+    // ── Foundry Image Generation: create images from text ───────────────
+    api.registerTool({
+      name: "foundry_image_generation",
+      label: "Foundry Image Generation",
+      description:
+        "Generate images from text prompts via Azure AI Foundry's image_generation tool. " +
+        "Uses gpt-image-1 model. Returns base64-encoded image data. Use when the user " +
+        "asks to create, draw, or generate an image, diagram, or visual.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "Text description of the image to generate.",
+          },
+          quality: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "Image quality (default: 'medium'). Higher = slower + more detailed.",
+          },
+          size: {
+            type: "string",
+            enum: ["1024x1024", "1024x1536", "1536x1024"],
+            description: "Image dimensions (default: '1024x1024').",
+          },
+          model: {
+            type: "string",
+            description: "Orchestrator model (default: gpt-4.1). Coordinates the image generation.",
+          },
+        },
+        required: ["prompt"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const imgModel = "gpt-image-1";
+          const quality = (params.quality as string) || "medium";
+          const size = (params.size as string) || "1024x1024";
+          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+            model: (params.model as string) || "gpt-4.1",
+            input: params.prompt,
+            tools: [{ type: "image_generation", image_generation: { model: imgModel, quality, size } }],
+            store: false,
+          }, { "x-ms-oai-image-generation-deployment": imgModel });
+          const output = result.output || result;
+          const parts: string[] = [];
+          if (Array.isArray(output)) {
+            for (const item of output) {
+              if (item.type === "image_generation_call" && item.result) {
+                parts.push(`[Generated image — base64 data ${item.result.length} chars]`);
+              } else if (item.type === "message" && item.content) {
+                for (const c of item.content) {
+                  if (c.type === "output_text" || c.type === "text") parts.push(c.text);
+                }
+              }
+            }
+          }
+          return { content: [{ type: "text", text: parts.length > 0 ? parts.join("\n\n") : safeJson(output) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry image generation failed: ${e.message}` }] };
+        }
+      },
+    });
+
     // ── Foundry Web Search: real-time Bing-grounded search ──────────────
     // Server-side web search via Bing grounding — no egress policy needed.
     // Results include inline URL citations.
@@ -1694,35 +2141,75 @@ const azureClawPlugin = definePluginEntry({
       name: "foundry_file_search",
       label: "Foundry File Search (RAG)",
       description:
-        "Search uploaded documents and knowledge bases via Azure AI Foundry's file_search. " +
-        "Performs retrieval-augmented generation (RAG) over vector stores. Use when the user " +
-        "asks about content in uploaded documents, project files, or configured knowledge bases.",
+        "Search documents and manage vector stores via Azure AI Foundry's file_search. " +
+        "Operations: 'search' for RAG queries, 'create_vector_store' to create a store, " +
+        "'list_vector_stores' to list stores, 'delete_vector_store' to remove one, " +
+        "'upload_file' to add a file to a store. Use search for document Q&A.",
       parameters: {
         type: "object",
         properties: {
+          operation: {
+            type: "string",
+            enum: ["search", "create_vector_store", "list_vector_stores", "delete_vector_store", "upload_file"],
+            description: "Operation: 'search' (default), or manage vector stores/files.",
+          },
           query: {
             type: "string",
-            description: "The question or search query to find in documents.",
+            description: "The question or search query (for 'search').",
           },
           vector_store_ids: {
             type: "array",
             items: { type: "string" },
-            description: "Optional vector store IDs to search. Omit to search all.",
+            description: "Vector store IDs to search (for 'search'). Omit to search all.",
+          },
+          store_name: {
+            type: "string",
+            description: "Name for the vector store (for 'create_vector_store').",
+          },
+          vector_store_id: {
+            type: "string",
+            description: "Vector store ID (for 'delete_vector_store' or 'upload_file').",
+          },
+          file_id: {
+            type: "string",
+            description: "File ID to add to vector store (for 'upload_file' — upload file via foundry_code_execute first).",
           },
           model: {
             type: "string",
-            description: "Model to use (default: gpt-4.1).",
+            description: "Model to use for search (default: gpt-4.1).",
           },
         },
-        required: ["query"],
+        required: [],
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
+          const op = (params.operation as string) || "search";
+          const apiVer = "api-version=2025-11-15-preview";
+
+          if (op === "list_vector_stores") {
+            const result = await routerCall("GET", `/openai/vector_stores?${apiVer}`);
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "create_vector_store") {
+            const result = await routerCall("POST", `/openai/vector_stores?${apiVer}`, {
+              name: params.store_name || "azureclaw-store",
+            });
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "delete_vector_store") {
+            await routerCall("DELETE", `/openai/vector_stores/${params.vector_store_id}?${apiVer}`);
+            return { content: [{ type: "text", text: `Vector store ${params.vector_store_id} deleted.` }] };
+          } else if (op === "upload_file") {
+            const result = await routerCall("POST",
+              `/openai/vector_stores/${params.vector_store_id}/files?${apiVer}`,
+              { file_id: params.file_id });
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          }
+
+          // Default: search operation
           const fileSearchTool: any = { type: "file_search" };
           if (params.vector_store_ids) {
             fileSearchTool.file_search = { vector_store_ids: params.vector_store_ids };
           }
-          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+          const result = await routerCall("POST", `/openai/responses?${apiVer}`, {
             model: (params.model as string) || "gpt-4.1",
             input: params.query,
             tools: [fileSearchTool],
@@ -1920,19 +2407,20 @@ const azureClawPlugin = definePluginEntry({
       name: "foundry_conversations",
       label: "Foundry Conversations",
       description:
-        "Manage persistent conversations via Azure AI Foundry. Create, list, " +
-        "continue, and delete conversations that maintain full message history " +
-        "server-side. Use for long-running multi-turn interactions that need to " +
-        "survive session restarts.",
+        "Manage persistent server-side conversations via Azure AI Foundry. " +
+        "Use cases: maintain long-running multi-turn dialogues across sessions, " +
+        "build research threads that survive restarts, keep separate conversation " +
+        "contexts for different tasks/topics. Operations: create, list, get, respond, " +
+        "add_message, delete.",
       parameters: {
         type: "object",
         properties: {
           operation: {
             type: "string",
-            enum: ["create", "list", "respond", "add_message", "delete"],
-            description: "Operation to perform on conversations.",
+            enum: ["create", "list", "get", "respond", "add_message", "delete"],
+            description: "Operation to perform. 'get' retrieves full message history for a conversation.",
           },
-          conversation_id: { type: "string", description: "Conversation ID (for respond/add_message/delete)." },
+          conversation_id: { type: "string", description: "Conversation ID (for get/respond/add_message/delete)." },
           input: { type: "string", description: "User input (for 'respond' — generates AI response in conversation context)." },
           message: { type: "string", description: "Message text to add (for 'add_message')." },
           role: { type: "string", description: "Message role: 'user' or 'assistant' (for 'add_message', default: 'user')." },
@@ -1953,6 +2441,9 @@ const azureClawPlugin = definePluginEntry({
             return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "list") {
             const result = await routerCall("GET", `/openai/conversations?${apiVer}`);
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "get") {
+            const result = await routerCall("GET", `/openai/conversations/${params.conversation_id}?${apiVer}`);
             return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "respond") {
             const result = await routerCall("POST", `/openai/responses?${apiVer}`, {
@@ -1999,17 +2490,19 @@ const azureClawPlugin = definePluginEntry({
       label: "Foundry Evaluations",
       description:
         "Create and run model quality evaluations via Azure AI Foundry Evals API. " +
-        "Test model outputs against criteria (string checks, model-graded, etc.). " +
-        "Use when you need to benchmark model performance or validate output quality.",
+        "Use cases: benchmark prompt quality before/after changes, validate output " +
+        "against golden answers, run regression tests on model responses, compare " +
+        "different models. Operations: list, create, run, get_run, list_evaluators.",
       parameters: {
         type: "object",
         properties: {
           operation: {
             type: "string",
-            enum: ["list", "create", "run", "list_evaluators"],
-            description: "Operation: 'list' evals, 'create' a new eval, 'run' an eval, or 'list_evaluators'.",
+            enum: ["list", "create", "run", "get_run", "list_evaluators"],
+            description: "Operation: 'list' evals, 'create' one, 'run' it, 'get_run' status/results, or 'list_evaluators'.",
           },
           eval_id: { type: "string", description: "Eval ID (for 'run')." },
+          run_id: { type: "string", description: "Run ID (for 'get_run' — check status and results)." },
           name: { type: "string", description: "Eval name (for 'create')." },
           data_source_config: { type: "object", description: "Data source config (for 'create')." },
           testing_criteria: { type: "array", items: { type: "object" }, description: "Testing criteria array (for 'create')." },
@@ -2035,6 +2528,9 @@ const azureClawPlugin = definePluginEntry({
           } else if (op === "run") {
             const result = await routerCall("POST", `/openai/evals/${params.eval_id}/runs?${apiVer}`,
               params.run_config || {});
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "get_run") {
+            const result = await routerCall("GET", `/openai/evals/${params.eval_id}/runs/${params.run_id}?${apiVer}`);
             return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "list_evaluators") {
             const result = await routerCall("GET", `/evaluators?${apiVer}`);
@@ -2154,7 +2650,7 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("Foundry tools registered: foundry_code_execute, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
+    log.info("Foundry tools registered: foundry_code_execute, foundry_image_generation, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
 
     // ── Register Azure AI Foundry as a model provider ───────────────────
     // Use dynamically discovered deployments when available, fall back to defaults
@@ -2498,11 +2994,12 @@ const azureClawPlugin = definePluginEntry({
               `  Audit logger: ${auditStatus}`,
               "",
               "**Infrastructure Layer** (Rust router):",
-              `  Governance: ${parsed.governance_enabled ? "enabled" : "disabled"}`,
-              `  Sandbox: ${parsed.sandbox_name}`,
-              `  Trust threshold: ${parsed.trust_threshold}`,
+              `  Governance: ${parsed.enabled ? "enabled" : "disabled"}`,
+              `  Sandbox: ${parsed.sandbox}`,
               `  Audit entries: ${parsed.audit_entries}`,
-              `  Mesh inbox: ${parsed.mesh_inbox_count} messages`,
+              `  Mesh inbox: ${parsed.inbox_messages} messages`,
+              `  Mesh sessions: ${parsed.mesh_sessions ?? 0}  sent: ${parsed.mesh_messages_sent ?? 0}  recv: ${parsed.mesh_messages_received ?? 0}`,
+              `  Trust updates: ${parsed.trust_updates ?? 0}  total interactions: ${parsed.total_interactions ?? 0}`,
               parsed.blocklist_domains ? `  Blocklist: ${parsed.blocklist_domains} domains` : "",
               "",
               "**Overlap resolution:**",

@@ -183,8 +183,12 @@ impl Blocklist {
         let interval = Duration::from_secs(refresh_secs.unwrap_or(DEFAULT_REFRESH_SECS));
 
         tokio::spawn(async move {
-            // Small initial delay to not block startup
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            // Short initial delay, then retry quickly if feeds fail on first attempt.
+            // Some containers have DNS not ready at startup — retry fixes that.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            // First fetch with aggressive retry (covers startup DNS timing)
+            let mut first_run = true;
 
             loop {
                 tracing::info!("Blocklist refresh: fetching upstream feeds");
@@ -199,14 +203,25 @@ impl Blocklist {
                     tracing::info!(count, "Blocklist: reloaded seed file");
                 }
 
-                // Fetch OISD (domainswild format: one domain per line)
-                match fetch_feed(&client, OISD_SMALL_URL).await {
-                    Ok(content) => {
-                        let count = parse_domain_list(&content, &mut new_domains);
-                        tracing::info!(count, "Blocklist: loaded OISD feed");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Blocklist: OISD fetch failed — keeping existing");
+                // Fetch OISD with retry on first run
+                let max_attempts = if first_run { 3 } else { 1 };
+                let mut oisd_ok = false;
+                for attempt in 1..=max_attempts {
+                    match fetch_feed(&client, OISD_SMALL_URL).await {
+                        Ok(content) => {
+                            let count = parse_domain_list(&content, &mut new_domains);
+                            tracing::info!(count, "Blocklist: loaded OISD feed");
+                            oisd_ok = true;
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt < max_attempts {
+                                tracing::warn!(attempt, error = %e, "Blocklist: OISD fetch failed — retrying in 10s");
+                                tokio::time::sleep(Duration::from_secs(10)).await;
+                            } else {
+                                tracing::warn!(error = %e, "Blocklist: OISD fetch failed — keeping existing");
+                            }
+                        }
                     }
                 }
 
@@ -231,7 +246,15 @@ impl Blocklist {
                     tracing::warn!("Blocklist: all feeds failed, keeping previous entries");
                 }
 
-                tokio::time::sleep(interval).await;
+                // On first run, if OISD failed, retry sooner (60s instead of 6h)
+                if first_run && !oisd_ok {
+                    tracing::info!("Blocklist: OISD failed on startup — retrying in 60s");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                } else {
+                    first_run = false;
+                    tokio::time::sleep(interval).await;
+                }
+                first_run = false;
             }
         });
     }

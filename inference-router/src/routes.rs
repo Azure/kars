@@ -166,13 +166,17 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
         // Insights APIs
         .route("/insights", get(foundry_proxy).post(foundry_proxy))
         .route("/insights/{*path}", get(foundry_proxy))
-        // OpenAI Conversations + Responses + Evals
+        // OpenAI Conversations + Responses + Evals + Vector Stores + Files
         .route("/openai/conversations", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/conversations/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/responses", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/responses/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/evals", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/evals/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/vector_stores", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/vector_stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/files", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/files/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/fine-tuning/{*path}", get(foundry_proxy).post(foundry_proxy))
         // Red Teams APIs
         .route("/redTeams/runs", get(foundry_proxy).post(foundry_proxy))
@@ -216,6 +220,8 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/audit/verify", get(agt_audit_verify))
         // Status (exposes trust scores, audit entries, inbox count)
         .route("/agt/status", get(agt_status))
+        // Trust update (plugin pushes reputation changes to the router's trust store)
+        .route("/agt/trust", post(agt_trust_update))
         // Registry reputation (proxied from agentmesh-registry)
         .route("/agt/reputation", get(agt_reputation))
 }
@@ -963,6 +969,7 @@ async fn agt_mesh_send(
     {
         Ok(resp) if resp.status().is_success() => {
             state.governance.trust.record_success(to_agent).await;
+            state.governance.mesh_metrics.messages_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             state.governance.audit.append(
                 &format!("mesh:send:{}", to_agent),
                 "delivered",
@@ -1038,6 +1045,7 @@ async fn agt_mesh_receive(
     }
 
     state.governance.trust.record_success(&msg.from_agent).await;
+    state.governance.mesh_metrics.messages_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state.governance.audit.append(
         &format!("mesh:receive:{}", msg.from_agent),
         "allow",
@@ -1063,6 +1071,8 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
 
     let blocklist_len = state.blocklist.len().await;
 
+    let total_interactions: u64 = trust_agents.iter().map(|a| a.interactions).sum();
+
     Json(serde_json::json!({
         "enabled": state.governance.enabled,
         "sandbox": state.governance.sandbox_name,
@@ -1075,7 +1085,48 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         "blocklist_domains": blocklist_len,
         "egress_learn_mode": state.blocklist.is_learn_mode(),
         "egress_learned_domains": state.blocklist.learned_count().await,
+        "mesh_sessions": state.governance.mesh_metrics.sessions.load(std::sync::atomic::Ordering::Relaxed),
+        "mesh_messages_sent": state.governance.mesh_metrics.messages_sent.load(std::sync::atomic::Ordering::Relaxed),
+        "mesh_messages_received": state.governance.mesh_metrics.messages_received.load(std::sync::atomic::Ordering::Relaxed),
+        "trust_updates": state.governance.mesh_metrics.trust_updates.load(std::sync::atomic::Ordering::Relaxed),
+        "total_interactions": total_interactions,
     }))
+}
+
+/// POST /agt/trust — plugin pushes trust updates after mesh interactions.
+/// Body: { "agent_id": "peer-name", "score": 510, "interactions": 1 }
+async fn agt_trust_update(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id = body["agent_id"].as_str().unwrap_or("");
+    let score = body["score"].as_u64().unwrap_or(500) as u32;
+    let interactions = body["interactions"].as_u64().unwrap_or(0);
+
+    if agent_id.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent_id required"})),
+        );
+    }
+
+    state.governance.trust.update_trust(agent_id, score, interactions).await;
+    state.governance.mesh_metrics.trust_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.governance.mesh_metrics.sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Record in the audit chain so the operator panel sees trust changes
+    state.governance.audit.append(
+        &format!("trust_update:{}", agent_id),
+        "applied",
+        &format!("score={} interactions={}", score, interactions),
+    ).await;
+
+    tracing::info!(agent_id, score, interactions, "AGT trust updated via plugin");
+
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "agent_id": agent_id, "score": score})),
+    )
 }
 
 /// GET /agt/reputation — fetch this agent's reputation from the AgentMesh registry.
@@ -1161,17 +1212,27 @@ async fn agt_relay_proxy(
 }
 
 /// Bidirectional WebSocket bridge: client ↔ relay.
-async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
+async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
     use futures::stream::StreamExt;
     use futures::sink::SinkExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio_tungstenite::tungstenite;
 
-    // Connect to the upstream relay
-    let upstream = match tokio_tungstenite::connect_async(relay_url).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
+    // Connect to the upstream relay with a 30-second timeout
+    let upstream = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio_tungstenite::connect_async(relay_url),
+    ).await {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
             tracing::error!(error = %e, url = %relay_url, "Failed to connect to AGT relay");
+            // Send close frame so the client gets an error instead of hanging
+            let _ = client_socket.close().await;
+            return;
+        }
+        Err(_) => {
+            tracing::error!(url = %relay_url, "AGT relay connection timed out (30s)");
+            let _ = client_socket.close().await;
             return;
         }
     };

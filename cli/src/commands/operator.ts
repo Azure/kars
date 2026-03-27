@@ -84,10 +84,16 @@ interface SecurityState {
   agtTrustThreshold: number;
   // AGT detail — populated from /agt/audit, /agt/trust, relay/registry logs
   agtRecentAudit: string[];     // last few audit entries
-  agtTrustScores: { agent: string; score: number; tier: string }[];
+  agtTrustScores: { agent: string; score: number; tier: string; interactions: number; lastSeen: string }[];
   agtRelayConnected: boolean;
   agtRegistryAgents: number;
   agtAmid: string;  // cryptographic identity from registry
+  // Mesh counters (from router MeshMetrics)
+  agtMeshSessions: number;
+  agtMeshSent: number;
+  agtMeshReceived: number;
+  agtTrustUpdates: number;
+  agtTotalInteractions: number;
   // Registry reputation (from agentmesh-registry)
   agtReputation: {
     score: number;       // 0.0–1.0 composite
@@ -600,6 +606,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       agtRelayConnected: false,
       agtRegistryAgents: 0,
       agtAmid: "",
+      agtMeshSessions: 0,
+      agtMeshSent: 0,
+      agtMeshReceived: 0,
+      agtTrustUpdates: 0,
+      agtTotalInteractions: 0,
       agtReputation: null,
       totalRequests: 0,
       errorRequests: 0,
@@ -686,8 +697,16 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           agent: a.agent_id || a.name || "unknown",
           score: a.score ?? 0,
           tier: a.tier || (a.score >= 800 ? "Sovereign" : a.score >= 600 ? "Verified" : a.score >= 400 ? "Known" : a.score >= 200 ? "Observed" : "Anonymous"),
+          interactions: a.interactions ?? 0,
+          lastSeen: a.last_interaction || "",
         }));
         state.agtRegistryAgents = ts.length;
+        // Mesh metrics from router MeshMetrics counters
+        state.agtMeshSessions = agt.mesh_sessions || 0;
+        state.agtMeshSent = agt.mesh_messages_sent || 0;
+        state.agtMeshReceived = agt.mesh_messages_received || 0;
+        state.agtTrustUpdates = agt.trust_updates || 0;
+        state.agtTotalInteractions = agt.total_interactions || 0;
         // If no trust states but governance is enabled, show self
         if (state.agtEnabled && ts.length === 0) {
           const threshold = agt.trust_threshold ?? 500;
@@ -695,6 +714,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             agent: agt.sandbox || sb.name,
             score: 500,
             tier: "Known (self)",
+            interactions: 0,
+            lastSeen: "",
           }];
           state.agtRegistryAgents = 1;
         }
@@ -772,6 +793,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             agent: a.agent_id || a.name || "unknown",
             score: a.score ?? 0,
             tier: a.tier || (a.score >= 800 ? "Sovereign" : a.score >= 600 ? "Verified" : a.score >= 400 ? "Known" : "Anonymous"),
+            interactions: a.interactions ?? 0,
+            lastSeen: a.last_interaction || "",
           }));
           state.agtRegistryAgents = local.length;
         }
@@ -1130,10 +1153,16 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       return;
     }
 
+        // Count only agents with actual interactions (excludes self and stale lookup-only entries)
+    const activePeerCount = sec.agtTrustScores.filter((t: any) =>
+      t.agent !== sb.name && (t.interactions > 0 || t.lastSeen)
+    ).length;
+
     const lines: string[] = [
       `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid.substring(0, 12)}…{/}` : ""),
       ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
-      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents} known`,
+      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : activePeerCount} known`,
+      ` Mesh    ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}  ${sec.agtTrustUpdates} trust updates`,
     ];
 
     // Registry reputation score (from agentmesh-registry)
@@ -1150,12 +1179,47 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       lines.push(`{gray-fg}Reputation  awaiting first session{/}`);
     }
 
-    // Local trust store (router in-memory, per-interaction)
+    // Local trust store + traffic flow (router in-memory, per-interaction)
     if (sec.agtTrustScores.length > 0) {
-      lines.push(`{bold}Local Trust{/} {gray-fg}(router){/}`);
-      for (const t of sec.agtTrustScores) {
-        const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
-        lines.push(` {${c}-fg}${t.score}{/} ${t.tier} ${t.agent.substring(0, 18)}`);
+      // Show self at the top
+      const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
+      // Filter out self and stale entries (never communicated — 0 interactions, no lastSeen)
+      const peers = sec.agtTrustScores.filter((t) =>
+        t.agent !== sb.name && (t.interactions > 0 || t.lastSeen)
+      );
+
+      if (peers.length > 0) {
+        lines.push(`{bold}Mesh Traffic{/}`);
+        for (const t of peers) {
+          const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
+          // Trust score bar visualization (0-1000 mapped to 10 chars)
+          const filled = Math.round(t.score / 100);
+          const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+          // Relative time
+          let ago = "";
+          if (t.lastSeen) {
+            const d = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
+            const ms = Date.now() - d.getTime();
+            if (!isNaN(ms) && ms >= 0) {
+              if (ms < 60_000) ago = `${Math.round(ms / 1000)}s ago`;
+              else if (ms < 3_600_000) ago = `${Math.round(ms / 60_000)}m ago`;
+              else ago = `${Math.round(ms / 3_600_000)}h ago`;
+            }
+          }
+          const name = t.agent.length > 20 ? t.agent.substring(0, 18) + "…" : t.agent;
+          lines.push(` {${c}-fg}${bar}{/} ${t.score} ${name}`);
+          lines.push(`   ${t.tier} · ${t.interactions} msg${t.interactions !== 1 ? "s" : ""}${ago ? ` · ${ago}` : ""}`);
+        }
+        // Traffic flow diagram
+        const selfName = (self?.agent || sb.name).substring(0, 14);
+        lines.push("");
+        for (const t of peers) {
+          const peerName = t.agent.length > 14 ? t.agent.substring(0, 12) + "…" : t.agent;
+          const arrow = t.interactions > 0 ? `═══⟐ ${t.interactions} msg${t.interactions !== 1 ? "s" : ""} ⟐═══` : `─── idle ───`;
+          lines.push(` {cyan-fg}${selfName}{/} ${arrow} {green-fg}${peerName}{/}`);
+        }
+      } else if (self) {
+        lines.push(`{gray-fg}No peer agents yet{/}`);
       }
     }
 

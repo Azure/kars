@@ -25,7 +25,8 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
     rm /tmp/node.tar.gz
 
 # Install OpenClaw
-RUN npm install -g openclaw@latest
+ARG OPENCLAW_VERSION=latest
+RUN npm install -g openclaw@${OPENCLAW_VERSION}
 
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
 # AzureClaw's runtime security (egress guard, Content Safety, read-only rootfs)
@@ -35,6 +36,27 @@ RUN openclaw skills install summarize 2>/dev/null || true && \
     openclaw skills install multi-search-engine 2>/dev/null || true && \
     openclaw skills install proactive-agent 2>/dev/null || true
 
+# Install npm CLIs that unlock built-in OpenClaw skills
+RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
+
+# ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
+
+FROM golang:1.24-alpine AS go-builder
+
+# Build Go CLI tools that enable built-in OpenClaw skills.
+# Each tool is a small static binary (~5-15MB) — discarded build cache doesn't bloat the runtime image.
+# GOTOOLCHAIN=auto lets Go download a newer toolchain if a module requires it (e.g. go >= 1.25).
+RUN apk add --no-cache git && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/blucli/cmd/blu@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/eightctl/cmd/eightctl@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/gifgrep/cmd/gifgrep@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/ordercli/cmd/ordercli@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/sonoscli/cmd/sonos@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/wacli/cmd/wacli@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/camsnap/cmd/camsnap@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/goplaces/cmd/goplaces@latest && \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/songsee/cmd/songsee@latest
+
 # ─── Runtime Stage ────────────────────────────────────────────────────────────
 
 FROM ${AZURELINUX_BASE}
@@ -42,14 +64,21 @@ FROM ${AZURELINUX_BASE}
 # Detect arch for Node.js download
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux \
+    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
                     python3 python3-pip && tdnf clean all && \
     pip3 install --no-cache-dir \
-      requests httpx beautifulsoup4 lxml \
-      pandas numpy matplotlib seaborn \
+      requests httpx beautifulsoup4 lxml cssselect \
+      pandas numpy matplotlib seaborn scipy sympy \
       pyyaml toml python-dotenv \
       aiohttp websockets \
-      tabulate rich && \
+      tabulate rich \
+      pdfplumber pypdf python-docx openpyxl python-pptx \
+      Pillow chardet python-dateutil \
+      xmltodict html5lib markdown html2text jinja2 \
+      pydantic jsonpath-ng \
+      sqlalchemy cryptography tiktoken \
+      dnspython networkx geopy \
+      ftfy unidecode qrcode fpdf2 nano-pdf && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
@@ -67,6 +96,22 @@ RUN RG_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64-
     cp /tmp/ripgrep-*/rg /usr/local/bin/ && \
     rm -rf /tmp/rg.tar.gz /tmp/ripgrep-*
 
+# Install 1Password CLI (enables 1password skill)
+RUN OP_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
+    OP_VER="2.30.3" && \
+    curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VER}/op_linux_${OP_ARCH}_v${OP_VER}.zip" -o /tmp/op.zip && \
+    unzip -qo /tmp/op.zip -d /usr/local/bin/ && \
+    rm /tmp/op.zip
+
+# Install himalaya (enables himalaya email skill)
+RUN HIM_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64";; *) echo "x86_64";; esac) && \
+    curl -fsSL "https://github.com/pimalaya/himalaya/releases/download/v1.2.0/himalaya.${HIM_ARCH}-linux.tgz" -o /tmp/himalaya.tgz && \
+    tar xzf /tmp/himalaya.tgz -C /usr/local/bin/ && \
+    rm /tmp/himalaya.tgz
+
+# Copy Go CLI tools from go-builder (enables blucli, eightctl, gifgrep, etc.)
+COPY --from=go-builder /go/bin/* /usr/local/bin/
+
 # Security: create non-root user (sandbox=1000) and router user (router=1001)
 # UID separation enables iptables egress guard: UID 1000 is restricted to
 # localhost + DNS, while UID 1001 (router) can reach the internet for
@@ -81,7 +126,10 @@ RUN echo 'export PS1="azureclaw@\\h:\\w\\$ "' >> /sandbox/.bashrc
 
 # Copy OpenClaw from builder (npm global root is /usr/local/lib/node_modules)
 COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw && \
+    for bin in clawhub mcporter oracle; do \
+      [ -f "/usr/local/lib/node_modules/.bin/$bin" ] && ln -sf "/usr/local/lib/node_modules/.bin/$bin" "/usr/local/bin/$bin"; \
+    done; true
 
 # Copy pre-installed ClawHub skills from builder (installed via openclaw skills install)
 COPY --from=builder /root/.openclaw/workspace/skills/ /opt/clawhub-skills/
@@ -98,12 +146,16 @@ COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
+
 # Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm install --omit=dev --ignore-scripts 2>/dev/null || true
 # Install vendored SDK with its dependencies (libsodium-wrappers etc.)
-COPY vendor/agentmesh-sdk/package.json /opt/azureclaw-vendored-sdk/package.json
+COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
+COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
 COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
-RUN cd /opt/azureclaw-vendored-sdk && npm install --omit=dev --ignore-scripts 2>/dev/null || true
+RUN cd /opt/azureclaw-vendored-sdk && npm install --ignore-scripts 2>/dev/null || true && \
+    npx tsup 2>/dev/null || echo "SDK build skipped (using pre-built dist)" && \
+    npm prune --omit=dev 2>/dev/null || true
 # Overlay vendored SDK into plugin node_modules (patched dist + deps)
 RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
     cp -r /opt/azureclaw-vendored-sdk/dist /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \

@@ -31,7 +31,7 @@
 │  │   ├─ TUI :18791                                                  │     │
 │  │   ├─ Read-only rootfs, writable /sandbox + /tmp                  │     │
 │  │   ├─ AzureClaw plugin (tools: spawn, mesh, Foundry, http_fetch)   │     │
-│  │   ├─ Python 3 (pandas, numpy, matplotlib, requests, httpx)       │     │
+│  │   ├─ Python 3 (43 packages: pandas, scipy, pdfplumber, Pillow, …)   │     │
 │  │   └─ All external access → localhost:8443 only                   │     │
 │  │                                                                  │     │
 │  │  container: inference-router (UID 1001, unrestricted network)    │     │
@@ -77,7 +77,7 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 | Level | RuntimeClass | seccomp | Node Pool |
 |-------|-------------|---------|-----------|
 | standard | (default runc) | RuntimeDefault | `sandbox` |
-| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (~219 syscalls) | `sandbox` |
+| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (175 syscalls) | `sandbox` |
 | confidential | `kata-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
 
 **Isolation inheritance:** The controller exports `SANDBOX_ISOLATION` as an environment variable into every pod. When a sub-agent is spawned via `/sandbox/spawn`, the inference router reads the parent's isolation level from this env var and applies it as the default for the child. Downgrading from `confidential` to a lower isolation level is blocked — the spawn request returns an error.
@@ -115,7 +115,7 @@ Runs as UID 1000 (all outbound blocked by iptables except localhost + DNS + ESTA
 - **TUI** on port 18791
 - **Plugin:** AzureClaw tools (`spawn`, `mesh`, `Foundry`, `http_fetch`), provider `azure-openai` routing to `localhost:8443`
 - **Native delegation:** Sub-agent tasks received via AGT mesh are delegated to the full OpenClaw agent loop (`openclaw agent --message`), giving sub-agents access to all registered tools (Foundry, exec, web_search, etc.)
-- **Python 3:** Pre-installed with pandas, numpy, matplotlib, seaborn, requests, httpx, beautifulsoup4, aiohttp, websockets, rich, tabulate
+- **Python 3:** 43 packages pre-installed — pandas, numpy, scipy, sympy, matplotlib, seaborn, requests, httpx, beautifulsoup4, lxml, cssselect, aiohttp, websockets, rich, tabulate, pdfplumber, pypdf, python-docx, openpyxl, python-pptx, Pillow, jinja2, pydantic, jsonpath-ng, xmltodict, markdown, html2text, chardet, python-dateutil, pyyaml, toml, python-dotenv, sqlalchemy, cryptography, tiktoken, dnspython, networkx, geopy, ftfy, unidecode, qrcode, fpdf2, html5lib
 - **Channels:** Telegram, Slack, Discord, WhatsApp (via `/egress/fetch` proxy)
 - **Filesystem:** Read-only rootfs, writable `/sandbox` + `/tmp` (emptyDir, `/tmp` is tmpfs 1Gi)
 - **Explicit proxy:** `proxy-bootstrap.js` is preloaded via `NODE_OPTIONS="--require ..."` before any OpenClaw code runs. It sets undici's `EnvHttpProxyAgent` as the global fetch dispatcher so all outbound HTTP/HTTPS requests (Telegram polling, model pricing, etc.) honor `HTTPS_PROXY`/`NO_PROXY` env vars.
@@ -276,6 +276,23 @@ All endpoints served by the inference router on `:8443`.
 | GET | `/agt/relay` | WebSocket bridge to agentmesh-relay (E2E encrypted) |
 | GET/POST | `/agt/registry/*` | AgentMesh registry proxy |
 | GET | `/agt/status` | Governance status |
+
+### AGT Mesh Connection Model
+
+Each container maintains **one AGT mesh connection**, created by the gateway process. All other processes in the container skip mesh initialization:
+
+| Process | AGT Mesh | Environment |
+|---------|----------|-------------|
+| Gateway (OpenClaw) | ✅ Creates mesh connection | Default `HOME` |
+| Node host | ❌ Skips mesh init | `AGT_SKIP_INIT=1 HOME=/tmp/node-host-home` |
+| Approvals command | ❌ Skips mesh init | `AGT_SKIP_INIT=1` |
+| Delegated sub-agent tasks | ❌ Skips mesh init | `AGT_SKIP_INIT=1 HOME=/tmp/agt-delegate-home` |
+
+**Why `AGT_SKIP_INIT=1`:** The AGT SDK creates a device fingerprint and Signal Protocol key store on init. Multiple processes sharing the same `HOME` would cause fingerprint conflicts and corrupt the key store. Only the gateway needs a mesh connection — it handles all inter-agent communication via the plugin's `onMessage` handler.
+
+**Why separate `HOME` dirs:** Processes that run the OpenClaw runtime (node host, delegated tasks) get an isolated `HOME` to prevent any residual SDK state from colliding with the gateway's key material.
+
+**Relay listener:** There is no separate relay listener process. Incoming mesh messages are handled by the AzureClaw plugin's built-in `onMessage` handler inside the gateway, which delegates tasks to the native agent loop (`openclaw agent --message`).
 
 ### Sub-Agent Spawning
 
