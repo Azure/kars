@@ -604,9 +604,12 @@ echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 
 # Auto-approve all exec requests — no manual approval in headless sandbox.
 # The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
-$AS_SANDBOX openclaw approvals set --stdin <<'APPROVALS' > /dev/null 2>&1 || true
-{ "mode": "auto-approve" }
-APPROVALS
+# Use timeout to prevent hanging (the command sometimes blocks on gateway connection).
+# Run in background so the entrypoint continues to the relay listener section.
+(
+  sleep 2  # Give gateway a moment to stabilize
+  echo '{ "mode": "auto-approve" }' | timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
+) &
 
 # Start a persistent background agent session that loads the AzureClaw plugin.
 # This keeps the AGT relay connection alive so the agent can receive E2E encrypted
