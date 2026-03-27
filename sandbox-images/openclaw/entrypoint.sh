@@ -596,7 +596,7 @@ done
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
 mkdir -p /tmp/node-host-home
 [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home
-HOME=/tmp/node-host-home OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
+HOME=/tmp/node-host-home AGT_SKIP_INIT=1 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
   --host 127.0.0.1 --port 18789 \
   --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!
@@ -608,7 +608,7 @@ echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 # Run in background so the entrypoint continues to the relay listener section.
 (
   sleep 2  # Give gateway a moment to stabilize
-  echo '{ "mode": "auto-approve" }' | timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
+  echo '{ "mode": "auto-approve" }' | AGT_SKIP_INIT=1 timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
 ) &
 
 # The AGT relay listener is NOT needed as a separate process.
