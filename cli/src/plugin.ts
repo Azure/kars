@@ -239,6 +239,9 @@ async function delegateToNativeAgent(
 
   log.info(`Delegating task to native OpenClaw agent (session: ${sessionId})`);
 
+  const fs = await import("node:fs");
+  try { fs.mkdirSync("/tmp/agt-delegate-home", { recursive: true }); } catch {}
+
   return new Promise<string>((resolve, reject) => {
     const child = spawn("openclaw", [
       "agent",
@@ -246,7 +249,16 @@ async function delegateToNativeAgent(
       "--session-id", sessionId,
       "--timeout", "300",
       "--json",
-    ], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    ], {
+      env: {
+        ...process.env,
+        // Separate HOME so the agent gets its own device fingerprint and doesn't
+        // conflict with the node host's "node" role pairing.
+        HOME: "/tmp/agt-delegate-home",
+        AGT_SKIP_INIT: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     const chunks: Buffer[] = [];
     // OpenClaw writes all output (plugin logs + JSON result) to stderr
@@ -663,6 +675,9 @@ async function processTaskWithTools(
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  // Node hosts don't participate in the mesh — skip entirely.
+  if (process.env.AGT_SKIP_INIT === "1") return;
+
   // Process-level singleton — the gateway loads this plugin in 5 parallel contexts.
   // Use a synchronous lock (set BEFORE any async work) to prevent race conditions.
   const AGT_CLIENT_KEY = Symbol.for("agt-mesh-client");
@@ -697,7 +712,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   // Module-level fallback guard (for hot-restart where process persists)
   if (agtInitialized && agtMeshClient) return;
 
-  // Store the init promise so other contexts can await it
+  // Create and store the init promise BEFORE any async work so other contexts
+  // that check AGT_LOCK_KEY can always await it (fixes race where pending was undefined).
   const initPromise = (async () => {
   try {
     const sdk: any = await import("@agentmesh/sdk");
@@ -958,6 +974,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     }
   }
   })(); // end of init IIFE
+  // Promise is stored on process BEFORE the IIFE body runs (line below runs
+  // synchronously because the IIFE returns a pending Promise immediately).
   (process as any)[Symbol.for("agt-init-promise")] = initPromise;
   await initPromise;
 }
