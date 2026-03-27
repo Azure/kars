@@ -51,7 +51,7 @@ let agtTrustStore: any = null;
 let agtAuditLogger: any = null;
 let agtMeshClient: any = null;
 let agtIdentity: any = null;
-let agtInitialized = false; // Singleton guard — only first plugin load creates the mesh client
+let agtInitialized = false; // Module-level guard (supplemented by process-level guard below)
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
 const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string }> = [];
@@ -663,12 +663,42 @@ async function processTaskWithTools(
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  // Singleton guard — only one mesh connection per module instance.
-  // Don't use process.env flag: OpenClaw's gateway hot-restart resets module state
-  // but inherits env vars, causing initAGT to be skipped with a null agtMeshClient.
-  if (agtInitialized && agtMeshClient) return;
-  agtInitialized = true;
+  // Process-level singleton — the gateway loads this plugin in 5 parallel contexts.
+  // Use a synchronous lock (set BEFORE any async work) to prevent race conditions.
+  const AGT_CLIENT_KEY = Symbol.for("agt-mesh-client");
+  const AGT_IDENTITY_KEY = Symbol.for("agt-identity");
+  const AGT_LOCK_KEY = Symbol.for("agt-init-lock");
+  const AGT_PROMISE_KEY = Symbol.for("agt-init-promise");
 
+  // Fast path: already initialized in another context
+  const existingClient = (process as any)[AGT_CLIENT_KEY];
+  if (existingClient) {
+    agtMeshClient = existingClient;
+    agtIdentity = (process as any)[AGT_IDENTITY_KEY];
+    agtInitialized = true;
+    return;
+  }
+
+  // Synchronous lock — first caller wins, others wait for the promise
+  if ((process as any)[AGT_LOCK_KEY]) {
+    // Another context is initializing — wait for it to finish
+    const pending = (process as any)[AGT_PROMISE_KEY];
+    if (pending) await pending;
+    const client = (process as any)[AGT_CLIENT_KEY];
+    if (client) {
+      agtMeshClient = client;
+      agtIdentity = (process as any)[AGT_IDENTITY_KEY];
+      agtInitialized = true;
+    }
+    return;
+  }
+  (process as any)[AGT_LOCK_KEY] = true; // Synchronous — prevents all other callers
+
+  // Module-level fallback guard (for hot-restart where process persists)
+  if (agtInitialized && agtMeshClient) return;
+
+  // Store the init promise so other contexts can await it
+  const initPromise = (async () => {
   try {
     const sdk: any = await import("@agentmesh/sdk");
     agtSdk = sdk;
@@ -740,6 +770,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
     }
+
+    // Store on process for cross-context singleton access
+    (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
+    (process as any)[Symbol.for("agt-identity")] = agtIdentity;
 
     // Set up KNOCK handler — policy-gated session establishment with trust scoring.
     // Each agent evaluates the incoming KNOCK before accepting:
@@ -923,6 +957,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       log.warn(`AGT SDK init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
     }
   }
+  })(); // end of init IIFE
+  (process as any)[Symbol.for("agt-init-promise")] = initPromise;
+  await initPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -1557,10 +1594,11 @@ const azureClawPlugin = definePluginEntry({
           }
           try {
             // 1. Discover target agent's AMID via registry search (with retry for boot timing)
-            let targetAmid = nameToAmid.get(agentName);
-            if (!targetAmid) {
-              for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
-                if (attempt > 0) {
+            // Always do a fresh registry lookup — the sub-agent's relay listener restarts
+            // create new AMID identities, so cached AMIDs go stale quickly.
+            let targetAmid: string | undefined;
+            for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
+              if (attempt > 0) {
                   log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
                   await new Promise(r => setTimeout(r, 2000));
                 }
@@ -1581,9 +1619,15 @@ const azureClawPlugin = definePluginEntry({
                     req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
                   });
                   if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
-                    const match = regResult.results.find((a: any) =>
-                      a.display_name === agentName || a.capabilities?.includes(agentName)
-                    ) || regResult.results[0];
+                    // Prefer online agents, then most recently seen
+                    const sorted = regResult.results
+                      .filter((a: any) => a.display_name === agentName || a.capabilities?.includes(agentName))
+                      .sort((a: any, b: any) => {
+                        if (a.status === "online" && b.status !== "online") return -1;
+                        if (b.status === "online" && a.status !== "online") return 1;
+                        return (b.last_seen || "").localeCompare(a.last_seen || "");
+                      });
+                    const match = sorted[0] || regResult.results[0];
                     targetAmid = match.amid;
                   }
                 } catch (regErr: any) {
@@ -1595,7 +1639,6 @@ const azureClawPlugin = definePluginEntry({
                 nameToAmid.set(agentName, targetAmid);
                 amidToName.set(targetAmid, agentName);
               }
-            }
 
             if (targetAmid) {
               // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
