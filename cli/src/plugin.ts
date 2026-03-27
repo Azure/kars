@@ -613,7 +613,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (AGT_TRUST_THRESHOLD > 0) {
         try {
           const peerInfo = await agtMeshClient.lookup(fromAmid);
-          const trustScore = peerInfo?.trustScore || peerInfo?.reputation || 0;
+          const trustScore = peerInfo?.reputationScore ?? 0;
           if (trustScore < AGT_TRUST_THRESHOLD) {
             log.warn(`AGT KNOCK rejected: ${fromAmid.slice(0, 12)} trust=${trustScore} < threshold=${AGT_TRUST_THRESHOLD}`);
             return { accept: false, reason: `trust_score_${trustScore}_below_${AGT_TRUST_THRESHOLD}` };
@@ -676,6 +676,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             timestamp: new Date().toISOString(),
           });
           log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
+          // Submit positive reputation after successful task completion
+          try {
+            const sessionId = `task-${Date.now().toString(36)}`;
+            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["task_completed"]);
+            log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
+          } catch { /* best effort — don't fail the task reply */ }
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
           try {
@@ -687,6 +693,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             });
           } catch { /* best effort */ }
           log.warn(`AGT relay: task processing failed: ${replyErr.message}`);
+          // Submit negative reputation on failure
+          try {
+            const sessionId = `task-${Date.now().toString(36)}`;
+            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["task_failed"]);
+          } catch { /* best effort */ }
         }
       }
     });
@@ -1378,6 +1389,11 @@ const azureClawPlugin = definePluginEntry({
                 };
                 if (replyContent) {
                   result.reply = replyContent;
+                  // Submit positive reputation — peer completed the task
+                  try {
+                    await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["task_responded"]);
+                    log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
+                  } catch { /* best effort */ }
                 } else {
                   result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
                 }

@@ -25,7 +25,8 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
     rm /tmp/node.tar.gz
 
 # Install OpenClaw
-RUN npm install -g openclaw@latest
+ARG OPENCLAW_VERSION=latest
+RUN npm install -g openclaw@${OPENCLAW_VERSION}
 
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
 # AzureClaw's runtime security (egress guard, Content Safety, read-only rootfs)
@@ -45,11 +46,18 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
     tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux \
                     python3 python3-pip && tdnf clean all && \
     pip3 install --no-cache-dir \
-      requests httpx beautifulsoup4 lxml \
-      pandas numpy matplotlib seaborn \
+      requests httpx beautifulsoup4 lxml cssselect \
+      pandas numpy matplotlib seaborn scipy sympy \
       pyyaml toml python-dotenv \
       aiohttp websockets \
-      tabulate rich && \
+      tabulate rich \
+      pdfplumber pypdf python-docx openpyxl python-pptx \
+      Pillow chardet python-dateutil \
+      xmltodict html5lib markdown html2text jinja2 \
+      pydantic jsonpath-ng \
+      sqlalchemy cryptography tiktoken \
+      dnspython networkx geopy \
+      ftfy unidecode qrcode fpdf2 && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz

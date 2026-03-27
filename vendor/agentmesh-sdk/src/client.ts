@@ -450,6 +450,20 @@ export class AgentMeshClient {
   }
 
   /**
+   * Submit reputation feedback for a peer agent after an interaction.
+   */
+  async submitReputation(
+    targetAmid: string,
+    sessionId: string,
+    score: number,
+    tags?: string[]
+  ): Promise<boolean> {
+    return this.registry.submitReputation(
+      this.identity, targetAmid, sessionId, score, tags
+    );
+  }
+
+  /**
    * Send a message to an agent.
    */
   async send(
