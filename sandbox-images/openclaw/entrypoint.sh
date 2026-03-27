@@ -148,6 +148,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" },
+      "timeoutSeconds": 300,
       "memorySearch": {
         "enabled": true,
         "provider": "openai",

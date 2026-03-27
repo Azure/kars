@@ -1161,17 +1161,27 @@ async fn agt_relay_proxy(
 }
 
 /// Bidirectional WebSocket bridge: client ↔ relay.
-async fn relay_websocket_bridge(client_socket: WebSocket, relay_url: &str) {
+async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
     use futures::stream::StreamExt;
     use futures::sink::SinkExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio_tungstenite::tungstenite;
 
-    // Connect to the upstream relay
-    let upstream = match tokio_tungstenite::connect_async(relay_url).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
+    // Connect to the upstream relay with a 30-second timeout
+    let upstream = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio_tungstenite::connect_async(relay_url),
+    ).await {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
             tracing::error!(error = %e, url = %relay_url, "Failed to connect to AGT relay");
+            // Send close frame so the client gets an error instead of hanging
+            let _ = client_socket.close().await;
+            return;
+        }
+        Err(_) => {
+            tracing::error!(url = %relay_url, "AGT relay connection timed out (30s)");
+            let _ = client_socket.close().await;
             return;
         }
     };

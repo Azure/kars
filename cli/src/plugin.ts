@@ -111,7 +111,7 @@ async function delegateToNativeAgent(
     child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
     child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
 
-    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 330_000);
+    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 120_000);
 
     child.on("close", () => {
       clearTimeout(timer);
@@ -1357,7 +1357,7 @@ const azureClawPlugin = definePluginEntry({
                 const messageId = `agt-${Date.now().toString(36)}`;
 
                 // Auto-wait for reply: poll agtInbox for a response from this agent
-                const waitMaxMs = 330_000; // 5.5 minutes — native delegation can take up to 5 min
+                const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
                 const pollIntervalMs = 2_000;
                 const waitStart = Date.now();
                 let replyContent: string | null = null;
