@@ -154,6 +154,49 @@ export function upCommand(): Command {
         await execa("kubectl", ["rollout", "status", "deployment/azureclaw-controller", "-n", "azureclaw-system", "--timeout=120s"], { stdio: "pipe" }).catch(() => {});
         spin.succeed("Controller restarted");
 
+        // Ensure controller SA has a fedcred (so it can get ARM tokens via WI to create sandbox fedcreds)
+        if (ctx.oidcIssuerUrl && ctx.identityName) {
+          spin = ora("Ensuring controller SA fedcred + MI Contributor...").start();
+          const idRg = ctx.identityResourceGroup || ctx.resourceGroup;
+
+          // Controller SA fedcred
+          await execa("az", [
+            "identity", "federated-credential", "create",
+            "--identity-name", ctx.identityName,
+            "--resource-group", idRg,
+            "--name", "azureclaw-controller-sa",
+            "--issuer", ctx.oidcIssuerUrl,
+            "--subject", "system:serviceaccount:azureclaw-system:azureclaw-controller",
+            "--audiences", "api://AzureADTokenExchange",
+            "--output", "none",
+          ], { stdio: "pipe", timeout: 30000 }).catch(() => {});
+
+          // MI Contributor self-scoped (so controller can create/delete fedcreds)
+          try {
+            const { stdout: subId } = await execa("az", [
+              "account", "show", "--query", "id", "--output", "tsv",
+            ], { stdio: "pipe", timeout: 10000 });
+            const miScope = `/subscriptions/${subId.trim()}/resourceGroups/${idRg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${ctx.identityName}`;
+            const { stdout: miPid } = await execa("az", [
+              "identity", "show",
+              "--name", ctx.identityName,
+              "--resource-group", idRg,
+              "--query", "principalId",
+              "--output", "tsv",
+            ], { stdio: "pipe" });
+            await execa("az", [
+              "role", "assignment", "create",
+              "--assignee-object-id", miPid.trim(),
+              "--assignee-principal-type", "ServicePrincipal",
+              "--role", "Managed Identity Contributor",
+              "--scope", miScope,
+              "--output", "none",
+            ], { stdio: "pipe" });
+          } catch { /* already exists or lacks Owner — non-fatal */ }
+
+          spin.succeed("Controller SA fedcred + MI Contributor ready");
+        }
+
         // Ensure federated credentials exist for all sandboxes
         if (ctx.oidcIssuerUrl && ctx.identityName) {
           spin = ora("Syncing federated credentials for sandboxes...").start();
