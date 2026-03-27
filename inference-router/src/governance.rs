@@ -394,7 +394,7 @@ impl TrustStore {
         });
         state.score = score.min(1000);
         state.tier = TrustTier::from_score(state.score);
-        state.interactions = interactions;
+        state.interactions += interactions; // accumulate, don't overwrite
         state.last_interaction = Some(chrono_now());
         drop(agents);
         self.save_to_disk().await;
@@ -554,6 +554,25 @@ impl MeshInbox {
 // ── Governance State ────────────────────────────────────────────────────────
 
 /// Combined AGT governance state for a sandbox.
+/// Counters for AGT mesh activity (atomic, lock-free).
+pub struct MeshMetrics {
+    pub sessions: std::sync::atomic::AtomicU64,
+    pub messages_sent: std::sync::atomic::AtomicU64,
+    pub messages_received: std::sync::atomic::AtomicU64,
+    pub trust_updates: std::sync::atomic::AtomicU64,
+}
+
+impl MeshMetrics {
+    pub fn new() -> Self {
+        Self {
+            sessions: std::sync::atomic::AtomicU64::new(0),
+            messages_sent: std::sync::atomic::AtomicU64::new(0),
+            messages_received: std::sync::atomic::AtomicU64::new(0),
+            trust_updates: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct GovernanceState {
     pub enabled: bool,
     pub policy: PolicyEngine,
@@ -561,6 +580,7 @@ pub struct GovernanceState {
     pub audit: AuditLog,
     pub inbox: MeshInbox,
     pub sandbox_name: String,
+    pub mesh_metrics: MeshMetrics,
 }
 
 impl GovernanceState {
@@ -593,6 +613,7 @@ impl GovernanceState {
             audit: AuditLog::new(sandbox_name),
             inbox: MeshInbox::new(),
             sandbox_name: sandbox_name.to_string(),
+            mesh_metrics: MeshMetrics::new(),
         }
     }
 

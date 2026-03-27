@@ -436,6 +436,11 @@ cli/package-lock.json
 vendor/agentmesh-sdk/node_modules/
 vendor/agentmesh-sdk/.turbo/
 vendor/agentmesh-sdk/dist/*.map
+vendor/agentmesh-sdk/dist/*.d.ts
+vendor/agentmesh-sdk/dist/*.d.cts
+vendor/agentmesh-sdk/dist/storage/*.map
+vendor/agentmesh-sdk/dist/storage/*.d.ts
+vendor/agentmesh-sdk/dist/storage/*.d.cts
 vendor/agentmesh-sdk/tests/
 vendor/agentmesh-sdk/examples/
 vendor/agentmesh-sdk/docs/

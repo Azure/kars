@@ -55,7 +55,7 @@ export interface SendOptions {
 export type MessageHandler = (
   from: string,
   message: unknown,
-  envelope: MessageEnvelope
+  envelope?: MessageEnvelope
 ) => void | Promise<void>;
 
 /**
@@ -517,7 +517,7 @@ export class AgentMeshClient {
       await this.transport.send(toAmid, JSON.stringify(message), 'message');
     } else {
       // Encrypt and send
-      const envelope: Record<string, unknown> = await this.sessionManager.encryptMessage(sessionId, message);
+      const envelope: Record<string, unknown> = await this.sessionManager.encryptMessage(sessionId, message) as unknown as Record<string, unknown>;
 
       // Attach X3DH initiator params to first message so receiver can establish session
       const x3dhMsg = this.pendingX3DH.get(toAmid);
