@@ -166,13 +166,17 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
         // Insights APIs
         .route("/insights", get(foundry_proxy).post(foundry_proxy))
         .route("/insights/{*path}", get(foundry_proxy))
-        // OpenAI Conversations + Responses + Evals
+        // OpenAI Conversations + Responses + Evals + Vector Stores + Files
         .route("/openai/conversations", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/conversations/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/responses", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/responses/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/evals", get(foundry_proxy).post(foundry_proxy))
         .route("/openai/evals/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/vector_stores", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/vector_stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route("/openai/files", get(foundry_proxy).post(foundry_proxy))
+        .route("/openai/files/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
         .route("/openai/fine-tuning/{*path}", get(foundry_proxy).post(foundry_proxy))
         // Red Teams APIs
         .route("/redTeams/runs", get(foundry_proxy).post(foundry_proxy))
@@ -216,6 +220,8 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/audit/verify", get(agt_audit_verify))
         // Status (exposes trust scores, audit entries, inbox count)
         .route("/agt/status", get(agt_status))
+        // Trust update (plugin pushes reputation changes to the router's trust store)
+        .route("/agt/trust", post(agt_trust_update))
         // Registry reputation (proxied from agentmesh-registry)
         .route("/agt/reputation", get(agt_reputation))
 }
@@ -1076,6 +1082,33 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         "egress_learn_mode": state.blocklist.is_learn_mode(),
         "egress_learned_domains": state.blocklist.learned_count().await,
     }))
+}
+
+/// POST /agt/trust — plugin pushes trust updates after mesh interactions.
+/// Body: { "agent_id": "peer-name", "score": 510, "interactions": 1 }
+async fn agt_trust_update(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id = body["agent_id"].as_str().unwrap_or("");
+    let score = body["score"].as_u64().unwrap_or(500) as u32;
+    let interactions = body["interactions"].as_u64().unwrap_or(0);
+
+    if agent_id.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent_id required"})),
+        );
+    }
+
+    state.governance.trust.update_trust(agent_id, score, interactions).await;
+
+    tracing::info!(agent_id, score, interactions, "AGT trust updated via plugin");
+
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "agent_id": agent_id, "score": score})),
+    )
 }
 
 /// GET /agt/reputation — fetch this agent's reputation from the AgentMesh registry.

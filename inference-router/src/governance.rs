@@ -381,6 +381,24 @@ impl TrustStore {
         };
         self.agents.get_mut().insert(agent_id.to_string(), state);
     }
+
+    /// Update trust for an agent (called by the plugin via POST /agt/trust).
+    pub async fn update_trust(&self, agent_id: &str, score: u32, interactions: u64) {
+        let mut agents = self.agents.write().await;
+        let state = agents.entry(agent_id.to_string()).or_insert_with(|| TrustState {
+            agent_id: agent_id.to_string(),
+            score: self.default_score,
+            tier: TrustTier::from_score(self.default_score),
+            interactions: 0,
+            last_interaction: None,
+        });
+        state.score = score.min(1000);
+        state.tier = TrustTier::from_score(state.score);
+        state.interactions = interactions;
+        state.last_interaction = Some(chrono_now());
+        drop(agents);
+        self.save_to_disk().await;
+    }
 }
 
 // ── Audit Log ───────────────────────────────────────────────────────────────
