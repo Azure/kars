@@ -63,6 +63,27 @@ const nameToAmid: Map<string, string> = new Map();
 // Stored sandbox name for reconnect attempts
 let agtSandboxName: string = "unknown";
 
+// Push trust updates to the router's local TrustStore (POST /agt/trust).
+// This syncs the plugin's reputation observations with the router for /agt/status display.
+async function pushTrustToRouter(agentId: string, scoreDelta: number) {
+  try {
+    const http = await import("node:http");
+    const body = JSON.stringify({
+      agent_id: agentId,
+      score: Math.round(500 + scoreDelta * 500), // 0.0-1.0 → 0-1000 scale
+      interactions: 1,
+    });
+    const req = http.request("http://127.0.0.1:8443/agt/trust", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      timeout: 5000,
+    }, () => {});
+    req.on("error", () => {});
+    req.write(body);
+    req.end();
+  } catch { /* best effort */ }
+}
+
 // ---------------------------------------------------------------------------
 // Foundry project discovery state
 // ---------------------------------------------------------------------------
@@ -258,7 +279,7 @@ async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_file_search: search documents in vector stores (requires vector_store_ids)\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. Be concise and report actual results.",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores, manage vector stores and files\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- foundry_conversations: persistent multi-turn dialogues (create, respond, get history)\n- foundry_evaluations: benchmark model quality (create, run, check results)\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. Be concise and report actual results.",
     },
     {
       role: "user",
@@ -680,6 +701,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             const sessionId = `task-${Date.now().toString(36)}`;
             await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["task_completed"]);
+            pushTrustToRouter(fromName, 0.8);
             log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
           } catch { /* best effort — don't fail the task reply */ }
         } catch (replyErr: any) {
@@ -697,6 +719,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             const sessionId = `task-${Date.now().toString(36)}`;
             await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["task_failed"]);
+            pushTrustToRouter(fromName, 0.3);
           } catch { /* best effort */ }
         }
       }
@@ -895,11 +918,12 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     sections.push(
       "## Available Tools\n",
       "- `foundry_code_execute` — Python code execution (server-side, data science libraries)",
+      "- `foundry_image_generation` — Generate images from text prompts (gpt-image-1)",
       "- `foundry_web_search` — Real-time web search via Bing grounding",
-      "- `foundry_file_search` — RAG over vector stores / Azure AI Search indexes",
+      "- `foundry_file_search` — RAG over vector stores + vector store CRUD + file upload",
       "- `foundry_memory` — Persistent semantic memory (cross-session, cross-agent)",
-      "- `foundry_conversations` — Persistent multi-turn conversations",
-      "- `foundry_evaluations` — Model quality testing",
+      "- `foundry_conversations` — Persistent multi-turn conversations (get/create/respond/list/delete)",
+      "- `foundry_evaluations` — Model quality testing and benchmarking",
       "- `foundry_deployments` — Discover models, connections, indexes",
       "- `foundry_agents` — List Foundry-hosted agents",
       "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
@@ -933,6 +957,46 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       fs.writeFileSync(memoryFile, content);
     }
     log.info("Foundry project context written to MEMORY.md");
+
+    // Recall prior context from Foundry memory store on startup
+    try {
+      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+      const store = `memory-${agentName}`;
+      const recallResult = await _routerCall(
+        "POST",
+        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
+        { query: "key facts, user preferences, prior context, recent work", max_memories: 10 },
+      );
+      const memories = recallResult?.memories || recallResult?.value || [];
+      if (Array.isArray(memories) && memories.length > 0) {
+        const recallSection = [
+          "\n## Prior Context (Foundry Memory)\n",
+          "_Recalled from persistent memory store on startup:_\n",
+        ];
+        for (const m of memories) {
+          const text = m?.content || m?.text || "";
+          const kind = m?.kind || m?.type || "memory";
+          if (text) recallSection.push(`- [${kind}] ${text}`);
+        }
+        recallSection.push("");
+        // Append recall section to MEMORY.md (before the user content separator)
+        let current = "";
+        try { current = fs.readFileSync(memoryFile, "utf8"); } catch { /* */ }
+        const recallMarker = "## Prior Context (Foundry Memory)";
+        if (!current.includes(recallMarker)) {
+          // Insert right before the --- separator
+          const sepIdx = current.indexOf("\n---\n");
+          if (sepIdx >= 0) {
+            const updated = current.slice(0, sepIdx) + recallSection.join("\n") + current.slice(sepIdx);
+            fs.writeFileSync(tmpFile, updated);
+            try { fs.renameSync(tmpFile, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); }
+          }
+        }
+        log.info(`Foundry memory: recalled ${memories.length} memories on startup`);
+      }
+    } catch {
+      // First boot or no memory store yet — silently skip
+    }
   } catch (e: any) {
     log.warn(`Failed to write Foundry context to MEMORY.md: ${e.message}`);
   }
@@ -1125,14 +1189,14 @@ const azureClawPlugin = definePluginEntry({
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
     const ROUTER = "http://127.0.0.1:8443";
-    async function routerCall(method: string, path: string, body?: unknown): Promise<any> {
+    async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
       const http = await import("node:http");
       const url = `${ROUTER}${path}`;
       return new Promise((resolve, reject) => {
         const opts: any = {
           method,
           timeout: 15000,
-          headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self" } as Record<string, string>,
+          headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
         };
         if (body) opts.headers["Content-Type"] = "application/json";
         let settled = false;
@@ -1392,6 +1456,7 @@ const azureClawPlugin = definePluginEntry({
                   // Submit positive reputation — peer completed the task
                   try {
                     await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["task_responded"]);
+                    pushTrustToRouter(agentName, 0.9);
                     log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
                   } catch { /* best effort */ }
                 } else {
@@ -1629,6 +1694,69 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
+    // ── Foundry Image Generation: create images from text ───────────────
+    api.registerTool({
+      name: "foundry_image_generation",
+      label: "Foundry Image Generation",
+      description:
+        "Generate images from text prompts via Azure AI Foundry's image_generation tool. " +
+        "Uses gpt-image-1 model. Returns base64-encoded image data. Use when the user " +
+        "asks to create, draw, or generate an image, diagram, or visual.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "Text description of the image to generate.",
+          },
+          quality: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "Image quality (default: 'medium'). Higher = slower + more detailed.",
+          },
+          size: {
+            type: "string",
+            enum: ["1024x1024", "1024x1536", "1536x1024"],
+            description: "Image dimensions (default: '1024x1024').",
+          },
+          model: {
+            type: "string",
+            description: "Orchestrator model (default: gpt-4.1). Coordinates the image generation.",
+          },
+        },
+        required: ["prompt"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          const imgModel = "gpt-image-1";
+          const quality = (params.quality as string) || "medium";
+          const size = (params.size as string) || "1024x1024";
+          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+            model: (params.model as string) || "gpt-4.1",
+            input: params.prompt,
+            tools: [{ type: "image_generation", image_generation: { model: imgModel, quality, size } }],
+            store: false,
+          }, { "x-ms-oai-image-generation-deployment": imgModel });
+          const output = result.output || result;
+          const parts: string[] = [];
+          if (Array.isArray(output)) {
+            for (const item of output) {
+              if (item.type === "image_generation_call" && item.result) {
+                parts.push(`[Generated image — base64 data ${item.result.length} chars]`);
+              } else if (item.type === "message" && item.content) {
+                for (const c of item.content) {
+                  if (c.type === "output_text" || c.type === "text") parts.push(c.text);
+                }
+              }
+            }
+          }
+          return { content: [{ type: "text", text: parts.length > 0 ? parts.join("\n\n") : safeJson(output) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Foundry image generation failed: ${e.message}` }] };
+        }
+      },
+    });
+
     // ── Foundry Web Search: real-time Bing-grounded search ──────────────
     // Server-side web search via Bing grounding — no egress policy needed.
     // Results include inline URL citations.
@@ -1710,35 +1838,75 @@ const azureClawPlugin = definePluginEntry({
       name: "foundry_file_search",
       label: "Foundry File Search (RAG)",
       description:
-        "Search uploaded documents and knowledge bases via Azure AI Foundry's file_search. " +
-        "Performs retrieval-augmented generation (RAG) over vector stores. Use when the user " +
-        "asks about content in uploaded documents, project files, or configured knowledge bases.",
+        "Search documents and manage vector stores via Azure AI Foundry's file_search. " +
+        "Operations: 'search' for RAG queries, 'create_vector_store' to create a store, " +
+        "'list_vector_stores' to list stores, 'delete_vector_store' to remove one, " +
+        "'upload_file' to add a file to a store. Use search for document Q&A.",
       parameters: {
         type: "object",
         properties: {
+          operation: {
+            type: "string",
+            enum: ["search", "create_vector_store", "list_vector_stores", "delete_vector_store", "upload_file"],
+            description: "Operation: 'search' (default), or manage vector stores/files.",
+          },
           query: {
             type: "string",
-            description: "The question or search query to find in documents.",
+            description: "The question or search query (for 'search').",
           },
           vector_store_ids: {
             type: "array",
             items: { type: "string" },
-            description: "Optional vector store IDs to search. Omit to search all.",
+            description: "Vector store IDs to search (for 'search'). Omit to search all.",
+          },
+          store_name: {
+            type: "string",
+            description: "Name for the vector store (for 'create_vector_store').",
+          },
+          vector_store_id: {
+            type: "string",
+            description: "Vector store ID (for 'delete_vector_store' or 'upload_file').",
+          },
+          file_id: {
+            type: "string",
+            description: "File ID to add to vector store (for 'upload_file' — upload file via foundry_code_execute first).",
           },
           model: {
             type: "string",
-            description: "Model to use (default: gpt-4.1).",
+            description: "Model to use for search (default: gpt-4.1).",
           },
         },
-        required: ["query"],
+        required: [],
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
+          const op = (params.operation as string) || "search";
+          const apiVer = "api-version=2025-11-15-preview";
+
+          if (op === "list_vector_stores") {
+            const result = await routerCall("GET", `/openai/vector_stores?${apiVer}`);
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "create_vector_store") {
+            const result = await routerCall("POST", `/openai/vector_stores?${apiVer}`, {
+              name: params.store_name || "azureclaw-store",
+            });
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "delete_vector_store") {
+            await routerCall("DELETE", `/openai/vector_stores/${params.vector_store_id}?${apiVer}`);
+            return { content: [{ type: "text", text: `Vector store ${params.vector_store_id} deleted.` }] };
+          } else if (op === "upload_file") {
+            const result = await routerCall("POST",
+              `/openai/vector_stores/${params.vector_store_id}/files?${apiVer}`,
+              { file_id: params.file_id });
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          }
+
+          // Default: search operation
           const fileSearchTool: any = { type: "file_search" };
           if (params.vector_store_ids) {
             fileSearchTool.file_search = { vector_store_ids: params.vector_store_ids };
           }
-          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
+          const result = await routerCall("POST", `/openai/responses?${apiVer}`, {
             model: (params.model as string) || "gpt-4.1",
             input: params.query,
             tools: [fileSearchTool],
@@ -1936,19 +2104,20 @@ const azureClawPlugin = definePluginEntry({
       name: "foundry_conversations",
       label: "Foundry Conversations",
       description:
-        "Manage persistent conversations via Azure AI Foundry. Create, list, " +
-        "continue, and delete conversations that maintain full message history " +
-        "server-side. Use for long-running multi-turn interactions that need to " +
-        "survive session restarts.",
+        "Manage persistent server-side conversations via Azure AI Foundry. " +
+        "Use cases: maintain long-running multi-turn dialogues across sessions, " +
+        "build research threads that survive restarts, keep separate conversation " +
+        "contexts for different tasks/topics. Operations: create, list, get, respond, " +
+        "add_message, delete.",
       parameters: {
         type: "object",
         properties: {
           operation: {
             type: "string",
-            enum: ["create", "list", "respond", "add_message", "delete"],
-            description: "Operation to perform on conversations.",
+            enum: ["create", "list", "get", "respond", "add_message", "delete"],
+            description: "Operation to perform. 'get' retrieves full message history for a conversation.",
           },
-          conversation_id: { type: "string", description: "Conversation ID (for respond/add_message/delete)." },
+          conversation_id: { type: "string", description: "Conversation ID (for get/respond/add_message/delete)." },
           input: { type: "string", description: "User input (for 'respond' — generates AI response in conversation context)." },
           message: { type: "string", description: "Message text to add (for 'add_message')." },
           role: { type: "string", description: "Message role: 'user' or 'assistant' (for 'add_message', default: 'user')." },
@@ -1969,6 +2138,9 @@ const azureClawPlugin = definePluginEntry({
             return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "list") {
             const result = await routerCall("GET", `/openai/conversations?${apiVer}`);
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "get") {
+            const result = await routerCall("GET", `/openai/conversations/${params.conversation_id}?${apiVer}`);
             return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "respond") {
             const result = await routerCall("POST", `/openai/responses?${apiVer}`, {
@@ -2015,17 +2187,19 @@ const azureClawPlugin = definePluginEntry({
       label: "Foundry Evaluations",
       description:
         "Create and run model quality evaluations via Azure AI Foundry Evals API. " +
-        "Test model outputs against criteria (string checks, model-graded, etc.). " +
-        "Use when you need to benchmark model performance or validate output quality.",
+        "Use cases: benchmark prompt quality before/after changes, validate output " +
+        "against golden answers, run regression tests on model responses, compare " +
+        "different models. Operations: list, create, run, get_run, list_evaluators.",
       parameters: {
         type: "object",
         properties: {
           operation: {
             type: "string",
-            enum: ["list", "create", "run", "list_evaluators"],
-            description: "Operation: 'list' evals, 'create' a new eval, 'run' an eval, or 'list_evaluators'.",
+            enum: ["list", "create", "run", "get_run", "list_evaluators"],
+            description: "Operation: 'list' evals, 'create' one, 'run' it, 'get_run' status/results, or 'list_evaluators'.",
           },
           eval_id: { type: "string", description: "Eval ID (for 'run')." },
+          run_id: { type: "string", description: "Run ID (for 'get_run' — check status and results)." },
           name: { type: "string", description: "Eval name (for 'create')." },
           data_source_config: { type: "object", description: "Data source config (for 'create')." },
           testing_criteria: { type: "array", items: { type: "object" }, description: "Testing criteria array (for 'create')." },
@@ -2051,6 +2225,9 @@ const azureClawPlugin = definePluginEntry({
           } else if (op === "run") {
             const result = await routerCall("POST", `/openai/evals/${params.eval_id}/runs?${apiVer}`,
               params.run_config || {});
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          } else if (op === "get_run") {
+            const result = await routerCall("GET", `/openai/evals/${params.eval_id}/runs/${params.run_id}?${apiVer}`);
             return { content: [{ type: "text", text: safeJson(result) }] };
           } else if (op === "list_evaluators") {
             const result = await routerCall("GET", `/evaluators?${apiVer}`);
@@ -2170,7 +2347,7 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("Foundry tools registered: foundry_code_execute, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
+    log.info("Foundry tools registered: foundry_code_execute, foundry_image_generation, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
 
     // ── Register Azure AI Foundry as a model provider ───────────────────
     // Use dynamically discovered deployments when available, fall back to defaults
