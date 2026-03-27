@@ -1153,10 +1153,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       return;
     }
 
+        // Count only agents with actual interactions (excludes self and stale lookup-only entries)
+    const activePeerCount = sec.agtTrustScores.filter((t: any) =>
+      t.agent !== sb.name && (t.interactions > 0 || t.lastSeen)
+    ).length;
+
     const lines: string[] = [
       `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid.substring(0, 12)}…{/}` : ""),
       ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
-      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : sec.agtKnownAgents} known`,
+      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : activePeerCount} known`,
       ` Mesh    ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}  ${sec.agtTrustUpdates} trust updates`,
     ];
 
@@ -1178,7 +1183,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (sec.agtTrustScores.length > 0) {
       // Show self at the top
       const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
-      const peers = sec.agtTrustScores.filter((t) => t.agent !== sb.name);
+      // Filter out self and stale entries (never communicated — 0 interactions, no lastSeen)
+      const peers = sec.agtTrustScores.filter((t) =>
+        t.agent !== sb.name && (t.interactions > 0 || t.lastSeen)
+      );
 
       if (peers.length > 0) {
         lines.push(`{bold}Mesh Traffic{/}`);
@@ -1190,10 +1198,13 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           // Relative time
           let ago = "";
           if (t.lastSeen) {
-            const ms = Date.now() - new Date(t.lastSeen).getTime();
-            if (ms < 60_000) ago = `${Math.round(ms / 1000)}s ago`;
-            else if (ms < 3_600_000) ago = `${Math.round(ms / 60_000)}m ago`;
-            else ago = `${Math.round(ms / 3_600_000)}h ago`;
+            const d = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
+            const ms = Date.now() - d.getTime();
+            if (!isNaN(ms) && ms >= 0) {
+              if (ms < 60_000) ago = `${Math.round(ms / 1000)}s ago`;
+              else if (ms < 3_600_000) ago = `${Math.round(ms / 60_000)}m ago`;
+              else ago = `${Math.round(ms / 3_600_000)}h ago`;
+            }
           }
           const name = t.agent.length > 20 ? t.agent.substring(0, 18) + "…" : t.agent;
           lines.push(` {${c}-fg}${bar}{/} ${t.score} ${name}`);
