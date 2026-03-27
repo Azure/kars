@@ -3019,6 +3019,18 @@ var AgentMeshClient = class _AgentMeshClient {
     return this.registry.lookup(amid);
   }
   /**
+   * Submit reputation feedback for a peer agent after an interaction.
+   */
+  async submitReputation(targetAmid, sessionId, score, tags) {
+    return this.registry.submitReputation(
+      this.identity,
+      targetAmid,
+      sessionId,
+      score,
+      tags
+    );
+  }
+  /**
    * Send a message to an agent.
    */
   async send(toAmid, message, options = {}) {

@@ -307,7 +307,7 @@ fn extract_sni(data: &[u8], len: usize) -> Option<String> {
     None
 }
 
-/// Bidirectional TCP tunnel.
+/// Bidirectional TCP tunnel with idle timeout.
 async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     let (mut cr, mut cw) = client.split();
     let (mut ur, mut uw) = upstream.split();
@@ -315,10 +315,15 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     let c2u = tokio::io::copy(&mut cr, &mut uw);
     let u2c = tokio::io::copy(&mut ur, &mut cw);
 
-    // When either direction closes, we're done
+    // 5-minute idle timeout prevents zombie tunnels when both sides go silent
+    let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(300));
+
     tokio::select! {
         _ = c2u => {},
         _ = u2c => {},
+        _ = idle_timeout => {
+            tracing::debug!("Forward proxy tunnel idle timeout (300s)");
+        },
     }
 }
 

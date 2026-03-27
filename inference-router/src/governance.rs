@@ -220,7 +220,7 @@ fn parse_duration(s: &str) -> u64 {
 // ── Trust Scoring ───────────────────────────────────────────────────────────
 
 /// Trust tier based on score.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TrustTier {
     VerifiedPartner,  // 900-1000
     Trusted,          // 700-899
@@ -242,7 +242,7 @@ impl TrustTier {
 }
 
 /// Per-agent trust state.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustState {
     pub agent_id: String,
     pub score: u32,
@@ -252,10 +252,12 @@ pub struct TrustState {
 }
 
 /// Trust store — tracks trust scores for known agents.
+/// Persists to /tmp/agt-trust-store.json so scores survive pod restarts.
 pub struct TrustStore {
     agents: RwLock<HashMap<String, TrustState>>,
     pub default_score: u32,
     threshold: u32,
+    persist_path: Option<String>,
 }
 
 impl TrustStore {
@@ -264,6 +266,7 @@ impl TrustStore {
             agents: RwLock::new(HashMap::new()),
             default_score,
             threshold,
+            persist_path: None,
         }
     }
 
@@ -272,28 +275,58 @@ impl TrustStore {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(500);
-        Self::new(500, threshold)
+        let persist_path = Some("/tmp/agt-trust-store.json".to_string());
+        let mut store = Self {
+            agents: RwLock::new(HashMap::new()),
+            default_score: 500,
+            threshold,
+            persist_path,
+        };
+        store.load_from_disk();
+        store
     }
 
-    /// Get trust state for an agent (creates with default if unknown).
+    /// Load persisted trust state from disk (best-effort).
+    fn load_from_disk(&mut self) {
+        if let Some(path) = &self.persist_path {
+            if let Ok(data) = std::fs::read_to_string(path) {
+                if let Ok(states) = serde_json::from_str::<Vec<TrustState>>(&data) {
+                    let mut agents = HashMap::new();
+                    for state in states {
+                        agents.insert(state.agent_id.clone(), state);
+                    }
+                    self.agents = RwLock::new(agents);
+                }
+            }
+        }
+    }
+
+    /// Persist trust state to disk (best-effort, async-safe).
+    async fn save_to_disk(&self) {
+        if let Some(path) = &self.persist_path {
+            let agents = self.agents.read().await;
+            let states: Vec<&TrustState> = agents.values().collect();
+            if let Ok(json) = serde_json::to_string(&states) {
+                let _ = tokio::fs::write(path, json).await;
+            }
+        }
+    }
+
+    /// Get trust state for an agent. Returns default if unknown (does NOT persist
+    /// the default — only record_success/failure/update_trust create entries).
     pub async fn get_trust(&self, agent_id: &str) -> TrustState {
         let agents = self.agents.read().await;
         if let Some(state) = agents.get(agent_id) {
             return state.clone();
         }
-        drop(agents);
 
-        let state = TrustState {
+        TrustState {
             agent_id: agent_id.to_string(),
             score: self.default_score,
             tier: TrustTier::from_score(self.default_score),
             interactions: 0,
             last_interaction: None,
-        };
-
-        let mut agents = self.agents.write().await;
-        agents.insert(agent_id.to_string(), state.clone());
-        state
+        }
     }
 
     /// Check if an agent is trusted enough for communication.
@@ -311,6 +344,8 @@ impl TrustStore {
             state.interactions += 1;
             state.last_interaction = Some(chrono_now());
         }
+        drop(agents);
+        self.save_to_disk().await;
     }
 
     /// Record a failed/suspicious interaction (decreases trust).
@@ -322,6 +357,8 @@ impl TrustStore {
             state.interactions += 1;
             state.last_interaction = Some(chrono_now());
         }
+        drop(agents);
+        self.save_to_disk().await;
     }
 
     /// Get all trust states.
@@ -339,6 +376,24 @@ impl TrustStore {
             last_interaction: None,
         };
         self.agents.get_mut().insert(agent_id.to_string(), state);
+    }
+
+    /// Update trust for an agent (called by the plugin via POST /agt/trust).
+    pub async fn update_trust(&self, agent_id: &str, score: u32, interactions: u64) {
+        let mut agents = self.agents.write().await;
+        let state = agents.entry(agent_id.to_string()).or_insert_with(|| TrustState {
+            agent_id: agent_id.to_string(),
+            score: self.default_score,
+            tier: TrustTier::from_score(self.default_score),
+            interactions: 0,
+            last_interaction: None,
+        });
+        state.score = score.min(1000);
+        state.tier = TrustTier::from_score(state.score);
+        state.interactions += interactions; // accumulate, don't overwrite
+        state.last_interaction = Some(chrono_now());
+        drop(agents);
+        self.save_to_disk().await;
     }
 }
 
@@ -495,6 +550,25 @@ impl MeshInbox {
 // ── Governance State ────────────────────────────────────────────────────────
 
 /// Combined AGT governance state for a sandbox.
+/// Counters for AGT mesh activity (atomic, lock-free).
+pub struct MeshMetrics {
+    pub sessions: std::sync::atomic::AtomicU64,
+    pub messages_sent: std::sync::atomic::AtomicU64,
+    pub messages_received: std::sync::atomic::AtomicU64,
+    pub trust_updates: std::sync::atomic::AtomicU64,
+}
+
+impl MeshMetrics {
+    pub fn new() -> Self {
+        Self {
+            sessions: std::sync::atomic::AtomicU64::new(0),
+            messages_sent: std::sync::atomic::AtomicU64::new(0),
+            messages_received: std::sync::atomic::AtomicU64::new(0),
+            trust_updates: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct GovernanceState {
     pub enabled: bool,
     pub policy: PolicyEngine,
@@ -502,6 +576,7 @@ pub struct GovernanceState {
     pub audit: AuditLog,
     pub inbox: MeshInbox,
     pub sandbox_name: String,
+    pub mesh_metrics: MeshMetrics,
 }
 
 impl GovernanceState {
@@ -534,6 +609,7 @@ impl GovernanceState {
             audit: AuditLog::new(sandbox_name),
             inbox: MeshInbox::new(),
             sandbox_name: sandbox_name.to_string(),
+            mesh_metrics: MeshMetrics::new(),
         }
     }
 
@@ -559,12 +635,31 @@ impl GovernanceState {
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 fn chrono_now() -> String {
-    // Simple ISO 8601 timestamp without chrono dependency
+    // ISO 8601 UTC timestamp — must be parseable by JavaScript's Date()
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs();
-    // Approximate ISO format
-    format!("{}Z", secs)
+    // Convert epoch seconds to YYYY-MM-DDTHH:MM:SSZ
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since 1970-01-01 → year/month/day (civil calendar)
+    // Algorithm from Howard Hinnant's date library (public domain)
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d_val = doy - (153 * mp + 2) / 5 + 1;
+    let m_val = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y_val = if m_val <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y_val, m_val, d_val, hours, minutes, seconds)
 }
 
 fn sha256_hex(input: &str) -> String {
