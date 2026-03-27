@@ -1103,6 +1103,13 @@ async fn agt_trust_update(
 
     state.governance.trust.update_trust(agent_id, score, interactions).await;
 
+    // Record in the audit chain so the operator panel sees trust changes
+    state.governance.audit.append(
+        &format!("trust_update:{}", agent_id),
+        "applied",
+        &format!("score={} interactions={}", score, interactions),
+    ).await;
+
     tracing::info!(agent_id, score, interactions, "AGT trust updated via plugin");
 
     (
