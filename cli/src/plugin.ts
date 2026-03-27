@@ -56,6 +56,13 @@ let agtInitialized = false; // Singleton guard — only first plugin load create
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
 const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string }> = [];
 
+// AGT reconnect & heartbeat state
+let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
+let agtHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let agtInboxNotifyTimer: ReturnType<typeof setInterval> | null = null;
+let agtConnected = false;
+let agtSdk: any = null; // cached SDK module for reconnect
+
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
@@ -84,9 +91,62 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
   } catch { /* best effort */ }
 }
 
-// ---------------------------------------------------------------------------
-// Foundry project discovery state
-// ---------------------------------------------------------------------------
+// Attempt to reconnect the AGT mesh client after a disconnect.
+async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (!agtMeshClient || agtConnected) return;
+  try {
+    await agtMeshClient.connect({
+      displayName: agtSandboxName,
+      capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
+    });
+    agtConnected = true;
+    log.info("AGT mesh reconnected successfully");
+  } catch (e: any) {
+    log.warn(`AGT mesh reconnect failed: ${e.message}`);
+  }
+}
+
+// Write unread inbox messages to a file the LLM can see in its context.
+// This is the key mechanism to keep conversations "lively" — the agent sees
+// pending messages in MEMORY.md without needing to manually call mesh_inbox.
+async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (agtInbox.length === 0) return;
+  try {
+    const fs = await import("node:fs/promises");
+    const memPath = process.env.MEMORY_FILE_PATH || "/home/user/MEMORY.md";
+    const INBOX_MARKER = "<!-- AGT_INBOX_START -->";
+    const INBOX_END = "<!-- AGT_INBOX_END -->";
+
+    let existing = "";
+    try { existing = await fs.readFile(memPath, "utf-8"); } catch { return; }
+
+    // Build inbox section with pending messages (don't drain — just preview)
+    const preview = agtInbox.slice(0, 10).map((m, i) =>
+      `${i + 1}. **${m.from_agent}** (${m.timestamp}): ${String(m.content).slice(0, 300)}`
+    ).join("\n");
+    const section = [
+      INBOX_MARKER,
+      "",
+      `## 📬 Unread Mesh Messages (${agtInbox.length})`,
+      "",
+      `> You have ${agtInbox.length} unread message(s) from sub-agents. Call \`azureclaw_mesh_inbox\` to read and respond.`,
+      "",
+      preview,
+      "",
+      INBOX_END,
+    ].join("\n");
+
+    // Replace existing inbox section or append
+    if (existing.includes(INBOX_MARKER)) {
+      const re = new RegExp(`${INBOX_MARKER}[\\s\\S]*?${INBOX_END}`, "m");
+      existing = existing.replace(re, section);
+    } else {
+      existing = existing + "\n\n" + section;
+    }
+    await fs.writeFile(memPath, existing, "utf-8");
+    log.info(`AGT inbox: wrote ${agtInbox.length} pending message(s) to MEMORY.md`);
+  } catch { /* best effort */ }
+}
 interface FoundryProjectInfo {
   endpoint: string;
   deployments: Array<{ id: string; model: string; sku?: string }>;
@@ -552,6 +612,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
   try {
     const sdk: any = await import("@agentmesh/sdk");
+    agtSdk = sdk;
 
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
@@ -608,6 +669,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         });
         log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
         connected = true;
+        agtConnected = true;
         break;
       } catch (connErr: any) {
         const delay = attempt * 2;
@@ -725,7 +787,46 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
+    // ── Disconnect handler + auto-reconnect ──────────────────────────────
+    // If the WS connection drops (relay restart, network blip), try to reconnect.
+    if (agtMeshClient.onDisconnect) {
+      agtMeshClient.onDisconnect(() => {
+        agtConnected = false;
+        log.warn("AGT mesh disconnected — will attempt reconnect in 15s");
+      });
+    }
+
+    // Reconnect timer: every 30s, check if disconnected and try to reconnect.
+    // Also serves as a keep-alive — if the SDK exposes a ping, use it.
+    if (agtReconnectTimer) clearInterval(agtReconnectTimer);
+    agtReconnectTimer = setInterval(async () => {
+      if (!agtConnected && agtMeshClient) {
+        await agtReconnect(log);
+      }
+      // Heartbeat: ping the relay proxy to keep the connection warm
+      try {
+        const http = await import("node:http");
+        const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
+        req.on("error", () => {});
+        req.end();
+      } catch { /* best effort */ }
+    }, 30_000);
+    // Don't let the timer prevent process exit
+    if (agtReconnectTimer.unref) agtReconnectTimer.unref();
+
+    // ── Inbox notification timer ─────────────────────────────────────────
+    // Every 10s, if there are unread messages, write a notification section
+    // into MEMORY.md so the LLM sees them in its context window without
+    // needing to manually call mesh_inbox. This is what keeps conversations
+    // "lively" — the agent is proactively told it has messages to process.
+    if (agtInboxNotifyTimer) clearInterval(agtInboxNotifyTimer);
+    agtInboxNotifyTimer = setInterval(() => {
+      notifyInboxToMemory(log).catch(() => {});
+    }, 10_000);
+    if (agtInboxNotifyTimer.unref) agtInboxNotifyTimer.unref();
+
     log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit${connected ? ", mesh ACTIVE" : ", mesh OFFLINE (relay unreachable)"}`);
+    log.info("AGT timers started: reconnect (30s), inbox notify (10s)");
   } catch (e: any) {
     // Distinguish module-not-found from other errors
     const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
@@ -1499,6 +1600,22 @@ const azureClawPlugin = definePluginEntry({
         try {
           // Collect messages from both sources
           const agtMessages = agtInbox.splice(0, agtInbox.length); // drain AGT buffer
+
+          // Clear the MEMORY.md inbox notification since we've drained messages
+          if (agtMessages.length > 0) {
+            try {
+              const fs = await import("node:fs/promises");
+              const memPath = process.env.MEMORY_FILE_PATH || "/home/user/MEMORY.md";
+              const INBOX_MARKER = "<!-- AGT_INBOX_START -->";
+              const INBOX_END = "<!-- AGT_INBOX_END -->";
+              let mem = await fs.readFile(memPath, "utf-8");
+              if (mem.includes(INBOX_MARKER)) {
+                const re = new RegExp(`\\n*${INBOX_MARKER}[\\s\\S]*?${INBOX_END}\\n*`, "m");
+                mem = mem.replace(re, "\n");
+                await fs.writeFile(memPath, mem, "utf-8");
+              }
+            } catch { /* best effort */ }
+          }
 
           // Also get any router-level messages (fallback / auto-reply)
           let routerMessages: any[] = [];

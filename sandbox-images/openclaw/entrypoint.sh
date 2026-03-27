@@ -612,12 +612,26 @@ APPROVALS
 # This keeps the AGT relay connection alive so the agent can receive E2E encrypted
 # messages from other agents in the mesh. Without this, the plugin only loads during
 # on-demand sessions and misses relay messages.
+#
+# The `openclaw agent --local --message` command exits after processing the single
+# message, so we wrap it in a restart loop. Each iteration:
+#   1. Starts a new agent session (loads plugin → initAGT → mesh connect)
+#   2. Plugin stays alive as long as the session runs
+#   3. When it exits, we wait 10s and restart
+# The session-id includes a counter so each restart gets a fresh session.
 (
   sleep 5  # Wait for gateway to stabilize
-  $AS_SANDBOX openclaw agent --local \
-    --session-id "agt-relay-listener-${NODE_HOSTNAME}" \
-    --message "You are an AGT relay listener. Stay connected and respond to any relay messages with AGT RELAY CONFIRMED." \
-    > /tmp/agt-relay-listener.log 2>&1 || true
+  _agt_restart=0
+  while true; do
+    _agt_restart=$((_agt_restart + 1))
+    echo "[azureclaw] AGT relay listener starting (attempt ${_agt_restart})" >> /tmp/agt-relay-listener.log
+    $AS_SANDBOX openclaw agent --local \
+      --session-id "agt-relay-listener-${NODE_HOSTNAME}-${_agt_restart}" \
+      --message "You are an AGT relay listener for ${NODE_HOSTNAME}. Monitor the mesh and respond to incoming relay messages. Stay connected." \
+      >> /tmp/agt-relay-listener.log 2>&1 || true
+    echo "[azureclaw] AGT relay listener exited (attempt ${_agt_restart}), restarting in 10s..." >> /tmp/agt-relay-listener.log
+    sleep 10
+  done
 ) &
 AGT_LISTENER_PID=$!
 echo "[azureclaw] AGT relay listener starting (PID: $AGT_LISTENER_PID)"
