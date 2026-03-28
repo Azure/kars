@@ -13,6 +13,22 @@ use crate::auth::WorkloadIdentityAuth;
 static AUTH: std::sync::LazyLock<WorkloadIdentityAuth> =
     std::sync::LazyLock::new(WorkloadIdentityAuth::new);
 
+/// Shared HTTP client for safety checks — reuses TCP connections and TLS sessions
+/// across calls instead of creating a new client per request.
+static SAFETY_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(4)
+            .timeout(std::time::Duration::from_millis(
+                std::env::var("CONTENT_SAFETY_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1500),
+            ))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+
 /// Determine audience for safety endpoints: Foundry project endpoints use ai.azure.com,
 /// standalone Content Safety resources use cognitiveservices.azure.com.
 fn safety_audience(endpoint: &str) -> &'static str {
@@ -74,14 +90,20 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
         output_type: "FourSeverityLevels".into(),
     };
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = match SAFETY_CLIENT
         .post(&url)
         .bearer_auth(&token)
         .json(&request_body)
         .send()
         .await
-        .context("Content Safety API request failed")?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Fail open on network errors / timeouts — don't block inference
+            tracing::warn!(error = %e, "Content Safety API unreachable, failing open");
+            return Ok(());
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -154,14 +176,20 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
         documents: vec![],
     };
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = match SAFETY_CLIENT
         .post(&url)
         .bearer_auth(&token)
         .json(&request_body)
         .send()
         .await
-        .context("Prompt Shields API request failed")?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Fail open on network errors / timeouts — don't block inference
+            tracing::warn!(error = %e, "Prompt Shields API unreachable, failing open");
+            return Ok(());
+        }
+    };
 
     if !resp.status().is_success() {
         // Fail open on API errors
