@@ -412,7 +412,7 @@ async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores, manage vector stores and files\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- foundry_conversations: persistent multi-turn dialogues (create, respond, get history)\n- foundry_evaluations: benchmark model quality (create, run, check results)\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. Be concise and report actual results.",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores, manage vector stores and files\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- foundry_conversations: persistent multi-turn dialogues (create, respond, get history)\n- foundry_evaluations: benchmark model quality (create, run, check results)\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls if needed. Be concise and report actual results.",
     },
     {
       role: "user",
@@ -1217,6 +1217,9 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       "- `foundry_agents` — List Foundry-hosted agents",
       "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
       "- `azureclaw_spawn` / `azureclaw_mesh_send` / `azureclaw_mesh_inbox` — Multi-agent orchestration with E2E encryption",
+      "",
+      "## Agent Behavior\n",
+      "When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls in sequence if needed to complete the task in a single response. Never say 'Processing...' or 'One moment...' without actually making a tool call in the same turn.",
       "",
     );
 
