@@ -1254,6 +1254,8 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     try {
       const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
       const store = `memory-${agentName}`;
+      // Ensure store exists before searching (avoids 404 on first boot)
+      await ensureMemoryStore(store);
       const recallResult = await _routerCall(
         "POST",
         `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
@@ -1298,20 +1300,84 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
 // Background Foundry Memory sync — persist conversation summaries
 // ---------------------------------------------------------------------------
 
+const MEMORY_SYNC_INTERVAL = 10; // Sync every N tool calls
+let memorySyncToolCount = 0;
+let memorySyncBuffer: string[] = [];
+let memorySyncInFlight = false;
+
+async function ensureMemoryStore(store: string): Promise<void> {
+  const apiVer = "api-version=2025-11-15-preview";
+  try {
+    await _routerCall("GET", `/memory_stores/${store}?${apiVer}`);
+  } catch {
+    await _routerCall("POST", `/memory_stores?${apiVer}`, {
+      name: store,
+      description: `Persistent memory for agent ${store.replace("memory-", "")}`,
+    });
+  }
+}
+
 async function syncToFoundryMemory(
   content: string,
   log: { info: (m: string) => void; warn: (m: string) => void },
 ) {
+  if (memorySyncInFlight) return; // Prevent overlapping syncs
+  memorySyncInFlight = true;
   try {
     const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
     const store = `memory-${agentName}`;
-    await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
-      scope: agentName,
-      items: [{ role: "assistant", content, type: "message" }],
-    });
+    try {
+      await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
+        scope: agentName,
+        items: [{ role: "assistant", content, type: "message" }],
+      });
+      log.info(`Foundry memory sync: persisted ${content.length} chars`);
+    } catch (e: any) {
+      if (e?.message?.includes("404")) {
+        await ensureMemoryStore(store);
+        await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
+          scope: agentName,
+          items: [{ role: "assistant", content, type: "message" }],
+        });
+        log.info(`Foundry memory sync: created store + persisted ${content.length} chars`);
+      }
+    }
   } catch {
     // Best effort — don't disrupt agent workflow
+  } finally {
+    memorySyncInFlight = false;
   }
+}
+
+function trackToolExecution(
+  toolName: string,
+  params: Record<string, unknown>,
+  resultText: string,
+  log: { info: (m: string) => void; warn: (m: string) => void },
+) {
+  memorySyncToolCount++;
+  // Build a compact summary line (tool name + key params, no secrets)
+  const paramHint = Object.keys(params).filter(k => !k.includes("key") && !k.includes("token")).slice(0, 3).join(",");
+  const resultSnippet = resultText.slice(0, 120).replace(/\n/g, " ");
+  memorySyncBuffer.push(`[${memorySyncToolCount}] ${toolName}(${paramHint}) → ${resultSnippet}`);
+
+  if (memorySyncToolCount % MEMORY_SYNC_INTERVAL === 0 && memorySyncBuffer.length > 0) {
+    const batch = memorySyncBuffer.splice(0);
+    const summary = `Agent activity checkpoint (calls ${memorySyncToolCount - batch.length + 1}–${memorySyncToolCount}):\n${batch.join("\n")}`;
+    syncToFoundryMemory(summary, log).catch(() => {});
+  }
+}
+
+// Flush remaining buffer on process exit (SIGTERM from pod shutdown)
+function registerMemorySyncShutdownHook(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  const flush = () => {
+    if (memorySyncBuffer.length === 0) return;
+    const batch = memorySyncBuffer.splice(0);
+    const summary = `Agent shutdown — final checkpoint (${batch.length} calls buffered):\n${batch.join("\n")}`;
+    syncToFoundryMemory(summary, log).catch(() => {});
+  };
+  process.once("SIGTERM", flush);
+  process.once("SIGINT", flush);
 }
 
 interface OpenClawConfig {
@@ -1474,6 +1540,27 @@ const azureClawPlugin = definePluginEntry({
 
     // Initialize Foundry project discovery (models, connections, indexes)
     initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
+
+    // ── Periodic Foundry memory sync middleware ───────────────────────
+    // Wraps every tool's execute() to track calls and periodically push
+    // activity summaries to Foundry permanent memory. Survives restarts.
+    memorySyncToolCount = 0;
+    memorySyncBuffer = [];
+    const _origRegisterTool = api.registerTool.bind(api);
+    api.registerTool = (tool: ToolDefinition) => {
+      const origExecute = tool.execute;
+      _origRegisterTool({
+        ...tool,
+        execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => {
+          const result = await origExecute(id, params, signal);
+          // Extract first text content for the summary
+          const txt = result?.content?.[0]?.text || "";
+          trackToolExecution(tool.name, params, txt, log);
+          return result;
+        },
+      });
+    };
+    registerMemorySyncShutdownHook(log);
 
     // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
     // These are first-class tools the LLM can call directly.
