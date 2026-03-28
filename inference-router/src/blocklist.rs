@@ -64,7 +64,17 @@ pub struct PendingApproval {
     pub url: String,
     pub sandbox: String,
     pub timestamp: String,
+    /// "pending" = normal allowlist request, "🛑 ech" = ECH block,
+    /// "🛑 no-sni" = missing SNI, "🛑 dns-rebind" = private IP resolution,
+    /// "🛑 ssrf" = SSRF attempt via egress fetch.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Human-readable explanation of why this was blocked.
+    #[serde(default)]
+    pub reason: String,
 }
+
+fn default_kind() -> String { "pending".into() }
 
 impl Blocklist {
     /// Create a new empty blocklist (disabled mode — passes everything).
@@ -354,6 +364,8 @@ impl Blocklist {
                     sandbox: sandbox.to_string(),
                     timestamp: format!("{}Z", std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                    kind: "pending".into(),
+                    reason: format!("Domain '{}' not on allowlist — awaiting operator approval", domain),
                 });
             }
         }
@@ -387,6 +399,28 @@ impl Blocklist {
     /// Get pending approval requests.
     pub async fn get_pending_approvals(&self) -> Vec<PendingApproval> {
         self.pending_approvals.read().await.clone()
+    }
+
+    /// Record a proxy-level block (ECH, missing SNI, private IP resolution).
+    /// Surfaces in the pending approvals queue so operators can see what was blocked
+    /// and why, rather than silently dropping connections.
+    pub async fn record_proxy_block(&self, domain: &str, kind: &str, reason: &str, sandbox: &str) {
+        let mut pending = self.pending_approvals.write().await;
+        // Dedup by domain + kind
+        let already = pending.iter().any(|p| p.domain == domain && p.kind == kind);
+        if !already {
+            let id = format!("{:x}", md5_hash(&format!("proxy:{}:{}", domain, kind)));
+            pending.push(PendingApproval {
+                id,
+                domain: domain.to_string(),
+                url: String::new(),
+                sandbox: sandbox.to_string(),
+                timestamp: format!("{}Z", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                kind: kind.to_string(),
+                reason: reason.to_string(),
+            });
+        }
     }
 }
 
