@@ -221,19 +221,28 @@ This log is the definitive proof that encryption is working end-to-end.
 2. Agent connects to relay via WebSocket (AMID + session UUID)
 3. Sender fetches recipient's prekeys from registry → X3DH key exchange
 4. Sender sends KNOCK via relay (policy-gated session establishment)
-5. Sender encrypts message with Double Ratchet → `encrypted_payload`
-6. Relay routes by AMID, forwards opaque payload
-7. Recipient decrypts with Double Ratchet → plaintext (or rejects on failure)
+5. Recipient evaluates KNOCK: trust score + spawner affinity + policy → accept or reject
+6. If accepted: sender encrypts message with Double Ratchet → `encrypted_payload`
+7. Relay routes by AMID, forwards opaque payload
+8. Recipient decrypts with Double Ratchet → plaintext (or rejects on failure)
+9. If KNOCK rejected: all messages from that peer are **blocked** (enforcement mode)
+
+**KNOCK protocol enforcement:** When `AGT_TRUST_THRESHOLD > 0`, KNOCK enforcement is active — messages from peers without an accepted KNOCK session are **blocked** (not delivered). The KNOCK handler evaluates trust scores using a normalized scale:
+
+- Registry reputation (0.0–1.0) is normalized to 0–1000 for threshold comparison
+- **Spawner affinity bonus** (+200) is added for sub-agents that this parent spawned, providing headroom for known children while still allowing the score to be overridden if the registry flags the agent
+- If the effective score (normalized + bonus) falls below the threshold, the KNOCK is rejected and all subsequent messages from that peer are blocked
+- Blocked messages are surfaced as `⛔ MESSAGE BLOCKED` security events in the operator inbox
 
 **Trust tiers** (registry-assigned at registration):
 
-| Tier | Score | Requirement |
-|------|-------|-------------|
-| Anonymous | 0.5 | Default — no proof of identity |
-| Verified (Tier 1) | 0.6 | OAuth verification (GitHub or Google) via `verificationToken` |
-| Organization (Tier 2) | 0.7 | OAuth + DNS TXT record verification for org domain |
+| Tier | Registry Score | Normalized (×1000) | With Spawner Bonus |
+|------|---------------|--------------------|--------------------|
+| Anonymous | 0.5 | 500 | 700 |
+| Verified (Tier 1) | 0.6 | 600 | 800 |
+| Organization (Tier 2) | 0.7 | 700 | 900 |
 
-Agents with `AGT_TRUST_THRESHOLD > 0` will evaluate the peer's trust score during KNOCK handling. Peers below the threshold receive a KNOCK rejection.
+With the default `AGT_TRUST_THRESHOLD=500`, all tiers pass. Raising it to `600` would require either OAuth verification or spawner affinity for anonymous agents.
 
 **Traffic capture proof:** A full hex-dump analysis of a live inter-agent exchange
 is documented in [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md), showing that
