@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use crate::blocklist::Blocklist;
 
@@ -23,8 +24,21 @@ const MAX_CONCURRENT_TUNNELS: usize = 256;
 const MAX_TUNNEL_LIFETIME_SECS: u64 = 3600;
 
 /// Start the transparent forward proxy on the given address.
-pub async fn start(addr: &str, blocklist: Blocklist) {
-    let listener = match TcpListener::bind(addr).await {
+/// Returns a CancellationToken that triggers graceful shutdown when cancelled.
+pub async fn start(addr: &str, blocklist: Blocklist) -> CancellationToken {
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    let addr = addr.to_string();
+    tokio::spawn(async move {
+        run(addr, blocklist, shutdown_clone).await;
+    });
+
+    shutdown
+}
+
+async fn run(addr: String, blocklist: Blocklist, shutdown: CancellationToken) {
+    let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
             tracing::error!(error = %e, addr = %addr, "Forward proxy failed to bind");
@@ -40,35 +54,58 @@ pub async fn start(addr: &str, blocklist: Blocklist) {
     let active_count = Arc::new(AtomicUsize::new(0));
 
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "Forward proxy accept error");
-                continue;
-            }
-        };
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, peer) = match result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Forward proxy accept error");
+                        continue;
+                    }
+                };
 
-        let permit = match semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::warn!(peer = %peer, active = active_count.load(Ordering::Relaxed),
-                    "Forward proxy: connection limit reached, rejecting");
-                drop(stream);
-                continue;
-            }
-        };
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!(peer = %peer, active = active_count.load(Ordering::Relaxed),
+                            "Forward proxy: connection limit reached, rejecting");
+                        drop(stream);
+                        continue;
+                    }
+                };
 
-        let bl = blocklist.clone();
-        let sb = sandbox_name.clone();
-        let count = active_count.clone();
-        count.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &bl, &sb).await {
-                tracing::debug!(peer = %peer, error = %e, "Forward proxy connection error");
+                let bl = blocklist.clone();
+                let sb = sandbox_name.clone();
+                let count = active_count.clone();
+                let conn_shutdown = shutdown.clone();
+                count.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(async move {
+                    tokio::select! {
+                        result = handle_connection(stream, &bl, &sb) => {
+                            if let Err(e) = result {
+                                tracing::debug!(peer = %peer, error = %e, "Forward proxy connection error");
+                            }
+                        }
+                        _ = conn_shutdown.cancelled() => {
+                            tracing::debug!(peer = %peer, "Forward proxy tunnel cancelled (shutdown)");
+                        }
+                    }
+                    count.fetch_sub(1, Ordering::Relaxed);
+                    drop(permit);
+                });
             }
-            count.fetch_sub(1, Ordering::Relaxed);
-            drop(permit); // Release semaphore on tunnel close
-        });
+            _ = shutdown.cancelled() => {
+                let remaining = active_count.load(Ordering::Relaxed);
+                tracing::info!(active = remaining, "Forward proxy shutting down, draining connections");
+                // Give active tunnels 5s to finish
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let still_active = active_count.load(Ordering::Relaxed);
+                if still_active > 0 {
+                    tracing::warn!(remaining = still_active, "Forward proxy: forcing shutdown with active tunnels");
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -137,20 +174,39 @@ async fn resolve_and_validate(domain: &str, port: u16, blocklist: &Blocklist, sa
 }
 
 async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist, sandbox: &str) -> anyhow::Result<()> {
-    // Read the initial request line to determine HTTP method.
-    // We peek at the first chunk to decide CONNECT vs plain HTTP.
-    let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
+    // Read the initial request. For TLS ClientHello, we may need multiple reads
+    // if the handshake is fragmented across TCP segments (rare, but possible).
+    let mut buf = vec![0u8; 16384];
+    let mut total = 0;
+    loop {
+        let n = stream.read(&mut buf[total..]).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        total += n;
+
+        // For plain HTTP: stop as soon as we see the end of the first line
+        if buf[..total].windows(2).any(|w| w == b"\r\n") {
+            break;
+        }
+        // For TLS: stop once we have at least the record header + full handshake length
+        if total >= 5 && buf[0] == 0x16 && buf[1] == 0x03 {
+            let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize + 5;
+            if total >= record_len || total >= buf.len() {
+                break;
+            }
+        }
+        if total >= buf.len() {
+            break;
+        }
     }
-    let request = &buf[..n];
+    let request = &buf[..total];
 
     // Parse the first line: "METHOD target HTTP/1.x\r\n"
     let first_line_end = request
         .windows(2)
         .position(|w| w == b"\r\n")
-        .unwrap_or(n);
+        .unwrap_or(total);
     let first_line = std::str::from_utf8(&request[..first_line_end])?;
     let parts: Vec<&str> = first_line.split_whitespace().collect();
 
@@ -165,7 +221,7 @@ async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist, sandbox
     if method.eq_ignore_ascii_case("CONNECT") {
         handle_connect(stream, target, request, blocklist, sandbox).await
     } else {
-        handle_http(stream, target, request, n, blocklist, sandbox).await
+        handle_http(stream, target, request, total, blocklist, sandbox).await
     }
 }
 
@@ -468,6 +524,11 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
     const LIFETIME_CAP: Duration = Duration::from_secs(MAX_TUNNEL_LIFETIME_SECS);
     const BUF_SIZE: usize = 8192;
+
+    // Disable Nagle's algorithm — flush every write immediately.
+    // Removes up to 40ms latency on small packets (Telegram polls, WS, SSE, LLM tokens).
+    client.set_nodelay(true).ok();
+    upstream.set_nodelay(true).ok();
 
     let (mut cr, mut cw) = client.split();
     let (mut ur, mut uw) = upstream.split();

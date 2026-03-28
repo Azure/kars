@@ -88,7 +88,12 @@ async fn main() -> Result<()> {
         public
             .merge(protected)
             .with_state(state)
-            .layer(tower::limit::ConcurrencyLimitLayer::new(64))
+            .layer(tower::limit::ConcurrencyLimitLayer::new(
+                std::env::var("ROUTER_CONCURRENCY_LIMIT")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(256),
+            ))
     };
 
     let addr = format!("0.0.0.0:{}", config.port);
@@ -101,9 +106,7 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8444);
     let proxy_addr = format!("127.0.0.1:{proxy_port}");
-    tokio::spawn(async move {
-        forward_proxy::start(&proxy_addr, proxy_blocklist).await;
-    });
+    let proxy_shutdown = forward_proxy::start(&proxy_addr, proxy_blocklist).await;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(
@@ -112,6 +115,11 @@ async fn main() -> Result<()> {
     )
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Signal the forward proxy to drain and shut down
+    proxy_shutdown.cancel();
+    // Give it a moment to drain active tunnels
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     tracing::info!("Inference router shut down gracefully");
     Ok(())
