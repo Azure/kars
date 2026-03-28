@@ -51,6 +51,7 @@ impl Config {
 
             default_model: std::env::var("DEFAULT_MODEL")
                 .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
+                .or_else(|_| std::env::var("OPENCLAW_MODEL"))
                 .unwrap_or_else(|_| "gpt-4.1".into()),
 
             content_safety_enabled: std::env::var("CONTENT_SAFETY_ENABLED")

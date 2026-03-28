@@ -246,10 +246,15 @@ fn build_upstream_url(
     request_body: Bytes,
 ) -> Result<(String, Bytes)> {
     if auth.is_api_key_mode() {
+        // Respect model from request body — allows per-request model selection
+        let deployment = serde_json::from_slice::<serde_json::Value>(&request_body)
+            .ok()
+            .and_then(|v| v.get("model")?.as_str().map(String::from))
+            .unwrap_or_else(|| upstream.deployment.clone());
         let url = format!(
             "{}/openai/deployments/{}/{}?api-version=2024-12-01-preview",
             upstream.endpoint.trim_end_matches('/'),
-            upstream.deployment,
+            deployment,
             path.trim_start_matches('/'),
         );
         Ok((url, request_body))
