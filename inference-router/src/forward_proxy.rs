@@ -539,6 +539,10 @@ fn parse_host_port(target: &str, default_port: u16) -> (String, u16) {
 /// A 5-minute idle timer is reset on every chunk transferred.
 /// This correctly supports long-lived connections like Telegram long-polling,
 /// WebSocket upgrades, and SSE streams while still cleaning up zombie tunnels.
+///
+/// TCP keepalive is enabled on both sockets to detect silently dead connections
+/// (NAT timeout, network changes, etc.) within ~90 seconds, preventing the
+/// read calls from hanging indefinitely on half-open TCP connections.
 async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     use std::time::Duration;
     use tokio::time::{Instant, sleep_until};
@@ -551,6 +555,12 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     // Removes up to 40ms latency on small packets (Telegram polls, WS, SSE, LLM tokens).
     client.set_nodelay(true).ok();
     upstream.set_nodelay(true).ok();
+
+    // Enable TCP keepalive — detect silently dead connections within ~90s.
+    // Without this, reads on half-open connections hang forever, blocking
+    // polling loops (e.g., Telegram getUpdates) until the 300s idle timer.
+    enable_tcp_keepalive(&client);
+    enable_tcp_keepalive(&upstream);
 
     let (mut cr, mut cw) = client.split();
     let (mut ur, mut uw) = upstream.split();
@@ -597,6 +607,23 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
                 break;
             }
         }
+    }
+}
+
+/// Enable TCP keepalive on a socket to detect silently dead connections.
+///
+/// Probes start after 60s idle, repeat every 10s. On most OSes this means
+/// a dead connection is detected within ~90s (idle + retries × interval).
+fn enable_tcp_keepalive(stream: &TcpStream) {
+    use socket2::SockRef;
+    use std::time::Duration;
+
+    let sock = SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10));
+    if let Err(e) = sock.set_tcp_keepalive(&keepalive) {
+        tracing::warn!(error = %e, "Failed to set TCP keepalive on tunnel socket");
     }
 }
 

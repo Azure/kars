@@ -40,6 +40,9 @@ anyhow.workspace = true
 # AGT governance (policy YAML parsing)
 serde_yaml = "0.9"
 
+# TCP keepalive for tunnel dead-connection detection
+socket2 = "0.5"
+
 # WebSocket proxy for AGT relay
 tokio-tungstenite = "0.26"
 
