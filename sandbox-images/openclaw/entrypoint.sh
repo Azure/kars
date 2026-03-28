@@ -190,8 +190,8 @@ EOF
     # DM policy: allowlist if TELEGRAM_ALLOW_FROM is set (comma-separated numeric IDs),
     # otherwise pairing (requires approval). Never default to open.
     if [ -n "${TELEGRAM_ALLOW_FROM:-}" ]; then
-      # Convert comma-separated IDs to JSON array: "123,456" → "123", "456"
-      TG_ALLOW_JSON=$(echo "$TELEGRAM_ALLOW_FROM" | sed 's/[[:space:]]//g' | awk -F, '{for(i=1;i<=NF;i++){printf "\"%s\"", $i; if(i<NF) printf ", "}}')
+      # Convert comma-separated IDs to JSON array: "123,456" → "\"123\", \"456\""
+      TG_ALLOW_JSON=$(echo "$TELEGRAM_ALLOW_FROM" | tr -d ' ' | sed 's/,/", "/g; s/^/"/; s/$/"/')
       TG_DM_POLICY="allowlist"
       TG_ALLOW_FROM="[${TG_ALLOW_JSON}]"
     else
