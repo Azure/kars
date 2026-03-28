@@ -1080,18 +1080,20 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     indexes: [],
   };
 
-  // Query deployed models via /openai/deployments (Foundry data plane) with /openai/models fallback,
-  // plus Foundry project resources in parallel
-  const [deploymentsResult, modelsResult, connResult, idxResult] = await Promise.allSettled([
-    _routerCall("GET", `/v1/deployments`),
+  // Query deployed models: Foundry project /deployments (actual deployments, not catalog),
+  // with /v1/models fallback (full Azure OpenAI catalog).
+  // Also query Foundry project resources in parallel.
+  const apiVerId = `api-version=2025-11-15-preview`;
+  const [foundryDeploymentsResult, modelsResult, connResult, idxResult] = await Promise.allSettled([
+    _routerCall("GET", `/deployments?${apiVerId}`),
     _routerCall("GET", `/v1/models`),
     _routerCall("GET", `/connections?${apiVer}`),
     _routerCall("GET", `/indexes?${apiVer}`),
   ]);
 
-  // Priority: 1) FOUNDRY_DEPLOYMENTS env var (from CLI discovery)
-  //           2) /v1/deployments (data-plane API, works on AI Services)
-  //           3) /v1/models (full catalog, always works)
+  // Priority: 1) FOUNDRY_DEPLOYMENTS env var (from CLI discovery at build time)
+  //           2) /deployments (Foundry project API — returns actual deployed models)
+  //           3) /v1/models (full Azure OpenAI catalog — 275+ models, not deployment-specific)
   const envDeployments = process.env.FOUNDRY_DEPLOYMENTS;
   if (envDeployments) {
     try {
@@ -1100,7 +1102,7 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
         foundryProject.deployments = deps.map((d: any) =>
           typeof d === "string"
             ? { id: d, model: d, sku: "active" }
-            : { id: d.id || d.name, model: d.model || d.id || d.name || "unknown", sku: d.sku || "active" }
+            : { id: d.id || d.name, model: d.model || d.modelName || d.id || d.name || "unknown", sku: d.sku?.name || d.sku || "active" }
         );
         log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) from FOUNDRY_DEPLOYMENTS env`);
       }
@@ -1108,24 +1110,25 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
   }
 
   if (foundryProject.deployments.length === 0) {
-    const deploymentsData = deploymentsResult.status === "fulfilled"
-      ? (deploymentsResult.value?.data || deploymentsResult.value?.value || [])
+    // Foundry project /deployments returns { value: [...] } with name, modelName, capabilities
+    const foundryDepsData = foundryDeploymentsResult.status === "fulfilled"
+      ? (foundryDeploymentsResult.value?.value || foundryDeploymentsResult.value?.data || [])
       : [];
     const modelsData = modelsResult.status === "fulfilled"
       ? (modelsResult.value?.data || modelsResult.value?.value || [])
       : [];
 
-    if (Array.isArray(deploymentsData) && deploymentsData.length > 0) {
-      foundryProject.deployments = deploymentsData
+    if (Array.isArray(foundryDepsData) && foundryDepsData.length > 0) {
+      foundryProject.deployments = foundryDepsData
         .slice(0, 50)
         .map((d: any) => ({
-          id: d.id || d.name || d.deployment_id,
-          model: d.model || d.properties?.model?.name || d.id || "unknown",
-          sku: d.sku?.name || d.properties?.provisioningState || d.status || "active",
+          id: d.name || d.id || d.deployment_id,
+          model: d.modelName || d.model || d.name || "unknown",
+          sku: d.sku?.name || d.status || "active",
         }));
       log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) discovered via /deployments`);
     } else if (Array.isArray(modelsData) && modelsData.length > 0) {
-      // Fall back to models catalog — filter to chat-capable
+      // Fall back to models catalog — filter to chat-capable only
       foundryProject.deployments = modelsData
         .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference || m?.id)
         .slice(0, 50)
@@ -1136,7 +1139,7 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
         }));
       log.info(`Foundry: ${foundryProject.deployments.length} model(s) discovered via /models catalog`);
     } else {
-      log.warn(`Foundry models discovery failed: deployments=${(deploymentsResult as any).reason?.message || "empty"}, models=${(modelsResult as any).reason?.message || "empty"}`);
+      log.warn(`Foundry models discovery failed: deployments=${(foundryDeploymentsResult as any).reason?.message || "empty"}, models=${(modelsResult as any).reason?.message || "empty"}`);
     }
   }
 
@@ -2711,42 +2714,42 @@ const azureClawPlugin = definePluginEntry({
           const resource = params.resource as string;
 
           if (resource === "models") {
-            // Priority: 1) pre-discovered deployments (from FOUNDRY_DEPLOYMENTS env / initFoundry)
-            //           2) /v1/deployments data-plane (usually 404 — no Azure API)
-            //           3) /v1/models catalog fallback
+            // Query live Foundry project deployments — returns actual deployed models
+            const apiVer = "api-version=2025-11-15-preview";
+            try {
+              const result = await routerCall("GET", `/deployments?${apiVer}`);
+              const deps = result?.value || result?.data || [];
+              if (Array.isArray(deps) && deps.length > 0) {
+                const currentModel = process.env.OPENCLAW_MODEL || config.model || "gpt-4.1";
+                const models = deps.map((d: any) => ({
+                  id: d.name || d.id,
+                  model: d.modelName || d.model || d.name || "unknown",
+                  version: d.modelVersion || "",
+                  publisher: d.modelPublisher || "",
+                  capabilities: d.capabilities || {},
+                  sku: d.sku?.name || "unknown",
+                  capacity: d.sku?.capacity || 0,
+                  current: (d.name || d.id) === currentModel,
+                }));
+                return { content: [{ type: "text", text: safeJson({
+                  source: "foundry_project_deployments",
+                  current_model: currentModel,
+                  total: models.length,
+                  models,
+                }) }] };
+              }
+            } catch { /* fall through to cached */ }
+
+            // Fallback to cached discovery from startup
             if (foundryProject?.deployments && foundryProject.deployments.length > 0) {
               return { content: [{ type: "text", text: safeJson({
-                source: "discovered_deployments",
+                source: "cached_discovery",
                 total: foundryProject.deployments.length,
                 models: foundryProject.deployments,
               }) }] };
             }
 
-            let deployments: any[] = [];
-            let source = "deployments";
-            try {
-              const depResult = await routerCall("GET", "/v1/deployments");
-              deployments = depResult?.data || depResult?.value || [];
-            } catch { /* fall through to models */ }
-
-            if (!Array.isArray(deployments) || deployments.length === 0) {
-              source = "models_catalog";
-              const result = await routerCall("GET", "/v1/models");
-              deployments = result?.data || result?.value || [];
-            }
-
-            const models = Array.isArray(deployments) ? deployments.map((m: any) => ({
-              id: m.id || m.name || m.deployment_id,
-              model: m.model || m.properties?.model?.name || m.id,
-              status: m.status || m.properties?.provisioningState || m.lifecycle_status || "active",
-              sku: m.sku?.name || "",
-            })) : [];
-
-            return { content: [{ type: "text", text: safeJson({
-              source,
-              total: models.length,
-              models,
-            }) }] };
+            return { content: [{ type: "text", text: "No deployments found. Check Foundry project configuration." }] };
           }
 
           // Other resources: try Foundry API first, fall back gracefully
@@ -3074,7 +3077,7 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    // ── /model — short alias with listing ─────────────────────────────────
+    // ── /model — short alias with live listing ──────────────────────────
     api.registerCommand({
       name: "model",
       description: "Show or switch AI model (e.g. /model gpt-5.4-mini)",
@@ -3082,10 +3085,31 @@ const azureClawPlugin = definePluginEntry({
       handler: async (ctx) => {
         const model = ctx.args?.trim();
         if (!model) {
+          // Query live deployments from Foundry
           const current = process.env.OPENCLAW_MODEL || config.model || "gpt-4.1";
-          const available = foundryProject?.deployments
-            ?.filter((d: any) => !d.id?.includes("embedding"))
-            ?.map((d: any) => d.id === current ? `**${d.id}** ← current` : d.id) || [];
+          let available: string[] = [];
+          try {
+            const result = await routerCall("GET", `/deployments?api-version=2025-11-15-preview`);
+            const deps = (result as any)?.data || (result as any)?.value || [];
+            if (Array.isArray(deps)) {
+              available = deps
+                .filter((d: any) => {
+                  const id = d.id || d.name || "";
+                  return !id.includes("embedding");
+                })
+                .map((d: any) => {
+                  const id = d.id || d.name || "?";
+                  const modelName = d.model?.name || d.model || d.properties?.model?.name || "";
+                  const label = modelName && modelName !== id ? `${id} (${modelName})` : id;
+                  return id === current ? `**${label}** ← current` : label;
+                });
+            }
+          } catch {
+            // Fall back to cached discovery
+            available = (foundryProject?.deployments || [])
+              .filter((d: any) => !d.id?.includes("embedding"))
+              .map((d: any) => d.id === current ? `**${d.id}** ← current` : d.id);
+          }
           return { text: [
             `Current model: **${current}**`,
             "",
