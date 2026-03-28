@@ -68,6 +68,10 @@ OPENCLAW_DIR="/sandbox/.openclaw"
 OPENCLAW_CONFIG="$OPENCLAW_DIR/openclaw.json"
 WORKSPACE_DIR="/sandbox/.openclaw/workspace"
 
+# Node.js compile cache for faster startup
+mkdir -p /var/tmp/openclaw-compile-cache 2>/dev/null || true
+[ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /var/tmp/openclaw-compile-cache 2>/dev/null || true
+
 # Read API key from mounted secret or env var (sub-agents get it via env)
 API_KEY=""
 if [ -f /run/secrets/azure-openai-key ]; then
@@ -559,7 +563,10 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   if [ -S /var/run/docker.sock ] && [ "$IS_ROOT" = "true" ]; then
     chmod 666 /var/run/docker.sock || true
   fi
+  # Generate a random admin token for the router's protected endpoints
+  ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
   ROUTER_PORT=8443 \
+  ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
   AZURE_OPENAI_API_KEY="$API_KEY" \
   DEFAULT_MODEL="$MODEL" \
@@ -590,6 +597,8 @@ fi
 HTTPS_PROXY="http://127.0.0.1:8444" HTTP_PROXY="http://127.0.0.1:8444" \
   NO_PROXY="127.0.0.1,localhost" \
   NODE_OPTIONS="--require /usr/local/lib/proxy-bootstrap.js" \
+  NODE_COMPILE_CACHE="/var/tmp/openclaw-compile-cache" \
+  OPENCLAW_NO_RESPAWN=1 \
   OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
 GATEWAY_PID=$!
 
