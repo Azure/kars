@@ -229,10 +229,8 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
 /// AGT mesh + relay routes — public (protected by E2E encryption + NetworkPolicy).
 pub fn mesh_routes() -> Router<AppState> {
     Router::new()
-        // Inter-agent mesh
-        .route("/agt/mesh/send", post(agt_mesh_send))
+        // Inter-agent mesh (E2E encrypted via AGT relay only — no plaintext HTTP)
         .route("/agt/mesh/inbox", get(agt_mesh_inbox))
-        .route("/agt/mesh/receive", post(agt_mesh_receive))
         // AGT relay proxy (WebSocket + HTTP registry)
         .route("/agt/relay", get(agt_relay_proxy))
         .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
@@ -891,9 +889,10 @@ async fn agt_audit_verify(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-/// POST /agt/mesh/send — send a message to another agent.
-/// Routes directly via K8s DNS: http://{agent}.{namespace}.svc.cluster.local:8443/agt/mesh/receive
-/// Each agent's inference-router sidecar (UID 1001) can reach other services within the cluster.
+/// REMOVED: POST /agt/mesh/send — plaintext HTTP mesh send.
+/// All inter-agent communication now uses E2E encrypted AGT relay exclusively.
+/// Keeping as dead code for reference until next cleanup.
+#[allow(dead_code)]
 async fn agt_mesh_send(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -1023,9 +1022,9 @@ async fn agt_mesh_inbox(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-/// POST /agt/mesh/receive — receive a message from another agent (HTTP fallback).
-/// Stores in inbox only. Task processing happens via the AGT relay (E2E encrypted)
-/// path in the OpenClaw plugin, which has full tool access via the node host.
+/// REMOVED: POST /agt/mesh/receive — plaintext HTTP mesh receive.
+/// All inter-agent communication now uses E2E encrypted AGT relay exclusively.
+#[allow(dead_code)]
 async fn agt_mesh_receive(
     State(state): State<AppState>,
     Json(msg): Json<crate::governance::MeshMessage>,
