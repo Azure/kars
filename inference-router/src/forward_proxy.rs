@@ -7,11 +7,20 @@
 //! iptables REDIRECT sends all outbound TCP 80/443 from UID 1000 to this port,
 //! making the proxy completely transparent to applications in the sandbox.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 
 use crate::blocklist::Blocklist;
+
+/// Maximum concurrent tunnel connections (prevents resource exhaustion).
+const MAX_CONCURRENT_TUNNELS: usize = 256;
+
+/// Maximum lifetime for a single tunnel (1 hour hard cap).
+const MAX_TUNNEL_LIFETIME_SECS: u64 = 3600;
 
 /// Start the transparent forward proxy on the given address.
 pub async fn start(addr: &str, blocklist: Blocklist) {
@@ -27,6 +36,8 @@ pub async fn start(addr: &str, blocklist: Blocklist) {
     tracing::info!(addr = %addr, sandbox = %sandbox_name, "Forward proxy listening (transparent egress)");
     let blocklist = Arc::new(blocklist);
     let sandbox_name = Arc::new(sandbox_name);
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TUNNELS));
+    let active_count = Arc::new(AtomicUsize::new(0));
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -37,14 +48,92 @@ pub async fn start(addr: &str, blocklist: Blocklist) {
             }
         };
 
+        let permit = match semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(peer = %peer, active = active_count.load(Ordering::Relaxed),
+                    "Forward proxy: connection limit reached, rejecting");
+                drop(stream);
+                continue;
+            }
+        };
+
         let bl = blocklist.clone();
         let sb = sandbox_name.clone();
+        let count = active_count.clone();
+        count.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, &bl, &sb).await {
                 tracing::debug!(peer = %peer, error = %e, "Forward proxy connection error");
             }
+            count.fetch_sub(1, Ordering::Relaxed);
+            drop(permit); // Release semaphore on tunnel close
         });
     }
+}
+
+/// Returns true if the IP address is private, loopback, or link-local.
+pub fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()              // 127.0.0.0/8
+            || v4.is_private()            // 10/8, 172.16/12, 192.168/16
+            || v4.is_link_local()         // 169.254/16
+            || v4.is_unspecified()        // 0.0.0.0
+            || v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] <= 127 // CGNAT 100.64/10
+            || *v4 == Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()              // ::1
+            || v6.is_unspecified()        // ::
+            || is_ipv6_private(v6)
+        }
+    }
+}
+
+fn is_ipv6_private(v6: &Ipv6Addr) -> bool {
+    let segs = v6.segments();
+    // Link-local fe80::/10
+    (segs[0] & 0xffc0) == 0xfe80
+    // Unique local fc00::/7
+    || (segs[0] & 0xfe00) == 0xfc00
+    // IPv4-mapped ::ffff:0:0/96 — check the embedded IPv4
+    || (segs[0..5] == [0, 0, 0, 0, 0] && segs[5] == 0xffff && {
+        let v4 = Ipv4Addr::new(
+            (segs[6] >> 8) as u8, segs[6] as u8,
+            (segs[7] >> 8) as u8, segs[7] as u8,
+        );
+        v4.is_loopback() || v4.is_private() || v4.is_link_local()
+    })
+}
+
+/// Resolve a domain and validate the result is not a private IP.
+/// Returns the resolved socket address string (ip:port) on success.
+/// On private IP detection, records the block in the blocklist pending queue.
+async fn resolve_and_validate(domain: &str, port: u16, blocklist: &Blocklist, sandbox: &str) -> anyhow::Result<String> {
+    let target = format!("{domain}:{port}");
+    let addrs: Vec<_> = tokio::net::lookup_host(&target).await?.collect();
+
+    if addrs.is_empty() {
+        anyhow::bail!("DNS resolution failed for {domain}");
+    }
+
+    let addr = addrs[0];
+    if is_private_ip(&addr.ip()) {
+        tracing::warn!(domain = %domain, resolved_ip = %addr.ip(),
+            "DNS rebinding blocked: domain resolves to private IP");
+        blocklist.record_proxy_block(
+            domain,
+            "🛑 dns-rebind",
+            &format!("DNS rebinding — domain '{}' resolves to private/internal IP {}. \
+                This could be a DNS rebinding attack targeting internal services.",
+                domain, addr.ip()),
+            sandbox,
+        ).await;
+        anyhow::bail!("domain {domain} resolves to private/internal IP {}", addr.ip());
+    }
+
+    Ok(addr.to_string())
 }
 
 async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist, sandbox: &str) -> anyhow::Result<()> {
@@ -90,13 +179,9 @@ async fn handle_connect(
     blocklist: &Blocklist,
     sandbox: &str,
 ) -> anyhow::Result<()> {
-    let domain = target
-        .split(':')
-        .next()
-        .unwrap_or(target)
-        .to_lowercase();
+    let (domain, port) = parse_host_port(target, 443);
 
-    tracing::debug!(domain = %domain, "CONNECT request");
+    tracing::info!(domain = %domain, port = port, "CONNECT request");
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %domain, reason = %reason, "CONNECT blocked");
@@ -104,11 +189,21 @@ async fn handle_connect(
         return Ok(());
     }
 
-    // Connect to the actual destination
-    let upstream = match TcpStream::connect(target).await {
+    // Resolve DNS immediately after policy check and validate against private IPs
+    let resolved = match resolve_and_validate(&domain, port, blocklist, sandbox).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::warn!(domain = %domain, error = %e, "CONNECT: DNS validation failed");
+            send_response(&mut stream, 502, "DNS validation failed").await?;
+            return Ok(());
+        }
+    };
+
+    // Connect to the resolved IP (not the domain string) to prevent DNS rebinding
+    let upstream = match TcpStream::connect(&resolved).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(target = %target, error = %e, "CONNECT upstream failed");
+            tracing::debug!(target = %resolved, error = %e, "CONNECT upstream failed");
             send_response(&mut stream, 502, "Bad Gateway").await?;
             return Ok(());
         }
@@ -155,7 +250,7 @@ async fn handle_http(
         return Ok(());
     }
 
-    tracing::debug!(domain = %domain, "HTTP proxy request");
+    tracing::info!(domain = %domain, "HTTP proxy request");
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %domain, reason = %reason, "HTTP blocked");
@@ -163,17 +258,21 @@ async fn handle_http(
         return Ok(());
     }
 
-    // Connect to actual destination (port 80 if not specified)
-    let dest = if domain.contains(':') {
-        domain.clone()
-    } else {
-        format!("{domain}:80")
+    // Resolve + validate (prevents DNS rebinding to private IPs)
+    let (host, port) = parse_host_port(&domain, 80);
+    let resolved = match resolve_and_validate(&host, port, blocklist, sandbox).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::warn!(domain = %domain, error = %e, "HTTP: DNS validation failed");
+            send_response(&mut stream, 502, "DNS validation failed").await?;
+            return Ok(());
+        }
     };
 
-    let mut upstream = match TcpStream::connect(&dest).await {
+    let mut upstream = match TcpStream::connect(&resolved).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(dest = %dest, error = %e, "HTTP upstream failed");
+            tracing::debug!(dest = %resolved, error = %e, "HTTP upstream failed");
             send_response(&mut stream, 502, "Bad Gateway").await?;
             return Ok(());
         }
@@ -198,36 +297,62 @@ async fn handle_tls_redirect(
     blocklist: &Blocklist,
     sandbox: &str,
 ) -> anyhow::Result<()> {
-    let domain = extract_sni(initial_data, data_len)
-        .unwrap_or_default()
-        .to_lowercase();
+    let (sni, has_ech) = extract_sni_ex(initial_data, data_len);
 
-    if domain.is_empty() {
-        tracing::debug!("TLS redirect: no SNI found, allowing");
-    } else {
-        tracing::debug!(domain = %domain, "TLS redirect (SNI)");
-
-        if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
-            tracing::warn!(domain = %domain, reason = %reason, "TLS blocked (SNI)");
-            return Ok(());
-        }
+    if has_ech {
+        // Encrypted Client Hello hides the real destination inside an encrypted
+        // inner ClientHello. The outer SNI is typically a CDN domain, not the
+        // true target. Allowing ECH would bypass domain-based egress policy.
+        let outer_sni = sni.as_deref().unwrap_or("unknown");
+        tracing::warn!(outer_sni = %outer_sni,
+            "TLS redirect: Encrypted Client Hello (ECH) detected, rejecting — \
+            cannot verify destination domain. Outer SNI visible in pending approvals.");
+        blocklist.record_proxy_block(
+            outer_sni,
+            "🛑 ech",
+            &format!("ECH (Encrypted Client Hello) — real destination hidden behind outer SNI '{}'. \
+                If this domain is a trusted CDN, contact your security team.", outer_sni),
+            sandbox,
+        ).await;
+        return Ok(());
     }
 
-    // Recover the original destination. iptables REDIRECT changes the destination
-    // to localhost:8444, but SO_ORIGINAL_DST can recover it on Linux.
-    // Fallback: use SNI domain + port 443.
-    let dest = if !domain.is_empty() {
-        format!("{domain}:443")
-    } else {
-        // Without SNI and without SO_ORIGINAL_DST, we can't route.
-        tracing::warn!("TLS redirect: no SNI and no original dest, dropping");
+    let domain = sni.unwrap_or_default().to_lowercase();
+
+    if domain.is_empty() {
+        // No SNI — actively reject instead of silently dropping.
+        // Modern TLS clients always send SNI; absence is suspicious.
+        tracing::warn!("TLS redirect: no SNI in ClientHello, rejecting connection");
+        blocklist.record_proxy_block(
+            "<no-sni>",
+            "🛑 no-sni",
+            "TLS connection without SNI (Server Name Indication). Cannot determine destination domain. \
+                This may indicate a misconfigured client or an attempt to bypass egress policy.",
+            sandbox,
+        ).await;
         return Ok(());
+    }
+
+    tracing::info!(domain = %domain, "TLS redirect (SNI)");
+
+    if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
+        tracing::warn!(domain = %domain, reason = %reason, "TLS blocked (SNI)");
+        return Ok(());
+    }
+
+    // Resolve + validate (prevents DNS rebinding to private IPs)
+    let resolved = match resolve_and_validate(&domain, 443, blocklist, sandbox).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::warn!(domain = %domain, error = %e, "TLS redirect: DNS validation failed");
+            return Ok(());
+        }
     };
 
-    let mut upstream = match TcpStream::connect(&dest).await {
+    let mut upstream = match TcpStream::connect(&resolved).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(dest = %dest, error = %e, "TLS upstream failed");
+            tracing::debug!(dest = %resolved, error = %e, "TLS upstream failed");
             return Ok(());
         }
     };
@@ -241,43 +366,45 @@ async fn handle_tls_redirect(
 }
 
 /// Extract SNI (Server Name Indication) from a TLS ClientHello.
-fn extract_sni(data: &[u8], len: usize) -> Option<String> {
+/// Also detects Encrypted Client Hello (ECH) extension and returns None
+/// with a flag so the caller can reject ECH connections.
+fn extract_sni_ex(data: &[u8], len: usize) -> (Option<String>, bool) {
     if len < 43 {
-        return None; // Too short for a ClientHello
+        return (None, false);
     }
 
     // TLS record: type(1) + version(2) + length(2) + handshake
     // Handshake: type(1) + length(3) + client_version(2) + random(32) = 43 bytes minimum
     let handshake_start = 5; // Skip TLS record header
     if data[handshake_start] != 0x01 {
-        return None; // Not a ClientHello
+        return (None, false); // Not a ClientHello
     }
 
     // Skip: handshake type(1) + length(3) + version(2) + random(32) = 38
     let mut pos = handshake_start + 38;
     if pos >= len {
-        return None;
+        return (None, false);
     }
 
     // Session ID length (1 byte) + session ID
     let session_id_len = data[pos] as usize;
     pos += 1 + session_id_len;
     if pos + 2 > len {
-        return None;
+        return (None, false);
     }
 
     // Cipher suites length (2 bytes) + cipher suites
     let cipher_suites_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2 + cipher_suites_len;
     if pos + 1 > len {
-        return None;
+        return (None, false);
     }
 
     // Compression methods length (1 byte) + compression methods
     let comp_len = data[pos] as usize;
     pos += 1 + comp_len;
     if pos + 2 > len {
-        return None;
+        return (None, false);
     }
 
     // Extensions length (2 bytes)
@@ -285,26 +412,47 @@ fn extract_sni(data: &[u8], len: usize) -> Option<String> {
     pos += 2;
     let extensions_end = pos + extensions_len;
 
-    // Walk extensions looking for SNI (type 0x0000)
+    let mut sni: Option<String> = None;
+    let mut has_ech = false;
+
+    // Walk all extensions — extract SNI and detect ECH
     while pos + 4 <= extensions_end && pos + 4 <= len {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        if ext_type == 0x0000 && ext_len > 5 && pos + ext_len <= len {
-            // SNI extension: list_length(2) + type(1) + name_length(2) + name
-            let name_len = u16::from_be_bytes([data[pos + 3], data[pos + 4]]) as usize;
-            if pos + 5 + name_len <= len {
-                return std::str::from_utf8(&data[pos + 5..pos + 5 + name_len])
-                    .ok()
-                    .map(|s| s.to_string());
+        match ext_type {
+            // SNI extension (0x0000)
+            0x0000 if ext_len > 5 && pos + ext_len <= len => {
+                let name_len = u16::from_be_bytes([data[pos + 3], data[pos + 4]]) as usize;
+                if pos + 5 + name_len <= len {
+                    sni = std::str::from_utf8(&data[pos + 5..pos + 5 + name_len])
+                        .ok()
+                        .map(|s| s.to_string());
+                }
             }
+            // Encrypted Client Hello (0xfe0d = draft ECH, 0xffce = older ESNI)
+            0xfe0d | 0xffce => {
+                has_ech = true;
+            }
+            _ => {}
         }
 
         pos += ext_len;
     }
 
-    None
+    (sni, has_ech)
+}
+
+/// Parse "host:port" or bare "host", returning (host, port) with a default port.
+fn parse_host_port(target: &str, default_port: u16) -> (String, u16) {
+    if let Some(colon) = target.rfind(':') {
+        let host = target[..colon].to_lowercase();
+        let port = target[colon + 1..].parse::<u16>().unwrap_or(default_port);
+        (host, port)
+    } else {
+        (target.to_lowercase(), default_port)
+    }
 }
 
 /// Bidirectional TCP tunnel with activity-based idle timeout.
@@ -318,6 +466,7 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     use tokio::time::{Instant, sleep_until};
 
     const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+    const LIFETIME_CAP: Duration = Duration::from_secs(MAX_TUNNEL_LIFETIME_SECS);
     const BUF_SIZE: usize = 8192;
 
     let (mut cr, mut cw) = client.split();
@@ -326,9 +475,11 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
     let mut c2u_buf = vec![0u8; BUF_SIZE];
     let mut u2c_buf = vec![0u8; BUF_SIZE];
 
-    let deadline = Instant::now() + IDLE_TIMEOUT;
-    let idle_timer = sleep_until(deadline);
+    let now = Instant::now();
+    let idle_timer = sleep_until(now + IDLE_TIMEOUT);
+    let lifetime_timer = sleep_until(now + LIFETIME_CAP);
     tokio::pin!(idle_timer);
+    tokio::pin!(lifetime_timer);
 
     loop {
         tokio::select! {
@@ -356,6 +507,10 @@ async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
             }
             _ = &mut idle_timer => {
                 tracing::debug!("Forward proxy tunnel idle timeout (300s with no data)");
+                break;
+            }
+            _ = &mut lifetime_timer => {
+                tracing::info!("Forward proxy tunnel lifetime cap reached ({}s)", MAX_TUNNEL_LIFETIME_SECS);
                 break;
             }
         }

@@ -40,6 +40,7 @@ impl AppState {
     pub async fn new(_config: &Config) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(32)
+            .redirect(reqwest::redirect::Policy::none()) // Never follow redirects — return 3xx as-is
             .build()?;
 
         let config = Config::from_env()?;
@@ -1502,6 +1503,9 @@ async fn egress_learned_clear(State(state): State<AppState>) -> impl IntoRespons
 /// 2. Allowlist → approved domains pass through
 /// 3. Unknown domain → deny + create pending approval request
 /// 4. Learn mode → log + allow (discovery phase only)
+/// 5. Private/internal IP → always deny (SSRF protection)
+/// 6. Redirects → returned as-is (never followed)
+/// 7. Response capped at 2 MB
 ///
 /// Body: { "url": "https://...", "method": "GET"|"POST"|..., "headers": {}, "body": "..." }
 /// Returns: { "status": <http_code>, "headers": {...}, "body": "..." }
@@ -1518,6 +1522,27 @@ async fn egress_fetch(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
             "error": "Missing 'url' field"
         }))).into_response();
+    }
+
+    // SSRF protection: reject requests to localhost/private IPs
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            let is_private = match host.parse::<std::net::IpAddr>() {
+                Ok(ip) => crate::forward_proxy::is_private_ip(&ip),
+                Err(_) => {
+                    // It's a hostname — check for common local hostnames
+                    let h = host.to_lowercase();
+                    h == "localhost" || h.ends_with(".local") || h.ends_with(".internal")
+                }
+            };
+            if is_private {
+                tracing::warn!(url = %url, "Egress fetch blocked: private/internal target");
+                return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                    "error": "Cannot fetch from private/internal addresses",
+                    "url": url,
+                }))).into_response();
+            }
+        }
     }
 
     let sandbox = &state.governance.sandbox_name;
@@ -1561,8 +1586,17 @@ async fn egress_fetch(
 
     let mut request = state.client.request(http_method, url);
 
+    // Allowlisted request headers — block dangerous ones
+    const BLOCKED_REQ_HEADERS: &[&str] = &[
+        "host", "transfer-encoding", "content-length",
+        "proxy-authorization", "proxy-connection",
+    ];
     if let Some(headers) = req_headers {
         for (k, v) in headers {
+            let lower = k.to_lowercase();
+            if BLOCKED_REQ_HEADERS.contains(&lower.as_str()) {
+                continue;
+            }
             if let Some(val) = v.as_str()
                 && let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
                     request = request.header(name, val);
@@ -1574,16 +1608,35 @@ async fn egress_fetch(
         request = request.body(req_body.to_string());
     }
 
+    const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+
     match request.timeout(std::time::Duration::from_secs(30)).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
+            // Strip sensitive response headers
+            const STRIPPED_RESP_HEADERS: &[&str] = &[
+                "set-cookie", "authorization", "x-api-key", "x-auth-token",
+                "proxy-authenticate", "proxy-authorization", "www-authenticate",
+            ];
             let resp_headers: serde_json::Map<String, serde_json::Value> = resp.headers()
                 .iter()
                 .filter_map(|(k, v)| {
-                    v.to_str().ok().map(|val| (k.to_string(), serde_json::Value::String(val.to_string())))
+                    let name = k.as_str();
+                    if STRIPPED_RESP_HEADERS.contains(&name) {
+                        None
+                    } else {
+                        v.to_str().ok().map(|val| (name.to_string(), serde_json::Value::String(val.to_string())))
+                    }
                 })
                 .collect();
-            let body = resp.text().await.unwrap_or_default();
+            // Cap response body to prevent OOM
+            let body_bytes = resp.bytes().await.unwrap_or_default();
+            let body = if body_bytes.len() > MAX_RESPONSE_BYTES {
+                let truncated = String::from_utf8_lossy(&body_bytes[..MAX_RESPONSE_BYTES]);
+                format!("{}... [truncated at {} bytes]", truncated, MAX_RESPONSE_BYTES)
+            } else {
+                String::from_utf8_lossy(&body_bytes).into_owned()
+            };
             (StatusCode::OK, Json(serde_json::json!({
                 "status": status,
                 "headers": resp_headers,
