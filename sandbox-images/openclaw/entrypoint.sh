@@ -187,7 +187,18 @@ EOF
   # Set proxy explicitly so OpenClaw uses a simple ProxyAgent for Telegram API calls.
   # The EnvHttpProxyAgent + autoSelectFamily path causes long-poll stalls in Docker.
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"], \"proxy\": \"http://127.0.0.1:8444\" }"
+    # DM policy: allowlist if TELEGRAM_ALLOW_FROM is set (comma-separated numeric IDs),
+    # otherwise pairing (requires approval). Never default to open.
+    if [ -n "${TELEGRAM_ALLOW_FROM:-}" ]; then
+      # Convert comma-separated IDs to JSON array: "123,456" → "123", "456"
+      TG_ALLOW_JSON=$(echo "$TELEGRAM_ALLOW_FROM" | sed 's/[[:space:]]//g' | awk -F, '{for(i=1;i<=NF;i++){printf "\"%s\"", $i; if(i<NF) printf ", "}}')
+      TG_DM_POLICY="allowlist"
+      TG_ALLOW_FROM="[${TG_ALLOW_JSON}]"
+    else
+      TG_DM_POLICY="pairing"
+      TG_ALLOW_FROM="[]"
+    fi
+    CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"${TG_DM_POLICY}\", \"allowFrom\": ${TG_ALLOW_FROM}, \"proxy\": \"http://127.0.0.1:8444\" }"
     PLUGINS_LIST="${PLUGINS_LIST}, \"telegram\""
     PLUGINS_ENTRIES="\"telegram\": { \"enabled\": true }"
   fi

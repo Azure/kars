@@ -44,6 +44,7 @@ export function devCommand(): Command {
     )
     .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
     .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
+    .option("--telegram-allow-from <ids>", "Telegram user IDs allowed to DM (comma-separated numeric IDs)")
     .option("--slack-token <token>", "Slack bot OAuth token")
     .option("--discord-token <token>", "Discord bot token")
     .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
@@ -384,6 +385,7 @@ export function devCommand(): Command {
           ...agtEnvArgs,
           // Channel tokens: CLI flags take priority, fall back to host env vars
           ...((options.telegramToken || process.env.TELEGRAM_BOT_TOKEN) ? ["-e", `TELEGRAM_BOT_TOKEN=${options.telegramToken || process.env.TELEGRAM_BOT_TOKEN}`] : []),
+          ...((options.telegramAllowFrom || process.env.TELEGRAM_ALLOW_FROM) ? ["-e", `TELEGRAM_ALLOW_FROM=${options.telegramAllowFrom || process.env.TELEGRAM_ALLOW_FROM}`] : []),
           ...((options.slackToken || process.env.SLACK_BOT_TOKEN) ? ["-e", `SLACK_BOT_TOKEN=${options.slackToken || process.env.SLACK_BOT_TOKEN}`] : []),
           ...((options.discordToken || process.env.DISCORD_BOT_TOKEN) ? ["-e", `DISCORD_BOT_TOKEN=${options.discordToken || process.env.DISCORD_BOT_TOKEN}`] : []),
           ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
