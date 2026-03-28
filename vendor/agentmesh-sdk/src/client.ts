@@ -171,6 +171,8 @@ export class AgentMeshClient {
   private errorHandlers: Array<(type: string, fromAmid: string, detail: string) => void> = [];
   private knockHandler?: KnockHandler;
   private e2eVerifiedPeers: Set<string> = new Set();
+  private knockAcceptedPeers: Set<string> = new Set();
+  private knockEnforcementEnabled: boolean = false;
   private eventHandlers: Map<ClientEventType, EventHandler[]> = new Map();
 
   // Circuit breaker state
@@ -335,6 +337,15 @@ export class AgentMeshClient {
               const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
               await this.transport.send(fromAmid, JSON.stringify(accept), 'accept' as any);
             } catch { /* best effort */ }
+          } else if (this.knockEnforcementEnabled) {
+            // KNOCK rejected with enforcement — block all future messages from this peer
+            console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) — messages will be blocked`);
+          }
+        } else if (this.knockEnforcementEnabled && this.knockHandler && !this.knockAcceptedPeers.has(fromAmid)) {
+          // KNOCK enforcement: peer has not been accepted — reject the message
+          console.warn(`[AGT] ⛔ Message blocked from ${fromAmid}: no accepted KNOCK session`);
+          for (const handler of this.errorHandlers) {
+            try { handler('knock_rejected', fromAmid, 'Message blocked: peer KNOCK not accepted'); } catch { /* handler error */ }
           }
         } else if (parsed.type === 'encrypted' && parsed.x3dh) {
           // First encrypted message with X3DH params — establish responder session
@@ -610,6 +621,9 @@ export class AgentMeshClient {
       // KNOCK send failure is non-fatal — X3DH already established the shared secret
     }
 
+    // Initiator implicitly trusts the peer it chose to contact — accept replies
+    this.knockAcceptedPeers.add(toAmid);
+
     // Activate session — X3DH completed with peer's signed prekey as ratchet key
     await this.sessionManager.activateSessionDirect(sessionId);
 
@@ -680,6 +694,21 @@ export class AgentMeshClient {
   }
 
   /**
+   * Enable KNOCK enforcement — messages from peers without an accepted KNOCK
+   * will be blocked and reported via error handlers.
+   */
+  enableKnockEnforcement(): void {
+    this.knockEnforcementEnabled = true;
+  }
+
+  /**
+   * Grant KNOCK-accepted status to a peer (e.g. for spawned sub-agents).
+   */
+  grantKnockAcceptance(peerAmid: string): void {
+    this.knockAcceptedPeers.add(peerAmid);
+  }
+
+  /**
    * Handle an incoming KNOCK request.
    * This method checks circuit state before policy evaluation.
    */
@@ -732,6 +761,7 @@ export class AgentMeshClient {
     // Accept - create session
     const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     this.protocolSessions.createSession(fromAmid, request, false);
+    this.knockAcceptedPeers.add(fromAmid);
 
     await this.auditLogger.log('KNOCK_RECEIVED', 'INFO',
       `KNOCK accepted from ${fromAmid}, session: ${sessionId}`);
