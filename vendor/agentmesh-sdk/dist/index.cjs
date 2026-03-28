@@ -2793,7 +2793,9 @@ var AgentMeshClient = class _AgentMeshClient {
   activeSessions = /* @__PURE__ */ new Map();
   // peerAmid -> sessionId
   messageHandlers = [];
+  errorHandlers = [];
   knockHandler;
+  e2eVerifiedPeers = /* @__PURE__ */ new Set();
   eventHandlers = /* @__PURE__ */ new Map();
   // Circuit breaker state
   circuitState = "RUNNING" /* RUNNING */;
@@ -2913,11 +2915,13 @@ var AgentMeshClient = class _AgentMeshClient {
             }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
+          console.log(`[AGT] Received encrypted+x3dh message from ${fromAmid}`);
           try {
             const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
             const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
             this.activeSessions.set(fromAmid, sessionId);
             const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+            this.emitE2EVerified(fromAmid);
             for (const handler of this.messageHandlers) {
               try {
                 handler(fromAmid, decrypted);
@@ -2925,42 +2929,47 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             }
           } catch (e) {
-            console.error("[AGT] E2E decrypt failed:", e?.message || e);
-            for (const handler of this.messageHandlers) {
+            console.error("[AGT] E2E decrypt failed \u2014 message REJECTED (not delivered):", e?.message || e);
+            for (const handler of this.errorHandlers) {
               try {
-                handler(fromAmid, { _encrypted: true, _error: e?.message, ...parsed });
+                handler("decrypt_failed", fromAmid, e?.message || "unknown");
               } catch {
               }
             }
           }
         } else if (parsed.type === "encrypted") {
+          console.log(`[AGT] Received encrypted message (no x3dh) from ${fromAmid}`);
           const sessionId = this.activeSessions.get(fromAmid);
           if (sessionId) {
             try {
               const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+              this.emitE2EVerified(fromAmid);
               for (const handler of this.messageHandlers) {
                 try {
                   handler(fromAmid, decrypted);
                 } catch {
                 }
               }
-            } catch {
-              for (const handler of this.messageHandlers) {
+            } catch (decErr) {
+              console.error("[AGT] E2E decrypt failed for existing session \u2014 message REJECTED:", decErr?.message || decErr);
+              for (const handler of this.errorHandlers) {
                 try {
-                  handler(fromAmid, parsed);
+                  handler("decrypt_failed", fromAmid, decErr?.message || "unknown");
                 } catch {
                 }
               }
             }
           } else {
-            for (const handler of this.messageHandlers) {
+            console.error(`[AGT] Encrypted message from ${fromAmid} but no session \u2014 message REJECTED`);
+            for (const handler of this.errorHandlers) {
               try {
-                handler(fromAmid, parsed);
+                handler("no_session", fromAmid, "No encryption session established");
               } catch {
               }
             }
           }
         } else {
+          console.log(`[AGT] Received PLAIN message from ${fromAmid}, type=${parsed.type}, keys=${Object.keys(parsed).join(",")}`);
           for (const handler of this.messageHandlers) {
             try {
               handler(fromAmid, parsed);
@@ -3148,6 +3157,33 @@ var AgentMeshClient = class _AgentMeshClient {
    */
   onMessage(handler) {
     this.messageHandlers.push(handler);
+  }
+  /**
+   * Register an error handler for decryption failures and rejected messages.
+   */
+  onError(handler) {
+    this.errorHandlers.push(handler);
+  }
+  e2eVerifiedHandler;
+  /**
+   * Register a handler called when E2E encryption is verified with a peer.
+   * Fires once per peer on first successful decrypt (X3DH + Double Ratchet proven).
+   */
+  onE2EVerified(handler) {
+    this.e2eVerifiedHandler = handler;
+  }
+  emitE2EVerified(peerAmid) {
+    if (this.e2eVerifiedPeers.has(peerAmid)) return;
+    const isFirst = this.e2eVerifiedPeers.size === 0;
+    this.e2eVerifiedPeers.add(peerAmid);
+    console.log(`[AGT] E2E VERIFIED with ${peerAmid} (first=${isFirst}, handler=${!!this.e2eVerifiedHandler})`);
+    if (this.e2eVerifiedHandler) {
+      try {
+        this.e2eVerifiedHandler(peerAmid, isFirst);
+      } catch (e) {
+        console.error("[AGT] e2eVerifiedHandler error:", e?.message || e);
+      }
+    }
   }
   /**
    * Register a KNOCK handler.

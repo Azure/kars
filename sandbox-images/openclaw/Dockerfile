@@ -39,6 +39,23 @@ RUN openclaw skills install summarize 2>/dev/null || true && \
 # Install npm CLIs that unlock built-in OpenClaw skills
 RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
 
+# ─── CLI Plugin Builder (TypeScript → JavaScript) ────────────────────────────
+
+FROM ${AZURELINUX_BASE} AS cli-builder
+
+ARG TARGETARCH
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
+    tdnf install -y tar gzip ca-certificates curl && tdnf clean all && \
+    curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
+    tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
+    rm /tmp/node.tar.gz
+
+WORKDIR /build
+COPY cli/package.json cli/tsconfig.json ./cli/
+COPY cli/src/ ./cli/src/
+COPY policy-engine/profiles/ ./policy-engine/profiles/
+RUN cd cli && npm install --ignore-scripts 2>/dev/null || true && npm run build
+
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
 FROM golang:1.24-alpine AS go-builder
@@ -140,8 +157,8 @@ COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.j
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
 
-# Copy AzureClaw OpenClaw plugin (pre-built dist/ + skills + policies)
-COPY cli/dist/ /opt/azureclaw-plugin/
+# Copy AzureClaw OpenClaw plugin (built from source in cli-builder stage)
+COPY --from=cli-builder /build/cli/dist/ /opt/azureclaw-plugin/
 COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/

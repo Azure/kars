@@ -758,44 +758,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       relayUrl,
     });
 
-    // Connect to the mesh — registers with registry + connects to relay.
-    // Capabilities include the sandbox name so other agents can discover us.
-    // SANDBOX_NAME is set on inference-router; for openclaw container extract from HOSTNAME.
-    agtSandboxName = process.env.SANDBOX_NAME
-      || (process.env.HOSTNAME ? process.env.HOSTNAME.replace(/-[a-f0-9]+-[a-z0-9]+$/, "") : "unknown");
+    // ── Register ALL handlers BEFORE connect() ──────────────────────────
+    // Messages can arrive immediately after connect() returns, so handlers
+    // must be in place first.
 
-    // Retry connection with exponential backoff — relay/registry may not be ready yet.
-    let connected = false;
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        await agtMeshClient.connect({
-          displayName: agtSandboxName,
-          capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
-        });
-        log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
-        connected = true;
-        agtConnected = true;
-        break;
-      } catch (connErr: any) {
-        const delay = attempt * 2;
-        if (attempt < 5) {
-          log.warn(`AGT mesh connect attempt ${attempt}/5 failed: ${connErr.message} — retrying in ${delay}s`);
-          await new Promise(r => setTimeout(r, delay * 1000));
-        } else {
-          log.warn(`AGT mesh connect failed after 5 attempts: ${connErr.message}. Mesh tools will be unavailable.`);
-        }
-      }
-    }
-
-    // Store on process for cross-context singleton access
-    (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
-    (process as any)[Symbol.for("agt-identity")] = agtIdentity;
-
-    // Set up KNOCK handler — policy-gated session establishment with trust scoring.
-    // Each agent evaluates the incoming KNOCK before accepting:
-    // - Checks the sender's trust tier (Anonymous=500, Verified=600, Organization=700)
-    // - Evaluates the requested intent against AGT policy
-    // - Rejects agents below the configured trust threshold
+    // KNOCK handler — policy-gated session establishment with trust scoring.
     const AGT_TRUST_THRESHOLD = parseInt(process.env.AGT_TRUST_THRESHOLD || "0", 10); // 0 = accept all (dev)
     agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
       const intent = request?.intent?.capability || '*';
@@ -826,6 +793,33 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
 
       return { accept: true };
+    });
+
+    // Handle E2E decryption failures — log and surface to operator
+    agtMeshClient.onError((type: string, fromAmid: string, detail: string) => {
+      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
+      // Push to trust as failure
+      pushTrustToRouter(fromName, -0.5);
+      // Surface to operator via inbox as a security event
+      agtInbox.push({
+        from_amid: fromAmid,
+        from_agent: fromName,
+        content: `⚠️ E2E DECRYPTION FAILURE: ${type} — ${detail}. Message was REJECTED (not delivered). This may indicate a session mismatch or tampering.`,
+        message_type: "security_event",
+        timestamp: new Date().toISOString(),
+        id: `agt-err-${Date.now().toString(36)}`,
+      });
+    });
+
+    // Log when E2E encrypted channel is verified with a peer
+    agtMeshClient.onE2EVerified((peerAmid: string, isFirstPeer: boolean) => {
+      const peerName = amidToName.get(peerAmid) || peerAmid.slice(0, 12);
+      if (isFirstPeer) {
+        log.info(`✅ E2E encrypted channel UP — first verified peer: '${peerName}' (X3DH + Double Ratchet)`);
+      } else {
+        log.info(`✅ E2E encrypted channel verified with '${peerName}'`);
+      }
     });
 
     // Set up message handler — stores received messages in the AGT inbox buffer
@@ -923,6 +917,36 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
     });
+
+    // ── Connect to the mesh (handlers are registered, safe to receive) ──
+    agtSandboxName = process.env.SANDBOX_NAME
+      || (process.env.HOSTNAME ? process.env.HOSTNAME.replace(/-[a-f0-9]+-[a-z0-9]+$/, "") : "unknown");
+
+    let connected = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        await agtMeshClient.connect({
+          displayName: agtSandboxName,
+          capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
+        });
+        log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
+        connected = true;
+        agtConnected = true;
+        break;
+      } catch (connErr: any) {
+        const delay = attempt * 2;
+        if (attempt < 5) {
+          log.warn(`AGT mesh connect attempt ${attempt}/5 failed: ${connErr.message} — retrying in ${delay}s`);
+          await new Promise(r => setTimeout(r, delay * 1000));
+        } else {
+          log.warn(`AGT mesh connect failed after 5 attempts: ${connErr.message}. Mesh tools will be unavailable.`);
+        }
+      }
+    }
+
+    // Store on process for cross-context singleton access
+    (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
+    (process as any)[Symbol.for("agt-identity")] = agtIdentity;
 
     // ── Disconnect handler + auto-reconnect ──────────────────────────────
     // If the WS connection drops (relay restart, network blip), try to reconnect.
@@ -1751,29 +1775,37 @@ const azureClawPlugin = definePluginEntry({
                 }
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
               }
-              log.warn(`AGT relay send failed after retries: ${sendErr?.message}, falling back to router`);
+              log.warn(`AGT relay send failed after 8 retries: ${sendErr?.message}`);
+              return { content: [{ type: "text", text: JSON.stringify({
+                error: "E2E encrypted send failed — message NOT delivered",
+                reason: sendErr?.message || "unknown",
+                agent: agentName,
+                hint: "The sub-agent may not have registered yet. Check azureclaw_spawn_status and retry.",
+              }, null, 2) }] };
             } else {
-              log.warn(`AGT relay: target '${agentName}' not found in registry, falling back to router`);
+              log.warn(`AGT relay: target '${agentName}' not found in registry after polling`);
+              return { content: [{ type: "text", text: JSON.stringify({
+                error: "Target agent not found in AGT registry — message NOT delivered",
+                agent: agentName,
+                hint: "The sub-agent has not registered with the mesh. Check azureclaw_spawn_status, ensure it is Running, then retry.",
+              }, null, 2) }] };
             }
           } catch (agtErr: any) {
-            log.warn(`AGT relay send failed: ${agtErr.message}, falling back to router`);
+            log.warn(`AGT relay send failed: ${agtErr.message}`);
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: "E2E encrypted send failed — message NOT delivered",
+              reason: agtErr.message,
+              agent: agentName,
+              hint: "Retry after confirming the sub-agent is Running.",
+            }, null, 2) }] };
           }
         }
 
-        // ── Fallback: router HTTP (K8s DNS, no encryption) ──
-        try {
-          const result = await routerCall("POST", "/agt/mesh/send", {
-            to_agent: agentName,
-            content: msgContent,
-            type: "task_request",
-          });
-          return { content: [{ type: "text", text: JSON.stringify({
-            ...result,
-            protocol: "router_http_fallback (no E2E encryption)",
-          }, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: "text", text: `Mesh send failed: ${e.message}` }] };
-        }
+        // No AGT mesh client available — cannot send without E2E encryption
+        return { content: [{ type: "text", text: JSON.stringify({
+          error: "AGT mesh not initialized — cannot send without E2E encryption",
+          hint: "The mesh client failed to start. Check gateway logs for AGT initialization errors.",
+        }, null, 2) }] };
       },
     });
 
@@ -3142,7 +3174,7 @@ const azureClawPlugin = definePluginEntry({
               "",
               "**After spawning:**",
               "  `/azureclaw-spawn-list` — list your sub-agents",
-              "  Use AGT mesh to communicate: `POST localhost:8443/agt/mesh/send`",
+              "  Use the azureclaw_mesh_send tool to communicate (E2E encrypted)",
             ].join("\n"),
           };
         }
@@ -3214,7 +3246,7 @@ const azureClawPlugin = definePluginEntry({
               "",
               "**Next steps:**",
               body.governance
-                ? "- Send tasks via AGT mesh: `POST localhost:8443/agt/mesh/send`"
+                ? "- Send tasks via azureclaw_mesh_send tool (E2E encrypted)"
                 : "- Enable governance for inter-agent communication",
               "- Check status: `/azureclaw-spawn-list`",
               "- Tear down: `/azureclaw-spawn-destroy " + name + "`",
@@ -3258,7 +3290,7 @@ const azureClawPlugin = definePluginEntry({
                 `- **${s.name}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
               ),
               "",
-              "Communicate via AGT mesh: `POST localhost:8443/agt/mesh/send`",
+              "Communicate via azureclaw_mesh_send tool (E2E encrypted)",
               "Destroy: `/azureclaw-spawn-destroy <name>`",
             ].join("\n"),
           };
@@ -3342,7 +3374,7 @@ const azureClawPlugin = definePluginEntry({
               parsed.namespace ? `Namespace: ${parsed.namespace}` : "",
               "",
               ready
-                ? "Send a task: `POST localhost:8443/agt/mesh/send` with `to_agent: \"" + name + "\"`"
+                ? "Send a task via azureclaw_mesh_send tool with to_agent: \"" + name + "\""
                 : "Wait for phase=Running before sending mesh messages.",
             ].filter(Boolean).join("\n"),
           };
