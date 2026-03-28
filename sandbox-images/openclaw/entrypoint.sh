@@ -184,8 +184,10 @@ EOF
   CHANNELS_CONFIG=""
 
   # Telegram (built into OpenClaw core, uses grammY)
+  # Set proxy explicitly so OpenClaw uses a simple ProxyAgent for Telegram API calls.
+  # The EnvHttpProxyAgent + autoSelectFamily path causes long-poll stalls in Docker.
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"] }"
+    CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"open\", \"allowFrom\": [\"*\"], \"proxy\": \"http://127.0.0.1:8444\" }"
     PLUGINS_LIST="${PLUGINS_LIST}, \"telegram\""
     PLUGINS_ENTRIES="\"telegram\": { \"enabled\": true }"
   fi
