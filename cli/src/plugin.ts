@@ -2967,71 +2967,135 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    // ── /azureclaw-switch — switch model live ─────────────────────────────
+    // ── Shared model switch logic ────────────────────────────────────────
+    async function switchModelInternal(model: string): Promise<string> {
+      const prevModel = process.env.OPENCLAW_MODEL || config.model || "gpt-4.1";
+
+      // 1. Flush conversation context to Foundry memory before switching
+      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+      const store = `memory-${agentName}`;
+      try {
+        // Flush any buffered tool calls
+        if (memorySyncBuffer.length > 0) {
+          const batch = memorySyncBuffer.splice(0);
+          const batchSummary = `Pre-switch checkpoint (${batch.length} calls):\n${batch.join("\n")}`;
+          await syncToFoundryMemory(batchSummary, log);
+        }
+        // Save a handoff summary so the new session has context
+        const handoff = [
+          `Model switch: ${prevModel} → ${model}`,
+          `User requested switching to ${model} mid-conversation.`,
+          `Session was active with ${prevModel}. Key context should be recalled from prior memories.`,
+        ].join("\n");
+        await syncToFoundryMemory(handoff, log);
+        log.info(`Memory flushed before model switch to ${model}`);
+      } catch (e: any) {
+        log.warn(`Memory flush before switch failed (non-blocking): ${e.message}`);
+      }
+
+      // 2. Update plugin env + config
+      process.env.OPENCLAW_MODEL = model;
+      config.model = model;
+
+      // 3. Update OpenClaw config files
+      try {
+        const fs = await import("node:fs");
+        const modelsPath = "/sandbox/.openclaw/agents/main/agent/models.json";
+        const oclawPath = "/sandbox/.openclaw/openclaw.json";
+
+        const allModels = new Set<string>();
+        allModels.add(model);
+        if (foundryProject?.deployments) {
+          for (const d of foundryProject.deployments) {
+            if (!d.id.includes("embedding")) allModels.add(d.id);
+          }
+        }
+        const modelsArr = [...allModels].map(id => ({
+          id, name: `${id} (Azure via AzureClaw)`, reasoning: false,
+          input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 200000, maxTokens: 8192, api: "openai-completions",
+        }));
+
+        try {
+          const mj = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
+          if (mj.providers?.["azure-openai"]) {
+            mj.providers["azure-openai"].models = modelsArr.map(m => ({ id: m.id, name: m.name }));
+          }
+          mj.selectedModel = { provider: "azure-openai", id: model };
+          fs.writeFileSync(modelsPath, JSON.stringify(mj, null, 2));
+        } catch { /* read-only fs */ }
+
+        try {
+          const oc = JSON.parse(fs.readFileSync(oclawPath, "utf8"));
+          if (oc.models?.providers?.["azure-openai"]) {
+            oc.models.providers["azure-openai"].models = modelsArr.map(m => ({ id: m.id, name: m.name }));
+          }
+          if (oc.agents?.defaults?.model) {
+            oc.agents.defaults.model.primary = `azure-openai/${model}`;
+          }
+          fs.writeFileSync(oclawPath, JSON.stringify(oc, null, 2));
+        } catch { /* read-only fs */ }
+      } catch { /* non-critical */ }
+
+      // 4. Update router model override
+      try {
+        const result = await routerCall("PUT", "/admin/model", { model });
+        const prev = (result as any)?.previous || prevModel;
+        return [
+          `✅ Switched **${prev}** → **${model}**`,
+          "",
+          "Context saved to Foundry memory.",
+          "Type `/new` to start a fresh session with **" + model + "** — your conversation context will be recalled automatically.",
+        ].join("\n");
+      } catch {
+        return [
+          `⚠️ Plugin updated to **${model}**, but router admin endpoint not reachable.`,
+          "",
+          "Context saved to Foundry memory.",
+          "Type `/new` to start a fresh session with **" + model + "**.",
+        ].join("\n");
+      }
+    }
+
+    // ── /azureclaw-switch — switch model with memory handoff ──────────────
     api.registerCommand({
       name: "azureclaw-switch",
-      description: "Switch AI model (e.g. /azureclaw-switch gpt-5-mini)",
+      description: "Switch AI model (e.g. /azureclaw-switch gpt-5.4-mini)",
       acceptsArgs: true,
       handler: async (ctx) => {
         const model = ctx.args?.trim();
         if (!model) {
-          const available = foundryProject?.deployments?.map(d => d.id).join(", ") || "unknown";
+          const available = foundryProject?.deployments
+            ?.filter((d: any) => !d.id?.includes("embedding"))
+            ?.map((d: any) => d.id).join(", ") || "unknown";
           return { text: `Usage: /azureclaw-switch <model-name>\nAvailable: ${available}` };
         }
-        // Update plugin env + inference router
-        process.env.OPENCLAW_MODEL = model;
-        config.model = model;
+        return { text: await switchModelInternal(model) };
+      },
+    });
 
-        // Update OpenClaw's model config files so session_status accepts the new model
-        try {
-          const fs = await import("node:fs");
-          const modelsPath = "/sandbox/.openclaw/agents/main/agent/models.json";
-          const oclawPath = "/sandbox/.openclaw/openclaw.json";
-          const sandbox = process.env.HOSTNAME || "dev-agent";
-
-          // Build models array with all deployments + the new model
-          const allModels = new Set<string>();
-          allModels.add(model);
-          if (foundryProject?.deployments) {
-            for (const d of foundryProject.deployments) {
-              if (!d.id.includes("embedding")) allModels.add(d.id);
-            }
-          }
-          const modelsArr = [...allModels].map(id => ({
-            id, name: `${id} (Azure via AzureClaw)`, reasoning: false,
-            input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 200000, maxTokens: 8192, api: "openai-completions",
-          }));
-
-          // Update models.json
-          try {
-            const mj = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
-            if (mj.providers?.["azure-openai"]) {
-              mj.providers["azure-openai"].models = modelsArr;
-            }
-            fs.writeFileSync(modelsPath, JSON.stringify(mj, null, 2));
-          } catch { /* non-critical */ }
-
-          // Update openclaw.json — both models list and default primary
-          try {
-            const oc = JSON.parse(fs.readFileSync(oclawPath, "utf8"));
-            if (oc.models?.providers?.["azure-openai"]) {
-              oc.models.providers["azure-openai"].models = modelsArr.map(m => ({ id: m.id, name: m.name }));
-            }
-            if (oc.agents?.defaults?.model) {
-              oc.agents.defaults.model.primary = `azure-openai/${model}`;
-            }
-            fs.writeFileSync(oclawPath, JSON.stringify(oc, null, 2));
-          } catch { /* non-critical */ }
-        } catch { /* read-only fs — skip config update */ }
-
-        try {
-          const result = await routerCall("PUT", "/admin/model", { model });
-          const prev = (result as any)?.previous || "unknown";
-          return { text: `Switched from **${prev}** → **${model}**. Takes effect on next request.` };
-        } catch {
-          return { text: `Plugin updated to **${model}**, but router admin endpoint not available. Model may need a restart.` };
+    // ── /model — short alias with listing ─────────────────────────────────
+    api.registerCommand({
+      name: "model",
+      description: "Show or switch AI model (e.g. /model gpt-5.4-mini)",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const model = ctx.args?.trim();
+        if (!model) {
+          const current = process.env.OPENCLAW_MODEL || config.model || "gpt-4.1";
+          const available = foundryProject?.deployments
+            ?.filter((d: any) => !d.id?.includes("embedding"))
+            ?.map((d: any) => d.id === current ? `**${d.id}** ← current` : d.id) || [];
+          return { text: [
+            `Current model: **${current}**`,
+            "",
+            "Available deployments:",
+            ...available.map((m: string) => `  • ${m}`),
+            "",
+            "Usage: `/model <name>` to switch",
+          ].join("\n") };
         }
+        return { text: await switchModelInternal(model) };
       },
     });
 

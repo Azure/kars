@@ -371,6 +371,7 @@ export function devCommand(): Command {
           "--tmpfs", "/root:ro,size=0",
           "-p", "18789:18789",
           "-e", `OPENCLAW_MODEL=${model}`,
+          "-e", `DEFAULT_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `SANDBOX_NAME=${options.name}`,
           "-e", "AZURECLAW_DEV_MODE=true",
