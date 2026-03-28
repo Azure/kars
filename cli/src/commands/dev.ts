@@ -138,7 +138,7 @@ export function devCommand(): Command {
             stepper.stop();
             console.log(chalk.dim("  Building inference-router (Rust)...\n"));
             await execa("docker", [
-              "build", "--no-cache",
+              "build",
               "-t", routerImage,
               "-f", routerDockerfile,
               repoRoot,
@@ -150,7 +150,7 @@ export function devCommand(): Command {
           stepper.stop();
           console.log(chalk.dim("  Building sandbox image...\n"));
           await execa("docker", [
-            "build", "--no-cache",
+            "build",
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
             "-t", "azureclaw-sandbox:dev",
