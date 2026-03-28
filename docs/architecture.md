@@ -270,9 +270,6 @@ All endpoints served by the inference router on `:8443`.
 | POST | `/agt/evaluate` | Policy evaluation |
 | GET | `/agt/trust`, `/agt/trust/{agent_id}` | Trust store queries |
 | GET | `/agt/audit`, `/agt/audit/verify` | Audit log + integrity verification |
-| POST | `/agt/mesh/send` | Send inter-agent message |
-| GET | `/agt/mesh/inbox` | Receive mesh messages |
-| POST | `/agt/mesh/receive` | Auto-receive webhook |
 | GET | `/agt/relay` | WebSocket bridge to agentmesh-relay (E2E encrypted) |
 | GET/POST | `/agt/registry/*` | AgentMesh registry proxy |
 | GET | `/agt/status` | Governance status |
@@ -293,6 +290,10 @@ Each container maintains **one AGT mesh connection**, created by the gateway pro
 **Why separate `HOME` dirs:** Processes that run the OpenClaw runtime (node host, delegated tasks) get an isolated `HOME` to prevent any residual SDK state from colliding with the gateway's key material.
 
 **Relay listener:** There is no separate relay listener process. Incoming mesh messages are handled by the AzureClaw plugin's built-in `onMessage` handler inside the gateway, which delegates tasks to the native agent loop (`openclaw agent --message`).
+
+**Handler registration order:** All mesh handlers (`onMessage`, `onKnock`, `onError`, `onE2EVerified`) are registered BEFORE `connect()` to prevent a race condition where early messages arrive with no handler.
+
+**No plaintext fallback:** The HTTP mesh routes (`/agt/mesh/send`, `/agt/mesh/receive`) have been removed. All inter-agent communication is E2E encrypted via the Signal Protocol relay. If encryption fails, messages are rejected — never delivered in cleartext.
 
 ### Sub-Agent Spawning
 

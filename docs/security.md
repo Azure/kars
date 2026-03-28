@@ -164,8 +164,8 @@ When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://git
 
 | Control | Implementation | API Endpoint |
 |---------|----------------|--------------|
-| **Trust-gated mesh** | Messages routed via K8s DNS, trust gate on both sender and receiver | `POST /agt/mesh/send` |
-| **Mesh inbox** | Cross-namespace message delivery + auto-response | `GET /agt/mesh/inbox` |
+| **Trust-gated mesh** | KNOCK protocol with trust scoring, E2E encrypted via Signal Protocol | `GET /agt/relay` (WebSocket) |
+| **Mesh inbox** | Cross-namespace message delivery + auto-response | Plugin `onMessage` handler |
 | **Router-level policy** | YAML-based policy evaluation as defense-in-depth | `POST /agt/evaluate` |
 | **Tamper-evident audit** | Hash-chain append-only log (SHA-256), integrity verification | `GET /agt/audit/verify` |
 
@@ -193,6 +193,14 @@ AGT does NOT duplicate AzureClaw infrastructure controls:
 
 All inter-agent messages are encrypted end-to-end using the **Signal Protocol** via the AgentMesh SDK (`@agentmesh/sdk`). The relay server acts as a dumb routing pipe — it can see who is talking to whom (AMIDs) but **cannot read message content**.
 
+**There is no plaintext fallback.** If E2E encryption fails (key exchange error, decrypt failure, session mismatch), the message is **rejected** — never delivered in cleartext. Decrypt failures are surfaced as `security_event` in the operator inbox with a trust penalty on the peer.
+
+**E2E channel verification:** After the first successful X3DH + Double Ratchet decrypt per peer, the gateway emits:
+```
+✅ E2E encrypted channel UP — first verified peer: '<name>' (X3DH + Double Ratchet)
+```
+This log is the definitive proof that encryption is working end-to-end.
+
 **Protocol stack:**
 
 | Layer | Component | What it sees |
@@ -206,13 +214,26 @@ All inter-agent messages are encrypted end-to-end using the **Signal Protocol** 
 - **X3DH** (Extended Triple Diffie-Hellman) — Initial key agreement between agents
 - **Double Ratchet** — Forward secrecy with per-message key rotation
 - **Identity keys** — Each agent has a unique AMID derived from its Signal Protocol identity key
+- **Signed prekeys** — 100 one-time prekeys uploaded at registration for async key exchange
 
 **Message flow:**
-1. Agent connects to relay with AMID + public key (key exchange)
-2. Relay assigns session UUID, confirms connection
-3. Agent encrypts message with recipient's public key → `encrypted_payload`
-4. Relay routes by AMID, forwards opaque payload
-5. Recipient decrypts with its private key → plaintext
+1. Agent registers with registry (identity + 100 signed prekeys)
+2. Agent connects to relay via WebSocket (AMID + session UUID)
+3. Sender fetches recipient's prekeys from registry → X3DH key exchange
+4. Sender sends KNOCK via relay (policy-gated session establishment)
+5. Sender encrypts message with Double Ratchet → `encrypted_payload`
+6. Relay routes by AMID, forwards opaque payload
+7. Recipient decrypts with Double Ratchet → plaintext (or rejects on failure)
+
+**Trust tiers** (registry-assigned at registration):
+
+| Tier | Score | Requirement |
+|------|-------|-------------|
+| Anonymous | 0.5 | Default — no proof of identity |
+| Verified (Tier 1) | 0.6 | OAuth verification (GitHub or Google) via `verificationToken` |
+| Organization (Tier 2) | 0.7 | OAuth + DNS TXT record verification for org domain |
+
+Agents with `AGT_TRUST_THRESHOLD > 0` will evaluate the peer's trust score during KNOCK handling. Peers below the threshold receive a KNOCK rejection.
 
 **Traffic capture proof:** A full hex-dump analysis of a live inter-agent exchange
 is documented in [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md), showing that
