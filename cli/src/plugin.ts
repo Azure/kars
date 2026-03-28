@@ -764,22 +764,34 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // KNOCK handler — policy-gated session establishment with trust scoring.
     const AGT_TRUST_THRESHOLD = parseInt(process.env.AGT_TRUST_THRESHOLD || "0", 10); // 0 = accept all (dev)
+    if (AGT_TRUST_THRESHOLD > 0) {
+      agtMeshClient.enableKnockEnforcement();
+      log.info(`AGT KNOCK enforcement enabled (threshold: ${AGT_TRUST_THRESHOLD})`);
+    }
     agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
       const intent = request?.intent?.capability || '*';
-      log.info(`AGT KNOCK from ${fromAmid.slice(0, 12)}... intent=${intent}`);
+      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      log.info(`AGT KNOCK from ${fromName} (${fromAmid.slice(0, 12)}...) intent=${intent}`);
 
       // Trust score evaluation (when threshold > 0)
       if (AGT_TRUST_THRESHOLD > 0) {
         try {
           const peerInfo = await agtMeshClient.lookup(fromAmid);
-          const trustScore = peerInfo?.reputationScore ?? 0;
-          if (trustScore < AGT_TRUST_THRESHOLD) {
-            log.warn(`AGT KNOCK rejected: ${fromAmid.slice(0, 12)} trust=${trustScore} < threshold=${AGT_TRUST_THRESHOLD}`);
-            return { accept: false, reason: `trust_score_${trustScore}_below_${AGT_TRUST_THRESHOLD}` };
+          // Registry returns 0.0-1.0 scale; normalize to 0-1000 for threshold comparison
+          const rawScore = peerInfo?.reputationScore ?? 0;
+          const normalizedScore = Math.round(rawScore * 1000);
+          // Spawner affinity: +200 bonus for agents this parent spawned
+          const isSpawnedChild = amidToName.has(fromAmid);
+          const affinityBonus = isSpawnedChild ? 200 : 0;
+          const effectiveScore = normalizedScore + affinityBonus;
+          if (effectiveScore < AGT_TRUST_THRESHOLD) {
+            log.warn(`AGT KNOCK rejected: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} spawner` : ''}) < threshold=${AGT_TRUST_THRESHOLD}`);
+            return { accept: false, reason: `trust_score_${effectiveScore}_below_${AGT_TRUST_THRESHOLD}` };
           }
-          log.info(`AGT KNOCK trust OK: ${fromAmid.slice(0, 12)} trust=${trustScore}`);
+          log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} spawner` : ''})`);
         } catch {
           // Registry lookup failed — accept anyway for mesh agents (trust evaluation best-effort)
+          log.warn(`AGT KNOCK trust lookup failed for ${fromName} — accepting (best-effort)`);
         }
       }
 
@@ -795,21 +807,31 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       return { accept: true };
     });
 
-    // Handle E2E decryption failures — log and surface to operator
+    // Handle E2E decryption failures and KNOCK rejections — log and surface to operator
     agtMeshClient.onError((type: string, fromAmid: string, detail: string) => {
       const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
-      log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
-      // Push to trust as failure
-      pushTrustToRouter(fromName, -0.5);
-      // Surface to operator via inbox as a security event
-      agtInbox.push({
-        from_amid: fromAmid,
-        from_agent: fromName,
-        content: `⚠️ E2E DECRYPTION FAILURE: ${type} — ${detail}. Message was REJECTED (not delivered). This may indicate a session mismatch or tampering.`,
-        message_type: "security_event",
-        timestamp: new Date().toISOString(),
-        id: `agt-err-${Date.now().toString(36)}`,
-      });
+      if (type === 'knock_rejected') {
+        log.warn(`⛔ Message blocked from '${fromName}': KNOCK not accepted — ${detail}`);
+        agtInbox.push({
+          from_amid: fromAmid,
+          from_agent: fromName,
+          content: `⛔ MESSAGE BLOCKED: ${fromName} attempted to send a message but has no accepted KNOCK session. The message was rejected and not delivered.`,
+          message_type: "security_event",
+          timestamp: new Date().toISOString(),
+          id: `agt-knock-${Date.now().toString(36)}`,
+        });
+      } else {
+        log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
+        pushTrustToRouter(fromName, -0.5);
+        agtInbox.push({
+          from_amid: fromAmid,
+          from_agent: fromName,
+          content: `⚠️ E2E DECRYPTION FAILURE: ${type} — ${detail}. Message was REJECTED (not delivered). This may indicate a session mismatch or tampering.`,
+          message_type: "security_event",
+          timestamp: new Date().toISOString(),
+          id: `agt-err-${Date.now().toString(36)}`,
+        });
+      }
     });
 
     // Log when E2E encrypted channel is verified with a peer

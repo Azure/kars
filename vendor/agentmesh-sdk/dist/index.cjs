@@ -2796,6 +2796,8 @@ var AgentMeshClient = class _AgentMeshClient {
   errorHandlers = [];
   knockHandler;
   e2eVerifiedPeers = /* @__PURE__ */ new Set();
+  knockAcceptedPeers = /* @__PURE__ */ new Set();
+  knockEnforcementEnabled = false;
   eventHandlers = /* @__PURE__ */ new Map();
   // Circuit breaker state
   circuitState = "RUNNING" /* RUNNING */;
@@ -2913,9 +2915,18 @@ var AgentMeshClient = class _AgentMeshClient {
               await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
             } catch {
             }
+          } else if (this.knockEnforcementEnabled) {
+            console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
+          }
+        } else if (this.knockEnforcementEnabled && this.knockHandler && !this.knockAcceptedPeers.has(fromAmid)) {
+          console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
+          for (const handler of this.errorHandlers) {
+            try {
+              handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
+            } catch {
+            }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
-          console.log(`[AGT] Received encrypted+x3dh message from ${fromAmid}`);
           try {
             const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
             const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
@@ -2938,7 +2949,6 @@ var AgentMeshClient = class _AgentMeshClient {
             }
           }
         } else if (parsed.type === "encrypted") {
-          console.log(`[AGT] Received encrypted message (no x3dh) from ${fromAmid}`);
           const sessionId = this.activeSessions.get(fromAmid);
           if (sessionId) {
             try {
@@ -2969,7 +2979,6 @@ var AgentMeshClient = class _AgentMeshClient {
             }
           }
         } else {
-          console.log(`[AGT] Received PLAIN message from ${fromAmid}, type=${parsed.type}, keys=${Object.keys(parsed).join(",")}`);
           for (const handler of this.messageHandlers) {
             try {
               handler(fromAmid, parsed);
@@ -3132,6 +3141,7 @@ var AgentMeshClient = class _AgentMeshClient {
       await this.transport.send(toAmid, JSON.stringify(knock), "knock");
     } catch {
     }
+    this.knockAcceptedPeers.add(toAmid);
     await this.sessionManager.activateSessionDirect(sessionId);
     this.protocolSessions.createSession(toAmid, request, true);
     await this.auditLogger.logSessionInitiated(toAmid, sessionId);
@@ -3176,7 +3186,6 @@ var AgentMeshClient = class _AgentMeshClient {
     if (this.e2eVerifiedPeers.has(peerAmid)) return;
     const isFirst = this.e2eVerifiedPeers.size === 0;
     this.e2eVerifiedPeers.add(peerAmid);
-    console.log(`[AGT] E2E VERIFIED with ${peerAmid} (first=${isFirst}, handler=${!!this.e2eVerifiedHandler})`);
     if (this.e2eVerifiedHandler) {
       try {
         this.e2eVerifiedHandler(peerAmid, isFirst);
@@ -3190,6 +3199,19 @@ var AgentMeshClient = class _AgentMeshClient {
    */
   onKnock(handler) {
     this.knockHandler = handler;
+  }
+  /**
+   * Enable KNOCK enforcement — messages from peers without an accepted KNOCK
+   * will be blocked and reported via error handlers.
+   */
+  enableKnockEnforcement() {
+    this.knockEnforcementEnabled = true;
+  }
+  /**
+   * Grant KNOCK-accepted status to a peer (e.g. for spawned sub-agents).
+   */
+  grantKnockAcceptance(peerAmid) {
+    this.knockAcceptedPeers.add(peerAmid);
   }
   /**
    * Handle an incoming KNOCK request.
@@ -3237,6 +3259,7 @@ var AgentMeshClient = class _AgentMeshClient {
     }
     const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     this.protocolSessions.createSession(fromAmid, request, false);
+    this.knockAcceptedPeers.add(fromAmid);
     await this.auditLogger.log(
       "KNOCK_RECEIVED",
       "INFO",
