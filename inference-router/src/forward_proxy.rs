@@ -307,23 +307,58 @@ fn extract_sni(data: &[u8], len: usize) -> Option<String> {
     None
 }
 
-/// Bidirectional TCP tunnel with idle timeout.
+/// Bidirectional TCP tunnel with activity-based idle timeout.
+///
+/// The tunnel stays open as long as data flows in either direction.
+/// A 5-minute idle timer is reset on every chunk transferred.
+/// This correctly supports long-lived connections like Telegram long-polling,
+/// WebSocket upgrades, and SSE streams while still cleaning up zombie tunnels.
 async fn tunnel(mut client: TcpStream, mut upstream: TcpStream) {
+    use std::time::Duration;
+    use tokio::time::{Instant, sleep_until};
+
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+    const BUF_SIZE: usize = 8192;
+
     let (mut cr, mut cw) = client.split();
     let (mut ur, mut uw) = upstream.split();
 
-    let c2u = tokio::io::copy(&mut cr, &mut uw);
-    let u2c = tokio::io::copy(&mut ur, &mut cw);
+    let mut c2u_buf = vec![0u8; BUF_SIZE];
+    let mut u2c_buf = vec![0u8; BUF_SIZE];
 
-    // 5-minute idle timeout prevents zombie tunnels when both sides go silent
-    let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(300));
+    let deadline = Instant::now() + IDLE_TIMEOUT;
+    let idle_timer = sleep_until(deadline);
+    tokio::pin!(idle_timer);
 
-    tokio::select! {
-        _ = c2u => {},
-        _ = u2c => {},
-        _ = idle_timeout => {
-            tracing::debug!("Forward proxy tunnel idle timeout (300s)");
-        },
+    loop {
+        tokio::select! {
+            result = cr.read(&mut c2u_buf) => {
+                match result {
+                    Ok(0) | Err(_) => break, // client closed or error
+                    Ok(n) => {
+                        if uw.write_all(&c2u_buf[..n]).await.is_err() {
+                            break;
+                        }
+                        idle_timer.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
+                    }
+                }
+            }
+            result = ur.read(&mut u2c_buf) => {
+                match result {
+                    Ok(0) | Err(_) => break, // upstream closed or error
+                    Ok(n) => {
+                        if cw.write_all(&u2c_buf[..n]).await.is_err() {
+                            break;
+                        }
+                        idle_timer.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
+                    }
+                }
+            }
+            _ = &mut idle_timer => {
+                tracing::debug!("Forward proxy tunnel idle timeout (300s with no data)");
+                break;
+            }
+        }
     }
 }
 
