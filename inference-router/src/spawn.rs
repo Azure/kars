@@ -12,7 +12,9 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 fn claw_sandbox_api_resource() -> ApiResource {
     ApiResource {
@@ -79,7 +81,11 @@ pub async fn create_sandbox(
     if req.name.is_empty() || req.name.len() > 63 {
         return Err("name must be 1-63 characters".into());
     }
-    if !req.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !req
+        .name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err("name must contain only lowercase alphanumeric characters and hyphens".into());
     }
     if req.name.starts_with('-') || req.name.ends_with('-') {
@@ -91,14 +97,14 @@ pub async fn create_sandbox(
         return create_sandbox_docker(parent_name, req).await;
     }
 
-    let client = Client::try_default().await.map_err(|e| format!("K8s client error: {e}"))?;
+    let client = Client::try_default()
+        .await
+        .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace = std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
-    let api: Api<DynamicObject> = Api::namespaced_with(
-        client,
-        &namespace,
-        &claw_sandbox_api_resource(),
-    );
+    let namespace =
+        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
 
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
     let parent_isolation = std::env::var("SANDBOX_ISOLATION").unwrap_or_else(|_| "enhanced".into());
@@ -165,7 +171,11 @@ pub async fn create_sandbox(
     // Propagate Foundry agent tools from parent environment
     let mut agent_tools: Vec<String> = Vec::new();
     if let Ok(tools) = std::env::var("FOUNDRY_AGENT_TOOLS") {
-        agent_tools = tools.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        agent_tools = tools
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     if !agent_tools.is_empty() {
         spec["agent"] = serde_json::json!({ "tools": agent_tools });
@@ -173,8 +183,14 @@ pub async fn create_sandbox(
 
     // Build labels
     let mut labels = BTreeMap::new();
-    labels.insert("azureclaw.azure.com/parent".to_string(), parent_name.to_string());
-    labels.insert("azureclaw.azure.com/spawned-by".to_string(), "agent".to_string());
+    labels.insert(
+        "azureclaw.azure.com/parent".to_string(),
+        parent_name.to_string(),
+    );
+    labels.insert(
+        "azureclaw.azure.com/spawned-by".to_string(),
+        "agent".to_string(),
+    );
 
     let crd = serde_json::json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
@@ -187,8 +203,8 @@ pub async fn create_sandbox(
         "spec": spec,
     });
 
-    let obj: kube::api::DynamicObject = serde_json::from_value(crd)
-        .map_err(|e| format!("Failed to build CRD: {e}"))?;
+    let obj: kube::api::DynamicObject =
+        serde_json::from_value(crd).map_err(|e| format!("Failed to build CRD: {e}"))?;
 
     match api.create(&PostParams::default(), &obj).await {
         Ok(_created) => {
@@ -216,48 +232,64 @@ pub async fn create_sandbox(
 
 /// List sub-agents spawned by a parent sandbox.
 pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, String> {
-    let client = Client::try_default().await.map_err(|e| format!("K8s client error: {e}"))?;
+    let client = Client::try_default()
+        .await
+        .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace = std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
-    let api: Api<DynamicObject> = Api::namespaced_with(
-        client,
-        &namespace,
-        &claw_sandbox_api_resource(),
-    );
+    let namespace =
+        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
 
-    let lp = ListParams::default()
-        .labels(&format!("azureclaw.azure.com/parent={parent_name}"));
+    let lp = ListParams::default().labels(&format!("azureclaw.azure.com/parent={parent_name}"));
 
-    let list = api.list(&lp).await.map_err(|e| format!("Failed to list sandboxes: {e}"))?;
+    let list = api
+        .list(&lp)
+        .await
+        .map_err(|e| format!("Failed to list sandboxes: {e}"))?;
 
-    let entries: Vec<SubAgentEntry> = list.items.iter().map(|obj| {
-        let name = obj.name_any();
-        let data = &obj.data;
+    let entries: Vec<SubAgentEntry> = list
+        .items
+        .iter()
+        .map(|obj| {
+            let name = obj.name_any();
+            let data = &obj.data;
 
-        let phase = data.get("status")
-            .and_then(|s| s.get("phase"))
-            .and_then(|p| p.as_str())
-            .map(String::from);
+            let phase = data
+                .get("status")
+                .and_then(|s| s.get("phase"))
+                .and_then(|p| p.as_str())
+                .map(String::from);
 
-        let ns = data.get("status")
-            .and_then(|s| s.get("namespace"))
-            .and_then(|n| n.as_str())
-            .map(String::from);
+            let ns = data
+                .get("status")
+                .and_then(|s| s.get("namespace"))
+                .and_then(|n| n.as_str())
+                .map(String::from);
 
-        let model = data.get("spec")
-            .and_then(|s| s.get("inference"))
-            .and_then(|i| i.get("model"))
-            .and_then(|m| m.as_str())
-            .map(String::from);
+            let model = data
+                .get("spec")
+                .and_then(|s| s.get("inference"))
+                .and_then(|i| i.get("model"))
+                .and_then(|m| m.as_str())
+                .map(String::from);
 
-        let governance = data.get("spec")
-            .and_then(|s| s.get("governance"))
-            .and_then(|g| g.get("enabled"))
-            .and_then(|e| e.as_bool())
-            .unwrap_or(false);
+            let governance = data
+                .get("spec")
+                .and_then(|s| s.get("governance"))
+                .and_then(|g| g.get("enabled"))
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
 
-        SubAgentEntry { name, namespace: ns, phase, model, governance }
-    }).collect();
+            SubAgentEntry {
+                name,
+                namespace: ns,
+                phase,
+                model,
+                governance,
+            }
+        })
+        .collect();
 
     Ok(entries)
 }
@@ -269,24 +301,29 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
         return get_sandbox_status_docker(name).await;
     }
 
-    let client = Client::try_default().await.map_err(|e| format!("K8s client error: {e}"))?;
+    let client = Client::try_default()
+        .await
+        .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace = std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
-    let api: Api<DynamicObject> = Api::namespaced_with(
-        client,
-        &namespace,
-        &claw_sandbox_api_resource(),
-    );
+    let namespace =
+        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
 
-    let obj = api.get(name).await.map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
+    let obj = api
+        .get(name)
+        .await
+        .map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
     let data = &obj.data;
 
-    let phase = data.get("status")
+    let phase = data
+        .get("status")
         .and_then(|s| s.get("phase"))
         .and_then(|p| p.as_str())
         .map(String::from);
 
-    let ns = data.get("status")
+    let ns = data
+        .get("status")
         .and_then(|s| s.get("namespace"))
         .and_then(|n| n.as_str())
         .map(String::from);
@@ -302,17 +339,20 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
 
 /// Delete a sub-agent sandbox.
 pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnResponse, String> {
-    let client = Client::try_default().await.map_err(|e| format!("K8s client error: {e}"))?;
+    let client = Client::try_default()
+        .await
+        .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace = std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
-    let api: Api<DynamicObject> = Api::namespaced_with(
-        client,
-        &namespace,
-        &claw_sandbox_api_resource(),
-    );
+    let namespace =
+        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
 
     // Verify the sandbox was spawned by this parent (prevent deleting others' sandboxes)
-    let obj = api.get(name).await.map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
+    let obj = api
+        .get(name)
+        .await
+        .map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
     let labels = obj.metadata.labels.as_ref();
     let actual_parent = labels
         .and_then(|l| l.get("azureclaw.azure.com/parent"))
@@ -325,7 +365,9 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
         ));
     }
 
-    api.delete(name, &Default::default()).await.map_err(|e| format!("Failed to delete: {e}"))?;
+    api.delete(name, &Default::default())
+        .await
+        .map_err(|e| format!("Failed to delete: {e}"))?;
 
     tracing::info!(parent = %parent_name, child = %name, "Sub-agent sandbox deleted");
     Ok(SpawnResponse {
@@ -354,7 +396,8 @@ fn docker_create_body(
     let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
     let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
-    let image = std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
+    let image =
+        std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
 
     let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
 
@@ -376,7 +419,10 @@ fn docker_create_body(
         env.push(format!("AGT_RELAY_URL={}", relay_url));
         env.push(format!("AGT_REGISTRY_URL={}", registry_url));
         env.push("AGT_GOVERNANCE_ENABLED=true".to_string());
-        env.push(format!("AGT_TRUST_THRESHOLD={}", req.trust_threshold.unwrap_or(500)));
+        env.push(format!(
+            "AGT_TRUST_THRESHOLD={}",
+            req.trust_threshold.unwrap_or(500)
+        ));
     }
 
     let mut labels = serde_json::Map::new();
@@ -404,9 +450,12 @@ fn docker_create_body(
 /// Call Docker Engine API via curl --unix-socket.
 async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
     let mut args = vec![
-        "--unix-socket".to_string(), "/var/run/docker.sock".into(),
-        "-s".into(), "-S".into(),
-        "-X".into(), method.into(),
+        "--unix-socket".to_string(),
+        "/var/run/docker.sock".into(),
+        "-s".into(),
+        "-S".into(),
+        "-X".into(),
+        method.into(),
     ];
     if body.is_some() {
         args.extend(["-H".into(), "Content-Type: application/json".into()]);
@@ -437,7 +486,12 @@ async fn create_sandbox_docker(
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
 
     // Remove existing container if any
-    let _ = docker_api("DELETE", &format!("/containers/{}?force=true", container_name), None).await;
+    let _ = docker_api(
+        "DELETE",
+        &format!("/containers/{}?force=true", container_name),
+        None,
+    )
+    .await;
 
     // Create container
     let body = docker_create_body(&container_name, req, parent_name);
@@ -446,7 +500,8 @@ async fn create_sandbox_docker(
         "POST",
         &format!("/containers/create?name={}", container_name),
         Some(&body_str),
-    ).await?;
+    )
+    .await?;
 
     // Parse response for container ID
     let resp: serde_json::Value = serde_json::from_str(&create_resp)
@@ -457,8 +512,13 @@ async fn create_sandbox_docker(
     }
 
     // Start container
-    docker_api("POST", &format!("/containers/{}/start", container_name), None).await
-        .map_err(|e| format!("Docker start failed: {e}"))?;
+    docker_api(
+        "POST",
+        &format!("/containers/{}/start", container_name),
+        None,
+    )
+    .await
+    .map_err(|e| format!("Docker start failed: {e}"))?;
 
     tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent container spawned (dev mode)");
     Ok(SpawnResponse {
@@ -481,13 +541,15 @@ async fn get_sandbox_status_docker(name: &str) -> Result<SpawnResponse, String> 
         format!("azureclaw-{}", name)
     };
 
-    let resp = docker_api("GET", &format!("/containers/{}/json", container_name), None).await
+    let resp = docker_api("GET", &format!("/containers/{}/json", container_name), None)
+        .await
         .map_err(|e| format!("Container '{}' not found: {}", name, e))?;
 
-    let info: serde_json::Value = serde_json::from_str(&resp)
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let info: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("Parse error: {e}"))?;
 
-    let state = info.get("State")
+    let state = info
+        .get("State")
         .and_then(|s| s.get("Status"))
         .and_then(|s| s.as_str())
         .unwrap_or("unknown");
@@ -512,29 +574,48 @@ async fn get_sandbox_status_docker(name: &str) -> Result<SpawnResponse, String> 
 pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntry>, String> {
     let filter = format!(r#"{{"label":["azureclaw.parent={}"]}}"#, parent_name);
     // URL-encode the filter JSON (only special chars that appear in our filter)
-    let encoded = filter.replace('{', "%7B").replace('}', "%7D")
-        .replace('[', "%5B").replace(']', "%5D")
-        .replace('"', "%22").replace('=', "%3D");
-    let resp = docker_api("GET", &format!("/containers/json?all=true&filters={}", encoded), None).await?;
+    let encoded = filter
+        .replace('{', "%7B")
+        .replace('}', "%7D")
+        .replace('[', "%5B")
+        .replace(']', "%5D")
+        .replace('"', "%22")
+        .replace('=', "%3D");
+    let resp = docker_api(
+        "GET",
+        &format!("/containers/json?all=true&filters={}", encoded),
+        None,
+    )
+    .await?;
 
-    let containers: Vec<serde_json::Value> = serde_json::from_str(&resp)
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let containers: Vec<serde_json::Value> =
+        serde_json::from_str(&resp).map_err(|e| format!("Parse error: {e}"))?;
 
-    let entries = containers.iter().filter_map(|c| {
-        let names = c.get("Names")?.as_array()?;
-        let raw_name = names.first()?.as_str()?.trim_start_matches('/');
-        let name = raw_name.strip_prefix("azureclaw-").unwrap_or(raw_name).to_string();
-        let state = c.get("State")?.as_str().unwrap_or("unknown");
-        let phase = if state == "running" { "Running" } else { "Stopped" };
+    let entries = containers
+        .iter()
+        .filter_map(|c| {
+            let names = c.get("Names")?.as_array()?;
+            let raw_name = names.first()?.as_str()?.trim_start_matches('/');
+            let name = raw_name
+                .strip_prefix("azureclaw-")
+                .unwrap_or(raw_name)
+                .to_string();
+            let state = c.get("State")?.as_str().unwrap_or("unknown");
+            let phase = if state == "running" {
+                "Running"
+            } else {
+                "Stopped"
+            };
 
-        Some(SubAgentEntry {
-            name,
-            namespace: Some(raw_name.to_string()),
-            phase: Some(phase.to_string()),
-            model: None,
-            governance: true,
+            Some(SubAgentEntry {
+                name,
+                namespace: Some(raw_name.to_string()),
+                phase: Some(phase.to_string()),
+                model: None,
+                governance: true,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(entries)
 }
@@ -544,11 +625,12 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
     let container_name = format!("azureclaw-{}", name);
 
     // Verify parent label via inspect
-    let inspect = docker_api("GET", &format!("/containers/{}/json", container_name), None).await
+    let inspect = docker_api("GET", &format!("/containers/{}/json", container_name), None)
+        .await
         .map_err(|_| format!("Container '{}' not found", name))?;
 
-    let info: serde_json::Value = serde_json::from_str(&inspect)
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let info: serde_json::Value =
+        serde_json::from_str(&inspect).map_err(|e| format!("Parse error: {e}"))?;
 
     let labels = info.pointer("/Config/Labels");
     let actual_parent = labels
@@ -556,11 +638,19 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
         .and_then(|v| v.as_str());
 
     if actual_parent != Some(parent_name) {
-        return Err(format!("Container '{}' was not spawned by '{}'", name, parent_name));
+        return Err(format!(
+            "Container '{}' was not spawned by '{}'",
+            name, parent_name
+        ));
     }
 
-    docker_api("DELETE", &format!("/containers/{}?force=true", container_name), None).await
-        .map_err(|e| format!("Failed to delete: {e}"))?;
+    docker_api(
+        "DELETE",
+        &format!("/containers/{}?force=true", container_name),
+        None,
+    )
+    .await
+    .map_err(|e| format!("Failed to delete: {e}"))?;
 
     tracing::info!(parent = %parent_name, child = %name, "Sub-agent container deleted (dev mode)");
     Ok(SpawnResponse {

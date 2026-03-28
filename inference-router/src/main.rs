@@ -20,10 +20,10 @@ mod budget;
 mod config;
 mod forward_proxy;
 mod governance;
+mod metrics;
 mod proxy;
 mod routes;
 mod safety;
-mod metrics;
 mod spawn;
 
 use anyhow::Result;
@@ -35,8 +35,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "azureclaw_inference_router=info,tower_http=info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "azureclaw_inference_router=info,tower_http=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
@@ -113,8 +115,8 @@ async fn main() -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // Signal the forward proxy to drain and shut down
     proxy_shutdown.cancel();
@@ -127,7 +129,9 @@ async fn main() -> Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
     #[cfg(unix)]
     let terminate = async {
@@ -157,7 +161,9 @@ async fn admin_auth_middleware(
     next: Next,
 ) -> impl IntoResponse {
     // Allow all localhost connections without auth — same pod is trusted.
-    if let Some(connect_info) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    if let Some(connect_info) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         && connect_info.0.ip().is_loopback()
     {
         return next.run(req).await.into_response();
@@ -187,7 +193,11 @@ async fn admin_auth_middleware(
                 path = %req.uri().path(),
                 "Admin auth: non-localhost request without token"
             );
-            (StatusCode::UNAUTHORIZED, "Admin token required for non-localhost access").into_response()
+            (
+                StatusCode::UNAUTHORIZED,
+                "Admin token required for non-localhost access",
+            )
+                .into_response()
         }
     }
 }

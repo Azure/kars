@@ -105,7 +105,8 @@ impl FedCredManager {
             url.push_str(&format!("&client_id={imds_client_id}"));
         }
 
-        let resp = self.http
+        let resp = self
+            .http
             .get(&url)
             .header("Metadata", "true")
             .timeout(std::time::Duration::from_secs(5))
@@ -115,10 +116,15 @@ impl FedCredManager {
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("IMDS ARM token failed: {}", &body[..body.len().min(300)]));
+            return Err(format!(
+                "IMDS ARM token failed: {}",
+                &body[..body.len().min(300)]
+            ));
         }
 
-        let body: serde_json::Value = resp.json().await
+        let body: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("IMDS ARM token parse failed: {e}"))?;
         let token = body["access_token"]
             .as_str()
@@ -141,7 +147,12 @@ impl FedCredManager {
     async fn wi_arm_token(&self) -> Result<String, String> {
         let sa_token = tokio::fs::read_to_string(&self.config.token_file)
             .await
-            .map_err(|e| format!("Failed to read projected token at {}: {e}", self.config.token_file))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to read projected token at {}: {e}",
+                    self.config.token_file
+                )
+            })?;
 
         let url = format!(
             "{}/{}/oauth2/v2.0/token",
@@ -149,12 +160,16 @@ impl FedCredManager {
             self.config.tenant_id,
         );
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .form(&[
                 ("grant_type", "client_credentials"),
                 ("client_id", &self.config.client_id),
-                ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+                (
+                    "client_assertion_type",
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                ),
                 ("client_assertion", sa_token.trim()),
                 ("scope", "https://management.azure.com/.default"),
             ])
@@ -165,7 +180,10 @@ impl FedCredManager {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Token exchange failed ({status}): {}", &body[..body.len().min(300)]));
+            return Err(format!(
+                "Token exchange failed ({status}): {}",
+                &body[..body.len().min(300)]
+            ));
         }
 
         let token_resp: TokenResponse = resp
@@ -204,7 +222,8 @@ impl FedCredManager {
             }
         });
 
-        let resp = self.http
+        let resp = self
+            .http
             .put(&url)
             .header("Authorization", format!("Bearer {token}"))
             .json(&body)
@@ -246,7 +265,8 @@ impl FedCredManager {
             cred_name,
         );
 
-        let resp = self.http
+        let resp = self
+            .http
             .delete(&url)
             .header("Authorization", format!("Bearer {token}"))
             .send()
@@ -259,8 +279,10 @@ impl FedCredManager {
             Ok(())
         } else {
             let body = resp.text().await.unwrap_or_default();
-            Err(format!("Failed to delete federated credential ({status}): {}", &body[..body.len().min(300)]))
+            Err(format!(
+                "Failed to delete federated credential ({status}): {}",
+                &body[..body.len().min(300)]
+            ))
         }
     }
-
 }

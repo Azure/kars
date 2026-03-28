@@ -22,9 +22,9 @@ use tokio::sync::RwLock;
 /// High-risk TLDs frequently abused for phishing/malware.
 /// Source: APWG Phishing Activity Trends, Spamhaus TLD stats.
 const HIGH_RISK_TLDS: &[&str] = &[
-    ".tk", ".ml", ".ga", ".cf", ".gq",   // Freenom free TLDs
-    ".top", ".buzz", ".surf", ".rest",     // Cheap bulk-registration TLDs
-    ".onion",                               // Tor hidden services
+    ".tk", ".ml", ".ga", ".cf", ".gq", // Freenom free TLDs
+    ".top", ".buzz", ".surf", ".rest",  // Cheap bulk-registration TLDs
+    ".onion", // Tor hidden services
 ];
 
 /// How often to refresh from upstream feeds (default: 6 hours).
@@ -74,7 +74,9 @@ pub struct PendingApproval {
     pub reason: String,
 }
 
-fn default_kind() -> String { "pending".into() }
+fn default_kind() -> String {
+    "pending".into()
+}
 
 impl Blocklist {
     /// Create a new empty blocklist (disabled mode — passes everything).
@@ -278,7 +280,9 @@ impl Blocklist {
     pub fn set_learn_mode(&self, enabled: bool) {
         self.learn_mode.store(enabled, Ordering::Relaxed);
         if enabled {
-            tracing::info!("Egress learn mode enabled — logging all accessed domains (blocklist still enforced)");
+            tracing::info!(
+                "Egress learn mode enabled — logging all accessed domains (blocklist still enforced)"
+            );
         } else {
             tracing::info!("Egress learn mode disabled");
         }
@@ -362,15 +366,26 @@ impl Blocklist {
                     domain: domain.clone(),
                     url: url.to_string(),
                     sandbox: sandbox.to_string(),
-                    timestamp: format!("{}Z", std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                    timestamp: format!(
+                        "{}Z",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    ),
                     kind: "pending".into(),
-                    reason: format!("Domain '{}' not on allowlist — awaiting operator approval", domain),
+                    reason: format!(
+                        "Domain '{}' not on allowlist — awaiting operator approval",
+                        domain
+                    ),
                 });
             }
         }
 
-        Err(format!("Domain '{}' not on allowlist — pending operator approval", domain))
+        Err(format!(
+            "Domain '{}' not on allowlist — pending operator approval",
+            domain
+        ))
     }
 
     /// Add a domain to the allowlist.
@@ -378,7 +393,10 @@ impl Blocklist {
         let domain = domain.to_lowercase();
         self.allowlist.write().await.insert(domain.clone());
         // Remove from pending approvals
-        self.pending_approvals.write().await.retain(|p| p.domain != domain);
+        self.pending_approvals
+            .write()
+            .await
+            .retain(|p| p.domain != domain);
         tracing::info!(domain = %domain, "Domain added to egress allowlist");
     }
 
@@ -386,7 +404,10 @@ impl Blocklist {
     pub async fn deny_domain(&self, domain: &str) {
         let domain = domain.to_lowercase();
         self.allowlist.write().await.remove(&domain);
-        self.pending_approvals.write().await.retain(|p| p.domain != domain);
+        self.pending_approvals
+            .write()
+            .await
+            .retain(|p| p.domain != domain);
     }
 
     /// Get the current allowlist.
@@ -415,8 +436,13 @@ impl Blocklist {
                 domain: domain.to_string(),
                 url: String::new(),
                 sandbox: sandbox.to_string(),
-                timestamp: format!("{}Z", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                timestamp: format!(
+                    "{}Z",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                ),
                 kind: kind.to_string(),
                 reason: reason.to_string(),
             });
@@ -517,7 +543,8 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> anyhow::Result<Strin
 fn extract_domain(input: &str) -> &str {
     let s = input.trim();
     // Strip scheme
-    let s = s.strip_prefix("https://")
+    let s = s
+        .strip_prefix("https://")
         .or_else(|| s.strip_prefix("http://"))
         .unwrap_or(s);
     // Take host part (before / or ?)
@@ -545,7 +572,9 @@ fn is_valid_domain(domain: &str) -> bool {
         && domain.contains('.')
         && !domain.contains(' ')
         && domain.len() < 256
-        && domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 /// Check if a string looks like an IP address (v4 or v6).
@@ -608,7 +637,11 @@ mod tests {
         let bl = Blocklist::new(None).await;
         assert!(bl.is_blocked("evil.tk").await.is_blocked());
         assert!(bl.is_blocked("phish.ml").await.is_blocked());
-        assert!(bl.is_blocked("https://malware.ga/payload").await.is_blocked());
+        assert!(
+            bl.is_blocked("https://malware.ga/payload")
+                .await
+                .is_blocked()
+        );
         assert!(!bl.is_blocked("microsoft.com").await.is_blocked());
     }
 
