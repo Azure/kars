@@ -168,7 +168,9 @@ export class AgentMeshClient {
   private activeSessions: Map<string, string> = new Map(); // peerAmid -> sessionId
 
   private messageHandlers: MessageHandler[] = [];
+  private errorHandlers: Array<(type: string, fromAmid: string, detail: string) => void> = [];
   private knockHandler?: KnockHandler;
+  private e2eVerifiedPeers: Set<string> = new Set();
   private eventHandlers: Map<ClientEventType, EventHandler[]> = new Map();
 
   // Circuit breaker state
@@ -342,15 +344,15 @@ export class AgentMeshClient {
             this.activeSessions.set(fromAmid, sessionId);
             // Decrypt with the newly established session
             const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+            this.emitE2EVerified(fromAmid);
             for (const handler of this.messageHandlers) {
               try { handler(fromAmid, decrypted); } catch { /* handler error */ }
             }
           } catch (e: any) {
-            // Log the error for debugging, then deliver as plaintext fallback
-            console.error('[AGT] E2E decrypt failed:', e?.message || e);
-            // Try to deliver the raw parsed object so the handler can at least see it
-            for (const handler of this.messageHandlers) {
-              try { handler(fromAmid, { _encrypted: true, _error: e?.message, ...parsed }); } catch { /* handler error */ }
+            console.error('[AGT] E2E decrypt failed — message REJECTED (not delivered):', e?.message || e);
+            // Notify via error handlers only — never deliver unverified content
+            for (const handler of this.errorHandlers) {
+              try { handler('decrypt_failed', fromAmid, e?.message || 'unknown'); } catch { /* handler error */ }
             }
           }
         } else if (parsed.type === 'encrypted') {
@@ -359,17 +361,20 @@ export class AgentMeshClient {
           if (sessionId) {
             try {
               const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+              this.emitE2EVerified(fromAmid);
               for (const handler of this.messageHandlers) {
                 try { handler(fromAmid, decrypted); } catch { /* handler error */ }
               }
-            } catch {
-              for (const handler of this.messageHandlers) {
-                try { handler(fromAmid, parsed); } catch { /* handler error */ }
+            } catch (decErr: any) {
+              console.error('[AGT] E2E decrypt failed for existing session — message REJECTED:', decErr?.message || decErr);
+              for (const handler of this.errorHandlers) {
+                try { handler('decrypt_failed', fromAmid, decErr?.message || 'unknown'); } catch { /* handler error */ }
               }
             }
           } else {
-            for (const handler of this.messageHandlers) {
-              try { handler(fromAmid, parsed); } catch { /* handler error */ }
+            console.error(`[AGT] Encrypted message from ${fromAmid} but no session — message REJECTED`);
+            for (const handler of this.errorHandlers) {
+              try { handler('no_session', fromAmid, 'No encryption session established'); } catch { /* handler error */ }
             }
           }
         } else {
@@ -637,6 +642,34 @@ export class AgentMeshClient {
    */
   onMessage(handler: MessageHandler): void {
     this.messageHandlers.push(handler);
+  }
+
+  /**
+   * Register an error handler for decryption failures and rejected messages.
+   */
+  onError(handler: (type: string, fromAmid: string, detail: string) => void): void {
+    this.errorHandlers.push(handler);
+  }
+
+  private e2eVerifiedHandler?: (peerAmid: string, isFirst: boolean) => void;
+
+  /**
+   * Register a handler called when E2E encryption is verified with a peer.
+   * Fires once per peer on first successful decrypt (X3DH + Double Ratchet proven).
+   */
+  onE2EVerified(handler: (peerAmid: string, isFirstPeer: boolean) => void): void {
+    this.e2eVerifiedHandler = handler;
+  }
+
+  private emitE2EVerified(peerAmid: string): void {
+    if (this.e2eVerifiedPeers.has(peerAmid)) return;
+    const isFirst = this.e2eVerifiedPeers.size === 0;
+    this.e2eVerifiedPeers.add(peerAmid);
+    if (this.e2eVerifiedHandler) {
+      try { this.e2eVerifiedHandler(peerAmid, isFirst); } catch (e: any) {
+        console.error('[AGT] e2eVerifiedHandler error:', e?.message || e);
+      }
+    }
   }
 
   /**
