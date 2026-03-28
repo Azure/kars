@@ -1372,7 +1372,10 @@ function trackToolExecution(
 }
 
 // Flush remaining buffer on process exit (SIGTERM from pod shutdown)
+let memorySyncShutdownRegistered = false;
 function registerMemorySyncShutdownHook(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (memorySyncShutdownRegistered) return;
+  memorySyncShutdownRegistered = true;
   const flush = () => {
     if (memorySyncBuffer.length === 0) return;
     const batch = memorySyncBuffer.splice(0);
@@ -1401,6 +1404,7 @@ interface PluginCliContext {
 }
 
 interface ProviderAuthMethod {
+  id?: string;
   type: string;
   envVar?: string;
   headerName?: string;
@@ -2830,6 +2834,7 @@ const azureClawPlugin = definePluginEntry({
       models: { chat: chatModels },
       auth: [
         {
+          id: "azure-openai-key",
           type: "api-key",
           envVar: "AZURE_OPENAI_API_KEY",
           headerName: "api-key",
