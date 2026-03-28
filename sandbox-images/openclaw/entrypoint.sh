@@ -609,6 +609,15 @@ done
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
 mkdir -p /tmp/node-host-home/.openclaw
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /tmp/node-host-home
+# Create a minimal config for the node-host — it only needs gateway connectivity,
+# NOT our plugins. Using the main config causes "plugin not found: azureclaw" crash loops.
+cat > /tmp/node-host-home/.openclaw/openclaw.json << 'NODECONF'
+{
+  "gateway": { "port": 18789 },
+  "plugins": { "allow": [] }
+}
+NODECONF
+[ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home/.openclaw/openclaw.json
 # OPENCLAW_STATE_DIR gives the node-host its own device identity so it doesn't
 # share the sandbox's device ID (which causes role-upgrade conflicts for operator clients).
 HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
