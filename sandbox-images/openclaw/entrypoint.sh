@@ -596,9 +596,12 @@ done
 # Give the node host its own HOME so it generates a separate device fingerprint.
 # Without this, it shares the TUI's device ID and blocks TUI pairing (role conflict).
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
-mkdir -p /tmp/node-host-home
-[ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home
-HOME=/tmp/node-host-home AGT_SKIP_INIT=1 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
+mkdir -p /tmp/node-host-home/.openclaw
+[ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /tmp/node-host-home
+# OPENCLAW_STATE_DIR gives the node-host its own device identity so it doesn't
+# share the sandbox's device ID (which causes role-upgrade conflicts for operator clients).
+HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
+  AGT_SKIP_INIT=1 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
   --host 127.0.0.1 --port 18789 \
   --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!

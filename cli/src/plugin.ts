@@ -3077,10 +3077,10 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    // ── /model — short alias with live listing ──────────────────────────
+    // ── /switch-model — show/switch AI model (avoids built-in /model) ───
     api.registerCommand({
-      name: "model",
-      description: "Show or switch AI model (e.g. /model gpt-5.4-mini)",
+      name: "switch-model",
+      description: "Show or switch AI model (e.g. /switch-model gpt-5.4-mini)",
       acceptsArgs: true,
       handler: async (ctx) => {
         const model = ctx.args?.trim();
@@ -3116,7 +3116,7 @@ const azureClawPlugin = definePluginEntry({
             "Available deployments:",
             ...available.map((m: string) => `  • ${m}`),
             "",
-            "Usage: `/model <name>` to switch",
+            "Usage: `/switch-model <name>` to switch",
           ].join("\n") };
         }
         return { text: await switchModelInternal(model) };
