@@ -1628,7 +1628,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_spawn",
       label: "Spawn Sub-Agent",
-      description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted communication (Signal Protocol). The sub-agent automatically connects to the AGT relay mesh for encrypted inter-agent messaging — no special configuration needed. Use azureclaw_mesh_send to communicate and azureclaw_mesh_inbox to receive replies.",
+      description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files or other agents' files. The ONLY way to exchange data is via azureclaw_mesh_send (include file contents in the message body). Always ask sub-agents to return results as text in their reply, then forward that text to the next agent.",
       parameters: {
         type: "object",
         properties: {
@@ -1725,7 +1725,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Automatically waits up to 5.5 minutes for the sub-agent's reply and returns it inline. If no reply arrives within the wait window, check azureclaw_mesh_inbox later. Wait for the sub-agent to be Running first.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply (not just save to a local file). Automatically waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
       parameters: {
         type: "object",
         properties: {

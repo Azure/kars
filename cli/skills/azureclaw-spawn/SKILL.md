@@ -32,10 +32,38 @@ Spawn secure isolated sub-agent sandboxes on AKS. Each sub-agent runs in its own
 5. **azureclaw_mesh_inbox** — read the sub-agent's response
 6. **azureclaw_spawn_destroy** — clean up when done
 
+## File sharing between agents — CRITICAL
+
+Sub-agents are **completely isolated containers** with separate filesystems.
+They CANNOT read each other's files or yours. The AGT mesh is the ONLY channel.
+
+**To share files between agents, you MUST pass file contents inside mesh messages.**
+
+### Multi-agent collaboration pattern (e.g. Red/Blue/Judge):
+
+```
+1. Spawn blue-team, red-team, judge
+2. mesh_send to blue-team: "Write a proposal. Return the FULL TEXT in your reply."
+3. Read blue-team's reply → extract the proposal text
+4. mesh_send to red-team: "Here is the proposal:\n\n<paste full text>\n\nFind 3 flaws."
+5. Read red-team's reply → extract the critique text
+6. mesh_send to blue-team: "Here is the critique:\n\n<paste full text>\n\nRevise your proposal."
+7. Read blue-team's reply → extract revised proposal
+8. mesh_send to judge: "Proposal:\n\n<paste>\n\nCritique:\n\n<paste>\n\nRevisions:\n\n<paste>\n\nScore it."
+9. Read judge's verdict
+10. Destroy all sub-agents
+```
+
+### Key rules:
+- **Always ask sub-agents to return file contents in their reply** — not just "save to file"
+- **You (the parent) are the relay** — extract text from each reply and forward to the next agent
+- **Never tell a sub-agent to read a file another agent wrote** — the file doesn't exist in its container
+- Sub-agents CAN write files locally for their own use, but other agents can't see them
+
 ## Important notes
 
-- Each sub-agent runs in its own isolated namespace — it cannot see your files
-- AGT mesh is the only communication channel (trust-gated, audited)
+- Each sub-agent runs in its own isolated namespace — it cannot see your files or other agents' files
+- AGT mesh is the only communication channel (E2E encrypted, trust-gated, audited)
 - Each sub-agent has its own token budget, blocklist, and Content Safety
 - Names must be DNS-safe: lowercase alphanumeric + hyphens, 1-63 chars
 - Only you (the parent) can destroy sub-agents you spawned
