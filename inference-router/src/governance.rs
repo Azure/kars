@@ -140,7 +140,10 @@ impl PolicyEngine {
                     }
                     // Check allow list (if non-empty, action must match)
                     if !policy.allowed_actions.is_empty() {
-                        let allowed = policy.allowed_actions.iter().any(|a| action_matches(action, a));
+                        let allowed = policy
+                            .allowed_actions
+                            .iter()
+                            .any(|a| action_matches(action, a));
                         if !allowed && action.starts_with("shell:") {
                             return PolicyDecision::Deny(format!(
                                 "Blocked by policy '{}': action '{}' not in allowlist",
@@ -163,11 +166,13 @@ impl PolicyEngine {
                     if policy.max_calls > 0 {
                         for pattern in &policy.actions {
                             if action_matches(action, pattern) {
-                                return self.check_rate_limit(
-                                    &policy.name,
-                                    policy.max_calls,
-                                    &policy.window,
-                                ).await;
+                                return self
+                                    .check_rate_limit(
+                                        &policy.name,
+                                        policy.max_calls,
+                                        &policy.window,
+                                    )
+                                    .await;
                             }
                         }
                     }
@@ -182,7 +187,9 @@ impl PolicyEngine {
     async fn check_rate_limit(&self, name: &str, max_calls: u32, window: &str) -> PolicyDecision {
         let window_secs = parse_duration(window);
         let mut counters = self.rate_counters.write().await;
-        let entry = counters.entry(name.to_string()).or_insert((0, std::time::Instant::now()));
+        let entry = counters
+            .entry(name.to_string())
+            .or_insert((0, std::time::Instant::now()));
 
         if entry.1.elapsed().as_secs() > window_secs {
             // Window expired, reset
@@ -190,7 +197,9 @@ impl PolicyEngine {
             PolicyDecision::Allow
         } else if entry.0 >= max_calls as u64 {
             let retry_after = window_secs - entry.1.elapsed().as_secs();
-            PolicyDecision::RateLimited { retry_after_secs: retry_after }
+            PolicyDecision::RateLimited {
+                retry_after_secs: retry_after,
+            }
         } else {
             entry.0 += 1;
             PolicyDecision::Allow
@@ -222,11 +231,11 @@ fn parse_duration(s: &str) -> u64 {
 /// Trust tier based on score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TrustTier {
-    VerifiedPartner,  // 900-1000
-    Trusted,          // 700-899
-    Standard,         // 500-699
-    Probationary,     // 300-499
-    Untrusted,        // 0-299
+    VerifiedPartner, // 900-1000
+    Trusted,         // 700-899
+    Standard,        // 500-699
+    Probationary,    // 300-499
+    Untrusted,       // 0-299
 }
 
 impl TrustTier {
@@ -381,13 +390,15 @@ impl TrustStore {
     /// Update trust for an agent (called by the plugin via POST /agt/trust).
     pub async fn update_trust(&self, agent_id: &str, score: u32, interactions: u64) {
         let mut agents = self.agents.write().await;
-        let state = agents.entry(agent_id.to_string()).or_insert_with(|| TrustState {
-            agent_id: agent_id.to_string(),
-            score: self.default_score,
-            tier: TrustTier::from_score(self.default_score),
-            interactions: 0,
-            last_interaction: None,
-        });
+        let state = agents
+            .entry(agent_id.to_string())
+            .or_insert_with(|| TrustState {
+                agent_id: agent_id.to_string(),
+                score: self.default_score,
+                tier: TrustTier::from_score(self.default_score),
+                interactions: 0,
+                last_interaction: None,
+            });
         state.score = score.min(1000);
         state.tier = TrustTier::from_score(state.score);
         state.interactions += interactions; // accumulate, don't overwrite
@@ -432,7 +443,8 @@ impl AuditLog {
     pub async fn append(&self, action: &str, decision: &str, details: &str) -> AuditEntry {
         let mut entries = self.entries.write().await;
         let seq = entries.len() as u64;
-        let prev_hash = entries.last()
+        let prev_hash = entries
+            .last()
             .map(|e| e.hash.clone())
             .unwrap_or_else(|| "genesis".to_string());
 
@@ -448,8 +460,10 @@ impl AuditLog {
         };
 
         // Compute hash: SHA-256(seq | timestamp | action | decision | prev_hash)
-        let hash_input = format!("{}|{}|{}|{}|{}",
-            entry.seq, entry.timestamp, entry.action, entry.decision, prev_hash);
+        let hash_input = format!(
+            "{}|{}|{}|{}|{}",
+            entry.seq, entry.timestamp, entry.action, entry.decision, prev_hash
+        );
         let hash = sha256_hex(&hash_input);
 
         let mut entry = entry;
@@ -474,7 +488,9 @@ impl AuditLog {
     /// Get entries since a sequence number.
     #[allow(dead_code)]
     pub async fn entries_since(&self, since_seq: u64) -> Vec<AuditEntry> {
-        self.entries.read().await
+        self.entries
+            .read()
+            .await
             .iter()
             .filter(|e| e.seq >= since_seq)
             .cloned()
@@ -491,13 +507,21 @@ impl AuditLog {
                 entries[i - 1].hash.clone()
             };
             if entry.prev_hash != expected_prev {
-                tracing::error!(seq = entry.seq, "Audit log integrity violation: prev_hash mismatch");
+                tracing::error!(
+                    seq = entry.seq,
+                    "Audit log integrity violation: prev_hash mismatch"
+                );
                 return false;
             }
-            let hash_input = format!("{}|{}|{}|{}|{}",
-                entry.seq, entry.timestamp, entry.action, entry.decision, entry.prev_hash);
+            let hash_input = format!(
+                "{}|{}|{}|{}|{}",
+                entry.seq, entry.timestamp, entry.action, entry.decision, entry.prev_hash
+            );
             if entry.hash != sha256_hex(&hash_input) {
-                tracing::error!(seq = entry.seq, "Audit log integrity violation: hash mismatch");
+                tracing::error!(
+                    seq = entry.seq,
+                    "Audit log integrity violation: hash mismatch"
+                );
                 return false;
             }
         }
@@ -627,7 +651,9 @@ impl GovernanceState {
             PolicyDecision::RateLimited { .. } => "rate_limited",
         };
 
-        self.audit.append(action, decision_str, &format!("{:?}", decision)).await;
+        self.audit
+            .append(action, decision_str, &format!("{:?}", decision))
+            .await;
         decision
     }
 }
@@ -637,7 +663,9 @@ impl GovernanceState {
 fn chrono_now() -> String {
     // ISO 8601 UTC timestamp — must be parseable by JavaScript's Date()
     use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs();
     // Convert epoch seconds to YYYY-MM-DDTHH:MM:SSZ
     let days = secs / 86400;
@@ -659,7 +687,10 @@ fn chrono_now() -> String {
     let m_val = if mp < 10 { mp + 3 } else { mp - 9 };
     let y_val = if m_val <= 2 { y + 1 } else { y };
 
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y_val, m_val, d_val, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y_val, m_val, d_val, hours, minutes, seconds
+    )
 }
 
 fn sha256_hex(input: &str) -> String {

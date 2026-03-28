@@ -33,7 +33,11 @@ impl WorkloadIdentityAuth {
             .or_else(|| std::fs::read_to_string("/tmp/azure-openai-key").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("AZURE_OPENAI_API_KEY").ok().filter(|s| !s.is_empty()));
+            .or_else(|| {
+                std::env::var("AZURE_OPENAI_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            });
 
         if api_key.is_some() {
             tracing::info!("Auth mode: API key from /run/secrets/ (dev mode)");
@@ -61,7 +65,8 @@ impl WorkloadIdentityAuth {
         {
             let cache = self.token_cache.read().await;
             if let Some(cached) = cache.get(resource)
-                && cached.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60)
+                && cached.expires_at
+                    > std::time::Instant::now() + std::time::Duration::from_secs(60)
             {
                 return Ok(cached.access_token.clone());
             }
@@ -92,14 +97,10 @@ impl WorkloadIdentityAuth {
             .await
             .context("Failed to read service account token — is Workload Identity configured?")?;
 
-        let tenant_id = std::env::var("AZURE_TENANT_ID")
-            .context("AZURE_TENANT_ID not set")?;
-        let client_id = std::env::var("AZURE_CLIENT_ID")
-            .context("AZURE_CLIENT_ID not set")?;
+        let tenant_id = std::env::var("AZURE_TENANT_ID").context("AZURE_TENANT_ID not set")?;
+        let client_id = std::env::var("AZURE_CLIENT_ID").context("AZURE_CLIENT_ID not set")?;
 
-        let token_url = format!(
-            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-        );
+        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
 
         let scope = format!("{resource}/.default");
         let resp = self
@@ -131,10 +132,13 @@ impl WorkloadIdentityAuth {
 
         // Cache it (keyed by resource scope)
         let mut cache = self.token_cache.write().await;
-        cache.insert(resource.to_string(), CachedToken {
-            access_token: access_token.clone(),
-            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
-        });
+        cache.insert(
+            resource.to_string(),
+            CachedToken {
+                access_token: access_token.clone(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
+            },
+        );
 
         Ok(access_token)
     }
@@ -171,10 +175,13 @@ impl WorkloadIdentityAuth {
 
         // Cache it (keyed by resource scope)
         let mut cache = self.token_cache.write().await;
-        cache.insert(resource.to_string(), CachedToken {
-            access_token: access_token.clone(),
-            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
-        });
+        cache.insert(
+            resource.to_string(),
+            CachedToken {
+                access_token: access_token.clone(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3500),
+            },
+        );
 
         tracing::info!("Token acquired via IMDS fallback");
         Ok(access_token)

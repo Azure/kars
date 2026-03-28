@@ -16,9 +16,9 @@ use k8s_openapi::api::{
     rbac::v1::ClusterRoleBinding,
 };
 use kube::{
+    Client, ResourceExt,
     api::{Api, DeleteParams, ListParams, Patch, PatchParams},
     runtime::controller::{Action, Controller},
-    Client, ResourceExt,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -175,7 +175,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     // Ensure our finalizer is present (add it if missing)
-    let has_finalizer = sandbox.metadata.finalizers.as_ref()
+    let has_finalizer = sandbox
+        .metadata
+        .finalizers
+        .as_ref()
         .is_some_and(|f| f.iter().any(|x| x == FINALIZER));
     if !has_finalizer {
         let sandbox_api: Api<ClawSandbox> =
@@ -198,7 +201,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // ── Validate CRD inputs ──────────────────────────────────────────────
     let isolation = &sandbox_config.isolation;
     if !["standard", "enhanced", "confidential"].contains(&isolation.as_str()) {
-        tracing::error!("Invalid isolation level: {isolation} (must be standard/enhanced/confidential)");
+        tracing::error!(
+            "Invalid isolation level: {isolation} (must be standard/enhanced/confidential)"
+        );
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
     if inference_config.model.is_empty() {
@@ -206,7 +211,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
     if ctx.foundry_endpoint.is_empty() && ctx.openai_endpoint.is_empty() {
-        tracing::error!("No inference endpoint configured (FOUNDRY_ENDPOINT or AZURE_OPENAI_ENDPOINT)");
+        tracing::error!(
+            "No inference endpoint configured (FOUNDRY_ENDPOINT or AZURE_OPENAI_ENDPOINT)"
+        );
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
@@ -264,7 +271,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // Maps system:serviceaccount:{namespace}:sandbox → managed identity so
     // Workload Identity token exchange works for this sub-agent.
     if let Some(ref fedcred) = ctx.fedcred {
-        if let Err(e) = fedcred.ensure_federated_credential(&name, &sandbox_ns).await {
+        if let Err(e) = fedcred
+            .ensure_federated_credential(&name, &sandbox_ns)
+            .await
+        {
             tracing::warn!(sandbox = %name, "Federated credential creation failed (non-fatal): {e}");
         }
     }
@@ -328,10 +338,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         for _ in 0..4 {
             let s = RandomState::new();
             let mut h = s.build_hasher();
-            h.write_u64(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64);
+            h.write_u64(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+            );
             token.push_str(&format!("{:016x}", h.finish()));
         }
         token.truncate(32);
@@ -384,10 +396,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         for _ in 0..8 {
             let s = RandomState::new();
             let mut h = s.build_hasher();
-            h.write_u64(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64);
+            h.write_u64(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+            );
             token.push_str(&format!("{:016x}", h.finish()));
         }
         token.truncate(64);
@@ -510,7 +524,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
 
-    let pull_policy = if image.ends_with(":latest") { "Always" } else { "IfNotPresent" };
+    let pull_policy = if image.ends_with(":latest") {
+        "Always"
+    } else {
+        "IfNotPresent"
+    };
 
     let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
@@ -535,14 +553,20 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     ];
     // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
     if !ctx.foundry_project_endpoint.is_empty() {
-        openclaw_env.push(json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}));
+        openclaw_env.push(
+            json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
+        );
     }
     // Foundry deployments list (so plugin shows only deployed models, not full catalog)
     if !ctx.foundry_deployments.is_empty() {
-        openclaw_env.push(json!({"name": "FOUNDRY_DEPLOYMENTS", "value": &ctx.foundry_deployments}));
+        openclaw_env
+            .push(json!({"name": "FOUNDRY_DEPLOYMENTS", "value": &ctx.foundry_deployments}));
     }
     // Inject Foundry Agent ID if set in status (for tools needing agent runs)
-    if let Some(ref agent_id) = sandbox.status.as_ref().and_then(|s| s.foundry_agent_id.clone())
+    if let Some(ref agent_id) = sandbox
+        .status
+        .as_ref()
+        .and_then(|s| s.foundry_agent_id.clone())
         && !agent_id.is_empty()
     {
         openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
@@ -558,11 +582,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let mut router_agt_env: Vec<serde_json::Value> = Vec::new();
     if governance_config.enabled {
         openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-        openclaw_env.push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
+        openclaw_env
+            .push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
         openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
         // Router needs these too for the AGT governance module
         router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-        router_agt_env.push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
+        router_agt_env
+            .push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
         router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
         // Mesh namespace for K8s DNS routing between agents
         router_agt_env.push(json!({"name": "AGT_MESH_NAMESPACE", "value": &sandbox_ns}));
@@ -596,11 +622,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // auto-refreshes from OISD + URLhaus feeds every 6 hours.
     let blocklist_cm_name = format!("{}-blocklist", &name);
     router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
-    router_env.push(json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}));
+    router_env.push(
+        json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}),
+    );
 
     // Egress learn mode — enabled by default so operators can discover required domains.
     // Blocklist (threat intelligence) is still enforced. Disable with network_policy.learn_egress=false.
-    let learn_egress = spec.network_policy.as_ref().is_none_or(|np| np.learn_egress);
+    let learn_egress = spec
+        .network_policy
+        .as_ref()
+        .is_none_or(|np| np.learn_egress);
     if learn_egress {
         router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
     }
@@ -756,10 +787,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // Set runtimeClassName for Kata (confidential) isolation
     if let Some(rc) = runtime_class {
-        pod_spec.as_object_mut().unwrap().insert(
-            "runtimeClassName".into(),
-            json!(rc),
-        );
+        pod_spec
+            .as_object_mut()
+            .unwrap()
+            .insert("runtimeClassName".into(), json!(rc));
     }
 
     // If AGT governance is enabled, mount the policy ConfigMap into the router
@@ -778,12 +809,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
 
         // Add volumeMount + AGT_POLICY_DIR env to the router container
-        if let Some(containers) = pod_spec.get_mut("containers").and_then(|c| c.as_array_mut()) {
+        if let Some(containers) = pod_spec
+            .get_mut("containers")
+            .and_then(|c| c.as_array_mut())
+        {
             for container in containers.iter_mut() {
                 if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
                     // Add volumeMount
                     let mounts = container
-                        .as_object_mut().unwrap()
+                        .as_object_mut()
+                        .unwrap()
                         .entry("volumeMounts")
                         .or_insert(json!([]));
                     if let Some(mounts_arr) = mounts.as_array_mut() {
@@ -812,11 +847,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }));
     }
-    if let Some(containers) = pod_spec.get_mut("containers").and_then(|c| c.as_array_mut()) {
+    if let Some(containers) = pod_spec
+        .get_mut("containers")
+        .and_then(|c| c.as_array_mut())
+    {
         for container in containers.iter_mut() {
             if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
                 let mounts = container
-                    .as_object_mut().unwrap()
+                    .as_object_mut()
+                    .unwrap()
                     .entry("volumeMounts")
                     .or_insert(json!([]));
                 if let Some(mounts_arr) = mounts.as_array_mut() {
@@ -907,7 +946,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .patch(
                 &name,
                 &PatchParams::apply("azureclaw-controller").force(),
-                &Patch::Apply(serde_json::from_value::<k8s_openapi::api::core::v1::ServiceAccount>(sa_patch)?),
+                &Patch::Apply(serde_json::from_value::<
+                    k8s_openapi::api::core::v1::ServiceAccount,
+                >(sa_patch)?),
             )
             .await?;
         tracing::info!(
@@ -1037,9 +1078,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let seed_domains = if full_seed.len() > 900_000 {
             // Take the first N lines that fit in 900KB
             let mut end = 900_000;
-            while end > 0 && !full_seed.is_char_boundary(end) { end -= 1; }
+            while end > 0 && !full_seed.is_char_boundary(end) {
+                end -= 1;
+            }
             // Find last newline before the boundary
-            if let Some(pos) = full_seed[..end].rfind('\n') { &full_seed[..pos] } else { &full_seed[..end] }
+            if let Some(pos) = full_seed[..end].rfind('\n') {
+                &full_seed[..pos]
+            } else {
+                &full_seed[..end]
+            }
         } else {
             full_seed
         };
@@ -1137,9 +1184,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Use dynamic API for CronJob (batch/v1)
         let cj_gvk = kube::api::GroupVersionKind::gvk("batch", "v1", "CronJob");
         let (cj_ar, _caps) = kube::discovery::pinned_kind(client, &cj_gvk).await?;
-        let cj_api: Api<kube::api::DynamicObject> = Api::namespaced_with(
-            client.clone(), &sandbox_ns, &cj_ar,
-        );
+        let cj_api: Api<kube::api::DynamicObject> =
+            Api::namespaced_with(client.clone(), &sandbox_ns, &cj_ar);
         let cj_obj: kube::api::DynamicObject = serde_json::from_value(cronjob)?;
         let _ = cj_api
             .patch(
@@ -1198,39 +1244,37 @@ pub async fn run(client: Client) -> Result<()> {
     let sandboxes: Api<ClawSandbox> = Api::all(client.clone());
 
     // Verify CRD is installed
-    sandboxes.list(&ListParams::default().limit(1)).await
-        .map_err(|e| anyhow::anyhow!("ClawSandbox CRD not found — install the Helm chart first: {e}"))?;
+    sandboxes
+        .list(&ListParams::default().limit(1))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("ClawSandbox CRD not found — install the Helm chart first: {e}")
+        })?;
     tracing::info!("ClawSandbox CRD found — starting controller");
 
-    let wi_client_id = std::env::var("AZURE_WI_CLIENT_ID")
-        .unwrap_or_default();
-    let inference_router_image = std::env::var("INFERENCE_ROUTER_IMAGE")
-        .unwrap_or_else(|_| {
-            tracing::warn!("INFERENCE_ROUTER_IMAGE not set — using default :latest image");
-            "azureclawacr.azurecr.io/azureclaw-inference-router:latest".into()
-        });
-    let sandbox_image = std::env::var("SANDBOX_IMAGE")
-        .unwrap_or_else(|_| {
-            tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
-            "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
-        });
-    let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
-        .unwrap_or_default();
-    let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT")
-        .unwrap_or_default();
-    let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT")
-        .unwrap_or_default();
-    let foundry_deployments = std::env::var("FOUNDRY_DEPLOYMENTS")
-        .unwrap_or_default();
-    let imds_client_id = std::env::var("IMDS_CLIENT_ID")
-        .unwrap_or_default();
+    let wi_client_id = std::env::var("AZURE_WI_CLIENT_ID").unwrap_or_default();
+    let inference_router_image = std::env::var("INFERENCE_ROUTER_IMAGE").unwrap_or_else(|_| {
+        tracing::warn!("INFERENCE_ROUTER_IMAGE not set — using default :latest image");
+        "azureclawacr.azurecr.io/azureclaw-inference-router:latest".into()
+    });
+    let sandbox_image = std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| {
+        tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
+        "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
+    });
+    let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
+    let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").unwrap_or_default();
+    let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
+    let foundry_deployments = std::env::var("FOUNDRY_DEPLOYMENTS").unwrap_or_default();
+    let imds_client_id = std::env::var("IMDS_CLIENT_ID").unwrap_or_default();
     // Content Safety endpoint — defaults to Foundry endpoint if not set separately,
     // since Azure AI Services multi-service resources host Content Safety at the same base URL.
-    let content_safety_endpoint = std::env::var("CONTENT_SAFETY_ENDPOINT")
-        .unwrap_or_else(|_| foundry_endpoint.clone());
+    let content_safety_endpoint =
+        std::env::var("CONTENT_SAFETY_ENDPOINT").unwrap_or_else(|_| foundry_endpoint.clone());
 
     if openai_endpoint.is_empty() && foundry_endpoint.is_empty() {
-        tracing::warn!("Neither AZURE_OPENAI_ENDPOINT nor FOUNDRY_ENDPOINT set — inference routing will fail");
+        tracing::warn!(
+            "Neither AZURE_OPENAI_ENDPOINT nor FOUNDRY_ENDPOINT set — inference routing will fail"
+        );
     }
     if !foundry_endpoint.is_empty() {
         tracing::info!("Using Foundry Models endpoint: {foundry_endpoint}");

@@ -4,7 +4,7 @@
 //! forwarding to Azure OpenAI. Uses Managed Identity for auth (same as
 //! inference routing — no API keys).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::WorkloadIdentityAuth;
@@ -15,19 +15,18 @@ static AUTH: std::sync::LazyLock<WorkloadIdentityAuth> =
 
 /// Shared HTTP client for safety checks — reuses TCP connections and TLS sessions
 /// across calls instead of creating a new client per request.
-static SAFETY_CLIENT: std::sync::LazyLock<reqwest::Client> =
-    std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(4)
-            .timeout(std::time::Duration::from_millis(
-                std::env::var("CONTENT_SAFETY_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1500),
-            ))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    });
+static SAFETY_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .timeout(std::time::Duration::from_millis(
+            std::env::var("CONTENT_SAFETY_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1500),
+        ))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 /// Determine audience for safety endpoints: Foundry project endpoints use ai.azure.com,
 /// standalone Content Safety resources use cognitiveservices.azure.com.

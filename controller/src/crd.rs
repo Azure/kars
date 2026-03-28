@@ -216,8 +216,12 @@ pub struct GovernanceConfig {
     pub trust_threshold: i32,
 }
 
-fn default_policy() -> String { "default".into() }
-fn default_trust_threshold() -> i32 { 500 }
+fn default_policy() -> String {
+    "default".into()
+}
+fn default_trust_threshold() -> i32 {
+    500
+}
 
 /// ClawSandbox status — reflects the current observed state.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -241,9 +245,21 @@ pub struct TokensUsed {
 }
 
 // Default helpers
-fn default_isolation() -> String { "enhanced".into() }
-fn default_seccomp() -> String { "azureclaw-strict".into() }
-fn default_selinux() -> String { String::new() }
-fn default_provider() -> String { "azure-openai".into() }
-fn default_model() -> String { "gpt-4.1".into() }
-fn default_true() -> bool { true }
+fn default_isolation() -> String {
+    "enhanced".into()
+}
+fn default_seccomp() -> String {
+    "azureclaw-strict".into()
+}
+fn default_selinux() -> String {
+    String::new()
+}
+fn default_provider() -> String {
+    "azure-openai".into()
+}
+fn default_model() -> String {
+    "gpt-4.1".into()
+}
+fn default_true() -> bool {
+    true
+}

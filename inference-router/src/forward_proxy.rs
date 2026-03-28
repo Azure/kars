@@ -147,7 +147,12 @@ fn is_ipv6_private(v6: &Ipv6Addr) -> bool {
 /// Resolve a domain and validate the result is not a private IP.
 /// Returns the resolved socket address string (ip:port) on success.
 /// On private IP detection, records the block in the blocklist pending queue.
-async fn resolve_and_validate(domain: &str, port: u16, blocklist: &Blocklist, sandbox: &str) -> anyhow::Result<String> {
+async fn resolve_and_validate(
+    domain: &str,
+    port: u16,
+    blocklist: &Blocklist,
+    sandbox: &str,
+) -> anyhow::Result<String> {
     let target = format!("{domain}:{port}");
     let addrs: Vec<_> = tokio::net::lookup_host(&target).await?.collect();
 
@@ -159,21 +164,33 @@ async fn resolve_and_validate(domain: &str, port: u16, blocklist: &Blocklist, sa
     if is_private_ip(&addr.ip()) {
         tracing::warn!(domain = %domain, resolved_ip = %addr.ip(),
             "DNS rebinding blocked: domain resolves to private IP");
-        blocklist.record_proxy_block(
-            domain,
-            "🛑 dns-rebind",
-            &format!("DNS rebinding — domain '{}' resolves to private/internal IP {}. \
+        blocklist
+            .record_proxy_block(
+                domain,
+                "🛑 dns-rebind",
+                &format!(
+                    "DNS rebinding — domain '{}' resolves to private/internal IP {}. \
                 This could be a DNS rebinding attack targeting internal services.",
-                domain, addr.ip()),
-            sandbox,
-        ).await;
-        anyhow::bail!("domain {domain} resolves to private/internal IP {}", addr.ip());
+                    domain,
+                    addr.ip()
+                ),
+                sandbox,
+            )
+            .await;
+        anyhow::bail!(
+            "domain {domain} resolves to private/internal IP {}",
+            addr.ip()
+        );
     }
 
     Ok(addr.to_string())
 }
 
-async fn handle_connection(mut stream: TcpStream, blocklist: &Blocklist, sandbox: &str) -> anyhow::Result<()> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    blocklist: &Blocklist,
+    sandbox: &str,
+) -> anyhow::Result<()> {
     // Read the initial request. For TLS ClientHello, we may need multiple reads
     // if the handshake is fragmented across TCP segments (rare, but possible).
     let mut buf = vec![0u8; 16384];
@@ -363,13 +380,18 @@ async fn handle_tls_redirect(
         tracing::warn!(outer_sni = %outer_sni,
             "TLS redirect: Encrypted Client Hello (ECH) detected, rejecting — \
             cannot verify destination domain. Outer SNI visible in pending approvals.");
-        blocklist.record_proxy_block(
-            outer_sni,
-            "🛑 ech",
-            &format!("ECH (Encrypted Client Hello) — real destination hidden behind outer SNI '{}'. \
-                If this domain is a trusted CDN, contact your security team.", outer_sni),
-            sandbox,
-        ).await;
+        blocklist
+            .record_proxy_block(
+                outer_sni,
+                "🛑 ech",
+                &format!(
+                    "ECH (Encrypted Client Hello) — real destination hidden behind outer SNI '{}'. \
+                If this domain is a trusted CDN, contact your security team.",
+                    outer_sni
+                ),
+                sandbox,
+            )
+            .await;
         return Ok(());
     }
 

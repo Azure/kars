@@ -1,16 +1,15 @@
 //! Axum route handlers for the inference router.
 
+use axum::extract::Path;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json,
 };
-use axum::extract::Path;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -44,10 +43,8 @@ impl AppState {
             .build()?;
 
         let config = Config::from_env()?;
-        let budget = TokenBudgetTracker::new(
-            config.token_budget_daily,
-            config.token_budget_per_request,
-        );
+        let budget =
+            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request);
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
@@ -98,12 +95,18 @@ impl AppState {
         // For inference (chat completions, embeddings): prefer the dedicated OpenAI endpoint
         // (openai.azure.com) over the Foundry project endpoint (services.ai.azure.com).
         // Foundry project endpoint is used for agent/memory/knowledge APIs, not inference.
-        let endpoint = self.config.azure_openai_endpoint.clone()
+        let endpoint = self
+            .config
+            .azure_openai_endpoint
+            .clone()
             .or_else(|| self.config.foundry_endpoint.clone())
             .unwrap_or_default();
 
         // Live model override takes priority over config default
-        let deployment = self.model_override.read().ok()
+        let deployment = self
+            .model_override
+            .read()
+            .ok()
             .and_then(|g| g.clone())
             .unwrap_or_else(|| self.config.default_model.clone());
 
@@ -130,7 +133,10 @@ pub fn inference_routes() -> Router<AppState> {
 pub fn foundry_agent_routes() -> Router<AppState> {
     Router::new()
         .route("/agents", get(foundry_proxy).post(foundry_proxy))
-        .route("/agents/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/agents/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
 }
 
 /// Foundry standalone API routes — Memory Store, Foundry IQ (Knowledge), Evaluations.
@@ -139,55 +145,121 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
     Router::new()
         // Memory Store APIs (persistent long-term memory) — uses underscores per REST spec
         .route("/memory_stores", get(foundry_proxy).post(foundry_proxy))
-        .route("/memory_stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/memory_stores/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
         // Foundry IQ / Knowledge Base APIs (agentic retrieval)
         .route("/knowledgebases", get(foundry_proxy).post(foundry_proxy))
-        .route("/knowledgebases/{*path}", get(foundry_proxy).post(foundry_proxy))
+        .route(
+            "/knowledgebases/{*path}",
+            get(foundry_proxy).post(foundry_proxy),
+        )
         // Evaluations APIs
         .route("/evaluations", get(foundry_proxy).post(foundry_proxy))
-        .route("/evaluations/{*path}", get(foundry_proxy).post(foundry_proxy))
+        .route(
+            "/evaluations/{*path}",
+            get(foundry_proxy).post(foundry_proxy),
+        )
         // Evaluators APIs
         .route("/evaluators", get(foundry_proxy).post(foundry_proxy))
-        .route("/evaluators/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/evaluators/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
         // Evaluation rules APIs
         .route("/evaluationrules", get(foundry_proxy).post(foundry_proxy))
-        .route("/evaluationrules/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/evaluationrules/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
         // Indexes APIs
         .route("/indexes", get(foundry_proxy))
-        .route("/indexes/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy).patch(foundry_proxy))
+        .route(
+            "/indexes/{*path}",
+            get(foundry_proxy)
+                .post(foundry_proxy)
+                .delete(foundry_proxy)
+                .patch(foundry_proxy),
+        )
         // Connections APIs
         .route("/connections", get(foundry_proxy).post(foundry_proxy))
-        .route("/connections/{*path}", get(foundry_proxy).post(foundry_proxy))
+        .route(
+            "/connections/{*path}",
+            get(foundry_proxy).post(foundry_proxy),
+        )
         // Deployments APIs
         .route("/deployments", get(foundry_proxy))
         .route("/deployments/{*path}", get(foundry_proxy))
         // Datasets APIs
         .route("/datasets", get(foundry_proxy))
-        .route("/datasets/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy).patch(foundry_proxy))
+        .route(
+            "/datasets/{*path}",
+            get(foundry_proxy)
+                .post(foundry_proxy)
+                .delete(foundry_proxy)
+                .patch(foundry_proxy),
+        )
         // Insights APIs
         .route("/insights", get(foundry_proxy).post(foundry_proxy))
         .route("/insights/{*path}", get(foundry_proxy))
         // OpenAI Conversations + Responses + Evals + Vector Stores + Files
-        .route("/openai/conversations", get(foundry_proxy).post(foundry_proxy))
-        .route("/openai/conversations/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/openai/conversations",
+            get(foundry_proxy).post(foundry_proxy),
+        )
+        .route(
+            "/openai/conversations/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
         .route("/openai/responses", get(foundry_proxy).post(foundry_proxy))
-        .route("/openai/responses/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/openai/responses/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
         .route("/openai/evals", get(foundry_proxy).post(foundry_proxy))
-        .route("/openai/evals/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
-        .route("/openai/vector_stores", get(foundry_proxy).post(foundry_proxy))
-        .route("/openai/vector_stores/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/openai/evals/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
+        .route(
+            "/openai/vector_stores",
+            get(foundry_proxy).post(foundry_proxy),
+        )
+        .route(
+            "/openai/vector_stores/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
         .route("/openai/files", get(foundry_proxy).post(foundry_proxy))
-        .route("/openai/files/{*path}", get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy))
-        .route("/openai/fine-tuning/{*path}", get(foundry_proxy).post(foundry_proxy))
+        .route(
+            "/openai/files/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
+        .route(
+            "/openai/fine-tuning/{*path}",
+            get(foundry_proxy).post(foundry_proxy),
+        )
         // Red Teams APIs
         .route("/redTeams/runs", get(foundry_proxy).post(foundry_proxy))
         .route("/redTeams/runs/{*path}", get(foundry_proxy))
         // Schedules APIs
         .route("/schedules", get(foundry_proxy))
-        .route("/schedules/{*path}", get(foundry_proxy).put(foundry_proxy).delete(foundry_proxy))
+        .route(
+            "/schedules/{*path}",
+            get(foundry_proxy).put(foundry_proxy).delete(foundry_proxy),
+        )
         // Evaluation Taxonomies APIs
-        .route("/evaluationtaxonomies", get(foundry_proxy).post(foundry_proxy))
-        .route("/evaluationtaxonomies/{*path}", get(foundry_proxy).put(foundry_proxy).delete(foundry_proxy).patch(foundry_proxy))
+        .route(
+            "/evaluationtaxonomies",
+            get(foundry_proxy).post(foundry_proxy),
+        )
+        .route(
+            "/evaluationtaxonomies/{*path}",
+            get(foundry_proxy)
+                .put(foundry_proxy)
+                .delete(foundry_proxy)
+                .patch(foundry_proxy),
+        )
 }
 
 /// Health and readiness routes.
@@ -204,8 +276,7 @@ pub fn metrics_routes() -> Router<AppState> {
 
 /// Admin routes — live configuration (localhost only, for dev mode model switching).
 pub fn admin_routes() -> Router<AppState> {
-    Router::new()
-        .route("/admin/model", get(admin_get_model).put(admin_set_model))
+    Router::new().route("/admin/model", get(admin_get_model).put(admin_set_model))
 }
 
 /// AGT governance routes that expose sensitive data — require admin token.
@@ -234,7 +305,10 @@ pub fn mesh_routes() -> Router<AppState> {
         .route("/agt/mesh/inbox", get(agt_mesh_inbox))
         // AGT relay proxy (WebSocket + HTTP registry)
         .route("/agt/relay", get(agt_relay_proxy))
-        .route("/agt/registry/{*path}", get(agt_registry_proxy).post(agt_registry_proxy))
+        .route(
+            "/agt/registry/{*path}",
+            get(agt_registry_proxy).post(agt_registry_proxy),
+        )
         // Blocklist (read-only, informational)
         .route("/blocklist/status", get(blocklist_status))
         .route("/blocklist/check", post(blocklist_check))
@@ -356,7 +430,9 @@ async fn chat_completions(
             "chat/completions",
             headers.clone(),
             body,
-        ).await {
+        )
+        .await
+        {
             Ok((status, resp_headers, stream)) => {
                 let body = Body::from_stream(stream);
                 let mut response = (status, body).into_response();
@@ -382,46 +458,47 @@ async fn chat_completions(
             "chat/completions",
             &headers,
             body,
-        ).await;
+        )
+        .await;
 
-    match result {
-        Ok((status, resp_headers, resp_body)) => {
-            // Record token usage from response for budget tracking
-            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
-                && let Some(total) = body_json
-                    .get("usage")
-                    .and_then(|u| u.get("total_tokens"))
-                    .and_then(|v| v.as_u64())
-            {
-                state.budget.record_usage(sandbox_name, total).await;
+        match result {
+            Ok((status, resp_headers, resp_body)) => {
+                // Record token usage from response for budget tracking
+                if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
+                    && let Some(total) = body_json
+                        .get("usage")
+                        .and_then(|u| u.get("total_tokens"))
+                        .and_then(|v| v.as_u64())
+                {
+                    state.budget.record_usage(sandbox_name, total).await;
 
-                if let Err(msg) = state.budget.check_per_request(total) {
-                    tracing::warn!(sandbox = %sandbox_name, "Per-request limit: {msg}");
-                }
-            }
-
-            let mut response = (status, Body::from(resp_body)).into_response();
-            // Forward content-type from upstream
-            if let Some(ct) = resp_headers.get("content-type") {
-                response.headers_mut().insert("content-type", ct.clone());
-            }
-            response
-        }
-        Err(e) => {
-            tracing::error!(sandbox = %sandbox_name, "Proxy error: {e:#}");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Failed to reach inference backend",
-                        "type": "proxy_error",
-                        "code": "bad_gateway"
+                    if let Err(msg) = state.budget.check_per_request(total) {
+                        tracing::warn!(sandbox = %sandbox_name, "Per-request limit: {msg}");
                     }
-                })),
-            )
-                .into_response()
-        }
-    } // end else (buffered)
+                }
+
+                let mut response = (status, Body::from(resp_body)).into_response();
+                // Forward content-type from upstream
+                if let Some(ct) = resp_headers.get("content-type") {
+                    response.headers_mut().insert("content-type", ct.clone());
+                }
+                response
+            }
+            Err(e) => {
+                tracing::error!(sandbox = %sandbox_name, "Proxy error: {e:#}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "Failed to reach inference backend",
+                            "type": "proxy_error",
+                            "code": "bad_gateway"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+        } // end else (buffered)
     } // end if is_stream
 }
 
@@ -470,7 +547,9 @@ async fn embeddings(
     if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
         if let Some(model) = body_json.get("model").and_then(|m| m.as_str()) {
             // Strip "azure/" or "azure-openai/" prefix if present
-            let clean = model.trim_start_matches("azure/").trim_start_matches("azure-openai/");
+            let clean = model
+                .trim_start_matches("azure/")
+                .trim_start_matches("azure-openai/");
             upstream.deployment = clean.to_string();
         }
     }
@@ -500,35 +579,50 @@ async fn healthz() -> &'static str {
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     // Check that we can acquire a token (validates Workload Identity / IMDS setup)
-    let audience = if state.config.foundry_endpoint.as_deref()
+    let audience = if state
+        .config
+        .foundry_endpoint
+        .as_deref()
         .is_some_and(|ep| ep.contains("services.ai.azure.com") && ep.contains("/api/projects/"))
     {
         "https://ai.azure.com"
     } else {
         "https://cognitiveservices.azure.com"
     };
-    match state
-        .auth
-        .get_token(audience)
-        .await
-    {
+    match state.auth.get_token(audience).await {
         Ok(_) => {
             // Also check Content Safety endpoint if configured
             if let Some(ref cs_endpoint) = state.config.content_safety_endpoint
                 && state.config.content_safety_enabled
             {
-                let url = format!("{}/contentsafety/text:analyze?api-version=2024-09-01", cs_endpoint.trim_end_matches('/'));
-                let reachable = state.client.post(&url).timeout(std::time::Duration::from_secs(3)).send().await.is_ok();
+                let url = format!(
+                    "{}/contentsafety/text:analyze?api-version=2024-09-01",
+                    cs_endpoint.trim_end_matches('/')
+                );
+                let reachable = state
+                    .client
+                    .post(&url)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .send()
+                    .await
+                    .is_ok();
                 if !reachable {
                     tracing::warn!("Content Safety endpoint unreachable: {cs_endpoint}");
-                    return (StatusCode::OK, "ok (content safety unreachable — failing open)").into_response();
+                    return (
+                        StatusCode::OK,
+                        "ok (content safety unreachable — failing open)",
+                    )
+                        .into_response();
                 }
             }
             (StatusCode::OK, "ok").into_response()
         }
         Err(e) => {
             tracing::warn!("Readiness check failed: {e}");
-            (StatusCode::SERVICE_UNAVAILABLE, "not ready — token acquisition failed")
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not ready — token acquisition failed",
+            )
                 .into_response()
         }
     }
@@ -545,24 +639,27 @@ async fn metrics() -> String {
 
 /// GET /admin/model — show current model
 async fn admin_get_model(State(state): State<AppState>) -> impl IntoResponse {
-    let current = state.model_override.read().ok()
+    let current = state
+        .model_override
+        .read()
+        .ok()
         .and_then(|g| g.clone())
         .unwrap_or_else(|| state.config.default_model.clone());
     Json(serde_json::json!({ "model": current, "default": state.config.default_model }))
 }
 
 /// PUT /admin/model — switch model live (body: {"model": "gpt-5-mini"})
-async fn admin_set_model(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> impl IntoResponse {
+async fn admin_set_model(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
     let model = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("model")?.as_str().map(String::from));
 
     match model {
         Some(m) => {
-            let prev = state.model_override.read().ok()
+            let prev = state
+                .model_override
+                .read()
+                .ok()
                 .and_then(|g| g.clone())
                 .unwrap_or_else(|| state.config.default_model.clone());
             if let Ok(mut guard) = state.model_override.write() {
@@ -577,25 +674,36 @@ async fn admin_set_model(
 
 /// GET /v1/models — list available models from the OpenAI endpoint.
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let endpoint = state.config.azure_openai_endpoint.clone()
+    let endpoint = state
+        .config
+        .azure_openai_endpoint
+        .clone()
         .or_else(|| state.config.foundry_endpoint.clone())
         .unwrap_or_default();
 
     // Azure OpenAI uses /openai/models?api-version=... (NOT /openai/v1/models)
-    let models_url = format!("{}/openai/models?api-version=2024-10-21", endpoint.trim_end_matches('/'));
+    let models_url = format!(
+        "{}/openai/models?api-version=2024-10-21",
+        endpoint.trim_end_matches('/')
+    );
 
     // Get token — use correct audience for Foundry project vs legacy AOAI
-    let audience = if endpoint.contains("services.ai.azure.com") && endpoint.contains("/api/projects/") {
-        "https://ai.azure.com"
-    } else {
-        "https://cognitiveservices.azure.com"
-    };
+    let audience =
+        if endpoint.contains("services.ai.azure.com") && endpoint.contains("/api/projects/") {
+            "https://ai.azure.com"
+        } else {
+            "https://cognitiveservices.azure.com"
+        };
     let token = match state.auth.get_token(audience).await {
         Ok(t) => t,
         Err(e) => {
-            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
-            }))).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -609,15 +717,18 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
 
     match resp {
         Ok(r) => {
-            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let body = r.bytes().await.unwrap_or_default();
             (status, Body::from(body)).into_response()
         }
-        Err(e) => {
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
                 "error": {"message": format!("Failed to list models: {e}"), "type": "proxy_error"}
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -625,11 +736,17 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
 /// For Foundry/AI Services endpoints, /openai/deployments is available on the data plane.
 /// For legacy Azure OpenAI, this may return 404 — callers should fall back to /v1/models.
 async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
-    let endpoint = state.config.azure_openai_endpoint.clone()
+    let endpoint = state
+        .config
+        .azure_openai_endpoint
+        .clone()
         .or_else(|| state.config.foundry_endpoint.clone())
         .unwrap_or_default();
 
-    let deployments_url = format!("{}/openai/deployments?api-version=2024-10-21", endpoint.trim_end_matches('/'));
+    let deployments_url = format!(
+        "{}/openai/deployments?api-version=2024-10-21",
+        endpoint.trim_end_matches('/')
+    );
 
     let audience = if endpoint.contains("services.ai.azure.com") {
         "https://ai.azure.com"
@@ -639,9 +756,13 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
     let token = match state.auth.get_token(audience).await {
         Ok(t) => t,
         Err(e) => {
-            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
-            }))).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -683,7 +804,10 @@ async fn foundry_proxy(
         .unwrap_or("unknown");
 
     // Use project endpoint for agent/standalone APIs, fall back to foundry/openai endpoint
-    let endpoint = state.config.foundry_project_endpoint.clone()
+    let endpoint = state
+        .config
+        .foundry_project_endpoint
+        .clone()
         .or_else(|| state.config.foundry_endpoint.clone())
         .or_else(|| state.config.azure_openai_endpoint.clone())
         .unwrap_or_default();
@@ -698,13 +822,17 @@ async fn foundry_proxy(
             reason = %reason,
             "Blocklist: blocked Foundry proxy request"
         );
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": {
-                "message": format!("Request blocked by threat intelligence: {reason}"),
-                "type": "blocklist_violation",
-                "domain": domain
-            }
-        }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("Request blocked by threat intelligence: {reason}"),
+                    "type": "blocklist_violation",
+                    "domain": domain
+                }
+            })),
+        )
+            .into_response();
     }
 
     // Learn mode: record this domain as accessed (for allowlist generation)
@@ -737,7 +865,12 @@ async fn foundry_proxy(
         (path.to_string(), query)
     };
 
-    let upstream_url = format!("{}{}{}", endpoint.trim_end_matches('/'), upstream_path, upstream_query);
+    let upstream_url = format!(
+        "{}{}{}",
+        endpoint.trim_end_matches('/'),
+        upstream_path,
+        upstream_query
+    );
 
     tracing::info!(
         sandbox = %sandbox_name,
@@ -758,9 +891,13 @@ async fn foundry_proxy(
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Foundry proxy auth failed: {e}");
-            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": {"message": format!("Auth error: {e}"), "type": "auth_error"}
-            }))).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": {"message": format!("Auth error: {e}"), "type": "auth_error"}
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -771,10 +908,17 @@ async fn foundry_proxy(
     let mut upstream_headers = HeaderMap::new();
     for (name, value) in headers.iter() {
         match name.as_str() {
-            "authorization" | "api-key" | "x-api-key"
-            | "host" | "connection" | "transfer-encoding" | "content-length"
+            "authorization"
+            | "api-key"
+            | "x-api-key"
+            | "host"
+            | "connection"
+            | "transfer-encoding"
+            | "content-length"
             | "x-azureclaw-sandbox" => continue,
-            _ => { upstream_headers.insert(name.clone(), value.clone()); }
+            _ => {
+                upstream_headers.insert(name.clone(), value.clone());
+            }
         }
     }
     if use_api_key_header {
@@ -788,10 +932,12 @@ async fn foundry_proxy(
             axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
     }
-    upstream_headers.entry("content-type")
+    upstream_headers
+        .entry("content-type")
         .or_insert(axum::http::HeaderValue::from_static("application/json"));
 
-    let resp = state.client
+    let resp = state
+        .client
         .request(method, &upstream_url)
         .headers(upstream_headers)
         .body(body)
@@ -800,7 +946,8 @@ async fn foundry_proxy(
 
     match resp {
         Ok(r) => {
-            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let resp_headers = r.headers().clone();
             let body = r.bytes().await.unwrap_or_default();
 
@@ -830,25 +977,41 @@ async fn agt_evaluate(
 ) -> impl IntoResponse {
     let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("");
     if action.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Missing 'action' field"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing 'action' field"
+            })),
+        )
+            .into_response();
     }
 
     let decision = state.governance.evaluate_action(action).await;
     let (status, result) = match decision {
-        crate::governance::PolicyDecision::Allow => (StatusCode::OK, serde_json::json!({
-            "decision": "allow", "action": action
-        })),
-        crate::governance::PolicyDecision::Deny(reason) => (StatusCode::FORBIDDEN, serde_json::json!({
-            "decision": "deny", "action": action, "reason": reason
-        })),
-        crate::governance::PolicyDecision::RequiresApproval(reason) => (StatusCode::ACCEPTED, serde_json::json!({
-            "decision": "requires_approval", "action": action, "reason": reason
-        })),
-        crate::governance::PolicyDecision::RateLimited { retry_after_secs } => (StatusCode::TOO_MANY_REQUESTS, serde_json::json!({
-            "decision": "rate_limited", "action": action, "retry_after_secs": retry_after_secs
-        })),
+        crate::governance::PolicyDecision::Allow => (
+            StatusCode::OK,
+            serde_json::json!({
+                "decision": "allow", "action": action
+            }),
+        ),
+        crate::governance::PolicyDecision::Deny(reason) => (
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "decision": "deny", "action": action, "reason": reason
+            }),
+        ),
+        crate::governance::PolicyDecision::RequiresApproval(reason) => (
+            StatusCode::ACCEPTED,
+            serde_json::json!({
+                "decision": "requires_approval", "action": action, "reason": reason
+            }),
+        ),
+        crate::governance::PolicyDecision::RateLimited { retry_after_secs } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({
+                "decision": "rate_limited", "action": action, "retry_after_secs": retry_after_secs
+            }),
+        ),
     };
 
     (status, Json(result)).into_response()
@@ -900,28 +1063,43 @@ async fn agt_mesh_send(
 ) -> impl IntoResponse {
     let to_agent = body.get("to_agent").and_then(|v| v.as_str()).unwrap_or("");
     let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let msg_type = body.get("type").and_then(|v| v.as_str()).unwrap_or("request");
+    let msg_type = body
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("request");
 
     if to_agent.is_empty() || content.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Missing 'to_agent' or 'content' field"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing 'to_agent' or 'content' field"
+            })),
+        )
+            .into_response();
     }
 
     // Trust gate: check if target agent is trusted
     if !state.governance.trust.is_trusted(to_agent).await {
         let trust = state.governance.trust.get_trust(to_agent).await;
-        state.governance.audit.append(
-            &format!("mesh:send:{}", to_agent),
-            "deny",
-            &format!("Trust score {} below threshold", trust.score),
-        ).await;
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Target agent trust score below threshold",
-            "agent": to_agent,
-            "score": trust.score,
-            "threshold": state.governance.trust.default_score
-        }))).into_response();
+        state
+            .governance
+            .audit
+            .append(
+                &format!("mesh:send:{}", to_agent),
+                "deny",
+                &format!("Trust score {} below threshold", trust.score),
+            )
+            .await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Target agent trust score below threshold",
+                "agent": to_agent,
+                "score": trust.score,
+                "threshold": state.governance.trust.default_score
+            })),
+        )
+            .into_response();
     }
 
     let msg = crate::governance::MeshMessage {
@@ -930,8 +1108,13 @@ async fn agt_mesh_send(
         to_agent: to_agent.to_string(),
         content: content.to_string(),
         message_type: msg_type.to_string(),
-        timestamp: format!("{}Z", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+        timestamp: format!(
+            "{}Z",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ),
         signature: String::new(),
     };
 
@@ -942,12 +1125,14 @@ async fn agt_mesh_send(
     } else {
         // Try to resolve the target's actual namespace from ClawSandbox CRD status
         let target_ns = match spawn::get_sandbox_status(to_agent).await {
-            Ok(resp) => resp.namespace.unwrap_or_else(|| format!("azureclaw-{}", to_agent)),
+            Ok(resp) => resp
+                .namespace
+                .unwrap_or_else(|| format!("azureclaw-{}", to_agent)),
             Err(_) => {
                 // Not a spawned sub-agent — try same namespace (peer agents like agent-alpha/agent-beta)
-                std::env::var("AGT_MESH_NAMESPACE")
-                    .unwrap_or_else(|_| std::env::var("NAMESPACE")
-                        .unwrap_or_else(|_| "azureclaw-foundry-test".into()))
+                std::env::var("AGT_MESH_NAMESPACE").unwrap_or_else(|_| {
+                    std::env::var("NAMESPACE").unwrap_or_else(|_| "azureclaw-foundry-test".into())
+                })
             }
         };
         format!("http://{}.{}.svc.cluster.local:8443", to_agent, target_ns)
@@ -961,7 +1146,9 @@ async fn agt_mesh_send(
         "Sending mesh message"
     );
 
-    match state.client.post(&receive_url)
+    match state
+        .client
+        .post(&receive_url)
         .json(&msg)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -969,47 +1156,79 @@ async fn agt_mesh_send(
     {
         Ok(resp) if resp.status().is_success() => {
             state.governance.trust.record_success(to_agent).await;
-            state.governance.mesh_metrics.messages_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            state.governance.audit.append(
-                &format!("mesh:send:{}", to_agent),
-                "delivered",
-                &format!("Message {} delivered to {}", msg.id, to_agent),
-            ).await;
+            state
+                .governance
+                .mesh_metrics
+                .messages_sent
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state
+                .governance
+                .audit
+                .append(
+                    &format!("mesh:send:{}", to_agent),
+                    "delivered",
+                    &format!("Message {} delivered to {}", msg.id, to_agent),
+                )
+                .await;
             tracing::info!(from = %state.governance.sandbox_name, to = %to_agent, id = %msg.id, "Mesh message delivered");
-            (StatusCode::OK, Json(serde_json::json!({
-                "status": "delivered",
-                "message_id": msg.id,
-                "to_agent": to_agent,
-                "from_agent": state.governance.sandbox_name
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "delivered",
+                    "message_id": msg.id,
+                    "to_agent": to_agent,
+                    "from_agent": state.governance.sandbox_name
+                })),
+            )
+                .into_response()
         }
         Ok(resp) => {
             let status_code = resp.status().as_u16();
             let body_text = resp.text().await.unwrap_or_default();
             state.governance.trust.record_failure(to_agent).await;
-            state.governance.audit.append(
-                &format!("mesh:send:{}", to_agent),
-                "failed",
-                &format!("Target returned {}: {}", status_code, &body_text[..body_text.len().min(100)]),
-            ).await;
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": format!("Target agent returned {}", status_code),
-                "to_agent": to_agent,
-                "details": &body_text[..body_text.len().min(200)]
-            }))).into_response()
+            state
+                .governance
+                .audit
+                .append(
+                    &format!("mesh:send:{}", to_agent),
+                    "failed",
+                    &format!(
+                        "Target returned {}: {}",
+                        status_code,
+                        &body_text[..body_text.len().min(100)]
+                    ),
+                )
+                .await;
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("Target agent returned {}", status_code),
+                    "to_agent": to_agent,
+                    "details": &body_text[..body_text.len().min(200)]
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(to = %to_agent, error = %e, "Target agent unreachable");
-            state.governance.audit.append(
-                &format!("mesh:send:{}", to_agent),
-                "unreachable",
-                &format!("Target unreachable: {}", e),
-            ).await;
-            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-                "error": format!("Target agent '{}' unreachable: {}", to_agent, e),
-                "to_agent": to_agent,
-                "message_id": msg.id
-            }))).into_response()
+            state
+                .governance
+                .audit
+                .append(
+                    &format!("mesh:send:{}", to_agent),
+                    "unreachable",
+                    &format!("Target unreachable: {}", e),
+                )
+                .await;
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": format!("Target agent '{}' unreachable: {}", to_agent, e),
+                    "to_agent": to_agent,
+                    "message_id": msg.id
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -1034,23 +1253,39 @@ async fn agt_mesh_receive(
 
     // Trust gate on incoming messages too
     if !state.governance.trust.is_trusted(&msg.from_agent).await {
-        state.governance.audit.append(
-            &format!("mesh:receive:{}", msg.from_agent),
-            "deny",
-            "Sender trust below threshold",
-        ).await;
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "error": "Sender trust score below threshold"
-        }))).into_response();
+        state
+            .governance
+            .audit
+            .append(
+                &format!("mesh:receive:{}", msg.from_agent),
+                "deny",
+                "Sender trust below threshold",
+            )
+            .await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Sender trust score below threshold"
+            })),
+        )
+            .into_response();
     }
 
     state.governance.trust.record_success(&msg.from_agent).await;
-    state.governance.mesh_metrics.messages_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.governance.audit.append(
-        &format!("mesh:receive:{}", msg.from_agent),
-        "allow",
-        &format!("Message {} received", msg.id),
-    ).await;
+    state
+        .governance
+        .mesh_metrics
+        .messages_received
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .governance
+        .audit
+        .append(
+            &format!("mesh:receive:{}", msg.from_agent),
+            "allow",
+            &format!("Message {} received", msg.id),
+        )
+        .await;
 
     let _from_agent = msg.from_agent.clone();
     let _msg_id = msg.id.clone();
@@ -1060,7 +1295,11 @@ async fn agt_mesh_receive(
     // plugin via the AGT relay (E2E encrypted) onMessage handler, which has full
     // tool access (exec/shell) through the node host.
 
-    (StatusCode::OK, Json(serde_json::json!({"status": "received"}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "received"})),
+    )
+        .into_response()
 }
 
 /// GET /agt/status — overall governance status.
@@ -1110,18 +1349,39 @@ async fn agt_trust_update(
         );
     }
 
-    state.governance.trust.update_trust(agent_id, score, interactions).await;
-    state.governance.mesh_metrics.trust_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.governance.mesh_metrics.sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .governance
+        .trust
+        .update_trust(agent_id, score, interactions)
+        .await;
+    state
+        .governance
+        .mesh_metrics
+        .trust_updates
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .governance
+        .mesh_metrics
+        .sessions
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Record in the audit chain so the operator panel sees trust changes
-    state.governance.audit.append(
-        &format!("trust_update:{}", agent_id),
-        "applied",
-        &format!("score={} interactions={}", score, interactions),
-    ).await;
+    state
+        .governance
+        .audit
+        .append(
+            &format!("trust_update:{}", agent_id),
+            "applied",
+            &format!("score={} interactions={}", score, interactions),
+        )
+        .await;
 
-    tracing::info!(agent_id, score, interactions, "AGT trust updated via plugin");
+    tracing::info!(
+        agent_id,
+        score,
+        interactions,
+        "AGT trust updated via plugin"
+    );
 
     (
         axum::http::StatusCode::OK,
@@ -1141,8 +1401,12 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 
     // Step 1: Look up our AMID by searching for our sandbox name as a capability.
     // The plugin registers with capabilities: ["azureclaw-agent", "task-execution", sandbox_name]
-    let amid = match state.client
-        .get(&format!("{}/v1/registry/search?capability={}", base, sandbox_name))
+    let amid = match state
+        .client
+        .get(&format!(
+            "{}/v1/registry/search?capability={}",
+            base, sandbox_name
+        ))
         .timeout(std::time::Duration::from_secs(3))
         .send()
         .await
@@ -1150,10 +1414,18 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
         Ok(resp) if resp.status().is_success() => {
             resp.json::<serde_json::Value>().await.ok().and_then(|v| {
                 // Pick the most recently seen agent matching our name
-                v.get("results")?.as_array()?
+                v.get("results")?
+                    .as_array()?
                     .iter()
-                    .filter(|a| a.get("display_name").and_then(|n| n.as_str()) == Some(sandbox_name))
-                    .max_by_key(|a| a.get("last_seen").and_then(|t| t.as_str()).unwrap_or("").to_string())
+                    .filter(|a| {
+                        a.get("display_name").and_then(|n| n.as_str()) == Some(sandbox_name)
+                    })
+                    .max_by_key(|a| {
+                        a.get("last_seen")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    })
                     .and_then(|a| a.get("amid").and_then(|v| v.as_str()).map(String::from))
             })
         }
@@ -1162,15 +1434,17 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 
     // Step 2: If we found our AMID, fetch reputation score
     let registry = if let Some(ref agent_amid) = amid {
-        match state.client
-            .get(&format!("{}/v1/registry/reputation/score?amid={}", base, agent_amid))
+        match state
+            .client
+            .get(&format!(
+                "{}/v1/registry/reputation/score?amid={}",
+                base, agent_amid
+            ))
             .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json::<serde_json::Value>().await.ok()
-            }
+            Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
             Ok(resp) => {
                 tracing::debug!(status = %resp.status(), "Registry reputation lookup returned non-200");
                 None
@@ -1200,9 +1474,7 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 /// GET /agt/relay — WebSocket proxy to the self-hosted AgentMesh relay.
 /// The plugin (UID 1000) can only reach localhost. The router (UID 1001) proxies
 /// WebSocket connections to the relay at agentmesh-relay.agentmesh.svc.cluster.local:8765.
-async fn agt_relay_proxy(
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn agt_relay_proxy(ws: WebSocketUpgrade) -> impl IntoResponse {
     let relay_url = std::env::var("AGT_RELAY_URL")
         .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
 
@@ -1213,8 +1485,8 @@ async fn agt_relay_proxy(
 
 /// Bidirectional WebSocket bridge: client ↔ relay.
 async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
-    use futures::stream::StreamExt;
     use futures::sink::SinkExt;
+    use futures::stream::StreamExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio_tungstenite::tungstenite;
 
@@ -1222,7 +1494,9 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
     let upstream = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio_tungstenite::connect_async(relay_url),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => {
             tracing::error!(error = %e, url = %relay_url, "Failed to connect to AGT relay");
@@ -1257,20 +1531,20 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
     let mut client_to_relay = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_rx.next().await {
             let (tung_msg, size) = match msg {
-                Message::Text(ref t) => (
-                    tungstenite::Message::Text(t.to_string().into()),
-                    t.len(),
-                ),
-                Message::Binary(ref b) => (
-                    tungstenite::Message::Binary(b.to_vec().into()),
-                    b.len(),
-                ),
+                Message::Text(ref t) => (tungstenite::Message::Text(t.to_string().into()), t.len()),
+                Message::Binary(ref b) => {
+                    (tungstenite::Message::Binary(b.to_vec().into()), b.len())
+                }
                 Message::Ping(p) => {
-                    let _ = upstream_tx.send(tungstenite::Message::Ping(p.to_vec().into())).await;
+                    let _ = upstream_tx
+                        .send(tungstenite::Message::Ping(p.to_vec().into()))
+                        .await;
                     continue;
                 }
                 Message::Pong(p) => {
-                    let _ = upstream_tx.send(tungstenite::Message::Pong(p.to_vec().into())).await;
+                    let _ = upstream_tx
+                        .send(tungstenite::Message::Pong(p.to_vec().into()))
+                        .await;
                     continue;
                 }
                 Message::Close(_) => break,
@@ -1284,8 +1558,23 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
                 tungstenite::Message::Binary(b) => b.to_vec(),
                 _ => vec![],
             };
-            let hex_preview: String = raw_bytes.iter().take(128).map(|b| format!("{b:02x}")).collect::<Vec<String>>().join(" ");
-            let printable: String = raw_bytes.iter().take(128).map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' }).collect();
+            let hex_preview: String = raw_bytes
+                .iter()
+                .take(128)
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<String>>()
+                .join(" ");
+            let printable: String = raw_bytes
+                .iter()
+                .take(128)
+                .map(|b| {
+                    if b.is_ascii_graphic() || *b == b' ' {
+                        *b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
             tracing::debug!(
                 direction = "agent->relay",
                 size,
@@ -1303,14 +1592,10 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
     let mut relay_to_client = tokio::spawn(async move {
         while let Some(Ok(msg)) = upstream_rx.next().await {
             let (axum_msg, size) = match msg {
-                tungstenite::Message::Text(ref t) => (
-                    Message::Text(t.to_string().into()),
-                    t.len(),
-                ),
-                tungstenite::Message::Binary(ref b) => (
-                    Message::Binary(b.to_vec().into()),
-                    b.len(),
-                ),
+                tungstenite::Message::Text(ref t) => (Message::Text(t.to_string().into()), t.len()),
+                tungstenite::Message::Binary(ref b) => {
+                    (Message::Binary(b.to_vec().into()), b.len())
+                }
                 tungstenite::Message::Ping(p) => {
                     let _ = client_tx.send(Message::Ping(p.to_vec().into())).await;
                     continue;
@@ -1330,8 +1615,23 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
                 tungstenite::Message::Binary(b) => b.to_vec(),
                 _ => vec![],
             };
-            let hex_preview: String = raw_bytes.iter().take(128).map(|b| format!("{b:02x}")).collect::<Vec<String>>().join(" ");
-            let printable: String = raw_bytes.iter().take(128).map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' }).collect();
+            let hex_preview: String = raw_bytes
+                .iter()
+                .take(128)
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<String>>()
+                .join(" ");
+            let printable: String = raw_bytes
+                .iter()
+                .take(128)
+                .map(|b| {
+                    if b.is_ascii_graphic() || *b == b' ' {
+                        *b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
             tracing::debug!(
                 direction = "relay->agent",
                 size,
@@ -1402,15 +1702,25 @@ async fn agt_registry_proxy(
 
     match req.timeout(std::time::Duration::from_secs(10)).send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let body = resp.bytes().await.unwrap_or_default();
-            (status, [(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response()
+            (
+                status,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(url = %url, error = %e, "AGT registry proxy failed");
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": format!("Registry unreachable: {}", e)
-            }))).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("Registry unreachable: {}", e)
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -1431,37 +1741,48 @@ async fn blocklist_check(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let input = body.get("domain")
+    let input = body
+        .get("domain")
         .or_else(|| body.get("url"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
     if input.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Provide 'domain' or 'url' field"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Provide 'domain' or 'url' field"
+            })),
+        )
+            .into_response();
     }
 
     match state.blocklist.is_blocked(input).await {
-        crate::blocklist::BlockResult::Blocked { reason, domain } => {
-            (StatusCode::OK, Json(serde_json::json!({
+        crate::blocklist::BlockResult::Blocked { reason, domain } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
                 "blocked": true,
                 "domain": domain,
                 "reason": reason,
-            }))).into_response()
-        }
-        crate::blocklist::BlockResult::Allowed => {
-            (StatusCode::OK, Json(serde_json::json!({
+            })),
+        )
+            .into_response(),
+        crate::blocklist::BlockResult::Allowed => (
+            StatusCode::OK,
+            Json(serde_json::json!({
                 "blocked": false,
                 "domain": input,
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
 fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{:x}-{:x}", d.as_secs(), d.subsec_nanos())
 }
 
@@ -1480,7 +1801,10 @@ async fn egress_learn_toggle(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     state.blocklist.set_learn_mode(enabled);
     Json(serde_json::json!({
         "learn_mode": enabled,
@@ -1519,9 +1843,13 @@ async fn egress_fetch(
     let req_headers = req.get("headers").and_then(|v| v.as_object());
 
     if url.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Missing 'url' field"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing 'url' field"
+            })),
+        )
+            .into_response();
     }
 
     // SSRF protection: reject requests to localhost/private IPs
@@ -1537,10 +1865,14 @@ async fn egress_fetch(
             };
             if is_private {
                 tracing::warn!(url = %url, "Egress fetch blocked: private/internal target");
-                return (StatusCode::FORBIDDEN, Json(serde_json::json!({
-                    "error": "Cannot fetch from private/internal addresses",
-                    "url": url,
-                }))).into_response();
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Cannot fetch from private/internal addresses",
+                        "url": url,
+                    })),
+                )
+                    .into_response();
             }
         }
     }
@@ -1550,11 +1882,11 @@ async fn egress_fetch(
     // Check egress access: blocklist → allowlist → pending
     if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
         tracing::warn!(url = %url, reason = %reason, "Egress fetch denied");
-        state.governance.audit.append(
-            &format!("egress:fetch:{}", url),
-            "deny",
-            &reason,
-        ).await;
+        state
+            .governance
+            .audit
+            .append(&format!("egress:fetch:{}", url), "deny", &reason)
+            .await;
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
@@ -1566,11 +1898,15 @@ async fn egress_fetch(
     state.blocklist.record_learned(url).await;
 
     // Audit log
-    state.governance.audit.append(
-        &format!("egress:fetch:{}", url),
-        "allow",
-        &format!("{} request to {}", method, url),
-    ).await;
+    state
+        .governance
+        .audit
+        .append(
+            &format!("egress:fetch:{}", url),
+            "allow",
+            &format!("{} request to {}", method, url),
+        )
+        .await;
 
     tracing::info!(url = %url, method = %method, "Egress fetch proxied");
 
@@ -1588,8 +1924,11 @@ async fn egress_fetch(
 
     // Allowlisted request headers — block dangerous ones
     const BLOCKED_REQ_HEADERS: &[&str] = &[
-        "host", "transfer-encoding", "content-length",
-        "proxy-authorization", "proxy-connection",
+        "host",
+        "transfer-encoding",
+        "content-length",
+        "proxy-authorization",
+        "proxy-connection",
     ];
     if let Some(headers) = req_headers {
         for (k, v) in headers {
@@ -1598,9 +1937,10 @@ async fn egress_fetch(
                 continue;
             }
             if let Some(val) = v.as_str()
-                && let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
-                    request = request.header(name, val);
-                }
+                && let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+            {
+                request = request.header(name, val);
+            }
         }
     }
 
@@ -1610,22 +1950,34 @@ async fn egress_fetch(
 
     const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 
-    match request.timeout(std::time::Duration::from_secs(30)).send().await {
+    match request
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
         Ok(resp) => {
             let status = resp.status().as_u16();
             // Strip sensitive response headers
             const STRIPPED_RESP_HEADERS: &[&str] = &[
-                "set-cookie", "authorization", "x-api-key", "x-auth-token",
-                "proxy-authenticate", "proxy-authorization", "www-authenticate",
+                "set-cookie",
+                "authorization",
+                "x-api-key",
+                "x-auth-token",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "www-authenticate",
             ];
-            let resp_headers: serde_json::Map<String, serde_json::Value> = resp.headers()
+            let resp_headers: serde_json::Map<String, serde_json::Value> = resp
+                .headers()
                 .iter()
                 .filter_map(|(k, v)| {
                     let name = k.as_str();
                     if STRIPPED_RESP_HEADERS.contains(&name) {
                         None
                     } else {
-                        v.to_str().ok().map(|val| (name.to_string(), serde_json::Value::String(val.to_string())))
+                        v.to_str().ok().map(|val| {
+                            (name.to_string(), serde_json::Value::String(val.to_string()))
+                        })
                     }
                 })
                 .collect();
@@ -1633,22 +1985,33 @@ async fn egress_fetch(
             let body_bytes = resp.bytes().await.unwrap_or_default();
             let body = if body_bytes.len() > MAX_RESPONSE_BYTES {
                 let truncated = String::from_utf8_lossy(&body_bytes[..MAX_RESPONSE_BYTES]);
-                format!("{}... [truncated at {} bytes]", truncated, MAX_RESPONSE_BYTES)
+                format!(
+                    "{}... [truncated at {} bytes]",
+                    truncated, MAX_RESPONSE_BYTES
+                )
             } else {
                 String::from_utf8_lossy(&body_bytes).into_owned()
             };
-            (StatusCode::OK, Json(serde_json::json!({
-                "status": status,
-                "headers": resp_headers,
-                "body": body,
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": status,
+                    "headers": resp_headers,
+                    "body": body,
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(url = %url, error = %e, "Egress fetch failed");
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": format!("Request failed: {}", e),
-                "url": url,
-            }))).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("Request failed: {}", e),
+                    "url": url,
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -1679,20 +2042,32 @@ async fn egress_approve(
 ) -> impl IntoResponse {
     let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
     if domain.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Missing 'domain' field"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing 'domain' field"
+            })),
+        )
+            .into_response();
     }
     state.blocklist.allow_domain(domain).await;
-    state.governance.audit.append(
-        &format!("egress:approve:{}", domain),
-        "approved",
-        &format!("Domain {} added to egress allowlist", domain),
-    ).await;
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": "approved",
-        "domain": domain,
-    }))).into_response()
+    state
+        .governance
+        .audit
+        .append(
+            &format!("egress:approve:{}", domain),
+            "approved",
+            &format!("Domain {} added to egress allowlist", domain),
+        )
+        .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "approved",
+            "domain": domain,
+        })),
+    )
+        .into_response()
 }
 
 /// POST /egress/deny — deny and remove a pending domain request.
@@ -1703,20 +2078,32 @@ async fn egress_deny(
 ) -> impl IntoResponse {
     let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
     if domain.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Missing 'domain' field"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing 'domain' field"
+            })),
+        )
+            .into_response();
     }
     state.blocklist.deny_domain(domain).await;
-    state.governance.audit.append(
-        &format!("egress:deny:{}", domain),
-        "denied",
-        &format!("Domain {} denied and removed from pending", domain),
-    ).await;
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": "denied",
-        "domain": domain,
-    }))).into_response()
+    state
+        .governance
+        .audit
+        .append(
+            &format!("egress:deny:{}", domain),
+            "denied",
+            &format!("Domain {} denied and removed from pending", domain),
+        )
+        .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "denied",
+            "domain": domain,
+        })),
+    )
+        .into_response()
 }
 
 /// POST /egress/enforce — graduate from learn mode to enforcement.
@@ -1726,11 +2113,15 @@ async fn egress_deny(
 async fn egress_enforce(State(state): State<AppState>) -> impl IntoResponse {
     let learned = state.blocklist.get_learned_domains().await;
     if learned.is_empty() && !state.blocklist.is_learn_mode() {
-        return (StatusCode::OK, Json(serde_json::json!({
-            "status": "already_enforcing",
-            "learn_mode": false,
-            "allowlist_count": state.blocklist.get_allowlist().await.len(),
-        }))).into_response();
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "already_enforcing",
+                "learn_mode": false,
+                "allowlist_count": state.blocklist.get_allowlist().await.len(),
+            })),
+        )
+            .into_response();
     }
 
     // Promote each learned domain to the allowlist
@@ -1744,11 +2135,19 @@ async fn egress_enforce(State(state): State<AppState>) -> impl IntoResponse {
 
     let allowlist = state.blocklist.get_allowlist().await;
 
-    state.governance.audit.append(
-        "egress:enforce",
-        "enforced",
-        &format!("Graduated to enforcement: {} learned domains promoted to allowlist ({} total)", learned.len(), allowlist.len()),
-    ).await;
+    state
+        .governance
+        .audit
+        .append(
+            "egress:enforce",
+            "enforced",
+            &format!(
+                "Graduated to enforcement: {} learned domains promoted to allowlist ({} total)",
+                learned.len(),
+                allowlist.len()
+            ),
+        )
+        .await;
 
     tracing::info!(
         promoted = learned.len(),
@@ -1756,12 +2155,16 @@ async fn egress_enforce(State(state): State<AppState>) -> impl IntoResponse {
         "Egress enforcement activated — learned domains promoted to allowlist"
     );
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": "enforcing",
-        "promoted": learned.len(),
-        "allowlist_count": allowlist.len(),
-        "allowlist": allowlist,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "enforcing",
+            "promoted": learned.len(),
+            "allowlist_count": allowlist.len(),
+            "allowlist": allowlist,
+        })),
+    )
+        .into_response()
 }
 
 // ==========================================================================
@@ -1785,11 +2188,16 @@ async fn sandbox_spawn(
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
     match spawn::create_sandbox(&parent_name, &req).await {
-        Ok(resp) => (StatusCode::CREATED, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(resp).unwrap()),
+        )
+            .into_response(),
         Err(msg) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": msg })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -1826,7 +2234,8 @@ async fn sandbox_status(Path(name): Path<String>) -> impl IntoResponse {
         Err(msg) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": msg })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -1849,6 +2258,7 @@ async fn sandbox_delete(
         Err(msg) => (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": msg })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
