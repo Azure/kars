@@ -54,9 +54,11 @@ export function pushCommand(): Command {
       // Define all images
       const images: Array<{ name: string; tag: string; dockerfile: string; context?: string; buildArgs?: string[] }> = [
         { name: "controller", tag: "azureclaw-controller:latest", dockerfile: "controller/Dockerfile" },
-        { name: "router", tag: "azureclaw-inference-router:latest", dockerfile: "inference-router/Dockerfile" },
+        { name: "router", tag: "azureclaw-inference-router:latest", dockerfile: "inference-router/Dockerfile",
+          buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
-          buildArgs: ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`] },
+          buildArgs: ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
+                      "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
         { name: "relay", tag: "agentmesh-relay:latest", dockerfile: "vendor/agentmesh-relay/Dockerfile", context: "vendor/agentmesh-relay" },
         { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry" },
       ];
