@@ -9,6 +9,10 @@
 
 set -e
 
+# Raise FD limit — the inference router and gateway share this process namespace.
+# Default 1024 is too low for long-running containers with many HTTP connections.
+ulimit -n 65536 2>/dev/null || true
+
 # Detect if running as root (dev mode via Docker) or non-root (AKS pod spec override).
 # In dev: Dockerfile has no USER directive, entrypoint runs as root, uses runuser to
 #   start router as UID 1001 and everything else as UID 1000.
