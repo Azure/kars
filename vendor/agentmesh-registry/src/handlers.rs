@@ -251,6 +251,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route("/registry/lookup", web::get().to(lookup_agent))
             .route("/registry/search", web::get().to(search_capabilities))
             .route("/registry/status", web::post().to(update_status))
+            .route("/registry/heartbeat", web::post().to(heartbeat))
             .route("/registry/capabilities", web::post().to(update_capabilities))
             .route("/registry/reputation", web::post().to(submit_reputation))
             .route("/registry/stats", web::get().to(registry_stats))
@@ -423,7 +424,7 @@ async fn register_agent(
         });
     }
 
-    // Check if already registered
+    // Check if already registered (same AMID)
     if let Ok(Some(_)) = db::get_agent_by_amid(pool, &req.amid).await {
         return HttpResponse::Conflict().json(RegisterResponse {
             success: false,
@@ -432,6 +433,20 @@ async fn register_agent(
             certificate: None,
             error: Some("AMID already registered".to_string()),
         });
+    }
+
+    // Clean up ghost entries: delete old agents with the same display_name
+    // (from prior container instances that generated different AMIDs)
+    if let Some(ref name) = req.display_name {
+        match db::delete_stale_by_display_name(pool, name, &req.amid).await {
+            Ok(deleted) if deleted > 0 => {
+                info!("Cleaned up {} stale registration(s) for display_name '{}'", deleted, name);
+            }
+            Err(e) => {
+                warn!("Failed to clean up stale registrations for '{}': {}", name, e);
+            }
+            _ => {}
+        }
     }
 
     // Determine tier and validate OAuth token
@@ -465,7 +480,7 @@ async fn register_agent(
         capabilities: req.capabilities.clone(),
         relay_endpoint: req.relay_endpoint.clone(),
         direct_endpoint: req.direct_endpoint.clone(),
-        status: PresenceStatus::Offline,
+        status: PresenceStatus::Online,
         reputation_score: match tier {
             TrustTier::Anonymous => 0.5,
             TrustTier::Verified => 0.6,
@@ -673,6 +688,36 @@ async fn update_status(
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Update failed"
             }))
+        }
+    }
+}
+
+/// Lightweight heartbeat — updates last_seen and sets status to online.
+/// No signature required; called by agents every 30s to stay visible.
+async fn heartbeat(
+    state: web::Data<Arc<AppState>>,
+    req: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let pool = match state.require_ready() {
+        Ok(p) => p,
+        Err(_) => return service_unavailable(),
+    };
+
+    let amid = match req.get("amid").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Missing 'amid' field"
+            }));
+        }
+    };
+
+    match db::heartbeat_agent(pool, amid).await {
+        Ok(true) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Ok(false) => HttpResponse::NotFound().json(serde_json::json!({ "error": "Agent not found" })),
+        Err(e) => {
+            error!("Heartbeat error for {}: {}", amid, e);
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Heartbeat failed" }))
         }
     }
 }

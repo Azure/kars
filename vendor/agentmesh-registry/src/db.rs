@@ -63,7 +63,7 @@ pub async fn search_by_capability(
     pool: &PgPool,
     req: &CapabilitySearchRequest,
 ) -> Result<(Vec<Agent>, u64)> {
-    // Count total
+    // Count total (only recently-seen agents)
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM agents
@@ -76,6 +76,7 @@ pub async fn search_by_capability(
              END <= $2)
         AND ($3 IS NULL OR reputation_score >= $3)
         AND ($4 IS NULL OR status = $4)
+        AND last_seen > NOW() - INTERVAL '5 minutes'
         "#
     )
     .bind(&req.capability)
@@ -85,7 +86,7 @@ pub async fn search_by_capability(
     .fetch_one(pool)
     .await?;
 
-    // Fetch page
+    // Fetch page — prefer recently-seen agents, exclude stale (>5min)
     let agents = sqlx::query_as::<_, Agent>(
         r#"
         SELECT id, amid, signing_public_key, exchange_public_key, tier,
@@ -102,7 +103,8 @@ pub async fn search_by_capability(
              END <= $2)
         AND ($3 IS NULL OR reputation_score >= $3)
         AND ($4 IS NULL OR status = $4)
-        ORDER BY reputation_score DESC, last_seen DESC
+        AND last_seen > NOW() - INTERVAL '5 minutes'
+        ORDER BY last_seen DESC, reputation_score DESC
         LIMIT $5 OFFSET $6
         "#
     )
@@ -133,6 +135,47 @@ pub async fn update_agent_status(
     )
     .bind(amid)
     .bind(status)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Delete stale agents with the same display_name (different AMID).
+/// Called during registration to prevent ghost entries from respawned containers.
+pub async fn delete_stale_by_display_name(
+    pool: &PgPool,
+    display_name: &str,
+    current_amid: &str,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM agents
+        WHERE display_name = $1 AND amid != $2
+        "#
+    )
+    .bind(display_name)
+    .bind(current_amid)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Heartbeat: update last_seen and set status to online (no signature required).
+pub async fn heartbeat_agent(
+    pool: &PgPool,
+    amid: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE agents
+        SET status = 'online', last_seen = $2, updated_at = $2
+        WHERE amid = $1
+        "#
+    )
+    .bind(amid)
     .bind(Utc::now())
     .execute(pool)
     .await?;

@@ -987,12 +987,28 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         await agtReconnect(log);
       }
       // Heartbeat: ping the relay proxy to keep the connection warm
+      // and send a registry heartbeat to keep status as "online"
       try {
         const http = await import("node:http");
         const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
         req.on("error", () => {});
         req.end();
       } catch { /* best effort */ }
+      // Registry heartbeat: update last_seen so other agents see us as online
+      if (agtIdentity) {
+        try {
+          const http = await import("node:http");
+          const body = JSON.stringify({ amid: agtIdentity.amid });
+          const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+            timeout: 3000,
+          }, () => {});
+          req.on("error", () => {});
+          req.write(body);
+          req.end();
+        } catch { /* best effort */ }
+      }
     }, 30_000);
     // Don't let the timer prevent process exit
     if (agtReconnectTimer.unref) agtReconnectTimer.unref();
