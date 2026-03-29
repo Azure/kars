@@ -25,8 +25,12 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
     rm /tmp/node.tar.gz
 
 # Install OpenClaw
+# NOTE: Docker caches RUN layers by instruction text, so @latest won't
+# re-pull once cached.  Pass --build-arg OPENCLAW_CACHE_BUST=$(date +%s)
+# or change the value below to force a fresh pull.
 ARG OPENCLAW_VERSION=latest
-RUN npm install -g openclaw@${OPENCLAW_VERSION}
+ARG OPENCLAW_CACHE_BUST=0
+RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
 
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
 # AzureClaw's runtime security (egress guard, Content Safety, read-only rootfs)

@@ -153,6 +153,7 @@ export function devCommand(): Command {
             "build",
             "--build-arg", `AZURELINUX_BASE=${baseImage}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
+            "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`,
             "-t", "azureclaw-sandbox:dev",
             "-f", dockerfilePath,
             repoRoot,
