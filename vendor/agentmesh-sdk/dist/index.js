@@ -2796,6 +2796,7 @@ var AgentMeshClient = class _AgentMeshClient {
   knockHandler;
   e2eVerifiedPeers = /* @__PURE__ */ new Set();
   knockAcceptedPeers = /* @__PURE__ */ new Set();
+  knockPendingPeers = /* @__PURE__ */ new Map(); // PATCH: track in-flight KNOCK → Promise<void>
   knockEnforcementEnabled = false;
   eventHandlers = /* @__PURE__ */ new Map();
   // Circuit breaker state
@@ -2907,22 +2908,82 @@ var AgentMeshClient = class _AgentMeshClient {
         const parsed = JSON.parse(rawPayload);
         if (msgType === "knock") {
           const request = parsed.request || parsed;
-          const result = await this.handleIncomingKnock(fromAmid, request);
-          if (result.accept) {
-            try {
-              const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
-              await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
-            } catch {
+          // PATCH: Track this KNOCK as pending so concurrent messages wait
+          let resolveKnockPending;
+          this.knockPendingPeers.set(fromAmid, new Promise((r) => { resolveKnockPending = r; }));
+          try {
+            const result = await this.handleIncomingKnock(fromAmid, request);
+            if (result.accept) {
+              try {
+                const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
+                await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
+              } catch {
+              }
+            } else if (this.knockEnforcementEnabled) {
+              console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
             }
-          } else if (this.knockEnforcementEnabled) {
-            console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
+          } finally {
+            // PATCH: Unblock any messages waiting on this KNOCK
+            this.knockPendingPeers.delete(fromAmid);
+            resolveKnockPending();
           }
         } else if (this.knockEnforcementEnabled && this.knockHandler && !this.knockAcceptedPeers.has(fromAmid)) {
-          console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
-          for (const handler of this.errorHandlers) {
-            try {
-              handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
-            } catch {
+          // PATCH: If a KNOCK from this peer is being processed, wait instead of rejecting
+          if (this.knockPendingPeers.has(fromAmid)) {
+            await this.knockPendingPeers.get(fromAmid);
+          }
+          // Re-check after waiting — KNOCK may have been accepted
+          if (this.knockAcceptedPeers.has(fromAmid)) {
+            // Fall through: re-parse and handle as normal message
+            if (parsed.type === "encrypted" && parsed.x3dh) {
+              try {
+                const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
+                const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
+                this.activeSessions.set(fromAmid, sessionId);
+                const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+                this.emitE2EVerified(fromAmid);
+                for (const handler of this.messageHandlers) {
+                  try { handler(fromAmid, decrypted); } catch {}
+                }
+              } catch (e) {
+                console.error("[AGT] E2E decrypt failed (post-KNOCK wait):", e?.message || e);
+                for (const handler of this.errorHandlers) {
+                  try { handler("decrypt_failed", fromAmid, e?.message || "unknown"); } catch {}
+                }
+              }
+            } else if (parsed.type === "encrypted") {
+              const sessionId = this.activeSessions.get(fromAmid);
+              if (sessionId) {
+                try {
+                  const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+                  this.emitE2EVerified(fromAmid);
+                  for (const handler of this.messageHandlers) {
+                    try { handler(fromAmid, decrypted); } catch {}
+                  }
+                } catch (decErr) {
+                  console.error("[AGT] E2E decrypt failed (post-KNOCK wait):", decErr?.message || decErr);
+                  for (const handler of this.errorHandlers) {
+                    try { handler("decrypt_failed", fromAmid, decErr?.message || "unknown"); } catch {}
+                  }
+                }
+              } else {
+                console.error(`[AGT] Encrypted message from ${fromAmid} but no session (post-KNOCK wait)`);
+                for (const handler of this.errorHandlers) {
+                  try { handler("no_session", fromAmid, "No encryption session established"); } catch {}
+                }
+              }
+            } else {
+              for (const handler of this.messageHandlers) {
+                try { handler(fromAmid, parsed); } catch {}
+              }
+            }
+          } else {
+            console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
+            for (const handler of this.errorHandlers) {
+              try {
+                handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
+              } catch {
+              }
             }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
