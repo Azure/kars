@@ -59,8 +59,10 @@ export function pushCommand(): Command {
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
                       "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
-        { name: "relay", tag: "agentmesh-relay:latest", dockerfile: "vendor/agentmesh-relay/Dockerfile", context: "vendor/agentmesh-relay" },
-        { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry" },
+        { name: "relay", tag: "agentmesh-relay:latest", dockerfile: "vendor/agentmesh-relay/Dockerfile", context: "vendor/agentmesh-relay",
+          buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
+        { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry",
+          buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
       ];
 
       // Filter if --only specified

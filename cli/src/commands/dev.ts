@@ -169,7 +169,8 @@ export function devCommand(): Command {
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
             await execa("docker", [
-              "build", "-t", "agentmesh-relay:dev",
+              "build", "--build-arg", `CACHE_BUST=${Date.now()}`,
+              "-t", "agentmesh-relay:dev",
               path.join(repoRoot, "vendor/agentmesh-relay"),
             ], { stdio: "inherit" });
             console.log();
@@ -178,7 +179,8 @@ export function devCommand(): Command {
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-registry (Rust + React)...\n"));
             await execa("docker", [
-              "build", "-t", "agentmesh-registry:dev",
+              "build", "--build-arg", `CACHE_BUST=${Date.now()}`,
+              "-t", "agentmesh-registry:dev",
               path.join(repoRoot, "vendor/agentmesh-registry"),
             ], { stdio: "inherit" });
             console.log();
