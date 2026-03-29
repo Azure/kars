@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
         public
             .merge(protected)
             .with_state(state)
+            .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
                 std::env::var("ROUTER_CONCURRENCY_LIMIT")
                     .ok()
@@ -146,6 +147,22 @@ async fn shutdown_signal() {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
     }
+}
+
+/// Prevent HTTP/1.1 keep-alive connection accumulation (Envoy-style
+/// `max_requests_per_connection: 1`).  On a localhost sidecar the overhead
+/// of a fresh TCP handshake is ~100 µs — negligible vs. the risk of FD
+/// exhaustion that stalls the Telegram CONNECT proxy sharing this process.
+/// WebSocket upgrades are excluded so mesh relay connections work normally.
+async fn connection_close_middleware(req: Request, next: Next) -> impl IntoResponse {
+    let mut response = next.run(req).await;
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        response.headers_mut().insert(
+            axum::http::header::CONNECTION,
+            axum::http::HeaderValue::from_static("close"),
+        );
+    }
+    response
 }
 
 /// Middleware that gates protected endpoints for non-localhost callers.
