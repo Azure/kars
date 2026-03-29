@@ -50,6 +50,9 @@ COPY src ./src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
+# Cache-bust: changing this ARG invalidates the cargo build layer
+ARG CACHE_BUST=0
+
 # Build release binary
 RUN touch src/main.rs && cargo build --release
 
