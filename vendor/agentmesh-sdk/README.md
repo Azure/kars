@@ -36,6 +36,19 @@ set during initialization.
 Fixed to create and send a KNOCK message through `transport.send()` before
 activating the session.
 
+### 5. KNOCK race condition — message before KNOCK accepted
+**Files:** `dist/index.js`, `dist/index.cjs`
+
+When KNOCK and encrypted message arrive near-simultaneously (1ms apart),
+the async KNOCK handler (trust lookup ~33ms) hasn't finished when the
+message is processed. The message hits the `!knockAcceptedPeers.has()`
+check and is rejected.
+
+Fix: Added `knockPendingPeers` Map to track in-flight KNOCK processing.
+When a message arrives for a peer with a pending KNOCK, it awaits the
+KNOCK resolution instead of immediately rejecting. If KNOCK is accepted,
+the message is processed normally. If rejected, it's blocked as before.
+
 ## Known Remaining Gap
 
 The SDK's relay transport `receive` events are not wired to
