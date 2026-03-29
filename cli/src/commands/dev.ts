@@ -139,6 +139,7 @@ export function devCommand(): Command {
             console.log(chalk.dim("  Building inference-router (Rust)...\n"));
             await execa("docker", [
               "build",
+              "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
               "-t", routerImage,
               "-f", routerDockerfile,
               repoRoot,
