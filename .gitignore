@@ -467,3 +467,4 @@ cli/*.test.*
 
 # Internal planning docs (not for repo)
 SECURITY-HARDENING-PLAN.md
+.DS_Store
