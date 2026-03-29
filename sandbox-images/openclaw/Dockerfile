@@ -175,7 +175,6 @@ COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/tsup.config.ts /opt/
 COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
 COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
 RUN cd /opt/azureclaw-vendored-sdk && npm install --ignore-scripts 2>/dev/null || true && \
-    npx tsup 2>/dev/null || echo "SDK build skipped (using pre-built dist)" && \
     npm prune --omit=dev 2>/dev/null || true
 # Overlay vendored SDK into plugin node_modules (patched dist + deps)
 RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
