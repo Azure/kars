@@ -20,6 +20,9 @@ COPY Cargo.toml Cargo.lock* ./
 COPY inference-router/ inference-router/
 COPY controller/ controller/
 
+# Cache-bust: changing this ARG invalidates the cargo build layer
+ARG ROUTER_CACHE_BUST=0
+
 RUN cargo build --release --package azureclaw-inference-router
 
 # ─── Runtime ──────────────────────────────────────────────────────────────────
