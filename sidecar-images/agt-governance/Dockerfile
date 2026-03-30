@@ -17,10 +17,10 @@ WORKDIR /app
 
 # Install AGT from vendored wheels (GitHub release v3.0.0, SHA256-verified)
 # Includes agentmesh-platform, agent-os-kernel, agent-hypervisor, and their
-# runtime dependencies (email-validator, jsonschema, rpds-py).
+# runtime dependencies (email-validator, jsonschema). All wheels are pure-Python.
 COPY vendor/agt-wheels/ /tmp/agt-wheels/
 RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
-    pip3 install --no-cache-dir pydantic pyyaml idna dnspython rpds-py && \
+    pip3 install --no-cache-dir pydantic pyyaml idna dnspython && \
     rm -rf /tmp/agt-wheels
 
 COPY sidecar-images/agt-governance/server.py ./
