@@ -1,132 +1,107 @@
 # AzureClaw AGT Governance Policy — Application Layer Only
 #
+# Uses agentmesh PolicyEngine condition expressions (field == 'value',
+# boolean fields, and/or compound). The sidecar pre-processes incoming
+# action strings into structured context dicts for evaluation.
+#
 # Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
-# are handled by AzureClaw at kernel/router level. AGT only governs
-# application-level behavior that AzureClaw can't see.
+# are handled by AzureClaw at kernel/router level.
 #
 # Rule: If AzureClaw enforces it at kernel/network/router, AGT doesn't touch it.
 
-version: "1.0"
-agent: openclaw
+name: azureclaw-default
 description: AzureClaw behavioral governance (tool-level only, no infra overlap)
+agents: ["*"]
+default_action: deny
 
-policies:
-  # Tool-level restrictions — AzureClaw CAN'T see tool calls before execution
-  - name: shell-safety
-    type: capability
-    allowed_actions:
-      - "shell:ls"
-      - "shell:cat"
-      - "shell:grep"
-      - "shell:find"
-      - "shell:echo"
-      - "shell:head"
-      - "shell:tail"
-      - "shell:wc"
-      - "shell:sort"
-      - "shell:uniq"
-      - "shell:diff"
-      - "shell:python"
-      - "shell:python3"
-      - "shell:pip"
-      - "shell:node"
-      - "shell:npm"
-      - "shell:git"
-      - "shell:curl"
-      - "shell:jq"
-      - "shell:sed"
-      - "shell:awk"
-    denied_actions:
-      - "shell:rm -rf /*"
-      - "shell:rm -rf /"
-      - "shell:dd"
-      - "shell:mkfs"
-      - "shell:shutdown"
-      - "shell:reboot"
-      - "shell:chmod 777"
-      - "shell:chown"
-      - "shell:mount"
-      - "shell:umount"
+rules:
+  # ── Shell safety: allow known-safe commands ──────────────────────────────
+  - name: shell-safe-commands
+    condition: "action.category == 'shell' and action.safe"
+    action: allow
+    priority: 100
+    description: "Allow pre-approved shell commands (ls, cat, grep, etc.)"
 
-  # Destructive operations require approval
+  - name: shell-destructive-deny
+    condition: "action.category == 'shell' and action.destructive"
+    action: deny
+    priority: 200
+    description: "Deny destructive shell commands (rm -rf, dd, mkfs, etc.)"
+
+  - name: shell-unknown-warn
+    condition: "action.category == 'shell'"
+    action: deny
+    priority: 50
+    description: "Deny-by-default for unrecognised shell commands"
+
+  # ── Destructive file operations require approval ─────────────────────────
   - name: destructive-approval
-    type: approval
-    actions:
-      - "delete_*"
-      - "shell:rm *"
-      - "file:write:.env"
-      - "file:write:.bashrc"
-    min_approvals: 1
-    approval_timeout_minutes: 15
+    condition: "action.destructive"
+    action: require_approval
+    priority: 190
+    approvers: ["operator"]
+    description: "Destructive operations require operator approval"
 
-  # Tool-specific rate limits (different from AzureClaw's token budget)
-  - name: tool-rate-limit
-    type: rate_limit
-    scope: tool_calls
-    max_calls: 20
-    window: 1m
-    actions: ["shell:*"]
-
-  # ── Issues #7, #8: Inference + spawn policy gates ────────────────────────
-
-  # Inference rate limit — cap chat completions per minute (#12b)
+  # ── Inference rate limit (#7, #12) ───────────────────────────────────────
   - name: inference-rate-limit
-    type: rate_limit
-    max_calls: 60
-    window: 1m
-    actions: ["inference:chat_completions:*"]
+    condition: "action.category == 'inference'"
+    action: allow
+    limit: "60/minute"
+    priority: 80
+    description: "Cap chat completions at 60 per minute"
 
-  # Spawn cap — max concurrent sub-agents (#8)
+  # ── Spawn limit (#8) ────────────────────────────────────────────────────
   - name: spawn-limit
-    type: rate_limit
-    max_calls: 5
-    window: 1h
-    actions: ["spawn:create:*"]
+    condition: "action.category == 'spawn'"
+    action: allow
+    limit: "5/hour"
+    priority: 80
+    description: "Cap sub-agent spawns at 5 per hour"
 
-  # ── Issue #9: Response validation ────────────────────────────────────────
-
-  # Block prompt injection patterns in model responses
+  # ── Response content safety (#9) ─────────────────────────────────────────
   - name: response-content-safety
-    type: pattern
-    scope: output
-    blocked_patterns:
-      - "ignore previous instructions"
-      - "ignore all prior"
-      - "you are now"
-      - "new system prompt"
-      - "DROP TABLE"
-      - "UNION SELECT"
-      - "rm -rf /"
-      - "; curl "
-      - "<script>"
+    condition: "action.category == 'output' and action.injection_detected"
+    action: deny
+    priority: 210
+    description: "Block model responses containing prompt injection patterns"
 
-  # ── Issue #10: Mesh message policy ───────────────────────────────────────
+  - name: response-allow
+    condition: "action.category == 'output'"
+    action: allow
+    priority: 40
+    description: "Allow clean model output"
 
-  # Require trust verification for incoming mesh messages
-  - name: mesh-receive-trust
-    type: capability
-    match:
-      pattern: "mesh:receive:.*"
-    config:
-      require_trust_score: 300
+  # ── Mesh message policy (#10) ────────────────────────────────────────────
+  - name: mesh-receive-untrusted
+    condition: "action.category == 'mesh' and action.untrusted"
+    action: deny
+    priority: 180
+    description: "Deny messages from agents below trust threshold"
 
-  # ── Issue #14: Bulk promote gate ─────────────────────────────────────────
+  - name: mesh-receive-trusted
+    condition: "action.category == 'mesh'"
+    action: allow
+    priority: 70
+    description: "Allow messages from trusted agents"
 
-  # Bulk operations (promote, enforce, delete-all) require approval
+  # ── Bulk operations gate (#14) ───────────────────────────────────────────
   - name: bulk-operations-approval
-    type: approval
-    actions:
-      - "egress:enforce"
-      - "egress:approve_all"
-      - "admin:promote"
-      - "admin:bulk_*"
-    min_approvals: 1
-    approval_timeout_minutes: 30
+    condition: "action.category == 'admin' and action.bulk"
+    action: require_approval
+    priority: 170
+    approvers: ["operator"]
+    description: "Bulk admin operations require operator approval"
 
-  # NOT included — AzureClaw handles these at infrastructure level:
-  # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
-  # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
-  # ✗ content-safety (Azure AI Content Safety — router-level enforcement)
-  # ✗ token-budgets (inference router — router-level enforcement)
-  # ✗ IMDS-blocking (iptables UID-based — kernel-level enforcement)
-  # ✗ rate-limit for API calls (ConcurrencyLimitLayer — router-level enforcement)
+  - name: admin-allow
+    condition: "action.category == 'admin'"
+    action: allow
+    priority: 60
+    description: "Allow non-bulk admin operations"
+
+# NOT included — AzureClaw handles these at infrastructure level:
+# ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
+# ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
+# ✗ content-safety (Azure AI Content Safety — router-level enforcement)
+# ✗ token-budgets (inference router — router-level enforcement)
+# ✗ IMDS-blocking (iptables UID-based — kernel-level enforcement)
+# ✗ rate-limit for API calls (ConcurrencyLimitLayer — router-level enforcement)
