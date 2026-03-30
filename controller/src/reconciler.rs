@@ -855,6 +855,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     {"name": "AGT_METRICS_PORT", "value": "9091"},
                     {"name": "SANDBOX_NAME", "value": &name},
                     {"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()},
+                    {"name": "AGT_TRUST_DB", "value": "/tmp/agt/trust_scores.json"},
                     {"name": "NODE_ENV", "value": "production"}
                 ],
                 "securityContext": {
@@ -865,7 +866,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 },
                 "volumeMounts": [
                     {"name": "agt-policy", "mountPath": "/etc/agt/policies", "readOnly": true},
-                    {"name": "tmp", "mountPath": "/tmp"}
+                    {"name": "agt-data", "mountPath": "/tmp/agt"},
+                    {"name": "tmp", "mountPath": "/tmp", "subPath": "agt-tmp"}
                 ],
                 "resources": {
                     "requests": {"cpu": "50m", "memory": "48Mi"},
@@ -882,6 +884,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     "periodSeconds": 10
                 }
             }));
+
+            // Add writable emptyDir volume for trust store + audit log persistence
+            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
+                volumes.push(json!({
+                    "name": "agt-data",
+                    "emptyDir": {"sizeLimit": "10Mi"}
+                }));
+            }
         }
     }
 

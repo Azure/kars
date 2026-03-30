@@ -47,7 +47,7 @@ POLICY_DIR = os.environ.get(
 PORT = int(os.environ.get("AGT_PORT", "8081"))
 SANDBOX = os.environ.get("SANDBOX_NAME", "unknown")
 TRUST_THRESHOLD = int(os.environ.get("AGT_TRUST_THRESHOLD", "500"))
-TRUST_DB = os.environ.get("AGT_TRUST_DB", "/sandbox/.agt/trust_scores.json")
+TRUST_DB = os.environ.get("AGT_TRUST_DB", "/tmp/agt/trust_scores.json")
 
 # ── Initialize AGT components ───────────────────────────────────────
 
