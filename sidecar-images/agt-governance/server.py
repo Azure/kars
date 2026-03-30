@@ -2,25 +2,37 @@
 """AGT Governance Sidecar — thin HTTP wrapper around the official
 Agent Governance Toolkit (microsoft/agent-governance-toolkit v3.0.0).
 
-Exposes PolicyEngine, FlightRecorder (audit), and trust scoring over REST
-so the inference-router can proxy /agt/* routes to localhost:8081.
+Every governance function delegates to real AGT components:
+  - agentmesh.PolicyEngine        → policy evaluation + built-in rate limiting
+  - agentmesh.services.RateLimiter → HTTP-level token-bucket rate limiting
+  - agentmesh.storage.FileTrustStore → persistent JSON-backed trust scores
+  - agentmesh.AuditLog            → hash-chain tamper-evident audit
+  - agentmesh.AgentDID            → agent identity format validation
+  - agentmesh.services.AgentBehaviorMonitor → anomaly detection
 
 When the AGT Rust SDK ships, this sidecar is removed entirely — the
 router calls the crate inline with the same policy YAML.
 """
 
-import hashlib
 import json
 import logging
 import os
+import re
 import time
-import threading
+import yaml
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-# AGT SDK imports — verified against agent-governance-toolkit 3.0.0
-from agent_os import PolicyEngine, FlightRecorder, PolicyDecision
+# ── AGT SDK imports (all from agentmesh v3.0.0) ─────────────────────
+from agentmesh import (
+    AgentDID,
+    AuditLog,
+    PolicyEngine,
+)
+from agentmesh.services.rate_limiter import RateLimiter
+from agentmesh.storage.file_trust_store import FileTrustStore
+from agentmesh.services.behavior_monitor import AgentBehaviorMonitor
 
 logging.basicConfig(
     level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
@@ -29,20 +41,35 @@ logging.basicConfig(
 log = logging.getLogger("agt-governance")
 
 # ── Configuration ────────────────────────────────────────────────────
-POLICY_DIR = os.environ.get("AGT_POLICY_DIR",
-    os.environ.get("POLICY_DIR", "/sandbox/.openclaw/policies"))
+POLICY_DIR = os.environ.get(
+    "AGT_POLICY_DIR", os.environ.get("POLICY_DIR", "/sandbox/.openclaw/policies")
+)
 PORT = int(os.environ.get("AGT_PORT", "8081"))
 SANDBOX = os.environ.get("SANDBOX_NAME", "unknown")
 TRUST_THRESHOLD = int(os.environ.get("AGT_TRUST_THRESHOLD", "500"))
+TRUST_DB = os.environ.get("AGT_TRUST_DB", "/sandbox/.agt/trust_scores.json")
+AUDIT_SINK = os.environ.get("AGT_AUDIT_SINK", None)
+
+# ── Safe shell commands & destructive patterns ───────────────────────
+SAFE_SHELL = frozenset([
+    "ls", "cat", "grep", "find", "echo", "head", "tail", "wc", "sort",
+    "uniq", "diff", "python", "python3", "pip", "node", "npm", "git",
+    "curl", "jq", "sed", "awk",
+])
+DESTRUCTIVE_PATTERNS = re.compile(
+    r"rm\s+-rf\s+/|mkfs|shutdown|reboot|chmod\s+777|dd\s+if=", re.IGNORECASE
+)
+INJECTION_PATTERNS = re.compile(
+    r"ignore previous instructions|ignore all prior|you are now|"
+    r"new system prompt|DROP TABLE|UNION SELECT|rm -rf /|; curl |<script>",
+    re.IGNORECASE,
+)
 
 # ── Initialize AGT components ───────────────────────────────────────
-policy = PolicyEngine()
 
-# Load YAML policies into a simple lookup structure
-import yaml
-_allowed_actions = set()
-_denied_actions = set()
-_policy_names = []
+# 1. PolicyEngine — loads YAML policies, evaluates with condition expressions
+policy_engine = PolicyEngine()
+policy_count = 0
 
 if os.path.isdir(POLICY_DIR):
     for fname in sorted(os.listdir(POLICY_DIR)):
@@ -51,47 +78,37 @@ if os.path.isdir(POLICY_DIR):
         fpath = os.path.join(POLICY_DIR, fname)
         try:
             with open(fpath) as fh:
-                data = yaml.safe_load(fh)
-            for p in data.get("policies", []):
-                name = p.get("name", fname)
-                ptype = p.get("type", "")
-                _policy_names.append(name)
-
-                if ptype == "capability":
-                    for a in p.get("allowed_actions", []):
-                        _allowed_actions.add(a)
-                    for d in p.get("denied_actions", []):
-                        _denied_actions.add(d)
-
-                log.info("Loaded policy: %s (%s)", name, ptype)
+                content = fh.read()
+            data = yaml.safe_load(content)
+            if "name" in data and "rules" in data:
+                policy = policy_engine.load_yaml(content)
+                policy_count = len(policy.rules)
+                log.info("Loaded policy '%s': %d rules", policy.name, policy_count)
+            else:
+                log.warning("Skipping %s: missing 'name' or 'rules'", fname)
         except Exception as e:
             log.error("Failed to load %s: %s", fname, e)
 
-policy_count = len(_policy_names)
+# 2. RateLimiter — token-bucket per agent
+rate_limiter = RateLimiter(
+    global_rate=100, global_capacity=200,
+    per_agent_rate=10, per_agent_capacity=20,
+)
 
-def evaluate_action(action: str) -> tuple:
-    """Returns (decision, reason). Decision: 'allow' or 'deny'."""
-    # Check explicit denials first (exact + prefix match)
-    for d in _denied_actions:
-        if d.endswith("*") and action.startswith(d.rstrip("*")):
-            return ("deny", f"Matches denied pattern: {d}")
-        if action == d:
-            return ("deny", f"Action explicitly denied: {d}")
-    # Check explicit allows
-    for a in _allowed_actions:
-        if a.endswith("*") and action.startswith(a.rstrip("*")):
-            return ("allow", "")
-        if action == a:
-            return ("allow", "")
-    # Default: allow (fail open for actions not covered by policy)
-    return ("allow", "")
+# 3. FileTrustStore — persistent JSON trust scores
+os.makedirs(os.path.dirname(TRUST_DB), exist_ok=True)
+trust_store = FileTrustStore(path=TRUST_DB, auto_save=True)
 
-# FlightRecorder for tamper-evident audit
-recorder = FlightRecorder(db_path="/tmp/agt-audit.db")
+# 4. AuditLog — hash-chain tamper-evident audit trail
+audit_log = AuditLog()
 
-# Simple trust store (agent_id → {score, interactions, last_interaction})
-_trust_lock = threading.Lock()
-_trust_store: dict = {}
+# 5. AgentBehaviorMonitor — anomaly detection
+behavior_monitor = AgentBehaviorMonitor(
+    burst_threshold=100,
+    consecutive_failure_threshold=20,
+    capability_denial_threshold=10,
+)
+
 
 def _score_to_tier(score: int) -> str:
     if score >= 800: return "Sovereign"
@@ -100,9 +117,80 @@ def _score_to_tier(score: int) -> str:
     if score >= 200: return "Observed"
     return "Anonymous"
 
+
+def _build_context(action_str: str, extra: dict = None) -> dict:
+    """Pre-process an action string into structured context for PolicyEngine.
+
+    PolicyEngine conditions use field == 'value' and boolean field checks.
+    We parse 'shell:ls', 'inference:chat', 'output:validate', etc. into
+    nested dicts with pre-computed boolean flags.
+    """
+    parts = action_str.split(":", 1)
+    category = parts[0] if parts else "unknown"
+    detail = parts[1] if len(parts) > 1 else ""
+    cmd = detail.split()[0] if detail else ""
+
+    ctx = {
+        "action": {
+            "full": action_str,
+            "category": category,
+            "detail": detail,
+            "command": cmd,
+            "safe": cmd in SAFE_SHELL if category == "shell" else False,
+            "destructive": bool(DESTRUCTIVE_PATTERNS.search(action_str)),
+            "injection_detected": bool(INJECTION_PATTERNS.search(detail))
+                if category == "output" else False,
+            "bulk": detail.startswith("bulk") or detail.startswith("promote"),
+            "untrusted": False,
+        },
+    }
+    if extra:
+        # Merge trust info for mesh messages
+        if "trust_score" in extra:
+            ctx["action"]["untrusted"] = extra["trust_score"] < TRUST_THRESHOLD
+        ctx.update({k: v for k, v in extra.items() if k != "action"})
+    return ctx
+
+
+def _evaluate(agent_did: str, action_str: str, extra: dict = None) -> dict:
+    """Run action through AGT PolicyEngine + RateLimiter + BehaviorMonitor."""
+    # Rate limit check (token bucket)
+    if not rate_limiter.allow(agent_did):
+        audit_log.log("rate_limit", agent_did, action_str, outcome="denied",
+                       policy_decision="deny")
+        behavior_monitor.record_tool_call(agent_did, action_str, success=False)
+        return {"allowed": False, "action": "deny",
+                "reason": "Rate limited (token bucket)",
+                "rate_limited": True}
+
+    # Build structured context and evaluate policy
+    ctx = _build_context(action_str, extra)
+    decision = policy_engine.evaluate(agent_did, ctx)
+
+    outcome = "success" if decision.allowed else "denied"
+    audit_log.log("policy_check", agent_did, action_str,
+                   outcome=outcome, policy_decision=decision.action,
+                   data={"rule": decision.matched_rule,
+                         "policy": decision.policy_name})
+
+    behavior_monitor.record_tool_call(agent_did, action_str,
+                                       success=decision.allowed)
+
+    return {
+        "allowed": decision.allowed,
+        "action": decision.action,
+        "matched_rule": decision.matched_rule,
+        "policy_name": decision.policy_name,
+        "reason": decision.reason,
+        "rate_limited": decision.rate_limited,
+        "evaluation_ms": decision.evaluation_ms,
+    }
+
+
 log.info(
-    "AGT governance ready: sandbox=%s policies=%d trust_threshold=%d",
-    SANDBOX, policy_count, TRUST_THRESHOLD,
+    "AGT governance ready: sandbox=%s policies=%d rules trust_threshold=%d "
+    "trust_db=%s",
+    SANDBOX, policy_count, TRUST_THRESHOLD, TRUST_DB,
 )
 
 
@@ -110,152 +198,160 @@ log.info(
 
 class GovernanceHandler(BaseHTTPRequestHandler):
 
-    def log_message(self, format, *args):
-        pass
+    def log_message(self, fmt, *args):
+        pass  # suppress default HTTP logging
 
-    def _json_response(self, status, data):
+    def _json(self, status, data):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data, default=str).encode())
 
-    def _read_body(self):
+    def _body(self):
         length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
-            return {}
-        return json.loads(self.rfile.read(length))
+        return json.loads(self.rfile.read(length)) if length else {}
+
+    # ── GET ───────────────────────────────────────────────────────────
 
     def do_GET(self):
         path = urlparse(self.path).path
 
         if path == "/healthz":
-            return self._json_response(200, {"status": "ok", "sandbox": SANDBOX})
+            return self._json(200, {"status": "ok", "sandbox": SANDBOX})
 
         if path == "/status":
-            with _trust_lock:
-                trust_states = [
-                    {"agent_id": aid, "score": ts["score"],
-                     "tier": _score_to_tier(ts["score"]),
-                     "interactions": ts["interactions"],
-                     "last_interaction": ts["last_interaction"]}
-                    for aid, ts in _trust_store.items()
-                ]
-            stats = recorder.get_statistics()
-            audit_count = stats.get("total_events", 0) if isinstance(stats, dict) else 0
-            return self._json_response(200, {
+            all_scores = trust_store.get_all_scores()
+            trust_states = [
+                {"agent_id": aid, "score": ts.get("score", 0),
+                 "tier": _score_to_tier(ts.get("score", 0)),
+                 "interactions": ts.get("interactions", 0),
+                 "last_interaction": ts.get("last_interaction", "")}
+                for aid, ts in all_scores.items()
+            ]
+            integrity_ok, integrity_msg = audit_log.verify_integrity()
+            entries = audit_log.query(limit=1)  # just get count efficiently
+            audit_count = len(audit_log.query(limit=10000))
+            return self._json(200, {
                 "enabled": True,
                 "sandbox": SANDBOX,
                 "policy_loaded": policy_count > 0,
                 "policy_rules": policy_count,
                 "audit_entries": audit_count,
-                "audit_integrity": recorder.verify_integrity(),
+                "audit_integrity": integrity_ok,
                 "known_agents": len(trust_states),
                 "trust_states": trust_states,
                 "trust_threshold": TRUST_THRESHOLD,
+                "trust_updates": len(all_scores),
             })
 
         if path == "/trust":
-            with _trust_lock:
-                agents = [
-                    {"agent_id": aid, "score": ts["score"],
-                     "tier": _score_to_tier(ts["score"]),
-                     "interactions": ts["interactions"],
-                     "last_interaction": ts["last_interaction"]}
-                    for aid, ts in _trust_store.items()
-                ]
-            return self._json_response(200, {"agents": agents})
+            all_scores = trust_store.get_all_scores()
+            agents = [
+                {"agent_id": aid, "score": ts.get("score", 0),
+                 "tier": _score_to_tier(ts.get("score", 0)),
+                 "interactions": ts.get("interactions", 0),
+                 "last_interaction": ts.get("last_interaction", "")}
+                for aid, ts in all_scores.items()
+            ]
+            return self._json(200, {"agents": agents})
 
         if path.startswith("/trust/"):
             agent_id = path.split("/trust/", 1)[1]
-            with _trust_lock:
-                ts = _trust_store.get(agent_id, {"score": 0, "interactions": 0, "last_interaction": ""})
-            return self._json_response(200, {
-                "agent_id": agent_id, "score": ts["score"],
-                "tier": _score_to_tier(ts["score"]),
-                "interactions": ts["interactions"],
-                "last_interaction": ts["last_interaction"],
+            try:
+                AgentDID.from_string(agent_id)
+            except ValueError:
+                if not re.match(r"^[a-z0-9][a-z0-9._-]{1,62}$", agent_id):
+                    return self._json(400, {
+                        "error": "Invalid agent_id format"})
+            ts = trust_store.get_trust_score(agent_id) or {
+                "score": 0, "interactions": 0, "last_interaction": ""}
+            return self._json(200, {
+                "agent_id": agent_id, "score": ts.get("score", 0),
+                "tier": _score_to_tier(ts.get("score", 0)),
+                "interactions": ts.get("interactions", 0),
+                "last_interaction": ts.get("last_interaction", ""),
             })
 
         if path == "/audit":
-            logs = recorder.get_log(limit=100)
-            entries = []
-            if isinstance(logs, list):
-                for e in logs:
-                    entries.append({
-                        "action": getattr(e, "tool_name", None) or getattr(e, "action", str(e)),
-                        "decision": getattr(e, "status", "unknown"),
-                        "timestamp": getattr(e, "timestamp", ""),
-                        "agent_id": SANDBOX,
-                    })
-            return self._json_response(200, {
-                "entries": entries,
+            entries = audit_log.query(limit=100)
+            return self._json(200, {
+                "entries": [
+                    {"action": e.action, "agent_id": e.agent_did,
+                     "decision": e.policy_decision or e.outcome,
+                     "result": e.outcome,
+                     "timestamp": str(e.timestamp)}
+                    for e in entries
+                ],
                 "count": len(entries),
                 "sandbox": SANDBOX,
             })
 
         if path == "/audit/verify":
-            valid = recorder.verify_integrity()
-            stats = recorder.get_statistics()
-            count = stats.get("total_events", 0) if isinstance(stats, dict) else 0
-            return self._json_response(200, {
+            valid, msg = audit_log.verify_integrity()
+            count = len(audit_log.query(limit=10000))
+            return self._json(200, {
                 "integrity": "valid" if valid else "COMPROMISED",
                 "entries": count,
                 "sandbox": SANDBOX,
+                "message": msg,
             })
 
-        self._json_response(404, {"error": "not found"})
+        self._json(404, {"error": "not found"})
+
+    # ── POST ──────────────────────────────────────────────────────────
 
     def do_POST(self):
         path = urlparse(self.path).path
 
         if path == "/evaluate":
-            body = self._read_body()
+            body = self._body()
             action = body.get("action", "")
             if not action:
-                return self._json_response(400, {"error": "Missing 'action' field"})
+                return self._json(400, {"error": "Missing 'action' field"})
+            agent_did = body.get("agent_id", SANDBOX)
+            extra = body.get("context", {})
 
-            decision, reason = evaluate_action(action)
-            status = 403 if decision == "deny" else 200
-
-            # Log to FlightRecorder
-            try:
-                if decision == "allow":
-                    recorder.log_success(tool_name=action, input_data=json.dumps(body.get("context", {})))
-                else:
-                    recorder.log_violation(tool_name=action, violation_type="policy_deny", details=reason)
-            except Exception as e:
-                log.warning("Audit log failed: %s", e)
-
-            return self._json_response(status, {
-                "decision": decision, "action": action, "reason": reason,
-            })
+            result = _evaluate(agent_did, action, extra)
+            status = 200 if result["allowed"] else 403
+            # Map to legacy field name for router compatibility
+            result["decision"] = result["action"]
+            return self._json(status, result)
 
         if path == "/trust":
-            body = self._read_body()
+            body = self._body()
             agent_id = body.get("agent_id", "")
             if not agent_id:
-                return self._json_response(400, {"error": "agent_id required"})
+                return self._json(400, {"error": "agent_id required"})
+
+            # Validate agent ID format
+            try:
+                AgentDID.from_string(agent_id)
+            except ValueError:
+                if not re.match(r"^[a-z0-9][a-z0-9._-]{1,62}$", agent_id):
+                    return self._json(400, {
+                        "error": "Invalid agent_id: 3-63 chars, "
+                                 "lowercase alphanumeric, dots, hyphens"})
 
             score = int(body.get("score", 500))
             interactions = int(body.get("interactions", 0))
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-            with _trust_lock:
-                existing = _trust_store.get(agent_id, {"score": 0, "interactions": 0, "last_interaction": ""})
-                _trust_store[agent_id] = {
-                    "score": score,
-                    "interactions": existing["interactions"] + interactions,
-                    "last_interaction": now,
-                }
+            existing = trust_store.get_trust_score(agent_id) or {
+                "score": 0, "interactions": 0, "last_interaction": ""}
+            trust_store.store_trust_score(agent_id, {
+                "score": score,
+                "interactions": existing.get("interactions", 0) + interactions,
+                "last_interaction": now,
+            })
 
-            try:
-                recorder.log_success(tool_name=f"trust_update:{agent_id}", input_data=f"score={score}")
-            except Exception:
-                pass
+            audit_log.log("trust_update", agent_id,
+                           f"trust_update:{agent_id}",
+                           data={"score": score}, outcome="success")
 
-            return self._json_response(200, {"ok": True, "agent_id": agent_id, "score": score})
+            return self._json(200, {
+                "ok": True, "agent_id": agent_id, "score": score})
 
-        self._json_response(404, {"error": "not found"})
+        self._json(404, {"error": "not found"})
 
 
 # ── Start ────────────────────────────────────────────────────────────
@@ -267,5 +363,4 @@ if __name__ == "__main__":
         server.serve_forever()
     except KeyboardInterrupt:
         log.info("Shutting down")
-        recorder.close()
         server.server_close()
