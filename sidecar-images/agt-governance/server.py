@@ -309,9 +309,13 @@ class GovernanceHandler(BaseHTTPRequestHandler):
                 "score": 0, "interactions": 0, "last_interaction": ""}
             old_score = existing.get("score", 0)
 
-            # Bound trust delta to ±200 per update (prevents score forging)
+            # Bound trust delta to ±200 per update (prevents score forging).
+            # Exception: first interaction (no prior record) may set up to 500
+            # to support KNOCK trust bootstrap (X3DH handshake = crypto identity).
             MAX_DELTA = 200
-            clamped = max(old_score - MAX_DELTA, min(old_score + MAX_DELTA, score))
+            is_new = existing.get("interactions", 0) == 0
+            max_initial = 500 if is_new else MAX_DELTA
+            clamped = max(old_score - MAX_DELTA, min(old_score + max_initial, score))
             clamped = max(0, min(1000, clamped))
 
             trust_store.store_trust_score(agent_id, {
