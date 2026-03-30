@@ -15,10 +15,11 @@ RUN tdnf install -y python3 python3-pip ca-certificates shadow-utils && tdnf cle
 
 WORKDIR /app
 
-# Install AGT + all deps from vendored wheels (zero PyPI dependency).
-# Wheels sourced from PyPI (SHA256-verified) and GitHub releases.
+# Install AGT SDK from vendored wheels; let pip fetch transitive deps.
+# Use --find-links so our wheels are preferred, but allow PyPI fallback
+# for any transitive dependencies we haven't vendored.
 COPY vendor/agt-wheels/ /tmp/agt-wheels/
-RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
+RUN pip3 install --no-cache-dir --find-links=/tmp/agt-wheels/ /tmp/agt-wheels/*.whl && \
     rm -rf /tmp/agt-wheels
 
 COPY sidecar-images/agt-governance/server.py ./
