@@ -886,6 +886,68 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
 
+      // AGT policy gate — validate incoming mesh message via sidecar PolicyEngine.
+      // Checks trust score of sender against mesh-receive-untrusted rule.
+      // Non-blocking: on error or timeout, fail-open (log and continue).
+      // This runs AFTER E2E decryption (handled by SDK) — encryption is not affected.
+      if (message?.type === "task_request") {
+        try {
+          const http = await import("node:http");
+          // Look up sender's trust score from sidecar
+          let senderTrustScore = 0;
+          try {
+            const trustBody = await new Promise<string>((resolve, reject) => {
+              const req = http.get(`http://127.0.0.1:8081/trust/${encodeURIComponent(fromAmid)}`, (res) => {
+                let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+              });
+              req.on("error", reject);
+              req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
+            });
+            const trustData = JSON.parse(trustBody);
+            senderTrustScore = trustData?.score ?? 0;
+          } catch { /* trust lookup failed — use 0 */ }
+
+          // Evaluate mesh:receive action with sender trust context
+          const evalPayload = JSON.stringify({
+            action: "mesh:receive",
+            agent_id: fromAmid,
+            context: { trust_score: senderTrustScore, from_agent: fromName },
+          });
+          const evalResult = await new Promise<string>((resolve, reject) => {
+            const req = http.request("http://127.0.0.1:8081/evaluate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
+            }, (res) => {
+              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+            });
+            req.on("error", reject);
+            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
+            req.write(evalPayload);
+            req.end();
+          });
+          const evalData = JSON.parse(evalResult);
+          if (evalData.decision === "deny") {
+            log.warn(`AGT policy DENIED mesh:receive from ${fromName} (trust=${senderTrustScore}): ${evalData.reason}`);
+            // Send rejection back via E2E encrypted relay
+            if (agtMeshClient) {
+              try {
+                await agtMeshClient.send(fromAmid, {
+                  type: "task_response",
+                  content: `Request denied by governance policy: ${evalData.reason}`,
+                  from_agent: agtSandboxName,
+                  timestamp: new Date().toISOString(),
+                });
+              } catch { /* best effort */ }
+            }
+            return; // Skip task processing — message was logged to inbox but not executed
+          }
+          log.info(`AGT policy allowed mesh:receive from ${fromName} (trust=${senderTrustScore})`);
+        } catch (policyErr: any) {
+          // Fail-open: sidecar unreachable or error — log and continue processing
+          log.warn(`AGT mesh policy check failed (proceeding): ${policyErr.message}`);
+        }
+      }
+
       // Process task_request messages: delegate to native OpenClaw agent for full tool access,
       // with fallback to the limited processTaskWithTools loop if native delegation fails.
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {

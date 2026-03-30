@@ -553,6 +553,48 @@ async fn chat_completions(
                     }
                 }
 
+                // AGT output validation — fire-and-forget so response isn't delayed.
+                // Extracts response content and checks for prompt injection patterns
+                // via sidecar PolicyEngine (response-content-safety rule).
+                if state.sidecar.enabled {
+                    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                        let response_text = body_json
+                            .get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("message"))
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !response_text.is_empty() {
+                            let sidecar = state.sidecar.clone();
+                            let sandbox = sandbox_name.to_string();
+                            tokio::spawn(async move {
+                                let eval_body = serde_json::json!({
+                                    "action": format!("output:{}", response_text),
+                                    "agent_id": sandbox,
+                                    "context": {
+                                        "response_length": response_text.len(),
+                                    }
+                                });
+                                match sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
+                                    Ok((s, json)) if s == 403 => {
+                                        let reason = json.get("reason")
+                                            .and_then(|r| r.as_str()).unwrap_or("output policy");
+                                        tracing::warn!(sandbox = %sandbox, %reason,
+                                            "AGT: model response flagged by output policy");
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::debug!(sandbox = %sandbox,
+                                            "AGT output validation skipped: {e}");
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
                 let mut response = (status, Body::from(resp_body)).into_response();
                 // Forward content-type from upstream
                 if let Some(ct) = resp_headers.get("content-type") {
