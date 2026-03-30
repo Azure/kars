@@ -1216,6 +1216,12 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         if state.sidecar.enabled {
             obj.insert("sidecar".into(), serde_json::json!(true));
         }
+        obj.insert(
+            "trust_updates".into(),
+            serde_json::json!(state.mesh_metrics.trust_updates.load(
+                std::sync::atomic::Ordering::Relaxed
+            )),
+        );
     }
 
     Json(result).into_response()

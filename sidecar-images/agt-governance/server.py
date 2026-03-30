@@ -95,6 +95,24 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             return self._json_response(200, {"status": "ok", "sandbox": SANDBOX})
 
         if path == "/status":
+            # Normalize trust_states to array format expected by operator
+            raw_scores = trust.all_scores()
+            if isinstance(raw_scores, dict):
+                trust_states = [
+                    {"agent_id": aid, "score": int(s * 1000) if isinstance(s, float) and s <= 1.0 else int(s),
+                     "tier": "Sovereign" if (int(s * 1000) if isinstance(s, float) and s <= 1.0 else int(s)) >= 800
+                            else "Verified" if (int(s * 1000) if isinstance(s, float) and s <= 1.0 else int(s)) >= 600
+                            else "Known" if (int(s * 1000) if isinstance(s, float) and s <= 1.0 else int(s)) >= 400
+                            else "Observed" if (int(s * 1000) if isinstance(s, float) and s <= 1.0 else int(s)) >= 200
+                            else "Anonymous",
+                     "interactions": 0, "last_interaction": ""}
+                    for aid, s in raw_scores.items()
+                ]
+            elif isinstance(raw_scores, list):
+                trust_states = raw_scores
+            else:
+                trust_states = []
+
             return self._json_response(200, {
                 "enabled": True,
                 "sandbox": SANDBOX,
@@ -102,13 +120,23 @@ class GovernanceHandler(BaseHTTPRequestHandler):
                 "policy_rules": len(policies),
                 "audit_entries": audit.entry_count,
                 "audit_integrity": audit.verify_integrity(),
-                "known_agents": len(trust.agents),
-                "trust_states": trust.all_scores(),
-                "trust_threshold": TRUST_THRESHOLD,
+                "known_agents": len(trust.agents) if hasattr(trust, 'agents') else len(trust_states),
+                "trust_states": trust_states,
+                "trust_threshold": int(TRUST_THRESHOLD * 1000),
             })
 
         if path == "/trust":
-            return self._json_response(200, {"agents": trust.all_scores()})
+            raw_scores = trust.all_scores()
+            if isinstance(raw_scores, dict):
+                agents = [
+                    {"agent_id": aid, "score": int(s * 1000) if isinstance(s, float) and s <= 1.0 else int(s)}
+                    for aid, s in raw_scores.items()
+                ]
+            elif isinstance(raw_scores, list):
+                agents = raw_scores
+            else:
+                agents = []
+            return self._json_response(200, {"agents": agents})
 
         if path.startswith("/trust/"):
             agent_id = path.split("/trust/", 1)[1]
