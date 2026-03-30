@@ -399,6 +399,42 @@ async fn chat_completions(
         }
     }
 
+    // AGT policy check — evaluate inference action via sidecar (audit mode: log, don't block)
+    if state.sidecar.enabled {
+        let model = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("model")?.as_str().map(String::from))
+            .unwrap_or_default();
+        let eval_body = serde_json::json!({
+            "action": format!("inference:chat_completions:{}", model),
+            "context": { "sandbox": sandbox_name, "model": model }
+        });
+        match state.sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
+            Ok((status, json)) if status == 403 => {
+                let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("policy denied");
+                tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED inference (enforcing)");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!("Blocked by governance policy: {}", reason),
+                            "type": "policy_violation",
+                            "code": "policy_denied"
+                        }
+                    })),
+                ).into_response();
+            }
+            Ok((_, json)) => {
+                let decision = json.get("decision").and_then(|d| d.as_str()).unwrap_or("allow");
+                tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
+            }
+            Err(e) => {
+                // Sidecar unreachable — fail open (don't block inference)
+                tracing::warn!(sandbox = %sandbox_name, error = %e, "AGT sidecar unreachable, skipping policy check");
+            }
+        }
+    }
+
     // Check token budget before forwarding
     if let Err(msg) = state.budget.check_budget(sandbox_name).await {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded: {msg}");
@@ -2309,10 +2345,36 @@ pub fn spawn_routes() -> Router<AppState> {
 
 /// POST /sandbox/spawn — create a new sub-agent sandbox.
 async fn sandbox_spawn(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<spawn::SpawnRequest>,
 ) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+
+    // AGT policy check — evaluate spawn action via sidecar
+    if state.sidecar.enabled {
+        let eval_body = serde_json::json!({
+            "action": format!("spawn:create:{}", req.name),
+            "context": {
+                "parent": parent_name,
+                "child": req.name,
+                "model": req.model.as_deref().unwrap_or("default"),
+            }
+        });
+        match state.sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
+            Ok((status, json)) if status == 403 => {
+                let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("policy denied");
+                tracing::warn!(parent = %parent_name, child = %req.name, %reason, "AGT policy DENIED spawn");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": format!("Spawn blocked by policy: {}", reason) })),
+                ).into_response();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "AGT sidecar unreachable, skipping spawn policy check");
+            }
+        }
+    }
 
     match spawn::create_sandbox(&parent_name, &req).await {
         Ok(resp) => (
