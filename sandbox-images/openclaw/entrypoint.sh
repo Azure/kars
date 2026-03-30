@@ -542,11 +542,11 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"
     cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
-    # AGT sidecar runs as UID 1002 (router) — needs read access to policies
-    # Grant traverse (o+x) on parent dirs and read on policy files
+    # AGT sidecar runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
+    # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
+    # chown -R sandbox:sandbox /sandbox — see below.
     chmod o+x "$OPENCLAW_DIR"
     chmod 755 "$OPENCLAW_DIR/policies"
-    chmod 644 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
     export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
     echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
   fi
@@ -563,6 +563,12 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 # Ensure all sandbox files are owned by sandbox user
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /sandbox
 
+# Harden AGT policy files AFTER the blanket chown — sandbox must not modify its own rules
+if [ "$IS_ROOT" = "true" ] && [ -d "$OPENCLAW_DIR/policies" ]; then
+  chown root:root "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+  chmod 444 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+fi
+
 # Start AzureClaw inference router as UID 1001 (router user) — only in dev mode.
 # UID 1001 is exempt from iptables egress guard, matching the AKS sidecar model
 # where the router runs in a separate container with internet access.
@@ -575,7 +581,12 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
     rm -f /tmp/agt-governance.log
     touch /tmp/agt-governance.log
     mkdir -p /tmp/agt
-    [ "$IS_ROOT" = "true" ] && chown 1002:1002 /tmp/agt-governance.log /tmp/agt
+    if [ "$IS_ROOT" = "true" ]; then
+      # Dev mode: sidecar runs as UID 1001 (router) via $AS_ROUTER.
+      # AKS mode: sidecar runs in its own container as UID 1002.
+      chown 1001:1001 /tmp/agt-governance.log /tmp/agt
+      chmod 700 /tmp/agt
+    fi
     AGT_POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
     POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
     AGT_PORT=8081 \
@@ -598,6 +609,12 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   fi
   # Generate a random admin token for the router's protected endpoints
   ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
+  # Share admin token with the plugin (UID 1000) for trust update auth.
+  # Written by root, readable by sandbox — the agent process can also read it,
+  # but the sidecar additionally clamps trust deltas to ±200 and blocks self-updates.
+  echo "$ROUTER_ADMIN_TOKEN" > /tmp/.agt-admin-token
+  [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/.agt-admin-token
+  chmod 400 /tmp/.agt-admin-token
   ROUTER_PORT=8443 \
   ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \

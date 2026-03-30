@@ -76,15 +76,27 @@ let agtSandboxName: string = "unknown";
 async function pushTrustToRouter(agentId: string, scoreDelta: number) {
   try {
     const http = await import("node:http");
+    const fs = await import("node:fs");
     const body = JSON.stringify({
       agent_id: agentId,
       score: Math.round(500 + scoreDelta * 500), // 0.0-1.0 → 0-1000 scale
       interactions: 1,
     });
+    // Read admin token for trust mutation auth (prevents sandbox from forging scores)
+    let adminToken = "";
+    try { adminToken = fs.readFileSync("/tmp/.agt-admin-token", "utf-8").trim(); } catch {}
+    if (!adminToken) {
+      try { adminToken = fs.readFileSync("/run/secrets/admin-token", "utf-8").trim(); } catch {}
+    }
+    const headers: Record<string, string | number> = {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
+    };
+    if (adminToken) headers["x-azureclaw-admin"] = adminToken;
     await new Promise<void>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/agt/trust", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        headers,
         timeout: 5000,
       }, (res: any) => {
         res.resume();
@@ -803,6 +815,15 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           return { accept: false, reason: 'policy_denied' };
         }
       }
+
+      // KNOCK accepted — bootstrap trust for this peer.
+      // A completed X3DH handshake proves cryptographic identity, warranting
+      // baseline trust (score=500 = threshold). Subsequent interactions adjust.
+      // Store by both name and AMID so the mesh gate can look up by either.
+      // Awaited to ensure trust is stored before the first message arrives.
+      await pushTrustToRouter(fromName, 0.0); // 500 + 0*500 = 500 (at threshold)
+      await pushTrustToRouter(fromAmid, 0.0);
+      log.info(`AGT KNOCK accepted: bootstrapped trust for ${fromName} / ${fromAmid.slice(0, 12)}... (score=500)`);
 
       return { accept: true };
     });
