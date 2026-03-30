@@ -241,6 +241,23 @@ export function upCommand(): Command {
         }
       }
 
+      // ── Pre-fill from cached deployment context ────────────────────
+      // If a previous `azureclaw up` saved context, use those values as
+      // defaults so the user isn't re-prompted for everything.
+      const cachedCtx = loadContext();
+      if (cachedCtx && cachedCtx.region) {
+        console.log(chalk.dim(`\n  Using cached deployment context (${cachedCtx.region}/${cachedCtx.resourceGroup || "default"}). Pass explicit flags to override.\n`));
+        const hasFlag = (f: string) => process.argv.includes(f);
+        if (cachedCtx.region && !hasFlag("--region"))
+          options.region = cachedCtx.region;
+        if (cachedCtx.resourceGroup && !hasFlag("-g") && !hasFlag("--resource-group"))
+          options.resourceGroup = cachedCtx.resourceGroup;
+        if (cachedCtx.foundryEndpoint && !hasFlag("--foundry-endpoint") && !hasFlag("--openai-endpoint"))
+          options.foundryEndpoint = cachedCtx.foundryEndpoint;
+        if (cachedCtx.foundryProjectEndpoint && !hasFlag("--foundry-endpoint"))
+          options.foundryEndpoint = options.foundryEndpoint || cachedCtx.foundryProjectEndpoint;
+      }
+
       // ══════════════════════════════════════════════════════════════
       //  PREFLIGHT: validate everything before touching Azure
       // ══════════════════════════════════════════════════════════════
@@ -331,10 +348,12 @@ export function upCommand(): Command {
       }
 
       // ── 3. Interactive prompts for region/name/isolation ────────────
-      const userProvidedRegion = process.argv.includes("--region");
+      // If a cached context provided values, treat them as "user-provided"
+      // so the user isn't re-prompted for details they already set.
+      const userProvidedRegion = process.argv.includes("--region") || !!cachedCtx?.region;
       const userProvidedName = process.argv.includes("--name");
       const userProvidedIsolation = process.argv.includes("--isolation");
-      const userProvidedRg = process.argv.includes("-g") || process.argv.includes("--resource-group");
+      const userProvidedRg = process.argv.includes("-g") || process.argv.includes("--resource-group") || !!cachedCtx?.resourceGroup;
 
       if (!options.dryRun && (!userProvidedRegion || !userProvidedName || !userProvidedIsolation)) {
         console.log();
