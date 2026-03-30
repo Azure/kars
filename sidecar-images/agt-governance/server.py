@@ -225,7 +225,7 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             try:
                 AgentDID.from_string(agent_id)
             except ValueError:
-                if not re.match(r"^[a-z0-9][a-z0-9._-]{1,62}$", agent_id):
+                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,62}$", agent_id):
                     return self._json(400, {
                         "error": "Invalid agent_id format"})
             ts = trust_store.get_trust_score(agent_id) or {
@@ -291,10 +291,11 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             try:
                 AgentDID.from_string(agent_id)
             except ValueError:
-                if not re.match(r"^[a-z0-9][a-z0-9._-]{1,62}$", agent_id):
+                # Accept lowercase agent names OR Base58-encoded AMIDs (mixed case)
+                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,62}$", agent_id):
                     return self._json(400, {
                         "error": "Invalid agent_id: 3-63 chars, "
-                                 "lowercase alphanumeric, dots, hyphens"})
+                                 "alphanumeric, dots, hyphens"})
 
             # Reject self-trust updates (sandbox can't boost its own score)
             if agent_id == SANDBOX:
