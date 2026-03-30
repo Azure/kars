@@ -38,6 +38,20 @@ fn safety_audience(endpoint: &str) -> &'static str {
     }
 }
 
+// ─── Circuit Breaker (#5) ────────────────────────────────────────────────────
+// After CIRCUIT_BREAKER_THRESHOLD consecutive Content Safety API failures,
+// switch to fail-closed (block all requests) until a probe succeeds.
+// This prevents a downed safety service from silently allowing all content.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Consecutive failure count for Content Safety API.
+static SAFETY_FAILURES: AtomicU32 = AtomicU32::new(0);
+/// Circuit breaker state: 0 = closed (normal), 1 = open (fail-closed).
+static SAFETY_CIRCUIT_OPEN: AtomicU32 = AtomicU32::new(0);
+/// Number of consecutive failures before the circuit opens.
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+
 // ─── Content Safety ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -63,6 +77,11 @@ struct CategoryAnalysis {
 /// Check input text against Azure AI Content Safety.
 /// Returns Ok(()) if safe, Err if content is blocked.
 pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
+    // Circuit breaker: if open, fail-closed until service recovers
+    if SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed) == 1 {
+        bail!("Content Safety circuit breaker OPEN — blocking request until service recovers");
+    }
+
     let token = AUTH
         .get_token(safety_audience(endpoint))
         .await
@@ -98,8 +117,16 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
     {
         Ok(r) => r,
         Err(e) => {
-            // Fail open on network errors / timeouts — don't block inference
-            tracing::warn!(error = %e, "Content Safety API unreachable, failing open");
+            let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if n >= CIRCUIT_BREAKER_THRESHOLD {
+                SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+                tracing::error!(
+                    failures = n,
+                    "Content Safety circuit breaker OPENED — failing closed"
+                );
+                bail!("Content Safety unreachable ({n} consecutive failures) — circuit breaker open");
+            }
+            tracing::warn!(error = %e, failures = n, "Content Safety API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
             return Ok(());
         }
     };
@@ -107,9 +134,23 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        tracing::warn!("Content Safety API error: {status} — {body}");
-        // Fail open on API errors (don't block inference if safety service is down)
+        let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+        if n >= CIRCUIT_BREAKER_THRESHOLD {
+            SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+            tracing::error!(
+                failures = n,
+                "Content Safety circuit breaker OPENED — failing closed"
+            );
+            bail!("Content Safety error {status} ({n} consecutive failures) — circuit breaker open");
+        }
+        tracing::warn!(%status, failures = n, "Content Safety API error ({n}/{CIRCUIT_BREAKER_THRESHOLD}): {body}");
         return Ok(());
+    }
+
+    // Success — reset circuit breaker
+    SAFETY_FAILURES.store(0, Ordering::Relaxed);
+    if SAFETY_CIRCUIT_OPEN.swap(0, Ordering::Relaxed) == 1 {
+        tracing::info!("Content Safety circuit breaker CLOSED — service recovered");
     }
 
     let result: AnalyzeTextResponse = resp
@@ -184,15 +225,31 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
     {
         Ok(r) => r,
         Err(e) => {
-            // Fail open on network errors / timeouts — don't block inference
-            tracing::warn!(error = %e, "Prompt Shields API unreachable, failing open");
+            let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if n >= CIRCUIT_BREAKER_THRESHOLD {
+                SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+                tracing::error!(failures = n, "Content Safety circuit breaker OPENED (via Prompt Shields)");
+                bail!("Prompt Shields unreachable ({n} consecutive failures) — circuit breaker open");
+            }
+            tracing::warn!(error = %e, failures = n, "Prompt Shields API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
             return Ok(());
         }
     };
 
     if !resp.status().is_success() {
-        // Fail open on API errors
+        let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+        if n >= CIRCUIT_BREAKER_THRESHOLD {
+            SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+            tracing::error!(failures = n, "Content Safety circuit breaker OPENED (via Prompt Shields)");
+            bail!("Prompt Shields error ({n} consecutive failures) — circuit breaker open");
+        }
         return Ok(());
+    }
+
+    // Success — reset circuit breaker
+    SAFETY_FAILURES.store(0, Ordering::Relaxed);
+    if SAFETY_CIRCUIT_OPEN.swap(0, Ordering::Relaxed) == 1 {
+        tracing::info!("Content Safety circuit breaker CLOSED — service recovered");
     }
 
     let result: PromptShieldResponse = resp

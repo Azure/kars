@@ -53,8 +53,12 @@ pub struct Blocklist {
     /// Only domains on this list can be fetched via /egress/fetch (unless learn mode is on).
     allowlist: Arc<RwLock<HashSet<String>>>,
     /// Pending approval requests: domains the agent tried to reach but aren't allowlisted.
+    /// Capped at MAX_PENDING to prevent unbounded memory growth (#13).
     pending_approvals: Arc<RwLock<Vec<PendingApproval>>>,
 }
+
+/// Maximum pending approval entries to prevent unbounded memory growth.
+const MAX_PENDING: usize = 1000;
 
 /// A pending egress approval request.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -355,11 +359,11 @@ impl Blocklist {
             }
         }
 
-        // 4. Not allowlisted → create pending approval (dedup by domain)
+        // 4. Not allowlisted → create pending approval (dedup by domain, capped)
         {
             let mut pending = self.pending_approvals.write().await;
             let already_pending = pending.iter().any(|p| p.domain == domain);
-            if !already_pending {
+            if !already_pending && pending.len() < MAX_PENDING {
                 let id = format!("{:x}", md5_hash(&format!("{}{}", domain, sandbox)));
                 pending.push(PendingApproval {
                     id,
@@ -429,7 +433,7 @@ impl Blocklist {
         let mut pending = self.pending_approvals.write().await;
         // Dedup by domain + kind
         let already = pending.iter().any(|p| p.domain == domain && p.kind == kind);
-        if !already {
+        if !already && pending.len() < MAX_PENDING {
             let id = format!("{:x}", md5_hash(&format!("proxy:{}:{}", domain, kind)));
             pending.push(PendingApproval {
                 id,
