@@ -614,7 +614,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
         json!({"name": "SANDBOX_NAME", "value": &name}),
         json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
-        json!({"name": "ADMIN_TOKEN", "value": &admin_token}),
         json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
     ];
     router_env.extend(router_agt_env);
@@ -769,12 +768,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 "httpGet": {"path": "/healthz", "port": "inference"},
                                 "initialDelaySeconds": 3,
                                 "periodSeconds": 5
-                            }
+                            },
+                            "volumeMounts": [
+                                {"name": "admin-token", "mountPath": "/run/secrets", "readOnly": true}
+                            ]
                         }
                     ],
                     "volumes": [
                         {"name": "sandbox-data", "emptyDir": {}},
-                        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}}
+                        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}},
+                        {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
                     ],
                     "tolerations": [{
                         "key": "azureclaw.azure.com/sandbox",
