@@ -22,6 +22,7 @@ use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
 use crate::sidecar::SidecarProxy;
 use crate::spawn;
+use futures::stream::StreamExt;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -461,7 +462,9 @@ async fn chat_completions(
         .unwrap_or(false);
 
     if is_stream {
-        // SSE streaming — pipe response directly for low TTFT
+        // SSE streaming — wrap stream to capture token usage from final [DONE] chunk
+        let sandbox_owned = sandbox_name.to_string();
+        let budget = state.budget.clone();
         match proxy::forward_stream(
             state.auth.clone(),
             state.client.clone(),
@@ -473,7 +476,37 @@ async fn chat_completions(
         .await
         {
             Ok((status, resp_headers, stream)) => {
-                let body = Body::from_stream(stream);
+                // Wrap stream to intercept usage in the final SSE chunk.
+                // Azure OpenAI / OpenAI include a `usage` field in the last
+                // `data:` line before `data: [DONE]` when `stream_options.include_usage` is set,
+                // or in a standalone chunk. We parse each SSE line looking for it.
+                let wrapped = stream.map(move |chunk| {
+                    if let Ok(ref bytes) = chunk {
+                        if let Ok(text) = std::str::from_utf8(bytes) {
+                            for line in text.lines() {
+                                let data = line.strip_prefix("data: ").unwrap_or("");
+                                if data.is_empty() || data == "[DONE]" {
+                                    continue;
+                                }
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(total) = v
+                                        .get("usage")
+                                        .and_then(|u| u.get("total_tokens"))
+                                        .and_then(|t| t.as_u64())
+                                    {
+                                        let b = budget.clone();
+                                        let s = sandbox_owned.clone();
+                                        tokio::spawn(async move {
+                                            b.record_usage(&s, total).await;
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    chunk
+                });
+                let body = Body::from_stream(wrapped);
                 let mut response = (status, body).into_response();
                 if let Some(ct) = resp_headers.get("content-type") {
                     response.headers_mut().insert("content-type", ct.clone());
