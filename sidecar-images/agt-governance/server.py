@@ -340,8 +340,9 @@ class GovernanceHandler(BaseHTTPRequestHandler):
 # ── Start ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    server = HTTPServer(("127.0.0.1", PORT), GovernanceHandler)
-    log.info("Listening on 127.0.0.1:%d", PORT)
+    bind = os.environ.get("AGT_BIND", "0.0.0.0")
+    server = HTTPServer((bind, PORT), GovernanceHandler)
+    log.info("Listening on %s:%d", bind, PORT)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
