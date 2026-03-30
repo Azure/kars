@@ -56,8 +56,9 @@ async fn main() -> Result<()> {
     // If set, /admin/*, /egress/*, /sandbox/*, and sensitive /agt/* endpoints
     // require Authorization: Bearer <token>. If unset, these endpoints are unrestricted
     // (backwards-compatible for local dev).
-    let admin_token: Option<Arc<String>> = std::fs::read_to_string("/run/secrets/admin-token")
+    let admin_token: Option<Arc<String>> = std::fs::read_to_string("/etc/azureclaw/secrets/admin-token")
         .ok()
+        .or_else(|| std::fs::read_to_string("/run/secrets/admin-token").ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .or_else(|| std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()))
