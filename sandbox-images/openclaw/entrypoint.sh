@@ -542,6 +542,11 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"
     cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
+    # AGT sidecar runs as UID 1002 (router) — needs read access to policies
+    # Grant traverse (o+x) on parent dirs and read on policy files
+    chmod o+x "$OPENCLAW_DIR"
+    chmod 755 "$OPENCLAW_DIR/policies"
+    chmod 644 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
     export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
     echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
   fi
