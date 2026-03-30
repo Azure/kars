@@ -11,7 +11,7 @@ ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:a452d39c91
 
 FROM ${AZURELINUX_BASE}
 
-RUN tdnf install -y python3 python3-pip ca-certificates && tdnf clean all
+RUN tdnf install -y python3 python3-pip ca-certificates shadow-utils && tdnf clean all
 
 WORKDIR /app
 
@@ -23,7 +23,8 @@ RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
 
 COPY sidecar-images/agt-governance/server.py ./
 
-RUN groupadd -g 1002 agt && useradd -u 1002 -g agt -m agt
+RUN groupadd -g 1002 agt && useradd -u 1002 -g agt -m agt && \
+    tdnf remove -y shadow-utils && tdnf clean all
 USER 1002
 
 EXPOSE 8081 9091
