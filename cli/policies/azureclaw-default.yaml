@@ -67,6 +67,62 @@ policies:
     window: 1m
     actions: ["shell:*"]
 
+  # ── Issues #7, #8: Inference + spawn policy gates ────────────────────────
+
+  # Inference rate limit — cap chat completions per minute (#12b)
+  - name: inference-rate-limit
+    type: rate_limit
+    max_calls: 60
+    window: 1m
+    actions: ["inference:chat_completions:*"]
+
+  # Spawn cap — max concurrent sub-agents (#8)
+  - name: spawn-limit
+    type: rate_limit
+    max_calls: 5
+    window: 1h
+    actions: ["spawn:create:*"]
+
+  # ── Issue #9: Response validation ────────────────────────────────────────
+
+  # Block prompt injection patterns in model responses
+  - name: response-content-safety
+    type: pattern
+    scope: output
+    blocked_patterns:
+      - "ignore previous instructions"
+      - "ignore all prior"
+      - "you are now"
+      - "new system prompt"
+      - "DROP TABLE"
+      - "UNION SELECT"
+      - "rm -rf /"
+      - "; curl "
+      - "<script>"
+
+  # ── Issue #10: Mesh message policy ───────────────────────────────────────
+
+  # Require trust verification for incoming mesh messages
+  - name: mesh-receive-trust
+    type: capability
+    match:
+      pattern: "mesh:receive:.*"
+    config:
+      require_trust_score: 300
+
+  # ── Issue #14: Bulk promote gate ─────────────────────────────────────────
+
+  # Bulk operations (promote, enforce, delete-all) require approval
+  - name: bulk-operations-approval
+    type: approval
+    actions:
+      - "egress:enforce"
+      - "egress:approve_all"
+      - "admin:promote"
+      - "admin:bulk_*"
+    min_approvals: 1
+    approval_timeout_minutes: 30
+
   # NOT included — AzureClaw handles these at infrastructure level:
   # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
   # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
