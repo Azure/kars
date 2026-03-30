@@ -86,6 +86,9 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
     let adminToken = "";
     try { adminToken = fs.readFileSync("/tmp/.agt-admin-token", "utf-8").trim(); } catch {}
     if (!adminToken) {
+      try { adminToken = fs.readFileSync("/etc/azureclaw/secrets/admin-token", "utf-8").trim(); } catch {}
+    }
+    if (!adminToken) {
       try { adminToken = fs.readFileSync("/run/secrets/admin-token", "utf-8").trim(); } catch {}
     }
     const headers: Record<string, string | number> = {
