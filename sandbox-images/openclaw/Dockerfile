@@ -84,10 +84,12 @@ FROM ${AZURELINUX_BASE}
 
 # Detect arch for Node.js download
 ARG TARGETARCH
-RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
-                    python3 python3-pip && tdnf clean all && \
-    pip3 install --no-cache-dir \
+RUN tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
+                    python3 python3-pip && tdnf clean all
+
+# Vendored Python packages (zero PyPI dependency)
+COPY vendor/sandbox-wheels/ /tmp/sandbox-wheels/
+RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
       requests httpx beautifulsoup4 lxml cssselect \
       pandas numpy matplotlib seaborn scipy sympy \
       pyyaml toml python-dotenv \
@@ -100,6 +102,10 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
       sqlalchemy cryptography tiktoken \
       dnspython networkx geopy \
       ftfy unidecode qrcode fpdf2 nano-pdf && \
+    rm -rf /tmp/sandbox-wheels
+
+# Node.js (vendored binary)
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
