@@ -47,10 +47,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Consecutive failure count for Content Safety API.
 static SAFETY_FAILURES: AtomicU32 = AtomicU32::new(0);
-/// Circuit breaker state: 0 = closed (normal), 1 = open (fail-closed).
+/// Circuit breaker state: 0 = closed (normal), 1 = open (fail-open).
 static SAFETY_CIRCUIT_OPEN: AtomicU32 = AtomicU32::new(0);
+/// Timestamp (epoch secs) when circuit opened — auto-reset after cooldown.
+static SAFETY_CIRCUIT_OPENED_AT: AtomicU32 = AtomicU32::new(0);
 /// Number of consecutive failures before the circuit opens.
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+/// Seconds to wait before retrying after circuit opens.
+const CIRCUIT_BREAKER_COOLDOWN_SECS: u32 = 60;
 
 // ─── Content Safety ──────────────────────────────────────────────────────────
 
@@ -77,9 +81,23 @@ struct CategoryAnalysis {
 /// Check input text against Azure AI Content Safety.
 /// Returns Ok(()) if safe, Err if content is blocked.
 pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
-    // Circuit breaker: if open, fail-closed until service recovers
+    // Circuit breaker: if open, fail-open (allow requests) until service recovers.
+    // Auto-reset after cooldown period to allow retries.
     if SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed) == 1 {
-        bail!("Content Safety circuit breaker OPEN — blocking request until service recovers");
+        let opened_at = SAFETY_CIRCUIT_OPENED_AT.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+        if now.saturating_sub(opened_at) >= CIRCUIT_BREAKER_COOLDOWN_SECS {
+            // Cooldown elapsed — reset and retry
+            SAFETY_CIRCUIT_OPEN.store(0, Ordering::Relaxed);
+            SAFETY_FAILURES.store(0, Ordering::Relaxed);
+            tracing::info!("Content Safety circuit breaker cooldown elapsed — retrying");
+        } else {
+            tracing::warn!("Content Safety circuit breaker OPEN — allowing request (fail-open)");
+            return Ok(());
+        }
     }
 
     let token = AUTH
@@ -120,11 +138,12 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
             let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= CIRCUIT_BREAKER_THRESHOLD {
                 SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+                SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
                 tracing::error!(
                     failures = n,
-                    "Content Safety circuit breaker OPENED — failing closed"
+                    "Content Safety circuit breaker OPENED — failing open"
                 );
-                bail!("Content Safety unreachable ({n} consecutive failures) — circuit breaker open");
+                return Ok(());
             }
             tracing::warn!(error = %e, failures = n, "Content Safety API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
             return Ok(());
@@ -137,11 +156,12 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
         let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= CIRCUIT_BREAKER_THRESHOLD {
             SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+                SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
             tracing::error!(
                 failures = n,
-                "Content Safety circuit breaker OPENED — failing closed"
+                "Content Safety circuit breaker OPENED — failing open"
             );
-            bail!("Content Safety error {status} ({n} consecutive failures) — circuit breaker open");
+            return Ok(());
         }
         tracing::warn!(%status, failures = n, "Content Safety API error ({n}/{CIRCUIT_BREAKER_THRESHOLD}): {body}");
         return Ok(());
@@ -228,8 +248,9 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
             let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= CIRCUIT_BREAKER_THRESHOLD {
                 SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+                SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
                 tracing::error!(failures = n, "Content Safety circuit breaker OPENED (via Prompt Shields)");
-                bail!("Prompt Shields unreachable ({n} consecutive failures) — circuit breaker open");
+                return Ok(());
             }
             tracing::warn!(error = %e, failures = n, "Prompt Shields API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
             return Ok(());
@@ -240,8 +261,9 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
         let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= CIRCUIT_BREAKER_THRESHOLD {
             SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
+            SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
             tracing::error!(failures = n, "Content Safety circuit breaker OPENED (via Prompt Shields)");
-            bail!("Prompt Shields error ({n} consecutive failures) — circuit breaker open");
+            return Ok(());
         }
         return Ok(());
     }
