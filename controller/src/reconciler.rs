@@ -717,7 +717,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             },
                             "volumeMounts": [
                                 {"name": "sandbox-data", "mountPath": "/sandbox"},
-                                {"name": "tmp", "mountPath": "/tmp"}
+                                {"name": "tmp", "mountPath": "/tmp"},
+                                // Plugin needs admin token to authenticate trust
+                                // mutations after KNOCK handshakes (pushTrustToRouter).
+                                {"name": "admin-token", "mountPath": "/run/secrets", "readOnly": true}
                             ],
                             "resources": spec.resources.as_ref().map(|r| json!({
                                 "requests": r.requests,
