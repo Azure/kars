@@ -99,11 +99,14 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
       pydantic jsonpath-ng \
       sqlalchemy cryptography tiktoken \
       dnspython networkx geopy \
-      ftfy unidecode qrcode fpdf2 nano-pdf \
-      "agent-governance-toolkit[full]==3.0.0" && \
+      ftfy unidecode qrcode fpdf2 nano-pdf && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
+
+# AGT governance SDK — separate layer for cache efficiency + longer timeout
+RUN pip3 install --no-cache-dir --timeout 120 --retries 5 \
+      "agent-governance-toolkit[full]==3.0.0"
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
