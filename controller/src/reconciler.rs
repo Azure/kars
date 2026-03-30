@@ -877,12 +877,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     "limits": {"cpu": "200m", "memory": "128Mi"}
                 },
                 "livenessProbe": {
-                    "httpGet": {"path": "/healthz", "port": 8081, "host": "127.0.0.1"},
+                    "httpGet": {"path": "/healthz", "port": 8081},
                     "initialDelaySeconds": 5,
                     "periodSeconds": 30
                 },
                 "readinessProbe": {
-                    "httpGet": {"path": "/healthz", "port": 8081, "host": "127.0.0.1"},
+                    "httpGet": {"path": "/healthz", "port": 8081},
                     "initialDelaySeconds": 3,
                     "periodSeconds": 10
                 }
