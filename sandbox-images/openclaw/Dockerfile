@@ -104,9 +104,12 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
 
-# AGT governance SDK — separate layer for cache efficiency + longer timeout
-RUN pip3 install --no-cache-dir --timeout 120 --retries 5 \
-      "agent-governance-toolkit[full]==3.0.0"
+# AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
+# Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
+COPY vendor/agt-wheels/ /tmp/agt-wheels/
+RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
+    pip3 install --no-cache-dir pydantic && \
+    rm -rf /tmp/agt-wheels
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \

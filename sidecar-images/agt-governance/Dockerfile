@@ -1,5 +1,5 @@
 # AGT Governance Sidecar — wraps the official Agent Governance Toolkit
-# (microsoft/agent-governance-toolkit v3.0.0, PyPI: agent-governance-toolkit).
+# (microsoft/agent-governance-toolkit v3.0.0).
 #
 # For AKS production, you can also use the upstream image directly:
 #   agentmesh/governance-sidecar:0.3.0
@@ -14,10 +14,14 @@ FROM ${AZURELINUX_BASE}
 RUN tdnf install -y python3 python3-pip ca-certificates && tdnf clean all
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY server.py ./
+# Install AGT from vendored wheels (GitHub release v3.0.0, SHA256-verified)
+COPY vendor/agt-wheels/ /tmp/agt-wheels/
+RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
+    pip3 install --no-cache-dir pydantic && \
+    rm -rf /tmp/agt-wheels
+
+COPY sidecar-images/agt-governance/server.py ./
 
 RUN groupadd -g 1002 agt && useradd -u 1002 -g agt -m agt
 USER 1002
