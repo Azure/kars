@@ -574,13 +574,15 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   if [ "${AGT_GOVERNANCE_ENABLED:-false}" = "true" ] && [ -f /opt/agt-governance/server.py ]; then
     rm -f /tmp/agt-governance.log
     touch /tmp/agt-governance.log
-    [ "$IS_ROOT" = "true" ] && chown 1002:1002 /tmp/agt-governance.log
+    mkdir -p /tmp/agt
+    [ "$IS_ROOT" = "true" ] && chown 1002:1002 /tmp/agt-governance.log /tmp/agt
     AGT_POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
     POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
     AGT_PORT=8081 \
     AGT_METRICS_PORT=9091 \
     SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
     AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
+    AGT_TRUST_DB="/tmp/agt/trust_scores.json" \
     $AS_ROUTER python3 /opt/agt-governance/server.py > /tmp/agt-governance.log 2>&1 &
     AGT_PID=$!
     echo "[azureclaw] AGT governance sidecar running (PID: $AGT_PID, port: 8081)"
