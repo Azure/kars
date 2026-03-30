@@ -47,7 +47,8 @@ fi
 # container handles this before the sandbox container starts.
 if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
   # Filter table: allow established, localhost, DNS — reject everything else
-  iptables -N AZURECLAW_EGRESS 2>/dev/null || true
+  # Flush before append to prevent duplicate rules on container restart (#13)
+  iptables -N AZURECLAW_EGRESS 2>/dev/null || iptables -F AZURECLAW_EGRESS
   iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
   iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT
   iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT
@@ -55,14 +56,17 @@ if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
   # Allow traffic to the forward proxy port (redirected packets go to localhost)
   iptables -A AZURECLAW_EGRESS -p tcp --dport 8444 -j ACCEPT
   iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable
+  # Remove stale jump rule before adding (idempotent)
+  iptables -D OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS 2>/dev/null || true
   iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS
 
   # NAT table: redirect HTTP/HTTPS from UID 1000 to the transparent forward proxy.
   # The proxy enforces blocklist, allowlist, and learn mode on every request.
   # Inference (localhost:8443) is unaffected — loopback traffic is ACCEPTed above.
-  iptables -t nat -N AZURECLAW_REDIRECT 2>/dev/null || true
+  iptables -t nat -N AZURECLAW_REDIRECT 2>/dev/null || iptables -t nat -F AZURECLAW_REDIRECT
   iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 80  -j REDIRECT --to-port 8444
   iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 443 -j REDIRECT --to-port 8444
+  iptables -t nat -D OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT 2>/dev/null || true
   iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT
 
   echo "[azureclaw] iptables egress guard active (UID 1000 → transparent proxy on :8444)"
