@@ -11,7 +11,7 @@ ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:a452d39c91
 
 FROM ${AZURELINUX_BASE}
 
-RUN tdnf install -y python3 python3-pip ca-certificates && tdnf clean all
+RUN tdnf install -y python3 python3-pip ca-certificates python3-idna PyYAML && tdnf clean all
 
 WORKDIR /app
 
@@ -20,8 +20,8 @@ WORKDIR /app
 # runtime dependencies (email-validator, jsonschema). All wheels are pure-Python.
 COPY vendor/agt-wheels/ /tmp/agt-wheels/
 RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
-    pip3 install --no-cache-dir pydantic pyyaml idna dnspython \
-      || echo "WARN: PyPI unreachable — AGT optional deps skipped (pydantic/pyyaml)" && \
+    pip3 install --no-cache-dir pydantic dnspython 2>/dev/null \
+      || echo "WARN: PyPI unreachable — pydantic/dnspython skipped" && \
     rm -rf /tmp/agt-wheels
 
 COPY sidecar-images/agt-governance/server.py ./
