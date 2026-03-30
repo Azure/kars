@@ -296,24 +296,38 @@ class GovernanceHandler(BaseHTTPRequestHandler):
                         "error": "Invalid agent_id: 3-63 chars, "
                                  "lowercase alphanumeric, dots, hyphens"})
 
+            # Reject self-trust updates (sandbox can't boost its own score)
+            if agent_id == SANDBOX:
+                return self._json(403, {
+                    "error": "Cannot update own trust score"})
+
             score = int(body.get("score", 500))
             interactions = int(body.get("interactions", 0))
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
             existing = trust_store.get_trust_score(agent_id) or {
                 "score": 0, "interactions": 0, "last_interaction": ""}
+            old_score = existing.get("score", 0)
+
+            # Bound trust delta to ±200 per update (prevents score forging)
+            MAX_DELTA = 200
+            clamped = max(old_score - MAX_DELTA, min(old_score + MAX_DELTA, score))
+            clamped = max(0, min(1000, clamped))
+
             trust_store.store_trust_score(agent_id, {
-                "score": score,
+                "score": clamped,
                 "interactions": existing.get("interactions", 0) + interactions,
                 "last_interaction": now,
             })
 
             audit_log.log("trust_update", agent_id,
                            f"trust_update:{agent_id}",
-                           data={"score": score}, outcome="success")
+                           data={"score": clamped, "requested": score,
+                                 "previous": old_score},
+                           outcome="success")
 
             return self._json(200, {
-                "ok": True, "agent_id": agent_id, "score": score})
+                "ok": True, "agent_id": agent_id, "score": clamped})
 
         self._json(404, {"error": "not found"})
 

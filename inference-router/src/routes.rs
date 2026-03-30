@@ -38,6 +38,8 @@ pub struct AppState {
     pub mesh_metrics: Arc<MeshMetrics>,
     /// Live model override (set via /admin/model). Takes priority over config.default_model.
     pub model_override: Arc<std::sync::RwLock<Option<String>>>,
+    /// Admin token for sensitive mutations (trust updates). None = no auth required.
+    pub admin_token: Option<Arc<String>>,
 }
 
 impl AppState {
@@ -96,6 +98,11 @@ impl AppState {
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),
+            admin_token: std::fs::read_to_string("/run/secrets/admin-token")
+                .or_else(|_| std::env::var("ADMIN_TOKEN"))
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| Arc::new(s.trim().to_string())),
         })
     }
 
@@ -1273,6 +1280,7 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
 /// Body: { "agent_id": "peer-name", "score": 510, "interactions": 1 }
 async fn agt_trust_update(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if !state.sidecar.enabled {
@@ -1281,6 +1289,27 @@ async fn agt_trust_update(
             Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
         );
     }
+
+    // Trust mutations require admin token even from localhost — prevents sandbox
+    // (UID 1000) from forging peer trust scores via the localhost auth exemption.
+    if let Some(ref expected) = state.admin_token {
+        let provided = headers
+            .get("x-azureclaw-admin")
+            .or_else(|| headers.get("authorization"))
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
+        match provided {
+            Some(tok) if tok == expected.as_str() => {}
+            _ => {
+                tracing::warn!("POST /agt/trust denied: missing or invalid admin token");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "Admin token required for trust mutations"})),
+                );
+            }
+        }
+    }
+
     match state.sidecar.forward("POST", "/trust", Some(&body)).await {
         Ok((status, json)) => (
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
