@@ -1,0 +1,26 @@
+# AGT Governance Sidecar — wraps the official Agent Governance Toolkit
+# (microsoft/agent-governance-toolkit v3.0.0, PyPI: agent-governance-toolkit).
+#
+# For AKS production, you can also use the upstream image directly:
+#   agentmesh/governance-sidecar:0.3.0
+# This Dockerfile exists for dev mode and ACR builds.
+#
+# When the AGT Rust SDK ships, this sidecar is removed entirely.
+
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:a452d39c91576f5a2c983c7d3b62521fabd08e16b4a7237e24bf2be3b06e1651
+
+FROM ${AZURELINUX_BASE}
+
+RUN tdnf install -y python3 python3-pip ca-certificates && tdnf clean all
+
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+COPY server.py ./
+
+RUN groupadd -g 1002 agt && useradd -u 1002 -g agt -m agt
+USER 1002
+
+EXPOSE 8081 9091
+CMD ["python3", "server.py"]
