@@ -108,9 +108,9 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 # Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
 # Includes agentmesh-platform, agent-os-kernel, agent-hypervisor, and their
 # runtime dependencies (email-validator, jsonschema). All wheels are pure-Python.
+# pydantic/pyyaml/dnspython are already installed by the main pip layer above.
 COPY vendor/agt-wheels/ /tmp/agt-wheels/
 RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
-    pip3 install --no-cache-dir pydantic pyyaml idna dnspython && \
     rm -rf /tmp/agt-wheels
 
 # Install GitHub CLI (enables github skill)

@@ -20,7 +20,8 @@ WORKDIR /app
 # runtime dependencies (email-validator, jsonschema). All wheels are pure-Python.
 COPY vendor/agt-wheels/ /tmp/agt-wheels/
 RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
-    pip3 install --no-cache-dir pydantic pyyaml idna dnspython && \
+    pip3 install --no-cache-dir pydantic pyyaml idna dnspython \
+      || echo "WARN: PyPI unreachable — AGT optional deps skipped (pydantic/pyyaml)" && \
     rm -rf /tmp/agt-wheels
 
 COPY sidecar-images/agt-governance/server.py ./
