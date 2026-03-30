@@ -99,7 +99,8 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
       pydantic jsonpath-ng \
       sqlalchemy cryptography tiktoken \
       dnspython networkx geopy \
-      ftfy unidecode qrcode fpdf2 nano-pdf && \
+      ftfy unidecode qrcode fpdf2 nano-pdf \
+      "agent-governance-toolkit[full]==3.0.0" && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
@@ -196,6 +197,9 @@ RUN mkdir -p /sandbox /tmp && \
 # Copy entrypoint that auto-configures OpenClaw from mounted secrets
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# AGT governance sidecar server (dev mode — started by entrypoint.sh)
+COPY sidecar-images/agt-governance/server.py /opt/agt-governance/server.py
 
 # Labels
 LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \

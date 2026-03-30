@@ -96,6 +96,8 @@ struct Context {
     inference_router_image: String,
     /// Sandbox image — injected via SANDBOX_IMAGE env
     sandbox_image: String,
+    /// AGT governance sidecar image — injected via AGT_SIDECAR_IMAGE env
+    governance_sidecar_image: String,
     /// Azure OpenAI endpoint — injected via AZURE_OPENAI_ENDPOINT env
     openai_endpoint: String,
     /// Foundry Models endpoint — injected via FOUNDRY_ENDPOINT env
@@ -828,12 +830,55 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "readOnly": true
                         }));
                     }
-                    // Add AGT_POLICY_DIR env var pointing to the mounted path
+                    // Add AGT_POLICY_DIR + AGT_SIDECAR_URL env vars
                     if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
                         env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
+                        env.push(json!({"name": "AGT_SIDECAR_URL", "value": "http://127.0.0.1:8081"}));
                     }
                 }
             }
+
+            // Add the AGT governance sidecar container
+            containers.push(json!({
+                "name": "agt-governance",
+                "image": &ctx.governance_sidecar_image,
+                "ports": [
+                    {"containerPort": 8081, "name": "governance"},
+                    {"containerPort": 9091, "name": "agt-metrics"}
+                ],
+                "env": [
+                    {"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"},
+                    {"name": "AGT_PORT", "value": "8081"},
+                    {"name": "AGT_METRICS_PORT", "value": "9091"},
+                    {"name": "SANDBOX_NAME", "value": &name},
+                    {"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()},
+                    {"name": "NODE_ENV", "value": "production"}
+                ],
+                "securityContext": {
+                    "runAsUser": 1002,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {"drop": ["ALL"]}
+                },
+                "volumeMounts": [
+                    {"name": "agt-policy", "mountPath": "/etc/agt/policies", "readOnly": true},
+                    {"name": "tmp", "mountPath": "/tmp"}
+                ],
+                "resources": {
+                    "requests": {"cpu": "50m", "memory": "48Mi"},
+                    "limits": {"cpu": "200m", "memory": "128Mi"}
+                },
+                "livenessProbe": {
+                    "httpGet": {"path": "/healthz", "port": 8081, "host": "127.0.0.1"},
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 30
+                },
+                "readinessProbe": {
+                    "httpGet": {"path": "/healthz", "port": 8081, "host": "127.0.0.1"},
+                    "initialDelaySeconds": 3,
+                    "periodSeconds": 10
+                }
+            }));
         }
     }
 
@@ -1261,6 +1306,10 @@ pub async fn run(client: Client) -> Result<()> {
         tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
         "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
     });
+    let governance_sidecar_image =
+        std::env::var("AGT_SIDECAR_IMAGE").unwrap_or_else(|_| {
+            "agentmesh/governance-sidecar:0.3.0".into()
+        });
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").unwrap_or_default();
     let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
@@ -1307,6 +1356,7 @@ pub async fn run(client: Client) -> Result<()> {
         wi_client_id,
         inference_router_image,
         sandbox_image,
+        governance_sidecar_image,
         openai_endpoint,
         foundry_endpoint,
         foundry_project_endpoint,

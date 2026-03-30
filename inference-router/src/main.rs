@@ -24,6 +24,7 @@ mod metrics;
 mod proxy;
 mod routes;
 mod safety;
+mod sidecar;
 mod spawn;
 
 use anyhow::Result;

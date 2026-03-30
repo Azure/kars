@@ -559,6 +559,24 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate sidecar container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+  # ── AGT governance sidecar (dev mode) ─────────────────────────────────────
+  # In AKS, the controller injects this as a separate container (UID 1002).
+  # In dev mode, we start it here inside the sandbox container.
+  if [ "${AGT_GOVERNANCE_ENABLED:-false}" = "true" ] && [ -f /opt/agt-governance/server.py ]; then
+    rm -f /tmp/agt-governance.log
+    touch /tmp/agt-governance.log
+    [ "$IS_ROOT" = "true" ] && chown 1002:1002 /tmp/agt-governance.log
+    AGT_POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
+    POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
+    AGT_PORT=8081 \
+    AGT_METRICS_PORT=9091 \
+    SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
+    AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
+    $AS_ROUTER python3 /opt/agt-governance/server.py > /tmp/agt-governance.log 2>&1 &
+    AGT_PID=$!
+    echo "[azureclaw] AGT governance sidecar running (PID: $AGT_PID, port: 8081)"
+  fi
+
   # Ensure router can write its log file (remove stale file from previous runs)
   rm -f /tmp/inference-router.log
   touch /tmp/inference-router.log
@@ -578,6 +596,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   AGT_RELAY_URL="${AGT_RELAY_URL:-}" \
   AGT_REGISTRY_URL="${AGT_REGISTRY_URL:-}" \
   AGT_GOVERNANCE_ENABLED="${AGT_GOVERNANCE_ENABLED:-false}" \
+  AGT_SIDECAR_URL="http://127.0.0.1:8081" \
   SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
   SANDBOX_ISOLATION="${SANDBOX_ISOLATION:-enhanced}" \
   AZURECLAW_DEV_MODE="${AZURECLAW_DEV_MODE:-}" \
