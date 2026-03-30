@@ -3,7 +3,8 @@
 Agent Governance Toolkit (microsoft/agent-governance-toolkit v3.0.0).
 
 Every governance function delegates to real AGT components:
-  - agentmesh.PolicyEngine        → policy evaluation + built-in rate limiting
+  - agentmesh TrustPolicy + PolicyEvaluator → native condition evaluation
+    with operators: eq, in, matches (regex), lt, gt, gte, lte, ne, not_in
   - agentmesh.services.RateLimiter → HTTP-level token-bucket rate limiting
   - agentmesh.storage.FileTrustStore → persistent JSON-backed trust scores
   - agentmesh.AuditLog            → hash-chain tamper-evident audit
@@ -19,17 +20,16 @@ import logging
 import os
 import re
 import time
-import yaml
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 # ── AGT SDK imports (all from agentmesh v3.0.0) ─────────────────────
-from agentmesh import (
-    AgentDID,
-    AuditLog,
-    PolicyEngine,
+from agentmesh import AgentDID, AuditLog
+from agentmesh.governance.trust_policy import (
+    TrustPolicy, TrustRule, TrustCondition, TrustDefaults, load_policies,
 )
+from agentmesh.governance.policy_evaluator import PolicyEvaluator
 from agentmesh.services.rate_limiter import RateLimiter
 from agentmesh.storage.file_trust_store import FileTrustStore
 from agentmesh.services.behavior_monitor import AgentBehaviorMonitor
@@ -48,46 +48,24 @@ PORT = int(os.environ.get("AGT_PORT", "8081"))
 SANDBOX = os.environ.get("SANDBOX_NAME", "unknown")
 TRUST_THRESHOLD = int(os.environ.get("AGT_TRUST_THRESHOLD", "500"))
 TRUST_DB = os.environ.get("AGT_TRUST_DB", "/sandbox/.agt/trust_scores.json")
-AUDIT_SINK = os.environ.get("AGT_AUDIT_SINK", None)
-
-# ── Safe shell commands & destructive patterns ───────────────────────
-SAFE_SHELL = frozenset([
-    "ls", "cat", "grep", "find", "echo", "head", "tail", "wc", "sort",
-    "uniq", "diff", "python", "python3", "pip", "node", "npm", "git",
-    "curl", "jq", "sed", "awk",
-])
-DESTRUCTIVE_PATTERNS = re.compile(
-    r"rm\s+-rf\s+/|mkfs|shutdown|reboot|chmod\s+777|dd\s+if=", re.IGNORECASE
-)
-INJECTION_PATTERNS = re.compile(
-    r"ignore previous instructions|ignore all prior|you are now|"
-    r"new system prompt|DROP TABLE|UNION SELECT|rm -rf /|; curl |<script>",
-    re.IGNORECASE,
-)
 
 # ── Initialize AGT components ───────────────────────────────────────
 
-# 1. PolicyEngine — loads YAML policies, evaluates with condition expressions
-policy_engine = PolicyEngine()
+# 1. TrustPolicy + PolicyEvaluator — native condition-based evaluation
+#    Uses TrustCondition with operators: eq, in, matches (regex), lt/gt, etc.
+#    No custom pre-processing — AGT evaluates conditions directly.
+policies = []
 policy_count = 0
-
 if os.path.isdir(POLICY_DIR):
-    for fname in sorted(os.listdir(POLICY_DIR)):
-        if not fname.endswith((".yaml", ".yml")):
-            continue
-        fpath = os.path.join(POLICY_DIR, fname)
-        try:
-            with open(fpath) as fh:
-                content = fh.read()
-            data = yaml.safe_load(content)
-            if "name" in data and "rules" in data:
-                policy = policy_engine.load_yaml(content)
-                policy_count = len(policy.rules)
-                log.info("Loaded policy '%s': %d rules", policy.name, policy_count)
-            else:
-                log.warning("Skipping %s: missing 'name' or 'rules'", fname)
-        except Exception as e:
-            log.error("Failed to load %s: %s", fname, e)
+    try:
+        policies = load_policies(POLICY_DIR)
+        for p in policies:
+            policy_count += len(p.rules)
+            log.info("Loaded policy '%s': %d rules", p.name, len(p.rules))
+    except Exception as e:
+        log.warning("Native load_policies failed (%s), policies empty", e)
+
+evaluator = PolicyEvaluator(policies)
 
 # 2. RateLimiter — token-bucket per agent
 rate_limiter = RateLimiter(
@@ -119,11 +97,11 @@ def _score_to_tier(score: int) -> str:
 
 
 def _build_context(action_str: str, extra: dict = None) -> dict:
-    """Pre-process an action string into structured context for PolicyEngine.
+    """Parse action string into context dict for PolicyEvaluator.
 
-    PolicyEngine conditions use field == 'value' and boolean field checks.
-    We parse 'shell:ls', 'inference:chat', 'output:validate', etc. into
-    nested dicts with pre-computed boolean flags.
+    Splits 'shell:ls -la' into structured fields that TrustCondition
+    operators (eq, in, matches, lt/gt) evaluate directly — no custom
+    classification logic.
     """
     parts = action_str.split(":", 1)
     category = parts[0] if parts else "unknown"
@@ -136,24 +114,15 @@ def _build_context(action_str: str, extra: dict = None) -> dict:
             "category": category,
             "detail": detail,
             "command": cmd,
-            "safe": cmd in SAFE_SHELL if category == "shell" else False,
-            "destructive": bool(DESTRUCTIVE_PATTERNS.search(action_str)),
-            "injection_detected": bool(INJECTION_PATTERNS.search(detail))
-                if category == "output" else False,
-            "bulk": detail.startswith("bulk") or detail.startswith("promote"),
-            "untrusted": False,
         },
     }
     if extra:
-        # Merge trust info for mesh messages
-        if "trust_score" in extra:
-            ctx["action"]["untrusted"] = extra["trust_score"] < TRUST_THRESHOLD
-        ctx.update({k: v for k, v in extra.items() if k != "action"})
+        ctx.update(extra)
     return ctx
 
 
 def _evaluate(agent_did: str, action_str: str, extra: dict = None) -> dict:
-    """Run action through AGT PolicyEngine + RateLimiter + BehaviorMonitor."""
+    """Run action through AGT PolicyEvaluator + RateLimiter + BehaviorMonitor."""
     # Rate limit check (token bucket)
     if not rate_limiter.allow(agent_did):
         audit_log.log("rate_limit", agent_did, action_str, outcome="denied",
@@ -163,15 +132,14 @@ def _evaluate(agent_did: str, action_str: str, extra: dict = None) -> dict:
                 "reason": "Rate limited (token bucket)",
                 "rate_limited": True}
 
-    # Build structured context and evaluate policy
+    # Build context and evaluate via AGT PolicyEvaluator
     ctx = _build_context(action_str, extra)
-    decision = policy_engine.evaluate(agent_did, ctx)
+    decision = evaluator.evaluate(ctx)
 
     outcome = "success" if decision.allowed else "denied"
     audit_log.log("policy_check", agent_did, action_str,
                    outcome=outcome, policy_decision=decision.action,
-                   data={"rule": decision.matched_rule,
-                         "policy": decision.policy_name})
+                   data={"rule": decision.rule_name})
 
     behavior_monitor.record_tool_call(agent_did, action_str,
                                        success=decision.allowed)
@@ -179,11 +147,9 @@ def _evaluate(agent_did: str, action_str: str, extra: dict = None) -> dict:
     return {
         "allowed": decision.allowed,
         "action": decision.action,
-        "matched_rule": decision.matched_rule,
-        "policy_name": decision.policy_name,
+        "matched_rule": decision.rule_name,
         "reason": decision.reason,
-        "rate_limited": decision.rate_limited,
-        "evaluation_ms": decision.evaluation_ms,
+        "rate_limited": False,
     }
 
 
@@ -228,8 +194,7 @@ class GovernanceHandler(BaseHTTPRequestHandler):
                  "last_interaction": ts.get("last_interaction", "")}
                 for aid, ts in all_scores.items()
             ]
-            integrity_ok, integrity_msg = audit_log.verify_integrity()
-            entries = audit_log.query(limit=1)  # just get count efficiently
+            integrity_ok, _ = audit_log.verify_integrity()
             audit_count = len(audit_log.query(limit=10000))
             return self._json(200, {
                 "enabled": True,
@@ -313,7 +278,6 @@ class GovernanceHandler(BaseHTTPRequestHandler):
 
             result = _evaluate(agent_did, action, extra)
             status = 200 if result["allowed"] else 403
-            # Map to legacy field name for router compatibility
             result["decision"] = result["action"]
             return self._json(status, result)
 
@@ -323,7 +287,7 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             if not agent_id:
                 return self._json(400, {"error": "agent_id required"})
 
-            # Validate agent ID format
+            # Validate agent ID format via AGT AgentDID
             try:
                 AgentDID.from_string(agent_id)
             except ValueError:
