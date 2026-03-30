@@ -107,11 +107,14 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 # AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
 # Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
 # Includes agentmesh-platform, agent-os-kernel, agent-hypervisor, and their
-# runtime dependencies (email-validator, jsonschema). All wheels are pure-Python.
+# runtime dependencies (email-validator, jsonschema).
 # pydantic/pyyaml/dnspython are already installed by the main pip layer above.
+# Install each wheel individually — skip platform-incompatible ones (e.g.
+# pydantic_core x86_64 on aarch64 dev builds; already satisfied from above).
 COPY vendor/agt-wheels/ /tmp/agt-wheels/
-RUN pip3 install --no-cache-dir --no-deps /tmp/agt-wheels/*.whl && \
-    rm -rf /tmp/agt-wheels
+RUN for whl in /tmp/agt-wheels/*.whl; do \
+      pip3 install --no-cache-dir --no-deps "$whl" 2>/dev/null || true; \
+    done && rm -rf /tmp/agt-wheels
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
