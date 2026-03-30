@@ -17,7 +17,7 @@ use crate::auth::WorkloadIdentityAuth;
 use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
-use crate::governance::GovernanceState;
+use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
 use crate::sidecar::SidecarProxy;
@@ -31,9 +31,11 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
-    pub governance: Arc<GovernanceState>,
     pub sidecar: SidecarProxy,
     pub blocklist: Blocklist,
+    pub sandbox_name: Arc<String>,
+    pub inbox: Arc<MeshInbox>,
+    pub mesh_metrics: Arc<MeshMetrics>,
     /// Live model override (set via /admin/model). Takes priority over config.default_model.
     pub model_override: Arc<std::sync::RwLock<Option<String>>>,
 }
@@ -88,9 +90,11 @@ impl AppState {
             client: client.clone(),
             config: Arc::new(config),
             budget,
-            governance: Arc::new(GovernanceState::new(&sandbox_name)),
             sidecar: SidecarProxy::new(&client),
             blocklist,
+            sandbox_name: Arc::new(sandbox_name),
+            inbox: Arc::new(MeshInbox::new()),
+            mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),
         })
     }
@@ -1049,79 +1053,44 @@ async fn agt_evaluate(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Sidecar path: proxy to AGT governance sidecar
-    if state.sidecar.enabled {
-        return match state.sidecar.forward("POST", "/evaluate", Some(&body)).await {
-            Ok((status, json)) => (
-                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-                Json(json),
-            )
-                .into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-            )
-                .into_response(),
-        };
-    }
-
-    // Fallback: local governance engine
-    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    if action.is_empty() {
+    if !state.sidecar.enabled {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Missing 'action' field"
-            })),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
         )
             .into_response();
     }
-
-    let decision = state.governance.evaluate_action(action).await;
-    let (status, result) = match decision {
-        crate::governance::PolicyDecision::Allow => (
-            StatusCode::OK,
-            serde_json::json!({
-                "decision": "allow", "action": action
-            }),
-        ),
-        crate::governance::PolicyDecision::Deny(reason) => (
-            StatusCode::FORBIDDEN,
-            serde_json::json!({
-                "decision": "deny", "action": action, "reason": reason
-            }),
-        ),
-        crate::governance::PolicyDecision::RequiresApproval(reason) => (
-            StatusCode::ACCEPTED,
-            serde_json::json!({
-                "decision": "requires_approval", "action": action, "reason": reason
-            }),
-        ),
-        crate::governance::PolicyDecision::RateLimited { retry_after_secs } => (
-            StatusCode::TOO_MANY_REQUESTS,
-            serde_json::json!({
-                "decision": "rate_limited", "action": action, "retry_after_secs": retry_after_secs
-            }),
-        ),
-    };
-
-    (status, Json(result)).into_response()
+    match state.sidecar.forward("POST", "/evaluate", Some(&body)).await {
+        Ok((status, json)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(json),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /agt/trust — list all known agent trust states.
 async fn agt_trust_list(State(state): State<AppState>) -> impl IntoResponse {
-    if state.sidecar.enabled {
-        return match state.sidecar.forward("GET", "/trust", None).await {
-            Ok((_, json)) => Json(json).into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-            )
-                .into_response(),
-        };
+    if !state.sidecar.enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
+        )
+            .into_response();
     }
-    let agents = state.governance.trust.all_agents().await;
-    Json(serde_json::json!({ "agents": agents })).into_response()
+    match state.sidecar.forward("GET", "/trust", None).await {
+        Ok((_, json)) => Json(json).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /agt/trust/:agent_id — get trust state for a specific agent.
@@ -1129,316 +1098,73 @@ async fn agt_trust_get(
     State(state): State<AppState>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    if state.sidecar.enabled {
-        let path = format!("/trust/{}", agent_id);
-        return match state.sidecar.forward("GET", &path, None).await {
-            Ok((_, json)) => Json(json).into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-            )
-                .into_response(),
-        };
+    if !state.sidecar.enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
+        )
+            .into_response();
     }
-    let trust = state.governance.trust.get_trust(&agent_id).await;
-    Json(serde_json::json!(trust)).into_response()
+    let path = format!("/trust/{}", agent_id);
+    match state.sidecar.forward("GET", &path, None).await {
+        Ok((_, json)) => Json(json).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /agt/audit — get the full audit log.
 async fn agt_audit(State(state): State<AppState>) -> impl IntoResponse {
-    if state.sidecar.enabled {
-        return match state.sidecar.forward("GET", "/audit", None).await {
-            Ok((_, json)) => Json(json).into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-            )
-                .into_response(),
-        };
+    if !state.sidecar.enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
+        )
+            .into_response();
     }
-    let entries = state.governance.audit.entries().await;
-    Json(serde_json::json!({
-        "entries": entries,
-        "count": entries.len(),
-        "sandbox": state.governance.sandbox_name
-    }))
-    .into_response()
+    match state.sidecar.forward("GET", "/audit", None).await {
+        Ok((_, json)) => Json(json).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /agt/audit/verify — verify hash-chain integrity.
 async fn agt_audit_verify(State(state): State<AppState>) -> impl IntoResponse {
-    if state.sidecar.enabled {
-        return match state.sidecar.forward("GET", "/audit/verify", None).await {
-            Ok((_, json)) => Json(json).into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-            )
-                .into_response(),
-        };
-    }
-    let valid = state.governance.audit.verify_integrity().await;
-    let count = state.governance.audit.entries().await.len();
-    Json(serde_json::json!({
-        "integrity": if valid { "valid" } else { "COMPROMISED" },
-        "entries": count,
-        "sandbox": state.governance.sandbox_name
-    }))
-    .into_response()
-}
-
-/// REMOVED: POST /agt/mesh/send — plaintext HTTP mesh send.
-/// All inter-agent communication now uses E2E encrypted AGT relay exclusively.
-/// Keeping as dead code for reference until next cleanup.
-#[allow(dead_code)]
-async fn agt_mesh_send(
-    State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let to_agent = body.get("to_agent").and_then(|v| v.as_str()).unwrap_or("");
-    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let msg_type = body
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("request");
-
-    if to_agent.is_empty() || content.is_empty() {
+    if !state.sidecar.enabled {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Missing 'to_agent' or 'content' field"
-            })),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
         )
             .into_response();
     }
-
-    // Trust gate: check if target agent is trusted
-    if !state.governance.trust.is_trusted(to_agent).await {
-        let trust = state.governance.trust.get_trust(to_agent).await;
-        state
-            .governance
-            .audit
-            .append(
-                &format!("mesh:send:{}", to_agent),
-                "deny",
-                &format!("Trust score {} below threshold", trust.score),
-            )
-            .await;
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "Target agent trust score below threshold",
-                "agent": to_agent,
-                "score": trust.score,
-                "threshold": state.governance.trust.default_score
-            })),
+    match state.sidecar.forward("GET", "/audit/verify", None).await {
+        Ok((_, json)) => Json(json).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
         )
-            .into_response();
-    }
-
-    let msg = crate::governance::MeshMessage {
-        id: format!("{}-{}", state.governance.sandbox_name, uuid_v4()),
-        from_agent: state.governance.sandbox_name.clone(),
-        to_agent: to_agent.to_string(),
-        content: content.to_string(),
-        message_type: msg_type.to_string(),
-        timestamp: format!(
-            "{}Z",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        ),
-        signature: String::new(),
-    };
-
-    // Resolve target agent's router via K8s DNS or explicit URL override.
-    // Priority: AGT_MESH_TARGET_URL env var > CRD namespace lookup > K8s DNS in parent namespace
-    let target_url = if let Ok(url) = std::env::var("AGT_MESH_TARGET_URL") {
-        url
-    } else {
-        // Try to resolve the target's actual namespace from ClawSandbox CRD status
-        let target_ns = match spawn::get_sandbox_status(to_agent).await {
-            Ok(resp) => resp
-                .namespace
-                .unwrap_or_else(|| format!("azureclaw-{}", to_agent)),
-            Err(_) => {
-                // Not a spawned sub-agent — try same namespace (peer agents like agent-alpha/agent-beta)
-                std::env::var("AGT_MESH_NAMESPACE").unwrap_or_else(|_| {
-                    std::env::var("NAMESPACE").unwrap_or_else(|_| "azureclaw-foundry-test".into())
-                })
-            }
-        };
-        format!("http://{}.{}.svc.cluster.local:8443", to_agent, target_ns)
-    };
-    let receive_url = format!("{}/agt/mesh/receive", target_url.trim_end_matches('/'));
-
-    tracing::info!(
-        from = %state.governance.sandbox_name,
-        to = %to_agent,
-        url = %receive_url,
-        "Sending mesh message"
-    );
-
-    match state
-        .client
-        .post(&receive_url)
-        .json(&msg)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            state.governance.trust.record_success(to_agent).await;
-            state
-                .governance
-                .mesh_metrics
-                .messages_sent
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            state
-                .governance
-                .audit
-                .append(
-                    &format!("mesh:send:{}", to_agent),
-                    "delivered",
-                    &format!("Message {} delivered to {}", msg.id, to_agent),
-                )
-                .await;
-            tracing::info!(from = %state.governance.sandbox_name, to = %to_agent, id = %msg.id, "Mesh message delivered");
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "delivered",
-                    "message_id": msg.id,
-                    "to_agent": to_agent,
-                    "from_agent": state.governance.sandbox_name
-                })),
-            )
-                .into_response()
-        }
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body_text = resp.text().await.unwrap_or_default();
-            state.governance.trust.record_failure(to_agent).await;
-            state
-                .governance
-                .audit
-                .append(
-                    &format!("mesh:send:{}", to_agent),
-                    "failed",
-                    &format!(
-                        "Target returned {}: {}",
-                        status_code,
-                        &body_text[..body_text.len().min(100)]
-                    ),
-                )
-                .await;
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("Target agent returned {}", status_code),
-                    "to_agent": to_agent,
-                    "details": &body_text[..body_text.len().min(200)]
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::warn!(to = %to_agent, error = %e, "Target agent unreachable");
-            state
-                .governance
-                .audit
-                .append(
-                    &format!("mesh:send:{}", to_agent),
-                    "unreachable",
-                    &format!("Target unreachable: {}", e),
-                )
-                .await;
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": format!("Target agent '{}' unreachable: {}", to_agent, e),
-                    "to_agent": to_agent,
-                    "message_id": msg.id
-                })),
-            )
-                .into_response()
-        }
+            .into_response(),
     }
 }
 
 /// GET /agt/mesh/inbox — read received messages.
 async fn agt_mesh_inbox(State(state): State<AppState>) -> impl IntoResponse {
-    let messages = state.governance.inbox.peek().await;
+    let messages = state.inbox.peek().await;
     Json(serde_json::json!({
         "messages": messages,
         "count": messages.len()
     }))
 }
 
-/// REMOVED: POST /agt/mesh/receive — plaintext HTTP mesh receive.
-/// All inter-agent communication now uses E2E encrypted AGT relay exclusively.
-#[allow(dead_code)]
-async fn agt_mesh_receive(
-    State(state): State<AppState>,
-    Json(msg): Json<crate::governance::MeshMessage>,
-) -> impl IntoResponse {
-    tracing::info!(from = %msg.from_agent, to = %msg.to_agent, msg_type = %msg.message_type, "Mesh message received");
-
-    // Trust gate on incoming messages too
-    if !state.governance.trust.is_trusted(&msg.from_agent).await {
-        state
-            .governance
-            .audit
-            .append(
-                &format!("mesh:receive:{}", msg.from_agent),
-                "deny",
-                "Sender trust below threshold",
-            )
-            .await;
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "Sender trust score below threshold"
-            })),
-        )
-            .into_response();
-    }
-
-    state.governance.trust.record_success(&msg.from_agent).await;
-    state
-        .governance
-        .mesh_metrics
-        .messages_received
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .governance
-        .audit
-        .append(
-            &format!("mesh:receive:{}", msg.from_agent),
-            "allow",
-            &format!("Message {} received", msg.id),
-        )
-        .await;
-
-    let _from_agent = msg.from_agent.clone();
-    let _msg_id = msg.id.clone();
-    state.governance.inbox.receive(msg).await;
-
-    // No auto-processing here. Task_request messages are handled by the OpenClaw
-    // plugin via the AGT relay (E2E encrypted) onMessage handler, which has full
-    // tool access (exec/shell) through the node host.
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "received"})),
-    )
-        .into_response()
-}
-
 /// GET /agt/status — overall governance status.
 async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
-    // Merge sidecar governance status with local mesh/blocklist metrics
     let sidecar_status = if state.sidecar.enabled {
         match state.sidecar.forward("GET", "/status", None).await {
             Ok((_, json)) => Some(json),
@@ -1448,70 +1174,51 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         None
     };
 
-    let inbox = state.governance.inbox.peek().await;
+    let inbox = state.inbox.peek().await;
     let blocklist_len = state.blocklist.len().await;
 
-    if let Some(mut sidecar_json) = sidecar_status {
-        // Enrich sidecar response with local-only data
-        if let Some(obj) = sidecar_json.as_object_mut() {
-            obj.insert("inbox_messages".into(), serde_json::json!(inbox.len()));
-            obj.insert("blocklist_domains".into(), serde_json::json!(blocklist_len));
-            obj.insert(
-                "egress_learn_mode".into(),
-                serde_json::json!(state.blocklist.is_learn_mode()),
-            );
-            obj.insert(
-                "egress_learned_domains".into(),
-                serde_json::json!(state.blocklist.learned_count().await),
-            );
-            obj.insert(
-                "mesh_sessions".into(),
-                serde_json::json!(state.governance.mesh_metrics.sessions.load(
-                    std::sync::atomic::Ordering::Relaxed
-                )),
-            );
-            obj.insert(
-                "mesh_messages_sent".into(),
-                serde_json::json!(state.governance.mesh_metrics.messages_sent.load(
-                    std::sync::atomic::Ordering::Relaxed
-                )),
-            );
-            obj.insert(
-                "mesh_messages_received".into(),
-                serde_json::json!(state.governance.mesh_metrics.messages_received.load(
-                    std::sync::atomic::Ordering::Relaxed
-                )),
-            );
+    let mut result = sidecar_status.unwrap_or_else(|| {
+        serde_json::json!({
+            "sidecar": false,
+            "sandbox": *state.sandbox_name,
+        })
+    });
+
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("inbox_messages".into(), serde_json::json!(inbox.len()));
+        obj.insert("blocklist_domains".into(), serde_json::json!(blocklist_len));
+        obj.insert(
+            "egress_learn_mode".into(),
+            serde_json::json!(state.blocklist.is_learn_mode()),
+        );
+        obj.insert(
+            "egress_learned_domains".into(),
+            serde_json::json!(state.blocklist.learned_count().await),
+        );
+        obj.insert(
+            "mesh_sessions".into(),
+            serde_json::json!(state.mesh_metrics.sessions.load(
+                std::sync::atomic::Ordering::Relaxed
+            )),
+        );
+        obj.insert(
+            "mesh_messages_sent".into(),
+            serde_json::json!(state.mesh_metrics.messages_sent.load(
+                std::sync::atomic::Ordering::Relaxed
+            )),
+        );
+        obj.insert(
+            "mesh_messages_received".into(),
+            serde_json::json!(state.mesh_metrics.messages_received.load(
+                std::sync::atomic::Ordering::Relaxed
+            )),
+        );
+        if state.sidecar.enabled {
             obj.insert("sidecar".into(), serde_json::json!(true));
         }
-        return Json(sidecar_json).into_response();
     }
 
-    // Fallback: local governance engine
-    let audit_entries = state.governance.audit.entries().await;
-    let trust_agents = state.governance.trust.all_agents().await;
-    let total_interactions: u64 = trust_agents.iter().map(|a| a.interactions).sum();
-
-    Json(serde_json::json!({
-        "enabled": state.governance.enabled,
-        "sandbox": state.governance.sandbox_name,
-        "sidecar": false,
-        "policy_loaded": state.governance.policy.is_loaded(),
-        "audit_entries": audit_entries.len(),
-        "audit_integrity": state.governance.audit.verify_integrity().await,
-        "known_agents": trust_agents.len(),
-        "trust_states": trust_agents,
-        "inbox_messages": inbox.len(),
-        "blocklist_domains": blocklist_len,
-        "egress_learn_mode": state.blocklist.is_learn_mode(),
-        "egress_learned_domains": state.blocklist.learned_count().await,
-        "mesh_sessions": state.governance.mesh_metrics.sessions.load(std::sync::atomic::Ordering::Relaxed),
-        "mesh_messages_sent": state.governance.mesh_metrics.messages_sent.load(std::sync::atomic::Ordering::Relaxed),
-        "mesh_messages_received": state.governance.mesh_metrics.messages_received.load(std::sync::atomic::Ordering::Relaxed),
-        "trust_updates": state.governance.mesh_metrics.trust_updates.load(std::sync::atomic::Ordering::Relaxed),
-        "total_interactions": total_interactions,
-    }))
-    .into_response()
+    Json(result).into_response()
 }
 
 /// POST /agt/trust — plugin pushes trust updates after mesh interactions.
@@ -1520,69 +1227,22 @@ async fn agt_trust_update(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Sidecar path
-    if state.sidecar.enabled {
-        return match state.sidecar.forward("POST", "/trust", Some(&body)).await {
-            Ok((status, json)) => (
-                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-                Json(json),
-            ),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-            ),
-        };
-    }
-
-    // Fallback: local trust store
-    let agent_id = body["agent_id"].as_str().unwrap_or("");
-    let score = body["score"].as_u64().unwrap_or(500) as u32;
-    let interactions = body["interactions"].as_u64().unwrap_or(0);
-
-    if agent_id.is_empty() {
+    if !state.sidecar.enabled {
         return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "agent_id required"})),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
         );
     }
-
-    state
-        .governance
-        .trust
-        .update_trust(agent_id, score, interactions)
-        .await;
-    state
-        .governance
-        .mesh_metrics
-        .trust_updates
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .governance
-        .mesh_metrics
-        .sessions
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    state
-        .governance
-        .audit
-        .append(
-            &format!("trust_update:{}", agent_id),
-            "applied",
-            &format!("score={} interactions={}", score, interactions),
-        )
-        .await;
-
-    tracing::info!(
-        agent_id,
-        score,
-        interactions,
-        "AGT trust updated via plugin"
-    );
-
-    (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({"ok": true, "agent_id": agent_id, "score": score})),
-    )
+    match state.sidecar.forward("POST", "/trust", Some(&body)).await {
+        Ok((status, json)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(json),
+        ),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+        ),
+    }
 }
 
 /// GET /agt/reputation — fetch this agent's reputation from the AgentMesh registry.
@@ -1592,7 +1252,7 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
-    let sandbox_name = &state.governance.sandbox_name;
+    let sandbox_name: &str = &state.sandbox_name;
     let base = registry_url.trim_end_matches('/');
 
     // Step 1: Look up our AMID by searching for our sandbox name as a capability.
@@ -1655,15 +1315,21 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
         None
     };
 
-    // Local trust store snapshot
-    let local_trust = state.governance.trust.all_agents().await;
+    // Local trust from sidecar (if available)
+    let local_trust = if state.sidecar.enabled {
+        match state.sidecar.forward("GET", "/trust", None).await {
+            Ok((_, json)) => json.get("agents").cloned().unwrap_or(serde_json::json!([])),
+            Err(_) => serde_json::json!([]),
+        }
+    } else {
+        serde_json::json!([])
+    };
 
     Json(serde_json::json!({
         "amid": amid.as_deref().unwrap_or(sandbox_name),
         "sandbox": sandbox_name,
         "registry": registry,
         "local_trust": local_trust,
-        "default_score": state.governance.trust.default_score,
     }))
 }
 
@@ -2073,16 +1739,11 @@ async fn egress_fetch(
         }
     }
 
-    let sandbox = &state.governance.sandbox_name;
+    let sandbox: &str = &state.sandbox_name;
 
     // Check egress access: blocklist → allowlist → pending
     if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
         tracing::warn!(url = %url, reason = %reason, "Egress fetch denied");
-        state
-            .governance
-            .audit
-            .append(&format!("egress:fetch:{}", url), "deny", &reason)
-            .await;
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
@@ -2092,17 +1753,6 @@ async fn egress_fetch(
 
     // Record in learn mode
     state.blocklist.record_learned(url).await;
-
-    // Audit log
-    state
-        .governance
-        .audit
-        .append(
-            &format!("egress:fetch:{}", url),
-            "allow",
-            &format!("{} request to {}", method, url),
-        )
-        .await;
 
     tracing::info!(url = %url, method = %method, "Egress fetch proxied");
 
@@ -2247,15 +1897,7 @@ async fn egress_approve(
             .into_response();
     }
     state.blocklist.allow_domain(domain).await;
-    state
-        .governance
-        .audit
-        .append(
-            &format!("egress:approve:{}", domain),
-            "approved",
-            &format!("Domain {} added to egress allowlist", domain),
-        )
-        .await;
+    tracing::info!(domain = %domain, "Egress domain approved");
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2283,15 +1925,7 @@ async fn egress_deny(
             .into_response();
     }
     state.blocklist.deny_domain(domain).await;
-    state
-        .governance
-        .audit
-        .append(
-            &format!("egress:deny:{}", domain),
-            "denied",
-            &format!("Domain {} denied and removed from pending", domain),
-        )
-        .await;
+    tracing::info!(domain = %domain, "Egress domain denied");
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2330,20 +1964,6 @@ async fn egress_enforce(State(state): State<AppState>) -> impl IntoResponse {
     state.blocklist.clear_learned().await;
 
     let allowlist = state.blocklist.get_allowlist().await;
-
-    state
-        .governance
-        .audit
-        .append(
-            "egress:enforce",
-            "enforced",
-            &format!(
-                "Graduated to enforcement: {} learned domains promoted to allowlist ({} total)",
-                learned.len(),
-                allowlist.len()
-            ),
-        )
-        .await;
 
     tracing::info!(
         promoted = learned.len(),

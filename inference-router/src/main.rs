@@ -19,7 +19,7 @@ mod blocklist;
 mod budget;
 mod config;
 mod forward_proxy;
-mod governance;
+mod mesh;
 mod metrics;
 mod proxy;
 mod routes;
