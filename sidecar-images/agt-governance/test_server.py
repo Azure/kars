@@ -608,6 +608,93 @@ class TestGovernanceSidecar(unittest.TestCase):
         self.assertEqual(ctx["action"]["detail"], "")
         self.assertEqual(ctx["action"]["command"], "")
 
+    # ── /report_content_flag endpoint ────────────────────────────────
+
+    def test_report_content_flag_jailbreak_applies_penalty(self):
+        """Jailbreak flag applies -100 trust penalty."""
+        # Set initial trust score
+        self._post("/trust", {
+            "agent_id": "test-peer", "score": 500, "interactions": 1})
+        # Report jailbreak flag
+        status, data = self._post("/report_content_flag", {
+            "agent_id": "test-peer",
+            "flags": {"jailbreak": True},
+            "filtered_categories": ["jailbreak"],
+            "detected_categories": [],
+            "trust_penalty": -100,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["penalty_applied"], -100)
+        self.assertEqual(data["trust_score"], 400)
+        self.assertEqual(data["previous_score"], 500)
+
+    def test_report_content_flag_no_penalty_when_zero(self):
+        """No trust change when penalty is 0."""
+        status, data = self._post("/report_content_flag", {
+            "agent_id": "test-peer",
+            "flags": {},
+            "filtered_categories": [],
+            "detected_categories": [],
+            "trust_penalty": 0,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["penalty_applied"], 0)
+
+    def test_report_content_flag_audit_recorded(self):
+        """Content flag creates an audit log entry."""
+        self._post("/report_content_flag", {
+            "agent_id": "test-peer",
+            "flags": {"hate": True},
+            "filtered_categories": ["hate"],
+            "detected_categories": [],
+            "trust_penalty": -50,
+        })
+        _, data = self._get("/audit")
+        actions = [e["action"] for e in data["entries"]]
+        self.assertTrue(
+            any("content_flag" in a for a in actions),
+            f"Expected content_flag in audit, got {actions}")
+
+    def test_report_content_flag_multiple_categories(self):
+        """Multiple flags accumulate penalty correctly."""
+        self._post("/trust", {
+            "agent_id": "multi-flag", "score": 500, "interactions": 1})
+        status, data = self._post("/report_content_flag", {
+            "agent_id": "multi-flag",
+            "flags": {"jailbreak": True, "hate": True, "violence": True},
+            "filtered_categories": ["jailbreak"],
+            "detected_categories": ["hate", "violence"],
+            "trust_penalty": -200,
+        })
+        self.assertEqual(data["trust_score"], 300)
+        self.assertEqual(data["penalty_applied"], -200)
+
+    def test_report_content_flag_floor_at_zero(self):
+        """Trust score cannot go below 0."""
+        self._post("/trust", {
+            "agent_id": "low-trust", "score": 50, "interactions": 1})
+        status, data = self._post("/report_content_flag", {
+            "agent_id": "low-trust",
+            "flags": {"jailbreak": True, "indirect_attack": True},
+            "filtered_categories": ["jailbreak", "indirect_attack"],
+            "detected_categories": [],
+            "trust_penalty": -200,
+        })
+        self.assertEqual(data["trust_score"], 0)
+
+    def test_report_content_flag_defaults_agent_to_sandbox(self):
+        """Missing agent_id defaults to SANDBOX."""
+        status, data = self._post("/report_content_flag", {
+            "flags": {"jailbreak": True},
+            "filtered_categories": ["jailbreak"],
+            "detected_categories": [],
+            "trust_penalty": -100,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

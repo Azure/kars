@@ -355,61 +355,9 @@ async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    // Content Safety check (on by default)
-    if state.config.content_safety_enabled
-        && let Some(ref endpoint) = state.config.content_safety_endpoint
-    {
-        // Extract user message from request body for safety check
-        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body)
-            && let Some(messages) = body_json.get("messages").and_then(|m| m.as_array())
-            && let Some(last_user_msg) = messages
-                .iter()
-                .rev()
-                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-            && let Err(e) = safety::check_content_safety(endpoint, last_user_msg).await
-        {
-            tracing::warn!(sandbox = %sandbox_name, "Content safety blocked: {e}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Request blocked by content safety policy",
-                        "type": "content_safety_violation",
-                        "code": "content_filtered"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    }
-
-    // Prompt Shields check
-    if state.config.prompt_shields_enabled
-        && let Some(ref endpoint) = state.config.content_safety_endpoint
-        && let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body)
-        && let Some(messages) = body_json.get("messages").and_then(|m| m.as_array())
-    {
-        let full_prompt: String = messages
-            .iter()
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if let Err(e) = safety::check_prompt_shields(endpoint, &full_prompt).await {
-            tracing::warn!(sandbox = %sandbox_name, "Prompt shield blocked: {e}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Request blocked by prompt shield — possible injection detected",
-                        "type": "prompt_shield_violation",
-                        "code": "prompt_filtered"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    }
+    // Foundry guardrails (DefaultV2) handle content safety and prompt shields
+    // at inference time — no pre-flight calls needed. We parse the response
+    // annotations after forwarding and report flags to AGT sidecar.
 
     // AGT policy check — evaluate inference action via sidecar (audit mode: log, don't block)
     if state.sidecar.enabled {
@@ -498,13 +446,36 @@ async fn chat_completions(
         .await
         {
             Ok((status, resp_headers, stream)) => {
-                // Wrap stream to intercept usage in the final SSE chunk.
-                // Azure OpenAI / OpenAI include a `usage` field in the last
-                // `data:` line before `data: [DONE]` when `stream_options.include_usage` is set,
-                // or in a standalone chunk. We parse each SSE line looking for it.
+                // Wrap stream to intercept the first SSE chunk for guardrail
+                // annotations and the final chunk for token usage.
+                let sidecar_for_stream = state.sidecar.clone();
+                let sandbox_for_flags = sandbox_owned.clone();
+                let checked_flags = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let wrapped = stream.map(move |chunk| {
                     if let Ok(ref bytes) = chunk {
                         if let Ok(text) = std::str::from_utf8(bytes) {
+                            // Check first chunk for Foundry guardrail annotations
+                            if !checked_flags.load(std::sync::atomic::Ordering::Relaxed)
+                                && text.contains("prompt_filter_results")
+                            {
+                                checked_flags.store(true, std::sync::atomic::Ordering::Relaxed);
+                                let flags = safety::parse_streaming_prompt_filter(text);
+                                if flags.any_detected() {
+                                    tracing::warn!(
+                                        sandbox = %sandbox_for_flags,
+                                        jailbreak = flags.jailbreak_detected,
+                                        "Foundry guardrail flags in stream"
+                                    );
+                                    let sc = sidecar_for_stream.clone();
+                                    let sb = sandbox_for_flags.clone();
+                                    tokio::spawn(async move {
+                                        safety::report_content_flags_to_agt(
+                                            &sc, &sb, &flags,
+                                        ).await;
+                                    });
+                                }
+                            }
+
                             for line in text.lines() {
                                 let data = line.strip_prefix("data: ").unwrap_or("");
                                 if data.is_empty() || data == "[DONE]" {
@@ -571,11 +542,35 @@ async fn chat_completions(
                     }
                 }
 
-                // AGT output validation — fire-and-forget so response isn't delayed.
-                // Extracts response content and checks for prompt injection patterns
-                // via sidecar PolicyEngine (response-content-safety rule).
+                // Parse Foundry guardrail annotations and report to AGT sidecar.
+                // On 200: prompt_filter_results at top level
+                // On 400: error.innererror.content_filter_result
                 if state.sidecar.enabled {
                     if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                        let flags = if status.is_success() {
+                            safety::parse_prompt_filter_results(&body_json)
+                        } else {
+                            safety::parse_error_content_filter(&body_json)
+                        };
+
+                        if flags.any_detected() {
+                            tracing::warn!(
+                                sandbox = %sandbox_name,
+                                jailbreak = flags.jailbreak_detected,
+                                filtered = ?flags.filtered_categories,
+                                detected = ?flags.detected_categories,
+                                "Foundry guardrail flags detected"
+                            );
+                            let sidecar = state.sidecar.clone();
+                            let sandbox = sandbox_name.to_string();
+                            tokio::spawn(async move {
+                                safety::report_content_flags_to_agt(
+                                    &sidecar, &sandbox, &flags,
+                                ).await;
+                            });
+                        }
+
+                        // AGT output validation — fire-and-forget
                         let response_text = body_json
                             .get("choices")
                             .and_then(|c| c.get(0))

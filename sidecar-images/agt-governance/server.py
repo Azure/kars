@@ -338,6 +338,50 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             return self._json(200, {
                 "ok": True, "agent_id": agent_id, "score": clamped})
 
+        if path == "/report_content_flag":
+            body = self._body()
+            agent_id = body.get("agent_id", SANDBOX)
+            flags = body.get("flags", {})
+            filtered = body.get("filtered_categories", [])
+            detected = body.get("detected_categories", [])
+            penalty = int(body.get("trust_penalty", 0))
+
+            # Audit log the content flag event
+            audit_log.log("content_flag", agent_id,
+                           f"content_flag:{','.join(filtered + detected)}",
+                           data={"flags": flags, "filtered": filtered,
+                                 "detected": detected, "penalty": penalty},
+                           outcome="flagged")
+
+            # Record as suspicious behavior
+            flag_summary = ",".join(filtered + detected) or "unknown"
+            behavior_monitor.record_tool_call(
+                agent_id, f"content_flag:{flag_summary}", success=False)
+
+            # Apply trust penalty (negative score adjustment)
+            if penalty < 0:
+                existing = trust_store.get_trust_score(agent_id) or {
+                    "score": 500, "interactions": 0, "last_interaction": ""}
+                old_score = existing.get("score", 500)
+                new_score = max(0, old_score + penalty)
+                now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                trust_store.store_trust_score(agent_id, {
+                    "score": new_score,
+                    "interactions": existing.get("interactions", 0) + 1,
+                    "last_interaction": now,
+                })
+                log.warning(
+                    "Content flag: agent=%s categories=%s penalty=%d "
+                    "trust=%d→%d",
+                    agent_id, flag_summary, penalty, old_score, new_score)
+                return self._json(200, {
+                    "ok": True, "penalty_applied": penalty,
+                    "trust_score": new_score, "previous_score": old_score})
+
+            return self._json(200, {
+                "ok": True, "penalty_applied": 0,
+                "trust_score": None})
+
         self._json(404, {"error": "not found"})
 
 

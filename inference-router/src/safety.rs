@@ -1,574 +1,490 @@
-//! Azure AI Content Safety + Prompt Shields integration.
+//! Foundry Guardrail annotation parsing + AGT content flag reporting.
 //!
-//! On by default — filters inference requests through Content Safety before
-//! forwarding to Azure OpenAI. Uses Managed Identity for auth (same as
-//! inference routing — no API keys).
+//! Instead of calling the standalone Content Safety API (which requires a
+//! separate Azure resource), we rely on Foundry's built-in guardrails
+//! (`Microsoft.DefaultV2`) that are applied to all model deployments by default.
+//!
+//! Foundry returns content filter annotations in the inference response:
+//! - `prompt_filter_results` (top-level): jailbreak, hate, violence, etc.
+//! - `choices[].content_filter_results`: output-side filtering
+//! - On 400 errors: `error.innererror.content_filter_result` with details
+//!
+//! When a content flag is detected, we report it to the AGT sidecar for
+//! trust scoring, behavior monitoring, and tamper-evident audit logging.
 
-use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::WorkloadIdentityAuth;
+use crate::sidecar::SidecarProxy;
 
-// Re-use a module-level auth instance for safety calls
-static AUTH: std::sync::LazyLock<WorkloadIdentityAuth> =
-    std::sync::LazyLock::new(WorkloadIdentityAuth::new);
+// ─── Guardrail Annotation Types ──────────────────────────────────────────────
 
-/// Shared HTTP client for safety checks — reuses TCP connections and TLS sessions
-/// across calls instead of creating a new client per request.
-static SAFETY_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(4)
-        .timeout(std::time::Duration::from_millis(
-            std::env::var("CONTENT_SAFETY_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1500),
-        ))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-});
+/// A single content filter category result from Foundry guardrails.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContentFilterResult {
+    pub filtered: bool,
+    #[serde(default)]
+    pub detected: Option<bool>,
+    #[serde(default)]
+    pub severity: Option<String>,
+}
 
-/// Determine audience for safety endpoints: Foundry project endpoints use ai.azure.com,
-/// standalone Content Safety resources use cognitiveservices.azure.com.
-fn safety_audience(endpoint: &str) -> &'static str {
-    if endpoint.contains("services.ai.azure.com") {
-        "https://ai.azure.com"
-    } else {
-        "https://cognitiveservices.azure.com"
+/// All content filter categories returned by Foundry.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ContentFilterResults {
+    #[serde(default)]
+    pub jailbreak: Option<ContentFilterResult>,
+    #[serde(default)]
+    pub indirect_attack: Option<ContentFilterResult>,
+    #[serde(default)]
+    pub hate: Option<ContentFilterResult>,
+    #[serde(default)]
+    pub self_harm: Option<ContentFilterResult>,
+    #[serde(default)]
+    pub sexual: Option<ContentFilterResult>,
+    #[serde(default)]
+    pub violence: Option<ContentFilterResult>,
+}
+
+/// A single prompt filter result from Foundry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PromptFilterResult {
+    pub prompt_index: u32,
+    pub content_filter_results: ContentFilterResults,
+}
+
+/// Summary of detected content flags from a Foundry response.
+#[derive(Debug, Clone, Default)]
+pub struct ContentFlags {
+    pub jailbreak_detected: bool,
+    pub indirect_attack_detected: bool,
+    pub hate_detected: bool,
+    pub self_harm_detected: bool,
+    pub sexual_detected: bool,
+    pub violence_detected: bool,
+    /// Categories that were actually filtered (blocked) by Foundry.
+    pub filtered_categories: Vec<String>,
+    /// Categories that were detected but not filtered.
+    pub detected_categories: Vec<String>,
+}
+
+impl ContentFlags {
+    /// Returns true if any content flag was detected.
+    pub fn any_detected(&self) -> bool {
+        self.jailbreak_detected
+            || self.indirect_attack_detected
+            || self.hate_detected
+            || self.self_harm_detected
+            || self.sexual_detected
+            || self.violence_detected
+    }
+
+    /// Calculate a trust penalty based on severity of detections.
+    /// Jailbreak/indirect_attack = -100, content categories = -50 each.
+    pub fn trust_penalty(&self) -> i32 {
+        let mut penalty = 0i32;
+        if self.jailbreak_detected {
+            penalty -= 100;
+        }
+        if self.indirect_attack_detected {
+            penalty -= 100;
+        }
+        if self.hate_detected {
+            penalty -= 50;
+        }
+        if self.self_harm_detected {
+            penalty -= 50;
+        }
+        if self.sexual_detected {
+            penalty -= 50;
+        }
+        if self.violence_detected {
+            penalty -= 50;
+        }
+        penalty
     }
 }
 
-// ─── Circuit Breaker (#5) ────────────────────────────────────────────────────
-// After CIRCUIT_BREAKER_THRESHOLD consecutive Content Safety API failures,
-// switch to fail-closed (block all requests) until a probe succeeds.
-// This prevents a downed safety service from silently allowing all content.
+// ─── Annotation Parsing ──────────────────────────────────────────────────────
 
-use std::sync::atomic::{AtomicU32, Ordering};
+/// Parse `prompt_filter_results` from a successful (200) Foundry response.
+pub fn parse_prompt_filter_results(response_body: &serde_json::Value) -> ContentFlags {
+    let mut flags = ContentFlags::default();
 
-/// Consecutive failure count for Content Safety API.
-static SAFETY_FAILURES: AtomicU32 = AtomicU32::new(0);
-/// Circuit breaker state: 0 = closed (normal), 1 = open (fail-open).
-static SAFETY_CIRCUIT_OPEN: AtomicU32 = AtomicU32::new(0);
-/// Timestamp (epoch secs) when circuit opened — auto-reset after cooldown.
-static SAFETY_CIRCUIT_OPENED_AT: AtomicU32 = AtomicU32::new(0);
-/// Number of consecutive failures before the circuit opens.
-const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
-/// Seconds to wait before retrying after circuit opens.
-const CIRCUIT_BREAKER_COOLDOWN_SECS: u32 = 60;
+    let results = match response_body.get("prompt_filter_results").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return flags,
+    };
 
-// ─── Content Safety ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-struct AnalyzeTextRequest {
-    text: String,
-    categories: Vec<String>,
-    #[serde(rename = "outputType")]
-    output_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnalyzeTextResponse {
-    #[serde(rename = "categoriesAnalysis")]
-    categories_analysis: Vec<CategoryAnalysis>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CategoryAnalysis {
-    category: String,
-    severity: u8,
-}
-
-/// Check input text against Azure AI Content Safety.
-/// Returns Ok(()) if safe, Err if content is blocked.
-pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
-    // Circuit breaker: if open, fail-open (allow requests) until service recovers.
-    // Auto-reset after cooldown period to allow retries.
-    if SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed) == 1 {
-        let opened_at = SAFETY_CIRCUIT_OPENED_AT.load(Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-        if now.saturating_sub(opened_at) >= CIRCUIT_BREAKER_COOLDOWN_SECS {
-            // Cooldown elapsed — reset and retry
-            SAFETY_CIRCUIT_OPEN.store(0, Ordering::Relaxed);
-            SAFETY_FAILURES.store(0, Ordering::Relaxed);
-            tracing::info!("Content Safety circuit breaker cooldown elapsed — retrying");
-        } else {
-            tracing::warn!("Content Safety circuit breaker OPEN — allowing request (fail-open)");
-            return Ok(());
+    for item in results {
+        if let Ok(pfr) = serde_json::from_value::<PromptFilterResult>(item.clone()) {
+            check_filter_results(&pfr.content_filter_results, &mut flags);
         }
     }
 
-    let token = AUTH
-        .get_token(safety_audience(endpoint))
-        .await
-        .context("Failed to get token for Content Safety")?;
+    flags
+}
 
-    let api_version = if endpoint.contains("services.ai.azure.com") {
-        "2025-04-01-preview"
-    } else {
-        "2024-09-01"
-    };
-    let url = format!(
-        "{}/contentsafety/text:analyze?api-version={api_version}",
-        endpoint.trim_end_matches('/')
-    );
+/// Parse content filter result from a Foundry 400 error response.
+/// Error shape: `{ "error": { "innererror": { "content_filter_result": { ... } } } }`
+pub fn parse_error_content_filter(response_body: &serde_json::Value) -> ContentFlags {
+    let mut flags = ContentFlags::default();
 
-    let request_body = AnalyzeTextRequest {
-        text: text.to_string(),
-        categories: vec![
-            "Hate".into(),
-            "SelfHarm".into(),
-            "Sexual".into(),
-            "Violence".into(),
-        ],
-        output_type: "FourSeverityLevels".into(),
-    };
+    let cfr = response_body
+        .get("error")
+        .and_then(|e| e.get("innererror"))
+        .and_then(|ie| ie.get("content_filter_result"));
 
-    let resp = match SAFETY_CLIENT
-        .post(&url)
-        .bearer_auth(&token)
-        .json(&request_body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-            if n >= CIRCUIT_BREAKER_THRESHOLD {
-                SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-                SAFETY_CIRCUIT_OPENED_AT.store(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as u32,
-                    Ordering::Relaxed,
-                );
-                tracing::error!(
-                    failures = n,
-                    "Content Safety circuit breaker OPENED — failing open"
-                );
-                return Ok(());
+    if let Some(cfr_val) = cfr {
+        if let Ok(results) = serde_json::from_value::<ContentFilterResults>(cfr_val.clone()) {
+            check_filter_results(&results, &mut flags);
+        }
+    }
+
+    flags
+}
+
+/// Parse `prompt_filter_results` from the first SSE chunk of a streaming response.
+pub fn parse_streaming_prompt_filter(chunk_text: &str) -> ContentFlags {
+    for line in chunk_text.split('\n') {
+        let line = line.trim();
+        if !line.starts_with("data: ") || line == "data: [DONE]" {
+            continue;
+        }
+        let json_str = &line[6..];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+            if v.get("prompt_filter_results").is_some() {
+                return parse_prompt_filter_results(&v);
             }
-            tracing::warn!(error = %e, failures = n, "Content Safety API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
-            return Ok(());
-        }
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-        if n >= CIRCUIT_BREAKER_THRESHOLD {
-            SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-            SAFETY_CIRCUIT_OPENED_AT.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as u32,
-                Ordering::Relaxed,
-            );
-            tracing::error!(
-                failures = n,
-                "Content Safety circuit breaker OPENED — failing open"
-            );
-            return Ok(());
-        }
-        tracing::warn!(%status, failures = n, "Content Safety API error ({n}/{CIRCUIT_BREAKER_THRESHOLD}): {body}");
-        return Ok(());
-    }
-
-    // Success — reset circuit breaker
-    SAFETY_FAILURES.store(0, Ordering::Relaxed);
-    if SAFETY_CIRCUIT_OPEN.swap(0, Ordering::Relaxed) == 1 {
-        tracing::info!("Content Safety circuit breaker CLOSED — service recovered");
-    }
-
-    let result: AnalyzeTextResponse = resp
-        .json()
-        .await
-        .context("Failed to parse Content Safety response")?;
-
-    // Block if any category severity >= 4 (configurable threshold)
-    let block_threshold = 4;
-    for category in &result.categories_analysis {
-        if category.severity >= block_threshold {
-            bail!(
-                "Content blocked: category={}, severity={}",
-                category.category,
-                category.severity
-            );
         }
     }
 
-    Ok(())
+    ContentFlags::default()
 }
 
-// ─── Prompt Shields ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-struct PromptShieldRequest {
-    #[serde(rename = "userPrompt")]
-    user_prompt: String,
-    documents: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PromptShieldResponse {
-    #[serde(rename = "userPromptAnalysis")]
-    user_prompt_analysis: Option<PromptAnalysis>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PromptAnalysis {
-    #[serde(rename = "attackDetected")]
-    attack_detected: bool,
-}
-
-/// Check for prompt injection / jailbreak attempts via Prompt Shields.
-pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
-    let token = AUTH
-        .get_token(safety_audience(endpoint))
-        .await
-        .context("Failed to get token for Prompt Shields")?;
-
-    let api_version = if endpoint.contains("services.ai.azure.com") {
-        "2025-04-01-preview"
-    } else {
-        "2024-09-01"
-    };
-    let url = format!(
-        "{}/contentsafety/text:shieldPrompt?api-version={api_version}",
-        endpoint.trim_end_matches('/')
-    );
-
-    let request_body = PromptShieldRequest {
-        user_prompt: prompt.to_string(),
-        documents: vec![],
-    };
-
-    let resp = match SAFETY_CLIENT
-        .post(&url)
-        .bearer_auth(&token)
-        .json(&request_body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-            if n >= CIRCUIT_BREAKER_THRESHOLD {
-                SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-                SAFETY_CIRCUIT_OPENED_AT.store(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as u32,
-                    Ordering::Relaxed,
-                );
-                tracing::error!(
-                    failures = n,
-                    "Content Safety circuit breaker OPENED (via Prompt Shields)"
-                );
-                return Ok(());
+/// Check individual filter results and populate flags.
+fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags) {
+    if let Some(ref jb) = results.jailbreak {
+        if jb.detected.unwrap_or(false) || jb.filtered {
+            flags.jailbreak_detected = true;
+            if jb.filtered {
+                flags.filtered_categories.push("jailbreak".into());
+            } else {
+                flags.detected_categories.push("jailbreak".into());
             }
-            tracing::warn!(error = %e, failures = n, "Prompt Shields API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
-            return Ok(());
         }
-    };
-
-    if !resp.status().is_success() {
-        let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-        if n >= CIRCUIT_BREAKER_THRESHOLD {
-            SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-            SAFETY_CIRCUIT_OPENED_AT.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as u32,
-                Ordering::Relaxed,
-            );
-            tracing::error!(
-                failures = n,
-                "Content Safety circuit breaker OPENED (via Prompt Shields)"
-            );
-            return Ok(());
+    }
+    if let Some(ref ia) = results.indirect_attack {
+        if ia.detected.unwrap_or(false) || ia.filtered {
+            flags.indirect_attack_detected = true;
+            if ia.filtered {
+                flags.filtered_categories.push("indirect_attack".into());
+            } else {
+                flags.detected_categories.push("indirect_attack".into());
+            }
         }
-        return Ok(());
     }
-
-    // Success — reset circuit breaker
-    SAFETY_FAILURES.store(0, Ordering::Relaxed);
-    if SAFETY_CIRCUIT_OPEN.swap(0, Ordering::Relaxed) == 1 {
-        tracing::info!("Content Safety circuit breaker CLOSED — service recovered");
+    if let Some(ref h) = results.hate {
+        if h.filtered || h.severity.as_deref().map_or(false, |s| s != "safe") {
+            flags.hate_detected = true;
+            if h.filtered {
+                flags.filtered_categories.push("hate".into());
+            } else {
+                flags.detected_categories.push("hate".into());
+            }
+        }
     }
-
-    let result: PromptShieldResponse = resp
-        .json()
-        .await
-        .context("Failed to parse Prompt Shields response")?;
-
-    if let Some(analysis) = result.user_prompt_analysis
-        && analysis.attack_detected
-    {
-        bail!("Prompt injection attack detected");
+    if let Some(ref sh) = results.self_harm {
+        if sh.filtered || sh.severity.as_deref().map_or(false, |s| s != "safe") {
+            flags.self_harm_detected = true;
+            if sh.filtered {
+                flags.filtered_categories.push("self_harm".into());
+            } else {
+                flags.detected_categories.push("self_harm".into());
+            }
+        }
     }
-
-    Ok(())
+    if let Some(ref sx) = results.sexual {
+        if sx.filtered || sx.severity.as_deref().map_or(false, |s| s != "safe") {
+            flags.sexual_detected = true;
+            if sx.filtered {
+                flags.filtered_categories.push("sexual".into());
+            } else {
+                flags.detected_categories.push("sexual".into());
+            }
+        }
+    }
+    if let Some(ref vi) = results.violence {
+        if vi.filtered || vi.severity.as_deref().map_or(false, |s| s != "safe") {
+            flags.violence_detected = true;
+            if vi.filtered {
+                flags.filtered_categories.push("violence".into());
+            } else {
+                flags.detected_categories.push("violence".into());
+            }
+        }
+    }
 }
+
+// ─── AGT Content Flag Reporting ──────────────────────────────────────────────
+
+/// Report detected content flags to the AGT sidecar for trust scoring and audit.
+/// Fire-and-forget — does not block the response.
+pub async fn report_content_flags_to_agt(
+    sidecar: &SidecarProxy,
+    sandbox_name: &str,
+    flags: &ContentFlags,
+) {
+    if !sidecar.enabled || !flags.any_detected() {
+        return;
+    }
+
+    let report = serde_json::json!({
+        "agent_id": sandbox_name,
+        "flags": {
+            "jailbreak": flags.jailbreak_detected,
+            "indirect_attack": flags.indirect_attack_detected,
+            "hate": flags.hate_detected,
+            "self_harm": flags.self_harm_detected,
+            "sexual": flags.sexual_detected,
+            "violence": flags.violence_detected,
+        },
+        "filtered_categories": flags.filtered_categories,
+        "detected_categories": flags.detected_categories,
+        "trust_penalty": flags.trust_penalty(),
+    });
+
+    match sidecar
+        .forward("POST", "/report_content_flag", Some(&report))
+        .await
+    {
+        Ok((status, _)) => {
+            tracing::info!(
+                sandbox = %sandbox_name,
+                status,
+                penalty = flags.trust_penalty(),
+                categories = ?flags.detected_categories,
+                "AGT: content flag reported"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                sandbox = %sandbox_name,
+                error = %e,
+                "AGT: failed to report content flag (non-blocking)"
+            );
+        }
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use std::sync::atomic::Ordering;
 
-    // Global lock so tests that touch shared circuit breaker atomics
-    // don't race each other when cargo runs them in parallel.
-    static CB_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Reset all circuit breaker state so tests don't leak into each other.
-    /// Call at the top of every test that touches the global atomics.
-    fn reset_circuit_breaker() {
-        SAFETY_FAILURES.store(0, Ordering::Relaxed);
-        SAFETY_CIRCUIT_OPEN.store(0, Ordering::Relaxed);
-        SAFETY_CIRCUIT_OPENED_AT.store(0, Ordering::Relaxed);
-    }
-
-    fn now_epoch_secs() -> u32 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32
-    }
-
-    // ── safety_audience ──────────────────────────────────────────────────
+    // ── Benign response — no flags ──────────────────────────────────────
 
     #[test]
-    fn test_safety_audience_foundry_project() {
-        assert_eq!(
-            safety_audience("https://my-project.services.ai.azure.com"),
-            "https://ai.azure.com"
-        );
+    fn test_parse_benign_response_no_flags() {
+        let json = serde_json::json!({
+            "choices": [{"message": {"content": "Hello"}}],
+            "prompt_filter_results": [{
+                "prompt_index": 0,
+                "content_filter_results": {
+                    "jailbreak": {"detected": false, "filtered": false},
+                    "hate": {"filtered": false, "severity": "safe"},
+                    "self_harm": {"filtered": false, "severity": "safe"},
+                    "sexual": {"filtered": false, "severity": "safe"},
+                    "violence": {"filtered": false, "severity": "safe"}
+                }
+            }]
+        });
+        let flags = parse_prompt_filter_results(&json);
+        assert!(!flags.any_detected(), "benign response should have no flags");
+        assert_eq!(flags.trust_penalty(), 0);
+        assert!(flags.filtered_categories.is_empty());
+        assert!(flags.detected_categories.is_empty());
     }
 
+    // ── Jailbreak detected and filtered ─────────────────────────────────
+
     #[test]
-    fn test_safety_audience_standalone_resource() {
-        assert_eq!(
-            safety_audience("https://my-resource.cognitiveservices.azure.com"),
-            "https://cognitiveservices.azure.com"
-        );
+    fn test_parse_jailbreak_detected_and_filtered() {
+        let json = serde_json::json!({
+            "prompt_filter_results": [{
+                "prompt_index": 0,
+                "content_filter_results": {
+                    "jailbreak": {"detected": true, "filtered": true},
+                    "hate": {"filtered": false, "severity": "safe"},
+                    "self_harm": {"filtered": false, "severity": "safe"},
+                    "sexual": {"filtered": false, "severity": "safe"},
+                    "violence": {"filtered": false, "severity": "safe"}
+                }
+            }]
+        });
+        let flags = parse_prompt_filter_results(&json);
+        assert!(flags.jailbreak_detected);
+        assert!(flags.any_detected());
+        assert_eq!(flags.trust_penalty(), -100);
+        assert!(flags.filtered_categories.contains(&"jailbreak".to_string()));
     }
 
-    // ── Circuit breaker state machine ────────────────────────────────────
+    // ── Jailbreak detected but not filtered ─────────────────────────────
 
     #[test]
-    fn test_circuit_breaker_constants() {
-        assert_eq!(CIRCUIT_BREAKER_THRESHOLD, 5);
-        assert_eq!(CIRCUIT_BREAKER_COOLDOWN_SECS, 60);
+    fn test_parse_jailbreak_detected_not_filtered() {
+        let json = serde_json::json!({
+            "prompt_filter_results": [{
+                "prompt_index": 0,
+                "content_filter_results": {
+                    "jailbreak": {"detected": true, "filtered": false}
+                }
+            }]
+        });
+        let flags = parse_prompt_filter_results(&json);
+        assert!(flags.jailbreak_detected);
+        assert_eq!(flags.trust_penalty(), -100);
+        assert!(flags.detected_categories.contains(&"jailbreak".to_string()));
+        assert!(flags.filtered_categories.is_empty());
     }
 
-    #[test]
-    fn test_circuit_stays_closed_below_threshold() {
-        let _lock = CB_LOCK.lock().unwrap();
-        reset_circuit_breaker();
-        for _ in 0..CIRCUIT_BREAKER_THRESHOLD - 1 {
-            SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed);
-        }
-        assert_eq!(
-            SAFETY_FAILURES.load(Ordering::Relaxed),
-            CIRCUIT_BREAKER_THRESHOLD - 1
-        );
-        // Circuit must still be closed — counter alone doesn't flip it.
-        assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 0);
-    }
+    // ── Error response with content_filter_result ────────────────────────
 
     #[test]
-    fn test_circuit_opens_at_threshold() {
-        let _lock = CB_LOCK.lock().unwrap();
-        reset_circuit_breaker();
-        // Replicate the logic from check_content_safety's error handler.
-        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-            if n >= CIRCUIT_BREAKER_THRESHOLD {
-                SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-                SAFETY_CIRCUIT_OPENED_AT.store(now_epoch_secs(), Ordering::Relaxed);
+    fn test_parse_error_content_filter() {
+        let json = serde_json::json!({
+            "error": {
+                "message": "content filtered",
+                "type": null,
+                "code": "content_filter",
+                "innererror": {
+                    "code": "ResponsibleAIPolicyViolation",
+                    "content_filter_result": {
+                        "jailbreak": {"detected": true, "filtered": true},
+                        "hate": {"filtered": false, "severity": "safe"},
+                        "self_harm": {"filtered": false, "severity": "safe"},
+                        "sexual": {"filtered": false, "severity": "safe"},
+                        "violence": {"filtered": false, "severity": "safe"}
+                    }
+                }
             }
-        }
-        assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            SAFETY_FAILURES.load(Ordering::Relaxed),
-            CIRCUIT_BREAKER_THRESHOLD
-        );
-        assert!(SAFETY_CIRCUIT_OPENED_AT.load(Ordering::Relaxed) > 0);
+        });
+        let flags = parse_error_content_filter(&json);
+        assert!(flags.jailbreak_detected);
+        assert!(flags.any_detected());
+        assert_eq!(flags.trust_penalty(), -100);
+    }
+
+    // ── Multiple categories detected ────────────────────────────────────
+
+    #[test]
+    fn test_parse_multiple_categories() {
+        let json = serde_json::json!({
+            "prompt_filter_results": [{
+                "prompt_index": 0,
+                "content_filter_results": {
+                    "jailbreak": {"detected": true, "filtered": true},
+                    "hate": {"filtered": true, "severity": "high"},
+                    "violence": {"filtered": false, "severity": "medium"},
+                    "self_harm": {"filtered": false, "severity": "safe"},
+                    "sexual": {"filtered": false, "severity": "safe"}
+                }
+            }]
+        });
+        let flags = parse_prompt_filter_results(&json);
+        assert!(flags.jailbreak_detected);
+        assert!(flags.hate_detected);
+        assert!(flags.violence_detected);
+        assert!(!flags.self_harm_detected);
+        assert!(!flags.sexual_detected);
+        // -100 jailbreak + -50 hate + -50 violence = -200
+        assert_eq!(flags.trust_penalty(), -200);
+    }
+
+    // ── Indirect attack ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_indirect_attack() {
+        let json = serde_json::json!({
+            "prompt_filter_results": [{
+                "prompt_index": 0,
+                "content_filter_results": {
+                    "indirect_attack": {"detected": true, "filtered": false}
+                }
+            }]
+        });
+        let flags = parse_prompt_filter_results(&json);
+        assert!(flags.indirect_attack_detected);
+        assert_eq!(flags.trust_penalty(), -100);
+    }
+
+    // ── Missing prompt_filter_results ────────────────────────────────────
+
+    #[test]
+    fn test_parse_missing_prompt_filter_results() {
+        let json = serde_json::json!({"choices": [{"message": {"content": "hi"}}]});
+        let flags = parse_prompt_filter_results(&json);
+        assert!(!flags.any_detected());
+    }
+
+    // ── Missing error innererror ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_error_no_innererror() {
+        let json = serde_json::json!({"error": {"message": "bad request"}});
+        let flags = parse_error_content_filter(&json);
+        assert!(!flags.any_detected());
+    }
+
+    // ── Streaming annotation parsing ────────────────────────────────────
+
+    #[test]
+    fn test_parse_streaming_benign() {
+        let chunk = r#"data: {"choices":[],"created":0,"id":"","model":"","object":"","prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"},"jailbreak":{"detected":false,"filtered":false},"self_harm":{"filtered":false,"severity":"safe"},"sexual":{"filtered":false,"severity":"safe"},"violence":{"filtered":false,"severity":"safe"}}}]}
+
+data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
+        let flags = parse_streaming_prompt_filter(chunk);
+        assert!(!flags.any_detected());
     }
 
     #[test]
-    fn test_success_resets_failure_count() {
-        let _lock = CB_LOCK.lock().unwrap();
-        reset_circuit_breaker();
-        SAFETY_FAILURES.store(3, Ordering::Relaxed);
-        // Replicate success path (lines 171-174 in production code).
-        SAFETY_FAILURES.store(0, Ordering::Relaxed);
-        assert_eq!(SAFETY_FAILURES.load(Ordering::Relaxed), 0);
+    fn test_parse_streaming_jailbreak() {
+        let chunk = r#"data: {"choices":[],"prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"jailbreak":{"detected":true,"filtered":true},"hate":{"filtered":false,"severity":"safe"}}}]}"#;
+        let flags = parse_streaming_prompt_filter(chunk);
+        assert!(flags.jailbreak_detected);
+        assert_eq!(flags.trust_penalty(), -100);
     }
 
     #[test]
-    fn test_success_closes_open_circuit() {
-        let _lock = CB_LOCK.lock().unwrap();
-        reset_circuit_breaker();
-        SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-        SAFETY_FAILURES.store(CIRCUIT_BREAKER_THRESHOLD, Ordering::Relaxed);
-        // Replicate success path.
-        SAFETY_FAILURES.store(0, Ordering::Relaxed);
-        let was_open = SAFETY_CIRCUIT_OPEN.swap(0, Ordering::Relaxed);
-        assert_eq!(was_open, 1, "circuit should have been open before swap");
-        assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 0);
-        assert_eq!(SAFETY_FAILURES.load(Ordering::Relaxed), 0);
+    fn test_parse_streaming_no_annotations() {
+        let chunk = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}
+data: [DONE]"#;
+        let flags = parse_streaming_prompt_filter(chunk);
+        assert!(!flags.any_detected());
     }
 
-    #[tokio::test]
-    async fn test_circuit_open_fail_open_returns_ok() {
-        let _lock = CB_LOCK.lock().unwrap();
-        reset_circuit_breaker();
-        // Open the circuit with a recent timestamp (cooldown NOT elapsed).
-        SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-        SAFETY_CIRCUIT_OPENED_AT.store(now_epoch_secs(), Ordering::Relaxed);
-
-        let result =
-            check_content_safety("https://test.cognitiveservices.azure.com", "test input").await;
-        assert!(result.is_ok(), "should fail-open when circuit is open");
-        // Circuit must remain open — cooldown hasn't elapsed.
-        assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn test_circuit_cooldown_resets_state() {
-        let _lock = CB_LOCK.lock().unwrap();
-        reset_circuit_breaker();
-        // Open the circuit with a timestamp well past cooldown.
-        SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-        SAFETY_CIRCUIT_OPENED_AT.store(
-            now_epoch_secs().saturating_sub(CIRCUIT_BREAKER_COOLDOWN_SECS + 10),
-            Ordering::Relaxed,
-        );
-
-        // After cooldown the circuit resets, then the function continues
-        // to the auth step which will fail in test (no Azure credentials).
-        let _ =
-            check_content_safety("https://test.cognitiveservices.azure.com", "test input").await;
-
-        // Regardless of auth failure, circuit state must have been reset.
-        assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 0);
-        assert_eq!(SAFETY_FAILURES.load(Ordering::Relaxed), 0);
-    }
-
-    // ── Content Safety response parsing ──────────────────────────────────
+    // ── ContentFlags penalty calculation ─────────────────────────────────
 
     #[test]
-    fn test_content_safety_response_all_safe() {
-        let json = r#"{
-            "categoriesAnalysis": [
-                {"category": "Hate", "severity": 0},
-                {"category": "SelfHarm", "severity": 0},
-                {"category": "Sexual", "severity": 0},
-                {"category": "Violence", "severity": 0}
-            ]
-        }"#;
-        let resp: AnalyzeTextResponse = serde_json::from_str(json).unwrap();
-        let block_threshold: u8 = 4;
-        assert!(
-            resp.categories_analysis
-                .iter()
-                .all(|c| c.severity < block_threshold),
-            "all-safe response should not be blocked"
-        );
+    fn test_trust_penalty_all_categories() {
+        let flags = ContentFlags {
+            jailbreak_detected: true,
+            indirect_attack_detected: true,
+            hate_detected: true,
+            self_harm_detected: true,
+            sexual_detected: true,
+            violence_detected: true,
+            filtered_categories: vec![],
+            detected_categories: vec![],
+        };
+        // -100 -100 -50 -50 -50 -50 = -400
+        assert_eq!(flags.trust_penalty(), -400);
     }
 
     #[test]
-    fn test_content_safety_response_blocked_above_threshold() {
-        let json = r#"{
-            "categoriesAnalysis": [
-                {"category": "Hate", "severity": 0},
-                {"category": "Violence", "severity": 6}
-            ]
-        }"#;
-        let resp: AnalyzeTextResponse = serde_json::from_str(json).unwrap();
-        let block_threshold: u8 = 4;
-        let blocked = resp
-            .categories_analysis
-            .iter()
-            .any(|c| c.severity >= block_threshold);
-        assert!(blocked, "severity 6 should be blocked");
-    }
-
-    #[test]
-    fn test_content_safety_response_blocked_at_threshold() {
-        let json = r#"{
-            "categoriesAnalysis": [
-                {"category": "Hate", "severity": 4}
-            ]
-        }"#;
-        let resp: AnalyzeTextResponse = serde_json::from_str(json).unwrap();
-        let block_threshold: u8 = 4;
-        let blocked = resp
-            .categories_analysis
-            .iter()
-            .any(|c| c.severity >= block_threshold);
-        assert!(blocked, "severity exactly at threshold should be blocked");
-    }
-
-    #[test]
-    fn test_content_safety_response_allowed_below_threshold() {
-        let json = r#"{
-            "categoriesAnalysis": [
-                {"category": "Hate", "severity": 3},
-                {"category": "Violence", "severity": 2}
-            ]
-        }"#;
-        let resp: AnalyzeTextResponse = serde_json::from_str(json).unwrap();
-        let block_threshold: u8 = 4;
-        let blocked = resp
-            .categories_analysis
-            .iter()
-            .any(|c| c.severity >= block_threshold);
-        assert!(!blocked, "severity below threshold should be allowed");
-    }
-
-    // ── Prompt Shield response parsing ───────────────────────────────────
-
-    #[test]
-    fn test_prompt_shield_no_attack() {
-        let json = r#"{"userPromptAnalysis": {"attackDetected": false}}"#;
-        let resp: PromptShieldResponse = serde_json::from_str(json).unwrap();
-        let detected = resp
-            .user_prompt_analysis
-            .map(|a| a.attack_detected)
-            .unwrap_or(false);
-        assert!(!detected);
-    }
-
-    #[test]
-    fn test_prompt_shield_attack_detected() {
-        let json = r#"{"userPromptAnalysis": {"attackDetected": true}}"#;
-        let resp: PromptShieldResponse = serde_json::from_str(json).unwrap();
-        let detected = resp
-            .user_prompt_analysis
-            .map(|a| a.attack_detected)
-            .unwrap_or(false);
-        assert!(detected, "should detect prompt injection attack");
-    }
-
-    #[test]
-    fn test_prompt_shield_null_analysis_is_safe() {
-        let json = r#"{"userPromptAnalysis": null}"#;
-        let resp: PromptShieldResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.user_prompt_analysis.is_none());
-        let detected = resp
-            .user_prompt_analysis
-            .map(|a| a.attack_detected)
-            .unwrap_or(false);
-        assert!(!detected, "null analysis should not flag as attack");
+    fn test_trust_penalty_none() {
+        let flags = ContentFlags::default();
+        assert_eq!(flags.trust_penalty(), 0);
+        assert!(!flags.any_detected());
     }
 }
