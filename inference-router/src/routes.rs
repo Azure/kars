@@ -2870,8 +2870,8 @@ fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
         return resp_body.clone();
     };
 
-    // If it's an error, pass through
-    if resp.get("error").is_some() {
+    // If it's an error response, pass through
+    if resp.get("error").and_then(|e| if e.is_null() { None } else { Some(e) }).is_some() {
         return resp_body.clone();
     }
 
@@ -3054,5 +3054,31 @@ mod tests {
 
         let input = v["input"].as_array().unwrap();
         assert_eq!(input[0]["role"], "developer");
+    }
+
+    #[test]
+    fn test_responses_to_chat_with_null_error() {
+        // Real Responses API includes "error": null — must NOT short-circuit
+        let resp = serde_json::json!({
+            "id": "resp_456",
+            "object": "response",
+            "model": "gpt-5.4-pro",
+            "created_at": 1234567890,
+            "error": null,
+            "output": [
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "Hello!"}
+                ]}
+            ],
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+        });
+        let body = Bytes::from(serde_json::to_vec(&resp).unwrap());
+        let result = responses_to_chat_body(&body);
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        // Should be converted to chat format, NOT raw passthrough
+        assert_eq!(v["object"], "chat.completion");
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello!");
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
     }
 }
