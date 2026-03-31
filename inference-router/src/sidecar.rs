@@ -107,3 +107,152 @@ impl std::fmt::Display for SidecarError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{routing::get, routing::post, Json, Router};
+    use tokio::net::TcpListener;
+
+    fn make_proxy(base_url: &str, enabled: bool) -> SidecarProxy {
+        SidecarProxy {
+            client: Client::new(),
+            base_url: base_url.to_string(),
+            enabled,
+        }
+    }
+
+    async fn start_test_server(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn test_default_sidecar_url() {
+        assert_eq!(DEFAULT_SIDECAR_URL, "http://127.0.0.1:8081");
+    }
+
+    #[test]
+    fn test_sidecar_error_display_unreachable() {
+        let err = SidecarError::Unreachable("connection refused".into());
+        assert_eq!(err.to_string(), "sidecar unreachable: connection refused");
+    }
+
+    #[test]
+    fn test_sidecar_error_display_bad_response() {
+        let err = SidecarError::BadResponse("invalid json".into());
+        assert_eq!(err.to_string(), "sidecar bad response: invalid json");
+    }
+
+    #[test]
+    fn test_proxy_enabled_flag() {
+        assert!(!make_proxy(DEFAULT_SIDECAR_URL, false).enabled);
+        assert!(make_proxy(DEFAULT_SIDECAR_URL, true).enabled);
+    }
+
+    #[test]
+    fn test_base_url_stored_correctly() {
+        let proxy = make_proxy("http://10.0.0.5:9090", true);
+        assert_eq!(proxy.base_url, "http://10.0.0.5:9090");
+    }
+
+    #[tokio::test]
+    async fn test_forward_unreachable_returns_error() {
+        let proxy = make_proxy("http://127.0.0.1:1", true);
+        let result = proxy.forward("GET", "/evaluate", None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SidecarError::Unreachable(msg) => assert!(!msg.is_empty()),
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_health_check_unreachable_returns_false() {
+        let proxy = make_proxy("http://127.0.0.1:1", true);
+        assert!(!proxy.health_check().await);
+    }
+
+    #[tokio::test]
+    async fn test_forward_get_success() {
+        let app = Router::new()
+            .route("/healthz", get(|| async { Json(serde_json::json!({"status": "ok"})) }));
+        let base_url = start_test_server(app).await;
+        let proxy = make_proxy(&base_url, true);
+
+        let (status, body) = proxy.forward("GET", "/healthz", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_forward_post_with_body() {
+        let app = Router::new().route(
+            "/evaluate",
+            post(|Json(body): Json<Value>| async move {
+                Json(serde_json::json!({
+                    "decision": "allow",
+                    "input": body,
+                }))
+            }),
+        );
+        let base_url = start_test_server(app).await;
+        let proxy = make_proxy(&base_url, true);
+
+        let payload = serde_json::json!({"agent_id": "agent-1", "action": "read"});
+        let (status, body) = proxy.forward("POST", "/evaluate", Some(&payload)).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["decision"], "allow");
+        assert_eq!(body["input"]["agent_id"], "agent-1");
+    }
+
+    #[tokio::test]
+    async fn test_health_check_success() {
+        let app = Router::new()
+            .route("/healthz", get(|| async { Json(serde_json::json!({"status": "healthy"})) }));
+        let base_url = start_test_server(app).await;
+        let proxy = make_proxy(&base_url, true);
+        assert!(proxy.health_check().await);
+    }
+
+    #[tokio::test]
+    async fn test_forward_non_json_response_returns_bad_response() {
+        let app = Router::new().route("/bad", get(|| async { "not json" }));
+        let base_url = start_test_server(app).await;
+        let proxy = make_proxy(&base_url, true);
+
+        let result = proxy.forward("GET", "/bad", None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SidecarError::BadResponse(msg) => assert!(!msg.is_empty()),
+            other => panic!("expected BadResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_forward_deny_response() {
+        let app = Router::new().route(
+            "/evaluate",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"decision": "deny", "reason": "policy violation"})),
+                )
+            }),
+        );
+        let base_url = start_test_server(app).await;
+        let proxy = make_proxy(&base_url, true);
+
+        let (status, body) = proxy
+            .forward("POST", "/evaluate", Some(&serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(status, 403);
+        assert_eq!(body["decision"], "deny");
+        assert_eq!(body["reason"], "policy violation");
+    }
+}

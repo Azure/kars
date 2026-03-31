@@ -1,0 +1,90 @@
+name: Bug Report
+description: Report a bug in AzureClaw
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the details below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Deploy agent with '...'
+        2. Send request to '...'
+        3. Observe error in '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      description: Where did you observe this bug?
+      options:
+        - AKS (Azure Kubernetes Service)
+        - Dev cluster
+        - Local (dev mode)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: AzureClaw Version
+      description: "Version or commit SHA (e.g., v0.3.1 or abc1234)"
+      placeholder: v0.x.x
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - Controller
+        - Inference Router
+        - Sandbox
+        - AGT Sidecar
+        - CLI
+        - AgentMesh Relay
+        - AgentMesh Registry
+        - Helm Chart
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output (please redact any secrets or PII).
+      render: shell
+    validations:
+      required: false

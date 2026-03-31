@@ -22,9 +22,10 @@ Seven independent defense-in-depth layers plus AGT governance, all active by def
 3. **Kata VM** (confidential) — per-pod dedicated kernel
 4. **Container Hardening** — read-only rootfs, non-root (UID 1000), drop ALL capabilities
 5. **Kernel Confinement** — custom seccomp profile (`azureclaw-strict`, ~150 allowed syscalls)
-6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + domain blocklist (51k+)
-7. **Inference Safety** — Content Safety + Prompt Shields + per-sandbox token budgets
-8. **AGT Governance** — trust scoring, E2E encryption (Signal Protocol), policy engine
+6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + domain blocklist (53k+)
+7. **Inference Safety** — Content Safety + Prompt Shields (circuit breaker, fail-open) + per-sandbox token budgets
+8. **AGT Governance** — PolicyEvaluator (YAML rules), FileTrustStore (0–1000 scoring, clamped ±200), SHA-256 Merkle audit chain, RateLimiter (100 req/min), AgentBehaviorMonitor
+9. **E2E Encrypted Mesh** — Signal Protocol (X3DH + Double Ratchet), KNOCK trust handshake, per-message forward secrecy via AgentMesh relay/registry
 
 See [docs/security.md](docs/security.md) for the full breakdown.
 

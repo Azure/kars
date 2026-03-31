@@ -187,3 +187,165 @@ impl WorkloadIdentityAuth {
         Ok(access_token)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_auth(api_key: Option<&str>) -> WorkloadIdentityAuth {
+        WorkloadIdentityAuth {
+            client: reqwest::Client::new(),
+            token_cache: Arc::new(RwLock::new(HashMap::new())),
+            api_key: api_key.map(|k| k.to_string()),
+        }
+    }
+
+    fn insert_cached_token(
+        cache: &mut HashMap<String, CachedToken>,
+        scope: &str,
+        token: &str,
+        expires_in: std::time::Duration,
+    ) {
+        cache.insert(
+            scope.to_string(),
+            CachedToken {
+                access_token: token.to_string(),
+                expires_at: std::time::Instant::now() + expires_in,
+            },
+        );
+    }
+
+    #[test]
+    fn test_is_api_key_mode_with_key() {
+        let auth = make_auth(Some("test-key-123"));
+        assert!(auth.is_api_key_mode());
+    }
+
+    #[test]
+    fn test_is_api_key_mode_without_key() {
+        let auth = make_auth(None);
+        assert!(!auth.is_api_key_mode());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_returns_api_key_directly() {
+        let auth = make_auth(Some("my-dev-key"));
+        let token = auth
+            .get_token("https://cognitiveservices.azure.com")
+            .await
+            .unwrap();
+        assert_eq!(token, "my-dev-key");
+    }
+
+    #[tokio::test]
+    async fn test_api_key_bypasses_token_cache() {
+        let auth = make_auth(Some("bypass-key"));
+        // Even with a cached token, API key mode returns the key
+        {
+            let mut cache = auth.token_cache.write().await;
+            insert_cached_token(
+                &mut cache,
+                "https://cognitiveservices.azure.com",
+                "cached-token",
+                std::time::Duration::from_secs(3600),
+            );
+        }
+        let token = auth
+            .get_token("https://cognitiveservices.azure.com")
+            .await
+            .unwrap();
+        assert_eq!(token, "bypass-key");
+    }
+
+    #[tokio::test]
+    async fn test_cached_token_is_reused() {
+        let auth = make_auth(None);
+        {
+            let mut cache = auth.token_cache.write().await;
+            insert_cached_token(
+                &mut cache,
+                "https://cognitiveservices.azure.com",
+                "cached-bearer-token",
+                std::time::Duration::from_secs(3600),
+            );
+        }
+        let token = auth
+            .get_token("https://cognitiveservices.azure.com")
+            .await
+            .unwrap();
+        assert_eq!(token, "cached-bearer-token");
+    }
+
+    #[tokio::test]
+    async fn test_expired_token_not_reused() {
+        let auth = make_auth(None);
+        // Token that expires within the 60s refresh buffer
+        {
+            let mut cache = auth.token_cache.write().await;
+            insert_cached_token(
+                &mut cache,
+                "https://cognitiveservices.azure.com",
+                "expired-token",
+                std::time::Duration::from_secs(30),
+            );
+        }
+        // Should try to refresh (and fail without WI/IMDS)
+        let result = auth
+            .get_token("https://cognitiveservices.azure.com")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_different_scopes_cached_independently() {
+        let auth = make_auth(None);
+        {
+            let mut cache = auth.token_cache.write().await;
+            insert_cached_token(
+                &mut cache,
+                "scope-a",
+                "token-a",
+                std::time::Duration::from_secs(3600),
+            );
+            insert_cached_token(
+                &mut cache,
+                "scope-b",
+                "token-b",
+                std::time::Duration::from_secs(3600),
+            );
+        }
+        assert_eq!(auth.get_token("scope-a").await.unwrap(), "token-a");
+        assert_eq!(auth.get_token("scope-b").await.unwrap(), "token-b");
+    }
+
+    #[tokio::test]
+    async fn test_no_credentials_returns_error() {
+        let auth = make_auth(None);
+        let result = auth
+            .get_token("https://cognitiveservices.azure.com")
+            .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("WI") || err_msg.contains("IMDS") || err_msg.contains("failed"),
+            "error should mention auth failure: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_cache_starts_empty() {
+        let auth = make_auth(None);
+        let cache = auth.token_cache.read().await;
+        assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_api_key_mode_ignores_resource_scope() {
+        let auth = make_auth(Some("shared-key"));
+        // Same key returned regardless of scope
+        let t1 = auth.get_token("scope-x").await.unwrap();
+        let t2 = auth.get_token("scope-y").await.unwrap();
+        assert_eq!(t1, t2);
+        assert_eq!(t1, "shared-key");
+    }
+}

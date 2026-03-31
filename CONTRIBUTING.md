@@ -8,8 +8,8 @@ This project welcomes contributions and suggestions.
 git clone https://github.com/<your-user>/azureclaw.git
 cd azureclaw
 make build    # Rust (controller + router) + TypeScript CLI
-make test     # 14 unit tests (Rust)
-make lint     # clippy + oxlint
+make test     # 21 unit tests (Rust)
+make lint     # clippy + oxlint + ruff
 ```
 
 ## Project Structure
@@ -21,6 +21,7 @@ make lint     # clippy + oxlint
 | `cli/` | TypeScript | 15+ CLI commands + OpenClaw plugin + 9 Foundry skills |
 | `cli/skills/` | Markdown | 10 SKILL.md files teaching the agent to use Foundry services |
 | `cli/policies/` | YAML | AGT policy profiles (shell-safety, approval, rate-limit) |
+| `sidecar-images/` | Python | AGT governance sidecar (PolicyEvaluator, TrustStore, AuditChain) |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
 | `deploy/seccomp/` | JSON | seccomp profile (`azureclaw-strict.json`) |
@@ -44,9 +45,18 @@ npm run typecheck                           # tsc --noEmit
 
 ```bash
 cargo build --release     # builds controller + inference-router
-cargo test --all          # 14 unit tests (9 controller + 5 budget)
+cargo test --all          # 21 unit tests (16 controller + 5 budget)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all           # format
+```
+
+### Python AGT Sidecar (Python 3.12+)
+
+```bash
+cd sidecar-images/agt-governance
+pip install -r requirements.txt         # install agentmesh SDK + deps
+python3 -m pytest test_server.py -v     # sidecar unit tests
+ruff check .                            # lint
 ```
 
 ### Docker Sandbox Image

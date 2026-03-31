@@ -1,0 +1,30 @@
+# AzureClaw Code Owners
+# Each line is a file pattern followed by one or more owners.
+
+# Core infrastructure
+/controller/                 @AzureClawTeam
+/inference-router/           @AzureClawTeam
+
+# CLI and plugins
+/cli/                        @AzureClawTeam
+
+# AGT Governance
+/sidecar-images/             @AzureClawTeam
+/cli/policies/               @AzureClawTeam
+
+# Deployment
+/deploy/                     @AzureClawTeam
+/Makefile                    @AzureClawTeam
+
+# Container images
+/sandbox-images/             @AzureClawTeam
+
+# Documentation
+/docs/                       @AzureClawTeam
+*.md                         @AzureClawTeam
+
+# CI/CD
+/.github/                    @AzureClawTeam
+
+# Security-sensitive
+/SECURITY.md                 @AzureClawTeam

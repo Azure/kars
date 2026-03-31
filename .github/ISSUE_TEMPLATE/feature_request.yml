@@ -1,0 +1,49 @@
+name: Feature Request
+description: Suggest a new feature for AzureClaw
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea for AzureClaw? We'd love to hear it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Description
+      description: What problem does this feature solve? Is it related to a frustration?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component would this feature apply to?
+      options:
+        - Controller
+        - Inference Router
+        - Sandbox
+        - AGT Sidecar
+        - CLI
+        - AgentMesh Relay
+        - AgentMesh Registry
+        - Helm Chart
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or features you've considered.
+    validations:
+      required: false
