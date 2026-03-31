@@ -495,13 +495,42 @@ async fn create_sandbox_docker(
     let container_name = format!("azureclaw-{}", req.name);
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
 
-    // Remove existing container if any
-    let _ = docker_api(
-        "DELETE",
-        &format!("/containers/{}?force=true", container_name),
+    // Check if container already exists and is running — reuse it
+    if let Ok(inspect_resp) = docker_api(
+        "GET",
+        &format!("/containers/{}/json", container_name),
         None,
     )
-    .await;
+    .await
+    {
+        if let Ok(info) = serde_json::from_str::<serde_json::Value>(&inspect_resp) {
+            let is_running = info
+                .get("State")
+                .and_then(|s| s.get("Running"))
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false);
+            if is_running {
+                tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent container already running — reusing");
+                return Ok(SpawnResponse {
+                    status: "created".into(),
+                    name: req.name.clone(),
+                    namespace: Some(container_name),
+                    phase: Some("Running".into()),
+                    message: Some(format!(
+                        "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
+                        req.name, model, req.governance
+                    )),
+                });
+            }
+        }
+        // Container exists but not running — remove it
+        let _ = docker_api(
+            "DELETE",
+            &format!("/containers/{}?force=true", container_name),
+            None,
+        )
+        .await;
+    }
 
     // Create container
     let body = docker_create_body(&container_name, req, parent_name);
