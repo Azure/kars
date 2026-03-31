@@ -50,7 +50,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: azure/setup-bicep@v1
       - run: az bicep build --file deploy/bicep/main.bicep
 
   helm-lint:
@@ -83,6 +82,7 @@ jobs:
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@ebcb5b36ded6beda4ceefea6a8bc4cc885255bb3 # v3
         if: always()
+        continue-on-error: true  # Code Scanning may not be enabled on private repos
         with:
           sarif_file: "trivy-results.sarif"
 
@@ -112,6 +112,7 @@ jobs:
       - name: Upload scan results
         uses: github/codeql-action/upload-sarif@ebcb5b36ded6beda4ceefea6a8bc4cc885255bb3 # v3
         if: always()
+        continue-on-error: true  # Code Scanning may not be enabled on private repos
         with:
           sarif_file: "container-results.sarif"
 

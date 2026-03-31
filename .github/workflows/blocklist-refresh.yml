@@ -8,7 +8,7 @@ on:
   workflow_dispatch: # manual trigger
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   refresh:
@@ -92,14 +92,20 @@ jobs:
 
       - name: Commit and push
         if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          BRANCH="chore/blocklist-refresh-$(date -u +%Y%m%d)"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add cli/blocklists/seed-domains.txt
           DOMAINS=$(grep -cv '^#\|^$' cli/blocklists/seed-domains.txt || echo 0)
           git commit -m "chore(blocklist): auto-refresh seed — $DOMAINS domains
 
           Sources: OISD small, URLhaus hostfile
           Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git pull --rebase origin main
-          git push
+          git push origin "$BRANCH"
+          gh pr create --title "chore(blocklist): auto-refresh seed — $DOMAINS domains" \
+            --body "Automated daily blocklist refresh from OISD + URLhaus feeds." \
+            --base main --head "$BRANCH"
