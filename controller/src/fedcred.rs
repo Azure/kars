@@ -83,10 +83,10 @@ impl FedCredManager {
         // Check cache
         {
             let cached = self.cached_token.read().await;
-            if let Some(ref ct) = *cached {
-                if ct.acquired_at.elapsed().as_secs() < 3000 {
-                    return Ok(ct.token.clone());
-                }
+            if let Some(ref ct) = *cached
+                && ct.acquired_at.elapsed().as_secs() < 3000
+            {
+                return Ok(ct.token.clone());
             }
         }
 

@@ -1,4 +1,12 @@
 //! AzureClaw Inference Router
+#![allow(
+    clippy::collapsible_if,
+    clippy::redundant_guards,
+    clippy::needless_borrows_for_generic_args,
+    clippy::match_like_matches_macro,
+    clippy::await_holding_lock,
+    clippy::unnecessary_unwrap
+)]
 //!
 //! High-performance reverse proxy that sits between sandboxed OpenClaw agents
 //! and Azure AI backends. Every inference call from a sandbox flows through

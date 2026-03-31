@@ -1746,6 +1746,7 @@ async fn blocklist_check(
     }
 }
 
+#[allow(dead_code)]
 fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now()
