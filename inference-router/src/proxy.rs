@@ -138,6 +138,8 @@ pub async fn forward(
 
     let headers = build_upstream_headers(request_headers, auth, &token)?;
 
+    tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
+
     let response = client
         .request(method, &upstream_url)
         .headers(headers)
@@ -158,7 +160,7 @@ pub async fn forward(
 
     record_metrics(upstream, status, latency, &response_body);
 
-    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), "Foundry complete");
+    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), resp_len = response_body.len(), "Foundry complete");
     Ok((status, response_headers, response_body))
 }
 
