@@ -971,18 +971,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (message?.type === "task_request") {
         try {
           const http = await import("node:http");
-          // Look up sender's trust score from sidecar (by resolved name, matching KNOCK bootstrap key)
+          // Look up sender's trust score via router (which forwards with admin token)
           let senderTrustScore = 0;
           try {
-            const trustBody = await new Promise<string>((resolve, reject) => {
-              const req = http.get(`http://127.0.0.1:8081/trust/${encodeURIComponent(fromName)}`, (res) => {
-                let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
-              });
-              req.on("error", reject);
-              req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
-            });
-            const trustData = JSON.parse(trustBody);
-            senderTrustScore = trustData?.score ?? 0;
+            const trustResult = await _routerCall("GET",
+              `/agt/trust/${encodeURIComponent(fromName)}`);
+            senderTrustScore = trustResult?.score ?? 0;
           } catch { /* trust lookup failed — use 0 */ }
 
           // Evaluate mesh:receive action with sender trust context
