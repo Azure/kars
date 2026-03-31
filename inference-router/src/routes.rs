@@ -141,6 +141,11 @@ pub fn inference_routes() -> Router<AppState> {
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/models", get(list_models))
         .route("/v1/deployments", get(list_deployments))
+        // Image generation (gpt-image-1, DALL-E, etc.)
+        .route(
+            "/openai/deployments/{deployment}/images/generations",
+            post(images_generations),
+        )
 }
 
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
@@ -723,6 +728,96 @@ async fn embeddings(
         Err(e) => {
             tracing::error!("Proxy error: {e:#}");
             StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
+}
+
+/// POST /openai/deployments/{deployment}/images/generations — image generation proxy.
+/// Forwards to Azure OpenAI's images API (gpt-image-1, DALL-E, etc.)
+async fn images_generations(
+    State(state): State<AppState>,
+    Path(deployment): Path<String>,
+    headers: HeaderMap,
+    query: axum::extract::RawQuery,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sandbox_name = headers
+        .get("x-azureclaw-sandbox")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("self");
+
+    // AGT policy check — image generation is a tool invocation
+    if state.sidecar.enabled {
+        let action = format!("image_generation:{}", deployment);
+        match state
+            .sidecar
+            .forward(
+                "POST",
+                "/evaluate",
+                Some(&serde_json::json!({"action": action, "agent_id": sandbox_name})),
+            )
+            .await
+        {
+            Ok((_, decision)) if decision.get("allowed") == Some(&serde_json::Value::Bool(false)) => {
+                let reason = decision
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("policy denied");
+                tracing::warn!(sandbox = sandbox_name, deployment = %deployment, "Image generation denied: {}", reason);
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": {"message": format!("Image generation denied by policy: {}", reason)}})),
+                )
+                    .into_response();
+            }
+            _ => {}
+        }
+    }
+
+    let mut upstream = state.upstream_config(sandbox_name);
+    upstream.deployment = deployment.clone();
+
+    // Build the upstream path: /openai/deployments/{deployment}/images/generations
+    let api_path = format!("deployments/{}/images/generations", deployment);
+    let _api_version = query
+        .0
+        .as_deref()
+        .and_then(|q| q.strip_prefix("api-version="))
+        .unwrap_or("2025-04-01-preview");
+
+    tracing::info!(
+        sandbox = sandbox_name,
+        deployment = %deployment,
+        "Image generation request"
+    );
+
+    match proxy::forward(
+        &state.auth,
+        &state.client,
+        &upstream,
+        axum::http::Method::POST,
+        &api_path,
+        &headers,
+        body,
+    )
+    .await
+    {
+        Ok((status, _, resp_body)) => {
+            tracing::info!(
+                sandbox = sandbox_name,
+                deployment = %deployment,
+                status = %status,
+                "Image generation complete"
+            );
+            (status, Body::from(resp_body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(deployment = %deployment, "Image generation proxy error: {e:#}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": {"message": format!("Image generation proxy error: {e}")}})),
+            )
+                .into_response()
         }
     }
 }

@@ -2424,11 +2424,7 @@ const azureClawPlugin = definePluginEntry({
           },
           image_model: {
             type: "string",
-            description: "Image generation model deployment name (default: 'gpt-image-1'). Use 'FLUX.2-pro' or any deployed image model.",
-          },
-          model: {
-            type: "string",
-            description: "Orchestrator model (default: gpt-4.1). Coordinates the image generation.",
+            description: "Image generation model deployment name (default: 'gpt-image-1').",
           },
         },
         required: ["prompt"],
@@ -2438,26 +2434,28 @@ const azureClawPlugin = definePluginEntry({
           const imgModel = (params.image_model as string) || "gpt-image-1";
           const quality = (params.quality as string) || "medium";
           const size = (params.size as string) || "1024x1024";
-          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
-            model: (params.model as string) || "gpt-4.1",
-            input: params.prompt,
-            tools: [{ type: "image_generation", image_generation: { model: imgModel, quality, size } }],
-            store: false,
-          }, { "x-ms-oai-image-generation-deployment": imgModel });
-          const output = result.output || result;
+          const n = 1;
+
+          // Use the standard OpenAI Images API (POST /images/generations)
+          // The router proxies this to Azure OpenAI: /openai/deployments/{model}/images/generations
+          const result = await _routerCall("POST",
+            `/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
+            { prompt: params.prompt, n, size, quality },
+          );
+
+          // Response format: { data: [{ b64_json: "...", revised_prompt: "..." }] }
+          const images = result?.data || [];
           const parts: string[] = [];
-          if (Array.isArray(output)) {
-            for (const item of output) {
-              if (item.type === "image_generation_call" && item.result) {
-                parts.push(`[Generated image — base64 data ${item.result.length} chars]`);
-              } else if (item.type === "message" && item.content) {
-                for (const c of item.content) {
-                  if (c.type === "output_text" || c.type === "text") parts.push(c.text);
-                }
-              }
+          for (const img of images) {
+            if (img.b64_json) {
+              parts.push(`[Generated image — base64 data ${img.b64_json.length} chars]`);
+              if (img.revised_prompt) parts.push(`Revised prompt: ${img.revised_prompt}`);
+            } else if (img.url) {
+              parts.push(`Image URL: ${img.url}`);
             }
           }
-          return { content: [{ type: "text", text: parts.length > 0 ? parts.join("\n\n") : safeJson(output) }] };
+          if (parts.length === 0) parts.push(safeJson(result));
+          return { content: [{ type: "text", text: parts.join("\n\n") }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Foundry image generation failed: ${e.message}` }] };
         }
