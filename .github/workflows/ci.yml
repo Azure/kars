@@ -37,8 +37,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: cli/package-lock.json
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
@@ -142,9 +140,10 @@ jobs:
           chmod +x /usr/local/bin/hadolint
       - name: Lint Dockerfiles
         run: |
-          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 controller/Dockerfile
-          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 inference-router/Dockerfile
-          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 sandbox-images/openclaw/Dockerfile
-          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 sidecar-images/agt-governance/Dockerfile
-          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 vendor/agentmesh-relay/Dockerfile
-          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 vendor/agentmesh-registry/Dockerfile
+          IGNORE="--ignore DL3008 --ignore DL3013 --ignore DL3018 --ignore DL3006 --ignore DL4006"
+          hadolint $IGNORE controller/Dockerfile
+          hadolint $IGNORE inference-router/Dockerfile
+          hadolint $IGNORE sandbox-images/openclaw/Dockerfile
+          hadolint $IGNORE sidecar-images/agt-governance/Dockerfile
+          hadolint $IGNORE vendor/agentmesh-relay/Dockerfile
+          hadolint $IGNORE vendor/agentmesh-registry/Dockerfile

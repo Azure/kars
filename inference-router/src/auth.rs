@@ -290,9 +290,7 @@ mod tests {
             );
         }
         // Should try to refresh (and fail without WI/IMDS)
-        let result = auth
-            .get_token("https://cognitiveservices.azure.com")
-            .await;
+        let result = auth.get_token("https://cognitiveservices.azure.com").await;
         assert!(result.is_err());
     }
 
@@ -321,9 +319,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_credentials_returns_error() {
         let auth = make_auth(None);
-        let result = auth
-            .get_token("https://cognitiveservices.azure.com")
-            .await;
+        let result = auth.get_token("https://cognitiveservices.azure.com").await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
