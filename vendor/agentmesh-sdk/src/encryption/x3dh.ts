@@ -88,6 +88,14 @@ export class X3DHKeyExchange {
     theirBundle: PrekeyBundle,
     theirSigningPublicKey: Uint8Array
   ): Promise<X3DHInitiatorResult> {
+    // Validate key lengths (X25519 keys must be exactly 32 bytes)
+    if (theirBundle.signedPrekey.length !== 32) {
+      throw new Error(`Invalid signedPrekey length: ${theirBundle.signedPrekey.length} (expected 32)`);
+    }
+    if (theirBundle.identityKey.length !== 32) {
+      throw new Error(`Invalid identityKey length: ${theirBundle.identityKey.length} (expected 32)`);
+    }
+
     // Verify signed prekey signature
     const signatureValid = await Identity.verifySignatureRaw(
       theirSigningPublicKey,
@@ -96,6 +104,8 @@ export class X3DHKeyExchange {
     );
 
     if (!signatureValid) {
+      // Log signature failure for audit trail (potential key substitution attack)
+      console.error('[X3DH] Signed prekey signature verification FAILED — possible key substitution attack');
       throw new Error('Invalid signed prekey signature');
     }
 
