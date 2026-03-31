@@ -67,6 +67,35 @@ let agtSdk: any = null; // cached SDK module for reconnect
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
 
+// Resolve AMID → display_name via registry lookup (results cached in amidToName).
+// Returns the display_name if found, or empty string on failure.
+async function resolveAmidToName(amid: string): Promise<string> {
+  const cached = amidToName.get(amid);
+  if (cached) return cached;
+  try {
+    const http = await import("node:http");
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.get(
+        `http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${amid}`,
+        (res) => {
+          let d = "";
+          res.on("data", (c: Buffer) => { d += c.toString(); });
+          res.on("end", () => resolve(d));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
+    });
+    const parsed = JSON.parse(body);
+    if (parsed.display_name) {
+      amidToName.set(amid, parsed.display_name);
+      nameToAmid.set(parsed.display_name, amid);
+      return parsed.display_name;
+    }
+  } catch { /* best effort */ }
+  return "";
+}
+
 // Stored sandbox name for reconnect attempts
 let agtSandboxName: string = "unknown";
 
@@ -785,7 +814,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     }
     agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
       const intent = request?.intent?.capability || '*';
-      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      const fromName = await resolveAmidToName(fromAmid) || fromAmid.slice(0, 12);
       log.info(`AGT KNOCK from ${fromName} (${fromAmid.slice(0, 12)}...) intent=${intent}`);
 
       // Trust score evaluation (when threshold > 0)
@@ -822,10 +851,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // KNOCK accepted — bootstrap trust for this peer.
       // A completed X3DH handshake proves cryptographic identity, warranting
       // baseline trust (score=500 = threshold). Subsequent interactions adjust.
-      // Store by both name and AMID so the mesh gate can look up by either.
+      // Store by resolved display_name so operator panel shows human-readable names.
       // Awaited to ensure trust is stored before the first message arrives.
       await pushTrustToRouter(fromName, 0.0); // 500 + 0*500 = 500 (at threshold)
-      await pushTrustToRouter(fromAmid, 0.0);
       log.info(`AGT KNOCK accepted: bootstrapped trust for ${fromName} / ${fromAmid.slice(0, 12)}... (score=500)`);
 
       return { accept: true };
@@ -879,23 +907,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         nameToAmid.set(fromName, fromAmid);
       }
       if (!fromName) {
-        // Try registry lookup by AMID
-        try {
-          const http = await import("node:http");
-          const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get(`http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${fromAmid}`, (res) => {
-              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
-            });
-            req.on("error", reject);
-            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
-          });
-          const parsed = JSON.parse(body);
-          if (parsed.display_name) {
-            fromName = parsed.display_name;
-            amidToName.set(fromAmid, fromName);
-            nameToAmid.set(fromName, fromAmid);
-          }
-        } catch { /* best effort */ }
+        fromName = await resolveAmidToName(fromAmid);
       }
       if (!fromName) fromName = fromAmid.slice(0, 12);
       const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
@@ -917,11 +929,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (message?.type === "task_request") {
         try {
           const http = await import("node:http");
-          // Look up sender's trust score from sidecar
+          // Look up sender's trust score from sidecar (by resolved name, matching KNOCK bootstrap key)
           let senderTrustScore = 0;
           try {
             const trustBody = await new Promise<string>((resolve, reject) => {
-              const req = http.get(`http://127.0.0.1:8081/trust/${encodeURIComponent(fromAmid)}`, (res) => {
+              const req = http.get(`http://127.0.0.1:8081/trust/${encodeURIComponent(fromName)}`, (res) => {
                 let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
               });
               req.on("error", reject);
