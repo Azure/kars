@@ -472,9 +472,88 @@ async fn chat_completions(
         .unwrap_or(false);
 
     if is_responses_only {
-        // Skip chat/completions — go directly to Responses API
+        // Skip chat/completions — go directly to Responses API.
+        // Use a streaming response body with SSE keepalive comments to prevent
+        // client timeouts while the Responses API processes (30-50s for reasoning models).
         tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using cached Responses API path");
         let responses_body = chat_to_responses_body(&body);
+
+        let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("stream")?.as_bool())
+            .unwrap_or(false);
+
+        if is_stream {
+            // Stream keepalive comments while the Responses API call is in progress,
+            // then send the converted result as a single SSE data frame.
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+            let auth = state.auth.clone();
+            let client = state.client.clone();
+            let upstream = upstream.clone();
+            let headers = headers.clone();
+            let budget = state.budget.clone();
+            let sandbox_owned = sandbox_name.to_string();
+
+            tokio::spawn(async move {
+                // Send keepalive comments every 5 seconds while waiting
+                let forward_fut = proxy::forward(
+                    &auth,
+                    &client,
+                    &upstream,
+                    axum::http::Method::POST,
+                    "responses",
+                    &headers,
+                    responses_body,
+                );
+
+                let keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                tokio::pin!(forward_fut);
+                tokio::pin!(keepalive_interval);
+
+                let result = loop {
+                    tokio::select! {
+                        res = &mut forward_fut => { break res; }
+                        _ = keepalive_interval.tick() => {
+                            // SSE comment — keeps connection alive, ignored by SSE parsers
+                            let _ = tx.send(Ok(bytes::Bytes::from(": keepalive\n\n"))).await;
+                        }
+                    }
+                };
+
+                match result {
+                    Ok((_resp_status, _, resp_body)) => {
+                        let chat_body = responses_to_chat_body(&resp_body);
+                        if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                            && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
+                        {
+                            budget.record_usage(&sandbox_owned, total).await;
+                        }
+                        let sse_data = format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            String::from_utf8_lossy(&chat_body)
+                        );
+                        let _ = tx.send(Ok(bytes::Bytes::from(sse_data))).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(sandbox = %sandbox_owned, "Responses API error: {e:#}");
+                        let err_sse = format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({"error":{"message":"Failed to reach inference backend","type":"proxy_error"}})
+                        );
+                        let _ = tx.send(Ok(bytes::Bytes::from(err_sse))).await;
+                    }
+                }
+            });
+
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            let body = Body::from_stream(stream);
+            let mut response = (StatusCode::OK, body).into_response();
+            response.headers_mut().insert("content-type", axum::http::HeaderValue::from_static("text/event-stream"));
+            response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-cache"));
+            return response;
+        }
+
+        // Non-streaming: buffered request/response (no timeout concern)
         match proxy::forward(
             &state.auth,
             &state.client,
@@ -492,17 +571,6 @@ async fn chat_completions(
                     && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
                 {
                     state.budget.record_usage(sandbox_name, total).await;
-                }
-                let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|v| v.get("stream")?.as_bool())
-                    .unwrap_or(false);
-                if is_stream {
-                    // Wrap as SSE for streaming clients
-                    let sse = format!("data: {}\n\ndata: [DONE]\n\n", String::from_utf8_lossy(&chat_body));
-                    let mut response = (resp_status, Body::from(sse)).into_response();
-                    response.headers_mut().insert("content-type", axum::http::HeaderValue::from_static("text/event-stream"));
-                    return response;
                 }
                 let mut response = (resp_status, Body::from(chat_body)).into_response();
                 if let Some(ct) = resp_hdrs.get("content-type") {
