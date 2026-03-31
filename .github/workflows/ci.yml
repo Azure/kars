@@ -66,6 +66,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -82,7 +83,6 @@ jobs:
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@ebcb5b36ded6beda4ceefea6a8bc4cc885255bb3 # v3
         if: always()
-        continue-on-error: true  # Code Scanning may not be enabled on private repos
         with:
           sarif_file: "trivy-results.sarif"
 
@@ -92,6 +92,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -112,7 +113,6 @@ jobs:
       - name: Upload scan results
         uses: github/codeql-action/upload-sarif@ebcb5b36ded6beda4ceefea6a8bc4cc885255bb3 # v3
         if: always()
-        continue-on-error: true  # Code Scanning may not be enabled on private repos
         with:
           sarif_file: "container-results.sarif"
 
