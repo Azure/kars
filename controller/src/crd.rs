@@ -335,8 +335,7 @@ mod tests {
         let cfg = GovernanceConfig::default();
         assert!(!cfg.enabled);
         // Serde default_policy() and default_trust_threshold() are used during deserialization only
-        let cfg_serde: GovernanceConfig =
-            serde_json::from_value(serde_json::json!({})).unwrap();
+        let cfg_serde: GovernanceConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(cfg_serde.tool_policy, "default");
         assert_eq!(cfg_serde.trust_threshold, 500);
         assert_eq!(cfg.tool_policy, ""); // derive Default gives empty string

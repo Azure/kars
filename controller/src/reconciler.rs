@@ -839,7 +839,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     // Add AGT_POLICY_DIR + AGT_SIDECAR_URL env vars
                     if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
                         env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
-                        env.push(json!({"name": "AGT_SIDECAR_URL", "value": "http://127.0.0.1:8081"}));
+                        env.push(
+                            json!({"name": "AGT_SIDECAR_URL", "value": "http://127.0.0.1:8081"}),
+                        );
                     }
                 }
             }
@@ -1322,10 +1324,8 @@ pub async fn run(client: Client) -> Result<()> {
         tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
         "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
     });
-    let governance_sidecar_image =
-        std::env::var("AGT_SIDECAR_IMAGE").unwrap_or_else(|_| {
-            "agentmesh/governance-sidecar:0.3.0".into()
-        });
+    let governance_sidecar_image = std::env::var("AGT_SIDECAR_IMAGE")
+        .unwrap_or_else(|_| "agentmesh/governance-sidecar:0.3.0".into());
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").unwrap_or_default();
     let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
@@ -1698,11 +1698,7 @@ mod tests {
     }
 
     /// Build AGT governance sidecar container JSON (line 848-889).
-    fn build_agt_container(
-        image: &str,
-        name: &str,
-        trust_threshold: i32,
-    ) -> serde_json::Value {
+    fn build_agt_container(image: &str, name: &str, trust_threshold: i32) -> serde_json::Value {
         json!({
             "name": "agt-governance",
             "image": image,
@@ -1824,9 +1820,7 @@ mod tests {
         let rules = build_default_egress_rules();
         let https_rule = &rules[2];
         assert_eq!(https_rule["to"][0]["ipBlock"]["cidr"], "0.0.0.0/0");
-        let except = https_rule["to"][0]["ipBlock"]["except"]
-            .as_array()
-            .unwrap();
+        let except = https_rule["to"][0]["ipBlock"]["except"].as_array().unwrap();
         assert!(except.contains(&json!("10.0.0.0/8")));
         assert!(except.contains(&json!("172.16.0.0/12")));
         assert!(except.contains(&json!("192.168.0.0/16")));
@@ -2014,8 +2008,14 @@ mod tests {
         let cfg = SandboxConfig::default();
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
         let agt = build_agt_container("agt:0.3.0", "test", 500);
-        assert_eq!(router["securityContext"]["capabilities"]["drop"], json!(["ALL"]));
-        assert_eq!(agt["securityContext"]["capabilities"]["drop"], json!(["ALL"]));
+        assert_eq!(
+            router["securityContext"]["capabilities"]["drop"],
+            json!(["ALL"])
+        );
+        assert_eq!(
+            agt["securityContext"]["capabilities"]["drop"],
+            json!(["ALL"])
+        );
     }
 
     // ── Pod spec: sidecar probes ────────────────────────────────────────
@@ -2054,10 +2054,7 @@ mod tests {
         let cfg = SandboxConfig::default();
         let oc = build_openclaw_container("img:latest", &cfg, "gpt-4.1");
         let mounts = oc["volumeMounts"].as_array().unwrap();
-        let names: Vec<&str> = mounts
-            .iter()
-            .map(|m| m["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = mounts.iter().map(|m| m["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"sandbox-data"));
         assert!(names.contains(&"tmp"));
         assert!(names.contains(&"admin-token"));
@@ -2076,10 +2073,7 @@ mod tests {
     fn agt_sidecar_has_policy_and_data_mounts() {
         let agt = build_agt_container("agt:0.3.0", "test", 500);
         let mounts = agt["volumeMounts"].as_array().unwrap();
-        let names: Vec<&str> = mounts
-            .iter()
-            .map(|m| m["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = mounts.iter().map(|m| m["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"agt-policy"));
         assert!(names.contains(&"agt-data"));
         assert!(names.contains(&"tmp"));
@@ -2106,7 +2100,10 @@ mod tests {
     #[test]
     fn init_container_seccomp_unconfined() {
         let init = build_init_container("router:latest");
-        assert_eq!(init["securityContext"]["seccompProfile"]["type"], "Unconfined");
+        assert_eq!(
+            init["securityContext"]["seccompProfile"]["type"],
+            "Unconfined"
+        );
     }
 
     // ── Pod spec: image pull policy ─────────────────────────────────────

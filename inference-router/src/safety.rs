@@ -138,7 +138,13 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
             let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= CIRCUIT_BREAKER_THRESHOLD {
                 SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-                SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
+                SAFETY_CIRCUIT_OPENED_AT.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as u32,
+                    Ordering::Relaxed,
+                );
                 tracing::error!(
                     failures = n,
                     "Content Safety circuit breaker OPENED — failing open"
@@ -156,7 +162,13 @@ pub async fn check_content_safety(endpoint: &str, text: &str) -> Result<()> {
         let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= CIRCUIT_BREAKER_THRESHOLD {
             SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-                SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
+            SAFETY_CIRCUIT_OPENED_AT.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as u32,
+                Ordering::Relaxed,
+            );
             tracing::error!(
                 failures = n,
                 "Content Safety circuit breaker OPENED — failing open"
@@ -248,8 +260,17 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
             let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= CIRCUIT_BREAKER_THRESHOLD {
                 SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-                SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
-                tracing::error!(failures = n, "Content Safety circuit breaker OPENED (via Prompt Shields)");
+                SAFETY_CIRCUIT_OPENED_AT.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as u32,
+                    Ordering::Relaxed,
+                );
+                tracing::error!(
+                    failures = n,
+                    "Content Safety circuit breaker OPENED (via Prompt Shields)"
+                );
                 return Ok(());
             }
             tracing::warn!(error = %e, failures = n, "Prompt Shields API unreachable, failing open ({n}/{CIRCUIT_BREAKER_THRESHOLD})");
@@ -261,8 +282,17 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
         let n = SAFETY_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= CIRCUIT_BREAKER_THRESHOLD {
             SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
-            SAFETY_CIRCUIT_OPENED_AT.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32, Ordering::Relaxed);
-            tracing::error!(failures = n, "Content Safety circuit breaker OPENED (via Prompt Shields)");
+            SAFETY_CIRCUIT_OPENED_AT.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as u32,
+                Ordering::Relaxed,
+            );
+            tracing::error!(
+                failures = n,
+                "Content Safety circuit breaker OPENED (via Prompt Shields)"
+            );
             return Ok(());
         }
         return Ok(());
@@ -291,8 +321,8 @@ pub async fn check_prompt_shields(endpoint: &str, prompt: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
 
     // Global lock so tests that touch shared circuit breaker atomics
     // don't race each other when cargo runs them in parallel.
@@ -406,11 +436,8 @@ mod tests {
         SAFETY_CIRCUIT_OPEN.store(1, Ordering::Relaxed);
         SAFETY_CIRCUIT_OPENED_AT.store(now_epoch_secs(), Ordering::Relaxed);
 
-        let result = check_content_safety(
-            "https://test.cognitiveservices.azure.com",
-            "test input",
-        )
-        .await;
+        let result =
+            check_content_safety("https://test.cognitiveservices.azure.com", "test input").await;
         assert!(result.is_ok(), "should fail-open when circuit is open");
         // Circuit must remain open — cooldown hasn't elapsed.
         assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 1);
@@ -429,11 +456,8 @@ mod tests {
 
         // After cooldown the circuit resets, then the function continues
         // to the auth step which will fail in test (no Azure credentials).
-        let _ = check_content_safety(
-            "https://test.cognitiveservices.azure.com",
-            "test input",
-        )
-        .await;
+        let _ =
+            check_content_safety("https://test.cognitiveservices.azure.com", "test input").await;
 
         // Regardless of auth failure, circuit state must have been reset.
         assert_eq!(SAFETY_CIRCUIT_OPEN.load(Ordering::Relaxed), 0);

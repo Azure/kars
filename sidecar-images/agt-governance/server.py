@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 # ── AGT SDK imports (all from agentmesh v3.0.0) ─────────────────────
 from agentmesh import AgentDID, AuditLog
 from agentmesh.governance.trust_policy import (
-    TrustPolicy, TrustRule, TrustCondition, TrustDefaults, load_policies,
+    load_policies,
 )
 from agentmesh.governance.policy_evaluator import PolicyEvaluator
 from agentmesh.services.rate_limiter import RateLimiter
@@ -89,10 +89,14 @@ behavior_monitor = AgentBehaviorMonitor(
 
 
 def _score_to_tier(score: int) -> str:
-    if score >= 800: return "Sovereign"
-    if score >= 600: return "Verified"
-    if score >= 400: return "Known"
-    if score >= 200: return "Observed"
+    if score >= 800:
+        return "Sovereign"
+    if score >= 600:
+        return "Verified"
+    if score >= 400:
+        return "Known"
+    if score >= 200:
+        return "Observed"
     return "Anonymous"
 
 

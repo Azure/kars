@@ -7,7 +7,6 @@ server in-process on a random port and exercises every endpoint.
 
 import json
 import os
-import re
 import sys
 import threading
 import time

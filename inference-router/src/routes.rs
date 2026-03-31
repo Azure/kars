@@ -421,9 +421,16 @@ async fn chat_completions(
             "action": format!("inference:chat_completions:{}", model),
             "context": { "sandbox": sandbox_name, "model": model }
         });
-        match state.sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
+        match state
+            .sidecar
+            .forward("POST", "/evaluate", Some(&eval_body))
+            .await
+        {
             Ok((status, json)) if status == 403 => {
-                let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("policy denied");
+                let reason = json
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("policy denied");
                 tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED inference (enforcing)");
                 return (
                     StatusCode::FORBIDDEN,
@@ -434,10 +441,14 @@ async fn chat_completions(
                             "code": "policy_denied"
                         }
                     })),
-                ).into_response();
+                )
+                    .into_response();
             }
             Ok((_, json)) => {
-                let decision = json.get("decision").and_then(|d| d.as_str()).unwrap_or("allow");
+                let decision = json
+                    .get("decision")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("allow");
                 tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
             }
             Err(e) => {
@@ -586,8 +597,10 @@ async fn chat_completions(
                                 });
                                 match sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
                                     Ok((s, json)) if s == 403 => {
-                                        let reason = json.get("reason")
-                                            .and_then(|r| r.as_str()).unwrap_or("output policy");
+                                        let reason = json
+                                            .get("reason")
+                                            .and_then(|r| r.as_str())
+                                            .unwrap_or("output policy");
                                         tracing::warn!(sandbox = %sandbox, %reason,
                                             "AGT: model response flagged by output policy");
                                     }
@@ -1109,7 +1122,11 @@ async fn agt_evaluate(
         )
             .into_response();
     }
-    match state.sidecar.forward("POST", "/evaluate", Some(&body)).await {
+    match state
+        .sidecar
+        .forward("POST", "/evaluate", Some(&body))
+        .await
+    {
         Ok((status, json)) => (
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             Json(json),
@@ -1246,30 +1263,42 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
         );
         obj.insert(
             "mesh_sessions".into(),
-            serde_json::json!(state.mesh_metrics.sessions.load(
-                std::sync::atomic::Ordering::Relaxed
-            )),
+            serde_json::json!(
+                state
+                    .mesh_metrics
+                    .sessions
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            ),
         );
         obj.insert(
             "mesh_messages_sent".into(),
-            serde_json::json!(state.mesh_metrics.messages_sent.load(
-                std::sync::atomic::Ordering::Relaxed
-            )),
+            serde_json::json!(
+                state
+                    .mesh_metrics
+                    .messages_sent
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            ),
         );
         obj.insert(
             "mesh_messages_received".into(),
-            serde_json::json!(state.mesh_metrics.messages_received.load(
-                std::sync::atomic::Ordering::Relaxed
-            )),
+            serde_json::json!(
+                state
+                    .mesh_metrics
+                    .messages_received
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            ),
         );
         if state.sidecar.enabled {
             obj.insert("sidecar".into(), serde_json::json!(true));
         }
         obj.insert(
             "trust_updates".into(),
-            serde_json::json!(state.mesh_metrics.trust_updates.load(
-                std::sync::atomic::Ordering::Relaxed
-            )),
+            serde_json::json!(
+                state
+                    .mesh_metrics
+                    .trust_updates
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            ),
         );
     }
 
@@ -2090,9 +2119,16 @@ async fn sandbox_spawn(
                 "model": req.model.as_deref().unwrap_or("default"),
             }
         });
-        match state.sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
+        match state
+            .sidecar
+            .forward("POST", "/evaluate", Some(&eval_body))
+            .await
+        {
             Ok((status, json)) if status == 403 => {
-                let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("policy denied");
+                let reason = json
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("policy denied");
                 tracing::warn!(parent = %parent_name, child = %req.name, %reason, "AGT policy DENIED spawn");
                 return (
                     StatusCode::FORBIDDEN,

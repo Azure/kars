@@ -31,8 +31,8 @@ impl SidecarProxy {
             .map(|v| v == "true")
             .unwrap_or(false);
 
-        let base_url = std::env::var("AGT_SIDECAR_URL")
-            .unwrap_or_else(|_| DEFAULT_SIDECAR_URL.to_string());
+        let base_url =
+            std::env::var("AGT_SIDECAR_URL").unwrap_or_else(|_| DEFAULT_SIDECAR_URL.to_string());
 
         tracing::info!(
             enabled,
@@ -111,7 +111,7 @@ impl std::fmt::Display for SidecarError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::get, routing::post, Json, Router};
+    use axum::{Json, Router, routing::get, routing::post};
     use tokio::net::TcpListener;
 
     fn make_proxy(base_url: &str, enabled: bool) -> SidecarProxy {
@@ -179,8 +179,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_forward_get_success() {
-        let app = Router::new()
-            .route("/healthz", get(|| async { Json(serde_json::json!({"status": "ok"})) }));
+        let app = Router::new().route(
+            "/healthz",
+            get(|| async { Json(serde_json::json!({"status": "ok"})) }),
+        );
         let base_url = start_test_server(app).await;
         let proxy = make_proxy(&base_url, true);
 
@@ -204,7 +206,10 @@ mod tests {
         let proxy = make_proxy(&base_url, true);
 
         let payload = serde_json::json!({"agent_id": "agent-1", "action": "read"});
-        let (status, body) = proxy.forward("POST", "/evaluate", Some(&payload)).await.unwrap();
+        let (status, body) = proxy
+            .forward("POST", "/evaluate", Some(&payload))
+            .await
+            .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body["decision"], "allow");
         assert_eq!(body["input"]["agent_id"], "agent-1");
@@ -212,8 +217,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_success() {
-        let app = Router::new()
-            .route("/healthz", get(|| async { Json(serde_json::json!({"status": "healthy"})) }));
+        let app = Router::new().route(
+            "/healthz",
+            get(|| async { Json(serde_json::json!({"status": "healthy"})) }),
+        );
         let base_url = start_test_server(app).await;
         let proxy = make_proxy(&base_url, true);
         assert!(proxy.health_check().await);
