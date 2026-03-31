@@ -459,12 +459,43 @@ async function processTaskWithTools(
         },
       },
     },
+    {
+      type: "function" as const,
+      function: {
+        name: "foundry_image_generation",
+        description: "Generate images from text prompts via Azure AI Foundry (gpt-image-1). Returns file path of saved image.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "Text description of the image to generate." },
+            quality: { type: "string", enum: ["low", "medium", "high"], description: "Image quality (default: medium)" },
+            size: { type: "string", enum: ["1024x1024", "1024x1536", "1536x1024"], description: "Image dimensions (default: 1024x1024)" },
+          },
+          required: ["prompt"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "mesh_send",
+        description: "Send a message to another agent via the AGT E2E encrypted mesh relay. Use this to communicate with sibling agents spawned by the same parent.",
+        parameters: {
+          type: "object",
+          properties: {
+            to_agent: { type: "string", description: "Name of the target agent" },
+            message: { type: "string", description: "The message to send" },
+          },
+          required: ["to_agent", "message"],
+        },
+      },
+    },
   ];
 
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores, manage vector stores and files\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- foundry_conversations: persistent multi-turn dialogues (create, respond, get history)\n- foundry_evaluations: benchmark model quality (create, run, check results)\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls if needed. Be concise and report actual results.",
+      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- mesh_send: send a message to another agent via E2E encrypted AGT mesh relay\nUse the appropriate tool for each task. When asked to contact or send data to another agent, use mesh_send. Execute tasks immediately using tools. Do not announce what you will do — just do it. Chain multiple tool calls if needed. Be concise and report actual results.",
     },
     {
       role: "user",
@@ -716,6 +747,85 @@ async function processTaskWithTools(
               result = memResult;
             }
             log.info(`AGT sub-agent foundry_memory result: ${result.slice(0, 200)}`);
+          } else if (fnName === "foundry_image_generation") {
+            // Route through the inference router → Azure OpenAI Images API
+            log.info(`AGT sub-agent image_gen: ${(args.prompt as string || "").slice(0, 100)}`);
+            const imgModel = (args.image_model as string) || "gpt-image-1";
+            const imgBody = JSON.stringify({
+              prompt: args.prompt, n: 1,
+              size: args.size || "1024x1024",
+              quality: args.quality || "medium",
+            });
+            const imgResult = await new Promise<string>((resolve, reject) => {
+              const req = http.request(
+                `http://127.0.0.1:8443/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
+                { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(imgBody) }, timeout: 120000 },
+                (res) => { let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body)); },
+              );
+              req.on("error", reject);
+              req.on("timeout", () => { req.destroy(); reject(new Error("Image gen timeout")); });
+              req.write(imgBody);
+              req.end();
+            });
+            try {
+              const parsed = JSON.parse(imgResult);
+              const images = parsed?.data || [];
+              const parts: string[] = [];
+              const fs = await import("node:fs");
+              const nodePath = await import("node:path");
+              const os = await import("node:os");
+              const imgDir = nodePath.join(os.tmpdir(), "azureclaw-images");
+              fs.mkdirSync(imgDir, { recursive: true });
+              for (const img of images) {
+                if (img.b64_json) {
+                  const ts = Date.now();
+                  const imgFile = nodePath.join(imgDir, `image-${ts}.png`);
+                  fs.writeFileSync(imgFile, Buffer.from(img.b64_json, "base64"));
+                  parts.push(`📁 Image saved: ${imgFile}`);
+                  if (img.revised_prompt) parts.push(`Revised prompt: ${img.revised_prompt}`);
+                } else if (img.url) {
+                  parts.push(`Image URL: ${img.url}`);
+                }
+              }
+              result = parts.length > 0 ? parts.join("\n") : imgResult;
+            } catch {
+              result = imgResult;
+            }
+            log.info(`AGT sub-agent image_gen complete`);
+          } else if (fnName === "mesh_send") {
+            // Send message to sibling agent via AGT mesh relay
+            const toAgent = args.to_agent as string;
+            const meshMsg = args.message as string;
+            log.info(`AGT sub-agent mesh_send: to=${toAgent} msg=${(meshMsg || "").slice(0, 100)}`);
+            try {
+              // Look up target AMID in registry
+              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const lookupResult = await new Promise<string>((resolve, reject) => {
+                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(toAgent)}`, { timeout: 10000 }, (res) => {
+                  let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                });
+                req.on("error", reject);
+                req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
+              });
+              const agents = JSON.parse(lookupResult);
+              const target = Array.isArray(agents) ? agents[0] : agents;
+              const targetAmid = target?.amid || target?.id;
+              if (!targetAmid) {
+                result = `Agent '${toAgent}' not found in registry`;
+              } else if (typeof agtMeshClient !== "undefined" && agtMeshClient) {
+                await agtMeshClient.send(targetAmid, {
+                  type: "task_request",
+                  content: meshMsg,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                });
+                result = `Message sent to ${toAgent} via E2E encrypted mesh relay`;
+              } else {
+                result = `Mesh client not available — cannot send to ${toAgent}`;
+              }
+            } catch (meshErr: any) {
+              result = `mesh_send failed: ${meshErr.message}`;
+            }
           } else {
             // exec_command — gate through AGT sidecar policy before execution
             const cmd = args.command || "";
@@ -1027,20 +1137,15 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
 
-      // Process task_request messages: delegate to native OpenClaw agent for full tool access,
-      // with fallback to the limited processTaskWithTools loop if native delegation fails.
+      // Process task_request messages via our own tool-calling loop.
+      // We use processTaskWithTools directly (not delegateToNativeAgent) because:
+      // 1. Native OpenClaw agent requires device pairing (blocks headless exec)
+      // 2. OpenClaw's own exec allowlist double-gates commands already checked by AGT sidecar
+      // 3. processTaskWithTools routes through AGT policy sidecar + direct execSync — no redundant gates
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
         try {
-          let llmResponse: string;
-          try {
-            // Primary: delegate to native OpenClaw agent (full toolset)
-            llmResponse = await delegateToNativeAgent(taskContent, fromName, log);
-          } catch (nativeErr: any) {
-            // Fallback: limited tool-calling loop (6 tools, 10 rounds)
-            log.warn(`Native delegation failed (${nativeErr.message}), falling back to processTaskWithTools`);
-            llmResponse = await processTaskWithTools(taskContent, log);
-          }
+          const llmResponse = await processTaskWithTools(taskContent, log);
 
           // Send the response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
@@ -2509,11 +2614,22 @@ const azureClawPlugin = definePluginEntry({
           // Response format: { data: [{ b64_json: "...", revised_prompt: "..." }] }
           const images = result?.data || [];
           const parts: string[] = [];
+          const fs = await import("node:fs");
+          const nodePath = await import("node:path");
+          const os = await import("node:os");
+          const imgDir = nodePath.join(os.tmpdir(), "azureclaw-images");
+          fs.mkdirSync(imgDir, { recursive: true });
+
           for (const img of images) {
             if (img.b64_json) {
-              parts.push(`[Generated image — base64 data ${img.b64_json.length} chars]`);
+              // Save image to temp file so user can view it
+              const ts = Date.now();
+              const imgFile = nodePath.join(imgDir, `image-${ts}.png`);
+              fs.writeFileSync(imgFile, Buffer.from(img.b64_json, "base64"));
+              parts.push(`📁 Image saved: ${imgFile}`);
               if (img.revised_prompt) parts.push(`Revised prompt: ${img.revised_prompt}`);
             } else if (img.url) {
+              parts.push(`![Generated Image](${img.url})`);
               parts.push(`Image URL: ${img.url}`);
             }
           }
