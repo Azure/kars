@@ -569,14 +569,14 @@ export class AgentMeshClient {
    * The responder will process the KNOCK asynchronously.
    */
   private async establishSession(toAmid: string, options: SendOptions): Promise<string> {
-    // Get recipient's prekey bundle from registry
-    const registryBundle = await this.registry.getPrekeys(toAmid);
+    // Fetch prekeys and agent info in parallel (both are registry HTTP calls)
+    const [registryBundle, agentInfo] = await Promise.all([
+      this.registry.getPrekeys(toAmid),
+      this.registry.lookup(toAmid),
+    ]);
     if (!registryBundle) {
       throw new SessionError(`Cannot get prekeys for ${toAmid}`, 'PREKEY_NOT_FOUND');
     }
-
-    // Get recipient's public key for verification
-    const agentInfo = await this.registry.lookup(toAmid);
     if (!agentInfo) {
       throw new SessionError(`Cannot find agent ${toAmid}`, 'AGENT_NOT_FOUND');
     }
