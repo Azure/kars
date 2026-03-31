@@ -47,6 +47,10 @@ pub struct SpawnRequest {
     pub token_budget_daily: Option<i64>,
     /// Per-request token budget.
     pub token_budget_per_request: Option<i64>,
+    /// Trusted peer AMIDs — parent-verified agents that the sub-agent should
+    /// auto-trust (parent + siblings). Passed securely via env var at spawn time,
+    /// not self-reported. Format: "name:AMID,name:AMID,..."
+    pub trusted_peers: Option<String>,
 }
 
 /// Response from spawn/status endpoints.
@@ -423,6 +427,12 @@ fn docker_create_body(
             "AGT_TRUST_THRESHOLD={}",
             req.trust_threshold.unwrap_or(500)
         ));
+        // Pass parent identity so sub-agents can trust their parent and siblings
+        env.push(format!("PARENT_SANDBOX={}", parent_name));
+        // Pre-seeded trusted peers (parent-verified AMIDs, not self-reported)
+        if let Some(ref peers) = req.trusted_peers {
+            env.push(format!("AGT_TRUSTED_PEERS={}", peers));
+        }
     }
 
     let mut labels = serde_json::Map::new();
