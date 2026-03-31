@@ -152,10 +152,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
 
         // Clean up the Azure federated identity credential
-        if let Some(ref fedcred) = ctx.fedcred {
-            if let Err(e) = fedcred.delete_federated_credential(&name).await {
-                tracing::warn!(sandbox = %name, "Federated credential cleanup failed (non-fatal): {e}");
-            }
+        if let Some(ref fedcred) = ctx.fedcred
+            && let Err(e) = fedcred.delete_federated_credential(&name).await
+        {
+            tracing::warn!(sandbox = %name, "Federated credential cleanup failed (non-fatal): {e}");
         }
 
         // Remove the finalizer so K8s can complete CRD deletion
@@ -272,13 +272,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // ── Step 2b: Create Azure federated identity credential ──────────────
     // Maps system:serviceaccount:{namespace}:sandbox → managed identity so
     // Workload Identity token exchange works for this sub-agent.
-    if let Some(ref fedcred) = ctx.fedcred {
-        if let Err(e) = fedcred
+    if let Some(ref fedcred) = ctx.fedcred
+        && let Err(e) = fedcred
             .ensure_federated_credential(&name, &sandbox_ns)
             .await
-        {
-            tracing::warn!(sandbox = %name, "Federated credential creation failed (non-fatal): {e}");
-        }
+    {
+        tracing::warn!(sandbox = %name, "Federated credential creation failed (non-fatal): {e}");
     }
 
     // ── Step 2a: Grant sandbox SA permission to spawn sub-agents ─────────
@@ -1919,7 +1918,7 @@ mod tests {
         let cfg = SandboxConfig::default();
         let oc = build_openclaw_container("img:latest", &cfg, "gpt-4.1");
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
-        let containers = vec![oc, router];
+        let containers = [oc, router];
         assert_eq!(containers.len(), 2);
         assert_eq!(containers[0]["name"], "openclaw");
         assert_eq!(containers[1]["name"], "inference-router");
@@ -1931,7 +1930,7 @@ mod tests {
         let oc = build_openclaw_container("img:latest", &cfg, "gpt-4.1");
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
         let agt = build_agt_container("agt:0.3.0", "test", 500);
-        let containers = vec![oc, router, agt];
+        let containers = [oc, router, agt];
         assert_eq!(containers.len(), 3);
         assert_eq!(containers[2]["name"], "agt-governance");
     }

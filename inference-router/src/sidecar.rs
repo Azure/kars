@@ -83,6 +83,7 @@ impl SidecarProxy {
     }
 
     /// Health check — verify sidecar is reachable.
+    #[allow(dead_code)]
     pub async fn health_check(&self) -> bool {
         match self.forward("GET", "/healthz", None).await {
             Ok((200, _)) => true,

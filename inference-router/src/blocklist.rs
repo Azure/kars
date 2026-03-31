@@ -78,6 +78,7 @@ pub struct PendingApproval {
     pub reason: String,
 }
 
+#[allow(dead_code)]
 fn default_kind() -> String {
     "pending".into()
 }
@@ -267,7 +268,6 @@ impl Blocklist {
                     tracing::info!("Blocklist: OISD failed on startup — retrying in 60s");
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 } else {
-                    first_run = false;
                     tokio::time::sleep(interval).await;
                 }
                 first_run = false;

@@ -30,6 +30,7 @@ impl MeshInbox {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn receive(&self, msg: MeshMessage) {
         self.messages.write().await.push(msg);
     }
