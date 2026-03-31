@@ -2268,8 +2268,8 @@ const azureClawPlugin = definePluginEntry({
       label: "Foundry Image Generation",
       description:
         "Generate images from text prompts via Azure AI Foundry's image_generation tool. " +
-        "Uses gpt-image-1 model. Returns base64-encoded image data. Use when the user " +
-        "asks to create, draw, or generate an image, diagram, or visual.",
+        "Supports any deployed image model (gpt-image-1, FLUX.2-pro, etc.). Returns base64-encoded image data. " +
+        "Use when the user asks to create, draw, or generate an image, diagram, or visual.",
       parameters: {
         type: "object",
         properties: {
@@ -2287,6 +2287,10 @@ const azureClawPlugin = definePluginEntry({
             enum: ["1024x1024", "1024x1536", "1536x1024"],
             description: "Image dimensions (default: '1024x1024').",
           },
+          image_model: {
+            type: "string",
+            description: "Image generation model deployment name (default: 'gpt-image-1'). Use 'FLUX.2-pro' or any deployed image model.",
+          },
           model: {
             type: "string",
             description: "Orchestrator model (default: gpt-4.1). Coordinates the image generation.",
@@ -2296,7 +2300,7 @@ const azureClawPlugin = definePluginEntry({
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
-          const imgModel = "gpt-image-1";
+          const imgModel = (params.image_model as string) || "gpt-image-1";
           const quality = (params.quality as string) || "medium";
           const size = (params.size as string) || "1024x1024";
           const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
