@@ -577,6 +577,19 @@ fi
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate sidecar container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+  # Generate admin token BEFORE starting any services that need it
+  ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
+  # Token file readable by both sandbox (UID 1000) and router (UID 1001)
+  echo "$ROUTER_ADMIN_TOKEN" > /tmp/.agt-admin-token
+  if [ "$IS_ROOT" = "true" ]; then
+    chown sandbox:sandbox /tmp/.agt-admin-token
+    chmod 440 /tmp/.agt-admin-token
+    # Add router user to sandbox group so UID 1001 can read the token file
+    adduser router sandbox 2>/dev/null || true
+  else
+    chmod 400 /tmp/.agt-admin-token
+  fi
+
   # ── AGT governance sidecar (dev mode) ─────────────────────────────────────
   # In AKS, the controller injects this as a separate container (UID 1002).
   # In dev mode, we start it here inside the sandbox container.
@@ -597,6 +610,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
     SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
     AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
     AGT_TRUST_DB="/tmp/agt/trust_scores.json" \
+    ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
     $AS_ROUTER python3 /opt/agt-governance/server.py > /tmp/agt-governance.log 2>&1 &
     AGT_PID=$!
     echo "[azureclaw] AGT governance sidecar running (PID: $AGT_PID, port: 8081)"
@@ -610,14 +624,6 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   if [ -S /var/run/docker.sock ] && [ "$IS_ROOT" = "true" ]; then
     chmod 666 /var/run/docker.sock || true
   fi
-  # Generate a random admin token for the router's protected endpoints
-  ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
-  # Share admin token with the plugin (UID 1000) for trust update auth.
-  # Written by root, readable by sandbox — the agent process can also read it,
-  # but the sidecar additionally clamps trust deltas to ±200 and blocks self-updates.
-  echo "$ROUTER_ADMIN_TOKEN" > /tmp/.agt-admin-token
-  [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/.agt-admin-token
-  chmod 400 /tmp/.agt-admin-token
   ROUTER_PORT=8443 \
   ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \

@@ -50,20 +50,22 @@ SANDBOX = os.environ.get("SANDBOX_NAME", "unknown")
 TRUST_THRESHOLD = int(os.environ.get("AGT_TRUST_THRESHOLD", "500"))
 TRUST_DB = os.environ.get("AGT_TRUST_DB", "/tmp/agt/trust_scores.json")
 
-# Admin token for protecting sensitive GET endpoints (trust, audit)
-ADMIN_TOKEN = ""
-for _token_path in ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token",
-                     "/run/secrets/admin-token"]:
-    try:
-        ADMIN_TOKEN = open(_token_path).read().strip()
-        if ADMIN_TOKEN:
-            break
-    except OSError:
-        pass
+# Admin token for protecting sensitive GET endpoints (trust, audit).
+# Prefer env var (passed by entrypoint) to avoid file-permission race conditions.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 if not ADMIN_TOKEN:
-    ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+    for _token_path in ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token",
+                         "/run/secrets/admin-token"]:
+        try:
+            ADMIN_TOKEN = open(_token_path).read().strip()
+            if ADMIN_TOKEN:
+                break
+        except OSError:
+            pass
 if ADMIN_TOKEN:
     log.info("Admin token loaded for GET endpoint auth")
+else:
+    log.warning("No admin token configured — sensitive GET endpoints are unprotected")
 
 # ── Initialize AGT components ───────────────────────────────────────
 
