@@ -21,13 +21,18 @@ pub struct Config {
     /// Default model name
     pub default_model: String,
 
-    /// Enable Azure AI Content Safety (default: true)
+    /// Enable Foundry guardrail annotation parsing (default: true).
+    /// When true, the router reads prompt_filter_results from Foundry
+    /// responses and reports content flags to the AGT sidecar.
+    #[allow(dead_code)]
     pub content_safety_enabled: bool,
 
-    /// Enable Prompt Shields (default: true)
+    /// Legacy — Foundry guardrails (DefaultV2) run Prompt Shields automatically.
+    #[allow(dead_code)]
     pub prompt_shields_enabled: bool,
 
-    /// Azure AI Content Safety endpoint
+    /// Legacy — no longer used (Foundry guardrails replace standalone API).
+    #[allow(dead_code)]
     pub content_safety_endpoint: Option<String>,
 
     /// Daily token budget per sandbox (0 = unlimited)
