@@ -19,11 +19,12 @@ mod blocklist;
 mod budget;
 mod config;
 mod forward_proxy;
-mod governance;
+mod mesh;
 mod metrics;
 mod proxy;
 mod routes;
 mod safety;
+mod sidecar;
 mod spawn;
 
 use anyhow::Result;
@@ -51,12 +52,16 @@ async fn main() -> Result<()> {
     let proxy_blocklist = state.blocklist.clone();
 
     // Read admin token for protecting sensitive endpoints.
-    // If ADMIN_TOKEN is set, /admin/*, /egress/*, /sandbox/*, and sensitive /agt/* endpoints
+    // Priority: file mount (AKS Secret) > env var > unset.
+    // If set, /admin/*, /egress/*, /sandbox/*, and sensitive /agt/* endpoints
     // require Authorization: Bearer <token>. If unset, these endpoints are unrestricted
     // (backwards-compatible for local dev).
-    let admin_token: Option<Arc<String>> = std::env::var("ADMIN_TOKEN")
+    let admin_token: Option<Arc<String>> = std::fs::read_to_string("/etc/azureclaw/secrets/admin-token")
         .ok()
+        .or_else(|| std::fs::read_to_string("/run/secrets/admin-token").ok())
+        .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+        .or_else(|| std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()))
         .map(Arc::new);
 
     let app = {

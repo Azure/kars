@@ -84,10 +84,12 @@ FROM ${AZURELINUX_BASE}
 
 # Detect arch for Node.js download
 ARG TARGETARCH
-RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
-                    python3 python3-pip && tdnf clean all && \
-    pip3 install --no-cache-dir \
+RUN tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
+                    python3 python3-pip && tdnf clean all
+
+# Vendored Python packages (zero PyPI dependency)
+COPY vendor/sandbox-wheels/ /tmp/sandbox-wheels/
+RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
       requests httpx beautifulsoup4 lxml cssselect \
       pandas numpy matplotlib seaborn scipy sympy \
       pyyaml toml python-dotenv \
@@ -100,9 +102,25 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
       sqlalchemy cryptography tiktoken \
       dnspython networkx geopy \
       ftfy unidecode qrcode fpdf2 nano-pdf && \
+    rm -rf /tmp/sandbox-wheels
+
+# Node.js (vendored binary)
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
+
+# AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
+# Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
+# Includes agentmesh-platform, agent-os-kernel, agent-hypervisor, and their
+# runtime dependencies (email-validator, jsonschema).
+# pydantic/pyyaml/dnspython are already installed by the main pip layer above.
+# Install each wheel individually — skip platform-incompatible ones (e.g.
+# pydantic_core x86_64 on aarch64 dev builds; already satisfied from above).
+COPY vendor/agt-wheels/ /tmp/agt-wheels/
+RUN for whl in /tmp/agt-wheels/*.whl; do \
+      pip3 install --no-cache-dir --no-deps "$whl" 2>/dev/null || true; \
+    done && rm -rf /tmp/agt-wheels
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
@@ -196,6 +214,9 @@ RUN mkdir -p /sandbox /tmp && \
 # Copy entrypoint that auto-configures OpenClaw from mounted secrets
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# AGT governance sidecar server (dev mode — started by entrypoint.sh)
+COPY sidecar-images/agt-governance/server.py /opt/agt-governance/server.py
 
 # Labels
 LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \

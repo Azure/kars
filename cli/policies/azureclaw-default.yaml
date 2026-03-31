@@ -1,76 +1,122 @@
-# AzureClaw AGT Governance Policy — Application Layer Only
+# AzureClaw AGT Governance Policy — Native TrustPolicy Format
+#
+# Uses agentmesh TrustPolicy + PolicyEvaluator with TrustCondition operators:
+#   eq, ne, gt, gte, lt, lte, in, not_in, matches (regex)
+# All classification (safe commands, destructive patterns, injection detection)
+# is done by AGT's native condition evaluation — zero custom logic.
 #
 # Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
-# are handled by AzureClaw at kernel/router level. AGT only governs
-# application-level behavior that AzureClaw can't see.
-#
-# Rule: If AzureClaw enforces it at kernel/network/router, AGT doesn't touch it.
+# are handled by AzureClaw at kernel/router level.
 
-version: "1.0"
-agent: openclaw
+name: azureclaw-default
 description: AzureClaw behavioral governance (tool-level only, no infra overlap)
 
-policies:
-  # Tool-level restrictions — AzureClaw CAN'T see tool calls before execution
-  - name: shell-safety
-    type: capability
-    allowed_actions:
-      - "shell:ls"
-      - "shell:cat"
-      - "shell:grep"
-      - "shell:find"
-      - "shell:echo"
-      - "shell:head"
-      - "shell:tail"
-      - "shell:wc"
-      - "shell:sort"
-      - "shell:uniq"
-      - "shell:diff"
-      - "shell:python"
-      - "shell:python3"
-      - "shell:pip"
-      - "shell:node"
-      - "shell:npm"
-      - "shell:git"
-      - "shell:curl"
-      - "shell:jq"
-      - "shell:sed"
-      - "shell:awk"
-    denied_actions:
-      - "shell:rm -rf /*"
-      - "shell:rm -rf /"
-      - "shell:dd"
-      - "shell:mkfs"
-      - "shell:shutdown"
-      - "shell:reboot"
-      - "shell:chmod 777"
-      - "shell:chown"
-      - "shell:mount"
-      - "shell:umount"
+defaults:
+  min_trust_score: 500
+  max_delegation_depth: 3
+  require_handshake: true
 
-  # Destructive operations require approval
-  - name: destructive-approval
-    type: approval
-    actions:
-      - "delete_*"
-      - "shell:rm *"
-      - "file:write:.env"
-      - "file:write:.bashrc"
-    min_approvals: 1
-    approval_timeout_minutes: 15
+rules:
+  # ── Shell safety ─────────────────────────────────────────────────────
+  - name: shell-safe-commands
+    description: Allow pre-approved shell commands
+    condition:
+      field: action.command
+      operator: in
+      value: [ls, cat, grep, find, echo, head, tail, wc, sort, uniq, diff,
+              python, python3, pip, node, npm, git, curl, jq, sed, awk]
+    action: allow
+    priority: 10
 
-  # Tool-specific rate limits (different from AzureClaw's token budget)
-  - name: tool-rate-limit
-    type: rate_limit
-    scope: tool_calls
-    max_calls: 20
-    window: 1m
-    actions: ["shell:*"]
+  - name: shell-destructive-deny
+    description: Deny destructive shell commands (regex match)
+    condition:
+      field: action.full
+      operator: matches
+      value: "rm\\s+-rf\\s+/|mkfs|shutdown|reboot|chmod\\s+777|dd\\s+if="
+    action: deny
+    priority: 5
 
-  # NOT included — AzureClaw handles these at infrastructure level:
-  # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
-  # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
-  # ✗ content-safety (Azure AI Content Safety — router-level enforcement)
-  # ✗ token-budgets (inference router — router-level enforcement)
-  # ✗ IMDS-blocking (iptables UID-based — kernel-level enforcement)
-  # ✗ rate-limit for API calls (ConcurrencyLimitLayer — router-level enforcement)
+  # ── Inference rate-limited allow (#7, #12) ───────────────────────────
+  - name: inference-allow
+    description: Allow inference requests (rate limiting via RateLimiter)
+    condition:
+      field: action.category
+      operator: eq
+      value: inference
+    action: allow
+    priority: 20
+
+  # ── Spawn allow (#8) ────────────────────────────────────────────────
+  - name: spawn-allow
+    description: Allow sub-agent spawns (rate limiting via RateLimiter)
+    condition:
+      field: action.category
+      operator: eq
+      value: spawn
+    action: allow
+    priority: 20
+
+  # ── Response content safety (#9) ────────────────────────────────────
+  - name: output-injection-deny
+    description: Block model responses containing prompt injection patterns
+    condition:
+      field: action.detail
+      operator: matches
+      value: "(?i)ignore previous instructions|ignore all prior|you are now|new system prompt|DROP TABLE|UNION SELECT|rm -rf /|; curl |<script>"
+    action: deny
+    priority: 5
+
+  - name: output-clean-allow
+    description: Allow clean model output
+    condition:
+      field: action.category
+      operator: eq
+      value: output
+    action: allow
+    priority: 30
+
+  # ── Mesh message policy (#10) ───────────────────────────────────────
+  - name: mesh-untrusted-deny
+    description: Deny messages from agents below trust threshold
+    condition:
+      field: trust_score
+      operator: lt
+      value: 500
+    action: deny
+    priority: 5
+
+  - name: mesh-trusted-allow
+    description: Allow messages from trusted agents
+    condition:
+      field: action.category
+      operator: eq
+      value: mesh
+    action: allow
+    priority: 20
+
+  # ── Bulk operations gate (#14) ──────────────────────────────────────
+  - name: admin-bulk-approval
+    description: Bulk admin operations require operator approval
+    condition:
+      field: action.detail
+      operator: matches
+      value: "^(bulk|promote)"
+    action: require_approval
+    priority: 10
+
+  - name: admin-allow
+    description: Allow non-bulk admin operations
+    condition:
+      field: action.category
+      operator: eq
+      value: admin
+    action: allow
+    priority: 25
+
+# NOT included — AzureClaw handles these at infrastructure level:
+# ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
+# ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
+# ✗ content-safety (Azure AI Content Safety — router-level enforcement)
+# ✗ token-budgets (inference router — router-level enforcement)
+# ✗ IMDS-blocking (iptables UID-based — kernel-level enforcement)
