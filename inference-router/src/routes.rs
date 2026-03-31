@@ -138,6 +138,7 @@ pub fn inference_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
+        .route("/v1/responses", post(responses))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/models", get(list_models))
         .route("/v1/deployments", get(list_deployments))
@@ -467,13 +468,74 @@ async fn chat_completions(
         match proxy::forward_stream(
             state.auth.clone(),
             state.client.clone(),
-            upstream,
+            upstream.clone(),
             "chat/completions",
             headers.clone(),
-            body,
+            body.clone(),
         )
         .await
         {
+            Ok((status, _resp_headers, stream)) if status == StatusCode::BAD_REQUEST => {
+                // Might be a Responses-only model — buffer the error and check
+                use futures::TryStreamExt;
+                let err_bytes: Vec<u8> = stream
+                    .try_fold(Vec::new(), |mut acc, chunk| async move {
+                        acc.extend_from_slice(&chunk);
+                        Ok(acc)
+                    })
+                    .await
+                    .unwrap_or_default();
+                let is_unsupported = serde_json::from_slice::<serde_json::Value>(&err_bytes)
+                    .ok()
+                    .and_then(|v| v.get("error")?.get("message")?.as_str().map(|s| s.contains("unsupported")))
+                    .unwrap_or(false);
+
+                if is_unsupported {
+                    // Fallback: convert to Responses API, return result as single SSE frame
+                    tracing::info!(sandbox = %sandbox_name, "Streaming chat/completions unsupported, falling back to Responses API");
+                    let responses_body = chat_to_responses_body(&body);
+                    match proxy::forward(
+                        &state.auth,
+                        &state.client,
+                        &upstream,
+                        axum::http::Method::POST,
+                        "responses",
+                        &headers,
+                        responses_body,
+                    )
+                    .await
+                    {
+                        Ok((resp_status, _, resp_body)) => {
+                            let chat_body = responses_to_chat_body(&resp_body);
+                            if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                                && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
+                            {
+                                state.budget.record_usage(sandbox_name, total).await;
+                            }
+                            // Wrap as SSE so the streaming client can parse it
+                            let sse = format!(
+                                "data: {}\n\ndata: [DONE]\n\n",
+                                String::from_utf8_lossy(&chat_body)
+                            );
+                            let mut response = (resp_status, Body::from(sse)).into_response();
+                            response.headers_mut().insert(
+                                "content-type",
+                                axum::http::HeaderValue::from_static("text/event-stream"),
+                            );
+                            response
+                        }
+                        Err(e) => {
+                            tracing::error!(sandbox = %sandbox_name, "Responses fallback error: {e:#}");
+                            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                                "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                            }))).into_response()
+                        }
+                    }
+                } else {
+                    // Genuine 400 error — return as-is
+                    (StatusCode::BAD_REQUEST, Body::from(err_bytes)).into_response()
+                }
+            }
             Ok((status, resp_headers, stream)) => {
                 // Wrap stream to intercept the first SSE chunk for guardrail
                 // annotations and the final chunk for token usage.
@@ -549,11 +611,63 @@ async fn chat_completions(
             axum::http::Method::POST,
             "chat/completions",
             &headers,
-            body,
+            body.clone(),
         )
         .await;
 
         match result {
+            Ok((status, _resp_headers, resp_body))
+                if status == StatusCode::BAD_REQUEST
+                    && serde_json::from_slice::<serde_json::Value>(&resp_body)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("error")?
+                                .get("message")?
+                                .as_str()
+                                .map(|s| s.contains("unsupported"))
+                        })
+                        .unwrap_or(false) =>
+            {
+                // Model doesn't support chat/completions — auto-fallback to Responses API.
+                // Convert messages → input and proxy to /openai/v1/responses.
+                tracing::info!(sandbox = %sandbox_name, "chat/completions unsupported, falling back to Responses API");
+                let responses_body = chat_to_responses_body(&body);
+                match proxy::forward(
+                    &state.auth,
+                    &state.client,
+                    &upstream,
+                    axum::http::Method::POST,
+                    "responses",
+                    &headers,
+                    responses_body,
+                )
+                .await
+                {
+                    Ok((resp_status, resp_hdrs, resp_body)) => {
+                        // Convert Responses API output back to chat/completions format
+                        let chat_body = responses_to_chat_body(&resp_body);
+                        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                            && let Some(total) = body_json
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|v| v.as_u64())
+                        {
+                            state.budget.record_usage(sandbox_name, total).await;
+                        }
+                        let mut response = (resp_status, Body::from(chat_body)).into_response();
+                        if let Some(ct) = resp_hdrs.get("content-type") {
+                            response.headers_mut().insert("content-type", ct.clone());
+                        }
+                        response
+                    }
+                    Err(e) => {
+                        tracing::error!(sandbox = %sandbox_name, "Responses fallback proxy error: {e:#}");
+                        (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                            "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                        }))).into_response()
+                    }
+                }
+            }
             Ok((status, resp_headers, resp_body)) => {
                 // Record token usage from response for budget tracking
                 if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
@@ -691,6 +805,130 @@ async fn completions(
     }
 }
 
+/// POST /v1/responses — Responses API for reasoning and Responses-only models.
+/// Proxies to Azure OpenAI /openai/v1/responses.
+async fn responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sandbox_name = headers
+        .get("x-azureclaw-sandbox")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 63
+                && v.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && v.as_bytes()[0].is_ascii_alphanumeric()
+        })
+        .unwrap_or("unknown");
+
+    // AGT policy check
+    if state.sidecar.enabled {
+        let model = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("model")?.as_str().map(String::from))
+            .unwrap_or_default();
+        let eval_body = serde_json::json!({
+            "action": format!("inference:responses:{}", model),
+            "context": { "sandbox": sandbox_name, "model": model }
+        });
+        match state
+            .sidecar
+            .forward("POST", "/evaluate", Some(&eval_body))
+            .await
+        {
+            Ok((status, json)) if status == 403 => {
+                let reason = json
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("policy denied");
+                tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED responses inference");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!("Blocked by governance policy: {}", reason),
+                            "type": "policy_violation",
+                            "code": "policy_denied"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                if state.sidecar.should_fail_closed() {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "Governance sidecar unavailable — inference blocked (fail-closed)",
+                                "type": "governance_unavailable"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+                tracing::warn!(sandbox = %sandbox_name, error = %e,
+                    "AGT sidecar unreachable, allowing responses request (grace window)");
+            }
+        }
+    }
+
+    // Budget check
+    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": { "message": msg, "type": "token_budget_exceeded" } })),
+        )
+            .into_response();
+    }
+
+    let upstream = state.upstream_config(sandbox_name);
+    tracing::info!(sandbox = %sandbox_name, model = %upstream.deployment, "Responses API request");
+
+    match proxy::forward(
+        &state.auth,
+        &state.client,
+        &upstream,
+        axum::http::Method::POST,
+        "responses",
+        &headers,
+        body,
+    )
+    .await
+    {
+        Ok((status, resp_headers, resp_body)) => {
+            // Record token usage
+            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
+                && let Some(total) = body_json
+                    .get("usage")
+                    .and_then(|u| u.get("total_tokens"))
+                    .and_then(|v| v.as_u64())
+            {
+                state.budget.record_usage(sandbox_name, total).await;
+            }
+            let mut response = (status, Body::from(resp_body)).into_response();
+            if let Some(ct) = resp_headers.get("content-type") {
+                response.headers_mut().insert("content-type", ct.clone());
+            }
+            response
+        }
+        Err(e) => {
+            tracing::error!(sandbox = %sandbox_name, "Responses proxy error: {e:#}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "message": "Failed to reach inference backend", "type": "proxy_error" }
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn embeddings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -738,7 +976,7 @@ async fn images_generations(
     State(state): State<AppState>,
     Path(deployment): Path<String>,
     headers: HeaderMap,
-    query: axum::extract::RawQuery,
+    _query: axum::extract::RawQuery,
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = headers
@@ -777,13 +1015,9 @@ async fn images_generations(
     let mut upstream = state.upstream_config(sandbox_name);
     upstream.deployment = deployment.clone();
 
-    // Build the upstream path: /openai/deployments/{deployment}/images/generations
-    let api_path = format!("deployments/{}/images/generations", deployment);
-    let _api_version = query
-        .0
-        .as_deref()
-        .and_then(|q| q.strip_prefix("api-version="))
-        .unwrap_or("2025-04-01-preview");
+    // Unified format: proxy builds {endpoint}/openai/v1/images/generations
+    // Model (deployment) is injected into request body automatically
+    let api_path = "images/generations";
 
     tracing::info!(
         sandbox = sandbox_name,
@@ -2353,4 +2587,104 @@ async fn sandbox_delete(
         )
             .into_response(),
     }
+}
+
+// ── Chat ↔ Responses format translation ────────────────────────────────────
+
+/// Convert a chat/completions request body to Responses API format.
+/// messages[] → input, max_completion_tokens → max_output_tokens
+fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
+    let Ok(mut body) = serde_json::from_slice::<serde_json::Value>(chat_body) else {
+        return chat_body.clone();
+    };
+    let obj = match body.as_object_mut() {
+        Some(o) => o,
+        None => return chat_body.clone(),
+    };
+
+    // Convert messages to input (Responses API accepts messages array as input)
+    if let Some(messages) = obj.remove("messages") {
+        obj.insert("input".into(), messages);
+    }
+
+    // max_completion_tokens → max_output_tokens
+    if let Some(max) = obj.remove("max_completion_tokens") {
+        obj.insert("max_output_tokens".into(), max);
+    }
+    if let Some(max) = obj.remove("max_tokens") {
+        obj.entry("max_output_tokens").or_insert(max);
+    }
+
+    // Remove chat-specific fields that Responses API doesn't accept
+    obj.remove("stream");
+    obj.remove("stop");
+    obj.remove("frequency_penalty");
+    obj.remove("presence_penalty");
+    obj.remove("logprobs");
+    obj.remove("top_logprobs");
+    obj.remove("n");
+
+    serde_json::to_vec(&body)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| chat_body.clone())
+}
+
+/// Convert a Responses API response back to chat/completions format.
+/// output[].content[].text → choices[].message.content
+fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
+    let Ok(resp) = serde_json::from_slice::<serde_json::Value>(resp_body) else {
+        return resp_body.clone();
+    };
+
+    // If it's an error, pass through
+    if resp.get("error").is_some() {
+        return resp_body.clone();
+    }
+
+    // Extract text from output
+    let content = resp
+        .get("output")
+        .and_then(|o| o.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    if item.get("type")?.as_str()? == "message" {
+                        let texts: Vec<&str> = item
+                            .get("content")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|c| c.get("text")?.as_str())
+                            .collect();
+                        Some(texts.join(""))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+
+    // Build chat/completions-shaped response
+    let usage = resp.get("usage").cloned().unwrap_or(serde_json::json!({}));
+    let chat_resp = serde_json::json!({
+        "id": resp.get("id").cloned().unwrap_or(serde_json::json!("")),
+        "object": "chat.completion",
+        "created": resp.get("created_at").cloned().unwrap_or(serde_json::json!(0)),
+        "model": resp.get("model").cloned().unwrap_or(serde_json::json!("")),
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": usage
+    });
+
+    serde_json::to_vec(&chat_resp)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| resp_body.clone())
 }
