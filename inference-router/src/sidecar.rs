@@ -7,6 +7,7 @@
 
 use reqwest::Client;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 /// Default sidecar URL (same pod, loopback only).
@@ -14,6 +15,9 @@ const DEFAULT_SIDECAR_URL: &str = "http://127.0.0.1:8081";
 
 /// Timeout for sidecar calls (local network — should be fast).
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Number of consecutive failures before switching to fail-closed mode.
+const FAIL_CLOSED_THRESHOLD: u32 = 3;
 
 /// Proxy client for the AGT governance sidecar.
 #[derive(Clone)]
@@ -23,6 +27,8 @@ pub struct SidecarProxy {
     /// If true, sidecar is available and governance routes proxy to it.
     /// If false, governance routes return 503 (sidecar not configured).
     pub enabled: bool,
+    /// Consecutive failure counter — shared across clones via Arc.
+    consecutive_failures: std::sync::Arc<AtomicU32>,
 }
 
 impl SidecarProxy {
@@ -44,11 +50,13 @@ impl SidecarProxy {
             client: client.clone(),
             base_url,
             enabled,
+            consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
         }
     }
 
     /// Forward a request to the sidecar and return its response verbatim.
     /// Returns (status_code, response_body).
+    /// Tracks consecutive failures for fail-closed enforcement.
     pub async fn forward(
         &self,
         method: &str,
@@ -69,17 +77,27 @@ impl SidecarProxy {
         }
 
         let resp = req.send().await.map_err(|e| {
+            self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(url = %url, error = %e, "Sidecar request failed");
             SidecarError::Unreachable(e.to_string())
         })?;
 
         let status = resp.status().as_u16();
         let json = resp.json::<Value>().await.map_err(|e| {
+            self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(url = %url, error = %e, "Sidecar response parse failed");
             SidecarError::BadResponse(e.to_string())
         })?;
 
+        // Success — reset failure counter
+        self.consecutive_failures.store(0, Ordering::Relaxed);
         Ok((status, json))
+    }
+
+    /// Returns true if the sidecar has exceeded the fail-closed threshold.
+    /// During the grace window (first N failures), callers should fail-open.
+    pub fn should_fail_closed(&self) -> bool {
+        self.consecutive_failures.load(Ordering::Relaxed) >= FAIL_CLOSED_THRESHOLD
     }
 
     /// Health check — verify sidecar is reachable.
@@ -120,6 +138,7 @@ mod tests {
             client: Client::new(),
             base_url: base_url.to_string(),
             enabled,
+            consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
         }
     }
 

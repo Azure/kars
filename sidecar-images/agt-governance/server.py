@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -49,6 +50,21 @@ SANDBOX = os.environ.get("SANDBOX_NAME", "unknown")
 TRUST_THRESHOLD = int(os.environ.get("AGT_TRUST_THRESHOLD", "500"))
 TRUST_DB = os.environ.get("AGT_TRUST_DB", "/tmp/agt/trust_scores.json")
 
+# Admin token for protecting sensitive GET endpoints (trust, audit)
+ADMIN_TOKEN = ""
+for _token_path in ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token",
+                     "/run/secrets/admin-token"]:
+    try:
+        ADMIN_TOKEN = open(_token_path).read().strip()
+        if ADMIN_TOKEN:
+            break
+    except OSError:
+        pass
+if not ADMIN_TOKEN:
+    ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+if ADMIN_TOKEN:
+    log.info("Admin token loaded for GET endpoint auth")
+
 # ── Initialize AGT components ───────────────────────────────────────
 
 # 1. TrustPolicy + PolicyEvaluator — native condition-based evaluation
@@ -76,6 +92,7 @@ rate_limiter = RateLimiter(
 # 3. FileTrustStore — persistent JSON trust scores
 os.makedirs(os.path.dirname(TRUST_DB), exist_ok=True)
 trust_store = FileTrustStore(path=TRUST_DB, auto_save=True)
+trust_lock = threading.Lock()  # serialize trust score get+update
 
 # 4. AuditLog — hash-chain tamper-evident audit trail
 audit_log = AuditLog()
@@ -181,6 +198,19 @@ class GovernanceHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length)) if length else {}
 
+    def _check_admin_token(self):
+        """Verify admin token on sensitive endpoints. Returns True if OK."""
+        if not ADMIN_TOKEN:
+            return True  # No token configured — allow (backward compat)
+        provided = self.headers.get("x-azureclaw-admin") or ""
+        if not provided:
+            auth = self.headers.get("Authorization") or ""
+            provided = auth.removeprefix("Bearer ").strip()
+        if provided == ADMIN_TOKEN:
+            return True
+        self._json(403, {"error": "Admin token required"})
+        return False
+
     # ── GET ───────────────────────────────────────────────────────────
 
     def do_GET(self):
@@ -214,6 +244,8 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             })
 
         if path == "/trust":
+            if not self._check_admin_token():
+                return
             all_scores = trust_store.get_all_scores()
             agents = [
                 {"agent_id": aid, "score": ts.get("score", 0),
@@ -225,6 +257,8 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             return self._json(200, {"agents": agents})
 
         if path.startswith("/trust/"):
+            if not self._check_admin_token():
+                return
             agent_id = path.split("/trust/", 1)[1]
             try:
                 AgentDID.from_string(agent_id)
@@ -242,6 +276,8 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             })
 
         if path == "/audit":
+            if not self._check_admin_token():
+                return
             entries = audit_log.query(limit=100)
             return self._json(200, {
                 "entries": [
@@ -256,6 +292,8 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             })
 
         if path == "/audit/verify":
+            if not self._check_admin_token():
+                return
             valid, msg = audit_log.verify_integrity()
             count = len(audit_log.query(limit=10000))
             return self._json(200, {
@@ -310,24 +348,25 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             interactions = int(body.get("interactions", 0))
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-            existing = trust_store.get_trust_score(agent_id) or {
-                "score": 0, "interactions": 0, "last_interaction": ""}
-            old_score = existing.get("score", 0)
+            with trust_lock:
+                existing = trust_store.get_trust_score(agent_id) or {
+                    "score": 0, "interactions": 0, "last_interaction": ""}
+                old_score = existing.get("score", 0)
 
-            # Bound trust delta to ±200 per update (prevents score forging).
-            # Exception: first interaction (no prior record) may set up to 500
-            # to support KNOCK trust bootstrap (X3DH handshake = crypto identity).
-            MAX_DELTA = 200
-            is_new = existing.get("interactions", 0) == 0
-            max_initial = 500 if is_new else MAX_DELTA
-            clamped = max(old_score - MAX_DELTA, min(old_score + max_initial, score))
-            clamped = max(0, min(1000, clamped))
+                # Bound trust delta to ±200 per update (prevents score forging).
+                # Exception: first interaction (no prior record) may set up to 500
+                # to support KNOCK trust bootstrap (X3DH handshake = crypto identity).
+                MAX_DELTA = 200
+                is_new = existing.get("interactions", 0) == 0
+                max_initial = 500 if is_new else MAX_DELTA
+                clamped = max(old_score - MAX_DELTA, min(old_score + max_initial, score))
+                clamped = max(0, min(1000, clamped))
 
-            trust_store.store_trust_score(agent_id, {
-                "score": clamped,
-                "interactions": existing.get("interactions", 0) + interactions,
-                "last_interaction": now,
-            })
+                trust_store.store_trust_score(agent_id, {
+                    "score": clamped,
+                    "interactions": existing.get("interactions", 0) + interactions,
+                    "last_interaction": now,
+                })
 
             audit_log.log("trust_update", agent_id,
                            f"trust_update:{agent_id}",
@@ -360,16 +399,17 @@ class GovernanceHandler(BaseHTTPRequestHandler):
 
             # Apply trust penalty (negative score adjustment)
             if penalty < 0:
-                existing = trust_store.get_trust_score(agent_id) or {
-                    "score": 500, "interactions": 0, "last_interaction": ""}
-                old_score = existing.get("score", 500)
-                new_score = max(0, old_score + penalty)
-                now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                trust_store.store_trust_score(agent_id, {
-                    "score": new_score,
-                    "interactions": existing.get("interactions", 0) + 1,
-                    "last_interaction": now,
-                })
+                with trust_lock:
+                    existing = trust_store.get_trust_score(agent_id) or {
+                        "score": 500, "interactions": 0, "last_interaction": ""}
+                    old_score = existing.get("score", 500)
+                    new_score = max(0, old_score + penalty)
+                    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    trust_store.store_trust_score(agent_id, {
+                        "score": new_score,
+                        "interactions": existing.get("interactions", 0) + 1,
+                        "last_interaction": now,
+                    })
                 log.warning(
                     "Content flag: agent=%s categories=%s penalty=%d "
                     "trust=%d→%d",

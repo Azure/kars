@@ -520,10 +520,21 @@ async function processTaskWithTools(
               headers: args.headers || {},
               body: args.body || "",
             });
-            const fetchResult = execSync(
-              `curl -s -X POST http://127.0.0.1:8443/egress/fetch -H "Content-Type: application/json" -d '${fetchBody.replace(/'/g, "'\\''")}'`,
-              { timeout: 35000, encoding: "utf8", maxBuffer: 256 * 1024 },
-            ).trim();
+            const http = await import("node:http");
+            const fetchResult = await new Promise<string>((resolve) => {
+              const req = http.request("http://127.0.0.1:8443/egress/fetch", {
+                method: "POST", timeout: 35000,
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
+              }, (res) => {
+                let data = "";
+                res.on("data", (c: Buffer) => { data += c.toString(); });
+                res.on("end", () => resolve(data.trim()));
+              });
+              req.on("error", (e: Error) => resolve(`http_fetch error: ${e.message}`));
+              req.on("timeout", () => { req.destroy(); resolve("http_fetch timeout"); });
+              req.write(fetchBody);
+              req.end();
+            });
             result = fetchResult;
           } else if (fnName === "foundry_web_search" || fnName === "foundry_code_execute" || fnName === "foundry_file_search") {
             // Route through the inference router → Foundry Responses API
@@ -698,10 +709,15 @@ async function processTaskWithTools(
             }
             log.info(`AGT sub-agent foundry_memory result: ${result.slice(0, 200)}`);
           } else {
-            // exec_command
+            // exec_command — gate through AGT policy before execution
             const cmd = args.command || "";
             log.info(`AGT sub-agent exec: ${cmd}`);
-            result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+            const policy = await evaluateAGTPolicy("exec_command", { command: cmd });
+            if (!policy.allowed) {
+              result = `Blocked by policy: ${policy.reason || policy.rule || "denied"}`;
+            } else {
+              result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+            }
           }
         } catch (e: any) {
           result = e.stderr || e.stdout || e.message || "Command failed";
@@ -917,7 +933,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         content,
         message_type: message?.type || "message",
         timestamp: new Date().toISOString(),
-        id: `agt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
       agtInbox.push(entry);
       log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
@@ -1683,6 +1699,10 @@ const azureClawPlugin = definePluginEntry({
     memorySyncToolCount = 0;
     memorySyncBuffer = [];
 
+    // Consecutive sidecar failure counter for fail-closed behavior
+    let sidecarFailCount = { value: 0 };
+    const FAIL_CLOSED_THRESHOLD = 3;
+
     async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
       // Build action string in AGT format: "category:detail"
       // Map tool names to AGT action categories for policy matching
@@ -1710,14 +1730,36 @@ const azureClawPlugin = definePluginEntry({
               try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); }
             });
           });
-          req.on("error", () => resolve({ allowed: true })); // fail-open if sidecar unreachable
-          req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
+          req.on("error", () => {
+            sidecarFailCount.value++;
+            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT sidecar unreachable (fail-closed)" });
+            } else {
+              log.warn(`AGT sidecar unreachable (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              resolve({ allowed: true });
+            }
+          });
+          req.on("timeout", () => {
+            req.destroy();
+            sidecarFailCount.value++;
+            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT sidecar timeout (fail-closed)" });
+            } else {
+              log.warn(`AGT sidecar timeout (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              resolve({ allowed: true });
+            }
+          });
           req.write(postData);
           req.end();
         });
+        if (result.allowed !== false) sidecarFailCount.value = 0; // reset on success
         return { allowed: result.allowed, rule: result.matched_rule, reason: result.reason };
       } catch {
-        return { allowed: true }; // fail-open
+        sidecarFailCount.value++;
+        if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+          return { allowed: false, reason: "AGT sidecar error (fail-closed)" };
+        }
+        return { allowed: true };
       }
     }
 

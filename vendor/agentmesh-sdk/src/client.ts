@@ -759,7 +759,7 @@ export class AgentMeshClient {
     }
 
     // Accept - create session
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const sessionId = `sess_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
     this.protocolSessions.createSession(fromAmid, request, false);
     this.knockAcceptedPeers.add(fromAmid);
 

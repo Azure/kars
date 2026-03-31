@@ -353,6 +353,14 @@ async fn chat_completions(
     let sandbox_name = headers
         .get("x-azureclaw-sandbox")
         .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            // Validate against K8s name rules: lowercase alphanumeric + hyphens, max 63 chars
+            !v.is_empty()
+                && v.len() <= 63
+                && v.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && v.as_bytes()[0].is_ascii_alphanumeric()
+        })
         .unwrap_or("unknown");
 
     // Foundry guardrails (DefaultV2) handle content safety and prompt shields
@@ -400,8 +408,24 @@ async fn chat_completions(
                 tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
             }
             Err(e) => {
-                // Sidecar unreachable — fail open (don't block inference)
-                tracing::warn!(sandbox = %sandbox_name, error = %e, "AGT sidecar unreachable, skipping policy check");
+                if state.sidecar.should_fail_closed() {
+                    tracing::error!(sandbox = %sandbox_name, error = %e,
+                        "AGT sidecar unreachable (fail-closed) — blocking inference");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "Governance sidecar unavailable — inference blocked (fail-closed)",
+                                "type": "governance_unavailable",
+                                "code": "sidecar_unreachable"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+                // Grace window — fail-open for first few failures (cold start)
+                tracing::warn!(sandbox = %sandbox_name, error = %e,
+                    "AGT sidecar unreachable, allowing request (grace window)");
             }
         }
     }
@@ -1639,6 +1663,23 @@ async fn agt_registry_proxy(
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
+    // Allowlist valid registry API paths — prevent path traversal
+    let valid_prefixes = [
+        "lookup", "search", "register", "prekeys", "heartbeat",
+        "agents", "health", "sessions",
+    ];
+    let path_valid = valid_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        && !path.contains("..");
+    if !path_valid {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid registry path"})),
+        )
+            .into_response();
+    }
+
     let mut url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
     // Forward query parameters (critical for search/lookup)
     if let Some(qs) = query.0 {
@@ -2130,7 +2171,14 @@ async fn sandbox_spawn(
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "AGT sidecar unreachable, skipping spawn policy check");
+                if state.sidecar.should_fail_closed() {
+                    tracing::error!(error = %e, "AGT sidecar unreachable (fail-closed) — blocking spawn");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({ "error": "Governance sidecar unavailable — spawn blocked (fail-closed)" })),
+                    ).into_response();
+                }
+                tracing::warn!(error = %e, "AGT sidecar unreachable, allowing spawn (grace window)");
             }
         }
     }
