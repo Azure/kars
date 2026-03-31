@@ -2602,9 +2602,55 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
         None => return chat_body.clone(),
     };
 
-    // Convert messages to input (Responses API accepts messages array as input)
+    // Convert messages to Responses API input format.
+    // Chat messages use {"role":"user","content":"text"} or content:[{type:"text",text:"..."}]
+    // Responses API uses different type names based on role:
+    //   user   "text"      → "input_text"
+    //   user   "image_url" → "input_image"
+    //   assist "text"      → "output_text"
+    //   any    "refusal"   → "refusal" (unchanged)
     if let Some(messages) = obj.remove("messages") {
-        obj.insert("input".into(), messages);
+        if let Some(msgs) = messages.as_array() {
+            let converted: Vec<serde_json::Value> = msgs
+                .iter()
+                .map(|msg| {
+                    let mut m = msg.clone();
+                    let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
+                    if let Some(content) = m.get_mut("content") {
+                        if let Some(arr) = content.as_array_mut() {
+                            for item in arr.iter_mut() {
+                                if let Some(t) = item.get("type").and_then(|t| t.as_str()).map(String::from) {
+                                    let new_type = match (t.as_str(), role.as_str()) {
+                                        ("text", "assistant") => "output_text",
+                                        ("text", _) => "input_text",
+                                        ("image_url", _) => "input_image",
+                                        ("refusal", _) => "refusal",
+                                        _ => continue,
+                                    };
+                                    item.as_object_mut().unwrap().insert(
+                                        "type".into(),
+                                        serde_json::json!(new_type),
+                                    );
+                                    // image_url: flatten {"url":"..."} to just the URL string
+                                    if new_type == "input_image" {
+                                        if let Some(url_obj) = item.get("image_url").cloned() {
+                                            let url = url_obj.get("url").cloned().unwrap_or(url_obj);
+                                            let obj = item.as_object_mut().unwrap();
+                                            obj.remove("image_url");
+                                            obj.insert("image_url".into(), url);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    m
+                })
+                .collect();
+            obj.insert("input".into(), serde_json::json!(converted));
+        } else {
+            obj.insert("input".into(), messages);
+        }
     }
 
     // max_completion_tokens → max_output_tokens
@@ -2613,6 +2659,50 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
     }
     if let Some(max) = obj.remove("max_tokens") {
         obj.entry("max_output_tokens").or_insert(max);
+    }
+
+    // Convert tools format: chat uses {type, function:{name, parameters, ...}}
+    // Responses API uses flattened {type, name, parameters, ...}
+    if let Some(tools) = obj.remove("tools") {
+        if let Some(tools_arr) = tools.as_array() {
+            let converted_tools: Vec<serde_json::Value> = tools_arr
+                .iter()
+                .map(|tool| {
+                    if let Some(func) = tool.get("function") {
+                        let mut t = serde_json::json!({"type": "function"});
+                        let t_obj = t.as_object_mut().unwrap();
+                        if let Some(f_obj) = func.as_object() {
+                            for (k, v) in f_obj {
+                                t_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                        t
+                    } else {
+                        tool.clone()
+                    }
+                })
+                .collect();
+            obj.insert("tools".into(), serde_json::json!(converted_tools));
+        } else {
+            obj.insert("tools".into(), tools);
+        }
+    }
+
+    // Convert tool_choice format if present
+    if let Some(tc) = obj.remove("tool_choice") {
+        // Chat: {"type":"function","function":{"name":"foo"}}
+        // Responses: {"type":"function","name":"foo"}
+        if let Some(func) = tc.get("function") {
+            if let Some(name) = func.get("name") {
+                obj.insert("tool_choice".into(), serde_json::json!({
+                    "type": "function",
+                    "name": name
+                }));
+            }
+        } else {
+            // "auto", "none", "required" pass through unchanged
+            obj.insert("tool_choice".into(), tc);
+        }
     }
 
     // Remove chat-specific fields that Responses API doesn't accept

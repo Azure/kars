@@ -66,6 +66,9 @@ let agtSdk: any = null; // cached SDK module for reconnect
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
+// Parent-verified trusted peer AMIDs — pre-seeded at spawn via AGT_TRUSTED_PEERS env var.
+// Separate from amidToName to prevent trust escalation via arbitrary registry lookups.
+const parentTrustedAmids: Set<string> = new Set();
 
 // Sanitize user-influenced strings before logging — strip ANSI escapes and collapse newlines
 function sanitizeLog(s: string, maxLen = 500): string {
@@ -866,15 +869,19 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // Registry returns 0.0-1.0 scale; normalize to 0-1000 for threshold comparison
           const rawScore = peerInfo?.reputationScore ?? 0;
           const normalizedScore = Math.round(rawScore * 1000);
-          // Spawner affinity: +200 bonus for agents this parent spawned
-          const isSpawnedChild = amidToName.has(fromAmid);
-          const affinityBonus = isSpawnedChild ? 200 : 0;
+          // Spawner affinity: +200 bonus for agents this agent spawned directly
+          const isSpawnedChild = amidToName.has(fromAmid) && !parentTrustedAmids.has(fromAmid);
+          // Parent-verified trust: +500 for peers pre-seeded by our parent at spawn time.
+          // These AMIDs came via AGT_TRUSTED_PEERS env var (set by router, not self-reported).
+          const isParentTrusted = parentTrustedAmids.has(fromAmid);
+          const affinityBonus = isParentTrusted ? 500 : (isSpawnedChild ? 200 : 0);
+          const affinityLabel = isParentTrusted ? "parent-verified" : (isSpawnedChild ? "spawner" : "");
           const effectiveScore = normalizedScore + affinityBonus;
           if (effectiveScore < AGT_TRUST_THRESHOLD) {
-            log.warn(`AGT KNOCK rejected: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} spawner` : ''}) < threshold=${AGT_TRUST_THRESHOLD}`);
+            log.warn(`AGT KNOCK rejected: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''}) < threshold=${AGT_TRUST_THRESHOLD}`);
             return { accept: false, reason: `trust_score_${effectiveScore}_below_${AGT_TRUST_THRESHOLD}` };
           }
-          log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} spawner` : ''})`);
+          log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''})`);
         } catch {
           // Registry lookup failed — accept anyway for mesh agents (trust evaluation best-effort)
           log.warn(`AGT KNOCK trust lookup failed for ${fromName} — accepting (best-effort)`);
@@ -1108,6 +1115,33 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Store on process for cross-context singleton access
     (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
     (process as any)[Symbol.for("agt-identity")] = agtIdentity;
+
+    // ── Pre-seed trusted peers from parent ──────────────────────────────
+    // AGT_TRUSTED_PEERS is set by the parent's router at spawn time.
+    // Format: "name:AMID,name:AMID,..." — these are parent-verified,
+    // not self-reported, so they're safe to auto-trust.
+    const trustedPeersEnv = process.env.AGT_TRUSTED_PEERS || "";
+    if (trustedPeersEnv && connected) {
+      const peers = trustedPeersEnv.split(",").filter(Boolean);
+      for (const peer of peers) {
+        const [name, amid] = peer.split(":");
+        if (name && amid) {
+          amidToName.set(amid, name);
+          nameToAmid.set(name, amid);
+          parentTrustedAmids.add(amid);
+          // Push baseline trust (score=500 = threshold) via local admin token
+          try {
+            await pushTrustToRouter(name, 0.0);
+            log.info(`AGT trusted peer seeded: ${name} (${amid.slice(0, 12)}...)`);
+          } catch {
+            log.warn(`AGT trusted peer seed failed for ${name}`);
+          }
+        }
+      }
+      if (peers.length > 0) {
+        log.info(`AGT pre-seeded ${peers.length} trusted peer(s) from parent`);
+      }
+    }
 
     // ── Disconnect handler + auto-reconnect ──────────────────────────────
     // If the WS connection drops (relay restart, network blip), try to reconnect.
@@ -1882,11 +1916,22 @@ const azureClawPlugin = definePluginEntry({
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
+          // Build trusted peers list: parent's AMID + all existing siblings
+          // These are parent-verified (from registry lookups), not self-reported
+          const trustedPeers: string[] = [];
+          const myAmid = agtMeshClient?.getAmid?.() || agtIdentity?.amid;
+          const myName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "parent";
+          if (myAmid) trustedPeers.push(`${myName}:${myAmid}`);
+          for (const [amid, name] of amidToName.entries()) {
+            if (amid !== myAmid) trustedPeers.push(`${name}:${amid}`);
+          }
+
           const result = await routerCall("POST", "/sandbox/spawn", {
             name: params.name,
             model: params.model || "gpt-4.1",
             governance: params.governance !== false,
             trust_threshold: 500,
+            trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
           });
 
           // Poll until sub-agent is Running (1s interval, 45s max)
