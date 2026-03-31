@@ -37,6 +37,33 @@ rules:
     action: deny
     priority: 5
 
+  - name: shell-sensitive-file-deny
+    description: Deny access to sensitive system files
+    condition:
+      field: action.full
+      operator: matches
+      value: "/etc/shadow|/etc/gshadow|/etc/sudoers|/root/\\.ssh|/proc/[0-9]+/environ"
+    action: deny
+    priority: 5
+
+  - name: shell-recon-deny
+    description: Deny network reconnaissance and reverse shell tools
+    condition:
+      field: action.full
+      operator: matches
+      value: "\\bnmap\\b|\\bnc\\s+-[elp]|\\bnetcat\\b|\\bsocat\\b|\\bnsenter\\b|\\bunshare\\b|\\bchroot\\b"
+    action: deny
+    priority: 5
+
+  - name: network-metadata-deny
+    description: Deny access to cloud metadata endpoints
+    condition:
+      field: action.full
+      operator: matches
+      value: "169\\.254\\.169\\.254|metadata\\.google\\.internal"
+    action: deny
+    priority: 5
+
   # ── Inference rate-limited allow (#7, #12) ───────────────────────────
   - name: inference-allow
     description: Allow inference requests (rate limiting via RateLimiter)

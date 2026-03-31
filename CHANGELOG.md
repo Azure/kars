@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Foundry Agent Service Integration** — web search, code execute, file search, image generation, memory via Foundry project endpoint
 - **6-Image Architecture** — controller, inference-router, sandbox, agt-governance-sidecar, agentmesh-relay, agentmesh-registry
 - **CLI `push --only <image> --apply`** — selective image builds with automatic pod restart
-- **10 AGT Policy Rules** — shell-safety, inference rate-limiting, content safety, mesh trust gates, spawn governance
+- **10 AGT Policy Rules** — shell-safety, inference rate-limiting, content safety, mesh trust gates, spawn governance, sensitive file deny, recon tool deny, cloud metadata deny
+- **AGT Tool Execution Gate** — exec_command and http_fetch are forwarded to AGT sidecar for policy evaluation before execution; fail-open with 2s timeout
 - **Operator Dashboard** — real-time trust scores, audit chain, policy status, mesh connectivity
 - **GitHub CI/CD** — Rust + TypeScript + Python lint/test, Bicep validation, Helm lint, Trivy security scan, Dockerfile lint, tag-triggered releases
-- **310 Unit Tests** — Rust (130), TypeScript (148), Python (32) covering controller, router, CLI, and sidecar
+- **318 Unit Tests** — Rust (130), TypeScript (148), Python (40) covering controller, router, CLI, and sidecar
 - **GitHub Templates** — issue templates (bug, feature, security), PR template, CODEOWNERS
 
 ### Fixed
@@ -25,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - K8s probe host field removal (kubelet defaults to pod IP)
 - Missing transitive Python dependencies (typing_inspection, cryptography) via PyPI fallback
 - 8 vendor patches for AgentMesh relay, registry, and SDK bugs
+- Foundry Memory Store format — ensureMemoryStore creates full store with chat + embedding models; item format matches Foundry REST API spec
 
 ### Security
 - Circuit breaker fails open instead of closed (prevents total service lockout)
