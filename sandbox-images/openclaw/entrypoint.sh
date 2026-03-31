@@ -90,6 +90,8 @@ elif [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
   mkdir -p /run/secrets 2>/dev/null || true
   echo -n "$API_KEY" > /run/secrets/azure-openai-key 2>/dev/null || \
     echo -n "$API_KEY" > /tmp/azure-openai-key 2>/dev/null
+  # Restrict permissions on fallback key file
+  chmod 400 /tmp/azure-openai-key 2>/dev/null || true
 fi
 
 # Get config from env vars (set by azureclaw dev/up)
@@ -277,8 +279,9 @@ EOF
   sed -i '/"_placeholder": false/d' "$OPENCLAW_CONFIG"
 
   # Set provider credentials via environment (OpenClaw reads these automatically)
-  # These are exported so openclaw tui/agent picks them up
-  export AZURE_OPENAI_API_KEY="${API_KEY}"
+  # Read from secret file at runtime — avoid leaking key value in process tree
+  export AZURE_OPENAI_API_KEY
+  AZURE_OPENAI_API_KEY="$(cat /run/secrets/azure-openai-key 2>/dev/null || cat /tmp/azure-openai-key 2>/dev/null)"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
   # AGT governance is always active in AzureClaw sandboxes (enables agt-governance skill)

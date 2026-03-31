@@ -30,7 +30,6 @@ impl WorkloadIdentityAuth {
         // Try to load API key from secret mount (dev mode), then env var (sub-agent)
         let api_key = std::fs::read_to_string("/run/secrets/azure-openai-key")
             .ok()
-            .or_else(|| std::fs::read_to_string("/tmp/azure-openai-key").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(|| {

@@ -153,7 +153,7 @@ const SEVERITY_PRIORITY: Record<AuditSeverity, number> = {
  */
 function generateEventId(): string {
   const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).slice(2, 10);
+  const random = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
   return `audit_${timestamp}_${random}`;
 }
 
