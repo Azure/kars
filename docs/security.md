@@ -156,7 +156,7 @@ When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://git
 
 | Control | Implementation | Integration |
 |---------|----------------|-------------|
-| **Tool-level policy** | AGT `Policy` engine with allow/deny rules, OPA/Rego/Cedar support | Plugin evaluates before tool execution |
+| **Tool-level policy** | AGT sidecar `PolicyEvaluator` gates `exec_command` and `http_fetch` pre-execution via `POST /evaluate`; denies sensitive files, recon tools, cloud metadata, destructive commands | Plugin forwards to sidecar before tool runs |
 | **Trust scoring** | AGT `createTrustStore()` — Ed25519 identity, 0-1000 scale, 5 tiers | Plugin tracks agent trust |
 | **Audit logging** | AGT `createAuditLogger()` — hash-chain, OWASP ASI compliance | Plugin logs all governance decisions |
 

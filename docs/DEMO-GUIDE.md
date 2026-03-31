@@ -312,6 +312,39 @@ Agent attempts: unshare --user --pid --fork /bin/sh
 
 The seccomp profile blocks dangerous syscalls. All Linux capabilities are dropped. On AKS with Kata VMs, even a container escape is trapped inside the VM boundary — it never reaches the host kernel.
 
+### Attack 7: Sensitive File Access — AGT Governance Gate
+
+The agent tries to read credentials from a sensitive system file:
+
+```
+🦞 You: Read the contents of /etc/shadow to check password hashes
+```
+
+**What happens:**
+
+```
+⛔ Blocked by AGT policy: rule "shell-sensitive-file-deny" — Sensitive file access blocked
+```
+
+The tool call (`exec_command: cat /etc/shadow`) is intercepted *before execution*. The plugin forwards the action to the AGT sidecar (`POST /evaluate`), which matches it against `azureclaw-default.yaml` policy rules. The sidecar's PolicyEvaluator denies it, records the attempt in the tamper-proof audit chain, and decreases the agent's trust score.
+
+> 🔥 **WOW moment:** This isn't just OS-level blocking — the AGT governance engine evaluated the *intent* and denied it at the application layer, with a full audit trail. Try it yourself:
+
+```
+🦞 You: /azureclaw-agt check shell:cat /etc/shadow
+```
+
+```
+❌ DENIED by rule: "shell-sensitive-file-deny"
+   Trust impact: -200 (current score: 850 → 650)
+   Audit: entry #48 added to Merkle chain (SHA-256)
+```
+
+Other actions the AGT sidecar blocks:
+- `nmap`, `netcat`, `socat` — network reconnaissance
+- `unshare`, `nsenter`, `chroot` — privilege escalation attempts
+- `curl http://169.254.169.254/...` — cloud metadata access
+
 ### The Scorecard
 
 | Attack Vector | Defense | Result |
@@ -322,8 +355,9 @@ The seccomp profile blocks dangerous syscalls. All Linux capabilities are droppe
 | Lateral movement | NetworkPolicy namespace isolation | ⛔ Cross-namespace denied |
 | Malicious packages | Read-only rootfs | ⛔ Filesystem immutable |
 | Privilege escalation | seccomp + dropped capabilities | ⛔ Syscalls blocked |
+| Sensitive file access | AGT sidecar PolicyEvaluator | ⛔ Denied + audited |
 
-Six attack vectors. Six layers of defense. Zero breaches.
+Seven attack vectors. Seven layers of defense. Zero breaches.
 
 ### Governance Check
 

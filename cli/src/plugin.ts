@@ -1427,9 +1427,20 @@ async function ensureMemoryStore(store: string): Promise<void> {
   try {
     await _routerCall("GET", `/memory_stores/${store}?${apiVer}`);
   } catch {
+    const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
     await _routerCall("POST", `/memory_stores?${apiVer}`, {
       name: store,
       description: `Persistent memory for agent ${store.replace("memory-", "")}`,
+      definition: {
+        kind: "default",
+        chat_model: chatModel,
+        embedding_model: "text-embedding-3-small",
+        options: {
+          user_profile_enabled: true,
+          user_profile_details: "Store user preferences, decisions, and project context",
+          chat_summary_enabled: true,
+        },
+      },
     });
   }
 }
@@ -1446,7 +1457,8 @@ async function syncToFoundryMemory(
     try {
       await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
         scope: agentName,
-        items: [{ role: "assistant", content, type: "message" }],
+        items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: content }] }],
+        update_delay: 0,
       });
       log.info(`Foundry memory sync: persisted ${content.length} chars`);
     } catch (e: any) {
@@ -1454,7 +1466,8 @@ async function syncToFoundryMemory(
         await ensureMemoryStore(store);
         await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
           scope: agentName,
-          items: [{ role: "assistant", content, type: "message" }],
+          items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: content }] }],
+          update_delay: 0,
         });
         log.info(`Foundry memory sync: created store + persisted ${content.length} chars`);
       }
@@ -1662,19 +1675,63 @@ const azureClawPlugin = definePluginEntry({
     // Initialize Foundry project discovery (models, connections, indexes)
     initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
 
-    // ── Periodic Foundry memory sync middleware ───────────────────────
-    // Wraps every tool's execute() to track calls and periodically push
-    // activity summaries to Foundry permanent memory. Survives restarts.
+    // ── Periodic Foundry memory sync + AGT policy gate middleware ────
+    // Wraps every tool's execute() to:
+    // 1. Forward action to AGT sidecar for policy evaluation BEFORE execution
+    // 2. Track calls and periodically push activity summaries to Foundry memory
+    // When Rust SDK ships, this will be a direct SDK call instead of HTTP.
     memorySyncToolCount = 0;
     memorySyncBuffer = [];
+
+    async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
+      // Only evaluate tools that execute user-influenced content
+      const checkableTools = ["exec_command", "http_fetch"];
+      if (!checkableTools.includes(toolName)) return { allowed: true };
+
+      // Build action string in AGT format: "category:detail"
+      const paramStr = Object.values(params).map(v => typeof v === "string" ? v : "").join(" ").trim();
+      const action = toolName === "exec_command" ? `shell:${paramStr}` : `egress:${paramStr}`;
+
+      try {
+        const http = await import("node:http");
+        const postData = JSON.stringify({ action, context: { tool: toolName } });
+        const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, reject) => {
+          const req = http.request("http://127.0.0.1:8081/evaluate", {
+            method: "POST", timeout: 2000,
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+          }, (res) => {
+            let data = "";
+            res.on("data", (c: Buffer) => { data += c.toString(); });
+            res.on("end", () => {
+              try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); }
+            });
+          });
+          req.on("error", () => resolve({ allowed: true })); // fail-open if sidecar unreachable
+          req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
+          req.write(postData);
+          req.end();
+        });
+        return { allowed: result.allowed, rule: result.matched_rule, reason: result.reason };
+      } catch {
+        return { allowed: true }; // fail-open
+      }
+    }
+
     const _origRegisterTool = api.registerTool.bind(api);
     api.registerTool = (tool: ToolDefinition) => {
       const origExecute = tool.execute;
       _origRegisterTool({
         ...tool,
         execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => {
+          // AGT policy gate — forward to sidecar for evaluation
+          const decision = await evaluateAGTPolicy(tool.name, params);
+          if (!decision.allowed) {
+            const msg = `⛔ Blocked by AGT policy: rule "${decision.rule}" — ${decision.reason || "action denied"}`;
+            log.warn(`AGT policy DENIED ${tool.name}: rule=${decision.rule}`);
+            return { content: [{ type: "text", text: msg }] };
+          }
+
           const result = await origExecute(id, params, signal);
-          // Extract first text content for the summary
           const txt = result?.content?.[0]?.text || "";
           trackToolExecution(tool.name, params, txt, log);
           return result;
