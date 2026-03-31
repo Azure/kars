@@ -187,7 +187,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref h) = results.hate {
-        if h.filtered || h.severity.as_deref().map_or(false, |s| s != "safe") {
+        if h.filtered || h.severity.as_deref().is_some_and(|s| s != "safe") {
             flags.hate_detected = true;
             if h.filtered {
                 flags.filtered_categories.push("hate".into());
@@ -197,7 +197,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref sh) = results.self_harm {
-        if sh.filtered || sh.severity.as_deref().map_or(false, |s| s != "safe") {
+        if sh.filtered || sh.severity.as_deref().is_some_and(|s| s != "safe") {
             flags.self_harm_detected = true;
             if sh.filtered {
                 flags.filtered_categories.push("self_harm".into());
@@ -207,7 +207,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref sx) = results.sexual {
-        if sx.filtered || sx.severity.as_deref().map_or(false, |s| s != "safe") {
+        if sx.filtered || sx.severity.as_deref().is_some_and(|s| s != "safe") {
             flags.sexual_detected = true;
             if sx.filtered {
                 flags.filtered_categories.push("sexual".into());
@@ -217,7 +217,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref vi) = results.violence {
-        if vi.filtered || vi.severity.as_deref().map_or(false, |s| s != "safe") {
+        if vi.filtered || vi.severity.as_deref().is_some_and(|s| s != "safe") {
             flags.violence_detected = true;
             if vi.filtered {
                 flags.filtered_categories.push("violence".into());
