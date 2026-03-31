@@ -1934,34 +1934,29 @@ const azureClawPlugin = definePluginEntry({
             trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
           });
 
-          // Poll until sub-agent is Running (1s interval, 45s max)
+          // Poll until sub-agent is Running AND registered on mesh (in parallel)
           const agentName = params.name as string;
-          log.info(`Waiting for sub-agent '${agentName}' to reach Running state...`);
+          log.info(`Waiting for sub-agent '${agentName}' to be Running + registered...`);
+
           let phase = "Pending";
-          for (let i = 0; i < 45; i++) {
+          let amid: string | undefined;
+          const startWait = Date.now();
+          const maxWaitMs = 45_000;
+
+          // Parallel poll: check status AND registry simultaneously
+          while (Date.now() - startWait < maxWaitMs) {
             await new Promise(r => setTimeout(r, 1000));
-            try {
-              const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}/status`);
-              phase = status?.phase || "Pending";
-              if (i % 5 === 0) log.info(`Sub-agent '${agentName}' phase: ${phase} (${i + 1}s)`);
-              if (phase === "Running") break;
-            } catch {
-              // Status endpoint not ready yet — keep polling
+
+            // Status check
+            if (phase !== "Running") {
+              try {
+                const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}/status`);
+                phase = status?.phase || "Pending";
+              } catch { /* not ready yet */ }
             }
-          }
 
-          if (phase !== "Running") {
-            return { content: [{ type: "text", text: JSON.stringify({
-              ...result,
-              warning: `Sub-agent created but not yet Running (phase: ${phase}). It may still be booting. Use azureclaw_spawn_status to check.`,
-            }, null, 2) }] };
-          }
-
-          // Poll registry for sub-agent registration instead of blind sleep.
-          // Sub-agent registers with relay ~5s after entrypoint completes.
-          if (agtMeshClient) {
-            let amid: string | undefined;
-            for (let i = 0; i < 10; i++) {
+            // Registry check (start early — sub-agent may register before status reports Running)
+            if (!amid && agtMeshClient) {
               try {
                 const searchResult = await routerCall("GET",
                   `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
@@ -1974,14 +1969,28 @@ const azureClawPlugin = definePluginEntry({
                   nameToAmid.set(agentName, match.amid);
                   amidToName.set(match.amid, agentName);
                   log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
-                  break;
                 }
               } catch { /* registry not ready yet */ }
-              await new Promise(r => setTimeout(r, 1000));
             }
-            if (!amid) {
-              log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
+
+            // Both ready — exit early
+            if (phase === "Running" && (amid || !agtMeshClient)) break;
+
+            const elapsed = Math.round((Date.now() - startWait) / 1000);
+            if (elapsed % 5 === 0) {
+              log.info(`Sub-agent '${agentName}': phase=${phase}, mesh=${amid ? "registered" : "waiting"} (${elapsed}s)`);
             }
+          }
+
+          if (phase !== "Running") {
+            return { content: [{ type: "text", text: JSON.stringify({
+              ...result,
+              warning: `Sub-agent created but not yet Running (phase: ${phase}). It may still be booting. Use azureclaw_spawn_status to check.`,
+            }, null, 2) }] };
+          }
+
+          if (!amid && agtMeshClient) {
+            log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
           }
 
           return { content: [{ type: "text", text: JSON.stringify({
@@ -2049,9 +2058,11 @@ const azureClawPlugin = definePluginEntry({
           }
           try {
             // 1. Discover target agent's AMID via registry search (with retry for boot timing)
-            // Always do a fresh registry lookup — the sub-agent's relay listener restarts
-            // create new AMID identities, so cached AMIDs go stale quickly.
-            let targetAmid: string | undefined;
+            // Check cache first — with container reuse, AMIDs are stable once established.
+            let targetAmid: string | undefined = nameToAmid.get(agentName);
+            if (targetAmid) {
+              log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
+            }
             for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
               if (attempt > 0) {
                   log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
@@ -2114,12 +2125,19 @@ const azureClawPlugin = definePluginEntry({
                   if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
                     log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/8)...`);
                     await new Promise(r => setTimeout(r, 2000));
+                  } else if (e.message?.includes("not found") || e.message?.includes("closed") || e.message?.includes("AGENT_NOT_FOUND")) {
+                    // Stale cached AMID — invalidate and re-discover
+                    log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
+                    nameToAmid.delete(agentName);
+                    amidToName.delete(targetAmid!);
+                    targetAmid = undefined;
+                    break;
                   } else {
                     break; // non-prekey error — don't retry
                   }
                 }
               }
-              if (!sendErr) {
+              if (!sendErr && targetAmid) {
                 log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
                 const messageId = crypto.randomUUID();
                 const sendStart = new Date().toISOString();
