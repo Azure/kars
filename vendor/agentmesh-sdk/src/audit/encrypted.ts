@@ -91,6 +91,7 @@ export class EncryptedAuditLogger {
   private readonly encrypted: boolean;
   private encryptedEntries: EncryptedAuditEntry[] = [];
   private keyInitialized: boolean = false;
+  private usedNonces: Set<string> = new Set();
 
   constructor(config: EncryptedAuditLoggerConfig) {
     this.baseLogger = new AuditLogger(config);
@@ -232,8 +233,14 @@ export class EncryptedAuditLogger {
       ['encrypt']
     );
 
-    // Generate random nonce
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    // Generate random nonce and verify uniqueness
+    let nonce: Uint8Array;
+    let nonceB64: string;
+    do {
+      nonce = crypto.getRandomValues(new Uint8Array(12));
+      nonceB64 = toBase64(nonce);
+    } while (this.usedNonces.has(nonceB64));
+    this.usedNonces.add(nonceB64);
 
     // Encrypt
     const ciphertext = await crypto.subtle.encrypt(
@@ -243,7 +250,7 @@ export class EncryptedAuditLogger {
     );
 
     return {
-      nonce: toBase64(nonce),
+      nonce: nonceB64,
       ciphertext: toBase64(new Uint8Array(ciphertext)),
       id: event.id,
       timestamp: event.timestamp.toISOString(),

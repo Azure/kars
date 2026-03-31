@@ -67,6 +67,11 @@ let agtSdk: any = null; // cached SDK module for reconnect
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
 
+// Sanitize user-influenced strings before logging — strip ANSI escapes and collapse newlines
+function sanitizeLog(s: string, maxLen = 500): string {
+  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\r\n]+/g, " ").slice(0, maxLen);
+}
+
 // Resolve AMID → display_name via registry lookup (results cached in amidToName).
 // Returns the display_name if found, or empty string on failure.
 async function resolveAmidToName(amid: string): Promise<string> {
@@ -709,12 +714,33 @@ async function processTaskWithTools(
             }
             log.info(`AGT sub-agent foundry_memory result: ${result.slice(0, 200)}`);
           } else {
-            // exec_command — gate through AGT policy before execution
+            // exec_command — gate through AGT sidecar policy before execution
             const cmd = args.command || "";
-            log.info(`AGT sub-agent exec: ${cmd}`);
-            const policy = await evaluateAGTPolicy("exec_command", { command: cmd });
-            if (!policy.allowed) {
-              result = `Blocked by policy: ${policy.reason || policy.rule || "denied"}`;
+            log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
+            let policyAllowed = true;
+            let policyReason = "";
+            try {
+              const policyHttp = await import("node:http");
+              const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
+              const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
+                const req = policyHttp.request("http://127.0.0.1:8081/evaluate", {
+                  method: "POST", timeout: 2000,
+                  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
+                }, (res) => {
+                  let data = "";
+                  res.on("data", (c: Buffer) => { data += c.toString(); });
+                  res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); } });
+                });
+                req.on("error", () => resolve({ allowed: true }));
+                req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
+                req.write(policyBody);
+                req.end();
+              });
+              policyAllowed = policyResult.allowed !== false;
+              policyReason = policyResult.reason || "";
+            } catch { /* sidecar unavailable — allow */ }
+            if (!policyAllowed) {
+              result = `Blocked by policy: ${policyReason || "denied"}`;
             } else {
               result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
             }
@@ -936,7 +962,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
       agtInbox.push(entry);
-      log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
+      log.info(`AGT relay message from ${sanitizeLog(fromName, 50)} (${fromAmid.slice(0, 12)}...): ${sanitizeLog(JSON.stringify(content), 200)}`);
 
       // AGT policy gate — validate incoming mesh message via sidecar PolicyEngine.
       // Checks trust score of sender against mesh-receive-untrusted rule.
@@ -1057,6 +1083,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // ── Connect to the mesh (handlers are registered, safe to receive) ──
     agtSandboxName = process.env.SANDBOX_NAME
       || (process.env.HOSTNAME ? process.env.HOSTNAME.replace(/-[a-f0-9]+-[a-z0-9]+$/, "") : "unknown");
+    // Validate sandbox name format
+    if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(agtSandboxName)) {
+      log.warn(`Invalid SANDBOX_NAME "${sanitizeLog(agtSandboxName, 30)}" — falling back to "unknown"`);
+      agtSandboxName = "unknown";
+    }
 
     let connected = false;
     for (let attempt = 1; attempt <= 5; attempt++) {

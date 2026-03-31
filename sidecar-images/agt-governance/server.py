@@ -211,6 +211,13 @@ class GovernanceHandler(BaseHTTPRequestHandler):
         self._json(403, {"error": "Admin token required"})
         return False
 
+    def _check_rate_limit(self):
+        """Apply rate limiting to all non-health endpoints. Returns True if OK."""
+        if not rate_limiter.allow(SANDBOX):
+            self._json(429, {"error": "Rate limited"})
+            return False
+        return True
+
     # ── GET ───────────────────────────────────────────────────────────
 
     def do_GET(self):
@@ -220,6 +227,8 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             return self._json(200, {"status": "ok", "sandbox": SANDBOX})
 
         if path == "/status":
+            if not self._check_rate_limit():
+                return
             all_scores = trust_store.get_all_scores()
             trust_states = [
                 {"agent_id": aid, "score": ts.get("score", 0),

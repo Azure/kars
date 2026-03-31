@@ -51,7 +51,7 @@ rules:
     condition:
       field: action.full
       operator: matches
-      value: "\\bnmap\\b|\\bnc\\s+-[elp]|\\bnetcat\\b|\\bsocat\\b|\\bnsenter\\b|\\bunshare\\b|\\bchroot\\b"
+      value: "(?:^|[\\s;|&(/])nmap(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])nc\\s+-[elp]|(?:^|[\\s;|&(/])netcat(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])socat(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])nsenter(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])unshare(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])chroot(?:\\s|$|;|\\||&)"
     action: deny
     priority: 5
 
