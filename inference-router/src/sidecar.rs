@@ -29,6 +29,8 @@ pub struct SidecarProxy {
     pub enabled: bool,
     /// Consecutive failure counter — shared across clones via Arc.
     consecutive_failures: std::sync::Arc<AtomicU32>,
+    /// Admin token for authenticating with the sidecar's protected endpoints.
+    admin_token: Option<String>,
 }
 
 impl SidecarProxy {
@@ -40,9 +42,12 @@ impl SidecarProxy {
         let base_url =
             std::env::var("AGT_SIDECAR_URL").unwrap_or_else(|_| DEFAULT_SIDECAR_URL.to_string());
 
+        let admin_token = std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty());
+
         tracing::info!(
             enabled,
             url = %base_url,
+            has_admin_token = admin_token.is_some(),
             "AGT sidecar proxy initialized"
         );
 
@@ -51,6 +56,7 @@ impl SidecarProxy {
             base_url,
             enabled,
             consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
+            admin_token,
         }
     }
 
@@ -71,6 +77,11 @@ impl SidecarProxy {
         };
 
         req = req.timeout(SIDECAR_TIMEOUT);
+
+        // Include admin token for sidecar auth (protects /trust, /audit, /audit/verify)
+        if let Some(ref token) = self.admin_token {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
 
         if let Some(json_body) = body {
             req = req.json(json_body);
@@ -139,6 +150,7 @@ mod tests {
             base_url: base_url.to_string(),
             enabled,
             consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
+            admin_token: None,
         }
     }
 
