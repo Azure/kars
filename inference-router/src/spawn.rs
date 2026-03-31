@@ -225,7 +225,18 @@ pub async fn create_sandbox(
             })
         }
         Err(kube::Error::Api(resp)) if resp.code == 409 => {
-            Err(format!("Sandbox '{}' already exists", req.name))
+            // Already exists — reuse rather than error
+            tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent sandbox already exists — reusing");
+            Ok(SpawnResponse {
+                status: "created".into(),
+                name: req.name.clone(),
+                namespace: Some(format!("azureclaw-{}", req.name)),
+                phase: Some("Running".into()),
+                message: Some(format!(
+                    "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
+                    req.name, model, req.governance
+                )),
+            })
         }
         Err(e) => {
             tracing::error!(parent = %parent_name, child = %req.name, "Failed to create sandbox: {e}");
