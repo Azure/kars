@@ -110,7 +110,10 @@ impl ContentFlags {
 pub fn parse_prompt_filter_results(response_body: &serde_json::Value) -> ContentFlags {
     let mut flags = ContentFlags::default();
 
-    let results = match response_body.get("prompt_filter_results").and_then(|v| v.as_array()) {
+    let results = match response_body
+        .get("prompt_filter_results")
+        .and_then(|v| v.as_array())
+    {
         Some(arr) => arr,
         None => return flags,
     };
@@ -300,7 +303,10 @@ mod tests {
             }]
         });
         let flags = parse_prompt_filter_results(&json);
-        assert!(!flags.any_detected(), "benign response should have no flags");
+        assert!(
+            !flags.any_detected(),
+            "benign response should have no flags"
+        );
         assert_eq!(flags.trust_penalty(), 0);
         assert!(flags.filtered_categories.is_empty());
         assert!(flags.detected_categories.is_empty());

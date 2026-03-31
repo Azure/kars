@@ -469,9 +469,7 @@ async fn chat_completions(
                                     let sc = sidecar_for_stream.clone();
                                     let sb = sandbox_for_flags.clone();
                                     tokio::spawn(async move {
-                                        safety::report_content_flags_to_agt(
-                                            &sc, &sb, &flags,
-                                        ).await;
+                                        safety::report_content_flags_to_agt(&sc, &sb, &flags).await;
                                     });
                                 }
                             }
@@ -564,9 +562,8 @@ async fn chat_completions(
                             let sidecar = state.sidecar.clone();
                             let sandbox = sandbox_name.to_string();
                             tokio::spawn(async move {
-                                safety::report_content_flags_to_agt(
-                                    &sidecar, &sandbox, &flags,
-                                ).await;
+                                safety::report_content_flags_to_agt(&sidecar, &sandbox, &flags)
+                                    .await;
                             });
                         }
 
