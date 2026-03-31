@@ -96,6 +96,8 @@ struct Context {
     inference_router_image: String,
     /// Sandbox image — injected via SANDBOX_IMAGE env
     sandbox_image: String,
+    /// AGT governance sidecar image — injected via AGT_SIDECAR_IMAGE env
+    governance_sidecar_image: String,
     /// Azure OpenAI endpoint — injected via AZURE_OPENAI_ENDPOINT env
     openai_endpoint: String,
     /// Foundry Models endpoint — injected via FOUNDRY_ENDPOINT env
@@ -612,7 +614,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
         json!({"name": "SANDBOX_NAME", "value": &name}),
         json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
-        json!({"name": "ADMIN_TOKEN", "value": &admin_token}),
         json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
     ];
     router_env.extend(router_agt_env);
@@ -716,7 +717,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             },
                             "volumeMounts": [
                                 {"name": "sandbox-data", "mountPath": "/sandbox"},
-                                {"name": "tmp", "mountPath": "/tmp"}
+                                {"name": "tmp", "mountPath": "/tmp"},
+                                // Plugin needs admin token to authenticate trust
+                                // mutations after KNOCK handshakes (pushTrustToRouter).
+                                {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
                             ],
                             "resources": spec.resources.as_ref().map(|r| json!({
                                 "requests": r.requests,
@@ -767,12 +771,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 "httpGet": {"path": "/healthz", "port": "inference"},
                                 "initialDelaySeconds": 3,
                                 "periodSeconds": 5
-                            }
+                            },
+                            "volumeMounts": [
+                                {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
+                            ]
                         }
                     ],
                     "volumes": [
                         {"name": "sandbox-data", "emptyDir": {}},
-                        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}}
+                        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}},
+                        {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
                     ],
                     "tolerations": [{
                         "key": "azureclaw.azure.com/sandbox",
@@ -828,11 +836,64 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "readOnly": true
                         }));
                     }
-                    // Add AGT_POLICY_DIR env var pointing to the mounted path
+                    // Add AGT_POLICY_DIR + AGT_SIDECAR_URL env vars
                     if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
                         env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
+                        env.push(json!({"name": "AGT_SIDECAR_URL", "value": "http://127.0.0.1:8081"}));
                     }
                 }
+            }
+
+            // Add the AGT governance sidecar container
+            containers.push(json!({
+                "name": "agt-governance",
+                "image": &ctx.governance_sidecar_image,
+                "ports": [
+                    {"containerPort": 8081, "name": "governance"},
+                    {"containerPort": 9091, "name": "agt-metrics"}
+                ],
+                "env": [
+                    {"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"},
+                    {"name": "AGT_PORT", "value": "8081"},
+                    {"name": "AGT_METRICS_PORT", "value": "9091"},
+                    {"name": "SANDBOX_NAME", "value": &name},
+                    {"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()},
+                    {"name": "AGT_TRUST_DB", "value": "/tmp/agt/trust_scores.json"},
+                    {"name": "NODE_ENV", "value": "production"}
+                ],
+                "securityContext": {
+                    "runAsUser": 1002,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {"drop": ["ALL"]}
+                },
+                "volumeMounts": [
+                    {"name": "agt-policy", "mountPath": "/etc/agt/policies", "readOnly": true},
+                    {"name": "agt-data", "mountPath": "/tmp/agt"},
+                    {"name": "tmp", "mountPath": "/tmp", "subPath": "agt-tmp"}
+                ],
+                "resources": {
+                    "requests": {"cpu": "50m", "memory": "48Mi"},
+                    "limits": {"cpu": "200m", "memory": "128Mi"}
+                },
+                "livenessProbe": {
+                    "httpGet": {"path": "/healthz", "port": 8081},
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 30
+                },
+                "readinessProbe": {
+                    "httpGet": {"path": "/healthz", "port": 8081},
+                    "initialDelaySeconds": 3,
+                    "periodSeconds": 10
+                }
+            }));
+
+            // Add writable emptyDir volume for trust store + audit log persistence
+            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
+                volumes.push(json!({
+                    "name": "agt-data",
+                    "emptyDir": {"sizeLimit": "10Mi"}
+                }));
             }
         }
     }
@@ -1261,6 +1322,10 @@ pub async fn run(client: Client) -> Result<()> {
         tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
         "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
     });
+    let governance_sidecar_image =
+        std::env::var("AGT_SIDECAR_IMAGE").unwrap_or_else(|_| {
+            "agentmesh/governance-sidecar:0.3.0".into()
+        });
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").unwrap_or_default();
     let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
@@ -1307,6 +1372,7 @@ pub async fn run(client: Client) -> Result<()> {
         wi_client_id,
         inference_router_image,
         sandbox_image,
+        governance_sidecar_image,
         openai_endpoint,
         foundry_endpoint,
         foundry_project_endpoint,

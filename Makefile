@@ -48,27 +48,68 @@ fmt: ## Format code
 
 # ─── Container Images ────────────────────────────────────────────────────────
 
-images: image-controller image-router ## Build all container images
+images: image-controller image-router image-sandbox image-sidecar image-relay image-registry ## Build all container images
 
 image-controller: ## Build controller Docker image
-	docker build -t $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG) \
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG) \
 		-t $(REGISTRY)/azureclaw-controller:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f controller/Dockerfile .
 
 image-router: ## Build inference router Docker image
-	docker build -t $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG) \
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG) \
 		-t $(REGISTRY)/azureclaw-inference-router:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f inference-router/Dockerfile .
 
-push: ## Push images to registry
+image-sandbox: image-router ## Build sandbox Docker image
+	docker build --platform linux/amd64 \
+		--build-arg AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0 \
+		--build-arg INFERENCE_ROUTER_IMAGE=$(REGISTRY)/azureclaw-inference-router:latest \
+		-t $(REGISTRY)/azureclaw-sandbox:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-sandbox:latest \
+		-f sandbox-images/openclaw/Dockerfile .
+
+image-sidecar: ## Build AGT governance sidecar image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/agt-governance-sidecar:$(IMAGE_TAG) \
+		-t $(REGISTRY)/agt-governance-sidecar:latest \
+		-f sidecar-images/agt-governance/Dockerfile .
+
+image-relay: ## Build AgentMesh relay image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG) \
+		-t $(REGISTRY)/agentmesh-relay:latest \
+		-f vendor/agentmesh-relay/Dockerfile vendor/agentmesh-relay
+
+image-registry: ## Build AgentMesh registry image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG) \
+		-t $(REGISTRY)/agentmesh-registry:latest \
+		-f vendor/agentmesh-registry/Dockerfile vendor/agentmesh-registry
+
+push: ## Push all images to ACR
 	docker push $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG)
 	docker push $(REGISTRY)/azureclaw-controller:latest
 	docker push $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG)
 	docker push $(REGISTRY)/azureclaw-inference-router:latest
+	docker push $(REGISTRY)/azureclaw-sandbox:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-sandbox:latest
+	docker push $(REGISTRY)/agt-governance-sidecar:$(IMAGE_TAG)
+	docker push $(REGISTRY)/agt-governance-sidecar:latest
+	docker push $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG)
+	docker push $(REGISTRY)/agentmesh-relay:latest
+	docker push $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG)
+	docker push $(REGISTRY)/agentmesh-registry:latest
+
+apply: ## Apply Helm chart to AKS (fast upgrade)
+	azureclaw up --upgrade
+
+push-apply: cli images push apply ## Rebuild CLI, build all images, push to ACR, apply to AKS
 
 # ─── Development ──────────────────────────────────────────────────────────────
 

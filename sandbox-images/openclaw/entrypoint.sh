@@ -47,7 +47,8 @@ fi
 # container handles this before the sandbox container starts.
 if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
   # Filter table: allow established, localhost, DNS — reject everything else
-  iptables -N AZURECLAW_EGRESS 2>/dev/null || true
+  # Flush before append to prevent duplicate rules on container restart (#13)
+  iptables -N AZURECLAW_EGRESS 2>/dev/null || iptables -F AZURECLAW_EGRESS
   iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
   iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT
   iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT
@@ -55,14 +56,17 @@ if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
   # Allow traffic to the forward proxy port (redirected packets go to localhost)
   iptables -A AZURECLAW_EGRESS -p tcp --dport 8444 -j ACCEPT
   iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable
+  # Remove stale jump rule before adding (idempotent)
+  iptables -D OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS 2>/dev/null || true
   iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS
 
   # NAT table: redirect HTTP/HTTPS from UID 1000 to the transparent forward proxy.
   # The proxy enforces blocklist, allowlist, and learn mode on every request.
   # Inference (localhost:8443) is unaffected — loopback traffic is ACCEPTed above.
-  iptables -t nat -N AZURECLAW_REDIRECT 2>/dev/null || true
+  iptables -t nat -N AZURECLAW_REDIRECT 2>/dev/null || iptables -t nat -F AZURECLAW_REDIRECT
   iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 80  -j REDIRECT --to-port 8444
   iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 443 -j REDIRECT --to-port 8444
+  iptables -t nat -D OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT 2>/dev/null || true
   iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT
 
   echo "[azureclaw] iptables egress guard active (UID 1000 → transparent proxy on :8444)"
@@ -538,6 +542,11 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"
     cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
+    # AGT sidecar runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
+    # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
+    # chown -R sandbox:sandbox /sandbox — see below.
+    chmod o+x "$OPENCLAW_DIR"
+    chmod 755 "$OPENCLAW_DIR/policies"
     export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
     echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
   fi
@@ -554,11 +563,42 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 # Ensure all sandbox files are owned by sandbox user
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /sandbox
 
+# Harden AGT policy files AFTER the blanket chown — sandbox must not modify its own rules
+if [ "$IS_ROOT" = "true" ] && [ -d "$OPENCLAW_DIR/policies" ]; then
+  chown root:root "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+  chmod 444 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+fi
+
 # Start AzureClaw inference router as UID 1001 (router user) — only in dev mode.
 # UID 1001 is exempt from iptables egress guard, matching the AKS sidecar model
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate sidecar container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+  # ── AGT governance sidecar (dev mode) ─────────────────────────────────────
+  # In AKS, the controller injects this as a separate container (UID 1002).
+  # In dev mode, we start it here inside the sandbox container.
+  if [ "${AGT_GOVERNANCE_ENABLED:-false}" = "true" ] && [ -f /opt/agt-governance/server.py ]; then
+    rm -f /tmp/agt-governance.log
+    touch /tmp/agt-governance.log
+    mkdir -p /tmp/agt
+    if [ "$IS_ROOT" = "true" ]; then
+      # Dev mode: sidecar runs as UID 1001 (router) via $AS_ROUTER.
+      # AKS mode: sidecar runs in its own container as UID 1002.
+      chown 1001:1001 /tmp/agt-governance.log /tmp/agt
+      chmod 700 /tmp/agt
+    fi
+    AGT_POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
+    POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
+    AGT_PORT=8081 \
+    AGT_METRICS_PORT=9091 \
+    SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
+    AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
+    AGT_TRUST_DB="/tmp/agt/trust_scores.json" \
+    $AS_ROUTER python3 /opt/agt-governance/server.py > /tmp/agt-governance.log 2>&1 &
+    AGT_PID=$!
+    echo "[azureclaw] AGT governance sidecar running (PID: $AGT_PID, port: 8081)"
+  fi
+
   # Ensure router can write its log file (remove stale file from previous runs)
   rm -f /tmp/inference-router.log
   touch /tmp/inference-router.log
@@ -569,6 +609,12 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   fi
   # Generate a random admin token for the router's protected endpoints
   ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
+  # Share admin token with the plugin (UID 1000) for trust update auth.
+  # Written by root, readable by sandbox — the agent process can also read it,
+  # but the sidecar additionally clamps trust deltas to ±200 and blocks self-updates.
+  echo "$ROUTER_ADMIN_TOKEN" > /tmp/.agt-admin-token
+  [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/.agt-admin-token
+  chmod 400 /tmp/.agt-admin-token
   ROUTER_PORT=8443 \
   ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
@@ -578,6 +624,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   AGT_RELAY_URL="${AGT_RELAY_URL:-}" \
   AGT_REGISTRY_URL="${AGT_REGISTRY_URL:-}" \
   AGT_GOVERNANCE_ENABLED="${AGT_GOVERNANCE_ENABLED:-false}" \
+  AGT_SIDECAR_URL="http://127.0.0.1:8081" \
   SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
   SANDBOX_ISOLATION="${SANDBOX_ISOLATION:-enhanced}" \
   AZURECLAW_DEV_MODE="${AZURECLAW_DEV_MODE:-}" \
