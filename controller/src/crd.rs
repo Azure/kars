@@ -263,3 +263,137 @@ fn default_model() -> String {
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_isolation_is_enhanced() {
+        let cfg = SandboxConfig::default();
+        assert_eq!(cfg.isolation, "enhanced");
+    }
+
+    #[test]
+    fn default_seccomp_is_azureclaw_strict() {
+        let cfg = SandboxConfig::default();
+        assert_eq!(cfg.seccomp_profile, "azureclaw-strict");
+    }
+
+    #[test]
+    fn default_selinux_context_is_empty() {
+        let cfg = SandboxConfig::default();
+        assert!(cfg.selinux_context.is_empty());
+    }
+
+    #[test]
+    fn default_writable_paths_include_sandbox_and_tmp() {
+        let cfg = SandboxConfig::default();
+        let paths = cfg.writable_paths.unwrap();
+        assert!(paths.contains(&"/sandbox".to_string()));
+        assert!(paths.contains(&"/tmp".to_string()));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn default_model_is_gpt_4_1() {
+        let cfg = InferenceConfig::default();
+        assert_eq!(cfg.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn default_provider_is_azure_openai() {
+        let cfg = InferenceConfig::default();
+        assert_eq!(cfg.provider, "azure-openai");
+    }
+
+    #[test]
+    fn default_inference_enables_content_safety() {
+        let cfg = InferenceConfig::default();
+        assert!(cfg.content_safety);
+        assert!(cfg.prompt_shields);
+    }
+
+    #[test]
+    fn default_inference_has_no_token_budget() {
+        let cfg = InferenceConfig::default();
+        assert!(cfg.token_budget.is_none());
+    }
+
+    #[test]
+    fn default_network_policy_denies_all() {
+        let cfg = NetworkPolicyConfig::default();
+        assert!(cfg.default_deny);
+        assert!(cfg.approval_required);
+        assert!(cfg.allowed_endpoints.is_none());
+        assert!(!cfg.learn_egress);
+    }
+
+    #[test]
+    fn default_governance_config() {
+        // GovernanceConfig derives Default (empty/zero), serde defaults apply on deserialization
+        let cfg = GovernanceConfig::default();
+        assert!(!cfg.enabled);
+        // Serde default_policy() and default_trust_threshold() are used during deserialization only
+        let cfg_serde: GovernanceConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(cfg_serde.tool_policy, "default");
+        assert_eq!(cfg_serde.trust_threshold, 500);
+        assert_eq!(cfg.tool_policy, ""); // derive Default gives empty string
+    }
+
+    #[test]
+    fn sandbox_spec_fields_all_optional() {
+        let spec = ClawSandboxSpec::default();
+        assert!(spec.openclaw.is_none());
+        assert!(spec.sandbox.is_none());
+        assert!(spec.inference.is_none());
+        assert!(spec.network_policy.is_none());
+        assert!(spec.agent.is_none());
+        assert!(spec.governance.is_none());
+        assert!(spec.azure_services.is_none());
+        assert!(spec.resources.is_none());
+    }
+
+    #[test]
+    fn token_budget_config_defaults_to_none() {
+        let cfg = TokenBudgetConfig::default();
+        assert!(cfg.daily.is_none());
+        assert!(cfg.per_request.is_none());
+    }
+
+    #[test]
+    fn sandbox_config_security_defaults() {
+        let cfg = SandboxConfig::default();
+        assert!(cfg.read_only_root_filesystem);
+        assert!(cfg.run_as_non_root);
+        assert!(!cfg.allow_privilege_escalation);
+    }
+
+    #[test]
+    fn agent_config_defaults_empty() {
+        let cfg = AgentConfig::default();
+        assert!(cfg.instructions.is_none());
+        assert!(cfg.tools.is_none());
+        assert!(cfg.file_ids.is_none());
+    }
+
+    #[test]
+    fn sandbox_status_defaults_empty() {
+        let status = ClawSandboxStatus::default();
+        assert!(status.phase.is_none());
+        assert!(status.sandbox_pod.is_none());
+        assert!(status.namespace.is_none());
+        assert!(status.inference_endpoint.is_none());
+        assert!(status.tokens_used.is_none());
+        assert!(status.pending_approvals.is_none());
+        assert!(status.foundry_agent_id.is_none());
+    }
+
+    #[test]
+    fn inference_config_default_has_no_fallback() {
+        let cfg = InferenceConfig::default();
+        assert!(cfg.fallback.is_none());
+        assert!(cfg.endpoint.is_none());
+    }
+}

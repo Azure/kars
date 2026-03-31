@@ -1,0 +1,57 @@
+name: Security Issue
+description: Report a security vulnerability (for critical vulnerabilities, use MSRC per SECURITY.md)
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **For critical or high-severity vulnerabilities**, please report them through the
+        [Microsoft Security Response Center (MSRC)](https://msrc.microsoft.com/create-report)
+        as described in [SECURITY.md](../SECURITY.md). Do not open a public issue.
+
+        Use this form only for lower-severity security concerns you're comfortable disclosing publicly.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the security issue.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How severe is this vulnerability?
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - Controller
+        - Inference Router
+        - Sandbox
+        - AGT Sidecar
+        - CLI
+        - AgentMesh Relay
+        - AgentMesh Registry
+        - Helm Chart
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: What is the potential impact of this vulnerability?
+    validations:
+      required: true

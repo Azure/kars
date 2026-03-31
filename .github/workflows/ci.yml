@@ -1,8 +1,11 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:      # allow reuse from release.yml
   workflow_dispatch:  # manual trigger
 
 permissions:
@@ -111,3 +114,36 @@ jobs:
         if: always()
         with:
           sarif_file: "container-results.sarif"
+
+  python-lint:
+    name: "Python Lint & Test (AGT Sidecar)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: Lint AGT governance sidecar
+        run: ruff check sidecar-images/agt-governance/
+      - name: Test AGT governance sidecar
+        run: cd sidecar-images/agt-governance && python3 -m pytest test_server.py -v
+
+  dockerfile-lint:
+    name: "Dockerfile Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install hadolint
+        run: |
+          wget -qO /usr/local/bin/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x /usr/local/bin/hadolint
+      - name: Lint Dockerfiles
+        run: |
+          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 controller/Dockerfile
+          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 inference-router/Dockerfile
+          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 sandbox-images/openclaw/Dockerfile
+          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 sidecar-images/agt-governance/Dockerfile
+          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 vendor/agentmesh-relay/Dockerfile
+          hadolint --ignore DL3008 --ignore DL3013 --ignore DL3018 vendor/agentmesh-registry/Dockerfile

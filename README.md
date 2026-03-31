@@ -45,20 +45,41 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
    │  │   drop ALL caps                 │ • Content Safety   │            │  │
    │  │   no Azure credentials          │ • Token budgets    │            │  │
    │  │                                 │ • Domain blocklist │            │  │
-   │  │                                 │ • Egress proxy     │            │  │
-   │  │                                 │ • AGT governance   │            │  │
-   │  │                                 └───────────────────┘             │  │
+   │  │  ┌──────────────────┐           │ • Egress proxy     │            │  │
+   │  │  │ AGT Governance   │           │ • AGT governance   │            │  │
+   │  │  │ Sidecar (Python) │◄─:8081───►│                    │            │  │
+   │  │  │ • PolicyEvaluator│           └────────────────────┘            │  │
+   │  │  │ • TrustStore     │                                             │  │
+   │  │  │ • AuditLog       │                                             │  │
+   │  │  │ • RateLimiter    │                                             │  │
+   │  │  └──────────────────┘                                             │  │
    │  │  NetworkPolicy: default-deny egress                               │  │
    │  └───────────────────────────────────────────────────────────────────┘  │
    │                                                                         │
-   │  ┌─ AGT Relay ───────────────────────────────────────────────────────┐  │
+   │  ┌─ AgentMesh ───────────────────────────────────────────────────────┐  │
    │  │  agent-alpha ◄──E2E encrypted──► agent-beta                       │  │
-   │  │  (Signal Protocol · trust-gated · audited)                        │  │
+   │  │  (Signal Protocol · X3DH + Double Ratchet · trust-gated)          │  │
+   │  │                                                                    │  │
+   │  │  agentmesh-relay (WebSocket :8765) — routes encrypted messages     │  │
+   │  │  agentmesh-registry (REST :8080 + PostgreSQL) — discovery/prekeys  │  │
    │  └───────────────────────────────────────────────────────────────────┘  │
    │                                                                         │
    │  Controller (Rust/kube-rs) — reconciles ClawSandbox CRDs               │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Docker Images
+
+| Image | Language | Purpose |
+|-------|----------|---------|
+| `azureclaw-controller` | Rust | K8s operator — reconciles ClawSandbox CRDs into pods |
+| `azureclaw-inference-router` | Rust | Inference proxy — Content Safety, AGT policy evaluation, egress filtering |
+| `azureclaw-sandbox` / `openclaw-sandbox` | Node.js | Main agent container (OpenClaw + AGT SDK + Python tools) |
+| `agt-governance-sidecar` | Python | AGT policy engine (AGT SDK v3.0.0) — per-request governance *(temporary, until Rust SDK)* |
+| `agentmesh-relay` | Rust | WebSocket relay for E2E encrypted inter-agent messaging |
+| `agentmesh-registry` | Rust + PostgreSQL | Agent discovery, prekey storage, React admin UI |
+
+All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`).
 
 ---
 
@@ -91,17 +112,28 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 - **Third-party plugins** — Brave, Tavily, Exa, Firecrawl, Perplexity (API key → auto-enabled)
 - **Foundry web search** — Bing Grounding via Responses API (zero-config, no API key needed)
 - **Sub-agent spawning** — agents create child agents via CRD (isolated, governed, full tool access via native delegation)
-- **10 Foundry skills** — memory, code interpreter, web search, knowledge, evaluations, and more
+- **10 Foundry skills** — web search (Bing Grounding), code execute, image generation, file search, memory, conversations, evaluations, knowledge, and more — all via Workload Identity (no API keys)
 - **Python 3** — 43 packages pre-installed: pandas, numpy, scipy, matplotlib, pdfplumber, pypdf, python-docx, openpyxl, python-pptx, Pillow, sqlalchemy, tiktoken, cryptography, networkx, and more
 - **200+ models** — hot-switch between GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc.
 - **Multi-frontend** — TUI, Telegram, Web UI at `localhost:18789`
 
-### 🏛️ Governance (AGT)
+### 🏛️ Governance (AGT v3.0.0)
 
-- **Trust scoring** — per-agent scores 0–1000 across 5 tiers (Ed25519 signed)
-- **E2E encryption** — Signal Protocol (X3DH + Double Ratchet) for inter-agent messaging
-- **Policy engine** — YAML-based tool-level allow/deny/approval/rate-limit rules
-- **Audit trail** — hash-chain append-only log with integrity verification
+- **AGT governance sidecar** — dedicated Python sidecar evaluates every inference, spawn, mesh-receive, and response request
+- **Trust scoring** — per-agent scores 0–1000, threshold 500, clamped ±200/update, Ed25519 signed
+- **Policy engine** — YAML-driven rules (10 default rules) covering shell safety, inference rate-limiting, content safety, mesh trust gates
+- **Audit trail** — SHA-256 Merkle tree append-only chain with tamper detection and integrity verification
+- **Components** — PolicyEvaluator, FileTrustStore, AuditLog, RateLimiter, AgentBehaviorMonitor
+
+> **⏳ Sidecar sunset:** The AGT governance sidecar is a temporary bridge — it wraps the Python-only AGT SDK v3.0.0. Once a native Rust SDK ships, governance will be compiled directly into the inference router, eliminating the sidecar and its extra container.
+
+### 🔐 E2E Encryption (Signal Protocol)
+
+- **X3DH key exchange** — identity, signed-prekey, and one-time prekey bundles for session setup
+- **Double Ratchet** — per-message forward secrecy via ratchet rotation
+- **KNOCK protocol** — policy-gated session establishment (trust score ≥ 500 required)
+- **AgentMesh relay** — untrusted WebSocket relay (`:8765`) routes encrypted payloads without decryption
+- **AgentMesh registry** — agent discovery and prekey storage (REST `:8080` + PostgreSQL)
 
 ### ⚙️ Operations
 
@@ -117,56 +149,114 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 
 ### Prerequisites
 
-Node.js 22+ · Docker (for local dev) · Azure CLI 2.60+ · kubectl · Helm (for AKS)
+| Tool | Version | Required For |
+|------|---------|--------------|
+| Node.js | 22+ | CLI (both paths) |
+| Docker | Latest | Local dev + image builds |
+| Azure CLI | 2.60+ | AKS path only |
+| kubectl | 1.28+ | AKS path only |
+| Helm | 3.14+ | AKS path only |
+| Rust | 1.88+ (edition 2024) | Building from source (both paths) |
 
-### Try It Locally (Docker)
-
-No Azure subscription needed — start a sandbox in seconds:
+### Step 1: Install the CLI
 
 ```bash
-# 1. Install
 git clone https://github.com/Azure/azureclaw.git
-cd azureclaw/cli && npm install && npm run build && npm link
+cd azureclaw
 
-# 2. Start a local agent
-azureclaw dev
+# Build the CLI
+cd cli && npm install && npm run build && npm link
+cd ..
 
-# 3. Chat through the TUI
-🦞 You: What's the latest news about AI security?
-
-# 4. Add a Telegram channel
-azureclaw dev --channels telegram --telegram-token "BOT_TOKEN"
-
-# 5. Add third-party search plugins
-azureclaw dev --brave-api-key "KEY" --tavily-api-key "KEY"
+# Verify
+azureclaw --help
 ```
 
-### Deploy to AKS (Production)
+---
+
+### Path A: Local Dev (Docker) — no Azure needed
+
+Start a sandboxed agent locally in under a minute:
 
 ```bash
-# Full stack deploy — prompts for region & subscription
+# Build the sandbox image and start it
+azureclaw dev --build
+
+# First run will prompt for Azure OpenAI credentials:
+#   Endpoint: https://your-resource.openai.azure.com
+#   API Key:  sk-...
+# Or set them beforehand:
+azureclaw credentials
+
+# You're now in a chat session with a governed AI agent
+🦞 You: What's the latest news about AI security?
+```
+
+**Optional enhancements:**
+
+```bash
+# Add Telegram channel
+azureclaw dev --build --channels telegram --telegram-token "BOT_TOKEN"
+
+# Add third-party search plugins
+azureclaw dev --build --brave-api-key "KEY" --tavily-api-key "KEY"
+
+# Use a specific model
+azureclaw dev --build --model gpt-5-mini
+```
+
+> **What happens:** Docker builds the sandbox image (Azure Linux 3 + inference router + OpenClaw), starts a container with iptables egress filtering, and connects you via the TUI. No Kubernetes needed.
+
+---
+
+### Path B: Deploy to AKS (Production)
+
+Full production deployment with all 9 security layers:
+
+```bash
+# 1. Login to Azure
+az login
+
+# 2. Build all 6 container images (controller, router, sandbox, AGT sidecar, relay, registry)
+#    First run takes ~10 min; subsequent builds are cached
+azureclaw push
+
+# 3. Deploy everything — AKS cluster, ACR, Key Vault, Azure OpenAI, Helm chart
+#    Prompts for region, subscription, and agent name
 azureclaw up
 
-# Connect to your agent
-azureclaw connect my-assistant
+# 4. Verify the cluster is healthy
+azureclaw operator    # live TUI — press 'c' for cluster health
 
-# Review egress activity
-azureclaw egress my-assistant --learned
+# 5. Connect to your first agent
+azureclaw connect my-assistant
 ```
 
-`azureclaw up` runs preflight checks (Azure CLI, kubectl, Helm, subscription, SKU availability), prompts for region and agent name, then provisions everything end-to-end.
+**What `azureclaw up` does (in order):**
+1. Preflight checks (az, kubectl, helm, subscription, SKU availability)
+2. Deploys Azure infrastructure via Bicep (AKS, ACR, Key Vault, AOAI)
+3. Installs AzureClaw Helm chart (CRD, controller, RBAC, seccomp profiles)
+4. Deploys AgentMesh (relay + registry) for E2E encrypted inter-agent comms
+5. Creates your first agent sandbox with AGT governance sidecar
 
-### Add Agents
+**After deployment:**
 
 ```bash
-# Add a governed agent with Telegram and egress learning
-azureclaw add research-bot \
-  --model gpt-4.1 \
-  --channels telegram --telegram-token "BOT_TOKEN" \
-  --governance --learn-egress
+# Add more agents
+azureclaw add research-bot --model gpt-4.1 --governance --learn-egress
 
-# Add a confidential agent (auto-provisions Kata nodepool if needed)
+# Add channels
+azureclaw credentials update research-bot --telegram-token "BOT_TOKEN"
+
+# Add a confidential agent (auto-provisions Kata nodepool)
 azureclaw add helper --model gpt-5-mini --isolation confidential
+
+# Review egress activity
+azureclaw egress research-bot --learned
+
+# Multi-agent communication (E2E encrypted)
+azureclaw connect research-bot
+🦞 You: @helper can you review this code for security issues?
 ```
 
 ### Operator Dashboard
@@ -214,7 +304,7 @@ azureclaw credentials update my-agent \
 | `azureclaw dev` | Local Docker sandbox with same security controls |
 | `azureclaw add <name>` | Add sandbox to existing cluster |
 | `azureclaw destroy [name]` | Tear down sandbox or entire resource group (`--all`) |
-| `azureclaw push` | Build and push images to ACR (`--only`, `--apply`) |
+| `azureclaw push` | Build and push all 6 images to ACR (`--apply` restarts deployments, `--only <image>` for single image) |
 | **Operations** | |
 | `azureclaw operator` | Live TUI dashboard — agents, egress, security, cluster health |
 | `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) |
@@ -265,7 +355,11 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 | **NetworkPolicy** | Default-deny egress at the Kubernetes level (Cilium-enforced) |
 | **Domain blocklist** | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus every 6h |
 | **Inference safety** | Content Safety + Prompt Shields on every request + per-agent token budgets |
+| **Content Safety circuit breaker** | Fail-open with 60s cooldown — inference continues if Content Safety is unavailable |
 | **Zero Azure credentials** | Agent never sees Azure auth tokens — sidecar authenticates via IMDS/Workload Identity |
+| **Admin token** | From K8s Secret mounted at `/etc/azureclaw/secrets/` — never hardcoded; required for trust mutation via `x-azureclaw-admin` header |
+| **AGT policy evaluation** | Per-request governance on inference, spawn, mesh receive, and response actions |
+| **Audit chain** | SHA-256 Merkle tree with integrity verification (validated on AKS: `integrity=valid`) |
 
 ### Per Isolation Level
 
@@ -281,6 +375,7 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 |---|---|---|
 | Azure auth tokens (IMDS, WI) | Sidecar only (projected file) | ❌ No — iptables blocks IMDS, file permissions enforce separation |
 | Azure OpenAI API key | Sidecar only (`/run/secrets/`) | ❌ No — mounted only in sidecar container |
+| Admin token | K8s Secret (`/etc/azureclaw/secrets/`) | ❌ No — mounted only in sidecar; required for trust mutation |
 | Plugin API keys (Brave, Tavily, etc.) | Agent env vars | ✅ Yes — plugins need them. Agent cannot exfiltrate: egress blocked by iptables |
 | Channel tokens (Telegram, Slack) | Agent env vars | ✅ Yes — channels need them. Same egress protection applies |
 
@@ -360,17 +455,21 @@ azureclaw egress my-agent --enforce                      # lock down to learned 
 ```
 azureclaw/
 ├── cli/                  # TypeScript CLI (azureclaw command)
-│   └── skills/           # Foundry skill definitions (10 skills)
+│   ├── skills/           # Foundry skill definitions (10 skills)
+│   └── policies/         # AGT governance policy YAML (default rules)
 ├── controller/           # Rust K8s operator (ClawSandbox CRDs)
 ├── inference-router/     # Rust sidecar proxy (axum)
-├── policy-engine/        # Seccomp profiles & security policies
+├── sidecar-images/       # AGT governance sidecar (Python) — temporary until Rust SDK
 ├── sandbox-images/       # OpenClaw container images
-├── deploy/               # Bicep IaC, Helm charts, monitoring
-├── docs/                 # Architecture, security, demo guides
-├── examples/             # Sample agents (basic, confidential, telegram)
+├── policy-engine/        # Seccomp profiles & security policies
+├── deploy/               # Bicep IaC, Helm charts, AgentMesh K8s manifests
+├── docs/                 # Architecture, security, E2E encryption, demo guides
+├── examples/             # Sample agents (basic, confidential, telegram, demo)
 ├── tests/                # E2E tests (Docker + Kind)
-└── vendor/               # AgentMesh SDK (8 vendor bug fixes)
+└── vendor/               # AgentMesh SDK, relay, registry, AGT wheels (patched forks)
 ```
+
+> **📦 Why `vendor/`?** AgentMesh is pre-release — we found and fixed 8 bugs in the relay, registry, and SDK (see `vendor/*/README.md` for each patch). These are carried as patched forks until fixes land upstream. The AGT governance wheels are also vendored here since the SDK isn't published to PyPI yet. Once AgentMesh and AGT ship stable releases, `vendor/` goes away entirely.
 
 ---
 
