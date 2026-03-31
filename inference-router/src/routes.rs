@@ -40,6 +40,9 @@ pub struct AppState {
     pub model_override: Arc<std::sync::RwLock<Option<String>>>,
     /// Admin token for sensitive mutations (trust updates). None = no auth required.
     pub admin_token: Option<Arc<String>>,
+    /// Models that don't support chat/completions (need Responses API).
+    /// Populated on first 400 "unsupported" — avoids redundant round-trips.
+    pub responses_only_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -98,6 +101,7 @@ impl AppState {
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),
+            responses_only_models: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
             admin_token: std::fs::read_to_string("/run/secrets/admin-token")
                 .or_else(|_| std::env::var("ADMIN_TOKEN"))
                 .ok()
@@ -455,6 +459,66 @@ async fn chat_completions(
     // Forward to Foundry
     let upstream = state.upstream_config(sandbox_name);
 
+    // Check if this model is known to require Responses API (cached from prior 400s)
+    let model_name = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(String::from))
+        .unwrap_or_else(|| upstream.deployment.clone());
+    let is_responses_only = state
+        .responses_only_models
+        .read()
+        .ok()
+        .map(|set| set.contains(&model_name))
+        .unwrap_or(false);
+
+    if is_responses_only {
+        // Skip chat/completions — go directly to Responses API
+        tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using cached Responses API path");
+        let responses_body = chat_to_responses_body(&body);
+        match proxy::forward(
+            &state.auth,
+            &state.client,
+            &upstream,
+            axum::http::Method::POST,
+            "responses",
+            &headers,
+            responses_body,
+        )
+        .await
+        {
+            Ok((resp_status, resp_hdrs, resp_body)) => {
+                let chat_body = responses_to_chat_body(&resp_body);
+                if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                    && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
+                {
+                    state.budget.record_usage(sandbox_name, total).await;
+                }
+                let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("stream")?.as_bool())
+                    .unwrap_or(false);
+                if is_stream {
+                    // Wrap as SSE for streaming clients
+                    let sse = format!("data: {}\n\ndata: [DONE]\n\n", String::from_utf8_lossy(&chat_body));
+                    let mut response = (resp_status, Body::from(sse)).into_response();
+                    response.headers_mut().insert("content-type", axum::http::HeaderValue::from_static("text/event-stream"));
+                    return response;
+                }
+                let mut response = (resp_status, Body::from(chat_body)).into_response();
+                if let Some(ct) = resp_hdrs.get("content-type") {
+                    response.headers_mut().insert("content-type", ct.clone());
+                }
+                return response;
+            }
+            Err(e) => {
+                tracing::error!(sandbox = %sandbox_name, "Responses API error: {e:#}");
+                return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                    "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                }))).into_response();
+            }
+        }
+    }
+
     // Check if client requested streaming
     let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
@@ -491,6 +555,11 @@ async fn chat_completions(
                     .unwrap_or(false);
 
                 if is_unsupported {
+                    // Cache this model as Responses-only to skip future chat/completions attempts
+                    if let Ok(mut set) = state.responses_only_models.write() {
+                        set.insert(model_name.clone());
+                        tracing::info!(model = %model_name, "Cached as Responses-only model");
+                    }
                     // Fallback: convert to Responses API, return result as single SSE frame
                     tracing::info!(sandbox = %sandbox_name, "Streaming chat/completions unsupported, falling back to Responses API");
                     let responses_body = chat_to_responses_body(&body);
@@ -629,6 +698,11 @@ async fn chat_completions(
                         .unwrap_or(false) =>
             {
                 // Model doesn't support chat/completions — auto-fallback to Responses API.
+                // Cache this model to skip future chat/completions attempts.
+                if let Ok(mut set) = state.responses_only_models.write() {
+                    set.insert(model_name.clone());
+                    tracing::info!(model = %model_name, "Cached as Responses-only model");
+                }
                 // Convert messages → input and proxy to /openai/v1/responses.
                 tracing::info!(sandbox = %sandbox_name, "chat/completions unsupported, falling back to Responses API");
                 let responses_body = chat_to_responses_body(&body);
