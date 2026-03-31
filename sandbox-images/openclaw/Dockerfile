@@ -38,7 +38,8 @@ RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g opencla
 RUN openclaw skills install summarize 2>/dev/null || true && \
     openclaw skills install browser 2>/dev/null || true && \
     openclaw skills install multi-search-engine 2>/dev/null || true && \
-    openclaw skills install proactive-agent 2>/dev/null || true
+    openclaw skills install proactive-agent 2>/dev/null || true && \
+    mkdir -p /root/.openclaw/workspace/skills
 
 # Install npm CLIs that unlock built-in OpenClaw skills
 RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
