@@ -141,6 +141,15 @@ rules:
     action: allow
     priority: 25
 
+  - name: tool-general-allow
+    description: Allow general tool calls (non-shell, non-egress)
+    condition:
+      field: action.category
+      operator: eq
+      value: tool
+    action: allow
+    priority: 25
+
 # NOT included — AzureClaw handles these at infrastructure level:
 # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
 # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)

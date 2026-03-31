@@ -1684,13 +1684,17 @@ const azureClawPlugin = definePluginEntry({
     memorySyncBuffer = [];
 
     async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
-      // Only evaluate tools that execute user-influenced content
-      const checkableTools = ["exec_command", "http_fetch"];
-      if (!checkableTools.includes(toolName)) return { allowed: true };
-
       // Build action string in AGT format: "category:detail"
+      // Map tool names to AGT action categories for policy matching
       const paramStr = Object.values(params).map(v => typeof v === "string" ? v : "").join(" ").trim();
-      const action = toolName === "exec_command" ? `shell:${paramStr}` : `egress:${paramStr}`;
+      let action: string;
+      if (toolName === "exec_command" || toolName === "foundry_code_execute") {
+        action = `shell:${paramStr}`;
+      } else if (toolName === "http_fetch") {
+        action = `egress:${paramStr}`;
+      } else {
+        action = `tool:${toolName}:${paramStr}`;
+      }
 
       try {
         const http = await import("node:http");
