@@ -1663,9 +1663,10 @@ async fn agt_registry_proxy(
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
-    // Allowlist valid registry API paths — prevent path traversal
+    // Allowlist valid registry API paths — prevent path traversal.
+    // Paths arrive as the wildcard after /agt/registry/, e.g. "registry/search".
     let valid_prefixes = [
-        "lookup", "search", "register", "prekeys", "heartbeat",
+        "registry/", "lookup", "search", "register", "prekeys", "heartbeat",
         "agents", "health", "sessions",
     ];
     let path_valid = valid_prefixes

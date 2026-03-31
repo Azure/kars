@@ -640,7 +640,11 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   DOCKER_NETWORK="${DOCKER_NETWORK:-}" \
   $AS_ROUTER azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
   ROUTER_PID=$!
-  sleep 1
+  # Wait for router to accept connections (replaces blind sleep 1)
+  for _i in $(seq 1 20); do
+    if curl -sf http://127.0.0.1:8443/healthz > /dev/null 2>&1; then break; fi
+    sleep 0.2
+  done
   echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
 else
   echo "[azureclaw] Inference router provided by sidecar (workload-identity mode)"
@@ -668,7 +672,7 @@ for i in $(seq 1 10); do
     echo "[azureclaw] Gateway running (PID: $GATEWAY_PID)"
     break
   fi
-  sleep 1
+  sleep 0.5
 done
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
@@ -701,7 +705,11 @@ echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 # Use timeout to prevent hanging (the command sometimes blocks on gateway connection).
 # Run in background so the entrypoint continues to the relay listener section.
 (
-  sleep 2  # Give gateway a moment to stabilize
+  # Wait for gateway to accept requests before setting auto-approve
+  for _i in $(seq 1 10); do
+    curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1 && break
+    sleep 0.5
+  done
   echo '{ "mode": "auto-approve" }' | AGT_SKIP_INIT=1 timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
 ) &
 

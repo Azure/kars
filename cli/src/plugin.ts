@@ -1895,16 +1895,16 @@ const azureClawPlugin = definePluginEntry({
             trust_threshold: 500,
           });
 
-          // Auto-wait until the sub-agent is Running (poll spawn_status)
+          // Poll until sub-agent is Running (1s interval, 45s max)
           const agentName = params.name as string;
           log.info(`Waiting for sub-agent '${agentName}' to reach Running state...`);
           let phase = "Pending";
-          for (let i = 0; i < 24; i++) { // 24 × 5s = 120s max
-            await new Promise(r => setTimeout(r, 5000));
+          for (let i = 0; i < 45; i++) {
+            await new Promise(r => setTimeout(r, 1000));
             try {
-              const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}`);
+              const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}/status`);
               phase = status?.phase || "Pending";
-              log.info(`Sub-agent '${agentName}' phase: ${phase} (${i + 1}/24)`);
+              if (i % 5 === 0) log.info(`Sub-agent '${agentName}' phase: ${phase} (${i + 1}s)`);
               if (phase === "Running") break;
             } catch {
               // Status endpoint not ready yet — keep polling
@@ -1918,24 +1918,31 @@ const azureClawPlugin = definePluginEntry({
             }, null, 2) }] };
           }
 
-          // Give the sub-agent a few more seconds to register with the AGT relay
-          await new Promise(r => setTimeout(r, 3000));
-
-          // Pre-discover the sub-agent's AMID so mesh_send doesn't need to search
+          // Poll registry for sub-agent registration instead of blind sleep.
+          // Sub-agent registers with relay ~5s after entrypoint completes.
           if (agtMeshClient) {
-            try {
-              const searchResult = await routerCall("GET",
-                `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
-              const agents = searchResult?.results || [];
-              const match = agents.find((a: any) =>
-                a.display_name === agentName || a.capabilities?.includes(agentName)
-              );
-              if (match?.amid) {
-                nameToAmid.set(agentName, match.amid);
-                amidToName.set(match.amid, agentName);
-                log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
-              }
-            } catch { /* best effort — mesh_send will retry */ }
+            let amid: string | undefined;
+            for (let i = 0; i < 10; i++) {
+              try {
+                const searchResult = await routerCall("GET",
+                  `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
+                const agents = searchResult?.results || [];
+                const match = agents.find((a: any) =>
+                  a.display_name === agentName || a.capabilities?.includes(agentName)
+                );
+                if (match?.amid) {
+                  amid = match.amid;
+                  nameToAmid.set(agentName, match.amid);
+                  amidToName.set(match.amid, agentName);
+                  log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
+                  break;
+                }
+              } catch { /* registry not ready yet */ }
+              await new Promise(r => setTimeout(r, 1000));
+            }
+            if (!amid) {
+              log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
+            }
           }
 
           return { content: [{ type: "text", text: JSON.stringify({
