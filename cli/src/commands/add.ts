@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
-import { loadContext } from "../config.js";
+import { loadContext, resolveSecret } from "../config.js";
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -22,6 +22,7 @@ export function addCommand(): Command {
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
     .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
     .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
+    .option("--telegram-allow-from <ids>", "Telegram user IDs allowed to DM (comma-separated numeric IDs)")
     .option("--slack-token <token>", "Slack bot OAuth token")
     .option("--discord-token <token>", "Discord bot token")
     .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
@@ -138,40 +139,59 @@ export function addCommand(): Command {
         const channels = options.channels.split(",").map((c: string) => c.trim().toLowerCase());
         const envSecrets: Record<string, string> = {};
 
+        // Map channel names to secret keys for resolveSecret lookup
+        const channelSecretKeys: Record<string, string> = {
+          telegram: "telegram-token",
+          slack: "slack-token",
+          discord: "discord-token",
+        };
+
         for (const channel of channels) {
           if (!knownChannels.has(channel)) {
             console.error(chalk.yellow(`  ⚠ Unknown channel '${channel}' — skipping`));
             continue;
           }
-          // Map channel token flags to env var names
           const tokenFlag = channelTokenFlags[channel];
-          if (tokenFlag && options[tokenFlag]) {
-            envSecrets[channelEnvVars[channel]] = options[tokenFlag];
+          const secretKey = channelSecretKeys[channel];
+          // Resolve: CLI flag > secrets.json > env var
+          const resolved = secretKey
+            ? resolveSecret(tokenFlag ? options[tokenFlag] : undefined, secretKey)
+            : undefined;
+          if (resolved) {
+            envSecrets[channelEnvVars[channel]] = resolved;
           } else if (channel === "whatsapp") {
             envSecrets[channelEnvVars[channel]] = "true";
-          } else if (tokenFlag && !options[tokenFlag]) {
-            console.error(chalk.yellow(`  ⚠ Channel '${channel}' enabled but no --${channel}-token provided`));
+          } else if (tokenFlag && !resolved) {
+            console.error(chalk.yellow(`  ⚠ Channel '${channel}' enabled but no token found (use --${channel}-token or 'azureclaw credentials set ${channel}-token <token>')`));
           }
         }
 
         // Store for secret creation (NOT in CRD spec — entrypoint reads env vars)
         channelEnvSecrets = envSecrets;
+
+        // Telegram allow-from (which user IDs can DM the bot)
+        if (channels.includes("telegram")) {
+          const allowFrom = resolveSecret(options.telegramAllowFrom, "telegram-allow-from");
+          if (allowFrom) channelEnvSecrets["TELEGRAM_ALLOW_FROM"] = allowFrom;
+        }
       }
 
       // Third-party plugin API keys — stored in the same K8s secret as channel tokens.
       // The entrypoint auto-enables plugins when their env var is present.
-      const pluginKeyFlags: Record<string, { flag: string; env: string }> = {
-        brave:      { flag: "braveApiKey",      env: "BRAVE_API_KEY" },
-        tavily:     { flag: "tavilyApiKey",     env: "TAVILY_API_KEY" },
-        exa:        { flag: "exaApiKey",        env: "EXA_API_KEY" },
-        firecrawl:  { flag: "firecrawlApiKey",  env: "FIRECRAWL_API_KEY" },
-        perplexity: { flag: "perplexityApiKey", env: "PERPLEXITY_API_KEY" },
-        openai:     { flag: "openaiApiKey",     env: "OPENAI_API_KEY" },
+      // Resolve: CLI flag > secrets.json > env var
+      const pluginKeyFlags: Record<string, { flag: string; env: string; secretKey: string }> = {
+        brave:      { flag: "braveApiKey",      env: "BRAVE_API_KEY",       secretKey: "brave-api-key" },
+        tavily:     { flag: "tavilyApiKey",     env: "TAVILY_API_KEY",      secretKey: "tavily-api-key" },
+        exa:        { flag: "exaApiKey",        env: "EXA_API_KEY",         secretKey: "exa-api-key" },
+        firecrawl:  { flag: "firecrawlApiKey",  env: "FIRECRAWL_API_KEY",   secretKey: "firecrawl-api-key" },
+        perplexity: { flag: "perplexityApiKey", env: "PERPLEXITY_API_KEY",  secretKey: "perplexity-api-key" },
+        openai:     { flag: "openaiApiKey",     env: "OPENAI_API_KEY",      secretKey: "openai-api-key" },
       };
       const pluginSecrets: Record<string, string> = {};
-      for (const [, { flag, env }] of Object.entries(pluginKeyFlags)) {
-        if (options[flag]) {
-          pluginSecrets[env] = options[flag];
+      for (const [, { flag, env, secretKey }] of Object.entries(pluginKeyFlags)) {
+        const resolved = resolveSecret(options[flag], secretKey);
+        if (resolved) {
+          pluginSecrets[env] = resolved;
         }
       }
 

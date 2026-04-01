@@ -1,10 +1,12 @@
 # AzureClaw Helm Chart Values
+# NOTE: For production, replace "latest" tags with specific image digests
+#       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
 # Controller configuration
 controller:
   image:
     repository: azureclaw.azurecr.io/azureclaw-controller
-    tag: "latest"
+    tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
   resources:

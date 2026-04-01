@@ -66,6 +66,14 @@ let agtSdk: any = null; // cached SDK module for reconnect
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
+// Parent-verified trusted peer AMIDs — pre-seeded at spawn via AGT_TRUSTED_PEERS env var.
+// Separate from amidToName to prevent trust escalation via arbitrary registry lookups.
+const parentTrustedAmids: Set<string> = new Set();
+
+// Sanitize user-influenced strings before logging — strip ANSI escapes and collapse newlines
+function sanitizeLog(s: string, maxLen = 500): string {
+  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\r\n]+/g, " ").slice(0, maxLen);
+}
 
 // Resolve AMID → display_name via registry lookup (results cached in amidToName).
 // Returns the display_name if found, or empty string on failure.
@@ -351,7 +359,7 @@ async function delegateToNativeAgent(
 /**
  * Fallback: process a task_request with a limited tool-calling loop.
  * Used when native delegation fails (e.g., Gateway not running).
- * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_tokens.
+ * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_completion_tokens.
  */
 async function processTaskWithTools(
   taskContent: any,
@@ -451,12 +459,67 @@ async function processTaskWithTools(
         },
       },
     },
+    {
+      type: "function" as const,
+      function: {
+        name: "foundry_image_generation",
+        description: "Generate images from text prompts via Azure AI Foundry (gpt-image-1). Returns file path of saved image.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "Text description of the image to generate." },
+            quality: { type: "string", enum: ["low", "medium", "high"], description: "Image quality (default: medium)" },
+            size: { type: "string", enum: ["1024x1024", "1024x1536", "1536x1024"], description: "Image dimensions (default: 1024x1024)" },
+          },
+          required: ["prompt"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "mesh_send",
+        description: "Send a message to another agent via the AGT E2E encrypted mesh relay. Use this to communicate with sibling agents spawned by the same parent.",
+        parameters: {
+          type: "object",
+          properties: {
+            to_agent: { type: "string", description: "Name of the target agent" },
+            message: { type: "string", description: "The message to send" },
+          },
+          required: ["to_agent", "message"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "discover",
+        description: "Discover other agents registered in the AGT mesh network. Returns agent names, tiers, trust scores, and online status.",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", description: "Glob pattern to filter agents (default: '*' for all)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "mesh_inbox",
+        description: "Check for incoming messages from other agents via the AGT E2E encrypted mesh relay. Returns pending messages.",
+        parameters: {
+          type: "object",
+          properties: {},
+        },
+      },
+    },
   ];
 
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are a helpful sub-agent running inside an AzureClaw sandbox. You have access to these tools:\n- exec_command: run shell commands (uname, hostname, etc.)\n- http_fetch: make HTTP requests through the security proxy\n- foundry_web_search: real-time web search via Bing grounding (use for news, current events, facts)\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib available)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores, manage vector stores and files\n- foundry_memory: persistent memory store — use 'search' to recall and 'update' to remember facts\n- foundry_conversations: persistent multi-turn dialogues (create, respond, get history)\n- foundry_evaluations: benchmark model quality (create, run, check results)\nUse the appropriate tool for each task. Use foundry_memory (not foundry_file_search) for storing/recalling knowledge. When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls if needed. Be concise and report actual results.",
+      content: "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- exec_command: run shell commands\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to other agents via AGT mesh relay\n- mesh_inbox: check for incoming messages from other agents\n- discover: find other agents in the mesh network (names, trust scores, status)\nUse the appropriate tool for each task. When asked to contact another agent, use mesh_send. Use discover to find available agents. Use mesh_inbox to check for replies. Execute tasks immediately — do not announce, just act. Chain tool calls as needed. Be concise, report results.",
     },
     {
       role: "user",
@@ -466,7 +529,7 @@ async function processTaskWithTools(
 
   // Tool-calling loop (max 10 rounds to prevent runaway)
   for (let round = 0; round < 10; round++) {
-    const postData = JSON.stringify({ model, messages, tools, max_tokens: 2048 });
+    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
         method: "POST",
@@ -520,10 +583,21 @@ async function processTaskWithTools(
               headers: args.headers || {},
               body: args.body || "",
             });
-            const fetchResult = execSync(
-              `curl -s -X POST http://127.0.0.1:8443/egress/fetch -H "Content-Type: application/json" -d '${fetchBody.replace(/'/g, "'\\''")}'`,
-              { timeout: 35000, encoding: "utf8", maxBuffer: 256 * 1024 },
-            ).trim();
+            const http = await import("node:http");
+            const fetchResult = await new Promise<string>((resolve) => {
+              const req = http.request("http://127.0.0.1:8443/egress/fetch", {
+                method: "POST", timeout: 35000,
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
+              }, (res) => {
+                let data = "";
+                res.on("data", (c: Buffer) => { data += c.toString(); });
+                res.on("end", () => resolve(data.trim()));
+              });
+              req.on("error", (e: Error) => resolve(`http_fetch error: ${e.message}`));
+              req.on("timeout", () => { req.destroy(); resolve("http_fetch timeout"); });
+              req.write(fetchBody);
+              req.end();
+            });
             result = fetchResult;
           } else if (fnName === "foundry_web_search" || fnName === "foundry_code_execute" || fnName === "foundry_file_search") {
             // Route through the inference router → Foundry Responses API
@@ -697,11 +771,151 @@ async function processTaskWithTools(
               result = memResult;
             }
             log.info(`AGT sub-agent foundry_memory result: ${result.slice(0, 200)}`);
+          } else if (fnName === "foundry_image_generation") {
+            // Route through the inference router → Azure OpenAI Images API
+            log.info(`AGT sub-agent image_gen: ${(args.prompt as string || "").slice(0, 100)}`);
+            const imgModel = (args.image_model as string) || "gpt-image-1";
+            const imgBody = JSON.stringify({
+              prompt: args.prompt, n: 1,
+              size: args.size || "1024x1024",
+              quality: args.quality || "medium",
+            });
+            const imgResult = await new Promise<string>((resolve, reject) => {
+              const req = http.request(
+                `http://127.0.0.1:8443/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
+                { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(imgBody) }, timeout: 120000 },
+                (res) => { let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body)); },
+              );
+              req.on("error", reject);
+              req.on("timeout", () => { req.destroy(); reject(new Error("Image gen timeout")); });
+              req.write(imgBody);
+              req.end();
+            });
+            try {
+              const parsed = JSON.parse(imgResult);
+              const images = parsed?.data || [];
+              const parts: string[] = [];
+              const fs = await import("node:fs");
+              const nodePath = await import("node:path");
+              const os = await import("node:os");
+              const imgDir = nodePath.join(os.tmpdir(), "azureclaw-images");
+              fs.mkdirSync(imgDir, { recursive: true });
+              for (const img of images) {
+                if (img.b64_json) {
+                  const ts = Date.now();
+                  const imgFile = nodePath.join(imgDir, `image-${ts}.png`);
+                  fs.writeFileSync(imgFile, Buffer.from(img.b64_json, "base64"));
+                  parts.push(`📁 Image saved: ${imgFile}`);
+                  if (img.revised_prompt) parts.push(`Revised prompt: ${img.revised_prompt}`);
+                } else if (img.url) {
+                  parts.push(`Image URL: ${img.url}`);
+                }
+              }
+              result = parts.length > 0 ? parts.join("\n") : imgResult;
+            } catch {
+              result = imgResult;
+            }
+            log.info(`AGT sub-agent image_gen complete`);
+          } else if (fnName === "mesh_send") {
+            // Send message to sibling agent via AGT mesh relay
+            const toAgent = args.to_agent as string;
+            const meshMsg = args.message as string;
+            log.info(`AGT sub-agent mesh_send: to=${toAgent} msg=${(meshMsg || "").slice(0, 100)}`);
+            try {
+              // Look up target AMID in registry
+              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const lookupResult = await new Promise<string>((resolve, reject) => {
+                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(toAgent)}`, { timeout: 10000 }, (res) => {
+                  let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                });
+                req.on("error", reject);
+                req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
+              });
+              const agents = JSON.parse(lookupResult);
+              const target = Array.isArray(agents) ? agents[0] : agents;
+              const targetAmid = target?.amid || target?.id;
+              if (!targetAmid) {
+                result = `Agent '${toAgent}' not found in registry`;
+              } else if (typeof agtMeshClient !== "undefined" && agtMeshClient) {
+                await agtMeshClient.send(targetAmid, {
+                  type: "task_request",
+                  content: meshMsg,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                });
+                result = `Message sent to ${toAgent} via E2E encrypted mesh relay`;
+              } else {
+                result = `Mesh client not available — cannot send to ${toAgent}`;
+              }
+            } catch (meshErr: any) {
+              result = `mesh_send failed: ${meshErr.message}`;
+            }
+          } else if (fnName === "discover") {
+            // Discover agents in the mesh network
+            const pattern = (args.pattern as string) || "*";
+            log.info(`AGT sub-agent discover: pattern=${pattern}`);
+            try {
+              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const discoverResult = await new Promise<string>((resolve, reject) => {
+                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
+                  let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                });
+                req.on("error", reject);
+                req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
+              });
+              result = discoverResult;
+            } catch (discErr: any) {
+              result = `discover failed: ${discErr.message}`;
+            }
+          } else if (fnName === "mesh_inbox") {
+            // Check for incoming messages via AGT mesh
+            log.info("AGT sub-agent mesh_inbox check");
+            try {
+              if (typeof agtMeshClient !== "undefined" && agtMeshClient && typeof agtMeshClient.drain === "function") {
+                const messages = await agtMeshClient.drain();
+                result = messages.length > 0
+                  ? JSON.stringify(messages.map((m: any) => ({ from: m.from_agent || m.sender, content: m.content || m.text, timestamp: m.timestamp })))
+                  : "No pending messages";
+              } else {
+                // Fallback: check via AGT inbox (pending messages stored by sidecar)
+                const agtInbox = (globalThis as any).__agtInbox || [];
+                result = agtInbox.length > 0
+                  ? JSON.stringify(agtInbox)
+                  : "No pending messages";
+              }
+            } catch (inboxErr: any) {
+              result = `mesh_inbox failed: ${inboxErr.message}`;
+            }
           } else {
-            // exec_command
-            const cmd = args.command || "";
-            log.info(`AGT sub-agent exec: ${cmd}`);
-            result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+            const cmd = String(args.command || args.cmd || "echo 'no command'");
+            log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
+            let policyAllowed = true;
+            let policyReason = "";
+            try {
+              const policyHttp = await import("node:http");
+              const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
+              const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
+                const req = policyHttp.request("http://127.0.0.1:8081/evaluate", {
+                  method: "POST", timeout: 2000,
+                  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
+                }, (res) => {
+                  let data = "";
+                  res.on("data", (c: Buffer) => { data += c.toString(); });
+                  res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); } });
+                });
+                req.on("error", () => resolve({ allowed: true }));
+                req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
+                req.write(policyBody);
+                req.end();
+              });
+              policyAllowed = policyResult.allowed !== false;
+              policyReason = policyResult.reason || "";
+            } catch { /* sidecar unavailable — allow */ }
+            if (!policyAllowed) {
+              result = `Blocked by policy: ${policyReason || "denied"}`;
+            } else {
+              result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
+            }
           }
         } catch (e: any) {
           result = e.stderr || e.stdout || e.message || "Command failed";
@@ -824,15 +1038,19 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // Registry returns 0.0-1.0 scale; normalize to 0-1000 for threshold comparison
           const rawScore = peerInfo?.reputationScore ?? 0;
           const normalizedScore = Math.round(rawScore * 1000);
-          // Spawner affinity: +200 bonus for agents this parent spawned
-          const isSpawnedChild = amidToName.has(fromAmid);
-          const affinityBonus = isSpawnedChild ? 200 : 0;
+          // Spawner affinity: +200 bonus for agents this agent spawned directly
+          const isSpawnedChild = amidToName.has(fromAmid) && !parentTrustedAmids.has(fromAmid);
+          // Parent-verified trust: +500 for peers pre-seeded by our parent at spawn time.
+          // These AMIDs came via AGT_TRUSTED_PEERS env var (set by router, not self-reported).
+          const isParentTrusted = parentTrustedAmids.has(fromAmid);
+          const affinityBonus = isParentTrusted ? 500 : (isSpawnedChild ? 200 : 0);
+          const affinityLabel = isParentTrusted ? "parent-verified" : (isSpawnedChild ? "spawner" : "");
           const effectiveScore = normalizedScore + affinityBonus;
           if (effectiveScore < AGT_TRUST_THRESHOLD) {
-            log.warn(`AGT KNOCK rejected: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} spawner` : ''}) < threshold=${AGT_TRUST_THRESHOLD}`);
+            log.warn(`AGT KNOCK rejected: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''}) < threshold=${AGT_TRUST_THRESHOLD}`);
             return { accept: false, reason: `trust_score_${effectiveScore}_below_${AGT_TRUST_THRESHOLD}` };
           }
-          log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} spawner` : ''})`);
+          log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''})`);
         } catch {
           // Registry lookup failed — accept anyway for mesh agents (trust evaluation best-effort)
           log.warn(`AGT KNOCK trust lookup failed for ${fromName} — accepting (best-effort)`);
@@ -917,10 +1135,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         content,
         message_type: message?.type || "message",
         timestamp: new Date().toISOString(),
-        id: `agt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
       agtInbox.push(entry);
-      log.info(`AGT relay message from ${fromName} (${fromAmid.slice(0, 12)}...): ${JSON.stringify(content).slice(0, 200)}`);
+      log.info(`AGT relay message from ${sanitizeLog(fromName, 50)} (${fromAmid.slice(0, 12)}...): ${sanitizeLog(JSON.stringify(content), 200)}`);
 
       // AGT policy gate — validate incoming mesh message via sidecar PolicyEngine.
       // Checks trust score of sender against mesh-receive-untrusted rule.
@@ -929,18 +1147,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (message?.type === "task_request") {
         try {
           const http = await import("node:http");
-          // Look up sender's trust score from sidecar (by resolved name, matching KNOCK bootstrap key)
+          // Look up sender's trust score via router (which forwards with admin token)
           let senderTrustScore = 0;
           try {
-            const trustBody = await new Promise<string>((resolve, reject) => {
-              const req = http.get(`http://127.0.0.1:8081/trust/${encodeURIComponent(fromName)}`, (res) => {
-                let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
-              });
-              req.on("error", reject);
-              req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
-            });
-            const trustData = JSON.parse(trustBody);
-            senderTrustScore = trustData?.score ?? 0;
+            const trustResult = await _routerCall("GET",
+              `/agt/trust/${encodeURIComponent(fromName)}`);
+            senderTrustScore = trustResult?.score ?? 0;
           } catch { /* trust lookup failed — use 0 */ }
 
           // Evaluate mesh:receive action with sender trust context
@@ -984,18 +1196,60 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
 
-      // Process task_request messages: delegate to native OpenClaw agent for full tool access,
-      // with fallback to the limited processTaskWithTools loop if native delegation fails.
+      // Process task_request messages via the native OpenClaw agent loop.
+      // AGT is the sole policy authority (no mixing with OpenClaw tools.deny):
+      //   1. mesh:receive trust gate (above) — rejects untrusted senders
+      //   2. task:execute policy check (below) — AGT gates the entire task
+      //   3. Container sandbox is the enforcement boundary (seccomp, netpol, cgroups)
+      //   4. Plugin tools inside native agent still check AGT per-call (http_fetch, foundry_*)
+      //   5. AGT audit + reputation recorded after completion
+      // Falls back to processTaskWithTools (per-tool AGT gating) if native agent fails.
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
+
+        // AGT policy: evaluate task:execute before dispatching to native agent
+        let taskAllowed = true;
+        try {
+          const http = await import("node:http");
+          const evalPayload = JSON.stringify({
+            action: "task:execute",
+            context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
+          });
+          const evalResult = await new Promise<string>((resolve, reject) => {
+            const req = http.request("http://127.0.0.1:8081/evaluate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
+            }, (res) => {
+              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+            });
+            req.on("error", reject);
+            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
+            req.write(evalPayload);
+            req.end();
+          });
+          const evalData = JSON.parse(evalResult);
+          if (evalData.decision === "deny") {
+            log.warn(`AGT policy DENIED task:execute from ${fromName}: ${evalData.reason}`);
+            taskAllowed = false;
+            try {
+              await agtMeshClient.send(fromAmid, {
+                type: "task_response",
+                content: `Task denied by AGT governance: ${evalData.reason}`,
+                from_agent: agtSandboxName,
+                timestamp: new Date().toISOString(),
+              });
+            } catch { /* best effort */ }
+          }
+        } catch { /* sidecar unavailable — allow (fail-open) */ }
+
+        if (!taskAllowed) return;
+
         try {
           let llmResponse: string;
           try {
-            // Primary: delegate to native OpenClaw agent (full toolset)
             llmResponse = await delegateToNativeAgent(taskContent, fromName, log);
           } catch (nativeErr: any) {
-            // Fallback: limited tool-calling loop (6 tools, 10 rounds)
-            log.warn(`Native delegation failed (${nativeErr.message}), falling back to processTaskWithTools`);
+            log.warn(`Native agent failed (${nativeErr.message}), falling back to processTaskWithTools`);
             llmResponse = await processTaskWithTools(taskContent, log);
           }
 
@@ -1041,6 +1295,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // ── Connect to the mesh (handlers are registered, safe to receive) ──
     agtSandboxName = process.env.SANDBOX_NAME
       || (process.env.HOSTNAME ? process.env.HOSTNAME.replace(/-[a-f0-9]+-[a-z0-9]+$/, "") : "unknown");
+    // Validate sandbox name format
+    if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(agtSandboxName)) {
+      log.warn(`Invalid SANDBOX_NAME "${sanitizeLog(agtSandboxName, 30)}" — falling back to "unknown"`);
+      agtSandboxName = "unknown";
+    }
 
     let connected = false;
     for (let attempt = 1; attempt <= 5; attempt++) {
@@ -1067,6 +1326,33 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Store on process for cross-context singleton access
     (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
     (process as any)[Symbol.for("agt-identity")] = agtIdentity;
+
+    // ── Pre-seed trusted peers from parent ──────────────────────────────
+    // AGT_TRUSTED_PEERS is set by the parent's router at spawn time.
+    // Format: "name:AMID,name:AMID,..." — these are parent-verified,
+    // not self-reported, so they're safe to auto-trust.
+    const trustedPeersEnv = process.env.AGT_TRUSTED_PEERS || "";
+    if (trustedPeersEnv && connected) {
+      const peers = trustedPeersEnv.split(",").filter(Boolean);
+      for (const peer of peers) {
+        const [name, amid] = peer.split(":");
+        if (name && amid) {
+          amidToName.set(amid, name);
+          nameToAmid.set(name, amid);
+          parentTrustedAmids.add(amid);
+          // Push baseline trust (score=500 = threshold) via local admin token
+          try {
+            await pushTrustToRouter(name, 0.0);
+            log.info(`AGT trusted peer seeded: ${name} (${amid.slice(0, 12)}...)`);
+          } catch {
+            log.warn(`AGT trusted peer seed failed for ${name}`);
+          }
+        }
+      }
+      if (peers.length > 0) {
+        log.info(`AGT pre-seeded ${peers.length} trusted peer(s) from parent`);
+      }
+    }
 
     // ── Disconnect handler + auto-reconnect ──────────────────────────────
     // If the WS connection drops (relay restart, network blip), try to reconnect.
@@ -1146,7 +1432,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
 const ROUTER_BASE = "http://127.0.0.1:8443";
 
-async function _routerCall(method: string, path: string, body?: unknown): Promise<any> {
+async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000): Promise<any> {
   const http = await import("node:http");
   const url = new URL(path, ROUTER_BASE);
   return new Promise((resolve, reject) => {
@@ -1168,7 +1454,7 @@ async function _routerCall(method: string, path: string, body?: unknown): Promis
       });
     });
     req.on("error", reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
     if (body) req.write(JSON.stringify(body));
     req.end();
   });
@@ -1321,6 +1607,23 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       sections.push("");
     }
 
+    // Identity section — tells the model who it is
+    sections.push(
+      "## Identity\n",
+      "You are **AzureClaw** — a secure, governed AI agent running on Azure Kubernetes Service.",
+      "You are NOT a generic assistant. You are AzureClaw, a specialized agent platform with",
+      "multi-agent orchestration, end-to-end encryption (Signal Protocol), governance (AGT),",
+      "and Azure AI Foundry integration. Always refer to yourself as **AzureClaw** — never",
+      'as "Assistant", "AI", "OpenClaw", or any other name.',
+      "",
+      "When greeting users or introducing yourself, be confident and specific:",
+      '- "I\'m AzureClaw, your secure AI agent on Azure."',
+      '- Mention your capabilities: multi-agent spawning, E2E encrypted mesh, web search,',
+      "  code execution, image generation, governed tool access, and persistent memory.",
+      '- Be professional but approachable. You are a production-grade platform, not a chatbot.',
+      "",
+    );
+
     sections.push(
       "## Available Tools\n",
       "- `foundry_code_execute` — Python code execution (server-side, data science libraries)",
@@ -1328,12 +1631,11 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       "- `foundry_web_search` — Real-time web search via Bing grounding",
       "- `foundry_file_search` — RAG over vector stores + vector store CRUD + file upload",
       "- `foundry_memory` — Persistent semantic memory (cross-session, cross-agent)",
-      "- `foundry_conversations` — Persistent multi-turn conversations (get/create/respond/list/delete)",
-      "- `foundry_evaluations` — Model quality testing and benchmarking",
-      "- `foundry_deployments` — Discover models, connections, indexes",
-      "- `foundry_agents` — List Foundry-hosted agents",
       "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
-      "- `azureclaw_spawn` / `azureclaw_mesh_send` / `azureclaw_mesh_inbox` — Multi-agent orchestration with E2E encryption",
+      "- `azureclaw_spawn` — Spawn governed sub-agents with dedicated sandboxes",
+      "- `azureclaw_mesh_send` — Send E2E encrypted messages to other agents via AGT mesh",
+      "- `azureclaw_mesh_inbox` — Check for incoming messages from other agents",
+      "- `azureclaw_discover` — Discover other agents in the mesh network",
       "",
       "## Agent Behavior\n",
       "When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls in sequence if needed to complete the task in a single response. Never say 'Processing...' or 'One moment...' without actually making a tool call in the same turn.",
@@ -1683,6 +1985,10 @@ const azureClawPlugin = definePluginEntry({
     memorySyncToolCount = 0;
     memorySyncBuffer = [];
 
+    // Consecutive sidecar failure counter for fail-closed behavior
+    let sidecarFailCount = { value: 0 };
+    const FAIL_CLOSED_THRESHOLD = 3;
+
     async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
       // Build action string in AGT format: "category:detail"
       // Map tool names to AGT action categories for policy matching
@@ -1710,14 +2016,36 @@ const azureClawPlugin = definePluginEntry({
               try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); }
             });
           });
-          req.on("error", () => resolve({ allowed: true })); // fail-open if sidecar unreachable
-          req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
+          req.on("error", () => {
+            sidecarFailCount.value++;
+            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT sidecar unreachable (fail-closed)" });
+            } else {
+              log.warn(`AGT sidecar unreachable (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              resolve({ allowed: true });
+            }
+          });
+          req.on("timeout", () => {
+            req.destroy();
+            sidecarFailCount.value++;
+            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT sidecar timeout (fail-closed)" });
+            } else {
+              log.warn(`AGT sidecar timeout (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              resolve({ allowed: true });
+            }
+          });
           req.write(postData);
           req.end();
         });
+        if (result.allowed !== false) sidecarFailCount.value = 0; // reset on success
         return { allowed: result.allowed, rule: result.matched_rule, reason: result.reason };
       } catch {
-        return { allowed: true }; // fail-open
+        sidecarFailCount.value++;
+        if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+          return { allowed: false, reason: "AGT sidecar error (fail-closed)" };
+        }
+        return { allowed: true };
       }
     }
 
@@ -1815,26 +2143,69 @@ const azureClawPlugin = definePluginEntry({
       },
       async execute(_id: string, params: Record<string, unknown>) {
         try {
+          // Build trusted peers list: parent's AMID + all existing siblings
+          // These are parent-verified (from registry lookups), not self-reported
+          const trustedPeers: string[] = [];
+          const myAmid = agtMeshClient?.getAmid?.() || agtIdentity?.amid;
+          const myName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "parent";
+          if (myAmid) trustedPeers.push(`${myName}:${myAmid}`);
+          for (const [amid, name] of amidToName.entries()) {
+            if (amid !== myAmid) trustedPeers.push(`${name}:${amid}`);
+          }
+
           const result = await routerCall("POST", "/sandbox/spawn", {
             name: params.name,
             model: params.model || "gpt-4.1",
             governance: params.governance !== false,
             trust_threshold: 500,
+            trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
           });
 
-          // Auto-wait until the sub-agent is Running (poll spawn_status)
+          // Poll until sub-agent is Running AND registered on mesh (in parallel)
           const agentName = params.name as string;
-          log.info(`Waiting for sub-agent '${agentName}' to reach Running state...`);
+          log.info(`Waiting for sub-agent '${agentName}' to be Running + registered...`);
+
           let phase = "Pending";
-          for (let i = 0; i < 24; i++) { // 24 × 5s = 120s max
-            await new Promise(r => setTimeout(r, 5000));
-            try {
-              const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}`);
-              phase = status?.phase || "Pending";
-              log.info(`Sub-agent '${agentName}' phase: ${phase} (${i + 1}/24)`);
-              if (phase === "Running") break;
-            } catch {
-              // Status endpoint not ready yet — keep polling
+          let amid: string | undefined;
+          const startWait = Date.now();
+          const maxWaitMs = 45_000;
+
+          // Parallel poll: check status AND registry simultaneously
+          while (Date.now() - startWait < maxWaitMs) {
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Status check
+            if (phase !== "Running") {
+              try {
+                const status = await routerCall("GET", `/sandbox/${encodeURIComponent(agentName)}/status`);
+                phase = status?.phase || "Pending";
+              } catch { /* not ready yet */ }
+            }
+
+            // Registry check (start early — sub-agent may register before status reports Running)
+            if (!amid && agtMeshClient) {
+              try {
+                const searchResult = await routerCall("GET",
+                  `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
+                const agents = searchResult?.results || [];
+                const match = agents.find((a: any) =>
+                  a.display_name === agentName || a.capabilities?.includes(agentName)
+                );
+                if (match?.amid) {
+                  amid = match.amid;
+                  nameToAmid.set(agentName, match.amid);
+                  amidToName.set(match.amid, agentName);
+                  log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
+                }
+              } catch { /* registry not ready yet */ }
+            }
+
+            // Both ready — exit early
+            if (phase === "Running" && (amid || !agtMeshClient)) break;
+
+            const elapsed = Math.round((Date.now() - startWait) / 1000);
+            if (elapsed % 5 === 0) {
+              log.info(`Sub-agent '${agentName}': phase=${phase}, mesh=${amid ? "registered" : "waiting"} (${elapsed}s)`);
             }
           }
 
@@ -1845,24 +2216,8 @@ const azureClawPlugin = definePluginEntry({
             }, null, 2) }] };
           }
 
-          // Give the sub-agent a few more seconds to register with the AGT relay
-          await new Promise(r => setTimeout(r, 3000));
-
-          // Pre-discover the sub-agent's AMID so mesh_send doesn't need to search
-          if (agtMeshClient) {
-            try {
-              const searchResult = await routerCall("GET",
-                `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
-              const agents = searchResult?.results || [];
-              const match = agents.find((a: any) =>
-                a.display_name === agentName || a.capabilities?.includes(agentName)
-              );
-              if (match?.amid) {
-                nameToAmid.set(agentName, match.amid);
-                amidToName.set(match.amid, agentName);
-                log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
-              }
-            } catch { /* best effort — mesh_send will retry */ }
+          if (!amid && agtMeshClient) {
+            log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
           }
 
           return { content: [{ type: "text", text: JSON.stringify({
@@ -1930,9 +2285,11 @@ const azureClawPlugin = definePluginEntry({
           }
           try {
             // 1. Discover target agent's AMID via registry search (with retry for boot timing)
-            // Always do a fresh registry lookup — the sub-agent's relay listener restarts
-            // create new AMID identities, so cached AMIDs go stale quickly.
-            let targetAmid: string | undefined;
+            // Check cache first — with container reuse, AMIDs are stable once established.
+            let targetAmid: string | undefined = nameToAmid.get(agentName);
+            if (targetAmid) {
+              log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
+            }
             for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
               if (attempt > 0) {
                   log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
@@ -1995,12 +2352,19 @@ const azureClawPlugin = definePluginEntry({
                   if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
                     log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/8)...`);
                     await new Promise(r => setTimeout(r, 2000));
+                  } else if (e.message?.includes("not found") || e.message?.includes("closed") || e.message?.includes("AGENT_NOT_FOUND")) {
+                    // Stale cached AMID — invalidate and re-discover
+                    log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
+                    nameToAmid.delete(agentName);
+                    amidToName.delete(targetAmid!);
+                    targetAmid = undefined;
+                    break;
                   } else {
                     break; // non-prekey error — don't retry
                   }
                 }
               }
-              if (!sendErr) {
+              if (!sendErr && targetAmid) {
                 log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
                 const messageId = crypto.randomUUID();
                 const sendStart = new Date().toISOString();
@@ -2350,11 +2714,7 @@ const azureClawPlugin = definePluginEntry({
           },
           image_model: {
             type: "string",
-            description: "Image generation model deployment name (default: 'gpt-image-1'). Use 'FLUX.2-pro' or any deployed image model.",
-          },
-          model: {
-            type: "string",
-            description: "Orchestrator model (default: gpt-4.1). Coordinates the image generation.",
+            description: "Image generation model deployment name (default: 'gpt-image-1').",
           },
         },
         required: ["prompt"],
@@ -2364,26 +2724,40 @@ const azureClawPlugin = definePluginEntry({
           const imgModel = (params.image_model as string) || "gpt-image-1";
           const quality = (params.quality as string) || "medium";
           const size = (params.size as string) || "1024x1024";
-          const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
-            model: (params.model as string) || "gpt-4.1",
-            input: params.prompt,
-            tools: [{ type: "image_generation", image_generation: { model: imgModel, quality, size } }],
-            store: false,
-          }, { "x-ms-oai-image-generation-deployment": imgModel });
-          const output = result.output || result;
+          const n = 1;
+
+          // Use the standard OpenAI Images API (POST /images/generations)
+          // The router proxies this to Azure OpenAI: /openai/deployments/{model}/images/generations
+          const result = await _routerCall("POST",
+            `/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
+            { prompt: params.prompt, n, size, quality },
+            90000,
+          );
+
+          // Response format: { data: [{ b64_json: "...", revised_prompt: "..." }] }
+          const images = result?.data || [];
           const parts: string[] = [];
-          if (Array.isArray(output)) {
-            for (const item of output) {
-              if (item.type === "image_generation_call" && item.result) {
-                parts.push(`[Generated image — base64 data ${item.result.length} chars]`);
-              } else if (item.type === "message" && item.content) {
-                for (const c of item.content) {
-                  if (c.type === "output_text" || c.type === "text") parts.push(c.text);
-                }
-              }
+          const fs = await import("node:fs");
+          const nodePath = await import("node:path");
+          const os = await import("node:os");
+          const imgDir = nodePath.join(os.tmpdir(), "azureclaw-images");
+          fs.mkdirSync(imgDir, { recursive: true });
+
+          for (const img of images) {
+            if (img.b64_json) {
+              // Save image to temp file so user can view it
+              const ts = Date.now();
+              const imgFile = nodePath.join(imgDir, `image-${ts}.png`);
+              fs.writeFileSync(imgFile, Buffer.from(img.b64_json, "base64"));
+              parts.push(`📁 Image saved: ${imgFile}`);
+              if (img.revised_prompt) parts.push(`Revised prompt: ${img.revised_prompt}`);
+            } else if (img.url) {
+              parts.push(`![Generated Image](${img.url})`);
+              parts.push(`Image URL: ${img.url}`);
             }
           }
-          return { content: [{ type: "text", text: parts.length > 0 ? parts.join("\n\n") : safeJson(output) }] };
+          if (parts.length === 0) parts.push(safeJson(result));
+          return { content: [{ type: "text", text: parts.join("\n\n") }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Foundry image generation failed: ${e.message}` }] };
         }

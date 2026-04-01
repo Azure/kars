@@ -158,6 +158,10 @@ export async function x25519DH(
   privateKey: Uint8Array,
   publicKey: Uint8Array
 ): Promise<Uint8Array> {
+  if (privateKey.length !== 32 || publicKey.length !== 32) {
+    throw new Error(`Invalid X25519 key length: private=${privateKey.length} public=${publicKey.length}`);
+  }
+
   const privKey = await importX25519PrivateKey(privateKey);
   const pubKey = await importX25519PublicKey(publicKey);
 
@@ -167,7 +171,14 @@ export async function x25519DH(
     256
   );
 
-  return new Uint8Array(sharedBits);
+  const result = new Uint8Array(sharedBits);
+
+  // Check for all-zero DH result (low-order point attack)
+  if (result.every(b => b === 0)) {
+    throw new Error('X25519 DH produced all-zero output — possible low-order point attack');
+  }
+
+  return result;
 }
 
 /**

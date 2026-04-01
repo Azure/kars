@@ -15,6 +15,7 @@ use crate::metrics;
 use std::sync::Arc;
 
 /// Upstream configuration for a single request.
+#[derive(Clone)]
 pub struct UpstreamConfig {
     pub endpoint: String,
     pub deployment: String,
@@ -37,7 +38,7 @@ fn token_audience(endpoint: &str) -> &'static str {
 /// then inject Azure auth.
 fn build_upstream_headers(
     request_headers: &HeaderMap,
-    auth: &WorkloadIdentityAuth,
+    _auth: &WorkloadIdentityAuth,
     token: &str,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
@@ -51,17 +52,12 @@ fn build_upstream_headers(
         }
     }
 
-    if auth.is_api_key_mode() {
-        headers.insert(
-            "api-key",
-            HeaderValue::from_str(token).context("Invalid API key")?,
-        );
-    } else {
-        headers.insert(
-            "authorization",
-            HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
-        );
-    }
+    // Both API-key and Entra modes use Authorization: Bearer for the unified
+    // /openai/v1/ endpoint format. Azure OpenAI accepts API keys as Bearer tokens.
+    headers.insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
+    );
     headers
         .entry("content-type")
         .or_insert(HeaderValue::from_static("application/json"));
@@ -142,6 +138,8 @@ pub async fn forward(
 
     let headers = build_upstream_headers(request_headers, auth, &token)?;
 
+    tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
+
     let response = client
         .request(method, &upstream_url)
         .headers(headers)
@@ -162,7 +160,7 @@ pub async fn forward(
 
     record_metrics(upstream, status, latency, &response_body);
 
-    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), "Foundry complete");
+    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), resp_len = response_body.len(), "Foundry complete");
     Ok((status, response_headers, response_body))
 }
 
@@ -287,43 +285,32 @@ fn inject_stream_usage(body: Bytes) -> Bytes {
 }
 
 /// Build the upstream URL and optionally inject model into request body.
+/// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
 fn build_upstream_url(
-    auth: &WorkloadIdentityAuth,
+    _auth: &WorkloadIdentityAuth,
     upstream: &UpstreamConfig,
     path: &str,
     request_body: Bytes,
 ) -> Result<(String, Bytes)> {
-    if auth.is_api_key_mode() {
-        // Respect model from request body — allows per-request model selection
-        let deployment = serde_json::from_slice::<serde_json::Value>(&request_body)
-            .ok()
-            .and_then(|v| v.get("model")?.as_str().map(String::from))
-            .unwrap_or_else(|| upstream.deployment.clone());
-        let url = format!(
-            "{}/openai/deployments/{}/{}?api-version=2024-12-01-preview",
-            upstream.endpoint.trim_end_matches('/'),
-            deployment,
-            path.trim_start_matches('/'),
-        );
-        Ok((url, request_body))
+    // Use the unified /openai/v1/ format for all modes.
+    // Both API-key (dev) and Entra (AKS) work with Bearer auth on this endpoint.
+    // This supports all models including Responses-only models like gpt-5.4-pro.
+    let url = format!(
+        "{}/openai/v1/{}",
+        upstream.endpoint.trim_end_matches('/'),
+        path.trim_start_matches('/'),
+    );
+    let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
+    {
+        if body_json.get("model").is_none() {
+            body_json.as_object_mut().unwrap().insert(
+                "model".into(),
+                serde_json::Value::String(upstream.deployment.clone()),
+            );
+        }
+        serde_json::to_vec(&body_json)?.into()
     } else {
-        let url = format!(
-            "{}/openai/v1/{}",
-            upstream.endpoint.trim_end_matches('/'),
-            path.trim_start_matches('/'),
-        );
-        let body =
-            if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
-                if body_json.get("model").is_none() {
-                    body_json.as_object_mut().unwrap().insert(
-                        "model".into(),
-                        serde_json::Value::String(upstream.deployment.clone()),
-                    );
-                }
-                serde_json::to_vec(&body_json)?.into()
-            } else {
-                request_body
-            };
-        Ok((url, body))
-    }
+        request_body
+    };
+    Ok((url, body))
 }

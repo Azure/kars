@@ -30,7 +30,6 @@ impl WorkloadIdentityAuth {
         // Try to load API key from secret mount (dev mode), then env var (sub-agent)
         let api_key = std::fs::read_to_string("/run/secrets/azure-openai-key")
             .ok()
-            .or_else(|| std::fs::read_to_string("/tmp/azure-openai-key").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(|| {
@@ -144,9 +143,14 @@ impl WorkloadIdentityAuth {
     }
 
     /// Acquire a token via IMDS (Azure Instance Metadata Service).
-    /// This works on AKS nodes with system/user-assigned managed identities
-    /// and bypasses WI federation + CA policies.
+    /// Only attempted when Workload Identity env vars are present (AKS mode).
+    /// Guarded to prevent sandbox-accessible IMDS token theft.
     async fn imds_token(&self, resource: &str) -> Result<String> {
+        // Only attempt IMDS if WI is configured (proves we're on AKS, not escaped sandbox)
+        if std::env::var("AZURE_TENANT_ID").is_err() {
+            anyhow::bail!("IMDS fallback disabled — AZURE_TENANT_ID not set (not AKS mode)");
+        }
+
         // Use IMDS_CLIENT_ID (kubelet MI) if set, otherwise AZURE_CLIENT_ID (WI MI)
         let client_id = std::env::var("IMDS_CLIENT_ID")
             .or_else(|_| std::env::var("AZURE_CLIENT_ID"))

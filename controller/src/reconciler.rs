@@ -118,6 +118,19 @@ struct Context {
 /// Main reconciliation function — called whenever a ClawSandbox changes.
 async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let name = sandbox.name_any();
+
+    // Validate sandbox name — must be K8s-safe (alphanumeric + hyphens)
+    if name.is_empty()
+        || name.len() > 63
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || !name.as_bytes()[0].is_ascii_alphanumeric()
+    {
+        tracing::error!(sandbox = %name, "Invalid sandbox name — must be lowercase alphanumeric with hyphens");
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+
     let sandbox_ns = format!("azureclaw-{name}");
     let client = &ctx.client;
 
