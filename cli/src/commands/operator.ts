@@ -1602,6 +1602,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const state = {
       name: "", model: "gpt-4.1", isolation: "enhanced",
       channel: "", telegramToken: "", slackToken: "", discordToken: "",
+      telegramAllowFrom: "",
       learnEgress: true,
       cursor: 0, editing: false,
     };
@@ -1612,6 +1613,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       slack: listSecretVariants("slack-token"),
       discord: listSecretVariants("discord-token"),
     };
+    const storedAllowFrom = listSecretVariants("telegram-allow-from");
     const tokenStateKey: Record<string, "telegramToken" | "slackToken" | "discordToken"> = {
       telegram: "telegramToken", slack: "slackToken", discord: "discordToken",
     };
@@ -1620,6 +1622,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       const sk = tokenStateKey[ch];
       if (sk && variants.length === 1) state[sk] = variants[0].value;
     }
+    // Auto-fill allow-from if exactly one variant
+    if (storedAllowFrom.length === 1) state.telegramAllowFrom = storedAllowFrom[0].value;
 
     const isoOpts = ["enhanced", "standard", "confidential"];
     const chOpts = ["", "telegram", "slack", "discord"];
@@ -1627,13 +1631,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const fields = () => {
       const f = ["name", "model", "isolation", "channel"];
       if (state.channel && tokenStateKey[state.channel]) f.push("chtoken");
+      if (state.channel === "telegram") f.push("challowfrom");
       f.push("egress", "launch");
       return f;
     };
 
     const dialog = blessed.box({
       parent: screen, top: "center", left: "center",
-      width: 62, height: 16,
+      width: 62, height: 18,
       border: { type: "line" },
       style: { border: { fg: "cyan" }, fg: "white", bg: "black" },
       label: " 🚀 Spawn New Agent ",
@@ -1641,7 +1646,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     });
 
     const formBox = blessed.box({
-      parent: dialog, top: 0, left: 1, width: 58, height: 12,
+      parent: dialog, top: 0, left: 1, width: 58, height: 14,
       tags: true, style: { fg: "white", bg: "black" },
     });
 
@@ -1663,10 +1668,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           const sk = tokenStateKey[state.channel];
           const tokenVal = sk ? state[sk] : "";
           const variants = storedTokens[state.channel] || [];
-          const masked = tokenVal ? "●●●●" + tokenVal.slice(-4) : "{gray-fg}(press Enter to type){/}";
+          const matchedVariant = variants.find(v => v.value === tokenVal);
+          const display = matchedVariant
+            ? `{green-fg}${matchedVariant.label}{/} (●●●●${tokenVal.slice(-4)})`
+            : tokenVal ? "●●●●" + tokenVal.slice(-4) : "{gray-fg}(press Enter to type){/}";
           const hint = variants.length > 1 ? `  {gray-fg}←→ ${variants.length} stored{/}` : "";
           const label = state.channel.charAt(0).toUpperCase() + state.channel.slice(1);
-          lines.push(`${sel} {bold}${label} Token:{/} ${masked}${hint}`);
+          lines.push(`${sel} {bold}${label} Token:{/} ${display}${hint}`);
+        } else if (f === "challowfrom") {
+          const afVal = state.telegramAllowFrom;
+          const afMatch = storedAllowFrom.find(v => v.value === afVal);
+          const afDisplay = afMatch
+            ? `{green-fg}${afMatch.label}{/} (${afVal.length > 20 ? afVal.slice(0, 17) + "…" : afVal})`
+            : afVal || "{gray-fg}(press Enter to type){/}";
+          const afHint = storedAllowFrom.length > 1 ? `  {gray-fg}←→ ${storedAllowFrom.length} stored{/}` : "";
+          lines.push(`${sel} {bold}Allow From:{/} ${afDisplay}${afHint}`);
         } else if (f === "egress") {
           const val = state.learnEgress ? "{green-fg}learn mode{/}" : "{yellow-fg}deny all{/}";
           lines.push(`${sel} {bold}Egress:{/}     ${val}  {gray-fg}←→{/}`);
@@ -1682,7 +1698,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     function close() { dialog.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50); }
 
-    function startEdit(field: "name" | "model" | "telegramToken" | "slackToken" | "discordToken") {
+    function startEdit(field: "name" | "model" | "telegramToken" | "slackToken" | "discordToken" | "telegramAllowFrom") {
       state.editing = true;
       const input = blessed.textbox({
         parent: dialog, bottom: 0, left: 1, width: 58, height: 1,
@@ -1745,6 +1761,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           if (currentToken && tokenFlag[state.channel]) {
             args.push(tokenFlag[state.channel], currentToken);
           }
+          if (state.channel === "telegram" && state.telegramAllowFrom) {
+            args.push("--telegram-allow-from", state.telegramAllowFrom);
+          }
         }
       } else {
         args = ["add", state.name.trim(), "--model", state.model, "--isolation", state.isolation];
@@ -1753,6 +1772,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           args.push("--channels", state.channel);
           if (currentToken && tokenFlag[state.channel]) {
             args.push(tokenFlag[state.channel], currentToken);
+          }
+          if (state.channel === "telegram" && state.telegramAllowFrom) {
+            args.push("--telegram-allow-from", state.telegramAllowFrom);
           }
         }
       }
@@ -1803,6 +1825,18 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             const idx = variants.findIndex(v => v.value === currentVal);
             const next = variants[(idx + d + variants.length) % variants.length];
             if (sk) state[sk] = next.value;
+            // Auto-correlate: fill matching allow-from variant (e.g. cloud→cloud)
+            if (state.channel === "telegram") {
+              const afMatch = storedAllowFrom.find(v => v.label === next.label);
+              if (afMatch) state.telegramAllowFrom = afMatch.value;
+            }
+          }
+        } else if (f === "challowfrom") {
+          // Cycle through stored allow-from variants with ←→
+          if (storedAllowFrom.length > 1) {
+            const idx = storedAllowFrom.findIndex(v => v.value === state.telegramAllowFrom);
+            const next = storedAllowFrom[(idx + d + storedAllowFrom.length) % storedAllowFrom.length];
+            state.telegramAllowFrom = next.value;
           }
         } else if (f === "egress") {
           state.learnEgress = !state.learnEgress;
@@ -1815,6 +1849,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           const sk = tokenStateKey[state.channel];
           if (sk) startEdit(sk);
         }
+        else if (f === "challowfrom") startEdit("telegramAllowFrom");
         else if (f === "launch") { screen.removeListener("keypress", onKey); launch(); }
         else {
           // Cycle fields advance on Enter too

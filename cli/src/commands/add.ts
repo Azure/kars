@@ -22,6 +22,7 @@ export function addCommand(): Command {
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
     .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
     .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
+    .option("--telegram-allow-from <ids>", "Telegram user IDs allowed to DM (comma-separated numeric IDs)")
     .option("--slack-token <token>", "Slack bot OAuth token")
     .option("--discord-token <token>", "Discord bot token")
     .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
@@ -167,6 +168,12 @@ export function addCommand(): Command {
 
         // Store for secret creation (NOT in CRD spec — entrypoint reads env vars)
         channelEnvSecrets = envSecrets;
+
+        // Telegram allow-from (which user IDs can DM the bot)
+        if (channels.includes("telegram")) {
+          const allowFrom = resolveSecret(options.telegramAllowFrom, "telegram-allow-from");
+          if (allowFrom) channelEnvSecrets["TELEGRAM_ALLOW_FROM"] = allowFrom;
+        }
       }
 
       // Third-party plugin API keys — stored in the same K8s secret as channel tokens.
