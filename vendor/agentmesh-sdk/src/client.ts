@@ -300,18 +300,19 @@ export class AgentMeshClient {
     // Load or generate prekeys
     await this.prekeyManager.loadOrInitialize();
 
-    // Register with the registry
+    // Upload prekeys BEFORE registering — ensures prekey bundle is available
+    // the instant another agent discovers us (eliminates PREKEY_NOT_FOUND race).
+    if (options.autoUploadPrekeys !== false) {
+      await this.uploadPrekeys();
+    }
+
+    // Register with the registry (now prekeys are guaranteed ready)
     const registerOptions: RegisterOptions = {
       displayName: options.displayName,
       capabilities: this.capabilities,
     };
 
     await this.registry.register(this.identity, registerOptions);
-
-    // Upload prekeys
-    if (options.autoUploadPrekeys !== false) {
-      await this.uploadPrekeys();
-    }
 
     // Connect transport
     await this.transport.connect();
