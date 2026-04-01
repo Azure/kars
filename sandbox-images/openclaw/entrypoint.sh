@@ -9,6 +9,14 @@
 
 set -e
 
+# Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)
+if [ -z "$SANDBOX_NAME" ]; then
+  # K8s pod names: <deployment>-<replicaset-hash>-<pod-hash>
+  # Strip the two trailing hash segments to get the deployment name
+  SANDBOX_NAME=$(echo "$HOSTNAME" | sed 's/-[a-z0-9]*-[a-z0-9]*$//')
+  export SANDBOX_NAME
+fi
+
 # Raise FD limit — the inference router and gateway share this process namespace.
 # Default 1024 is too low for long-running containers with many HTTP connections.
 ulimit -n 65536 2>/dev/null || true
@@ -90,6 +98,8 @@ elif [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
   mkdir -p /run/secrets 2>/dev/null || true
   echo -n "$API_KEY" > /run/secrets/azure-openai-key 2>/dev/null || \
     echo -n "$API_KEY" > /tmp/azure-openai-key 2>/dev/null
+  # Restrict permissions on fallback key file
+  chmod 400 /tmp/azure-openai-key 2>/dev/null || true
 fi
 
 # Get config from env vars (set by azureclaw dev/up)
@@ -144,11 +154,19 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
         "authHeader": false,
         "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": ${MODELS_JSON}
+      },
+      "openai": {
+        "baseUrl": "http://127.0.0.1:8443/v1",
+        "apiKey": "routed-via-inference-router",
+        "models": []
       }
     }
   },
   "tools": {
-    "deny": ["sessions_spawn", "sessions_send"]
+    "deny": ["sessions_spawn", "sessions_send"],
+    "exec": {
+      "security": "full"
+    }
   },
   "plugins": {
     "allow": [PLUGINS_ALLOW_PLACEHOLDER],
@@ -157,9 +175,16 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "channels": {
     CHANNELS_PLACEHOLDER
   },
+  "ui": {
+    "assistant": {
+      "name": "${AZURECLAW_DISPLAY_NAME:-AzureClaw}",
+      "avatar": "🐾"
+    }
+  },
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" },
+      "imageGenerationModel": "openai/gpt-image-1",
       "timeoutSeconds": 300,
       "memorySearch": {
         "enabled": true,
@@ -192,7 +217,7 @@ EOF
   #   1. A channel block in channels.* with credentials
   #   2. An entry in plugins.allow so the gateway loads the extension
   PLUGINS_LIST='"azureclaw"'
-  PLUGINS_ENTRIES=""
+  PLUGINS_ENTRIES='"azureclaw": { "enabled": true }'
   CHANNELS_CONFIG=""
 
   # Telegram (built into OpenClaw core, uses grammY)
@@ -277,8 +302,9 @@ EOF
   sed -i '/"_placeholder": false/d' "$OPENCLAW_CONFIG"
 
   # Set provider credentials via environment (OpenClaw reads these automatically)
-  # These are exported so openclaw tui/agent picks them up
-  export AZURE_OPENAI_API_KEY="${API_KEY}"
+  # Read from secret file at runtime — avoid leaking key value in process tree
+  export AZURE_OPENAI_API_KEY
+  AZURE_OPENAI_API_KEY="$(cat /run/secrets/azure-openai-key 2>/dev/null || cat /tmp/azure-openai-key 2>/dev/null)"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
   # AGT governance is always active in AzureClaw sandboxes (enables agt-governance skill)
@@ -555,7 +581,8 @@ if [ -d /opt/azureclaw-plugin ]; then
 fi
 
 # Write gateway token to .bashrc (remove any stale tokens from prior runs first)
-sed -i '/OPENCLAW_GATEWAY_TOKEN/d' /sandbox/.bashrc
+touch /sandbox/.bashrc 2>/dev/null || true
+sed -i '/OPENCLAW_GATEWAY_TOKEN/d' /sandbox/.bashrc 2>/dev/null || true
 echo "export OPENCLAW_GATEWAY_TOKEN=\"${GATEWAY_TOKEN}\"" >> /sandbox/.bashrc
 # Also write to a dedicated file so dev.ts can read it without parsing .bashrc
 echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
@@ -574,6 +601,19 @@ fi
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate sidecar container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+  # Generate admin token BEFORE starting any services that need it
+  ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
+  # Token file readable by both sandbox (UID 1000) and router (UID 1001)
+  echo "$ROUTER_ADMIN_TOKEN" > /tmp/.agt-admin-token
+  if [ "$IS_ROOT" = "true" ]; then
+    chown sandbox:sandbox /tmp/.agt-admin-token
+    chmod 440 /tmp/.agt-admin-token
+    # Add router user to sandbox group so UID 1001 can read the token file
+    adduser router sandbox 2>/dev/null || true
+  else
+    chmod 400 /tmp/.agt-admin-token
+  fi
+
   # ── AGT governance sidecar (dev mode) ─────────────────────────────────────
   # In AKS, the controller injects this as a separate container (UID 1002).
   # In dev mode, we start it here inside the sandbox container.
@@ -594,6 +634,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
     SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
     AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
     AGT_TRUST_DB="/tmp/agt/trust_scores.json" \
+    ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
     $AS_ROUTER python3 /opt/agt-governance/server.py > /tmp/agt-governance.log 2>&1 &
     AGT_PID=$!
     echo "[azureclaw] AGT governance sidecar running (PID: $AGT_PID, port: 8081)"
@@ -607,14 +648,6 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   if [ -S /var/run/docker.sock ] && [ "$IS_ROOT" = "true" ]; then
     chmod 666 /var/run/docker.sock || true
   fi
-  # Generate a random admin token for the router's protected endpoints
-  ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
-  # Share admin token with the plugin (UID 1000) for trust update auth.
-  # Written by root, readable by sandbox — the agent process can also read it,
-  # but the sidecar additionally clamps trust deltas to ±200 and blocks self-updates.
-  echo "$ROUTER_ADMIN_TOKEN" > /tmp/.agt-admin-token
-  [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/.agt-admin-token
-  chmod 400 /tmp/.agt-admin-token
   ROUTER_PORT=8443 \
   ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
@@ -631,7 +664,11 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   DOCKER_NETWORK="${DOCKER_NETWORK:-}" \
   $AS_ROUTER azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
   ROUTER_PID=$!
-  sleep 1
+  # Wait for router to accept connections (replaces blind sleep 1)
+  for _i in $(seq 1 20); do
+    if curl -sf http://127.0.0.1:8443/healthz > /dev/null 2>&1; then break; fi
+    sleep 0.2
+  done
   echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
 else
   echo "[azureclaw] Inference router provided by sidecar (workload-identity mode)"
@@ -659,7 +696,7 @@ for i in $(seq 1 10); do
     echo "[azureclaw] Gateway running (PID: $GATEWAY_PID)"
     break
   fi
-  sleep 1
+  sleep 0.5
 done
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
@@ -687,14 +724,8 @@ HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
 NODE_PID=$!
 echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 
-# Auto-approve all exec requests — no manual approval in headless sandbox.
-# The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
-# Use timeout to prevent hanging (the command sometimes blocks on gateway connection).
-# Run in background so the entrypoint continues to the relay listener section.
-(
-  sleep 2  # Give gateway a moment to stabilize
-  echo '{ "mode": "auto-approve" }' | AGT_SKIP_INIT=1 timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
-) &
+# Exec approvals are disabled via openclaw.json config (tools.exec.security=full).
+# AGT governance is the sole policy authority — no need for OpenClaw's exec approval layer.
 
 # The AGT relay listener is NOT needed as a separate process.
 # The plugin running inside the gateway already handles incoming mesh messages:

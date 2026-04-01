@@ -144,6 +144,15 @@ fn is_ipv6_private(v6: &Ipv6Addr) -> bool {
     })
 }
 
+/// Truncate domain for safe logging — prevents log flooding from excessively long domains.
+fn safe_domain(domain: &str) -> String {
+    if domain.len() <= 100 {
+        domain.to_string()
+    } else {
+        format!("{}…[truncated, len={}]", &domain[..100], domain.len())
+    }
+}
+
 /// Resolve a domain and validate the result is not a private IP.
 /// Returns the resolved socket address string (ip:port) on success.
 /// On private IP detection, records the block in the blocklist pending queue.
@@ -253,11 +262,12 @@ async fn handle_connect(
     sandbox: &str,
 ) -> anyhow::Result<()> {
     let (domain, port) = parse_host_port(target, 443);
+    let log_dom = safe_domain(&domain);
 
-    tracing::info!(domain = %domain, port = port, "CONNECT request");
+    tracing::info!(domain = %log_dom, port = port, "CONNECT request");
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
-        tracing::warn!(domain = %domain, reason = %reason, "CONNECT blocked");
+        tracing::warn!(domain = %log_dom, reason = %reason, "CONNECT blocked");
         send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
         return Ok(());
     }
@@ -266,7 +276,7 @@ async fn handle_connect(
     let resolved = match resolve_and_validate(&domain, port, blocklist, sandbox).await {
         Ok(addr) => addr,
         Err(e) => {
-            tracing::warn!(domain = %domain, error = %e, "CONNECT: DNS validation failed");
+            tracing::warn!(domain = %log_dom, error = %e, "CONNECT: DNS validation failed");
             send_response(&mut stream, 502, "DNS validation failed").await?;
             return Ok(());
         }
@@ -322,11 +332,12 @@ async fn handle_http(
         send_response(&mut stream, 400, "Missing Host header").await?;
         return Ok(());
     }
+    let log_dom = safe_domain(&domain);
 
-    tracing::info!(domain = %domain, "HTTP proxy request");
+    tracing::info!(domain = %log_dom, "HTTP proxy request");
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
-        tracing::warn!(domain = %domain, reason = %reason, "HTTP blocked");
+        tracing::warn!(domain = %log_dom, reason = %reason, "HTTP blocked");
         send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
         return Ok(());
     }
@@ -336,7 +347,7 @@ async fn handle_http(
     let resolved = match resolve_and_validate(&host, port, blocklist, sandbox).await {
         Ok(addr) => addr,
         Err(e) => {
-            tracing::warn!(domain = %domain, error = %e, "HTTP: DNS validation failed");
+            tracing::warn!(domain = %log_dom, error = %e, "HTTP: DNS validation failed");
             send_response(&mut stream, 502, "DNS validation failed").await?;
             return Ok(());
         }
@@ -411,10 +422,11 @@ async fn handle_tls_redirect(
         return Ok(());
     }
 
-    tracing::info!(domain = %domain, "TLS redirect (SNI)");
+    let log_dom = safe_domain(&domain);
+    tracing::info!(domain = %log_dom, "TLS redirect (SNI)");
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
-        tracing::warn!(domain = %domain, reason = %reason, "TLS blocked (SNI)");
+        tracing::warn!(domain = %log_dom, reason = %reason, "TLS blocked (SNI)");
         return Ok(());
     }
 
@@ -422,7 +434,7 @@ async fn handle_tls_redirect(
     let resolved = match resolve_and_validate(&domain, 443, blocklist, sandbox).await {
         Ok(addr) => addr,
         Err(e) => {
-            tracing::warn!(domain = %domain, error = %e, "TLS redirect: DNS validation failed");
+            tracing::warn!(domain = %log_dom, error = %e, "TLS redirect: DNS validation failed");
             return Ok(());
         }
     };

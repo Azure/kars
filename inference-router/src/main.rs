@@ -71,6 +71,24 @@ async fn main() -> Result<()> {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .or_else(|| std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()))
+            .or_else(|| {
+                // Auto-generate a random admin token when none is configured.
+                // This ensures admin endpoints are always protected.
+                let mut buf = [0u8; 32];
+                if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+                    use std::io::Read;
+                    if f.read_exact(&mut buf).is_ok() {
+                        let token: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+                        tracing::warn!(
+                            "ADMIN_TOKEN not configured — auto-generated a random token. \
+                             Set ADMIN_TOKEN explicitly in production."
+                        );
+                        return Some(token);
+                    }
+                }
+                tracing::error!("Failed to generate random admin token from /dev/urandom");
+                None
+            })
             .map(Arc::new);
 
     let app = {
@@ -97,7 +115,8 @@ async fn main() -> Result<()> {
                 admin_auth_middleware(token, req, next)
             }))
         } else {
-            tracing::warn!("ADMIN_TOKEN not set — sensitive endpoints are unauthenticated");
+            // Unreachable — auto-generated token above guarantees Some
+            tracing::error!("ADMIN_TOKEN is None — this should be unreachable");
             protected
         };
 

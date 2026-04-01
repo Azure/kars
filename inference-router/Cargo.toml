@@ -49,3 +49,4 @@ tokio-tungstenite = "0.26"
 # Kubernetes (for sub-agent spawn via CRD)
 kube.workspace = true
 k8s-openapi.workspace = true
+tokio-stream = "0.1.18"

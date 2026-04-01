@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { ensureCredentials, CREDENTIALS_FILE } from "../config.js";
+import { ensureCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -337,6 +337,34 @@ export function devCommand(): Command {
           : [];
 
         stepper.update("Launching container...");
+
+        // Parse channel variants: "telegram.cloud" → base "telegram", suffix "cloud"
+        // Used to resolve the correct dot-suffixed secret (e.g. telegram-token.cloud)
+        const channelVariants: Record<string, string | undefined> = {};
+        if (options.channels) {
+          for (const ch of String(options.channels).split(",")) {
+            const dotIdx = ch.indexOf(".");
+            if (dotIdx > 0) {
+              channelVariants[ch.slice(0, dotIdx)] = ch.slice(dotIdx); // e.g. ".cloud"
+            } else {
+              channelVariants[ch] = undefined;
+            }
+          }
+          // Rewrite --channels to base names for the entrypoint
+          options.channels = Object.keys(channelVariants).join(",");
+        }
+
+        // Resolve a channel token, respecting dot-suffix variants from --channels
+        const resolveChannelToken = (flagValue: string | undefined, baseKey: string, channel: string): string | undefined => {
+          if (flagValue) return flagValue;
+          const suffix = channelVariants[channel];
+          if (suffix) {
+            const suffixed = getSecret(baseKey + suffix);
+            if (suffixed) return suffixed;
+          }
+          return resolveSecret(undefined, baseKey);
+        };
+
         // AGT network args: connect sandbox to the shared Docker network
         // so the router can reach relay/registry by container hostname
         const networkArgs = options.agt ? ["--network", AGT_NETWORK] : [];
@@ -387,19 +415,19 @@ export function devCommand(): Command {
           // Learn mode on by default in dev — records all egress domains for review
           "-e", "EGRESS_LEARN_MODE=true",
           ...agtEnvArgs,
-          // Channel tokens: CLI flags take priority, fall back to host env vars
-          ...((options.telegramToken || process.env.TELEGRAM_BOT_TOKEN) ? ["-e", `TELEGRAM_BOT_TOKEN=${options.telegramToken || process.env.TELEGRAM_BOT_TOKEN}`] : []),
-          ...((options.telegramAllowFrom || process.env.TELEGRAM_ALLOW_FROM) ? ["-e", `TELEGRAM_ALLOW_FROM=${options.telegramAllowFrom || process.env.TELEGRAM_ALLOW_FROM}`] : []),
-          ...((options.slackToken || process.env.SLACK_BOT_TOKEN) ? ["-e", `SLACK_BOT_TOKEN=${options.slackToken || process.env.SLACK_BOT_TOKEN}`] : []),
-          ...((options.discordToken || process.env.DISCORD_BOT_TOKEN) ? ["-e", `DISCORD_BOT_TOKEN=${options.discordToken || process.env.DISCORD_BOT_TOKEN}`] : []),
+          // Channel tokens: CLI flag > variant from --channels > secrets.json > host env var
+          ...(resolveChannelToken(options.telegramToken, "telegram-token", "telegram") ? ["-e", `TELEGRAM_BOT_TOKEN=${resolveChannelToken(options.telegramToken, "telegram-token", "telegram")}`] : []),
+          ...(resolveSecret(options.telegramAllowFrom, "telegram-allow-from") ? ["-e", `TELEGRAM_ALLOW_FROM=${resolveSecret(options.telegramAllowFrom, "telegram-allow-from")}`] : []),
+          ...(resolveChannelToken(options.slackToken, "slack-token", "slack") ? ["-e", `SLACK_BOT_TOKEN=${resolveChannelToken(options.slackToken, "slack-token", "slack")}`] : []),
+          ...(resolveChannelToken(options.discordToken, "discord-token", "discord") ? ["-e", `DISCORD_BOT_TOKEN=${resolveChannelToken(options.discordToken, "discord-token", "discord")}`] : []),
           ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
-          // Third-party plugin API keys: CLI flags take priority, fall back to host env vars
-          ...((options.braveApiKey || process.env.BRAVE_API_KEY) ? ["-e", `BRAVE_API_KEY=${options.braveApiKey || process.env.BRAVE_API_KEY}`] : []),
-          ...((options.tavilyApiKey || process.env.TAVILY_API_KEY) ? ["-e", `TAVILY_API_KEY=${options.tavilyApiKey || process.env.TAVILY_API_KEY}`] : []),
-          ...((options.exaApiKey || process.env.EXA_API_KEY) ? ["-e", `EXA_API_KEY=${options.exaApiKey || process.env.EXA_API_KEY}`] : []),
-          ...((options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY) ? ["-e", `FIRECRAWL_API_KEY=${options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY}`] : []),
-          ...((options.perplexityApiKey || process.env.PERPLEXITY_API_KEY) ? ["-e", `PERPLEXITY_API_KEY=${options.perplexityApiKey || process.env.PERPLEXITY_API_KEY}`] : []),
-          ...((options.openaiApiKey || process.env.OPENAI_API_KEY) ? ["-e", `OPENAI_API_KEY=${options.openaiApiKey || process.env.OPENAI_API_KEY}`] : []),
+          // Third-party plugin API keys: CLI flag > secrets.json > host env var
+          ...(resolveSecret(options.braveApiKey, "brave-api-key") ? ["-e", `BRAVE_API_KEY=${resolveSecret(options.braveApiKey, "brave-api-key")}`] : []),
+          ...(resolveSecret(options.tavilyApiKey, "tavily-api-key") ? ["-e", `TAVILY_API_KEY=${resolveSecret(options.tavilyApiKey, "tavily-api-key")}`] : []),
+          ...(resolveSecret(options.exaApiKey, "exa-api-key") ? ["-e", `EXA_API_KEY=${resolveSecret(options.exaApiKey, "exa-api-key")}`] : []),
+          ...(resolveSecret(options.firecrawlApiKey, "firecrawl-api-key") ? ["-e", `FIRECRAWL_API_KEY=${resolveSecret(options.firecrawlApiKey, "firecrawl-api-key")}`] : []),
+          ...(resolveSecret(options.perplexityApiKey, "perplexity-api-key") ? ["-e", `PERPLEXITY_API_KEY=${resolveSecret(options.perplexityApiKey, "perplexity-api-key")}`] : []),
+          ...(resolveSecret(options.openaiApiKey, "openai-api-key") ? ["-e", `OPENAI_API_KEY=${resolveSecret(options.openaiApiKey, "openai-api-key")}`] : []),
           image,
         ], { stdio: "pipe" });
 

@@ -40,6 +40,9 @@ pub struct AppState {
     pub model_override: Arc<std::sync::RwLock<Option<String>>>,
     /// Admin token for sensitive mutations (trust updates). None = no auth required.
     pub admin_token: Option<Arc<String>>,
+    /// Models that don't support chat/completions (need Responses API).
+    /// Populated on first 400 "unsupported" — avoids redundant round-trips.
+    pub responses_only_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -98,6 +101,9 @@ impl AppState {
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),
+            responses_only_models: Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             admin_token: std::fs::read_to_string("/run/secrets/admin-token")
                 .or_else(|_| std::env::var("ADMIN_TOKEN"))
                 .ok()
@@ -138,9 +144,17 @@ pub fn inference_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
+        .route("/v1/responses", post(responses))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/models", get(list_models))
         .route("/v1/deployments", get(list_deployments))
+        // Image generation (gpt-image-1, DALL-E, etc.)
+        .route(
+            "/openai/deployments/{deployment}/images/generations",
+            post(images_generations),
+        )
+        // OpenAI-compatible endpoint: extracts model from body, defaults to gpt-image-1
+        .route("/v1/images/generations", post(images_generations_v1))
 }
 
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
@@ -353,6 +367,14 @@ async fn chat_completions(
     let sandbox_name = headers
         .get("x-azureclaw-sandbox")
         .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            // Validate against K8s name rules: lowercase alphanumeric + hyphens, max 63 chars
+            !v.is_empty()
+                && v.len() <= 63
+                && v.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && v.as_bytes()[0].is_ascii_alphanumeric()
+        })
         .unwrap_or("unknown");
 
     // Foundry guardrails (DefaultV2) handle content safety and prompt shields
@@ -400,8 +422,24 @@ async fn chat_completions(
                 tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
             }
             Err(e) => {
-                // Sidecar unreachable — fail open (don't block inference)
-                tracing::warn!(sandbox = %sandbox_name, error = %e, "AGT sidecar unreachable, skipping policy check");
+                if state.sidecar.should_fail_closed() {
+                    tracing::error!(sandbox = %sandbox_name, error = %e,
+                        "AGT sidecar unreachable (fail-closed) — blocking inference");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "Governance sidecar unavailable — inference blocked (fail-closed)",
+                                "type": "governance_unavailable",
+                                "code": "sidecar_unreachable"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+                // Grace window — fail-open for first few failures (cold start)
+                tracing::warn!(sandbox = %sandbox_name, error = %e,
+                    "AGT sidecar unreachable, allowing request (grace window)");
             }
         }
     }
@@ -425,6 +463,146 @@ async fn chat_completions(
     // Forward to Foundry
     let upstream = state.upstream_config(sandbox_name);
 
+    // Check if this model is known to require Responses API (cached from prior 400s)
+    let model_name = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(String::from))
+        .unwrap_or_else(|| upstream.deployment.clone());
+    let is_responses_only = state
+        .responses_only_models
+        .read()
+        .ok()
+        .map(|set| set.contains(&model_name))
+        .unwrap_or(false);
+
+    if is_responses_only {
+        // Skip chat/completions — go directly to Responses API.
+        // Use a streaming response body with SSE keepalive comments to prevent
+        // client timeouts while the Responses API processes (30-50s for reasoning models).
+        tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using cached Responses API path");
+        let responses_body = chat_to_responses_body(&body);
+
+        let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("stream")?.as_bool())
+            .unwrap_or(false);
+
+        if is_stream {
+            // Stream keepalive comments while the Responses API call is in progress,
+            // then send the converted result as a single SSE data frame.
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+            let auth = state.auth.clone();
+            let client = state.client.clone();
+            let upstream = upstream.clone();
+            let headers = headers.clone();
+            let budget = state.budget.clone();
+            let sandbox_owned = sandbox_name.to_string();
+
+            tokio::spawn(async move {
+                // Send keepalive comments every 5 seconds while waiting
+                let forward_fut = proxy::forward(
+                    &auth,
+                    &client,
+                    &upstream,
+                    axum::http::Method::POST,
+                    "responses",
+                    &headers,
+                    responses_body,
+                );
+
+                let keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                tokio::pin!(forward_fut);
+                tokio::pin!(keepalive_interval);
+
+                let result = loop {
+                    tokio::select! {
+                        res = &mut forward_fut => { break res; }
+                        _ = keepalive_interval.tick() => {
+                            // SSE comment — keeps connection alive, ignored by SSE parsers
+                            let _ = tx.send(Ok(bytes::Bytes::from(": keepalive\n\n"))).await;
+                        }
+                    }
+                };
+
+                match result {
+                    Ok((_resp_status, _, resp_body)) => {
+                        let chat_body = responses_to_chat_body(&resp_body);
+                        if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                            && let Some(total) = bj
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|v| v.as_u64())
+                        {
+                            budget.record_usage(&sandbox_owned, total).await;
+                        }
+                        let sse_data = format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            String::from_utf8_lossy(&chat_body)
+                        );
+                        let _ = tx.send(Ok(bytes::Bytes::from(sse_data))).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(sandbox = %sandbox_owned, "Responses API error: {e:#}");
+                        let err_sse = format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({"error":{"message":"Failed to reach inference backend","type":"proxy_error"}})
+                        );
+                        let _ = tx.send(Ok(bytes::Bytes::from(err_sse))).await;
+                    }
+                }
+            });
+
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            let body = Body::from_stream(stream);
+            let mut response = (StatusCode::OK, body).into_response();
+            response.headers_mut().insert(
+                "content-type",
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            response.headers_mut().insert(
+                "cache-control",
+                axum::http::HeaderValue::from_static("no-cache"),
+            );
+            return response;
+        }
+
+        // Non-streaming: buffered request/response (no timeout concern)
+        match proxy::forward(
+            &state.auth,
+            &state.client,
+            &upstream,
+            axum::http::Method::POST,
+            "responses",
+            &headers,
+            responses_body,
+        )
+        .await
+        {
+            Ok((resp_status, resp_hdrs, resp_body)) => {
+                let chat_body = responses_to_chat_body(&resp_body);
+                if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                    && let Some(total) = bj
+                        .get("usage")
+                        .and_then(|u| u.get("total_tokens"))
+                        .and_then(|v| v.as_u64())
+                {
+                    state.budget.record_usage(sandbox_name, total).await;
+                }
+                let mut response = (resp_status, Body::from(chat_body)).into_response();
+                if let Some(ct) = resp_hdrs.get("content-type") {
+                    response.headers_mut().insert("content-type", ct.clone());
+                }
+                return response;
+            }
+            Err(e) => {
+                tracing::error!(sandbox = %sandbox_name, "Responses API error: {e:#}");
+                return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                    "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                }))).into_response();
+            }
+        }
+    }
+
     // Check if client requested streaming
     let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
@@ -438,14 +616,89 @@ async fn chat_completions(
         match proxy::forward_stream(
             state.auth.clone(),
             state.client.clone(),
-            upstream,
+            upstream.clone(),
             "chat/completions",
             headers.clone(),
-            body,
+            body.clone(),
         )
         .await
         {
+            Ok((status, _resp_headers, stream)) if status == StatusCode::BAD_REQUEST => {
+                // Might be a Responses-only model — buffer the error and check
+                use futures::TryStreamExt;
+                let err_bytes: Vec<u8> = stream
+                    .try_fold(Vec::new(), |mut acc, chunk| async move {
+                        acc.extend_from_slice(&chunk);
+                        Ok(acc)
+                    })
+                    .await
+                    .unwrap_or_default();
+                let is_unsupported = serde_json::from_slice::<serde_json::Value>(&err_bytes)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("error")?
+                            .get("message")?
+                            .as_str()
+                            .map(|s| s.contains("unsupported"))
+                    })
+                    .unwrap_or(false);
+
+                if is_unsupported {
+                    // Cache this model as Responses-only to skip future chat/completions attempts
+                    if let Ok(mut set) = state.responses_only_models.write() {
+                        set.insert(model_name.clone());
+                        tracing::info!(model = %model_name, "Cached as Responses-only model");
+                    }
+                    // Fallback: convert to Responses API, return result as single SSE frame
+                    tracing::info!(sandbox = %sandbox_name, "Streaming chat/completions unsupported, falling back to Responses API");
+                    let responses_body = chat_to_responses_body(&body);
+                    match proxy::forward(
+                        &state.auth,
+                        &state.client,
+                        &upstream,
+                        axum::http::Method::POST,
+                        "responses",
+                        &headers,
+                        responses_body,
+                    )
+                    .await
+                    {
+                        Ok((resp_status, _, resp_body)) => {
+                            let chat_body = responses_to_chat_body(&resp_body);
+                            if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                                && let Some(total) = bj
+                                    .get("usage")
+                                    .and_then(|u| u.get("total_tokens"))
+                                    .and_then(|v| v.as_u64())
+                            {
+                                state.budget.record_usage(sandbox_name, total).await;
+                            }
+                            // Wrap as SSE so the streaming client can parse it
+                            let sse = format!(
+                                "data: {}\n\ndata: [DONE]\n\n",
+                                String::from_utf8_lossy(&chat_body)
+                            );
+                            let mut response = (resp_status, Body::from(sse)).into_response();
+                            response.headers_mut().insert(
+                                "content-type",
+                                axum::http::HeaderValue::from_static("text/event-stream"),
+                            );
+                            response
+                        }
+                        Err(e) => {
+                            tracing::error!(sandbox = %sandbox_name, "Responses fallback error: {e:#}");
+                            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                                "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                            }))).into_response()
+                        }
+                    }
+                } else {
+                    // Genuine 400 error — return as-is
+                    (StatusCode::BAD_REQUEST, Body::from(err_bytes)).into_response()
+                }
+            }
             Ok((status, resp_headers, stream)) => {
+                tracing::info!(sandbox = %sandbox_owned, status = %status.as_u16(), "Stream response status");
                 // Wrap stream to intercept the first SSE chunk for guardrail
                 // annotations and the final chunk for token usage.
                 let sidecar_for_stream = state.sidecar.clone();
@@ -520,11 +773,69 @@ async fn chat_completions(
             axum::http::Method::POST,
             "chat/completions",
             &headers,
-            body,
+            body.clone(),
         )
         .await;
 
         match result {
+            Ok((status, _resp_headers, resp_body))
+                if status == StatusCode::BAD_REQUEST
+                    && serde_json::from_slice::<serde_json::Value>(&resp_body)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("error")?
+                                .get("message")?
+                                .as_str()
+                                .map(|s| s.contains("unsupported"))
+                        })
+                        .unwrap_or(false) =>
+            {
+                // Model doesn't support chat/completions — auto-fallback to Responses API.
+                // Cache this model to skip future chat/completions attempts.
+                if let Ok(mut set) = state.responses_only_models.write() {
+                    set.insert(model_name.clone());
+                    tracing::info!(model = %model_name, "Cached as Responses-only model");
+                }
+                // Convert messages → input and proxy to /openai/v1/responses.
+                tracing::info!(sandbox = %sandbox_name, "chat/completions unsupported, falling back to Responses API");
+                let responses_body = chat_to_responses_body(&body);
+                match proxy::forward(
+                    &state.auth,
+                    &state.client,
+                    &upstream,
+                    axum::http::Method::POST,
+                    "responses",
+                    &headers,
+                    responses_body,
+                )
+                .await
+                {
+                    Ok((resp_status, resp_hdrs, resp_body)) => {
+                        // Convert Responses API output back to chat/completions format
+                        let chat_body = responses_to_chat_body(&resp_body);
+                        if let Ok(body_json) =
+                            serde_json::from_slice::<serde_json::Value>(&chat_body)
+                            && let Some(total) = body_json
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|v| v.as_u64())
+                        {
+                            state.budget.record_usage(sandbox_name, total).await;
+                        }
+                        let mut response = (resp_status, Body::from(chat_body)).into_response();
+                        if let Some(ct) = resp_hdrs.get("content-type") {
+                            response.headers_mut().insert("content-type", ct.clone());
+                        }
+                        response
+                    }
+                    Err(e) => {
+                        tracing::error!(sandbox = %sandbox_name, "Responses fallback proxy error: {e:#}");
+                        (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                            "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
+                        }))).into_response()
+                    }
+                }
+            }
             Ok((status, resp_headers, resp_body)) => {
                 // Record token usage from response for budget tracking
                 if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
@@ -662,6 +973,132 @@ async fn completions(
     }
 }
 
+/// POST /v1/responses — Responses API for reasoning and Responses-only models.
+/// Proxies to Azure OpenAI /openai/v1/responses.
+async fn responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sandbox_name = headers
+        .get("x-azureclaw-sandbox")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 63
+                && v.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && v.as_bytes()[0].is_ascii_alphanumeric()
+        })
+        .unwrap_or("unknown");
+
+    // AGT policy check
+    if state.sidecar.enabled {
+        let model = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("model")?.as_str().map(String::from))
+            .unwrap_or_default();
+        let eval_body = serde_json::json!({
+            "action": format!("inference:responses:{}", model),
+            "context": { "sandbox": sandbox_name, "model": model }
+        });
+        match state
+            .sidecar
+            .forward("POST", "/evaluate", Some(&eval_body))
+            .await
+        {
+            Ok((status, json)) if status == 403 => {
+                let reason = json
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("policy denied");
+                tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED responses inference");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!("Blocked by governance policy: {}", reason),
+                            "type": "policy_violation",
+                            "code": "policy_denied"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                if state.sidecar.should_fail_closed() {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "Governance sidecar unavailable — inference blocked (fail-closed)",
+                                "type": "governance_unavailable"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+                tracing::warn!(sandbox = %sandbox_name, error = %e,
+                    "AGT sidecar unreachable, allowing responses request (grace window)");
+            }
+        }
+    }
+
+    // Budget check
+    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(
+                serde_json::json!({ "error": { "message": msg, "type": "token_budget_exceeded" } }),
+            ),
+        )
+            .into_response();
+    }
+
+    let upstream = state.upstream_config(sandbox_name);
+    tracing::info!(sandbox = %sandbox_name, model = %upstream.deployment, "Responses API request");
+
+    match proxy::forward(
+        &state.auth,
+        &state.client,
+        &upstream,
+        axum::http::Method::POST,
+        "responses",
+        &headers,
+        body,
+    )
+    .await
+    {
+        Ok((status, resp_headers, resp_body)) => {
+            // Record token usage
+            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
+                && let Some(total) = body_json
+                    .get("usage")
+                    .and_then(|u| u.get("total_tokens"))
+                    .and_then(|v| v.as_u64())
+            {
+                state.budget.record_usage(sandbox_name, total).await;
+            }
+            let mut response = (status, Body::from(resp_body)).into_response();
+            if let Some(ct) = resp_headers.get("content-type") {
+                response.headers_mut().insert("content-type", ct.clone());
+            }
+            response
+        }
+        Err(e) => {
+            tracing::error!(sandbox = %sandbox_name, "Responses proxy error: {e:#}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "message": "Failed to reach inference backend", "type": "proxy_error" }
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn embeddings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -701,6 +1138,121 @@ async fn embeddings(
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
+}
+
+/// POST /openai/deployments/{deployment}/images/generations — image generation proxy.
+/// Forwards to Azure OpenAI's images API (gpt-image-1, DALL-E, etc.)
+async fn images_generations(
+    State(state): State<AppState>,
+    Path(deployment): Path<String>,
+    headers: HeaderMap,
+    _query: axum::extract::RawQuery,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sandbox_name = headers
+        .get("x-azureclaw-sandbox")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("self");
+
+    // AGT policy check — image generation is a tool invocation
+    if state.sidecar.enabled {
+        let action = format!("image_generation:{}", deployment);
+        match state
+            .sidecar
+            .forward(
+                "POST",
+                "/evaluate",
+                Some(&serde_json::json!({"action": action, "agent_id": sandbox_name})),
+            )
+            .await
+        {
+            Ok((_, decision))
+                if decision.get("allowed") == Some(&serde_json::Value::Bool(false)) =>
+            {
+                let reason = decision
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("policy denied");
+                tracing::warn!(sandbox = sandbox_name, deployment = %deployment, "Image generation denied: {}", reason);
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": {"message": format!("Image generation denied by policy: {}", reason)}})),
+                )
+                    .into_response();
+            }
+            _ => {}
+        }
+    }
+
+    let mut upstream = state.upstream_config(sandbox_name);
+    upstream.deployment = deployment.clone();
+
+    // Unified format: proxy builds {endpoint}/openai/v1/images/generations
+    // Model (deployment) is injected into request body automatically
+    let api_path = "images/generations";
+
+    tracing::info!(
+        sandbox = sandbox_name,
+        deployment = %deployment,
+        "Image generation request"
+    );
+
+    match proxy::forward(
+        &state.auth,
+        &state.client,
+        &upstream,
+        axum::http::Method::POST,
+        api_path,
+        &headers,
+        body,
+    )
+    .await
+    {
+        Ok((status, _, resp_body)) => {
+            tracing::info!(
+                sandbox = sandbox_name,
+                deployment = %deployment,
+                status = %status,
+                "Image generation complete"
+            );
+            (status, Body::from(resp_body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(deployment = %deployment, "Image generation proxy error: {e:#}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": {"message": format!("Image generation proxy error: {e}")}})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /v1/images/generations — OpenAI-compatible image generation endpoint.
+/// Translates OpenAI-format requests to Azure OpenAI format: extracts `model` for the
+/// deployment path and strips parameters Azure doesn't accept (response_format, model).
+async fn images_generations_v1(
+    state: State<AppState>,
+    headers: HeaderMap,
+    query: axum::extract::RawQuery,
+    body: Bytes,
+) -> impl IntoResponse {
+    let mut parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+    let deployment = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("gpt-image-1")
+        .to_string();
+    // Strip params Azure doesn't accept — it uses deployment in URL (not body)
+    // and returns b64_json by default (response_format is rejected as unknown)
+    if let Some(obj) = parsed.as_object_mut() {
+        obj.remove("model");
+        obj.remove("response_format");
+    }
+    let patched_body = Bytes::from(serde_json::to_vec(&parsed).unwrap_or_default());
+
+    images_generations(state, Path(deployment), headers, query, patched_body).await
 }
 
 async fn healthz() -> &'static str {
@@ -1639,6 +2191,29 @@ async fn agt_registry_proxy(
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
+    // Allowlist valid registry API paths — prevent path traversal.
+    // Paths arrive as the wildcard after /agt/registry/, e.g. "registry/search".
+    let valid_prefixes = [
+        "registry/",
+        "lookup",
+        "search",
+        "register",
+        "prekeys",
+        "heartbeat",
+        "agents",
+        "health",
+        "sessions",
+    ];
+    let path_valid =
+        valid_prefixes.iter().any(|prefix| path.starts_with(prefix)) && !path.contains("..");
+    if !path_valid {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid registry path"})),
+        )
+            .into_response();
+    }
+
     let mut url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
     // Forward query parameters (critical for search/lookup)
     if let Some(qs) = query.0 {
@@ -2130,7 +2705,14 @@ async fn sandbox_spawn(
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "AGT sidecar unreachable, skipping spawn policy check");
+                if state.sidecar.should_fail_closed() {
+                    tracing::error!(error = %e, "AGT sidecar unreachable (fail-closed) — blocking spawn");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({ "error": "Governance sidecar unavailable — spawn blocked (fail-closed)" })),
+                    ).into_response();
+                }
+                tracing::warn!(error = %e, "AGT sidecar unreachable, allowing spawn (grace window)");
             }
         }
     }
@@ -2208,5 +2790,468 @@ async fn sandbox_delete(
             Json(serde_json::json!({ "error": msg })),
         )
             .into_response(),
+    }
+}
+
+// ── Chat ↔ Responses format translation ────────────────────────────────────
+
+/// Convert a chat/completions request body to Responses API format.
+/// messages[] → input, max_completion_tokens → max_output_tokens
+fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
+    let Ok(mut body) = serde_json::from_slice::<serde_json::Value>(chat_body) else {
+        return chat_body.clone();
+    };
+    let obj = match body.as_object_mut() {
+        Some(o) => o,
+        None => return chat_body.clone(),
+    };
+
+    // Convert chat messages to Responses API input format.
+    //
+    // Chat format:
+    //   {"role":"user","content":"text"}
+    //   {"role":"assistant","content":null,"tool_calls":[{id,type,function:{name,arguments}}]}
+    //   {"role":"tool","tool_call_id":"...","content":"result"}
+    //
+    // Responses API format:
+    //   {"type":"message","role":"user","content":[{"type":"input_text","text":"..."}]}
+    //   {"type":"function_call","name":"...","arguments":"...","call_id":"..."}
+    //   {"type":"function_call_output","call_id":"...","output":"..."}
+    if let Some(messages) = obj.remove("messages") {
+        if let Some(msgs) = messages.as_array() {
+            let mut converted: Vec<serde_json::Value> = Vec::new();
+            for msg in msgs {
+                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+
+                match role {
+                    "tool" => {
+                        // Tool result → function_call_output
+                        let call_id = msg
+                            .get("tool_call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let output = msg
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        converted.push(serde_json::json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": output
+                        }));
+                    }
+                    "assistant"
+                        if msg
+                            .get("tool_calls")
+                            .and_then(|v| v.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false) =>
+                    {
+                        // Assistant with tool_calls → function_call items
+                        // First emit any text content as a message
+                        if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                            if !content.is_empty() {
+                                converted.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": content}]
+                                }));
+                            }
+                        }
+                        // Then emit each tool call as a function_call item
+                        for tc in msg["tool_calls"].as_array().unwrap() {
+                            let call_id = tc
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = tc
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = tc
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("{}")
+                                .to_string();
+                            converted.push(serde_json::json!({
+                                "type": "function_call",
+                                "name": name,
+                                "arguments": arguments,
+                                "call_id": call_id
+                            }));
+                        }
+                    }
+                    _ => {
+                        // Regular message (user/assistant/system/developer)
+                        let resp_role = if role == "system" { "developer" } else { role };
+                        let content = if let Some(arr) =
+                            msg.get("content").and_then(|c| c.as_array())
+                        {
+                            // Array content — convert type names
+                            let items: Vec<serde_json::Value> = arr
+                                .iter()
+                                .map(|item| {
+                                    let mut it = item.clone();
+                                    if let Some(t) =
+                                        it.get("type").and_then(|t| t.as_str()).map(String::from)
+                                    {
+                                        let new_type = match (t.as_str(), role) {
+                                            ("text", "assistant") => "output_text",
+                                            ("text", _) => "input_text",
+                                            ("image_url", _) => "input_image",
+                                            ("refusal", _) => "refusal",
+                                            _ => t.as_str(),
+                                        };
+                                        it.as_object_mut()
+                                            .unwrap()
+                                            .insert("type".into(), serde_json::json!(new_type));
+                                        if new_type == "input_image" {
+                                            if let Some(url_obj) = it.get("image_url").cloned() {
+                                                let url =
+                                                    url_obj.get("url").cloned().unwrap_or(url_obj);
+                                                let obj = it.as_object_mut().unwrap();
+                                                obj.remove("image_url");
+                                                obj.insert("image_url".into(), url);
+                                            }
+                                        }
+                                    }
+                                    it
+                                })
+                                .collect();
+                            serde_json::json!(items)
+                        } else if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                            // String content — wrap in typed content block
+                            let ct = if role == "assistant" {
+                                "output_text"
+                            } else {
+                                "input_text"
+                            };
+                            serde_json::json!([{"type": ct, "text": text}])
+                        } else {
+                            serde_json::json!([])
+                        };
+                        converted.push(serde_json::json!({
+                            "type": "message",
+                            "role": resp_role,
+                            "content": content
+                        }));
+                    }
+                }
+            }
+            obj.insert("input".into(), serde_json::json!(converted));
+        } else {
+            obj.insert("input".into(), messages);
+        }
+    }
+
+    // max_completion_tokens → max_output_tokens
+    if let Some(max) = obj.remove("max_completion_tokens") {
+        obj.insert("max_output_tokens".into(), max);
+    }
+    if let Some(max) = obj.remove("max_tokens") {
+        obj.entry("max_output_tokens").or_insert(max);
+    }
+
+    // Convert tools format: chat uses {type, function:{name, parameters, ...}}
+    // Responses API uses flattened {type, name, parameters, ...}
+    if let Some(tools) = obj.remove("tools") {
+        if let Some(tools_arr) = tools.as_array() {
+            let converted_tools: Vec<serde_json::Value> = tools_arr
+                .iter()
+                .map(|tool| {
+                    if let Some(func) = tool.get("function") {
+                        let mut t = serde_json::json!({"type": "function"});
+                        let t_obj = t.as_object_mut().unwrap();
+                        if let Some(f_obj) = func.as_object() {
+                            for (k, v) in f_obj {
+                                t_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                        t
+                    } else {
+                        tool.clone()
+                    }
+                })
+                .collect();
+            obj.insert("tools".into(), serde_json::json!(converted_tools));
+        } else {
+            obj.insert("tools".into(), tools);
+        }
+    }
+
+    // Convert tool_choice format if present
+    if let Some(tc) = obj.remove("tool_choice") {
+        // Chat: {"type":"function","function":{"name":"foo"}}
+        // Responses: {"type":"function","name":"foo"}
+        if let Some(func) = tc.get("function") {
+            if let Some(name) = func.get("name") {
+                obj.insert(
+                    "tool_choice".into(),
+                    serde_json::json!({
+                        "type": "function",
+                        "name": name
+                    }),
+                );
+            }
+        } else {
+            // "auto", "none", "required" pass through unchanged
+            obj.insert("tool_choice".into(), tc);
+        }
+    }
+
+    // Remove chat-specific fields that Responses API doesn't accept
+    obj.remove("stream");
+    obj.remove("stop");
+    obj.remove("frequency_penalty");
+    obj.remove("presence_penalty");
+    obj.remove("logprobs");
+    obj.remove("top_logprobs");
+    obj.remove("n");
+
+    serde_json::to_vec(&body)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| chat_body.clone())
+}
+
+/// Convert a Responses API response back to chat/completions format.
+/// output[].content[].text → choices[].message.content
+/// output[] function_call items → choices[].message.tool_calls
+fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
+    let Ok(resp) = serde_json::from_slice::<serde_json::Value>(resp_body) else {
+        return resp_body.clone();
+    };
+
+    // If it's an error response, pass through
+    if resp
+        .get("error")
+        .and_then(|e| if e.is_null() { None } else { Some(e) })
+        .is_some()
+    {
+        return resp_body.clone();
+    }
+
+    // Extract text content and tool_calls from output
+    let mut content = String::new();
+    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(items) = resp.get("output").and_then(|o| o.as_array()) {
+        for item in items {
+            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match item_type {
+                "message" => {
+                    if let Some(texts) = item.get("content").and_then(|c| c.as_array()) {
+                        for c in texts {
+                            if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
+                                content.push_str(text);
+                            }
+                        }
+                    }
+                }
+                "function_call" => {
+                    let call_id = item
+                        .get("call_id")
+                        .or(item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
+                    tool_calls.push(serde_json::json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Build chat/completions-shaped response
+    let usage = resp.get("usage").cloned().unwrap_or(serde_json::json!({}));
+    let mut message = serde_json::json!({
+        "role": "assistant",
+    });
+    let finish_reason;
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = serde_json::json!(tool_calls);
+        message["content"] = serde_json::Value::Null;
+        if !content.is_empty() {
+            message["content"] = serde_json::json!(content);
+        }
+        finish_reason = "tool_calls";
+    } else {
+        message["content"] = serde_json::json!(content);
+        finish_reason = "stop";
+    }
+
+    let chat_resp = serde_json::json!({
+        "id": resp.get("id").cloned().unwrap_or(serde_json::json!("")),
+        "object": "chat.completion",
+        "created": resp.get("created_at").cloned().unwrap_or(serde_json::json!(0)),
+        "model": resp.get("model").cloned().unwrap_or(serde_json::json!("")),
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason
+        }],
+        "usage": usage
+    });
+
+    serde_json::to_vec(&chat_resp)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| resp_body.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_chat_to_responses_simple_message() {
+        let chat = serde_json::json!({
+            "model": "gpt-5.4-pro",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "max_completion_tokens": 100,
+            "stream": true
+        });
+        let body = Bytes::from(serde_json::to_vec(&chat).unwrap());
+        let result = chat_to_responses_body(&body);
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert!(v.get("messages").is_none(), "messages should be removed");
+        assert!(v.get("stream").is_none(), "stream should be removed");
+        assert_eq!(v["max_output_tokens"], 100);
+
+        let input = v["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_chat_to_responses_tool_calls() {
+        let chat = serde_json::json!({
+            "model": "gpt-5.4-pro",
+            "messages": [
+                {"role": "user", "content": "Search for cats"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{\"q\":\"cats\"}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_123", "content": "Cats are great"},
+                {"role": "assistant", "content": "Here's what I found about cats."}
+            ],
+            "tools": [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
+        });
+        let body = Bytes::from(serde_json::to_vec(&chat).unwrap());
+        let result = chat_to_responses_body(&body);
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        let input = v["input"].as_array().unwrap();
+        assert_eq!(input.len(), 4);
+        // User message
+        assert_eq!(input[0]["type"], "message");
+        // Function call
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["name"], "web_search");
+        assert_eq!(input[1]["call_id"], "call_123");
+        // Function call output
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_123");
+        assert_eq!(input[2]["output"], "Cats are great");
+        // Assistant response
+        assert_eq!(input[3]["type"], "message");
+        assert_eq!(input[3]["role"], "assistant");
+
+        // Tools should be flattened
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "web_search");
+        assert!(tools[0].get("function").is_none());
+    }
+
+    #[test]
+    fn test_responses_to_chat_with_tool_calls() {
+        let resp = serde_json::json!({
+            "id": "resp_123",
+            "model": "gpt-5.4-pro",
+            "created_at": 1234567890,
+            "output": [
+                {"type": "function_call", "call_id": "call_456", "name": "search", "arguments": "{\"q\":\"dogs\"}"}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        let body = Bytes::from(serde_json::to_vec(&resp).unwrap());
+        let result = responses_to_chat_body(&body);
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+        let tc = &v["choices"][0]["message"]["tool_calls"];
+        assert_eq!(tc[0]["id"], "call_456");
+        assert_eq!(tc[0]["function"]["name"], "search");
+    }
+
+    #[test]
+    fn test_chat_to_responses_system_to_developer() {
+        let chat = serde_json::json!({
+            "model": "gpt-5.4-pro",
+            "messages": [
+                {"role": "system", "content": "You are helpful"}
+            ]
+        });
+        let body = Bytes::from(serde_json::to_vec(&chat).unwrap());
+        let result = chat_to_responses_body(&body);
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        let input = v["input"].as_array().unwrap();
+        assert_eq!(input[0]["role"], "developer");
+    }
+
+    #[test]
+    fn test_responses_to_chat_with_null_error() {
+        // Real Responses API includes "error": null — must NOT short-circuit
+        let resp = serde_json::json!({
+            "id": "resp_456",
+            "object": "response",
+            "model": "gpt-5.4-pro",
+            "created_at": 1234567890,
+            "error": null,
+            "output": [
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "Hello!"}
+                ]}
+            ],
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+        });
+        let body = Bytes::from(serde_json::to_vec(&resp).unwrap());
+        let result = responses_to_chat_body(&body);
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        // Should be converted to chat format, NOT raw passthrough
+        assert_eq!(v["object"], "chat.completion");
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello!");
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
     }
 }

@@ -47,6 +47,10 @@ pub struct SpawnRequest {
     pub token_budget_daily: Option<i64>,
     /// Per-request token budget.
     pub token_budget_per_request: Option<i64>,
+    /// Trusted peer AMIDs — parent-verified agents that the sub-agent should
+    /// auto-trust (parent + siblings). Passed securely via env var at spawn time,
+    /// not self-reported. Format: "name:AMID,name:AMID,..."
+    pub trusted_peers: Option<String>,
 }
 
 /// Response from spawn/status endpoints.
@@ -221,7 +225,18 @@ pub async fn create_sandbox(
             })
         }
         Err(kube::Error::Api(resp)) if resp.code == 409 => {
-            Err(format!("Sandbox '{}' already exists", req.name))
+            // Already exists — reuse rather than error
+            tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent sandbox already exists — reusing");
+            Ok(SpawnResponse {
+                status: "created".into(),
+                name: req.name.clone(),
+                namespace: Some(format!("azureclaw-{}", req.name)),
+                phase: Some("Running".into()),
+                message: Some(format!(
+                    "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
+                    req.name, model, req.governance
+                )),
+            })
         }
         Err(e) => {
             tracing::error!(parent = %parent_name, child = %req.name, "Failed to create sandbox: {e}");
@@ -423,6 +438,12 @@ fn docker_create_body(
             "AGT_TRUST_THRESHOLD={}",
             req.trust_threshold.unwrap_or(500)
         ));
+        // Pass parent identity so sub-agents can trust their parent and siblings
+        env.push(format!("PARENT_SANDBOX={}", parent_name));
+        // Pre-seeded trusted peers (parent-verified AMIDs, not self-reported)
+        if let Some(ref peers) = req.trusted_peers {
+            env.push(format!("AGT_TRUSTED_PEERS={}", peers));
+        }
     }
 
     let mut labels = serde_json::Map::new();
@@ -485,13 +506,38 @@ async fn create_sandbox_docker(
     let container_name = format!("azureclaw-{}", req.name);
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
 
-    // Remove existing container if any
-    let _ = docker_api(
-        "DELETE",
-        &format!("/containers/{}?force=true", container_name),
-        None,
-    )
-    .await;
+    // Check if container already exists and is running — reuse it
+    if let Ok(inspect_resp) =
+        docker_api("GET", &format!("/containers/{}/json", container_name), None).await
+    {
+        if let Ok(info) = serde_json::from_str::<serde_json::Value>(&inspect_resp) {
+            let is_running = info
+                .get("State")
+                .and_then(|s| s.get("Running"))
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false);
+            if is_running {
+                tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent container already running — reusing");
+                return Ok(SpawnResponse {
+                    status: "created".into(),
+                    name: req.name.clone(),
+                    namespace: Some(container_name),
+                    phase: Some("Running".into()),
+                    message: Some(format!(
+                        "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
+                        req.name, model, req.governance
+                    )),
+                });
+            }
+        }
+        // Container exists but not running — remove it
+        let _ = docker_api(
+            "DELETE",
+            &format!("/containers/{}?force=true", container_name),
+            None,
+        )
+        .await;
+    }
 
     // Create container
     let body = docker_create_body(&container_name, req, parent_name);
