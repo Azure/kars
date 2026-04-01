@@ -158,7 +158,10 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
     }
   },
   "tools": {
-    "deny": ["sessions_spawn", "sessions_send"]
+    "deny": ["sessions_spawn", "sessions_send"],
+    "exec": {
+      "security": "full"
+    }
   },
   "plugins": {
     "allow": [PLUGINS_ALLOW_PLACEHOLDER],
@@ -715,18 +718,8 @@ HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
 NODE_PID=$!
 echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 
-# Auto-approve all exec requests — no manual approval in headless sandbox.
-# The agent is already constrained by seccomp, read-only rootfs, and non-root UID.
-# Use timeout to prevent hanging (the command sometimes blocks on gateway connection).
-# Run in background so the entrypoint continues to the relay listener section.
-(
-  # Wait for gateway to accept requests before setting auto-approve
-  for _i in $(seq 1 10); do
-    curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1 && break
-    sleep 0.5
-  done
-  echo '{ "mode": "auto-approve" }' | AGT_SKIP_INIT=1 timeout 10 $AS_SANDBOX openclaw approvals set --stdin > /dev/null 2>&1 || true
-) &
+# Exec approvals are disabled via openclaw.json config (tools.exec.security=full).
+# AGT governance is the sole policy authority — no need for OpenClaw's exec approval layer.
 
 # The AGT relay listener is NOT needed as a separate process.
 # The plugin running inside the gateway already handles incoming mesh messages:
