@@ -35,6 +35,7 @@ import { Command } from "commander";
 import { execa } from "execa";
 import blessed from "blessed";
 import contrib from "blessed-contrib";
+import { listSecretVariants } from "../config.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -1600,16 +1601,32 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     const state = {
       name: "", model: "gpt-4.1", isolation: "enhanced",
-      channel: "", telegramToken: "", learnEgress: true,
+      channel: "", telegramToken: "", slackToken: "", discordToken: "",
+      learnEgress: true,
       cursor: 0, editing: false,
     };
+
+    // Pre-load stored token variants for each channel
+    const storedTokens: Record<string, Array<{ key: string; label: string; value: string }>> = {
+      telegram: listSecretVariants("telegram-token"),
+      slack: listSecretVariants("slack-token"),
+      discord: listSecretVariants("discord-token"),
+    };
+    const tokenStateKey: Record<string, "telegramToken" | "slackToken" | "discordToken"> = {
+      telegram: "telegramToken", slack: "slackToken", discord: "discordToken",
+    };
+    // Auto-fill default token if exactly one variant exists
+    for (const [ch, variants] of Object.entries(storedTokens)) {
+      const sk = tokenStateKey[ch];
+      if (sk && variants.length === 1) state[sk] = variants[0].value;
+    }
 
     const isoOpts = ["enhanced", "standard", "confidential"];
     const chOpts = ["", "telegram", "slack", "discord"];
     const chLabels: Record<string, string> = { "": "(none)", telegram: "telegram", slack: "slack", discord: "discord" };
     const fields = () => {
       const f = ["name", "model", "isolation", "channel"];
-      if (state.channel === "telegram") f.push("tgtoken");
+      if (state.channel && tokenStateKey[state.channel]) f.push("chtoken");
       f.push("egress", "launch");
       return f;
     };
@@ -1642,9 +1659,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           lines.push(`${sel} {bold}Isolation:{/}  {green-fg}${state.isolation}{/}  {gray-fg}←→{/}`);
         } else if (f === "channel") {
           lines.push(`${sel} {bold}Channel:{/}    ${chLabels[state.channel] || "(none)"}  {gray-fg}←→{/}`);
-        } else if (f === "tgtoken") {
-          const masked = state.telegramToken ? "●●●●" + state.telegramToken.slice(-4) : "{gray-fg}(press Enter to type){/}";
-          lines.push(`${sel} {bold}TG Token:{/}  ${masked}`);
+        } else if (f === "chtoken") {
+          const sk = tokenStateKey[state.channel];
+          const tokenVal = sk ? state[sk] : "";
+          const variants = storedTokens[state.channel] || [];
+          const masked = tokenVal ? "●●●●" + tokenVal.slice(-4) : "{gray-fg}(press Enter to type){/}";
+          const hint = variants.length > 1 ? `  {gray-fg}←→ ${variants.length} stored{/}` : "";
+          const label = state.channel.charAt(0).toUpperCase() + state.channel.slice(1);
+          lines.push(`${sel} {bold}${label} Token:{/} ${masked}${hint}`);
         } else if (f === "egress") {
           const val = state.learnEgress ? "{green-fg}learn mode{/}" : "{yellow-fg}deny all{/}";
           lines.push(`${sel} {bold}Egress:{/}     ${val}  {gray-fg}←→{/}`);
@@ -1660,9 +1682,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     function close() { dialog.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50); }
 
-    function startEdit(field: "name" | "model" | "telegramToken") {
+    function startEdit(field: "name" | "model" | "telegramToken" | "slackToken" | "discordToken") {
       state.editing = true;
-      // Create a fresh textbox each time (blessed reuses are buggy)
       const input = blessed.textbox({
         parent: dialog, bottom: 0, left: 1, width: 58, height: 1,
         style: { fg: "white", bg: "blue" },
@@ -1710,12 +1731,19 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       }
 
       let args: string[];
+      const tokenFlag: Record<string, string> = {
+        telegram: "--telegram-token",
+        slack: "--slack-token",
+        discord: "--discord-token",
+      };
+      const currentToken = tokenStateKey[state.channel] ? state[tokenStateKey[state.channel]] : "";
+
       if (devMode) {
         args = ["dev", "--name", state.name.trim(), "--model", state.model];
         if (state.channel) {
           args.push("--channels", state.channel);
-          if (state.channel === "telegram" && state.telegramToken) {
-            args.push("--telegram-token", state.telegramToken);
+          if (currentToken && tokenFlag[state.channel]) {
+            args.push(tokenFlag[state.channel], currentToken);
           }
         }
       } else {
@@ -1723,8 +1751,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         if (state.learnEgress) args.push("--learn-egress");
         if (state.channel) {
           args.push("--channels", state.channel);
-          if (state.channel === "telegram" && state.telegramToken) {
-            args.push("--telegram-token", state.telegramToken);
+          if (currentToken && tokenFlag[state.channel]) {
+            args.push(tokenFlag[state.channel], currentToken);
           }
         }
       }
@@ -1760,6 +1788,22 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         } else if (f === "channel") {
           const i = chOpts.indexOf(state.channel);
           state.channel = chOpts[(i + d + chOpts.length) % chOpts.length];
+          // Auto-fill token when switching channel (default or single stored)
+          const sk = tokenStateKey[state.channel];
+          if (sk && !state[sk]) {
+            const variants = storedTokens[state.channel] || [];
+            if (variants.length === 1) state[sk] = variants[0].value;
+          }
+        } else if (f === "chtoken") {
+          // Cycle through stored token variants with ←→
+          const variants = storedTokens[state.channel] || [];
+          if (variants.length > 1) {
+            const sk = tokenStateKey[state.channel];
+            const currentVal = sk ? state[sk] : "";
+            const idx = variants.findIndex(v => v.value === currentVal);
+            const next = variants[(idx + d + variants.length) % variants.length];
+            if (sk) state[sk] = next.value;
+          }
         } else if (f === "egress") {
           state.learnEgress = !state.learnEgress;
         }
@@ -1767,7 +1811,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       } else if (key.name === "return" || key.name === "enter") {
         if (f === "name") startEdit("name");
         else if (f === "model") startEdit("model");
-        else if (f === "tgtoken") startEdit("telegramToken");
+        else if (f === "chtoken") {
+          const sk = tokenStateKey[state.channel];
+          if (sk) startEdit(sk);
+        }
         else if (f === "launch") { screen.removeListener("keypress", onKey); launch(); }
         else {
           // Cycle fields advance on Enter too

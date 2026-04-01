@@ -306,3 +306,22 @@ export function resolveSecret(flagValue: string | undefined, secretKey: string):
   if (envVar) return process.env[envVar];
   return undefined;
 }
+
+/**
+ * Find all stored secrets matching a base key (supports dot-suffixed variants).
+ * E.g. listSecretVariants("telegram-token") returns:
+ *   [{ key: "telegram-token", label: "default", value: "bot123..." },
+ *    { key: "telegram-token.cloud", label: "cloud", value: "bot456..." }]
+ */
+export function listSecretVariants(baseKey: string): Array<{ key: string; label: string; value: string }> {
+  const secrets = loadSecrets();
+  const results: Array<{ key: string; label: string; value: string }> = [];
+  for (const [k, v] of Object.entries(secrets)) {
+    if (k === baseKey) {
+      results.push({ key: k, label: "default", value: v });
+    } else if (k.startsWith(baseKey + ".")) {
+      results.push({ key: k, label: k.slice(baseKey.length + 1), value: v });
+    }
+  }
+  return results;
+}
