@@ -151,6 +151,8 @@ pub fn inference_routes() -> Router<AppState> {
             "/openai/deployments/{deployment}/images/generations",
             post(images_generations),
         )
+        // OpenAI-compatible endpoint: extracts model from body, defaults to gpt-image-1
+        .route("/v1/images/generations", post(images_generations_v1))
 }
 
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
@@ -1197,6 +1199,33 @@ async fn images_generations(
                 .into_response()
         }
     }
+}
+
+/// POST /v1/images/generations — OpenAI-compatible image generation endpoint.
+/// Translates OpenAI-format requests to Azure OpenAI format: extracts `model` for the
+/// deployment path and strips parameters Azure doesn't accept (response_format, model).
+async fn images_generations_v1(
+    state: State<AppState>,
+    headers: HeaderMap,
+    query: axum::extract::RawQuery,
+    body: Bytes,
+) -> impl IntoResponse {
+    let mut parsed: serde_json::Value = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let deployment = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("gpt-image-1")
+        .to_string();
+    // Strip params Azure doesn't accept — it uses deployment in URL (not body)
+    // and returns b64_json by default (response_format is rejected as unknown)
+    if let Some(obj) = parsed.as_object_mut() {
+        obj.remove("model");
+        obj.remove("response_format");
+    }
+    let patched_body = Bytes::from(serde_json::to_vec(&parsed).unwrap_or_default());
+
+    images_generations(state, Path(deployment), headers, query, patched_body).await
 }
 
 async fn healthz() -> &'static str {

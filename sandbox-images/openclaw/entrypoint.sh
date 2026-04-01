@@ -154,6 +154,11 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
         "authHeader": false,
         "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": ${MODELS_JSON}
+      },
+      "openai": {
+        "baseUrl": "http://127.0.0.1:8443/v1",
+        "apiKey": "routed-via-inference-router",
+        "models": []
       }
     }
   },
@@ -179,7 +184,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" },
-      "imageGenerationModel": "azure-foundry/gpt-image-1",
+      "imageGenerationModel": "openai/gpt-image-1",
       "timeoutSeconds": 300,
       "memorySearch": {
         "enabled": true,
