@@ -224,6 +224,10 @@ EOF
   # Set proxy explicitly so OpenClaw uses a simple ProxyAgent for Telegram API calls.
   # The EnvHttpProxyAgent + autoSelectFamily path causes long-poll stalls in Docker.
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    # Strip "bot" prefix if present — grammY prepends it, so "bot123:ABC" would
+    # become "botbot123:ABC" in the API URL, causing 404 from Telegram.
+    TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN#bot}"
+
     # DM policy: allowlist if TELEGRAM_ALLOW_FROM is set (comma-separated numeric IDs),
     # otherwise pairing (requires approval). Never default to open.
     if [ -n "${TELEGRAM_ALLOW_FROM:-}" ]; then
