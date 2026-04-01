@@ -60,7 +60,7 @@ export function credentialsCommand(): Command {
           const promptMap: Record<string, Array<{ key: string; label: string; allowSuffix?: boolean }>> = {
             telegram: [
               { key: "telegram-token", label: "Telegram bot token", allowSuffix: true },
-              { key: "telegram-allow-from", label: "Telegram allowed user IDs (comma-separated)" },
+              { key: "telegram-allow-from", label: "Telegram allowed user IDs (comma-separated)", allowSuffix: true },
             ],
             slack: [
               { key: "slack-token", label: "Slack bot OAuth token", allowSuffix: true },
@@ -191,7 +191,19 @@ export function credentialsCommand(): Command {
         const val = secrets[key];
         const masked = val.length > 8 ? "••••" + val.slice(-4) : "••••";
         const info = KNOWN_SECRETS[key];
-        const label = info ? chalk.dim(` (${info.label})`) : "";
+        let label = "";
+        if (info) {
+          label = chalk.dim(` (${info.label})`);
+        } else {
+          // Check for dot-suffixed variant (e.g. telegram-token.cloud → "Telegram bot token")
+          const dotIdx = key.indexOf(".");
+          if (dotIdx > 0) {
+            const baseKey = key.substring(0, dotIdx);
+            const variant = key.substring(dotIdx + 1);
+            const baseInfo = KNOWN_SECRETS[baseKey];
+            if (baseInfo) label = chalk.dim(` (${baseInfo.label} · ${variant})`);
+          }
+        }
         console.log(`  ${chalk.cyan(key)} = ${masked}${label}`);
       }
       console.log(chalk.dim(`\n  File: ${SECRETS_FILE}\n`));
