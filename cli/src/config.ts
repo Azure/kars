@@ -302,6 +302,9 @@ export function resolveSecret(flagValue: string | undefined, secretKey: string):
   if (flagValue) return flagValue;
   const stored = getSecret(secretKey);
   if (stored) return stored;
+  // If no exact match, check for dot-suffixed variants (e.g. telegram-token.dev)
+  const variants = listSecretVariants(secretKey);
+  if (variants.length > 0) return variants[0].value;
   const envVar = KNOWN_SECRETS[secretKey]?.env;
   if (envVar) return process.env[envVar];
   return undefined;
