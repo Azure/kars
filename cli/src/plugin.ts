@@ -1196,11 +1196,53 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
 
       // Process task_request messages via the native OpenClaw agent loop.
-      // This gives sub-agents access to ALL tools (exec, file editing, git, browser,
-      // foundry_*, azureclaw_*, etc.) through the full OpenClaw pipeline.
-      // Falls back to processTaskWithTools (limited toolset) if native agent fails.
+      // AGT is the sole policy authority (no mixing with OpenClaw tools.deny):
+      //   1. mesh:receive trust gate (above) — rejects untrusted senders
+      //   2. task:execute policy check (below) — AGT gates the entire task
+      //   3. Container sandbox is the enforcement boundary (seccomp, netpol, cgroups)
+      //   4. Plugin tools inside native agent still check AGT per-call (http_fetch, foundry_*)
+      //   5. AGT audit + reputation recorded after completion
+      // Falls back to processTaskWithTools (per-tool AGT gating) if native agent fails.
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
+
+        // AGT policy: evaluate task:execute before dispatching to native agent
+        let taskAllowed = true;
+        try {
+          const http = await import("node:http");
+          const evalPayload = JSON.stringify({
+            action: "task:execute",
+            context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
+          });
+          const evalResult = await new Promise<string>((resolve, reject) => {
+            const req = http.request("http://127.0.0.1:8081/evaluate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
+            }, (res) => {
+              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+            });
+            req.on("error", reject);
+            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
+            req.write(evalPayload);
+            req.end();
+          });
+          const evalData = JSON.parse(evalResult);
+          if (evalData.decision === "deny") {
+            log.warn(`AGT policy DENIED task:execute from ${fromName}: ${evalData.reason}`);
+            taskAllowed = false;
+            try {
+              await agtMeshClient.send(fromAmid, {
+                type: "task_response",
+                content: `Task denied by AGT governance: ${evalData.reason}`,
+                from_agent: agtSandboxName,
+                timestamp: new Date().toISOString(),
+              });
+            } catch { /* best effort */ }
+          }
+        } catch { /* sidecar unavailable — allow (fail-open) */ }
+
+        if (!taskAllowed) return;
+
         try {
           let llmResponse: string;
           try {
