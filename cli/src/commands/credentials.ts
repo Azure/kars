@@ -1,14 +1,17 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { banner, section } from "../stepper.js";
-import { promptAndSaveCredentials, CONFIG_FILE, CREDENTIALS_FILE } from "../config.js";
+import {
+  promptAndSaveCredentials, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
+  KNOWN_SECRETS, loadSecrets, setSecret, deleteSecret,
+} from "../config.js";
 
 export function credentialsCommand(): Command {
   const cmd = new Command("credentials");
 
   cmd
     .description(
-      "Set or update Azure OpenAI credentials (endpoint, API key, model)"
+      "Manage AzureClaw credentials (Azure OpenAI, channel tokens, API keys)"
     )
     .action(async () => {
       banner("AzureClaw · Credentials", "Secure AI Agent Runtime on Azure");
@@ -20,14 +23,75 @@ export function credentialsCommand(): Command {
       console.log(`  Model:     ${chalk.bold(creds.model)}`);
       console.log(`  Key:       ${chalk.dim("••••" + creds.apiKey.slice(-4))}`);
       console.log(`  Config:    ${chalk.dim(CONFIG_FILE)}`);
-      console.log(`  Key file:  ${chalk.dim(CREDENTIALS_FILE)} ${chalk.dim("(600)")}`);
+      console.log(`  Secrets:   ${chalk.dim(SECRETS_FILE)} ${chalk.dim("(600)")}`);
 
       section("Next Steps");
       console.log(`  Dev:       ${chalk.cyan("azureclaw dev")}`);
       console.log(`  Prod:      ${chalk.cyan("azureclaw up")}`);
-      console.log(`  Re-run:    ${chalk.cyan("azureclaw credentials")}`);
+      console.log(`  Set token: ${chalk.cyan("azureclaw credentials set telegram-token <token>")}`);
+      console.log(`  List:      ${chalk.cyan("azureclaw credentials list")}`);
       console.log();
     });
+
+  // ─── set <key> <value> ─────────────────────────────────────────────────────
+  const set = new Command("set");
+  set
+    .description("Store a secret locally (e.g. telegram-token, brave-api-key)")
+    .argument("<key>", `Secret key (${Object.keys(KNOWN_SECRETS).join(", ")})`)
+    .argument("<value>", "Secret value")
+    .action((key: string, value: string) => {
+      const info = KNOWN_SECRETS[key];
+      if (!info) {
+        // Allow arbitrary keys but warn
+        console.log(chalk.yellow(`  Warning: '${key}' is not a known secret key.`));
+        console.log(chalk.dim(`  Known keys: ${Object.keys(KNOWN_SECRETS).join(", ")}`));
+      }
+      setSecret(key, value);
+      const masked = value.length > 8 ? "••••" + value.slice(-4) : "••••";
+      console.log(chalk.green(`  ✔ ${key} = ${masked}`));
+      console.log(chalk.dim(`  Saved to ${SECRETS_FILE}`));
+      if (info) {
+        console.log(chalk.dim(`  → env var: ${info.env}`));
+      }
+    });
+  cmd.addCommand(set);
+
+  // ─── list ──────────────────────────────────────────────────────────────────
+  const list = new Command("list");
+  list
+    .description("List all stored secrets (values masked)")
+    .action(() => {
+      const secrets = loadSecrets();
+      const keys = Object.keys(secrets);
+      if (keys.length === 0) {
+        console.log(chalk.dim("  No secrets stored. Use: azureclaw credentials set <key> <value>"));
+        return;
+      }
+      console.log(chalk.bold("\n  Stored secrets:\n"));
+      for (const key of keys.sort()) {
+        const val = secrets[key];
+        const masked = val.length > 8 ? "••••" + val.slice(-4) : "••••";
+        const info = KNOWN_SECRETS[key];
+        const label = info ? chalk.dim(` (${info.label})`) : "";
+        console.log(`  ${chalk.cyan(key)} = ${masked}${label}`);
+      }
+      console.log(chalk.dim(`\n  File: ${SECRETS_FILE}\n`));
+    });
+  cmd.addCommand(list);
+
+  // ─── remove <key> ──────────────────────────────────────────────────────────
+  const remove = new Command("remove");
+  remove
+    .description("Remove a stored secret")
+    .argument("<key>", "Secret key to remove")
+    .action((key: string) => {
+      if (deleteSecret(key)) {
+        console.log(chalk.green(`  ✔ Removed '${key}'`));
+      } else {
+        console.log(chalk.yellow(`  '${key}' not found in secrets`));
+      }
+    });
+  cmd.addCommand(remove);
 
   // Subcommand: update credentials for a running AKS sandbox
   const update = new Command("update");
