@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { ensureCredentials, CREDENTIALS_FILE } from "../config.js";
+import { ensureCredentials, CREDENTIALS_FILE, resolveSecret } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -387,19 +387,19 @@ export function devCommand(): Command {
           // Learn mode on by default in dev — records all egress domains for review
           "-e", "EGRESS_LEARN_MODE=true",
           ...agtEnvArgs,
-          // Channel tokens: CLI flags take priority, fall back to host env vars
-          ...((options.telegramToken || process.env.TELEGRAM_BOT_TOKEN) ? ["-e", `TELEGRAM_BOT_TOKEN=${options.telegramToken || process.env.TELEGRAM_BOT_TOKEN}`] : []),
-          ...((options.telegramAllowFrom || process.env.TELEGRAM_ALLOW_FROM) ? ["-e", `TELEGRAM_ALLOW_FROM=${options.telegramAllowFrom || process.env.TELEGRAM_ALLOW_FROM}`] : []),
-          ...((options.slackToken || process.env.SLACK_BOT_TOKEN) ? ["-e", `SLACK_BOT_TOKEN=${options.slackToken || process.env.SLACK_BOT_TOKEN}`] : []),
-          ...((options.discordToken || process.env.DISCORD_BOT_TOKEN) ? ["-e", `DISCORD_BOT_TOKEN=${options.discordToken || process.env.DISCORD_BOT_TOKEN}`] : []),
+          // Channel tokens: CLI flag > secrets.json > host env var
+          ...(resolveSecret(options.telegramToken, "telegram-token") ? ["-e", `TELEGRAM_BOT_TOKEN=${resolveSecret(options.telegramToken, "telegram-token")}`] : []),
+          ...(resolveSecret(options.telegramAllowFrom, "telegram-allow-from") ? ["-e", `TELEGRAM_ALLOW_FROM=${resolveSecret(options.telegramAllowFrom, "telegram-allow-from")}`] : []),
+          ...(resolveSecret(options.slackToken, "slack-token") ? ["-e", `SLACK_BOT_TOKEN=${resolveSecret(options.slackToken, "slack-token")}`] : []),
+          ...(resolveSecret(options.discordToken, "discord-token") ? ["-e", `DISCORD_BOT_TOKEN=${resolveSecret(options.discordToken, "discord-token")}`] : []),
           ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
-          // Third-party plugin API keys: CLI flags take priority, fall back to host env vars
-          ...((options.braveApiKey || process.env.BRAVE_API_KEY) ? ["-e", `BRAVE_API_KEY=${options.braveApiKey || process.env.BRAVE_API_KEY}`] : []),
-          ...((options.tavilyApiKey || process.env.TAVILY_API_KEY) ? ["-e", `TAVILY_API_KEY=${options.tavilyApiKey || process.env.TAVILY_API_KEY}`] : []),
-          ...((options.exaApiKey || process.env.EXA_API_KEY) ? ["-e", `EXA_API_KEY=${options.exaApiKey || process.env.EXA_API_KEY}`] : []),
-          ...((options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY) ? ["-e", `FIRECRAWL_API_KEY=${options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY}`] : []),
-          ...((options.perplexityApiKey || process.env.PERPLEXITY_API_KEY) ? ["-e", `PERPLEXITY_API_KEY=${options.perplexityApiKey || process.env.PERPLEXITY_API_KEY}`] : []),
-          ...((options.openaiApiKey || process.env.OPENAI_API_KEY) ? ["-e", `OPENAI_API_KEY=${options.openaiApiKey || process.env.OPENAI_API_KEY}`] : []),
+          // Third-party plugin API keys: CLI flag > secrets.json > host env var
+          ...(resolveSecret(options.braveApiKey, "brave-api-key") ? ["-e", `BRAVE_API_KEY=${resolveSecret(options.braveApiKey, "brave-api-key")}`] : []),
+          ...(resolveSecret(options.tavilyApiKey, "tavily-api-key") ? ["-e", `TAVILY_API_KEY=${resolveSecret(options.tavilyApiKey, "tavily-api-key")}`] : []),
+          ...(resolveSecret(options.exaApiKey, "exa-api-key") ? ["-e", `EXA_API_KEY=${resolveSecret(options.exaApiKey, "exa-api-key")}`] : []),
+          ...(resolveSecret(options.firecrawlApiKey, "firecrawl-api-key") ? ["-e", `FIRECRAWL_API_KEY=${resolveSecret(options.firecrawlApiKey, "firecrawl-api-key")}`] : []),
+          ...(resolveSecret(options.perplexityApiKey, "perplexity-api-key") ? ["-e", `PERPLEXITY_API_KEY=${resolveSecret(options.perplexityApiKey, "perplexity-api-key")}`] : []),
+          ...(resolveSecret(options.openaiApiKey, "openai-api-key") ? ["-e", `OPENAI_API_KEY=${resolveSecret(options.openaiApiKey, "openai-api-key")}`] : []),
           image,
         ], { stdio: "pipe" });
 
