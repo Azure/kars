@@ -15,7 +15,7 @@ import {
   loadConfig, loadContext, saveContext,
   CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
   loadSecrets, saveSecrets, getSecret, setSecret, deleteSecret, resolveSecret,
-  KNOWN_SECRETS,
+  listSecretVariants, KNOWN_SECRETS,
 } from "./config.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "fs";
 
@@ -304,5 +304,34 @@ describe("secrets store", () => {
     expect(KNOWN_SECRETS["telegram-token"].env).toBe("TELEGRAM_BOT_TOKEN");
     expect(KNOWN_SECRETS["slack-token"].env).toBe("SLACK_BOT_TOKEN");
     expect(KNOWN_SECRETS["azure-openai-key"].env).toBe("AZURE_OPENAI_API_KEY");
+  });
+
+  it("listSecretVariants finds base key and dot-suffixed variants", () => {
+    mockExistsSync.mockImplementation((path) => {
+      if (typeof path === "string" && path.endsWith("secrets.json")) return true;
+      return false;
+    });
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      "telegram-token": "bot-default",
+      "telegram-token.cloud": "bot-cloud",
+      "telegram-token.dev": "bot-dev",
+      "slack-token": "xoxb-slack",
+    }));
+
+    const variants = listSecretVariants("telegram-token");
+    expect(variants).toHaveLength(3);
+    expect(variants[0]).toEqual({ key: "telegram-token", label: "default", value: "bot-default" });
+    expect(variants[1]).toEqual({ key: "telegram-token.cloud", label: "cloud", value: "bot-cloud" });
+    expect(variants[2]).toEqual({ key: "telegram-token.dev", label: "dev", value: "bot-dev" });
+
+    // Unrelated keys not included
+    const slackVariants = listSecretVariants("slack-token");
+    expect(slackVariants).toHaveLength(1);
+    expect(slackVariants[0].label).toBe("default");
+  });
+
+  it("listSecretVariants returns empty for missing base key", () => {
+    mockExistsSync.mockReturnValue(false);
+    expect(listSecretVariants("nonexistent")).toEqual([]);
   });
 });
