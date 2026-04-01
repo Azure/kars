@@ -359,7 +359,7 @@ async function delegateToNativeAgent(
 /**
  * Fallback: process a task_request with a limited tool-calling loop.
  * Used when native delegation fails (e.g., Gateway not running).
- * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_tokens.
+ * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_completion_tokens.
  */
 async function processTaskWithTools(
   taskContent: any,
@@ -529,7 +529,7 @@ async function processTaskWithTools(
 
   // Tool-calling loop (max 10 rounds to prevent runaway)
   for (let round = 0; round < 10; round++) {
-    const postData = JSON.stringify({ model, messages, tools, max_tokens: 2048 });
+    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
         method: "POST",

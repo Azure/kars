@@ -169,7 +169,7 @@ export async function promptAndSaveCredentials(options?: {
         {
           method: "POST",
           headers: { "Content-Type": "application/json", "api-key": answers.apiKey },
-          body: JSON.stringify({ messages: [{ role: "user", content: "hello" }], max_tokens: 5 }),
+          body: JSON.stringify({ messages: [{ role: "user", content: "hello" }], max_completion_tokens: 5 }),
         }
       );
       if (!response.ok) {
