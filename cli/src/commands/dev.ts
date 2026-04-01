@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { ensureCredentials, CREDENTIALS_FILE, resolveSecret } from "../config.js";
+import { ensureCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -337,6 +337,34 @@ export function devCommand(): Command {
           : [];
 
         stepper.update("Launching container...");
+
+        // Parse channel variants: "telegram.cloud" → base "telegram", suffix "cloud"
+        // Used to resolve the correct dot-suffixed secret (e.g. telegram-token.cloud)
+        const channelVariants: Record<string, string | undefined> = {};
+        if (options.channels) {
+          for (const ch of String(options.channels).split(",")) {
+            const dotIdx = ch.indexOf(".");
+            if (dotIdx > 0) {
+              channelVariants[ch.slice(0, dotIdx)] = ch.slice(dotIdx); // e.g. ".cloud"
+            } else {
+              channelVariants[ch] = undefined;
+            }
+          }
+          // Rewrite --channels to base names for the entrypoint
+          options.channels = Object.keys(channelVariants).join(",");
+        }
+
+        // Resolve a channel token, respecting dot-suffix variants from --channels
+        const resolveChannelToken = (flagValue: string | undefined, baseKey: string, channel: string): string | undefined => {
+          if (flagValue) return flagValue;
+          const suffix = channelVariants[channel];
+          if (suffix) {
+            const suffixed = getSecret(baseKey + suffix);
+            if (suffixed) return suffixed;
+          }
+          return resolveSecret(undefined, baseKey);
+        };
+
         // AGT network args: connect sandbox to the shared Docker network
         // so the router can reach relay/registry by container hostname
         const networkArgs = options.agt ? ["--network", AGT_NETWORK] : [];
@@ -387,11 +415,11 @@ export function devCommand(): Command {
           // Learn mode on by default in dev — records all egress domains for review
           "-e", "EGRESS_LEARN_MODE=true",
           ...agtEnvArgs,
-          // Channel tokens: CLI flag > secrets.json > host env var
-          ...(resolveSecret(options.telegramToken, "telegram-token") ? ["-e", `TELEGRAM_BOT_TOKEN=${resolveSecret(options.telegramToken, "telegram-token")}`] : []),
+          // Channel tokens: CLI flag > variant from --channels > secrets.json > host env var
+          ...(resolveChannelToken(options.telegramToken, "telegram-token", "telegram") ? ["-e", `TELEGRAM_BOT_TOKEN=${resolveChannelToken(options.telegramToken, "telegram-token", "telegram")}`] : []),
           ...(resolveSecret(options.telegramAllowFrom, "telegram-allow-from") ? ["-e", `TELEGRAM_ALLOW_FROM=${resolveSecret(options.telegramAllowFrom, "telegram-allow-from")}`] : []),
-          ...(resolveSecret(options.slackToken, "slack-token") ? ["-e", `SLACK_BOT_TOKEN=${resolveSecret(options.slackToken, "slack-token")}`] : []),
-          ...(resolveSecret(options.discordToken, "discord-token") ? ["-e", `DISCORD_BOT_TOKEN=${resolveSecret(options.discordToken, "discord-token")}`] : []),
+          ...(resolveChannelToken(options.slackToken, "slack-token", "slack") ? ["-e", `SLACK_BOT_TOKEN=${resolveChannelToken(options.slackToken, "slack-token", "slack")}`] : []),
+          ...(resolveChannelToken(options.discordToken, "discord-token", "discord") ? ["-e", `DISCORD_BOT_TOKEN=${resolveChannelToken(options.discordToken, "discord-token", "discord")}`] : []),
           ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
           // Third-party plugin API keys: CLI flag > secrets.json > host env var
           ...(resolveSecret(options.braveApiKey, "brave-api-key") ? ["-e", `BRAVE_API_KEY=${resolveSecret(options.braveApiKey, "brave-api-key")}`] : []),
