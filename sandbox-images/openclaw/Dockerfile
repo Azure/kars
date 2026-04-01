@@ -32,6 +32,10 @@ ARG OPENCLAW_VERSION=latest
 ARG OPENCLAW_CACHE_BUST=0
 RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
 
+# Patch vulnerable transitive npm deps (tar, minimatch, glob, brace-expansion)
+# without waiting for upstream OpenClaw to update them.
+RUN cd /usr/local/lib/node_modules && npm audit fix --force 2>/dev/null || true
+
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
 # AzureClaw's runtime security (egress guard, Content Safety, read-only rootfs)
 # provides defense-in-depth even if a skill is compromised.
@@ -63,7 +67,7 @@ RUN cd cli && npm install --ignore-scripts 2>/dev/null || true && npm run build
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
-FROM golang:1.24-alpine AS go-builder
+FROM golang:1.25-alpine AS go-builder
 
 # Build Go CLI tools that enable built-in OpenClaw skills.
 # Each tool is a small static binary (~5-15MB) — discarded build cache doesn't bloat the runtime image.

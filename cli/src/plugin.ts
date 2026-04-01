@@ -1432,7 +1432,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
 const ROUTER_BASE = "http://127.0.0.1:8443";
 
-async function _routerCall(method: string, path: string, body?: unknown): Promise<any> {
+async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000): Promise<any> {
   const http = await import("node:http");
   const url = new URL(path, ROUTER_BASE);
   return new Promise((resolve, reject) => {
@@ -1454,7 +1454,7 @@ async function _routerCall(method: string, path: string, body?: unknown): Promis
       });
     });
     req.on("error", reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
     if (body) req.write(JSON.stringify(body));
     req.end();
   });
@@ -2731,6 +2731,7 @@ const azureClawPlugin = definePluginEntry({
           const result = await _routerCall("POST",
             `/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
             { prompt: params.prompt, n, size, quality },
+            90000,
           );
 
           // Response format: { data: [{ b64_json: "...", revised_prompt: "..." }] }
