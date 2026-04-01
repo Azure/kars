@@ -237,7 +237,8 @@ EOF
     fi
     CHANNELS_CONFIG="\"telegram\": { \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"${TG_DM_POLICY}\", \"allowFrom\": ${TG_ALLOW_FROM}, \"proxy\": \"http://127.0.0.1:8444\" }"
     PLUGINS_LIST="${PLUGINS_LIST}, \"telegram\""
-    PLUGINS_ENTRIES="\"telegram\": { \"enabled\": true }"
+    [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+    PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"telegram\": { \"enabled\": true }"
   fi
 
   # WhatsApp (built-in, uses Baileys — QR pairing at runtime)

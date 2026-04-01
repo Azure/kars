@@ -343,9 +343,10 @@ export function addCommand(): Command {
             for (const [envVar, value] of Object.entries(allSecrets)) {
               secretArgs.push(`--from-literal=${envVar}=${value}`);
             }
-            await execa("kubectl", secretArgs, { stdio: "pipe" }).catch(() => {
-              // May already exist — update it
-              return execa("kubectl", [...secretArgs.slice(0, 2), "replace", ...secretArgs.slice(3)], { stdio: "pipe" });
+            await execa("kubectl", secretArgs, { stdio: "pipe" }).catch(async () => {
+              // Already exists — delete and recreate with updated values
+              await execa("kubectl", ["delete", "secret", `${name}-credentials`, "-n", namespace], { stdio: "pipe" }).catch(() => {});
+              return execa("kubectl", secretArgs, { stdio: "pipe" });
             });
           } catch {
             // Non-fatal — controller can still create pod without credential secret
