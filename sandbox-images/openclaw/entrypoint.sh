@@ -194,7 +194,7 @@ EOF
   #   1. A channel block in channels.* with credentials
   #   2. An entry in plugins.allow so the gateway loads the extension
   PLUGINS_LIST='"azureclaw"'
-  PLUGINS_ENTRIES=""
+  PLUGINS_ENTRIES='"azureclaw": { "enabled": true }'
   CHANNELS_CONFIG=""
 
   # Telegram (built into OpenClaw core, uses grammY)
