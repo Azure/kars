@@ -887,6 +887,7 @@ async function processTaskWithTools(
               result = `mesh_inbox failed: ${inboxErr.message}`;
             }
           } else {
+            const cmd = String(args.command || args.cmd || "echo 'no command'");
             log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
             let policyAllowed = true;
             let policyReason = "";

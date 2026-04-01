@@ -58,7 +58,7 @@ export function credentialsCommand(): Command {
         if (category === "aoai") {
           await promptAndSaveCredentials({ heading: "Azure OpenAI" });
         } else {
-          const prompts: Array<{ key: string; label: string; allowSuffix?: boolean }> = {
+          const promptMap: Record<string, Array<{ key: string; label: string; allowSuffix?: boolean }>> = {
             telegram: [
               { key: "telegram-token", label: "Telegram bot token", allowSuffix: true },
               { key: "telegram-allow-from", label: "Telegram allowed user IDs (comma-separated)" },
@@ -79,7 +79,8 @@ export function credentialsCommand(): Command {
               { key: "firecrawl-api-key", label: "Firecrawl API key" },
               { key: "openai-api-key", label: "OpenAI API key" },
             ],
-          }[category] || [];
+          };
+          const prompts = promptMap[category] || [];
 
           for (const p of prompts) {
             let finalKey = p.key;
