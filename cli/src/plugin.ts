@@ -490,12 +490,36 @@ async function processTaskWithTools(
         },
       },
     },
+    {
+      type: "function" as const,
+      function: {
+        name: "discover",
+        description: "Discover other agents registered in the AGT mesh network. Returns agent names, tiers, trust scores, and online status.",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", description: "Glob pattern to filter agents (default: '*' for all)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "mesh_inbox",
+        description: "Check for incoming messages from other agents via the AGT E2E encrypted mesh relay. Returns pending messages.",
+        parameters: {
+          type: "object",
+          properties: {},
+        },
+      },
+    },
   ];
 
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- exec_command: run shell commands\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to other agents via AGT mesh relay\nUse the appropriate tool for each task. When asked to contact another agent, use mesh_send. Execute tasks immediately — do not announce, just act. Chain tool calls as needed. Be concise, report results.",
+      content: "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- exec_command: run shell commands\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to other agents via AGT mesh relay\n- mesh_inbox: check for incoming messages from other agents\n- discover: find other agents in the mesh network (names, trust scores, status)\nUse the appropriate tool for each task. When asked to contact another agent, use mesh_send. Use discover to find available agents. Use mesh_inbox to check for replies. Execute tasks immediately — do not announce, just act. Chain tool calls as needed. Be concise, report results.",
     },
     {
       role: "user",
@@ -826,9 +850,43 @@ async function processTaskWithTools(
             } catch (meshErr: any) {
               result = `mesh_send failed: ${meshErr.message}`;
             }
+          } else if (fnName === "discover") {
+            // Discover agents in the mesh network
+            const pattern = (args.pattern as string) || "*";
+            log.info(`AGT sub-agent discover: pattern=${pattern}`);
+            try {
+              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const discoverResult = await new Promise<string>((resolve, reject) => {
+                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
+                  let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                });
+                req.on("error", reject);
+                req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
+              });
+              result = discoverResult;
+            } catch (discErr: any) {
+              result = `discover failed: ${discErr.message}`;
+            }
+          } else if (fnName === "mesh_inbox") {
+            // Check for incoming messages via AGT mesh
+            log.info("AGT sub-agent mesh_inbox check");
+            try {
+              if (typeof agtMeshClient !== "undefined" && agtMeshClient && typeof agtMeshClient.drain === "function") {
+                const messages = await agtMeshClient.drain();
+                result = messages.length > 0
+                  ? JSON.stringify(messages.map((m: any) => ({ from: m.from_agent || m.sender, content: m.content || m.text, timestamp: m.timestamp })))
+                  : "No pending messages";
+              } else {
+                // Fallback: check via AGT inbox (pending messages stored by sidecar)
+                const agtInbox = (globalThis as any).__agtInbox || [];
+                result = agtInbox.length > 0
+                  ? JSON.stringify(agtInbox)
+                  : "No pending messages";
+              }
+            } catch (inboxErr: any) {
+              result = `mesh_inbox failed: ${inboxErr.message}`;
+            }
           } else {
-            // exec_command — gate through AGT sidecar policy before execution
-            const cmd = args.command || "";
             log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
             let policyAllowed = true;
             let policyReason = "";
