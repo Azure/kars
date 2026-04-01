@@ -179,6 +179,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" },
+      "imageGenerationModel": "azure-foundry/gpt-image-1",
       "timeoutSeconds": 300,
       "memorySearch": {
         "enabled": true,

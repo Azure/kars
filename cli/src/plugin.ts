@@ -3378,6 +3378,42 @@ const azureClawPlugin = definePluginEntry({
         }))
       : defaultModels;
 
+    // ── Image Generation Provider (renders inline in OpenClaw UI) ────────
+    // Uses the inference router which handles Azure managed identity auth.
+    // OpenClaw's built-in image_generate tool delegates to this provider,
+    // and the UI renders the returned buffer as an inline image attachment.
+    if (typeof (api as any).registerImageGenerationProvider === "function") {
+      (api as any).registerImageGenerationProvider({
+        id: "azure-foundry",
+        aliases: ["azureclaw", "foundry"],
+        label: "Azure AI Foundry (via AzureClaw)",
+        defaultModel: "gpt-image-1",
+        models: ["gpt-image-1"],
+        capabilities: {
+          generate: { maxCount: 4, supportsSize: true, supportsAspectRatio: false, supportsResolution: false },
+          edit: { enabled: false },
+          geometry: { sizes: ["1024x1024", "1024x1536", "1536x1024"] },
+        },
+        async generateImage(req: any) {
+          const model = req.model || "gpt-image-1";
+          const size = req.size || "1024x1024";
+          const count = req.count || 1;
+          const result = await _routerCall("POST",
+            `/openai/deployments/${encodeURIComponent(model)}/images/generations?api-version=2025-04-01-preview`,
+            { prompt: req.prompt, n: count, size, quality: "medium", response_format: "b64_json" },
+            90000,
+          );
+          const images = (result?.data || []).map((img: any) => ({
+            buffer: Buffer.from(img.b64_json || "", "base64"),
+            mimeType: "image/png",
+            revisedPrompt: img.revised_prompt,
+          }));
+          return { images, model };
+        },
+      });
+      log.info("Image generation provider registered: azure-foundry (inline rendering enabled)");
+    }
+
     api.registerProvider({
       id: "azure-openai",
       label: "Azure AI Foundry (via AzureClaw)",
