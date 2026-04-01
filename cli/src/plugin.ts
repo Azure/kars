@@ -1195,15 +1195,20 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
 
-      // Process task_request messages via our own tool-calling loop.
-      // We use processTaskWithTools directly (not delegateToNativeAgent) because:
-      // 1. Native OpenClaw agent requires device pairing (blocks headless exec)
-      // 2. OpenClaw's own exec allowlist double-gates commands already checked by AGT sidecar
-      // 3. processTaskWithTools routes through AGT policy sidecar + direct execSync — no redundant gates
+      // Process task_request messages via the native OpenClaw agent loop.
+      // This gives sub-agents access to ALL tools (exec, file editing, git, browser,
+      // foundry_*, azureclaw_*, etc.) through the full OpenClaw pipeline.
+      // Falls back to processTaskWithTools (limited toolset) if native agent fails.
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
         try {
-          const llmResponse = await processTaskWithTools(taskContent, log);
+          let llmResponse: string;
+          try {
+            llmResponse = await delegateToNativeAgent(taskContent, fromName, log);
+          } catch (nativeErr: any) {
+            log.warn(`Native agent failed (${nativeErr.message}), falling back to processTaskWithTools`);
+            llmResponse = await processTaskWithTools(taskContent, log);
+          }
 
           // Send the response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
