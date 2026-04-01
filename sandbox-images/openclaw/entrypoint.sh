@@ -9,6 +9,14 @@
 
 set -e
 
+# Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)
+if [ -z "$SANDBOX_NAME" ]; then
+  # K8s pod names: <deployment>-<replicaset-hash>-<pod-hash>
+  # Strip the two trailing hash segments to get the deployment name
+  SANDBOX_NAME=$(echo "$HOSTNAME" | sed 's/-[a-z0-9]*-[a-z0-9]*$//')
+  export SANDBOX_NAME
+fi
+
 # Raise FD limit — the inference router and gateway share this process namespace.
 # Default 1024 is too low for long-running containers with many HTTP connections.
 ulimit -n 65536 2>/dev/null || true
@@ -158,6 +166,12 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   },
   "channels": {
     CHANNELS_PLACEHOLDER
+  },
+  "ui": {
+    "assistant": {
+      "name": "${AZURECLAW_DISPLAY_NAME:-AzureClaw}",
+      "avatar": "🐾"
+    }
   },
   "agents": {
     "defaults": {
