@@ -1202,7 +1202,7 @@ async fn images_generations(
         &state.client,
         &upstream,
         axum::http::Method::POST,
-        &api_path,
+        api_path,
         &headers,
         body,
     )

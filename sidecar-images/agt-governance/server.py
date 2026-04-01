@@ -57,11 +57,16 @@ if not ADMIN_TOKEN:
     for _token_path in ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token",
                          "/run/secrets/admin-token"]:
         try:
-            ADMIN_TOKEN = open(_token_path).read().strip()
+            with open(_token_path) as _f:
+                ADMIN_TOKEN = _f.read().strip()
             if ADMIN_TOKEN:
                 break
-        except OSError:
-            pass
+        except FileNotFoundError:
+            # Expected — try next path
+            continue
+        except OSError as e:
+            log.debug(f"Could not read {_token_path}: {e}")
+            continue
 if ADMIN_TOKEN:
     log.info("Admin token loaded for GET endpoint auth")
 else:

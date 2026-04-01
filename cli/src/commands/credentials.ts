@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { banner, section } from "../stepper.js";
 import {
-  promptAndSaveCredentials, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
+  promptAndSaveCredentials, SECRETS_FILE,
   KNOWN_SECRETS, loadSecrets, setSecret, getSecret, deleteSecret, listSecretVariants,
 } from "../config.js";
 
@@ -44,8 +44,7 @@ export function credentialsCommand(): Command {
         { name: "Done", value: "done" },
       ];
 
-      let keepGoing = true;
-      while (keepGoing) {
+      while (true) {
         const { category } = await inquirer.prompt([{
           type: "list",
           name: "category",
@@ -53,7 +52,7 @@ export function credentialsCommand(): Command {
           choices: categories,
         }]);
 
-        if (category === "done") { keepGoing = false; break; }
+        if (category === "done") break;
 
         if (category === "aoai") {
           await promptAndSaveCredentials({ heading: "Azure OpenAI" });

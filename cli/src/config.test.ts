@@ -14,7 +14,7 @@ vi.mock("fs", () => ({
 import {
   loadConfig, loadContext, saveContext,
   CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
-  loadSecrets, saveSecrets, getSecret, setSecret, deleteSecret, resolveSecret,
+  loadSecrets, saveSecrets, setSecret, deleteSecret, resolveSecret,
   listSecretVariants, KNOWN_SECRETS,
 } from "./config.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "fs";
