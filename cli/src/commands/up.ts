@@ -253,7 +253,7 @@ export function upCommand(): Command {
         if (cachedCtx.resourceGroup && !hasFlag("-g") && !hasFlag("--resource-group"))
           options.resourceGroup = cachedCtx.resourceGroup;
         if (cachedCtx.foundryEndpoint && !hasFlag("--foundry-endpoint") && !hasFlag("--openai-endpoint"))
-          options.foundryEndpoint = cachedCtx.foundryEndpoint;
+          options.openaiEndpoint = options.openaiEndpoint || cachedCtx.foundryEndpoint;
         if (cachedCtx.foundryProjectEndpoint && !hasFlag("--foundry-endpoint"))
           options.foundryEndpoint = options.foundryEndpoint || cachedCtx.foundryProjectEndpoint;
       }
@@ -1664,7 +1664,7 @@ export function upCommand(): Command {
             wiClientId,
             imdsClientId: imdsClientId || undefined,
             foundryEndpoint: openAiEndpoint,
-            foundryProjectEndpoint: options.foundryEndpoint || undefined,
+            foundryProjectEndpoint: foundryEndpoint || undefined,
             identityName: `${baseName}-aks-sandbox-wi`,
             identityResourceGroup: rg,
             oidcIssuerUrl: oidcIssuer?.trim() || undefined,
