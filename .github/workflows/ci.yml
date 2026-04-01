@@ -86,7 +86,7 @@ jobs:
 
   container-scan:
     name: Container Image Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-xl
     permissions:
       contents: read
       security-events: write
