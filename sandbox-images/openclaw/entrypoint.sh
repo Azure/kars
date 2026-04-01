@@ -558,7 +558,8 @@ if [ -d /opt/azureclaw-plugin ]; then
 fi
 
 # Write gateway token to .bashrc (remove any stale tokens from prior runs first)
-sed -i '/OPENCLAW_GATEWAY_TOKEN/d' /sandbox/.bashrc
+touch /sandbox/.bashrc 2>/dev/null || true
+sed -i '/OPENCLAW_GATEWAY_TOKEN/d' /sandbox/.bashrc 2>/dev/null || true
 echo "export OPENCLAW_GATEWAY_TOKEN=\"${GATEWAY_TOKEN}\"" >> /sandbox/.bashrc
 # Also write to a dedicated file so dev.ts can read it without parsing .bashrc
 echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
