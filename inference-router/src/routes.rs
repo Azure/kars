@@ -101,7 +101,9 @@ impl AppState {
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),
-            responses_only_models: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            responses_only_models: Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             admin_token: std::fs::read_to_string("/run/secrets/admin-token")
                 .or_else(|_| std::env::var("ADMIN_TOKEN"))
                 .ok()
@@ -526,7 +528,10 @@ async fn chat_completions(
                     Ok((_resp_status, _, resp_body)) => {
                         let chat_body = responses_to_chat_body(&resp_body);
                         if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
-                            && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
+                            && let Some(total) = bj
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|v| v.as_u64())
                         {
                             budget.record_usage(&sandbox_owned, total).await;
                         }
@@ -550,8 +555,14 @@ async fn chat_completions(
             let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
             let body = Body::from_stream(stream);
             let mut response = (StatusCode::OK, body).into_response();
-            response.headers_mut().insert("content-type", axum::http::HeaderValue::from_static("text/event-stream"));
-            response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-cache"));
+            response.headers_mut().insert(
+                "content-type",
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            response.headers_mut().insert(
+                "cache-control",
+                axum::http::HeaderValue::from_static("no-cache"),
+            );
             return response;
         }
 
@@ -570,7 +581,10 @@ async fn chat_completions(
             Ok((resp_status, resp_hdrs, resp_body)) => {
                 let chat_body = responses_to_chat_body(&resp_body);
                 if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
-                    && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
+                    && let Some(total) = bj
+                        .get("usage")
+                        .and_then(|u| u.get("total_tokens"))
+                        .and_then(|v| v.as_u64())
                 {
                     state.budget.record_usage(sandbox_name, total).await;
                 }
@@ -621,7 +635,12 @@ async fn chat_completions(
                     .unwrap_or_default();
                 let is_unsupported = serde_json::from_slice::<serde_json::Value>(&err_bytes)
                     .ok()
-                    .and_then(|v| v.get("error")?.get("message")?.as_str().map(|s| s.contains("unsupported")))
+                    .and_then(|v| {
+                        v.get("error")?
+                            .get("message")?
+                            .as_str()
+                            .map(|s| s.contains("unsupported"))
+                    })
                     .unwrap_or(false);
 
                 if is_unsupported {
@@ -647,7 +666,10 @@ async fn chat_completions(
                         Ok((resp_status, _, resp_body)) => {
                             let chat_body = responses_to_chat_body(&resp_body);
                             if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
-                                && let Some(total) = bj.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_u64())
+                                && let Some(total) = bj
+                                    .get("usage")
+                                    .and_then(|u| u.get("total_tokens"))
+                                    .and_then(|v| v.as_u64())
                             {
                                 state.budget.record_usage(sandbox_name, total).await;
                             }
@@ -791,7 +813,8 @@ async fn chat_completions(
                     Ok((resp_status, resp_hdrs, resp_body)) => {
                         // Convert Responses API output back to chat/completions format
                         let chat_body = responses_to_chat_body(&resp_body);
-                        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                        if let Ok(body_json) =
+                            serde_json::from_slice::<serde_json::Value>(&chat_body)
                             && let Some(total) = body_json
                                 .get("usage")
                                 .and_then(|u| u.get("total_tokens"))
@@ -1026,7 +1049,9 @@ async fn responses(
     if let Err(msg) = state.budget.check_budget(sandbox_name).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "error": { "message": msg, "type": "token_budget_exceeded" } })),
+            Json(
+                serde_json::json!({ "error": { "message": msg, "type": "token_budget_exceeded" } }),
+            ),
         )
             .into_response();
     }
@@ -1141,7 +1166,9 @@ async fn images_generations(
             )
             .await
         {
-            Ok((_, decision)) if decision.get("allowed") == Some(&serde_json::Value::Bool(false)) => {
+            Ok((_, decision))
+                if decision.get("allowed") == Some(&serde_json::Value::Bool(false)) =>
+            {
                 let reason = decision
                     .get("reason")
                     .and_then(|r| r.as_str())
@@ -1210,8 +1237,8 @@ async fn images_generations_v1(
     query: axum::extract::RawQuery,
     body: Bytes,
 ) -> impl IntoResponse {
-    let mut parsed: serde_json::Value = serde_json::from_slice(&body)
-        .unwrap_or_else(|_| serde_json::json!({}));
+    let mut parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
     let deployment = parsed
         .get("model")
         .and_then(|m| m.as_str())
@@ -2167,13 +2194,18 @@ async fn agt_registry_proxy(
     // Allowlist valid registry API paths — prevent path traversal.
     // Paths arrive as the wildcard after /agt/registry/, e.g. "registry/search".
     let valid_prefixes = [
-        "registry/", "lookup", "search", "register", "prekeys", "heartbeat",
-        "agents", "health", "sessions",
+        "registry/",
+        "lookup",
+        "search",
+        "register",
+        "prekeys",
+        "heartbeat",
+        "agents",
+        "health",
+        "sessions",
     ];
-    let path_valid = valid_prefixes
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-        && !path.contains("..");
+    let path_valid =
+        valid_prefixes.iter().any(|prefix| path.starts_with(prefix)) && !path.contains("..");
     if !path_valid {
         return (
             StatusCode::BAD_REQUEST,
@@ -2794,11 +2826,13 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
                 match role {
                     "tool" => {
                         // Tool result → function_call_output
-                        let call_id = msg.get("tool_call_id")
+                        let call_id = msg
+                            .get("tool_call_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let output = msg.get("content")
+                        let output = msg
+                            .get("content")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
@@ -2808,7 +2842,13 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
                             "output": output
                         }));
                     }
-                    "assistant" if msg.get("tool_calls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false) => {
+                    "assistant"
+                        if msg
+                            .get("tool_calls")
+                            .and_then(|v| v.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false) =>
+                    {
                         // Assistant with tool_calls → function_call items
                         // First emit any text content as a message
                         if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
@@ -2822,16 +2862,19 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
                         }
                         // Then emit each tool call as a function_call item
                         for tc in msg["tool_calls"].as_array().unwrap() {
-                            let call_id = tc.get("id")
+                            let call_id = tc
+                                .get("id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let name = tc.get("function")
+                            let name = tc
+                                .get("function")
                                 .and_then(|f| f.get("name"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let arguments = tc.get("function")
+                            let arguments = tc
+                                .get("function")
                                 .and_then(|f| f.get("arguments"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("{}")
@@ -2847,34 +2890,48 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
                     _ => {
                         // Regular message (user/assistant/system/developer)
                         let resp_role = if role == "system" { "developer" } else { role };
-                        let content = if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
+                        let content = if let Some(arr) =
+                            msg.get("content").and_then(|c| c.as_array())
+                        {
                             // Array content — convert type names
-                            let items: Vec<serde_json::Value> = arr.iter().map(|item| {
-                                let mut it = item.clone();
-                                if let Some(t) = it.get("type").and_then(|t| t.as_str()).map(String::from) {
-                                    let new_type = match (t.as_str(), role) {
-                                        ("text", "assistant") => "output_text",
-                                        ("text", _) => "input_text",
-                                        ("image_url", _) => "input_image",
-                                        ("refusal", _) => "refusal",
-                                        _ => t.as_str(),
-                                    };
-                                    it.as_object_mut().unwrap().insert("type".into(), serde_json::json!(new_type));
-                                    if new_type == "input_image" {
-                                        if let Some(url_obj) = it.get("image_url").cloned() {
-                                            let url = url_obj.get("url").cloned().unwrap_or(url_obj);
-                                            let obj = it.as_object_mut().unwrap();
-                                            obj.remove("image_url");
-                                            obj.insert("image_url".into(), url);
+                            let items: Vec<serde_json::Value> = arr
+                                .iter()
+                                .map(|item| {
+                                    let mut it = item.clone();
+                                    if let Some(t) =
+                                        it.get("type").and_then(|t| t.as_str()).map(String::from)
+                                    {
+                                        let new_type = match (t.as_str(), role) {
+                                            ("text", "assistant") => "output_text",
+                                            ("text", _) => "input_text",
+                                            ("image_url", _) => "input_image",
+                                            ("refusal", _) => "refusal",
+                                            _ => t.as_str(),
+                                        };
+                                        it.as_object_mut()
+                                            .unwrap()
+                                            .insert("type".into(), serde_json::json!(new_type));
+                                        if new_type == "input_image" {
+                                            if let Some(url_obj) = it.get("image_url").cloned() {
+                                                let url =
+                                                    url_obj.get("url").cloned().unwrap_or(url_obj);
+                                                let obj = it.as_object_mut().unwrap();
+                                                obj.remove("image_url");
+                                                obj.insert("image_url".into(), url);
+                                            }
                                         }
                                     }
-                                }
-                                it
-                            }).collect();
+                                    it
+                                })
+                                .collect();
                             serde_json::json!(items)
                         } else if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
                             // String content — wrap in typed content block
-                            let ct = if role == "assistant" { "output_text" } else { "input_text" };
+                            let ct = if role == "assistant" {
+                                "output_text"
+                            } else {
+                                "input_text"
+                            };
                             serde_json::json!([{"type": ct, "text": text}])
                         } else {
                             serde_json::json!([])
@@ -2934,10 +2991,13 @@ fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
         // Responses: {"type":"function","name":"foo"}
         if let Some(func) = tc.get("function") {
             if let Some(name) = func.get("name") {
-                obj.insert("tool_choice".into(), serde_json::json!({
-                    "type": "function",
-                    "name": name
-                }));
+                obj.insert(
+                    "tool_choice".into(),
+                    serde_json::json!({
+                        "type": "function",
+                        "name": name
+                    }),
+                );
             }
         } else {
             // "auto", "none", "required" pass through unchanged
@@ -2968,7 +3028,11 @@ fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
     };
 
     // If it's an error response, pass through
-    if resp.get("error").and_then(|e| if e.is_null() { None } else { Some(e) }).is_some() {
+    if resp
+        .get("error")
+        .and_then(|e| if e.is_null() { None } else { Some(e) })
+        .is_some()
+    {
         return resp_body.clone();
     }
 
@@ -2990,10 +3054,22 @@ fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
                     }
                 }
                 "function_call" => {
-                    let call_id = item.get("call_id").or(item.get("id"))
-                        .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+                    let call_id = item
+                        .get("call_id")
+                        .or(item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
                     tool_calls.push(serde_json::json!({
                         "id": call_id,
                         "type": "function",
