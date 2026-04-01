@@ -300,17 +300,17 @@ fn build_upstream_url(
         upstream.endpoint.trim_end_matches('/'),
         path.trim_start_matches('/'),
     );
-    let body =
-        if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body) {
-            if body_json.get("model").is_none() {
-                body_json.as_object_mut().unwrap().insert(
-                    "model".into(),
-                    serde_json::Value::String(upstream.deployment.clone()),
-                );
-            }
-            serde_json::to_vec(&body_json)?.into()
-        } else {
-            request_body
-        };
+    let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
+    {
+        if body_json.get("model").is_none() {
+            body_json.as_object_mut().unwrap().insert(
+                "model".into(),
+                serde_json::Value::String(upstream.deployment.clone()),
+            );
+        }
+        serde_json::to_vec(&body_json)?.into()
+    } else {
+        request_body
+    };
     Ok((url, body))
 }

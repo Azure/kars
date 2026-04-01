@@ -507,12 +507,8 @@ async fn create_sandbox_docker(
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
 
     // Check if container already exists and is running — reuse it
-    if let Ok(inspect_resp) = docker_api(
-        "GET",
-        &format!("/containers/{}/json", container_name),
-        None,
-    )
-    .await
+    if let Ok(inspect_resp) =
+        docker_api("GET", &format!("/containers/{}/json", container_name), None).await
     {
         if let Ok(info) = serde_json::from_str::<serde_json::Value>(&inspect_resp) {
             let is_running = info
