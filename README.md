@@ -68,6 +68,8 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
    └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+> 📐 **[Architecture & Flow Diagrams](docs/architecture-diagrams.md)** — Mermaid diagrams for all core flows: pod architecture, agent creation, sub-agent spawning, E2E encrypted communication, inference routing, egress control, and defense-in-depth layers.
+
 ### Docker Images
 
 | Image | Language | Purpose |
@@ -422,6 +424,7 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 | Document | Description |
 |---|---|
 | [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, operator dashboard, auth flow |
+| [Architecture Diagrams](docs/architecture-diagrams.md) | Mermaid flow diagrams: pod layout, agent creation, spawn, mesh, egress, inference |
 | [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations |
 | [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
 | [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode, approval flow |
