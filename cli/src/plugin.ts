@@ -2578,6 +2578,19 @@ const azureClawPlugin = definePluginEntry({
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const result = await routerCall("DELETE", `/sandbox/${encodeURIComponent(params.name as string)}`);
+
+          // Clean up stale trust state for the destroyed agent
+          try {
+            await routerCall("DELETE", `/agt/trust/${encodeURIComponent(params.name as string)}`);
+          } catch { /* trust cleanup is best-effort */ }
+
+          // Clean AMID caches
+          const amid = nameToAmid.get(params.name as string);
+          if (amid) {
+            amidToName.delete(amid);
+            nameToAmid.delete(params.name as string);
+          }
+
           return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Destroy failed: ${e.message}` }] };

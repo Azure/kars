@@ -21,6 +21,9 @@
  *   a         — approve selected egress domain
  *   d         — deny selected egress domain
  *   e         — enforce egress (lock down)
+ *   L         — toggle learning ↔ enforcement
+ *   g         — open/close full AGT detail overlay
+ *   t         — toggle topology view
  *   n         — spawn new agent
  *   m         — switch model for selected agent
  *   l         — tail logs for selected agent
@@ -28,7 +31,7 @@
  *   Enter     — connect to selected agent (shell session)
  *   c         — toggle cluster health view
  *   r         — refresh now
- *   q / Esc   — quit
+ *   q / Esc   — quit (or close overlay)
  */
 
 import { Command } from "commander";
@@ -132,6 +135,13 @@ interface ClusterHealth {
   quotas: { namespace: string; cpuUsed: string; cpuHard: string; memUsed: string; memHard: string }[];
   pvcs: { namespace: string; name: string; phase: string; size: string }[];
   warnings: { time: string; reason: string; object: string; message: string }[];
+}
+
+interface MeshHealth {
+  relayReady: boolean;
+  registryReady: boolean;
+  registryPods: number;
+  registryReadyPods: number;
 }
 
 // ── Command ─────────────────────────────────────────────────────────
@@ -283,17 +293,54 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   const clusterPanels = [clusterNodeBox, clusterInfoBox];
 
+  // Topology view (takes full content area when active — rows 1-9)
+  const topologyBox = grid.set(1, 0, 9, 12, blessed.box, {
+    tags: true,
+    label: " 🔗 Agent Topology ",
+    scrollable: true,
+    alwaysScroll: true,
+    mouse: true,
+    style: { border: { fg: "cyan" }, fg: "white" },
+    padding: { left: 1 },
+    hidden: true,
+  });
+
+  // AGT full-detail overlay (shown with 'g' key)
+  const agtOverlay = blessed.box({
+    parent: screen,
+    hidden: true,
+    top: 1, left: 0, right: 0, bottom: 1,
+    tags: true,
+    scrollable: true,
+    alwaysScroll: true,
+    mouse: true,
+    label: " 🛡 AGT Governance ",
+    border: { type: "line" },
+    style: { border: { fg: "blue" }, fg: "white", bg: "default" },
+    padding: { left: 1, right: 1 },
+  });
+
   // ── State ─────────────────────────────────────────────────────────
 
   let sandboxes: SandboxInfo[] = [];
   let egressByAgent: Map<string, EgressDomain[]> = new Map();
   let securityStates: Map<string, SecurityState> = new Map();
   let clusterData: ClusterHealth | null = null;
-  let viewMode: "agents" | "cluster" = "agents";
+  let meshHealth: MeshHealth | null = null;
+  let viewMode: "agents" | "cluster" | "topology" = "agents";
   let focusedPanel: "agents" | "egress" = "agents";
   let refreshCount = 0;
   let isRefreshing = false;
   let dialogOpen = false;
+  let lastLogState = "";
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  let connectedToAgent = false;  // suppress refresh rendering while connected
+  let agtOverlayOpen = false;
+
+  // Tiered refresh: not everything needs to refresh every cycle.
+  // Sandboxes: every cycle (10s). Security/egress: every 3rd (30s). Cluster: every 6th (60s).
+  const TIER_DETAIL = 3;   // security + egress every 3 cycles
+  const TIER_CLUSTER = 6;  // cluster health every 6 cycles
 
   /** Egress domains for the currently selected agent. */
   function selectedEgressDomains(): EgressDomain[] {
@@ -338,11 +385,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
       const data = JSON.parse(stdout);
       const items: any[] = data.items || [];
-      const results: SandboxInfo[] = [];
 
-      for (const item of items) {
+      // Fetch pods + secrets for ALL sandboxes in parallel (not sequentially)
+      const enriched = await Promise.allSettled(items.map(async (item) => {
         const name: string = item.metadata?.name || "";
-        if (!name) continue;
+        if (!name) return null;
         const phase: string = item.status?.phase || "Unknown";
         const model: string = item.spec?.inference?.model || "gpt-4.1";
         const isolation: string = item.spec?.sandbox?.isolation || "enhanced";
@@ -359,77 +406,87 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         let health: HealthState = "pending";
         let restarts = 0;
 
-        try {
-          const { stdout: podJson } = await execa("kubectl", kctl([
+        // Fetch pods and secret in parallel
+        const [podResult, secretResult] = await Promise.allSettled([
+          execa("kubectl", kctl([
             "get", "pods", "-n", sandboxNs, "-o", "json",
-          ], kubeContext), { stdio: "pipe", timeout: 15000 });
-          const pods = JSON.parse(podJson);
-          if (pods.items?.length > 0) {
-            // Pick the best pod: Running > Pending > Terminating
-            const sorted = [...pods.items].sort((a: any, b: any) => {
-              const order = (p: any) => {
-                if (p.metadata?.deletionTimestamp) return 3; // Terminating
-                const phase = p.status?.phase || "";
-                if (phase === "Running") return 0;
-                if (phase === "Pending") return 1;
-                return 2;
-              };
-              return order(a) - order(b);
-            });
-            const pod = sorted[0];
-            const isTerminating = !!pod.metadata?.deletionTimestamp;
-            podName = pod.metadata?.name || "";
-            podCreated = pod.metadata?.creationTimestamp || "";
-            const pPhase = isTerminating ? "Terminating" : (pod.status?.phase || "Unknown");
-            const statuses: any[] = pod.status?.containerStatuses || [];
-            const readyCount = statuses.filter((c: any) => c.ready).length;
-            const totalCount = statuses.length;
-            restarts = statuses.reduce((sum: number, c: any) => sum + (c.restartCount || 0), 0);
-            podStatus = totalCount > 0 ? `${pPhase} (${readyCount}/${totalCount})` : pPhase;
-
-            const hasCrash = statuses.some((c: any) =>
-              c.state?.waiting?.reason === "CrashLoopBackOff" ||
-              c.state?.waiting?.reason === "Error",
-            );
-            if (isTerminating) health = "degraded";
-            else if (hasCrash || pPhase === "Failed") health = "down";
-            else if (readyCount === totalCount && totalCount > 0) health = "healthy";
-            else if (readyCount > 0) health = "degraded";
-            else if (pPhase === "Pending") health = "pending";
-            else health = "unknown";
-
-            // Don't try kubectl exec on unreachable pods
-            if (isTerminating || pPhase === "Pending" || readyCount === 0) podName = "";
-          }
-        } catch { /* no pod */ }
-
-        try {
-          const { stdout: secretOut } = await execa("kubectl", kctl([
+          ], kubeContext), { stdio: "pipe", timeout: 15000 }),
+          execa("kubectl", kctl([
             "get", "secret", `${name}-credentials`, "-n", sandboxNs,
             "-o", "jsonpath={.data}",
-          ], kubeContext), { stdio: "pipe", timeout: 10000 });
+          ], kubeContext), { stdio: "pipe", timeout: 10000 }),
+        ]);
+
+        if (podResult.status === "fulfilled") {
+          try {
+            const pods = JSON.parse(podResult.value.stdout);
+            if (pods.items?.length > 0) {
+              const sorted = [...pods.items].sort((a: any, b: any) => {
+                const order = (p: any) => {
+                  if (p.metadata?.deletionTimestamp) return 3;
+                  const phase = p.status?.phase || "";
+                  if (phase === "Running") return 0;
+                  if (phase === "Pending") return 1;
+                  return 2;
+                };
+                return order(a) - order(b);
+              });
+              const pod = sorted[0];
+              const isTerminating = !!pod.metadata?.deletionTimestamp;
+              podName = pod.metadata?.name || "";
+              podCreated = pod.metadata?.creationTimestamp || "";
+              const pPhase = isTerminating ? "Terminating" : (pod.status?.phase || "Unknown");
+              const statuses: any[] = pod.status?.containerStatuses || [];
+              const readyCount = statuses.filter((c: any) => c.ready).length;
+              const totalCount = statuses.length;
+              restarts = statuses.reduce((sum: number, c: any) => sum + (c.restartCount || 0), 0);
+              podStatus = totalCount > 0 ? `${pPhase} (${readyCount}/${totalCount})` : pPhase;
+
+              const hasCrash = statuses.some((c: any) =>
+                c.state?.waiting?.reason === "CrashLoopBackOff" ||
+                c.state?.waiting?.reason === "Error",
+              );
+              if (isTerminating) health = "degraded";
+              else if (hasCrash || pPhase === "Failed") health = "down";
+              else if (readyCount === totalCount && totalCount > 0) health = "healthy";
+              else if (readyCount > 0) health = "degraded";
+              else if (pPhase === "Pending") health = "pending";
+              else health = "unknown";
+
+              if (isTerminating || pPhase === "Pending" || readyCount === 0) podName = "";
+            }
+          } catch { /* bad JSON */ }
+        }
+
+        if (secretResult.status === "fulfilled") {
+          const secretOut = secretResult.value.stdout;
           const chs: string[] = [];
           if (secretOut.includes("TELEGRAM")) chs.push("TG");
           if (secretOut.includes("SLACK")) chs.push("SL");
           if (secretOut.includes("DISCORD")) chs.push("DC");
           channels = chs.join(",") || "-";
-        } catch { channels = "-"; }
+        } else {
+          channels = "-";
+        }
 
         let age = "-";
-        // Use pod creation time (reflects restarts), fall back to CRD creation
         const ageSource = podCreated || created;
         if (ageSource) {
           const d = new Date(ageSource);
           if (!isNaN(d.getTime())) age = timeSince(d);
         }
 
-        results.push({
+        return {
           name, namespace: sandboxNs, status: podStatus,
           health, model, isolation,
           channels, age, podName, restarts,
           role, parent: parentLabel,
-        });
-      }
+        } as SandboxInfo;
+      }));
+
+      const results: SandboxInfo[] = enriched
+        .filter((r): r is PromiseFulfilledResult<SandboxInfo | null> => r.status === "fulfilled" && r.value !== null)
+        .map((r) => r.value!);
 
       // Build tree: controllers sorted alphabetically, sub-agents right after their parent
       const controllers = results.filter((s) => s.role === "controller").sort((a, b) => a.name.localeCompare(b.name));
@@ -805,6 +862,41 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     return state;
   }
 
+  // ── Mesh Health ──────────────────────────────────────────────────
+
+  async function fetchMeshHealth(): Promise<MeshHealth> {
+    const result: MeshHealth = { relayReady: false, registryReady: false, registryPods: 0, registryReadyPods: 0 };
+    if (devMode) {
+      try {
+        const { stdout } = await execa("docker", ["ps", "--filter", "name=relay", "--filter", "status=running", "--format", "{{.Names}}"], { stdio: "pipe", timeout: 5000 });
+        result.relayReady = stdout.trim().length > 0;
+      } catch {}
+      try {
+        const { stdout } = await execa("docker", ["ps", "--filter", "name=registry", "--filter", "status=running", "--format", "{{.Names}}"], { stdio: "pipe", timeout: 5000 });
+        result.registryReady = stdout.trim().length > 0;
+        result.registryPods = result.registryReady ? 1 : 0;
+        result.registryReadyPods = result.registryPods;
+      } catch {}
+      return result;
+    }
+    try {
+      const { stdout } = await execa("kubectl", kctl([
+        "get", "pods", "-n", "agentmesh", "-o",
+        `jsonpath={range .items[*]}{.metadata.labels.app}{"||"}{.status.conditions[?(@.type=="Ready")].status}{"\\n"}{end}`,
+      ], kubeContext), { stdio: "pipe", timeout: 10000 });
+      for (const line of stdout.trim().split("\n")) {
+        if (!line) continue;
+        const [app, ready] = line.split("||");
+        if (app?.includes("relay") && ready === "True") result.relayReady = true;
+        if (app?.includes("registry")) {
+          result.registryPods++;
+          if (ready === "True") { result.registryReady = true; result.registryReadyPods++; }
+        }
+      }
+    } catch {}
+    return result;
+  }
+
   // ── Cluster Health ────────────────────────────────────────────────
 
   async function fetchClusterHealth(): Promise<ClusterHealth> {
@@ -1000,6 +1092,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     }
   }
 
+  async function learnEgress(sb: SandboxInfo) {
+    if (!sb.podName) return;
+    try {
+      await execa("kubectl", kctl([
+        "exec", "-n", sb.namespace, sb.podName,
+        "-c", "inference-router", "--",
+        "curl", "-s", "-X", "POST",
+        "http://localhost:8443/egress/learn",
+      ], kubeContext), { stdio: "pipe" });
+      activityLog.log(`{yellow-fg}📖 Learning{/} ${sb.name}`);
+    } catch (e: any) {
+      activityLog.log(`{red-fg}✗ Learn fail:{/} ${e.message?.substring(0, 50)}`);
+    }
+  }
+
   // ── Rendering ─────────────────────────────────────────────────────
 
   const ok = (v: boolean) => v ? "{green-fg}●{/}" : "{red-fg}●{/}";
@@ -1032,9 +1139,18 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       clusterTag = `${apiTag} API  {${nColor}-fg}${readyNodes}/${totalNodes}{/} nodes  │  `;
     }
 
+    // Mesh health indicator
+    let meshTag = "";
+    if (meshHealth) {
+      const relayColor = meshHealth.relayReady ? "green" : "red";
+      const regColor = meshHealth.registryReady ? (meshHealth.registryReadyPods < meshHealth.registryPods ? "yellow" : "green") : "red";
+      const regCount = meshHealth.registryPods > 0 ? ` (${meshHealth.registryReadyPods}/${meshHealth.registryPods})` : "";
+      meshTag = `{${relayColor}-fg}●{/} relay  {${regColor}-fg}●{/} registry${regCount}  │  `;
+    }
+
     const viewLabel = viewMode === "cluster" ? "{blue-fg}{bold}[CLUSTER]{/bold}{/}  │  " : "";
     const title = ` ${spin}{bold}AzureClaw Operator{/bold}  │  ${ctx}  │  ${viewLabel}`;
-    const stats = `${clusterTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`;
+    const stats = `${clusterTag}${meshTag}${healthSummary()}  │  ${totalEgressCount()} domain(s)  │  {gray-fg}${now}{/}`;
     const shortStats = `${healthSummary()}  │  {gray-fg}${now}{/}`;
 
     // Measure visible width (strip blessed tags, account for double-wide emoji)
@@ -1135,6 +1251,87 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     securityBox.setContent(lines.join("\n"));
   }
 
+  /** Full AGT detail — used in the overlay panel. */
+  function renderAGTFull(sb: SandboxInfo): string {
+    const sec = securityStates.get(sb.name);
+    if (!sec) return `{bold}${sb.name}{/}\n{gray-fg}Polling...{/}`;
+    if (!sec.agtEnabled) return "{gray-fg}AGT not enabled{/}\n{gray-fg}Use --governance flag{/}";
+
+    const activePeerCount = sec.agtTrustScores.filter((t: any) =>
+      t.agent !== sb.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)
+    ).length;
+
+    const lines: string[] = [
+      `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid}{/}` : ""),
+      ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
+      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : activePeerCount} known`,
+      ` Mesh    ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}  ${sec.agtTrustUpdates} trust updates`,
+    ];
+
+    if (sec.agtReputation) {
+      const r = sec.agtReputation;
+      const pct = (r.score * 100).toFixed(0);
+      const c = r.score >= 0.7 ? "green" : r.score >= 0.5 ? "yellow" : "red";
+      lines.push("", `{bold}Reputation{/} {gray-fg}(registry){/}`);
+      lines.push(` {${c}-fg}${pct}%{/} ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
+      if (r.totalSessions > 0) {
+        lines.push(` Completion ${(r.completionRate * 100).toFixed(0)}%  Avg ${r.avgFeedback.toFixed(2)}`);
+      }
+    } else {
+      lines.push("", `{gray-fg}Reputation  awaiting first session{/}`);
+    }
+
+    if (sec.agtTrustScores.length > 0) {
+      const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
+      const peers = sec.agtTrustScores.filter((t) =>
+        t.agent !== sb.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)
+      );
+
+      if (peers.length > 0) {
+        lines.push("", `{bold}Mesh Traffic{/}`);
+        for (const t of peers) {
+          const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
+          const filled = Math.round(t.score / 100);
+          const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+          let ago = "";
+          if (t.lastSeen) {
+            const d = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
+            const ms = Date.now() - d.getTime();
+            if (!isNaN(ms) && ms >= 0) {
+              if (ms < 60_000) ago = `${Math.round(ms / 1000)}s ago`;
+              else if (ms < 3_600_000) ago = `${Math.round(ms / 60_000)}m ago`;
+              else ago = `${Math.round(ms / 3_600_000)}h ago`;
+            }
+          }
+          const name = t.agent;
+          lines.push(` {${c}-fg}${bar}{/} ${t.score} ${name}`);
+          lines.push(`   ${t.tier} · ${t.interactions} msg${t.interactions !== 1 ? "s" : ""}${ago ? ` · ${ago}` : ""}`);
+        }
+        const selfName = self?.agent || sb.name;
+        lines.push("");
+        for (const t of peers) {
+          const peerName = t.agent;
+          const arrow = t.interactions > 0 ? `═══⟐ ${t.interactions} msg${t.interactions !== 1 ? "s" : ""} ⟐═══` : `─── idle ───`;
+          lines.push(` {cyan-fg}${selfName}{/} ${arrow} {green-fg}${peerName}{/}`);
+        }
+      } else if (self) {
+        lines.push("", `{gray-fg}No peer agents yet{/}`);
+      }
+    }
+
+    if (sec.agtRecentAudit.length > 0) {
+      lines.push("", "{bold}Audit{/}");
+      for (const entry of sec.agtRecentAudit) {
+        lines.push(` {gray-fg}${entry}{/}`);
+      }
+    } else {
+      lines.push("", "{gray-fg}No audit entries yet{/}");
+    }
+
+    return lines.join("\n");
+  }
+
+  /** Compact AGT summary for the small panel. */
   function renderAGT() {
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
@@ -1154,86 +1351,189 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       return;
     }
 
-        // Count only agents with actual interactions (excludes self and stale lookup-only entries)
-    const activePeerCount = sec.agtTrustScores.filter((t: any) =>
-      t.agent !== sb.name && (t.interactions > 0 || t.lastSeen)
-    ).length;
+    const mode = sec.egressMode === "enforcing" ? "{green-fg}enforcing{/}" : "{yellow-fg}learning{/}";
+    const peers = sec.agtTrustScores.filter((t) =>
+      t.agent !== sb.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)
+    );
 
     const lines: string[] = [
       `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid.substring(0, 12)}…{/}` : ""),
-      ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
-      ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : activePeerCount} known`,
-      ` Mesh    ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}  ${sec.agtTrustUpdates} trust updates`,
+      ` ${mode}  ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}`,
+      ` ${peers.length} peer${peers.length !== 1 ? "s" : ""}`,
     ];
 
-    // Registry reputation score (from agentmesh-registry)
-    if (sec.agtReputation) {
-      const r = sec.agtReputation;
-      const pct = (r.score * 100).toFixed(0);
-      const c = r.score >= 0.7 ? "green" : r.score >= 0.5 ? "yellow" : "red";
-      lines.push(`{bold}Reputation{/} {gray-fg}(registry){/}`);
-      lines.push(` {${c}-fg}${pct}%{/} ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
-      if (r.totalSessions > 0) {
-        lines.push(` Completion ${(r.completionRate * 100).toFixed(0)}%  Avg ${r.avgFeedback.toFixed(2)}`);
-      }
-    } else {
-      lines.push(`{gray-fg}Reputation  awaiting first session{/}`);
+    for (const t of peers) {
+      const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
+      const filled = Math.round(t.score / 100);
+      const bar = "█".repeat(filled) + "░".repeat(4 - Math.min(filled, 4));
+      lines.push(` {${c}-fg}${bar}{/} ${t.score} ${t.agent}`);
     }
 
-    // Local trust store + traffic flow (router in-memory, per-interaction)
-    if (sec.agtTrustScores.length > 0) {
-      // Show self at the top
-      const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
-      // Filter out self and stale entries (never communicated — 0 interactions, no lastSeen)
-      const peers = sec.agtTrustScores.filter((t) =>
-        t.agent !== sb.name && (t.interactions > 0 || t.lastSeen)
-      );
-
-      if (peers.length > 0) {
-        lines.push(`{bold}Mesh Traffic{/}`);
-        for (const t of peers) {
-          const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
-          // Trust score bar visualization (0-1000 mapped to 10 chars)
-          const filled = Math.round(t.score / 100);
-          const bar = "█".repeat(filled) + "░".repeat(10 - filled);
-          // Relative time
-          let ago = "";
-          if (t.lastSeen) {
-            const d = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
-            const ms = Date.now() - d.getTime();
-            if (!isNaN(ms) && ms >= 0) {
-              if (ms < 60_000) ago = `${Math.round(ms / 1000)}s ago`;
-              else if (ms < 3_600_000) ago = `${Math.round(ms / 60_000)}m ago`;
-              else ago = `${Math.round(ms / 3_600_000)}h ago`;
-            }
-          }
-          const name = t.agent.length > 20 ? t.agent.substring(0, 18) + "…" : t.agent;
-          lines.push(` {${c}-fg}${bar}{/} ${t.score} ${name}`);
-          lines.push(`   ${t.tier} · ${t.interactions} msg${t.interactions !== 1 ? "s" : ""}${ago ? ` · ${ago}` : ""}`);
-        }
-        // Traffic flow diagram
-        const selfName = (self?.agent || sb.name).substring(0, 14);
-        lines.push("");
-        for (const t of peers) {
-          const peerName = t.agent.length > 14 ? t.agent.substring(0, 12) + "…" : t.agent;
-          const arrow = t.interactions > 0 ? `═══⟐ ${t.interactions} msg${t.interactions !== 1 ? "s" : ""} ⟐═══` : `─── idle ───`;
-          lines.push(` {cyan-fg}${selfName}{/} ${arrow} {green-fg}${peerName}{/}`);
-        }
-      } else if (self) {
-        lines.push(`{gray-fg}No peer agents yet{/}`);
-      }
+    if (peers.length === 0) {
+      lines.push(` {gray-fg}no peers yet{/}`);
     }
 
-    if (sec.agtRecentAudit.length > 0) {
-      lines.push("{bold}Audit{/}");
-      for (const entry of sec.agtRecentAudit) {
-        lines.push(` {gray-fg}${entry}{/}`);
-      }
-    } else {
-      lines.push("{gray-fg}No audit entries yet{/}");
-    }
+    lines.push(`{gray-fg}[g] full detail{/}`);
 
     agtPanel.setContent(lines.join("\n"));
+  }
+
+  function renderTopology() {
+    if (sandboxes.length === 0) {
+      topologyBox.setContent("{gray-fg}No agents{/}");
+      return;
+    }
+
+    const parents = sandboxes.filter((s) => s.role !== "sub-agent");
+    const children = sandboxes.filter((s) => s.role === "sub-agent");
+    const totalMesh = [...securityStates.values()].reduce((n, s) => n + s.agtMeshSessions, 0);
+
+    const lines: string[] = [];
+    lines.push(`{bold}Mesh Topology{/}  ${sandboxes.length} agent${sandboxes.length !== 1 ? "s" : ""}  ·  ${totalMesh} session${totalMesh !== 1 ? "s" : ""}  ·  {gray-fg}[t] back to table{/}`);
+    lines.push("");
+
+    function statusIcon(health: string): string {
+      return health === "healthy" ? "{green-fg}●{/}" :
+             health === "pending" ? "{yellow-fg}◌{/}" :
+             health === "degraded" ? "{yellow-fg}◐{/}" : "{red-fg}✗{/}";
+    }
+
+    // Fixed column width for all boxes — keeps alignment clean at scale
+    const COL_W = 26;  // inner content width
+    const BOX_W = COL_W + 4; // +4 for "│ " and " │"
+    const CELL_W = BOX_W + 2; // +2 gap between columns
+
+    function padC(text: string, w: number): string {
+      // Strip blessed tags for length calculation
+      const plain = text.replace(/\{[^}]+\}/g, "");
+      const pad = Math.max(0, w - plain.length);
+      const left = Math.floor(pad / 2);
+      return " ".repeat(left) + text + " ".repeat(pad - left);
+    }
+
+    function makeBox(name: string, icon: string, line2: string, line3: string): string[] {
+      const border = "─".repeat(COL_W + 2);
+      return [
+        `┌${border}┐`,
+        `│ ${icon} ${name.length > COL_W - 2 ? name.substring(0, COL_W - 4) + "…" : name.padEnd(COL_W - 2)} │`,
+        `│ ${line2.length > COL_W ? line2.substring(0, COL_W - 1) + "…" : line2.padEnd(COL_W)} │`,
+        `│ ${line3.length > COL_W ? line3.substring(0, COL_W - 1) + "…" : line3.padEnd(COL_W)} │`,
+        `└${border}┘`,
+      ];
+    }
+
+    for (const p of parents) {
+      const sec = securityStates.get(p.name);
+      const icon = statusIcon(p.health);
+      const mode = sec?.egressMode === "enforcing" ? "🔒 enforce" :
+                   sec?.egressMode === "learning" ? "📖 learn" : "";
+      const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
+      const peerCount = sec?.agtTrustScores.filter((t) => t.agent !== p.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)).length || 0;
+
+      const pBox = makeBox(p.name, icon, `${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
+      for (const l of pBox) lines.push(`  ${l}`);
+
+      const subs = children.filter((c) => c.parent === p.name);
+      if (subs.length > 0) {
+        // Vertical connector from parent center
+        const parentCenter = Math.floor(BOX_W / 2) + 2; // +2 for indent
+        lines.push(" ".repeat(parentCenter) + "│");
+
+        if (subs.length === 1) {
+          // Single child — straight line down
+          lines.push(" ".repeat(parentCenter) + "│");
+          const childSec = securityStates.get(subs[0].name);
+          const ci = statusIcon(subs[0].health);
+          const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
+          const cBox = makeBox(subs[0].name, ci, subs[0].model, cMesh);
+          // Center single child under parent
+          const childIndent = Math.max(2, parentCenter - Math.floor(BOX_W / 2));
+          for (const l of cBox) lines.push(" ".repeat(childIndent) + l);
+        } else {
+          // Multiple children — horizontal bar with drops
+          // Each child occupies CELL_W chars; center the group under parent
+          const totalGroupW = subs.length * CELL_W - 2; // -2 because last has no trailing gap
+          const groupStart = Math.max(4, parentCenter - Math.floor(totalGroupW / 2));
+
+          // Horizontal bar: ├──┬──┬──┤ centered under parent's │
+          let bar = " ".repeat(groupStart);
+          for (let i = 0; i < subs.length; i++) {
+            const mid = Math.floor(BOX_W / 2);
+            if (i === 0) {
+              bar += "┌" + "─".repeat(mid);
+            } else {
+              bar += "─".repeat(mid) + "┬";
+              if (i < subs.length - 1) {
+                bar += "─".repeat(CELL_W - mid - 1);
+              }
+            }
+            if (i === subs.length - 1 && i > 0) {
+              bar += "─".repeat(mid) + "┐";
+            }
+            if (i === 0 && subs.length > 1) {
+              bar += "─".repeat(CELL_W - mid - 1);
+            }
+          }
+          lines.push(bar);
+
+          // Drop stubs: │ at center of each column
+          let stubs = " ".repeat(groupStart);
+          for (let i = 0; i < subs.length; i++) {
+            const mid = Math.floor(BOX_W / 2);
+            stubs += " ".repeat(mid) + "│" + " ".repeat(CELL_W - mid - 1);
+          }
+          lines.push(stubs);
+
+          // Render child boxes side-by-side
+          const childBoxes: string[][] = [];
+          for (const s of subs) {
+            const childSec = securityStates.get(s.name);
+            const ci = statusIcon(s.health);
+            const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
+            childBoxes.push(makeBox(s.name, ci, s.model, cMesh));
+          }
+          for (let row = 0; row < 5; row++) {
+            let line = " ".repeat(groupStart);
+            for (let i = 0; i < childBoxes.length; i++) {
+              line += childBoxes[i][row];
+              if (i < childBoxes.length - 1) line += "  ";
+            }
+            lines.push(line);
+          }
+        }
+
+        // Peer-to-peer mesh links
+        const peerLinks: string[] = [];
+        for (const s of subs) {
+          const childSec = securityStates.get(s.name);
+          const peers = childSec?.agtTrustScores.filter((t) =>
+            t.agent !== s.name && subs.some((sub) => sub.name === t.agent) && t.interactions > 0
+          ) || [];
+          for (const peer of peers) {
+            const key = [s.name, peer.agent].sort().join(":");
+            if (!peerLinks.includes(key)) {
+              peerLinks.push(key);
+              const c = peer.score >= 600 ? "green" : peer.score >= 400 ? "yellow" : "red";
+              lines.push(`         {${c}-fg}⟷{/} ${s.name} ↔ ${peer.agent} {gray-fg}(${peer.interactions} msg${peer.interactions !== 1 ? "s" : ""}, trust: ${peer.score}){/}`);
+            }
+          }
+        }
+      }
+
+      lines.push("");
+    }
+
+    // Orphan sub-agents (parent destroyed but children remain)
+    const orphans = children.filter((c) => !parents.some((p) => p.name === c.parent));
+    if (orphans.length > 0) {
+      lines.push("{gray-fg}─── Orphaned agents ───{/}");
+      for (const s of orphans) {
+        const icon = statusIcon(s.health);
+        lines.push(`  ${icon} ${s.name} {gray-fg}(${s.model}) parent: ${s.parent || "?"}{/}`);
+      }
+    }
+
+    topologyBox.setContent(lines.join("\n"));
   }
 
   function renderCluster() {
@@ -1361,13 +1661,23 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (viewMode === "cluster") {
       for (const p of agentDetailPanels) (p as any).hide();
       for (const p of clusterPanels) (p as any).show();
+      (topologyBox as any).hide();
+      (agentTable as any).show();
       renderCluster();
+    } else if (viewMode === "topology") {
+      for (const p of clusterPanels) (p as any).hide();
+      for (const p of agentDetailPanels) (p as any).hide();
+      (agentTable as any).hide();
+      (topologyBox as any).show();
+      renderTopology();
     } else {
       for (const p of clusterPanels) (p as any).hide();
       for (const p of agentDetailPanels) (p as any).show();
+      (topologyBox as any).hide();
+      (agentTable as any).show();
     }
 
-    // Agent table (always visible) — with tree hierarchy
+    // Agent table — with tree hierarchy
     const agentData = sandboxes.map((s) => {
       const hIcon = s.health === "healthy" ? "●" :
                     s.health === "degraded" ? "●" :
@@ -1420,18 +1730,27 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     // Status bar
     const viewTag = viewMode === "cluster"
       ? "{blue-fg}{bold}[Cluster]{/bold}{/}"
-      : "{gray-fg}Cluster{/}";
+      : viewMode === "topology"
+        ? "{cyan-fg}{bold}[Topology]{/bold}{/}"
+        : "{gray-fg}Cluster{/}";
+    const topoTag = viewMode === "topology"
+      ? "{cyan-fg}{bold}[Topology]{/bold}{/}"
+      : "{gray-fg}Topology{/}";
     if (viewMode === "agents") {
       const focusTag = focusedPanel === "agents"
         ? "{cyan-fg}{bold}[Agents]{/bold}{/}  {gray-fg}Egress{/}"
         : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
       statusBar.setContent(
-        ` ${focusTag}  ${viewTag}  │  [Tab] Focus  [↑↓] Nav  [Enter] Connect  [c] Cluster  [a] Approve  [A] All  ` +
-        `[d] Del/Deny  [e] Enforce  [n] Spawn  [r] Refresh  [q] Quit`,
+        ` ${focusTag}  ${viewTag}  ${topoTag}  │  [Tab] Focus  [↑↓] Nav  [Enter] Connect  [c] Cluster  [t] Topology  ` +
+        `[a] Approve  [A] All  [d] Del/Deny  [e] Enforce  [L] Learn/Enforce  [g] AGT  [n] Spawn  [r] Refresh  [q] Quit`,
+      );
+    } else if (viewMode === "topology") {
+      statusBar.setContent(
+        ` ${topoTag}  │  [t] Back to Agents  [c] Cluster  [r] Refresh  [q] Quit`,
       );
     } else {
       statusBar.setContent(
-        ` ${viewTag}  │  [c] Back to Agents  [r] Refresh  [q] Quit`,
+        ` ${viewTag}  │  [c] Back to Agents  [t] Topology  [r] Refresh  [q] Quit`,
       );
     }
 
@@ -1451,41 +1770,71 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   async function refresh() {
     if (isRefreshing) return;
+    if (connectedToAgent) return; // don't poll or render while inside agent session
     isRefreshing = true;
     startSpinner();
     render();
 
     try {
+      // Always fetch sandbox list (lightweight: 1 CRD query + parallel pod/secret)
       sandboxes = await fetchSandboxes();
-
-      // Parallel: egress + security + cluster for all running sandboxes
       const running = sandboxes.filter((s) => s.podName);
-      const [egressSettled, secSettled, clusterSettled] = await Promise.allSettled([
-        Promise.allSettled(running.map((s) => fetchEgressDomains(s))),
-        Promise.allSettled(running.map((s) => fetchSecurityState(s))),
-        fetchClusterHealth(),
-      ]);
 
-      egressByAgent = new Map();
-      if (egressSettled.status === "fulfilled") {
-        for (let i = 0; i < running.length; i++) {
-          const r = egressSettled.value[i];
-          if (r.status === "fulfilled") egressByAgent.set(running[i].name, r.value);
-        }
+      // Tiered: only fetch detail data every Nth cycle to reduce API load
+      const fetchDetail = refreshCount === 0 || refreshCount % TIER_DETAIL === 0;
+      const fetchCluster = refreshCount === 0 || refreshCount % TIER_CLUSTER === 0;
+
+      const promises: Promise<any>[] = [];
+
+      if (fetchDetail) {
+        promises.push(
+          Promise.allSettled(running.map((s) => fetchEgressDomains(s))).then((settled) => {
+            egressByAgent = new Map();
+            for (let i = 0; i < running.length; i++) {
+              const r = settled[i];
+              if (r.status === "fulfilled") egressByAgent.set(running[i].name, r.value);
+            }
+          }),
+          Promise.allSettled(running.map((s) => fetchSecurityState(s))).then((settled) => {
+            securityStates = new Map();
+            for (let i = 0; i < running.length; i++) {
+              const r = settled[i];
+              if (r.status === "fulfilled") securityStates.set(r.value.sandbox, r.value);
+            }
+          }),
+        );
       }
-      securityStates = new Map();
-      if (secSettled.status === "fulfilled") {
-        for (let i = 0; i < running.length; i++) {
-          const r = secSettled.value[i];
-          if (r.status === "fulfilled") securityStates.set(r.value.sandbox, r.value);
-        }
+
+      if (fetchCluster) {
+        promises.push(
+          fetchClusterHealth().then((d) => { clusterData = d; }).catch(() => {}),
+          fetchMeshHealth().then((d) => { meshHealth = d; }).catch(() => {}),
+        );
       }
-      clusterData = clusterSettled.status === "fulfilled" ? clusterSettled.value : null;
+
+      if (promises.length > 0) await Promise.allSettled(promises);
 
       refreshCount++;
-      activityLog.log(
-        `{cyan-fg}↻{/} #${refreshCount}  ${sandboxes.length} agent(s)  ${totalEgressCount()} domain(s)`,
-      );
+      const newState = `${sandboxes.length}:${totalEgressCount()}:${sandboxes.map(s => s.status).join(",")}`;
+      if (newState !== lastLogState) {
+        if (lastLogState) {
+          const [prevAgents, prevDomains] = lastLogState.split(":").map(Number);
+          const agentDiff = sandboxes.length - prevAgents;
+          const domainDiff = totalEgressCount() - prevDomains;
+          const parts: string[] = [];
+          if (agentDiff > 0) parts.push(`+${agentDiff} agent${agentDiff !== 1 ? "s" : ""}`);
+          else if (agentDiff < 0) parts.push(`${agentDiff} agent${agentDiff !== -1 ? "s" : ""}`);
+          if (domainDiff > 0) parts.push(`${domainDiff} new domain${domainDiff !== 1 ? "s" : ""}`);
+          else if (domainDiff < 0) parts.push(`${domainDiff} domain${domainDiff !== -1 ? "s" : ""}`);
+          if (parts.length === 0) parts.push("status changed");
+          activityLog.log(`{cyan-fg}↻{/} ${parts.join(", ")}`);
+        } else {
+          activityLog.log(
+            `{cyan-fg}↻{/} ${sandboxes.length} agent(s)  ${totalEgressCount()} domain(s)`,
+          );
+        }
+        lastLogState = newState;
+      }
     } catch (e: any) {
       activityLog.log(`{red-fg}✗ Refresh:{/} ${e.message?.substring(0, 50)}`);
     }
@@ -1521,6 +1870,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   // ── Keyboard ──────────────────────────────────────────────────────
 
   screen.key(["q", "escape"], () => {
+    if (agtOverlayOpen) {
+      (agtOverlay as any).hide();
+      agtOverlayOpen = false;
+      screen.render();
+      return;
+    }
     stopSpinner();
     screen.destroy();
     process.exit(0);
@@ -1541,9 +1896,37 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   // Cluster view toggle
   screen.key(["c"], () => {
-    if (dialogOpen) return;
-    viewMode = viewMode === "agents" ? "cluster" : "agents";
+    if (dialogOpen || agtOverlayOpen) return;
+    viewMode = viewMode === "cluster" ? "agents" : "cluster";
     render();
+  });
+
+  // Topology view toggle
+  screen.key(["t"], () => {
+    if (dialogOpen || agtOverlayOpen) return;
+    viewMode = viewMode === "topology" ? "agents" : "topology";
+    render();
+  });
+
+  // AGT full-detail overlay
+  screen.key(["g"], () => {
+    if (dialogOpen) return;
+    if (agtOverlayOpen) {
+      (agtOverlay as any).hide();
+      agtOverlayOpen = false;
+      screen.render();
+      return;
+    }
+    const idx = (agentTable as any).rows?.selected ?? 0;
+    const sb = sandboxes[idx];
+    if (!sb) return;
+    const content = renderAGTFull(sb);
+    (agtOverlay as any).setLabel(` 🛡 AGT Governance — ${sb.name} `);
+    agtOverlay.setContent(content);
+    (agtOverlay as any).show();
+    agtOverlay.focus();
+    agtOverlayOpen = true;
+    screen.render();
   });
 
   // Egress actions
@@ -1592,6 +1975,43 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
     if (sb) { await enforceEgress(sb); await refresh(); }
+  });
+
+  // Learning ↔ Enforcement toggle
+  screen.key(["S-l"], async () => {
+    if (dialogOpen || agtOverlayOpen) return;
+    if (sandboxes.length === 0) return;
+    const idx = (agentTable as any).rows?.selected ?? 0;
+    const sb = sandboxes[idx];
+    if (!sb) return;
+    const sec = securityStates.get(sb.name);
+    const mode = sec?.egressMode;
+    if (mode === "learning") {
+      await enforceEgress(sb);
+      await refresh();
+    } else if (mode === "enforcing") {
+      dialogOpen = true;
+      const confirmBox = blessed.question({
+        parent: screen,
+        border: { type: "line" },
+        height: "shrink",
+        width: "half",
+        top: "center",
+        left: "center",
+        tags: true,
+        style: { border: { fg: "yellow" }, fg: "white" },
+      });
+      confirmBox.ask(`Switch ${sb.name} to learning mode?`, async (err: any, value: string) => {
+        (confirmBox as any).destroy();
+        dialogOpen = false;
+        if (!err && value) {
+          await learnEgress(sb);
+          await refresh();
+        }
+        screen.render();
+      });
+      screen.render();
+    }
   });
 
   // Spawn — multi-step wizard
@@ -2015,62 +2435,119 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (!sb) return;
 
     dialogOpen = true;
+    connectedToAgent = true;
+    const sessionId = `operator-${sb.name}`;
 
-    // Save blessed terminal state and fully leave the alternate screen
+    // Stop the refresh timer — prevents blessed from writing to stdout
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+
+    // Save blessed state and leave alternate screen
     try { screen.program.lsaveCursor("operator"); } catch {}
     screen.program.normalBuffer();
     screen.program.showCursor();
     screen.program.flush();
 
-    // Give up raw mode so the child process gets clean stdin
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(false);
-      process.stdin.resume();
-    }
+    // Remove ALL blessed listeners from stdin so we're the sole reader.
+    const savedDataListeners = process.stdin.listeners("data").slice();
+    const savedKeypressListeners = process.stdin.listeners("keypress").slice();
+    process.stdin.removeAllListeners("data");
+    process.stdin.removeAllListeners("keypress");
 
-    // Persistent session ID — reconnecting resumes the same conversation
-    const sessionId = `operator-${sb.name}`;
-
-    // Ignore SIGINT in parent so Ctrl+C only reaches the child
-    const sigintHandler = () => {};
-    process.on("SIGINT", sigintHandler);
-
-    // Use spawnSync to block — avoids any async blessed interference.
-    // Launch openclaw tui directly — quit the TUI to return to operator.
-    const { spawnSync } = await import("child_process");
+    // Spawn PTY for proper TTY passthrough with colors
+    const nodePty = await import("node-pty");
     const connectCmd = devMode ? "docker" : "kubectl";
     const connectArgs = devMode
       ? ["exec", "-it", sb.podName!, "openclaw", "tui"]
-      : ["exec", "-it", "-n", sb.namespace, `deploy/${sb.name}`, "-c", "openclaw", "--", "openclaw", "tui"];
-    const result = spawnSync(connectCmd, connectArgs, {
-      stdio: "inherit",
-      env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
+      : kctl(["exec", "-it", "-n", sb.namespace, `deploy/${sb.name}`, "-c", "openclaw", "--", "openclaw", "tui"], kubeContext);
+
+    const cols = process.stdout.columns || 80;
+    const rows = process.stdout.rows || 24;
+    const ptyProcess = nodePty.spawn(connectCmd, connectArgs, {
+      name: "xterm-256color",
+      cols,
+      rows,
+      cwd: process.cwd(),
+      env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
     });
 
-    // Restore SIGINT handling
-    process.removeListener("SIGINT", sigintHandler);
+    // Pipe PTY output to stdout
+    ptyProcess.onData((data: string) => {
+      process.stdout.write(data);
+    });
 
-    // Restore blessed terminal state
+    // Raw mode: forward keystrokes to PTY.
+    // Detach: Ctrl+\ (0x1c) or Ctrl+] (0x1d)
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
     }
-    // Reset terminal to clean state before re-entering blessed
-    process.stdout.write("\x1b[?25l\x1b[?1049h"); // hide cursor + alt buffer
-    screen.program.alternateBuffer();
-    try { screen.program.lrestoreCursor("operator"); } catch {}
-    screen.program.hideCursor();
-    screen.program.flush();
-    screen.alloc();
-    dialogOpen = false;
-    render();
-    screen.render();
+    process.stdin.resume();
 
-    if (result.status === 0 || result.signal === "SIGINT") {
-      activityLog.log(`{green-fg}↩ Back from ${sb.name} (session: ${sessionId}){/}`);
-    } else {
-      activityLog.log(`{red-fg}✗ Connection to ${sb.name} failed{/}`);
+    const onData = (data: Buffer) => {
+      // Ctrl+\ = 0x1c, Ctrl+] = 0x1d — detach
+      if (data.length === 1 && (data[0] === 0x1c || data[0] === 0x1d)) {
+        cleanup("detach");
+        return;
+      }
+      try { ptyProcess.write(data.toString()); } catch {}
+    };
+    process.stdin.on("data", onData);
+
+    // Forward resize to PTY
+    const onResize = () => {
+      try { ptyProcess.resize(process.stdout.columns || 80, process.stdout.rows || 24); } catch {}
+    };
+    process.stdout.on("resize", onResize);
+
+    // Suppress SIGINT — let it reach child via PTY
+    const sigintHandler = () => {};
+    process.on("SIGINT", sigintHandler);
+
+    ptyProcess.onExit(() => cleanup("exit"));
+
+    let cleaned = false;
+    function cleanup(reason: string) {
+      if (cleaned) return;
+      cleaned = true;
+
+      process.stdin.removeAllListeners("data");
+      process.stdout.removeListener("resize", onResize);
+      process.removeListener("SIGINT", sigintHandler);
+      try { ptyProcess.kill(); } catch {}
+
+      // Restore ALL blessed stdin listeners
+      for (const fn of savedDataListeners) process.stdin.on("data", fn as (...args: any[]) => void);
+      for (const fn of savedKeypressListeners) process.stdin.on("keypress", fn as (...args: any[]) => void);
+
+      // Restore blessed terminal state
+      if (process.stdin.isTTY) process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdout.write("\x1b[?25l\x1b[?1049h");
+      screen.program.alternateBuffer();
+      try { screen.program.lrestoreCursor("operator"); } catch {}
+      screen.program.hideCursor();
+      screen.program.flush();
+      screen.alloc();
+
+      connectedToAgent = false;
+      dialogOpen = false;
+
+      // Restart refresh timer
+      refreshTimer = setInterval(async () => { await refresh(); }, refreshInterval);
+
+      if (reason === "detach") {
+        activityLog.log(`{cyan-fg}⏏ Detached from ${sb.name}{/}`);
+      } else {
+        activityLog.log(`{green-fg}↩ Back from ${sb.name} (session: ${sessionId}){/}`);
+      }
+      render();
+      screen.render();
+
+      // Immediate refresh to catch any changes while we were connected
+      setTimeout(() => refresh(), 500);
     }
-    screen.render();
+
+    // Show hint
+    process.stdout.write(`\r\n\x1b[36m⟩ Connected to ${sb.name}. Press Ctrl+\\ to detach, /exit to quit.\x1b[0m\r\n\r\n`);
   }
 
   screen.key(["enter"], () => connectToAgent());
@@ -2090,8 +2567,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   await refresh();
 
-  const timer = setInterval(async () => { await refresh(); }, refreshInterval);
-  screen.on("destroy", () => { clearInterval(timer); stopSpinner(); });
+  refreshTimer = setInterval(async () => { await refresh(); }, refreshInterval);
+  screen.on("destroy", () => { if (refreshTimer) clearInterval(refreshTimer); stopSpinner(); });
 }
 
 function timeSince(date: Date): string {
