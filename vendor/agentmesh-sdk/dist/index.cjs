@@ -2892,14 +2892,14 @@ var AgentMeshClient = class _AgentMeshClient {
       this.knockProtocol.setPolicy(this.policy);
     }
     await this.prekeyManager.loadOrInitialize();
-    if (options.autoUploadPrekeys !== false) {
-      await this.uploadPrekeys();
-    }
     const registerOptions = {
       displayName: options.displayName,
       capabilities: this.capabilities
     };
     await this.registry.register(this.identity, registerOptions);
+    if (options.autoUploadPrekeys !== false) {
+      await this.uploadPrekeys();
+    }
     await this.transport.connect();
     this.transport.onMessage("receive", async (data) => {
       const fromAmid = data.from;

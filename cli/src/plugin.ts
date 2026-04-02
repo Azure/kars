@@ -859,13 +859,31 @@ async function processTaskWithTools(
               if (!targetAmid) {
                 result = `Agent '${toAgent}' not found in registry after retries. It may not be running yet.`;
               } else if (typeof agtMeshClient !== "undefined" && agtMeshClient) {
-                await agtMeshClient.send(targetAmid, {
-                  type: "task_request",
-                  content: meshMsg,
-                  from_agent: process.env.SANDBOX_NAME || "unknown",
-                  timestamp: new Date().toISOString(),
-                });
-                result = `Message sent to ${toAgent} via E2E encrypted mesh relay`;
+                // Retry send — target may still be uploading prekeys after registration
+                let sendErr: Error | null = null;
+                for (let sendAttempt = 0; sendAttempt < 5; sendAttempt++) {
+                  try {
+                    await agtMeshClient.send(targetAmid, {
+                      type: "task_request",
+                      content: meshMsg,
+                      from_agent: process.env.SANDBOX_NAME || "unknown",
+                      timestamp: new Date().toISOString(),
+                    });
+                    sendErr = null;
+                    break;
+                  } catch (e: any) {
+                    sendErr = e;
+                    if (e.message?.includes("prekey") || e.message?.includes("prekeys")) {
+                      log.info(`AGT sub-agent mesh_send: waiting for prekeys from '${toAgent}' (${sendAttempt + 1}/5)...`);
+                      await new Promise(r => setTimeout(r, 1000));
+                    } else {
+                      break;
+                    }
+                  }
+                }
+                result = sendErr
+                  ? `mesh_send to ${toAgent} failed: ${sendErr.message}`
+                  : `Message sent to ${toAgent} via E2E encrypted mesh relay`;
               } else {
                 result = `Mesh client not available — cannot send to ${toAgent}`;
               }

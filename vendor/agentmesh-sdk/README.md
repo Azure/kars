@@ -49,17 +49,19 @@ When a message arrives for a peer with a pending KNOCK, it awaits the
 KNOCK resolution instead of immediately rejecting. If KNOCK is accepted,
 the message is processed normally. If rejected, it's blocked as before.
 
-### 6. connect() prekey/register race — PREKEY_NOT_FOUND on first message
-**Files:** `src/client.ts`, `dist/index.js`
+### 6. connect() prekey/register order — registry requires registration first
+**Files:** `src/client.ts`, `dist/index.js`, `dist/index.cjs`
 
-Upstream `connect()` registers the agent *before* uploading prekeys.
-There is a 100-500ms window where the agent is discoverable in the
-registry but its prekey bundle returns 404. Any peer that discovers and
-immediately tries to establish an X3DH session gets PREKEY_NOT_FOUND.
+Upstream `connect()` registers the agent *before* uploading prekeys. A prior
+patch attempted to swap the order (uploadPrekeys → register), but the registry
+returns 404 for prekey uploads when the agent isn't registered yet — making
+prekeys permanently unavailable.
 
-Fix: Swap order — `uploadPrekeys()` runs before `registry.register()`.
-Prekeys are guaranteed available the instant the agent appears in search
-results, eliminating the race entirely.
+Fix: Reverted to `register() → uploadPrekeys()` (as registry requires).
+The brief race window (~100ms) where an agent is discoverable but prekeys
+aren't ready is handled by **sender-side retry** in plugin.ts: both parent
+and sub-agent `mesh_send` retry `agtMeshClient.send()` on prekey errors
+(parent: 8×2s, sub-agent: 5×1s).
 
 ## Known Remaining Gap
 
