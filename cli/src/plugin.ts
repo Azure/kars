@@ -479,7 +479,7 @@ async function processTaskWithTools(
       type: "function" as const,
       function: {
         name: "mesh_send",
-        description: "Send a message to another agent via the AGT E2E encrypted mesh relay. Use this to communicate with sibling agents spawned by the same parent.",
+        description: "Send an E2E encrypted message to any agent in the mesh — siblings, parent, or any discovered agent. Auto-discovers the target by name (no need to call discover first). Use for peer-to-peer communication between agents.",
         parameters: {
           type: "object",
           properties: {
@@ -494,7 +494,7 @@ async function processTaskWithTools(
       type: "function" as const,
       function: {
         name: "discover",
-        description: "Discover other agents registered in the AGT mesh network. Returns agent names, tiers, trust scores, and online status.",
+        description: "Find agents in the mesh network. Returns names, trust scores, and online status. Useful to see who's available, but mesh_send auto-discovers — you don't need to call discover before sending.",
         parameters: {
           type: "object",
           properties: {
@@ -519,7 +519,7 @@ async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- exec_command: run shell commands\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to other agents via AGT mesh relay\n- mesh_inbox: check for incoming messages from other agents\n- discover: find other agents in the mesh network (names, trust scores, status)\nUse the appropriate tool for each task. When asked to contact another agent, use mesh_send. Use discover to find available agents. Use mesh_inbox to check for replies. Execute tasks immediately — do not announce, just act. Chain tool calls as needed. Be concise, report results.",
+      content: "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- exec_command: run shell commands\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to ANY agent (parent, siblings, or others) — auto-discovers the target\n- mesh_inbox: check for incoming messages from any agent\n- discover: list agents in the mesh network with status and trust scores\n\nPEER-TO-PEER MESH: You can message any agent directly — not just your parent. To forward data to a sibling agent (e.g. 'writer'), just call mesh_send with to_agent='writer'. Discovery is automatic. After sending, the recipient can reply via mesh_send back to you — check mesh_inbox for replies.\n\nExecute tasks immediately — do not announce, just act. When asked to forward results to another agent, DO IT directly with mesh_send. Chain tool calls as needed. Be concise, report results.",
     },
     {
       role: "user",
@@ -817,25 +817,47 @@ async function processTaskWithTools(
             }
             log.info(`AGT sub-agent image_gen complete`);
           } else if (fnName === "mesh_send") {
-            // Send message to sibling agent via AGT mesh relay
+            // Send message to sibling/peer agent via AGT mesh relay (with auto-discover + retry)
             const toAgent = args.to_agent as string;
             const meshMsg = args.message as string;
             log.info(`AGT sub-agent mesh_send: to=${toAgent} msg=${(meshMsg || "").slice(0, 100)}`);
             try {
-              // Look up target AMID in registry
+              // Check pre-seeded cache first (populated from AGT_TRUSTED_PEERS at startup)
+              let targetAmid = nameToAmid.get(toAgent);
+              if (targetAmid) {
+                log.info(`AGT sub-agent mesh_send: using cached AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
+              }
+
+              // Auto-discover with retry (match parent's reliability)
               const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
-              const lookupResult = await new Promise<string>((resolve, reject) => {
-                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(toAgent)}`, { timeout: 10000 }, (res) => {
-                  let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
-                });
-                req.on("error", reject);
-                req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
-              });
-              const agents = JSON.parse(lookupResult);
-              const target = Array.isArray(agents) ? agents[0] : agents;
-              const targetAmid = target?.amid || target?.id;
+              for (let attempt = 0; attempt < 8 && !targetAmid; attempt++) {
+                if (attempt > 0) {
+                  log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
+                  await new Promise(r => setTimeout(r, 2000));
+                }
+                try {
+                  const lookupResult = await new Promise<string>((resolve, reject) => {
+                    const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(toAgent)}`, { timeout: 5000 }, (res) => {
+                      let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                    });
+                    req.on("error", reject);
+                    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+                  });
+                  const agents = JSON.parse(lookupResult);
+                  const target = Array.isArray(agents) ? agents[0] : agents;
+                  const amid = target?.amid || target?.id;
+                  if (amid) {
+                    targetAmid = amid;
+                    nameToAmid.set(toAgent, amid);
+                    amidToName.set(amid, toAgent);
+                  }
+                } catch (lookupErr: any) {
+                  if (attempt === 0) log.warn(`AGT sub-agent registry lookup: ${lookupErr.message}`);
+                }
+              }
+
               if (!targetAmid) {
-                result = `Agent '${toAgent}' not found in registry`;
+                result = `Agent '${toAgent}' not found in registry after retries. It may not be running yet.`;
               } else if (typeof agtMeshClient !== "undefined" && agtMeshClient) {
                 await agtMeshClient.send(targetAmid, {
                   type: "task_request",
@@ -2131,7 +2153,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_spawn",
       label: "Spawn Sub-Agent",
-      description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files or other agents' files. The ONLY way to exchange data is via azureclaw_mesh_send (include file contents in the message body). Always ask sub-agents to return results as text in their reply, then forward that text to the next agent.",
+      description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files. Exchange data via azureclaw_mesh_send (include content in the message body). Sub-agents can also message EACH OTHER directly via mesh — you can instruct one sub-agent to forward its results to another sub-agent by name (e.g. 'send your analysis to the writer agent'). You don't need to relay everything yourself.",
       parameters: {
         type: "object",
         properties: {
@@ -2220,10 +2242,14 @@ const azureClawPlugin = definePluginEntry({
             log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
           }
 
+          // Collect known sibling names for context
+          const siblings = [...amidToName.values()].filter(n => n !== agentName && n !== (process.env.SANDBOX_NAME || ""));
+
           return { content: [{ type: "text", text: JSON.stringify({
             ...result,
             phase: "Running",
             message: `Sub-agent '${agentName}' is Running and ready for mesh communication. Use azureclaw_mesh_send to send it a task.`,
+            ...(siblings.length > 0 ? { mesh_peers: `This agent can communicate directly with other sub-agents: ${siblings.join(", ")}. You can instruct it to forward results to them by name.` } : {}),
           }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Spawn failed: ${e.message}` }] };
@@ -2255,7 +2281,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply (not just save to a local file). Automatically waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply. You can also instruct sub-agents to forward results to each other directly (they have peer-to-peer mesh access). Automatically waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
       parameters: {
         type: "object",
         properties: {
