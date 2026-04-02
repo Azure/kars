@@ -862,6 +862,49 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     return state;
   }
 
+  // ── Fast AGT Poll (every cycle) ─────────────────────────────────
+  // Lightweight: only fetches /agt/status per sandbox to keep trust scores
+  // and mesh counters alive between full security refreshes.
+
+  async function fetchAgtQuick(sb: SandboxInfo): Promise<void> {
+    if (!sb.podName) return;
+    const existing = securityStates.get(sb.name);
+    if (!existing?.agtEnabled) return;
+
+    try {
+      const { stdout } = devMode
+        ? await execa("docker", [
+            "exec", sb.podName,
+            "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/status",
+          ], { stdio: "pipe" })
+        : await execa("kubectl", kctl([
+            "exec", "-n", sb.namespace, sb.podName,
+            "-c", "inference-router", "--",
+            "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/status",
+          ], kubeContext), { stdio: "pipe", timeout: 8000 });
+
+      const agt = JSON.parse(stdout);
+      const ts = agt.trust_states || [];
+      if (ts.length > 0) {
+        existing.agtTrustScores = ts.map((a: any) => ({
+          agent: a.agent_id || a.name || "unknown",
+          score: a.score ?? 0,
+          tier: a.tier || (a.score >= 800 ? "Sovereign" : a.score >= 600 ? "Verified" : a.score >= 400 ? "Known" : a.score >= 200 ? "Observed" : "Anonymous"),
+          interactions: a.interactions ?? 0,
+          lastSeen: a.last_interaction || "",
+        }));
+        existing.agtRegistryAgents = ts.length;
+      }
+      existing.agtMeshSessions = agt.mesh_sessions || 0;
+      existing.agtMeshSent = agt.mesh_messages_sent || 0;
+      existing.agtMeshReceived = agt.mesh_messages_received || 0;
+      existing.agtTrustUpdates = agt.trust_updates || 0;
+      existing.agtTotalInteractions = agt.total_interactions || 0;
+      existing.agtAuditEntries = agt.audit_entries || 0;
+      existing.agtAuditIntegrity = agt.audit_integrity ?? false;
+    } catch { /* non-fatal — full refresh on next TIER_DETAIL cycle */ }
+  }
+
   // ── Mesh Health ──────────────────────────────────────────────────
 
   async function fetchMeshHealth(): Promise<MeshHealth> {
@@ -1802,6 +1845,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
               if (r.status === "fulfilled") securityStates.set(r.value.sandbox, r.value);
             }
           }),
+        );
+      } else {
+        // Fast AGT-only poll on non-detail cycles to keep mesh data alive
+        promises.push(
+          Promise.allSettled(running.map((s) => fetchAgtQuick(s))),
         );
       }
 
