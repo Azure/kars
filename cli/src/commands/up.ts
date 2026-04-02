@@ -264,6 +264,8 @@ export function upCommand(): Command {
 
       if (!options.dryRun) {
         banner("AzureClaw · Preflight Check", "Validating environment before deployment");
+      } else {
+        console.log(chalk.dim("  Preflight validation...\n"));
       }
 
       // ── 1. Check required CLI tools ────────────────────────────────
@@ -274,7 +276,7 @@ export function upCommand(): Command {
         { cmd: "docker", args: ["info", "--format", "{{.ServerVersion}}"], label: "Docker", required: options.build },
       ];
 
-      if (!options.dryRun) {
+      {
         let allToolsOk = true;
         for (const tool of tools) {
           try {
@@ -296,54 +298,65 @@ export function upCommand(): Command {
       }
 
       // ── 2. Azure auth + subscription ───────────────────────────────
-      if (!options.dryRun) {
+      {
         let isLoggedIn = false;
         try {
           await execa("az", ["account", "show", "--output", "none"], { stdio: "pipe" });
           isLoggedIn = true;
+          checkLine(true, "Azure CLI — logged in");
         } catch { /* not logged in */ }
 
         if (!isLoggedIn) {
-          console.log(chalk.yellow("\n  Not logged into Azure. Opening browser for login...\n"));
-          await execa("az", ["login"], { stdio: "inherit" });
+          if (options.dryRun) {
+            checkLine(false, "Azure CLI — not logged in");
+          } else {
+            console.log(chalk.yellow("\n  Not logged into Azure. Opening browser for login...\n"));
+            await execa("az", ["login"], { stdio: "inherit" });
+          }
         }
 
-        // Get current subscription
-        const { stdout: subJson } = await execa("az", [
-          "account", "show", "--output", "json",
-        ], { stdio: "pipe" });
-        const currentSub = JSON.parse(subJson);
+        if (isLoggedIn) {
+          // Get current subscription (read-only)
+          const { stdout: subJson } = await execa("az", [
+            "account", "show", "--output", "json",
+          ], { stdio: "pipe" });
+          const currentSub = JSON.parse(subJson);
 
-        // List all subscriptions to check for multiples
-        const { stdout: subsJson } = await execa("az", [
-          "account", "list", "--query", "[?state=='Enabled']", "--output", "json",
-        ], { stdio: "pipe" });
-        const subs = JSON.parse(subsJson) as { id: string; name: string; isDefault: boolean }[];
-
-        if (subs.length > 1) {
-          // Multiple subscriptions — let user confirm or pick
-          const subChoices = subs.map((s) => ({
-            name: `${s.name} (${s.id.slice(0, 8)}...)${s.isDefault ? chalk.dim(" ← default") : ""}`,
-            value: s.id,
-          }));
-
-          const { subId } = await inquirer.prompt([{
-            type: "list",
-            name: "subId",
-            message: "Which Azure subscription?",
-            choices: subChoices,
-            default: currentSub.id,
-          }]);
-
-          if (subId !== currentSub.id) {
-            await execa("az", ["account", "set", "--subscription", subId], { stdio: "pipe" });
-            const selected = subs.find((s) => s.id === subId);
-            checkLine(true, `Subscription — ${selected?.name || subId}`);
-          } else {
+          if (options.dryRun) {
             checkLine(true, `Subscription — ${currentSub.name}`);
+          } else {
+            // List all subscriptions to check for multiples
+            const { stdout: subsJson } = await execa("az", [
+              "account", "list", "--query", "[?state=='Enabled']", "--output", "json",
+            ], { stdio: "pipe" });
+            const subs = JSON.parse(subsJson) as { id: string; name: string; isDefault: boolean }[];
+
+            if (subs.length > 1) {
+              // Multiple subscriptions — let user confirm or pick
+              const subChoices = subs.map((s) => ({
+                name: `${s.name} (${s.id.slice(0, 8)}...)${s.isDefault ? chalk.dim(" ← default") : ""}`,
+                value: s.id,
+              }));
+
+              const { subId } = await inquirer.prompt([{
+                type: "list",
+                name: "subId",
+                message: "Which Azure subscription?",
+                choices: subChoices,
+                default: currentSub.id,
+              }]);
+
+              if (subId !== currentSub.id) {
+                await execa("az", ["account", "set", "--subscription", subId], { stdio: "pipe" });
+                const selected = subs.find((s) => s.id === subId);
+                checkLine(true, `Subscription — ${selected?.name || subId}`);
+              } else {
+                checkLine(true, `Subscription — ${currentSub.name}`);
+              }
+            } else {
+              checkLine(true, `Subscription — ${currentSub.name}`);
+            }
           }
-        } else {
-          checkLine(true, `Subscription — ${currentSub.name}`);
         }
       }
 
