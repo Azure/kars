@@ -73,6 +73,7 @@ impl SidecarProxy {
 
         let mut req = match method {
             "POST" => self.client.post(&url),
+            "DELETE" => self.client.delete(&url),
             _ => self.client.get(&url),
         };
 

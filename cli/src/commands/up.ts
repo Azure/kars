@@ -1216,6 +1216,25 @@ export function upCommand(): Command {
             // May already exist — non-fatal
           });
 
+          // Ensure the agentmesh namespace exists before creating the secret
+          await execa("kubectl", ["create", "namespace", "agentmesh"], { stdio: "pipe" }).catch(() => {});
+
+          // Auto-generate postgres credentials if the secret doesn't exist yet
+          const secretExists = await execa("kubectl", [
+            "get", "secret", "agentmesh-db-credentials", "-n", "agentmesh",
+          ], { stdio: "pipe" }).then(() => true).catch(() => false);
+
+          if (!secretExists) {
+            stepper.update("Generating AgentMesh database credentials...");
+            const { randomBytes } = await import("crypto");
+            const dbPassword = randomBytes(24).toString("base64url");
+            await execa("kubectl", [
+              "create", "secret", "generic", "agentmesh-db-credentials",
+              "-n", "agentmesh",
+              `--from-literal=POSTGRES_PASSWORD=${dbPassword}`,
+            ], { stdio: "pipe" });
+          }
+
           // Substitute ACR login server in the manifest
           const fs = await import("fs");
           const manifest = fs.readFileSync(agentmeshManifest, "utf-8");

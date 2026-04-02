@@ -315,7 +315,7 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/evaluate", post(agt_evaluate))
         // Trust management
         .route("/agt/trust", get(agt_trust_list))
-        .route("/agt/trust/{agent_id}", get(agt_trust_get))
+        .route("/agt/trust/{agent_id}", get(agt_trust_get).delete(agt_trust_delete))
         // Audit log
         .route("/agt/audit", get(agt_audit))
         .route("/agt/audit/verify", get(agt_audit_verify))
@@ -1723,6 +1723,52 @@ async fn agt_trust_get(
             Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
         )
             .into_response(),
+    }
+}
+
+/// DELETE /agt/trust/:agent_id — remove trust state for a specific agent.
+async fn agt_trust_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if !state.sidecar.enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
+        );
+    }
+
+    // Trust mutations require admin token even from localhost — prevents sandbox
+    // (UID 1000) from forging peer trust scores via the localhost auth exemption.
+    if let Some(ref expected) = state.admin_token {
+        let provided = headers
+            .get("x-azureclaw-admin")
+            .or_else(|| headers.get("authorization"))
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
+        match provided {
+            Some(tok) if tok == expected.as_str() => {}
+            _ => {
+                tracing::warn!("DELETE /agt/trust/{} denied: missing or invalid admin token", agent_id);
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "Admin token required for trust mutations"})),
+                );
+            }
+        }
+    }
+
+    let path = format!("/trust/{}", agent_id);
+    match state.sidecar.forward("DELETE", &path, None).await {
+        Ok((status, json)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(json),
+        ),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+        ),
     }
 }
 
