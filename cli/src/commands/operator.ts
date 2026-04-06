@@ -1454,13 +1454,37 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       return " ".repeat(left) + text + " ".repeat(pad - left);
     }
 
+    // Visual width of a string, counting emoji (surrogate pairs) as 2 cells
+    function visualLen(s: string): number {
+      let w = 0;
+      for (const ch of s) {
+        w += ch.codePointAt(0)! > 0xFFFF ? 2 : 1;
+      }
+      return w;
+    }
+
+    // Fit string to exactly w visual columns (pad or truncate)
+    function fitVis(s: string, w: number): string {
+      const vw = visualLen(s);
+      if (vw <= w) return s + " ".repeat(w - vw);
+      let used = 0;
+      let result = "";
+      for (const ch of s) {
+        const cw = ch.codePointAt(0)! > 0xFFFF ? 2 : 1;
+        if (used + cw > w - 1) break;
+        result += ch;
+        used += cw;
+      }
+      return result + "…" + " ".repeat(Math.max(0, w - used - 1));
+    }
+
     function makeBox(name: string, icon: string, line2: string, line3: string): string[] {
       const border = "─".repeat(COL_W + 2);
       return [
         `┌${border}┐`,
-        `│ ${icon} ${name.length > COL_W - 2 ? name.substring(0, COL_W - 4) + "…" : name.padEnd(COL_W - 2)} │`,
-        `│ ${line2.length > COL_W ? line2.substring(0, COL_W - 1) + "…" : line2.padEnd(COL_W)} │`,
-        `│ ${line3.length > COL_W ? line3.substring(0, COL_W - 1) + "…" : line3.padEnd(COL_W)} │`,
+        `│ ${icon} ${fitVis(name, COL_W - 2)} │`,
+        `│ ${fitVis(line2, COL_W)} │`,
+        `│ ${fitVis(line3, COL_W)} │`,
         `└${border}┘`,
       ];
     }
@@ -2598,7 +2622,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     process.stdout.write(`\r\n\x1b[36m⟩ Connected to ${sb.name}. Press Ctrl+\\ to detach, /exit to quit.\x1b[0m\r\n\r\n`);
   }
 
-  screen.key(["enter"], () => connectToAgent());
+  screen.key(["enter"], () => {
+    if (dialogOpen || agtOverlayOpen) return;
+    connectToAgent();
+  });
 
   // ── Boot ──────────────────────────────────────────────────────────
 
