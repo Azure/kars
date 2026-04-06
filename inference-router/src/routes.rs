@@ -2032,17 +2032,21 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 /// GET /agt/relay — WebSocket proxy to the self-hosted AgentMesh relay.
 /// The plugin (UID 1000) can only reach localhost. The router (UID 1001) proxies
 /// WebSocket connections to the relay at agentmesh-relay.agentmesh.svc.cluster.local:8765.
-async fn agt_relay_proxy(ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn agt_relay_proxy(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
     let relay_url = std::env::var("AGT_RELAY_URL")
         .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
 
+    let mesh_metrics = state.mesh_metrics.clone();
     ws.on_upgrade(move |client_socket| async move {
-        relay_websocket_bridge(client_socket, &relay_url).await;
+        relay_websocket_bridge(client_socket, &relay_url, &mesh_metrics).await;
     })
 }
 
 /// Bidirectional WebSocket bridge: client ↔ relay.
-async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
+async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str, mesh_metrics: &std::sync::Arc<MeshMetrics>) {
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2085,6 +2089,9 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
     let in_count = inbound_count.clone();
     let in_bytes = inbound_bytes.clone();
 
+    let sent_metrics = mesh_metrics.clone();
+    let recv_metrics = mesh_metrics.clone();
+
     // Forward: client → relay (outbound encrypted messages)
     let mut client_to_relay = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_rx.next().await {
@@ -2109,6 +2116,7 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
             };
             out_count.fetch_add(1, Ordering::Relaxed);
             out_bytes.fetch_add(size as u64, Ordering::Relaxed);
+            sent_metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
             // Hex-dump first 128 bytes for traffic capture / E2E encryption proof.
             // The relay only ever sees ciphertext — readable plaintext here means encryption failed.
             let raw_bytes: Vec<u8> = match &tung_msg {
@@ -2167,6 +2175,7 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str) {
             };
             in_count.fetch_add(1, Ordering::Relaxed);
             in_bytes.fetch_add(size as u64, Ordering::Relaxed);
+            recv_metrics.messages_received.fetch_add(1, Ordering::Relaxed);
             // Hex-dump first 128 bytes of each inbound frame for traffic capture.
             let raw_bytes: Vec<u8> = match &msg {
                 tungstenite::Message::Text(t) => t.as_bytes().to_vec(),
