@@ -236,6 +236,7 @@ export function credentialsCommand(): Command {
     .description("Update credentials for a running AKS sandbox (updates secret + restarts pod)")
     .argument("<name>", "Sandbox name")
     .option("--telegram-token <token>", "New Telegram bot token")
+    .option("--telegram-allow-from <ids>", "Telegram allowed user IDs (comma-separated)")
     .option("--slack-token <token>", "New Slack bot token")
     .option("--discord-token <token>", "New Discord bot token")
     .option("--brave-api-key <key>", "New Brave Search API key")
@@ -251,6 +252,7 @@ export function credentialsCommand(): Command {
 
       const flagToEnv: Record<string, string> = {
         telegramToken: "TELEGRAM_BOT_TOKEN",
+        telegramAllowFrom: "TELEGRAM_ALLOW_FROM",
         slackToken: "SLACK_BOT_TOKEN",
         discordToken: "DISCORD_BOT_TOKEN",
         braveApiKey: "BRAVE_API_KEY",
