@@ -17,6 +17,7 @@ use crate::auth::WorkloadIdentityAuth;
 use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
+use crate::governance::Governance;
 use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
@@ -31,7 +32,9 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
+    #[allow(dead_code)] // Phase 3: sidecar field will be removed
     pub sidecar: SidecarProxy,
+    pub governance: Arc<Governance>,
     pub blocklist: Blocklist,
     pub sandbox_name: Arc<String>,
     pub inbox: Arc<MeshInbox>,
@@ -57,6 +60,18 @@ impl AppState {
             TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request);
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+
+        // Initialize native AGT governance (replaces Python sidecar)
+        let governance = Arc::new(Governance::new(&sandbox_name));
+
+        // Load policy YAML from AGT_POLICY_DIR if set
+        let policy_dir = std::env::var("AGT_POLICY_DIR").ok();
+        if let Some(ref dir) = policy_dir {
+            match governance.load_policies_from_dir(dir) {
+                Ok(count) => tracing::info!(dir, count, "AGT governance: loaded policy rules"),
+                Err(e) => tracing::warn!(dir, error = %e, "AGT governance: failed to load policies"),
+            }
+        }
 
         // Initialize blocklist — enabled via BLOCKLIST_ENABLED=true
         let blocklist_enabled = std::env::var("BLOCKLIST_ENABLED")
@@ -96,6 +111,7 @@ impl AppState {
             config: Arc::new(config),
             budget,
             sidecar: SidecarProxy::new(&client),
+            governance,
             blocklist,
             sandbox_name: Arc::new(sandbox_name),
             inbox: Arc::new(MeshInbox::new()),
@@ -379,69 +395,40 @@ async fn chat_completions(
 
     // Foundry guardrails (DefaultV2) handle content safety and prompt shields
     // at inference time — no pre-flight calls needed. We parse the response
-    // annotations after forwarding and report flags to AGT sidecar.
+    // annotations after forwarding and report flags to AGT governance.
 
-    // AGT policy check — evaluate inference action via sidecar (audit mode: log, don't block)
-    if state.sidecar.enabled {
+    // AGT policy check — evaluate inference action via native governance
+    {
         let model = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("model")?.as_str().map(String::from))
             .unwrap_or_default();
-        let eval_body = serde_json::json!({
-            "action": format!("inference:chat_completions:{}", model),
-            "context": { "sandbox": sandbox_name, "model": model }
-        });
-        match state
-            .sidecar
-            .forward("POST", "/evaluate", Some(&eval_body))
-            .await
-        {
-            Ok((status, json)) if status == 403 => {
-                let reason = json
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("policy denied");
-                tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED inference (enforcing)");
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": format!("Blocked by governance policy: {}", reason),
-                            "type": "policy_violation",
-                            "code": "policy_denied"
-                        }
-                    })),
-                )
-                    .into_response();
-            }
-            Ok((_, json)) => {
-                let decision = json
-                    .get("decision")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("allow");
-                tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
-            }
-            Err(e) => {
-                if state.sidecar.should_fail_closed() {
-                    tracing::error!(sandbox = %sandbox_name, error = %e,
-                        "AGT sidecar unreachable (fail-closed) — blocking inference");
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
-                            "error": {
-                                "message": "Governance sidecar unavailable — inference blocked (fail-closed)",
-                                "type": "governance_unavailable",
-                                "code": "sidecar_unreachable"
-                            }
-                        })),
-                    )
-                        .into_response();
-                }
-                // Grace window — fail-open for first few failures (cold start)
-                tracing::warn!(sandbox = %sandbox_name, error = %e,
-                    "AGT sidecar unreachable, allowing request (grace window)");
-            }
+        let action = format!("inference:chat_completions:{}", model);
+        let result = state.governance.evaluate(sandbox_name, &action, None);
+        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let decision = result
+            .get("decision")
+            .and_then(|d| d.as_str())
+            .unwrap_or("allow");
+        if !allowed {
+            let reason = result
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("policy denied");
+            tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED inference (enforcing)");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!("Blocked by governance policy: {}", reason),
+                        "type": "policy_violation",
+                        "code": "policy_denied"
+                    }
+                })),
+            )
+                .into_response();
         }
+        tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
     }
 
     // Check token budget before forwarding
@@ -701,7 +688,7 @@ async fn chat_completions(
                 tracing::info!(sandbox = %sandbox_owned, status = %status.as_u16(), "Stream response status");
                 // Wrap stream to intercept the first SSE chunk for guardrail
                 // annotations and the final chunk for token usage.
-                let sidecar_for_stream = state.sidecar.clone();
+                let governance_for_stream = state.governance.clone();
                 let sandbox_for_flags = sandbox_owned.clone();
                 let checked_flags = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let wrapped = stream.map(move |chunk| {
@@ -719,10 +706,10 @@ async fn chat_completions(
                                         jailbreak = flags.jailbreak_detected,
                                         "Foundry guardrail flags in stream"
                                     );
-                                    let sc = sidecar_for_stream.clone();
+                                    let gov = governance_for_stream.clone();
                                     let sb = sandbox_for_flags.clone();
                                     tokio::spawn(async move {
-                                        safety::report_content_flags_to_agt(&sc, &sb, &flags).await;
+                                        safety::report_content_flags_to_agt(&gov, &sb, &flags).await;
                                     });
                                 }
                             }
@@ -851,10 +838,10 @@ async fn chat_completions(
                     }
                 }
 
-                // Parse Foundry guardrail annotations and report to AGT sidecar.
+                // Parse Foundry guardrail annotations and report to AGT governance.
                 // On 200: prompt_filter_results at top level
                 // On 400: error.innererror.content_filter_result
-                if state.sidecar.enabled {
+                {
                     if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
                         let flags = if status.is_success() {
                             safety::parse_prompt_filter_results(&body_json)
@@ -870,10 +857,10 @@ async fn chat_completions(
                                 detected = ?flags.detected_categories,
                                 "Foundry guardrail flags detected"
                             );
-                            let sidecar = state.sidecar.clone();
+                            let gov = state.governance.clone();
                             let sandbox = sandbox_name.to_string();
                             tokio::spawn(async move {
-                                safety::report_content_flags_to_agt(&sidecar, &sandbox, &flags)
+                                safety::report_content_flags_to_agt(&gov, &sandbox, &flags)
                                     .await;
                             });
                         }
@@ -888,30 +875,19 @@ async fn chat_completions(
                             .unwrap_or("")
                             .to_string();
                         if !response_text.is_empty() {
-                            let sidecar = state.sidecar.clone();
+                            let gov = state.governance.clone();
                             let sandbox = sandbox_name.to_string();
                             tokio::spawn(async move {
-                                let eval_body = serde_json::json!({
-                                    "action": format!("output:{}", response_text),
-                                    "agent_id": sandbox,
-                                    "context": {
-                                        "response_length": response_text.len(),
-                                    }
-                                });
-                                match sidecar.forward("POST", "/evaluate", Some(&eval_body)).await {
-                                    Ok((s, json)) if s == 403 => {
-                                        let reason = json
-                                            .get("reason")
-                                            .and_then(|r| r.as_str())
-                                            .unwrap_or("output policy");
-                                        tracing::warn!(sandbox = %sandbox, %reason,
-                                            "AGT: model response flagged by output policy");
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        tracing::debug!(sandbox = %sandbox,
-                                            "AGT output validation skipped: {e}");
-                                    }
+                                let action = format!("output:{}", &response_text[..response_text.len().min(200)]);
+                                let result = gov.evaluate(&sandbox, &action, None);
+                                let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+                                if !allowed {
+                                    let reason = result
+                                        .get("reason")
+                                        .and_then(|r| r.as_str())
+                                        .unwrap_or("output policy");
+                                    tracing::warn!(sandbox = %sandbox, %reason,
+                                        "AGT: model response flagged by output policy");
                                 }
                             });
                         }
@@ -992,56 +968,32 @@ async fn responses(
         })
         .unwrap_or("unknown");
 
-    // AGT policy check
-    if state.sidecar.enabled {
+    // AGT policy check — native governance
+    {
         let model = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("model")?.as_str().map(String::from))
             .unwrap_or_default();
-        let eval_body = serde_json::json!({
-            "action": format!("inference:responses:{}", model),
-            "context": { "sandbox": sandbox_name, "model": model }
-        });
-        match state
-            .sidecar
-            .forward("POST", "/evaluate", Some(&eval_body))
-            .await
-        {
-            Ok((status, json)) if status == 403 => {
-                let reason = json
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("policy denied");
-                tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED responses inference");
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": format!("Blocked by governance policy: {}", reason),
-                            "type": "policy_violation",
-                            "code": "policy_denied"
-                        }
-                    })),
-                )
-                    .into_response();
-            }
-            Ok(_) => {}
-            Err(e) => {
-                if state.sidecar.should_fail_closed() {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
-                            "error": {
-                                "message": "Governance sidecar unavailable — inference blocked (fail-closed)",
-                                "type": "governance_unavailable"
-                            }
-                        })),
-                    )
-                        .into_response();
-                }
-                tracing::warn!(sandbox = %sandbox_name, error = %e,
-                    "AGT sidecar unreachable, allowing responses request (grace window)");
-            }
+        let action = format!("inference:responses:{}", model);
+        let result = state.governance.evaluate(sandbox_name, &action, None);
+        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !allowed {
+            let reason = result
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("policy denied");
+            tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED responses inference");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!("Blocked by governance policy: {}", reason),
+                        "type": "policy_violation",
+                        "code": "policy_denied"
+                    }
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -1155,32 +1107,21 @@ async fn images_generations(
         .unwrap_or("self");
 
     // AGT policy check — image generation is a tool invocation
-    if state.sidecar.enabled {
+    {
         let action = format!("image_generation:{}", deployment);
-        match state
-            .sidecar
-            .forward(
-                "POST",
-                "/evaluate",
-                Some(&serde_json::json!({"action": action, "agent_id": sandbox_name})),
+        let result = state.governance.evaluate(sandbox_name, &action, None);
+        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !allowed {
+            let reason = result
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("policy denied");
+            tracing::warn!(sandbox = sandbox_name, deployment = %deployment, "Image generation denied: {}", reason);
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": {"message": format!("Image generation denied by policy: {}", reason)}})),
             )
-            .await
-        {
-            Ok((_, decision))
-                if decision.get("allowed") == Some(&serde_json::Value::Bool(false)) =>
-            {
-                let reason = decision
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("policy denied");
-                tracing::warn!(sandbox = sandbox_name, deployment = %deployment, "Image generation denied: {}", reason);
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": {"message": format!("Image generation denied by policy: {}", reason)}})),
-                )
-                    .into_response();
-            }
-            _ => {}
+                .into_response();
         }
     }
 
@@ -1659,48 +1600,26 @@ async fn agt_evaluate(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        )
-            .into_response();
-    }
-    match state
-        .sidecar
-        .forward("POST", "/evaluate", Some(&body))
-        .await
-    {
-        Ok((status, json)) => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            Json(json),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-        )
-            .into_response(),
-    }
+    let agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&state.sandbox_name);
+    let action = body
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let extra_context = body.get("context").cloned();
+
+    let result = state
+        .governance
+        .evaluate(agent_id, action, extra_context.as_ref());
+    Json(result).into_response()
 }
 
 /// GET /agt/trust — list all known agent trust states.
 async fn agt_trust_list(State(state): State<AppState>) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        )
-            .into_response();
-    }
-    match state.sidecar.forward("GET", "/trust", None).await {
-        Ok((_, json)) => Json(json).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-        )
-            .into_response(),
-    }
+    let agents = state.governance.all_trust_scores();
+    Json(serde_json::json!({ "agents": agents }))
 }
 
 /// GET /agt/trust/:agent_id — get trust state for a specific agent.
@@ -1708,22 +1627,13 @@ async fn agt_trust_get(
     State(state): State<AppState>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        )
-            .into_response();
-    }
-    let path = format!("/trust/{}", agent_id);
-    match state.sidecar.forward("GET", &path, None).await {
-        Ok((_, json)) => Json(json).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-        )
-            .into_response(),
-    }
+    let ts = state.governance.trust.get_trust_score(&agent_id);
+    Json(serde_json::json!({
+        "agent_id": ts.agent_id,
+        "score": ts.score,
+        "tier": crate::governance::tier_label(ts.score),
+        "interactions": ts.interactions,
+    }))
 }
 
 /// DELETE /agt/trust/:agent_id — remove trust state for a specific agent.
@@ -1732,13 +1642,6 @@ async fn agt_trust_delete(
     headers: HeaderMap,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        );
-    }
-
     // Trust mutations require admin token even from localhost — prevents sandbox
     // (UID 1000) from forging peer trust scores via the localhost auth exemption.
     if let Some(ref expected) = state.admin_token {
@@ -1759,55 +1662,18 @@ async fn agt_trust_delete(
         }
     }
 
-    let path = format!("/trust/{}", agent_id);
-    match state.sidecar.forward("DELETE", &path, None).await {
-        Ok((status, json)) => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            Json(json),
-        ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-        ),
-    }
+    let result = state.governance.delete_trust(&agent_id);
+    (StatusCode::OK, Json(result))
 }
 
 /// GET /agt/audit — get the full audit log.
 async fn agt_audit(State(state): State<AppState>) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        )
-            .into_response();
-    }
-    match state.sidecar.forward("GET", "/audit", None).await {
-        Ok((_, json)) => Json(json).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-        )
-            .into_response(),
-    }
+    Json(state.governance.audit_json())
 }
 
 /// GET /agt/audit/verify — verify hash-chain integrity.
 async fn agt_audit_verify(State(state): State<AppState>) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        )
-            .into_response();
-    }
-    match state.sidecar.forward("GET", "/audit/verify", None).await {
-        Ok((_, json)) => Json(json).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
-        )
-            .into_response(),
-    }
+    Json(state.governance.audit_verify_json())
 }
 
 /// GET /agt/mesh/inbox — read received messages.
@@ -1821,24 +1687,11 @@ async fn agt_mesh_inbox(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /agt/status — overall governance status.
 async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
-    let sidecar_status = if state.sidecar.enabled {
-        match state.sidecar.forward("GET", "/status", None).await {
-            Ok((_, json)) => Some(json),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
     let inbox = state.inbox.peek().await;
     let blocklist_len = state.blocklist.len().await;
 
-    let mut result = sidecar_status.unwrap_or_else(|| {
-        serde_json::json!({
-            "sidecar": false,
-            "sandbox": *state.sandbox_name,
-        })
-    });
+    // Get base status from native governance (policy, trust, audit, metrics)
+    let mut result = state.governance.status_json();
 
     if let Some(obj) = result.as_object_mut() {
         obj.insert("inbox_messages".into(), serde_json::json!(inbox.len()));
@@ -1878,9 +1731,6 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
                     .load(std::sync::atomic::Ordering::Relaxed)
             ),
         );
-        if state.sidecar.enabled {
-            obj.insert("sidecar".into(), serde_json::json!(true));
-        }
         obj.insert(
             "trust_updates".into(),
             serde_json::json!(
@@ -1902,13 +1752,6 @@ async fn agt_trust_update(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if !state.sidecar.enabled {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "AGT governance sidecar not enabled"})),
-        );
-    }
-
     // Trust mutations require admin token even from localhost — prevents sandbox
     // (UID 1000) from forging peer trust scores via the localhost auth exemption.
     if let Some(ref expected) = state.admin_token {
@@ -1929,14 +1772,29 @@ async fn agt_trust_update(
         }
     }
 
-    match state.sidecar.forward("POST", "/trust", Some(&body)).await {
-        Ok((status, json)) => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            Json(json),
-        ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("AGT sidecar: {}", e)})),
+    let agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let score = body
+        .get("score")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(500) as u32;
+    let interactions = body
+        .get("interactions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    state
+        .mesh_metrics
+        .trust_updates
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    match state.governance.update_trust(agent_id, score, interactions) {
+        Ok(json) => (StatusCode::OK, Json(json)),
+        Err(msg) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
         ),
     }
 }
@@ -2011,15 +1869,8 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
         None
     };
 
-    // Local trust from sidecar (if available)
-    let local_trust = if state.sidecar.enabled {
-        match state.sidecar.forward("GET", "/trust", None).await {
-            Ok((_, json)) => json.get("agents").cloned().unwrap_or(serde_json::json!([])),
-            Err(_) => serde_json::json!([]),
-        }
-    } else {
-        serde_json::json!([])
-    };
+    // Local trust from native governance
+    let local_trust = serde_json::json!(state.governance.all_trust_scores());
 
     Json(serde_json::json!({
         "amid": amid.as_deref().unwrap_or(sandbox_name),
@@ -2732,43 +2583,21 @@ async fn sandbox_spawn(
 ) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
-    // AGT policy check — evaluate spawn action via sidecar
-    if state.sidecar.enabled {
-        let eval_body = serde_json::json!({
-            "action": format!("spawn:create:{}", req.name),
-            "context": {
-                "parent": parent_name,
-                "child": req.name,
-                "model": req.model.as_deref().unwrap_or("default"),
-            }
-        });
-        match state
-            .sidecar
-            .forward("POST", "/evaluate", Some(&eval_body))
-            .await
-        {
-            Ok((status, json)) if status == 403 => {
-                let reason = json
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("policy denied");
-                tracing::warn!(parent = %parent_name, child = %req.name, %reason, "AGT policy DENIED spawn");
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({ "error": format!("Spawn blocked by policy: {}", reason) })),
-                ).into_response();
-            }
-            Ok(_) => {}
-            Err(e) => {
-                if state.sidecar.should_fail_closed() {
-                    tracing::error!(error = %e, "AGT sidecar unreachable (fail-closed) — blocking spawn");
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({ "error": "Governance sidecar unavailable — spawn blocked (fail-closed)" })),
-                    ).into_response();
-                }
-                tracing::warn!(error = %e, "AGT sidecar unreachable, allowing spawn (grace window)");
-            }
+    // AGT policy check — evaluate spawn action via native governance
+    {
+        let action = format!("spawn:create:{}", req.name);
+        let result = state.governance.evaluate(&parent_name, &action, None);
+        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !allowed {
+            let reason = result
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("policy denied");
+            tracing::warn!(parent = %parent_name, child = %req.name, %reason, "AGT policy DENIED spawn");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": format!("Spawn blocked by policy: {}", reason) })),
+            ).into_response();
         }
     }
 

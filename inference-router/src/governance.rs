@@ -253,17 +253,12 @@ impl Governance {
         });
 
         let policy = PolicyEngine::new();
-
-        // Load policy YAML if AGT_POLICY_DIR is set
-        let policy_dir = std::env::var("AGT_POLICY_DIR")
-            .unwrap_or_else(|_| "/sandbox/.openclaw/policies".into());
-        let policy_rule_count = Self::load_policies_from_dir(&policy, &policy_dir);
+        let policy_rule_count = AtomicU64::new(0);
 
         tracing::info!(
             sandbox = sandbox_name,
             did = %identity.did,
             trust_threshold,
-            policy_rules = policy_rule_count,
             trust_db = "/tmp/agt/trust_scores.json",
             "Native AGT governance initialized"
         );
@@ -278,17 +273,17 @@ impl Governance {
             metrics: GovernanceMetrics::new(),
             sandbox_name: sandbox_name.to_string(),
             trust_threshold,
+            policy_rule_count,
             start_time: Instant::now(),
-            policy_rule_count: AtomicU64::new(policy_rule_count as u64),
         }
     }
 
     /// Load all YAML policy files from a directory.  Returns rule count.
-    fn load_policies_from_dir(engine: &PolicyEngine, dir: &str) -> usize {
+    pub fn load_policies_from_dir(&self, dir: &str) -> Result<usize, String> {
         let path = Path::new(dir);
         if !path.is_dir() {
             tracing::debug!(dir, "Policy directory not found — starting with empty policy");
-            return 0;
+            return Ok(0);
         }
 
         let mut total_rules = 0;
@@ -296,11 +291,10 @@ impl Governance {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.extension().is_some_and(|e| e == "yaml" || e == "yml") {
-                    match engine.load_from_file(p.to_str().unwrap_or_default()) {
+                    match self.policy.load_from_file(p.to_str().unwrap_or_default()) {
                         Ok(()) => {
                             tracing::info!(file = %p.display(), "Loaded policy file");
-                            // Count rules by checking if engine is loaded
-                            total_rules += 1; // approximate — one file = one profile
+                            total_rules += 1;
                         }
                         Err(e) => {
                             tracing::warn!(file = %p.display(), error = %e, "Failed to load policy");
@@ -309,16 +303,19 @@ impl Governance {
                 }
             }
         }
-        total_rules
+        self.policy_rule_count.store(total_rules as u64, Ordering::Relaxed);
+        Ok(total_rules)
     }
 
     /// Reload policies from disk (for hot-reload).
+    #[allow(dead_code)] // Used by policy hot-reload (Phase 2)
     pub fn reload_policies(&self) {
         let dir = std::env::var("AGT_POLICY_DIR")
             .unwrap_or_else(|_| "/sandbox/.openclaw/policies".into());
-        let count = Self::load_policies_from_dir(&self.policy, &dir);
-        self.policy_rule_count.store(count as u64, Ordering::Relaxed);
-        tracing::info!(rules = count, "Policy hot-reloaded");
+        match self.load_policies_from_dir(&dir) {
+            Ok(count) => tracing::info!(rules = count, "Policy hot-reloaded"),
+            Err(e) => tracing::warn!(error = %e, "Policy hot-reload failed"),
+        }
     }
 
     // ── Evaluate ─────────────────────────────────────────────────────────
@@ -499,6 +496,7 @@ impl Governance {
     }
 
     /// Get trust score for a single agent (matching sidecar JSON shape).
+    #[allow(dead_code)] // Used by individual trust route
     pub fn get_trust_score_json(&self, agent_id: &str) -> Value {
         let ts = self.trust.get_trust_score(agent_id);
         serde_json::json!({
@@ -507,6 +505,18 @@ impl Governance {
             "tier": tier_label(ts.score),
             "interactions": ts.interactions,
             "last_interaction": "",
+        })
+    }
+
+    /// Delete trust state for an agent by resetting to initial score (0 interactions).
+    /// The SDK TrustManager has no delete method, so we set score to 0.
+    pub fn delete_trust(&self, agent_id: &str) -> Value {
+        self.trust.set_trust(agent_id, 0);
+        self.audit.log(agent_id, "trust_delete", "success");
+        serde_json::json!({
+            "ok": true,
+            "agent_id": agent_id,
+            "deleted": true,
         })
     }
 
@@ -638,7 +648,7 @@ impl Governance {
 }
 
 /// Convert trust score to tier label (matches Python sidecar _score_to_tier).
-fn tier_label(score: u32) -> &'static str {
+pub fn tier_label(score: u32) -> &'static str {
     if score >= 800 {
         "Sovereign"
     } else if score >= 600 {
