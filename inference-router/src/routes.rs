@@ -341,7 +341,10 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         // Trust update (plugin pushes reputation changes to the router's trust store)
         .route("/agt/trust", post(agt_trust_update))
         // Dynamic rate-limit update (admin only)
-        .route("/agt/rate-limit", put(agt_rate_limit_update).get(agt_rate_limit_get))
+        .route(
+            "/agt/rate-limit",
+            put(agt_rate_limit_update).get(agt_rate_limit_get),
+        )
         // Registry reputation (proxied from agentmesh-registry)
         .route("/agt/reputation", get(agt_reputation))
 }
@@ -1518,10 +1521,7 @@ async fn foundry_proxy(
     //      /agents/x/runs               → foundry:agents:runs
     //      /knowledgebases/x/queries     → foundry:file_search:queries
     let foundry_action = {
-        let segments: Vec<&str> = upstream_path
-            .trim_start_matches('/')
-            .split('/')
-            .collect();
+        let segments: Vec<&str> = upstream_path.trim_start_matches('/').split('/').collect();
         let category = match segments.first().copied().unwrap_or("") {
             s if s.starts_with("memory_stores") => "memory",
             s if s.starts_with("knowledgebases") => "file_search",
@@ -1905,24 +1905,41 @@ async fn agt_rate_limit_update(
 
     let rl = &state.governance.rate_limiter;
     let global_rate = body["global_rate"].as_f64().unwrap_or(rl.global_rate());
-    let global_capacity = body["global_capacity"].as_f64().unwrap_or(rl.global_capacity());
-    let per_agent_rate = body["per_agent_rate"].as_f64().unwrap_or(rl.per_agent_rate());
-    let per_agent_capacity = body["per_agent_capacity"].as_f64().unwrap_or(rl.per_agent_capacity());
+    let global_capacity = body["global_capacity"]
+        .as_f64()
+        .unwrap_or(rl.global_capacity());
+    let per_agent_rate = body["per_agent_rate"]
+        .as_f64()
+        .unwrap_or(rl.per_agent_rate());
+    let per_agent_capacity = body["per_agent_capacity"]
+        .as_f64()
+        .unwrap_or(rl.per_agent_capacity());
 
-    rl.update_rates(global_rate, global_capacity, per_agent_rate, per_agent_capacity);
+    rl.update_rates(
+        global_rate,
+        global_capacity,
+        per_agent_rate,
+        per_agent_capacity,
+    );
 
     tracing::info!(
-        global_rate, global_capacity, per_agent_rate, per_agent_capacity,
+        global_rate,
+        global_capacity,
+        per_agent_rate,
+        per_agent_capacity,
         "Rate limits updated dynamically"
     );
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "global_rate": global_rate,
-        "global_capacity": global_capacity,
-        "per_agent_rate": per_agent_rate,
-        "per_agent_capacity": per_agent_capacity,
-        "message": "Rate limits updated",
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "global_rate": global_rate,
+            "global_capacity": global_capacity,
+            "per_agent_rate": per_agent_rate,
+            "per_agent_capacity": per_agent_capacity,
+            "message": "Rate limits updated",
+        })),
+    )
 }
 
 /// GET /agt/reputation — fetch this agent's reputation from the AgentMesh registry.

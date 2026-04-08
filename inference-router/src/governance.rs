@@ -129,7 +129,13 @@ impl RateLimiter {
     }
 
     /// Update rate limits at runtime (e.g. from API endpoint).
-    pub fn update_rates(&self, global_rate: f64, global_capacity: f64, per_agent_rate: f64, per_agent_capacity: f64) {
+    pub fn update_rates(
+        &self,
+        global_rate: f64,
+        global_capacity: f64,
+        per_agent_rate: f64,
+        per_agent_capacity: f64,
+    ) {
         let mut global = self.global.lock().unwrap();
         global.rate = global_rate;
         global.capacity = global_capacity;
@@ -186,12 +192,7 @@ impl Default for BehaviorState {
 
 impl BehaviorState {
     /// Which thresholds this state exceeds, if any.
-    fn triggered_reasons(
-        &self,
-        burst_t: u32,
-        fail_t: u32,
-        denial_t: u32,
-    ) -> Vec<String> {
+    fn triggered_reasons(&self, burst_t: u32, fail_t: u32, denial_t: u32) -> Vec<String> {
         let mut reasons = Vec::new();
         if self.recent_calls > burst_t {
             reasons.push(format!(
@@ -968,7 +969,8 @@ mod tests {
         assert!(
             score2.score > prev,
             "Score {} should increase after positive interaction (was {})",
-            score2.score, prev
+            score2.score,
+            prev
         );
     }
 
