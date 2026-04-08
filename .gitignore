@@ -426,7 +426,8 @@ Cargo.lock
 # Node
 node_modules/
 cli/dist/
-cli/package-lock.json
+# Lock file needed for reproducible Docker builds
+!cli/package-lock.json
 
 # Docker
 .docker/
@@ -447,11 +448,14 @@ vendor/agentmesh-sdk/docs/
 vendor/agentmesh-sdk/openspec/
 vendor/agentmesh-sdk/AUDIT_REPORT.md
 vendor/agentmesh-sdk/vitest.config.ts
-vendor/agentmesh-sdk/package-lock.json
+# Lock file needed for reproducible Docker builds
+!vendor/agentmesh-sdk/package-lock.json
 vendor/agentmesh-registry/frontend/node_modules/
 vendor/agentmesh-registry/frontend/dist/
-vendor/agentmesh-registry/frontend/package-lock.json
-vendor/agentmesh-registry/migrations/
+# Lock file needed for reproducible Docker builds
+!vendor/agentmesh-registry/frontend/package-lock.json
+# Migrations needed for registry database setup
+!vendor/agentmesh-registry/migrations/
 
 # Internal planning docs (not for public repo)
 PLAN.md

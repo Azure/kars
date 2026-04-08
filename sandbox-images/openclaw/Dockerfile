@@ -100,11 +100,11 @@ RUN cd cli && npm install --ignore-scripts 2>/dev/null || true && npm run build
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
-FROM golang:1.25-alpine AS go-builder
+FROM golang:1.23-alpine AS go-builder
 
 # Build Go CLI tools that enable built-in OpenClaw skills.
 # Each tool is a small static binary (~5-15MB) — discarded build cache doesn't bloat the runtime image.
-# GOTOOLCHAIN=auto lets Go download a newer toolchain if a module requires it (e.g. go >= 1.25).
+# GOTOOLCHAIN=auto lets Go download a newer toolchain if a module requires it (e.g. go >= 1.23).
 RUN apk add --no-cache git && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/blucli/cmd/blu@latest && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/eightctl/cmd/eightctl@latest && \
