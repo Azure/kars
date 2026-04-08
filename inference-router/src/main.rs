@@ -27,6 +27,8 @@ mod blocklist;
 mod budget;
 mod config;
 mod forward_proxy;
+#[allow(dead_code)] // Phase 1: wired into routes in Phase 2
+mod governance;
 mod mesh;
 mod metrics;
 mod proxy;

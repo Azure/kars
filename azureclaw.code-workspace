@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../../agt/agent-governance-toolkit"
 		}
 	],
 	"settings": {}
