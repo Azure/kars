@@ -455,13 +455,13 @@ export function devCommand(): Command {
               ], { stdio: "pipe" });
               gatewayHealthy = true;
             }
-            if (!routerHealthy) {
-              await execa("docker", [
-                "exec", containerName, "sh", "-c",
-                "wget -qO- --timeout=2 http://127.0.0.1:8443/healthz 2>/dev/null || curl -sf --max-time 2 http://127.0.0.1:8443/healthz 2>/dev/null",
-              ], { stdio: "pipe" });
-              routerHealthy = true;
-            }
+            // Router is always the last check — no guard needed since
+            // routerHealthy is only set here, right before break
+            await execa("docker", [
+              "exec", containerName, "sh", "-c",
+              "wget -qO- --timeout=2 http://127.0.0.1:8443/healthz 2>/dev/null || curl -sf --max-time 2 http://127.0.0.1:8443/healthz 2>/dev/null",
+            ], { stdio: "pipe" });
+            routerHealthy = true;
             // All three checks passed without throwing — we're ready
             break;
           } catch {
