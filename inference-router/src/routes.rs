@@ -1511,6 +1511,56 @@ async fn foundry_proxy(
         upstream_query
     );
 
+    // Derive a governance action from the Foundry API path.
+    // e.g. /memory_stores/x:search_memories → foundry:memory:search_memories
+    //      /agents/x/runs               → foundry:agents:runs
+    //      /knowledgebases/x/queries     → foundry:file_search:queries
+    let foundry_action = {
+        let segments: Vec<&str> = upstream_path
+            .trim_start_matches('/')
+            .split('/')
+            .collect();
+        let category = match segments.first().copied().unwrap_or("") {
+            s if s.starts_with("memory_stores") => "memory",
+            s if s.starts_with("knowledgebases") => "file_search",
+            "agents" => "agents",
+            "evaluations" | "evaluators" | "evaluationrules" => "evaluations",
+            "deployments" => "deployments",
+            "connections" => "connections",
+            "indexes" => "indexes",
+            other => other,
+        };
+        // Extract the operation (last segment or :action suffix)
+        let last_seg = segments.last().copied().unwrap_or("list");
+        let detail = last_seg.rsplit(':').next().unwrap_or("list");
+        format!("foundry:{category}:{detail}")
+    };
+
+    let result = state
+        .governance
+        .evaluate(sandbox_name, &foundry_action, None);
+    let allowed = result
+        .get("allowed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if !allowed {
+        let reason = result
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Denied by governance policy");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": {
+                    "message": reason,
+                    "type": "governance_denial",
+                    "action": foundry_action
+                }
+            })),
+        )
+            .into_response();
+    }
+
     tracing::info!(
         sandbox = %sandbox_name,
         method = %method,
