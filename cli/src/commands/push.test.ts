@@ -56,11 +56,6 @@ function buildImageList(acrLoginServer: string): ImageDef[] {
       context: "vendor/agentmesh-registry",
       buildArgs: ["--build-arg", `CACHE_BUST=${now}`],
     },
-    {
-      name: "sidecar",
-      tag: "agt-governance-sidecar:latest",
-      dockerfile: "sidecar-images/agt-governance/Dockerfile",
-    },
   ];
 }
 
@@ -120,15 +115,15 @@ describe("ACR login server resolution", () => {
 });
 
 describe("image list", () => {
-  it("defines 6 images", () => {
+  it("defines 5 images", () => {
     const images = buildImageList("test.azurecr.io");
-    expect(images).toHaveLength(6);
+    expect(images).toHaveLength(5);
   });
 
   it("includes all expected image names", () => {
     const images = buildImageList("test.azurecr.io");
     const names = images.map((i) => i.name);
-    expect(names).toEqual(["controller", "router", "sandbox", "relay", "registry", "sidecar"]);
+    expect(names).toEqual(["controller", "router", "sandbox", "relay", "registry"]);
   });
 
   it("sandbox image references router image from ACR", () => {
@@ -162,7 +157,7 @@ describe("--only flag filtering", () => {
   const images = buildImageList("test.azurecr.io");
 
   it("returns all images when --only is not set", () => {
-    expect(filterImages(images)).toHaveLength(6);
+    expect(filterImages(images)).toHaveLength(5);
   });
 
   it("filters to single image when --only is set", () => {
@@ -181,11 +176,6 @@ describe("--only flag filtering", () => {
     expect(result[0].tag).toBe("azureclaw-inference-router:latest");
   });
 
-  it("filters sidecar correctly", () => {
-    const result = filterImages(images, "sidecar");
-    expect(result).toHaveLength(1);
-    expect(result[0].dockerfile).toBe("sidecar-images/agt-governance/Dockerfile");
-  });
 });
 
 describe("docker build command construction", () => {
@@ -247,12 +237,13 @@ describe("docker build command construction", () => {
 
   it("generates full ACR tag with login server prefix", () => {
     const img: ImageDef = {
-      name: "sidecar",
-      tag: "agt-governance-sidecar:latest",
-      dockerfile: "sidecar-images/agt-governance/Dockerfile",
+      name: "relay",
+      tag: "agentmesh-relay:latest",
+      dockerfile: "vendor/agentmesh-relay/Dockerfile",
+      context: "vendor/agentmesh-relay",
     };
     const args = buildDockerArgs(img, acrLoginServer, repoRoot);
-    expect(args).toContain("myacr.azurecr.io/agt-governance-sidecar:latest");
+    expect(args).toContain("myacr.azurecr.io/agentmesh-relay:latest");
   });
 });
 
@@ -261,7 +252,7 @@ describe("--apply restart logic", () => {
     expect(deploymentMap.controller).toBe("azureclaw-controller");
   });
 
-  it("maps router to azureclaw-controller (sidecar in sandbox pods)", () => {
+  it("maps router to azureclaw-controller (router in sandbox pods)", () => {
     expect(deploymentMap.router).toBe("azureclaw-controller");
   });
 

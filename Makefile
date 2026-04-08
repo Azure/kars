@@ -48,7 +48,7 @@ fmt: ## Format code
 
 # ─── Container Images ────────────────────────────────────────────────────────
 
-images: image-controller image-router image-sandbox image-sidecar image-relay image-registry ## Build all container images
+images: image-controller image-router image-sandbox image-relay image-registry ## Build all container images
 
 image-controller: ## Build controller Docker image
 	docker build --platform linux/amd64 \
@@ -74,12 +74,6 @@ image-sandbox: image-router ## Build sandbox Docker image
 		-t $(REGISTRY)/azureclaw-sandbox:latest \
 		-f sandbox-images/openclaw/Dockerfile .
 
-image-sidecar: ## Build AGT governance sidecar image
-	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/agt-governance-sidecar:$(IMAGE_TAG) \
-		-t $(REGISTRY)/agt-governance-sidecar:latest \
-		-f sidecar-images/agt-governance/Dockerfile .
-
 image-relay: ## Build AgentMesh relay image
 	docker build --platform linux/amd64 \
 		-t $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG) \
@@ -99,8 +93,6 @@ push: ## Push all images to ACR
 	docker push $(REGISTRY)/azureclaw-inference-router:latest
 	docker push $(REGISTRY)/azureclaw-sandbox:$(IMAGE_TAG)
 	docker push $(REGISTRY)/azureclaw-sandbox:latest
-	docker push $(REGISTRY)/agt-governance-sidecar:$(IMAGE_TAG)
-	docker push $(REGISTRY)/agt-governance-sidecar:latest
 	docker push $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG)
 	docker push $(REGISTRY)/agentmesh-relay:latest
 	docker push $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG)

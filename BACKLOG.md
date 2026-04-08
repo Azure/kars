@@ -13,7 +13,7 @@
 | **Third-party Plugins** | Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI — enabled via API key flags (e.g., `--brave-api-key <key>`). Auto-registered in `plugins.allow` + `plugins.entries` when env var is present. |
 | **Foundry Web Search** | Bing Grounding auto-discovered via `/connections` API. Uses full resource ID for the Bing connection. No manual config needed when a Bing Grounding resource is connected to the Foundry project. |
 | **Controller** | Rust/kube-rs operator. Reconciles ClawSandbox → NS, SA, NetworkPolicy, Deployment, Service, ConfigMap. 3 isolation levels. AGT: Service (mesh DNS), ConfigMap (policy), volume mount, mesh ingress. `envFrom` credentials secret mounting (`<name>-credentials`, optional). Azure Services RBAC annotations. 9 unit tests. |
-| **Inference Router** | Rust/axum sidecar. 40+ routes, 18 Foundry API groups. SSE streaming. Content Safety + Prompt Shields. Token budgets (429). IMDS/WI auth. Auto-refreshing domain blocklist (OISD + URLhaus, 6h refresh). AGT module: PolicyEngine, TrustStore, AuditLog, MeshInbox. 9 `/agt/*` endpoints. |
+| **Inference Router** | Rust/axum per-pod proxy. 40+ routes, 18 Foundry API groups. SSE streaming. Content Safety + Prompt Shields. Token budgets (429). IMDS/WI auth. Auto-refreshing domain blocklist (OISD + URLhaus, 6h refresh). Native AGT governance: PolicyEngine, TrustStore, AuditLog, MeshInbox, Prometheus metrics, policy hot-reload. 9 `/agt/*` endpoints. |
 | **Foundry Integration** | All services via Responses API — no hosted agents. 18 API groups E2E tested: memory_stores, agents, evaluators, evaluationrules, indexes, connections, deployments, datasets, insights, openai/*, knowledgebases, redTeams, schedules, evaluationtaxonomies. |
 | **Foundry Skills** | 9 SKILL.md files: foundry-memory, foundry-code, foundry-knowledge, foundry-web-search, foundry-agents, foundry-conversations, foundry-evaluations, foundry-deployments, agt-governance. |
 | **AGT Governance** | Opt-in via CRD or `--governance` flag. Router-integrated PolicyEngine, TrustStore (0-1000), AuditLog (hash-chain), MeshInbox. Inter-agent mesh via K8s DNS. Controller creates Service + ConfigMap + mesh ingress. E2E: 2 agents, 21/21 tests. |
@@ -57,7 +57,7 @@
 | Foundry Agent API proxy (`/agents/*`) | Memory, threads, files, runs via Foundry — no custom Cosmos/Search needed |
 | iptables egress-guard (UID-based) | Agent (UID 1000) restricted to localhost + DNS. Strictly stronger than proxy-only. |
 | IMDS over Workload Identity for prod | Bypasses Conditional Access Token Protection policies |
-| Per-pod sidecar router (not shared gateway) | No cross-tenant blast radius. Simple NetworkPolicy. |
+| Per-pod router (not shared gateway) | No cross-tenant blast radius. Simple NetworkPolicy. |
 | `enforce: privileged` PodSecurity | egress-guard init container needs NET_ADMIN. Audit+warn remain restricted. |
 | seccomp + iptables + Kata (no custom SELinux) | Custom SELinux types incompatible with restricted PodSecurity |
 | SSE streaming for chat completions | Direct pipe for low TTFT. Non-streaming buffered for budget tracking. |

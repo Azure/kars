@@ -326,7 +326,7 @@ The agent tries to read credentials from a sensitive system file:
 ⛔ Blocked by AGT policy: rule "shell-sensitive-file-deny" — Sensitive file access blocked
 ```
 
-The tool call (`exec_command: cat /etc/shadow`) is intercepted *before execution*. The plugin forwards the action to the AGT sidecar (`POST /evaluate`), which matches it against `azureclaw-default.yaml` policy rules. The sidecar's PolicyEvaluator denies it, records the attempt in the tamper-proof audit chain, and decreases the agent's trust score.
+The tool call (`exec_command: cat /etc/shadow`) is intercepted *before execution*. The plugin forwards the action to the AGT governance engine (`POST /evaluate`), which matches it against `azureclaw-default.yaml` policy rules. The PolicyEngine denies it, records the attempt in the tamper-proof audit chain, and decreases the agent's trust score.
 
 > 🔥 **WOW moment:** This isn't just OS-level blocking — the AGT governance engine evaluated the *intent* and denied it at the application layer, with a full audit trail. Try it yourself:
 
@@ -340,7 +340,7 @@ The tool call (`exec_command: cat /etc/shadow`) is intercepted *before execution
    Audit: entry #48 added to Merkle chain (SHA-256)
 ```
 
-Other actions the AGT sidecar blocks:
+Other actions the AGT governance engine blocks:
 - `nmap`, `netcat`, `socat` — network reconnaissance
 - `unshare`, `nsenter`, `chroot` — privilege escalation attempts
 - `curl http://169.254.169.254/...` — cloud metadata access
@@ -355,7 +355,7 @@ Other actions the AGT sidecar blocks:
 | Lateral movement | NetworkPolicy namespace isolation | ⛔ Cross-namespace denied |
 | Malicious packages | Read-only rootfs | ⛔ Filesystem immutable |
 | Privilege escalation | seccomp + dropped capabilities | ⛔ Syscalls blocked |
-| Sensitive file access | AGT sidecar PolicyEvaluator | ⛔ Denied + audited |
+| Sensitive file access | AGT PolicyEngine | ⛔ Denied + audited |
 
 Seven attack vectors. Seven layers of defense. Zero breaches.
 

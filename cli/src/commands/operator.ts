@@ -98,6 +98,16 @@ interface SecurityState {
   agtMeshReceived: number;
   agtTrustUpdates: number;
   agtTotalInteractions: number;
+  // Native governance stats (from /agt/status when governance_mode === "native")
+  agtGovernanceMode: string;     // "native" | ""
+  agtPolicyEvaluations: number;
+  agtPolicyDenials: number;
+  agtPolicyRateLimits: number;
+  agtEvalLatencyUs: number;      // average eval latency in microseconds
+  agtBehaviorAlerts: number;
+  agtBehaviorDetail: Array<{ agent: string; reasons: string[] }>;
+  agtContentFlags: number;
+  agtPolicyRules: number;
   // Registry reputation (from agentmesh-registry)
   agtReputation: {
     score: number;       // 0.0–1.0 composite
@@ -106,6 +116,7 @@ interface SecurityState {
     totalSessions: number;
     feedbackCount: number;
     avgFeedback: number;
+    tags: { tag: string; count: number }[];
   } | null;
   // Prometheus metrics
   totalRequests: number;
@@ -155,8 +166,11 @@ export function operatorCommand(): Command {
     .option("--context <name>", "Kubernetes context to use")
     .option("--dev", "Dev mode — discover Docker containers instead of K8s pods")
     .action(async (options) => {
-      const refreshInterval = parseInt(options.refresh, 10) * 1000;
-      await startDashboard(refreshInterval, options.context, !!options.dev);
+      const isDevMode = !!options.dev;
+      // Dev mode: default 3s refresh (local Docker, no K8s latency)
+      const defaultRefresh = isDevMode ? 3 : 10;
+      const refreshInterval = (options.refresh ? parseInt(options.refresh, 10) : defaultRefresh) * 1000;
+      await startDashboard(refreshInterval, options.context, isDevMode);
     });
 
   return cmd;
@@ -338,9 +352,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   let agtOverlayOpen = false;
 
   // Tiered refresh: not everything needs to refresh every cycle.
-  // Sandboxes: every cycle (10s). Security/egress: every 3rd (30s). Cluster: every 6th (60s).
-  const TIER_DETAIL = 3;   // security + egress every 3 cycles
-  const TIER_CLUSTER = 6;  // cluster health every 6 cycles
+  // AKS: Sandboxes every cycle (10s). Security/egress every 3rd (30s). Cluster every 6th (60s).
+  // Dev:  Everything every cycle (3s) — local Docker, negligible overhead.
+  const TIER_DETAIL = devMode ? 1 : 3;
+  const TIER_CLUSTER = devMode ? 2 : 6;
 
   /** Egress domains for the currently selected agent. */
   function selectedEgressDomains(): EgressDomain[] {
@@ -669,6 +684,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       agtMeshReceived: 0,
       agtTrustUpdates: 0,
       agtTotalInteractions: 0,
+      agtGovernanceMode: "",
+      agtPolicyEvaluations: 0,
+      agtPolicyDenials: 0,
+      agtPolicyRateLimits: 0,
+      agtEvalLatencyUs: 0,
+      agtBehaviorAlerts: 0,
+      agtBehaviorDetail: [],
+      agtContentFlags: 0,
+      agtPolicyRules: 0,
       agtReputation: null,
       totalRequests: 0,
       errorRequests: 0,
@@ -765,6 +789,16 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         state.agtMeshReceived = agt.mesh_messages_received || 0;
         state.agtTrustUpdates = agt.trust_updates || 0;
         state.agtTotalInteractions = agt.total_interactions || 0;
+        // Native governance stats
+        state.agtGovernanceMode = agt.governance_mode || "";
+        state.agtPolicyEvaluations = agt.policy_evaluations || 0;
+        state.agtPolicyDenials = agt.policy_denials || 0;
+        state.agtPolicyRateLimits = agt.policy_rate_limits || 0;
+        state.agtEvalLatencyUs = agt.eval_latency_avg_us || 0;
+        state.agtBehaviorAlerts = agt.behavior_alerts || 0;
+        state.agtBehaviorDetail = agt.behavior_alerts_detail || [];
+        state.agtContentFlags = agt.content_flags || 0;
+        state.agtPolicyRules = agt.policy_rules || 0;
         // If no trust states but governance is enabled, show self
         if (state.agtEnabled && ts.length === 0) {
           const threshold = agt.trust_threshold ?? 500;
@@ -842,6 +876,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             totalSessions: r.total_sessions ?? 0,
             feedbackCount: r.feedback_count ?? 0,
             avgFeedback: r.average_feedback ?? 0,
+            tags: (r.tags || []).map((t: any) => ({ tag: t.tag || "", count: t.count || 0 })),
           };
         }
         // Local trust store (from router in-memory)
@@ -902,6 +937,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       existing.agtTotalInteractions = agt.total_interactions || 0;
       existing.agtAuditEntries = agt.audit_entries || 0;
       existing.agtAuditIntegrity = agt.audit_integrity ?? false;
+      existing.agtGovernanceMode = agt.governance_mode || existing.agtGovernanceMode;
+      existing.agtPolicyEvaluations = agt.policy_evaluations || 0;
+      existing.agtPolicyDenials = agt.policy_denials || 0;
+      existing.agtPolicyRateLimits = agt.policy_rate_limits || 0;
+      existing.agtEvalLatencyUs = agt.eval_latency_avg_us || 0;
+      existing.agtBehaviorAlerts = agt.behavior_alerts || 0;
+      existing.agtBehaviorDetail = agt.behavior_alerts_detail || [];
+      existing.agtContentFlags = agt.content_flags || 0;
+      existing.agtPolicyRules = agt.policy_rules || existing.agtPolicyRules;
     } catch { /* non-fatal — full refresh on next TIER_DETAIL cycle */ }
   }
 
@@ -1298,10 +1342,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     ];
 
     if (sec.agtEnabled) {
+      const modeLabel = sec.agtGovernanceMode === "native"
+        ? "{green-fg}native{/}" : sec.agtGovernanceMode || "unknown";
+      const denyRate = sec.agtPolicyEvaluations > 0
+        ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
+        : "0%";
       lines.push(
         "",
-        `{bold}{underline}AGT{/}`,
-        ` ${ok(sec.agtEnabled)} enabled  │  see AGT panel →`,
+        `{bold}{underline}AGT Governance{/}`,
+        ` Mode       ${modeLabel}  ${sec.agtPolicyRules} rules`,
+        ` Evals      ${sec.agtPolicyEvaluations}  deny ${denyRate}  RL ${sec.agtPolicyRateLimits}`,
+        ` Latency    ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"}`,
+        sec.agtBehaviorAlerts > 0 && sec.agtBehaviorDetail.length > 0
+          ? ` {red-fg}⚠ ${sec.agtBehaviorDetail.map((a: { agent: string; reasons: string[] }) => `${a.agent}: ${a.reasons[0]}`).join("; ")}{/}`
+          : ` Safety    {green-fg}✓{/}  flags ${sec.agtContentFlags}`,
+        ` {gray-fg}[g] full detail{/}`,
       );
     }
 
@@ -1320,19 +1375,55 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     const lines: string[] = [
       `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid}{/}` : ""),
+      ` Mode    ${sec.agtGovernanceMode === "native" ? "{green-fg}native{/}" : sec.agtGovernanceMode || "unknown"}  ${sec.agtPolicyRules} policy rules`,
       ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
       ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : activePeerCount} known`,
       ` Mesh    ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}  ${sec.agtTrustUpdates} trust updates`,
     ];
 
+    // Native governance policy stats
+    if (sec.agtPolicyEvaluations > 0 || sec.agtGovernanceMode === "native") {
+      const denyRate = sec.agtPolicyEvaluations > 0
+        ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
+        : "0%";
+      const rlColor = sec.agtPolicyRateLimits > 0 ? "yellow" : "green";
+      const contentColor = sec.agtContentFlags > 0 ? "yellow" : "green";
+      lines.push(
+        "",
+        `{bold}Policy Engine{/}  ${sec.agtPolicyRules} rules loaded`,
+        ` Evals    ${sec.agtPolicyEvaluations}  deny ${denyRate}  {${rlColor}-fg}${sec.agtPolicyRateLimits} rate-limited{/}`,
+        ` Latency  ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"} avg`,
+      );
+      // Behavior: show reasons when alerts fire, ✓ when clean
+      if (sec.agtBehaviorAlerts > 0 && sec.agtBehaviorDetail.length > 0) {
+        for (const alert of sec.agtBehaviorDetail) {
+          const why = alert.reasons.join(", ");
+          lines.push(` {red-fg}⚠ ${alert.agent}: ${why}{/}`);
+        }
+      } else {
+        lines.push(` Safety   {green-fg}✓ behavior{/}  {${contentColor}-fg}${sec.agtContentFlags > 0 ? `⚠ ${sec.agtContentFlags} content` : "✓ content"}{/}`);
+      }
+    }
+
     if (sec.agtReputation) {
       const r = sec.agtReputation;
       const pct = (r.score * 100).toFixed(0);
       const c = r.score >= 0.7 ? "green" : r.score >= 0.5 ? "yellow" : "red";
+      // Reputation score bar (10 blocks)
+      const filled = Math.round(r.score * 10);
+      const bar = "█".repeat(filled) + "░".repeat(10 - filled);
       lines.push("", `{bold}Reputation{/} {gray-fg}(registry){/}`);
-      lines.push(` {${c}-fg}${pct}%{/} ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
+      lines.push(` {${c}-fg}${bar}{/} ${pct}% ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
       if (r.totalSessions > 0) {
-        lines.push(` Completion ${(r.completionRate * 100).toFixed(0)}%  Avg ${r.avgFeedback.toFixed(2)}`);
+        // Star rating from avg feedback (0.0–1.0 → 0–5 stars)
+        const stars = Math.round(r.avgFeedback * 5);
+        const starStr = "★".repeat(stars) + "☆".repeat(5 - stars);
+        lines.push(` {yellow-fg}${starStr}{/} ${r.avgFeedback.toFixed(2)}  completion ${(r.completionRate * 100).toFixed(0)}%`);
+      }
+      // Tag badges
+      if (r.tags.length > 0) {
+        const tagStr = r.tags.map((t) => `{cyan-fg}#${t.tag}{/}×${t.count}`).join("  ");
+        lines.push(` ${tagStr}`);
       }
     } else {
       lines.push("", `{gray-fg}Reputation  awaiting first session{/}`);
@@ -1340,9 +1431,17 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     if (sec.agtTrustScores.length > 0) {
       const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
-      const peers = sec.agtTrustScores.filter((t) =>
-        t.agent !== sb.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)
-      );
+      // Show peers that are either known sandboxes OR recently active
+      // (sub-agents are spawned dynamically and won't be in the sandboxes list).
+      // "Recently active" = lastSeen within the last 30 minutes.
+      const recentThreshold = Date.now() - 30 * 60_000;
+      const peers = sec.agtTrustScores.filter((t) => {
+        if (t.agent === sb.name) return false;
+        if (sandboxes.some((s) => s.name === t.agent)) return true;
+        if (!t.lastSeen) return false;
+        const seen = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
+        return !isNaN(seen.getTime()) && seen.getTime() > recentThreshold;
+      });
 
       if (peers.length > 0) {
         lines.push("", `{bold}Mesh Traffic{/}`);
@@ -1385,7 +1484,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       lines.push("", "{gray-fg}No audit entries yet{/}");
     }
 
-    return lines.join("\n");
+    return lines.filter(Boolean).join("\n");
   }
 
   /** Compact AGT summary for the small panel. */

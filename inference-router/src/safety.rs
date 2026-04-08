@@ -9,12 +9,12 @@
 //! - `choices[].content_filter_results`: output-side filtering
 //! - On 400 errors: `error.innererror.content_filter_result` with details
 //!
-//! When a content flag is detected, we report it to the AGT sidecar for
+//! When a content flag is detected, we report it to the AGT governance engine for
 //! trust scoring, behavior monitoring, and tamper-evident audit logging.
 
 use serde::{Deserialize, Serialize};
 
-use crate::sidecar::SidecarProxy;
+use crate::governance::Governance;
 
 // ─── Guardrail Annotation Types ──────────────────────────────────────────────
 
@@ -230,14 +230,14 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
 
 // ─── AGT Content Flag Reporting ──────────────────────────────────────────────
 
-/// Report detected content flags to the AGT sidecar for trust scoring and audit.
+/// Report detected content flags to the AGT governance engine for trust scoring and audit.
 /// Fire-and-forget — does not block the response.
 pub async fn report_content_flags_to_agt(
-    sidecar: &SidecarProxy,
+    governance: &Governance,
     sandbox_name: &str,
     flags: &ContentFlags,
 ) {
-    if !sidecar.enabled || !flags.any_detected() {
+    if !flags.any_detected() {
         return;
     }
 
@@ -256,27 +256,21 @@ pub async fn report_content_flags_to_agt(
         "trust_penalty": flags.trust_penalty(),
     });
 
-    match sidecar
-        .forward("POST", "/report_content_flag", Some(&report))
-        .await
-    {
-        Ok((status, _)) => {
-            tracing::info!(
-                sandbox = %sandbox_name,
-                status,
-                penalty = flags.trust_penalty(),
-                categories = ?flags.detected_categories,
-                "AGT: content flag reported"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                sandbox = %sandbox_name,
-                error = %e,
-                "AGT: failed to report content flag (non-blocking)"
-            );
-        }
-    }
+    let result = governance.report_content_flag(
+        sandbox_name,
+        &report,
+        &flags.filtered_categories,
+        &flags.detected_categories,
+        flags.trust_penalty(),
+    );
+
+    tracing::info!(
+        sandbox = %sandbox_name,
+        penalty = flags.trust_penalty(),
+        categories = ?flags.detected_categories,
+        result = %result,
+        "AGT: content flag reported (native)"
+    );
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

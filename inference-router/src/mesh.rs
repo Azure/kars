@@ -1,7 +1,7 @@
 //! Local mesh state — inbox buffer and metrics counters.
 //!
 //! These are the only pieces of governance.rs that survive: simple data
-//! structures for mesh communication that the sidecar doesn't own.
+//! structures for mesh communication that governance doesn't own.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
@@ -21,6 +21,12 @@ pub struct MeshMessage {
 /// Inbox for received mesh messages (fallback HTTP path, not E2E relay).
 pub struct MeshInbox {
     messages: RwLock<Vec<MeshMessage>>,
+}
+
+impl Default for MeshInbox {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MeshInbox {
@@ -46,6 +52,12 @@ pub struct MeshMetrics {
     pub messages_sent: AtomicU64,
     pub messages_received: AtomicU64,
     pub trust_updates: AtomicU64,
+}
+
+impl Default for MeshMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MeshMetrics {

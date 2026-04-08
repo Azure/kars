@@ -40,20 +40,6 @@ inferenceRouter:
     promptShields:
       enabled: true
 
-# AGT governance sidecar (microsoft/agent-governance-toolkit v3.0.0)
-agtGovernance:
-  image:
-    repository: azureclaw.azurecr.io/agt-governance-sidecar
-    tag: "latest"
-    pullPolicy: Always
-  resources:
-    requests:
-      cpu: "50m"
-      memory: "48Mi"
-    limits:
-      cpu: "200m"
-      memory: "128Mi"
-
 # Default sandbox configuration
 sandbox:
   image:

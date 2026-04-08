@@ -63,7 +63,6 @@ export function pushCommand(): Command {
           buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
         { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry",
           buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
-        { name: "sidecar", tag: "agt-governance-sidecar:latest", dockerfile: "sidecar-images/agt-governance/Dockerfile" },
       ];
 
       // Filter if --only specified
@@ -122,7 +121,7 @@ export function pushCommand(): Command {
         const ns = "azureclaw-system";
         const deploymentMap: Record<string, string> = {
           controller: "azureclaw-controller",
-          router: "azureclaw-controller",   // router runs as sidecar in sandbox pods
+          router: "azureclaw-controller",   // router runs in sandbox pods
           sandbox: "azureclaw-controller",   // controller manages sandbox pods
         };
 

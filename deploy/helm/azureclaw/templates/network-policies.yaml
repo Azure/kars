@@ -33,7 +33,7 @@ data:
               port: 53
             - protocol: TCP
               port: 53
-        # Allow traffic to inference router sidecar (localhost)
+        # Allow traffic to inference router (localhost)
         - to:
             - podSelector:
                 matchLabels:

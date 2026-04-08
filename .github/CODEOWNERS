@@ -9,7 +9,6 @@
 /cli/                        @AzureClawTeam
 
 # AGT Governance
-/sidecar-images/             @AzureClawTeam
 /cli/policies/               @AzureClawTeam
 
 # Deployment

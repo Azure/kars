@@ -93,8 +93,6 @@ export function upCommand(): Command {
           "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
           "--set", `sandbox.image.repository=${ctx.acrLoginServer}/openclaw-sandbox`,
           "--set", `sandbox.image.tag=latest`,
-          "--set", `agtGovernance.image.repository=${ctx.acrLoginServer}/agt-governance-sidecar`,
-          "--set", `agtGovernance.image.tag=latest`,
           "--set", `azure.workloadIdentity.clientId=${ctx.wiClientId || ""}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${ctx.keyVaultName || ""}`,
           "--wait",
@@ -950,9 +948,6 @@ export function upCommand(): Command {
           await buildPush("vendor/agentmesh-relay/Dockerfile", "agentmesh-relay:latest", [], "vendor/agentmesh-relay");
           await buildPush("vendor/agentmesh-registry/Dockerfile", "agentmesh-registry:latest", [], "vendor/agentmesh-registry");
 
-          // AGT governance sidecar (wraps microsoft/agent-governance-toolkit v3.0.0)
-          await buildPush("sidecar-images/agt-governance/Dockerfile", "agt-governance-sidecar:latest");
-
           stepper.done("Images built and pushed to ACR");
         } else {
           // Customer mode: import pre-built images from source ACR
@@ -1120,8 +1115,6 @@ export function upCommand(): Command {
           "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
           "--set", `sandbox.image.repository=${acrLoginServer}/openclaw-sandbox`,
           "--set", `sandbox.image.tag=latest`,
-          "--set", `agtGovernance.image.repository=${acrLoginServer}/agt-governance-sidecar`,
-          "--set", `agtGovernance.image.tag=latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--wait",

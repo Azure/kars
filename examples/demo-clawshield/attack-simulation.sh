@@ -208,7 +208,7 @@ imds_url="http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018
 if curl -s --connect-timeout 3 -H "Metadata:true" "$imds_url" 2>/dev/null | grep -q "access_token"; then
     failed "IMDS token stolen! Cluster credentials compromised!"
 else
-    blocked "IMDS access blocked — NetworkPolicy restricts IMDS to inference-router sidecar only"
+    blocked "IMDS access blocked — NetworkPolicy restricts IMDS to inference-router only"
 fi
 
 attack "5.2 — Read service account token"

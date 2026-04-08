@@ -96,8 +96,6 @@ struct Context {
     inference_router_image: String,
     /// Sandbox image — injected via SANDBOX_IMAGE env
     sandbox_image: String,
-    /// AGT governance sidecar image — injected via AGT_SIDECAR_IMAGE env
-    governance_sidecar_image: String,
     /// Azure OpenAI endpoint — injected via AZURE_OPENAI_ENDPOINT env
     openai_endpoint: String,
     /// Foundry Models endpoint — injected via FOUNDRY_ENDPOINT env
@@ -472,7 +470,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Allow HTTPS egress for inference-router only (Workload Identity,
         // Azure OpenAI, Foundry, Content Safety). The openclaw agent container
         // is blocked from all external HTTPS by the iptables init container —
-        // it can only reach localhost:8443 (inference-router sidecar) and DNS.
+        // it can only reach localhost:8443 (inference-router) and DNS.
         json!({
             "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}],
             "ports": [{"protocol": "TCP", "port": 443}]
@@ -674,7 +672,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         //  - Data exfiltration to any external host
         //  - Lateral movement to other pods
         //
-        // The agent can only reach the inference-router sidecar on localhost:8443.
+        // The agent can only reach the inference-router on localhost:8443.
         // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
         "initContainers": [{
             "name": "egress-guard",
@@ -689,7 +687,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
                 // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
-                // forward proxy (port 8444) in the inference-router sidecar. This
+                // forward proxy (port 8444) in the inference-router. This
                 // enables learn mode (domain discovery) and per-domain enforcement.
                 // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
                 // rule above. The proxy (UID 1001) then connects to the real destination.
@@ -848,59 +846,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "readOnly": true
                         }));
                     }
-                    // Add AGT_POLICY_DIR + AGT_SIDECAR_URL env vars
+                    // Add AGT_POLICY_DIR env var (router reads policies natively)
                     if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
                         env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
-                        env.push(
-                            json!({"name": "AGT_SIDECAR_URL", "value": "http://127.0.0.1:8081"}),
-                        );
                     }
                 }
             }
-
-            // Add the AGT governance sidecar container
-            containers.push(json!({
-                "name": "agt-governance",
-                "image": &ctx.governance_sidecar_image,
-                "ports": [
-                    {"containerPort": 8081, "name": "governance"},
-                    {"containerPort": 9091, "name": "agt-metrics"}
-                ],
-                "env": [
-                    {"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"},
-                    {"name": "AGT_PORT", "value": "8081"},
-                    {"name": "AGT_METRICS_PORT", "value": "9091"},
-                    {"name": "SANDBOX_NAME", "value": &name},
-                    {"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()},
-                    {"name": "AGT_TRUST_DB", "value": "/tmp/agt/trust_scores.json"},
-                    {"name": "NODE_ENV", "value": "production"}
-                ],
-                "securityContext": {
-                    "runAsUser": 1002,
-                    "allowPrivilegeEscalation": false,
-                    "readOnlyRootFilesystem": true,
-                    "capabilities": {"drop": ["ALL"]}
-                },
-                "volumeMounts": [
-                    {"name": "agt-policy", "mountPath": "/etc/agt/policies", "readOnly": true},
-                    {"name": "agt-data", "mountPath": "/tmp/agt"},
-                    {"name": "tmp", "mountPath": "/tmp", "subPath": "agt-tmp"}
-                ],
-                "resources": {
-                    "requests": {"cpu": "50m", "memory": "48Mi"},
-                    "limits": {"cpu": "200m", "memory": "128Mi"}
-                },
-                "livenessProbe": {
-                    "httpGet": {"path": "/healthz", "port": 8081},
-                    "initialDelaySeconds": 5,
-                    "periodSeconds": 30
-                },
-                "readinessProbe": {
-                    "httpGet": {"path": "/healthz", "port": 8081},
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 10
-                }
-            }));
 
             // Add writable emptyDir volume for trust store + audit log persistence
             if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
@@ -1336,8 +1287,6 @@ pub async fn run(client: Client) -> Result<()> {
         tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
         "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
     });
-    let governance_sidecar_image = std::env::var("AGT_SIDECAR_IMAGE")
-        .unwrap_or_else(|_| "agentmesh/governance-sidecar:0.3.0".into());
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").unwrap_or_default();
     let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
@@ -1384,7 +1333,6 @@ pub async fn run(client: Client) -> Result<()> {
         wi_client_id,
         inference_router_image,
         sandbox_image,
-        governance_sidecar_image,
         openai_endpoint,
         foundry_endpoint,
         foundry_project_endpoint,
@@ -1709,52 +1657,6 @@ mod tests {
         })
     }
 
-    /// Build AGT governance sidecar container JSON (line 848-889).
-    fn build_agt_container(image: &str, name: &str, trust_threshold: i32) -> serde_json::Value {
-        json!({
-            "name": "agt-governance",
-            "image": image,
-            "ports": [
-                {"containerPort": 8081, "name": "governance"},
-                {"containerPort": 9091, "name": "agt-metrics"}
-            ],
-            "env": [
-                {"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"},
-                {"name": "AGT_PORT", "value": "8081"},
-                {"name": "AGT_METRICS_PORT", "value": "9091"},
-                {"name": "SANDBOX_NAME", "value": name},
-                {"name": "AGT_TRUST_THRESHOLD", "value": trust_threshold.to_string()},
-                {"name": "AGT_TRUST_DB", "value": "/tmp/agt/trust_scores.json"},
-                {"name": "NODE_ENV", "value": "production"}
-            ],
-            "securityContext": {
-                "runAsUser": 1002,
-                "allowPrivilegeEscalation": false,
-                "readOnlyRootFilesystem": true,
-                "capabilities": {"drop": ["ALL"]}
-            },
-            "volumeMounts": [
-                {"name": "agt-policy", "mountPath": "/etc/agt/policies", "readOnly": true},
-                {"name": "agt-data", "mountPath": "/tmp/agt"},
-                {"name": "tmp", "mountPath": "/tmp", "subPath": "agt-tmp"}
-            ],
-            "resources": {
-                "requests": {"cpu": "50m", "memory": "48Mi"},
-                "limits": {"cpu": "200m", "memory": "128Mi"}
-            },
-            "livenessProbe": {
-                "httpGet": {"path": "/healthz", "port": 8081},
-                "initialDelaySeconds": 5,
-                "periodSeconds": 30
-            },
-            "readinessProbe": {
-                "httpGet": {"path": "/healthz", "port": 8081},
-                "initialDelaySeconds": 3,
-                "periodSeconds": 10
-            }
-        })
-    }
-
     /// Build init container JSON (line 667-701).
     fn build_init_container(image: &str) -> serde_json::Value {
         json!({
@@ -1938,14 +1840,14 @@ mod tests {
     }
 
     #[test]
-    fn governance_adds_third_container() {
+    fn pod_has_two_containers() {
         let cfg = SandboxConfig::default();
         let oc = build_openclaw_container("img:latest", &cfg, "gpt-4.1");
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
-        let containers = [oc, router, agt];
-        assert_eq!(containers.len(), 3);
-        assert_eq!(containers[2]["name"], "agt-governance");
+        let containers = [oc, router];
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0]["name"], "openclaw");
+        assert_eq!(containers[1]["name"], "inference-router");
     }
 
     #[test]
@@ -1967,14 +1869,6 @@ mod tests {
     }
 
     #[test]
-    fn agt_governance_listens_on_port_8081() {
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
-        let ports = agt["ports"].as_array().unwrap();
-        assert_eq!(ports[0]["containerPort"], 8081);
-        assert_eq!(ports[0]["name"], "governance");
-    }
-
-    #[test]
     fn openclaw_gateway_port_18789() {
         let cfg = SandboxConfig::default();
         let oc = build_openclaw_container("img:latest", &cfg, "gpt-4.1");
@@ -1989,48 +1883,37 @@ mod tests {
         let cfg = SandboxConfig::default();
         let oc = build_openclaw_container("img:latest", &cfg, "gpt-4.1");
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
         assert_eq!(oc["securityContext"]["runAsUser"], 1000);
         assert_eq!(router["securityContext"]["runAsUser"], 1001);
-        assert_eq!(agt["securityContext"]["runAsUser"], 1002);
     }
 
-    // ── Pod spec: sidecar security ──────────────────────────────────────
+    // ── Pod spec: router security ──────────────────────────────────────
 
     #[test]
-    fn sidecars_deny_privilege_escalation() {
+    fn router_denies_privilege_escalation() {
         let cfg = SandboxConfig::default();
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
         assert_eq!(router["securityContext"]["allowPrivilegeEscalation"], false);
-        assert_eq!(agt["securityContext"]["allowPrivilegeEscalation"], false);
     }
 
     #[test]
-    fn sidecars_have_read_only_rootfs() {
+    fn router_has_read_only_rootfs() {
         let cfg = SandboxConfig::default();
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
         assert_eq!(router["securityContext"]["readOnlyRootFilesystem"], true);
-        assert_eq!(agt["securityContext"]["readOnlyRootFilesystem"], true);
     }
 
     #[test]
-    fn sidecars_drop_all_capabilities() {
+    fn router_drops_all_capabilities() {
         let cfg = SandboxConfig::default();
         let router = build_router_container("router:latest", "test", &cfg, "gpt-4.1");
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
         assert_eq!(
             router["securityContext"]["capabilities"]["drop"],
             json!(["ALL"])
         );
-        assert_eq!(
-            agt["securityContext"]["capabilities"]["drop"],
-            json!(["ALL"])
-        );
     }
 
-    // ── Pod spec: sidecar probes ────────────────────────────────────────
+    // ── Pod spec: router probes ────────────────────────────────────────
 
     #[test]
     fn router_probes_use_httpget_no_host() {
@@ -2042,19 +1925,6 @@ mod tests {
         assert!(liveness.get("host").is_none());
 
         let readiness = &router["readinessProbe"]["httpGet"];
-        assert_eq!(readiness["path"], "/healthz");
-        assert!(readiness.get("host").is_none());
-    }
-
-    #[test]
-    fn agt_probes_use_httpget_no_host() {
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
-        let liveness = &agt["livenessProbe"]["httpGet"];
-        assert_eq!(liveness["path"], "/healthz");
-        assert_eq!(liveness["port"], 8081);
-        assert!(liveness.get("host").is_none());
-
-        let readiness = &agt["readinessProbe"]["httpGet"];
         assert_eq!(readiness["path"], "/healthz");
         assert!(readiness.get("host").is_none());
     }
@@ -2079,16 +1949,6 @@ mod tests {
         let mounts = router["volumeMounts"].as_array().unwrap();
         assert_eq!(mounts[0]["name"], "admin-token");
         assert_eq!(mounts[0]["readOnly"], true);
-    }
-
-    #[test]
-    fn agt_sidecar_has_policy_and_data_mounts() {
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
-        let mounts = agt["volumeMounts"].as_array().unwrap();
-        let names: Vec<&str> = mounts.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"agt-policy"));
-        assert!(names.contains(&"agt-data"));
-        assert!(names.contains(&"tmp"));
     }
 
     // ── Pod spec: init container ────────────────────────────────────────
@@ -2220,30 +2080,6 @@ mod tests {
         assert!(!ep_var["value"].as_str().unwrap().is_empty());
     }
 
-    // ── AGT governance sidecar env ──────────────────────────────────────
-
-    #[test]
-    fn agt_sidecar_env_includes_policy_dir() {
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
-        let env = agt["env"].as_array().unwrap();
-        let policy_var = env
-            .iter()
-            .find(|e| e["name"] == "AGT_POLICY_DIR")
-            .expect("AGT_POLICY_DIR missing");
-        assert_eq!(policy_var["value"], "/etc/agt/policies");
-    }
-
-    #[test]
-    fn agt_sidecar_env_includes_trust_threshold() {
-        let agt = build_agt_container("agt:0.3.0", "test-agent", 750);
-        let env = agt["env"].as_array().unwrap();
-        let threshold_var = env
-            .iter()
-            .find(|e| e["name"] == "AGT_TRUST_THRESHOLD")
-            .expect("AGT_TRUST_THRESHOLD missing");
-        assert_eq!(threshold_var["value"], "750");
-    }
-
     // ── Default resource limits ─────────────────────────────────────────
 
     #[test]
@@ -2264,15 +2100,6 @@ mod tests {
         assert_eq!(router["resources"]["requests"]["memory"], "64Mi");
         assert_eq!(router["resources"]["limits"]["cpu"], "500m");
         assert_eq!(router["resources"]["limits"]["memory"], "256Mi");
-    }
-
-    #[test]
-    fn agt_default_resource_limits() {
-        let agt = build_agt_container("agt:0.3.0", "test", 500);
-        assert_eq!(agt["resources"]["requests"]["cpu"], "50m");
-        assert_eq!(agt["resources"]["requests"]["memory"], "48Mi");
-        assert_eq!(agt["resources"]["limits"]["cpu"], "200m");
-        assert_eq!(agt["resources"]["limits"]["memory"], "128Mi");
     }
 
     // ── Finalizer ───────────────────────────────────────────────────────

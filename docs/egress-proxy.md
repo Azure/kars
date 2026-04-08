@@ -5,7 +5,7 @@
 AzureClaw enforces strict outbound network control for every sandboxed agent.
 No agent can reach the internet directly — all external HTTP traffic is mediated
 by a two-layer egress system that combines kernel-level iptables rules with an
-application-level proxy inside the inference-router sidecar.
+application-level proxy inside the inference router.
 
 ## How It Works
 
@@ -22,7 +22,7 @@ rules that restrict the agent container (UID 1000 / `openclaw`) to:
 | `--ctstate ESTABLISHED,RELATED -j ACCEPT` | Allow reply packets for inbound connections (WebUX, Telegram) |
 | `-j DROP` | **Drop everything else** |
 
-The inference-router sidecar (UID 1001) is **not** restricted — it has full
+The inference router (UID 1001) is **not** restricted — it has full
 network access to Azure OpenAI, Foundry, Content Safety, and approved egress
 destinations.
 
@@ -124,7 +124,7 @@ commands inside the `inference-router` container to interact with the router API
 
 ## API Endpoints (Router)
 
-All endpoints are served by the inference-router sidecar on `127.0.0.1:8443`.
+All endpoints are served by the inference router on `127.0.0.1:8443`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -201,7 +201,7 @@ The blocklist stays current through multiple refresh mechanisms:
 ## Agent Integration
 
 Agents use the `http_fetch` tool to make external HTTP requests. The tool
-is implemented as a `POST` to the local inference-router sidecar:
+is implemented as a `POST` to the local inference router:
 
 ```json
 {
