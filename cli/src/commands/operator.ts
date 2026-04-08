@@ -116,6 +116,7 @@ interface SecurityState {
     totalSessions: number;
     feedbackCount: number;
     avgFeedback: number;
+    tags: { tag: string; count: number }[];
   } | null;
   // Prometheus metrics
   totalRequests: number;
@@ -875,6 +876,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             totalSessions: r.total_sessions ?? 0,
             feedbackCount: r.feedback_count ?? 0,
             avgFeedback: r.average_feedback ?? 0,
+            tags: (r.tags || []).map((t: any) => ({ tag: t.tag || "", count: t.count || 0 })),
           };
         }
         // Local trust store (from router in-memory)
@@ -1407,10 +1409,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       const r = sec.agtReputation;
       const pct = (r.score * 100).toFixed(0);
       const c = r.score >= 0.7 ? "green" : r.score >= 0.5 ? "yellow" : "red";
+      // Reputation score bar (10 blocks)
+      const filled = Math.round(r.score * 10);
+      const bar = "█".repeat(filled) + "░".repeat(10 - filled);
       lines.push("", `{bold}Reputation{/} {gray-fg}(registry){/}`);
-      lines.push(` {${c}-fg}${pct}%{/} ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
+      lines.push(` {${c}-fg}${bar}{/} ${pct}% ${r.tier}  ${r.totalSessions} sessions  ${r.feedbackCount} reviews`);
       if (r.totalSessions > 0) {
-        lines.push(` Completion ${(r.completionRate * 100).toFixed(0)}%  Avg ${r.avgFeedback.toFixed(2)}`);
+        // Star rating from avg feedback (0.0–1.0 → 0–5 stars)
+        const stars = Math.round(r.avgFeedback * 5);
+        const starStr = "★".repeat(stars) + "☆".repeat(5 - stars);
+        lines.push(` {yellow-fg}${starStr}{/} ${r.avgFeedback.toFixed(2)}  completion ${(r.completionRate * 100).toFixed(0)}%`);
+      }
+      // Tag badges
+      if (r.tags.length > 0) {
+        const tagStr = r.tags.map((t) => `{cyan-fg}#${t.tag}{/}×${t.count}`).join("  ");
+        lines.push(` ${tagStr}`);
       }
     } else {
       lines.push("", `{gray-fg}Reputation  awaiting first session{/}`);
