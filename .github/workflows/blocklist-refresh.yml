@@ -92,6 +92,21 @@ jobs:
             echo "Blocklist updated: $LINES lines"
           fi
 
+      - name: Clean up old blocklist branches
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete previous blocklist branches (keep only today's)
+          TODAY="chore/blocklist-refresh-$(date -u +%Y%m%d)"
+          for ref in $(git ls-remote --heads origin 'refs/heads/chore/blocklist-refresh-*' | awk '{print $2}'); do
+            BRANCH="${ref#refs/heads/}"
+            if [ "$BRANCH" != "$TODAY" ]; then
+              echo "Deleting stale branch: $BRANCH"
+              git push origin --delete "$BRANCH" 2>/dev/null || true
+            fi
+          done
+
       - name: Commit and push
         if: steps.diff.outputs.changed == 'true'
         env:
@@ -107,7 +122,19 @@ jobs:
 
           Sources: OISD small, URLhaus hostfile
           Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push origin "$BRANCH"
-          gh pr create --title "chore(blocklist): auto-refresh seed — $DOMAINS domains" \
-            --body "Automated daily blocklist refresh from OISD + URLhaus feeds." \
-            --base main --head "$BRANCH"
+          git push --force origin "$BRANCH"
+
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="chore/blocklist-refresh-$(date -u +%Y%m%d)"
+          DOMAINS=$(grep -cv '^#\|^$' cli/blocklists/seed-domains.txt || echo 0)
+          # Use REST API instead of GraphQL — works with limited GITHUB_TOKEN
+          gh api repos/${{ github.repository }}/pulls \
+            -f title="chore(blocklist): auto-refresh seed — $DOMAINS domains" \
+            -f body="Automated daily blocklist refresh from OISD + URLhaus feeds." \
+            -f head="$BRANCH" \
+            -f base="main" \
+            2>/dev/null || echo "::warning::Could not create PR (enterprise token restriction). Branch $BRANCH pushed — create PR manually."
