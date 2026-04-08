@@ -160,7 +160,7 @@ export class RelayTransport {
               const handler = this.messageHandlers.get(msgType);
               if (handler) {
                 Promise.resolve(handler(data)).catch((err) => {
-                  console.error(`Handler error for ${msgType}:`, err);
+                  console.error(`Handler error for ${String(msgType)}: ${err instanceof Error ? err.message : String(err)}`);
                 });
               }
             }

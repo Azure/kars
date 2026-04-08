@@ -305,20 +305,24 @@ export class AuditLogger {
   private logToConsole(event: AuditEvent): void {
     const prefix = `[${event.severity}] [${event.type}]`;
     const msg = `${prefix} ${event.message}`;
+    const detail = event.severity === 'ERROR' || event.severity === 'CRITICAL'
+      ? (event.error || event.metadata || undefined)
+      : (event.metadata || undefined);
+    const line = detail !== undefined ? `${msg} ${JSON.stringify(detail)}` : msg;
 
     switch (event.severity) {
       case 'DEBUG':
-        console.debug(msg, event.metadata || '');
+        console.debug(line);
         break;
       case 'INFO':
-        console.info(msg, event.metadata || '');
+        console.info(line);
         break;
       case 'WARNING':
-        console.warn(msg, event.metadata || '');
+        console.warn(line);
         break;
       case 'ERROR':
       case 'CRITICAL':
-        console.error(msg, event.error || event.metadata || '');
+        console.error(line);
         break;
     }
   }

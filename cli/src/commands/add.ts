@@ -413,7 +413,7 @@ export function addCommand(): Command {
       } catch (error) {
         spinner.fail("Failed to create sandbox");
         const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("clawsandboxes.azureclaw.azure.com")) {
+        if (message.includes("clawsandboxes.azureclaw.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation
           console.error(chalk.red("\n  AzureClaw is not installed on this cluster."));
           console.error(chalk.red("  Run 'azureclaw up' first to deploy the infrastructure.\n"));
         } else {
