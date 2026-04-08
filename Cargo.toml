@@ -4,6 +4,10 @@ members = [
     "inference-router",
     "controller",
 ]
+exclude = [
+    "vendor/agentmesh-registry",
+    "vendor/agentmesh-relay",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -46,6 +50,9 @@ prometheus = "0.14"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+
+# AGT governance (native — replaces former Python sidecar)
+agentmesh = "3.0.2"
 
 [profile.release]
 lto = true

@@ -32,6 +32,39 @@ ARG OPENCLAW_VERSION=latest
 ARG OPENCLAW_CACHE_BUST=0
 RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
 
+# OpenClaw ≥2026.4 hoists channel bundle chunks to dist/ but npm installs don't
+# stage extension deps into the top-level node_modules/ (openclaw/openclaw#62749).
+# Symlink each missing package so Node's require() resolves from dist/.
+# This is a no-op once upstream ships the stageRuntimeDependencies fix.
+RUN TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
+    EXTDIR="/usr/local/lib/node_modules/openclaw/dist/extensions" && \
+    link_pkg() { \
+      ext="$1"; pkg="$2"; \
+      src="$EXTDIR/$ext/node_modules/$pkg"; \
+      dst="$TOPMOD/$pkg"; \
+      if [ -d "$src" ] && [ ! -e "$dst" ]; then \
+        mkdir -p "$(dirname "$dst")" && ln -s "$src" "$dst"; \
+      fi; \
+    } && \
+    # Telegram (3 packages)
+    link_pkg telegram grammy && \
+    link_pkg telegram @grammyjs/runner && \
+    link_pkg telegram @grammyjs/transformer-throttler && \
+    # Discord (6 packages)
+    link_pkg discord @buape/carbon && \
+    link_pkg discord @discordjs/opus && \
+    link_pkg discord debug && \
+    link_pkg discord https-proxy-agent && \
+    link_pkg discord opusscript && \
+    link_pkg discord discord-api-types && \
+    # Slack (3 packages)
+    link_pkg slack @slack/bolt && \
+    link_pkg slack @slack/web-api && \
+    link_pkg slack p-queue && \
+    # Feishu (1 package)
+    link_pkg feishu @larksuiteoapi/node-sdk && \
+    echo "OpenClaw extension dep symlinks applied"
+
 # Patch vulnerable transitive npm deps (tar, minimatch, glob, brace-expansion)
 # without waiting for upstream OpenClaw to update them.
 RUN cd /usr/local/lib/node_modules && npm audit fix --force 2>/dev/null || true
@@ -117,15 +150,6 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 
 # AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
 # Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
-# Includes agentmesh-platform, agent-os-kernel, agent-hypervisor, and their
-# runtime dependencies (email-validator, jsonschema).
-# pydantic/pyyaml/dnspython are already installed by the main pip layer above.
-# Install each wheel individually — skip platform-incompatible ones (e.g.
-# pydantic_core x86_64 on aarch64 dev builds; already satisfied from above).
-COPY vendor/agt-wheels/ /tmp/agt-wheels/
-RUN for whl in /tmp/agt-wheels/*.whl; do \
-      pip3 install --no-cache-dir --no-deps "$whl" 2>/dev/null || true; \
-    done && rm -rf /tmp/agt-wheels
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
@@ -220,9 +244,6 @@ RUN mkdir -p /sandbox /tmp && \
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# AGT governance sidecar server (dev mode — started by entrypoint.sh)
-COPY sidecar-images/agt-governance/server.py /opt/agt-governance/server.py
-
 # Labels
 LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
       org.opencontainers.image.description="Hardened OpenClaw sandbox on Azure Linux 3" \
@@ -234,7 +255,7 @@ LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
 # Entrypoint runs as root to set up iptables and start services under correct UIDs:
 #   UID 1001 (router)  — can reach the internet (Foundry API, blocklist feeds)
 #   UID 1000 (sandbox) — restricted to localhost + DNS by iptables egress guard
-# This mirrors AKS where router is a separate sidecar container.
+# This mirrors AKS where router is a separate container in the pod.
 WORKDIR /sandbox
 
 # Entrypoint auto-configures OpenClaw, then runs the command

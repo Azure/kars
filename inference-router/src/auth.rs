@@ -25,6 +25,12 @@ pub struct WorkloadIdentityAuth {
     api_key: Option<String>,
 }
 
+impl Default for WorkloadIdentityAuth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkloadIdentityAuth {
     pub fn new() -> Self {
         // Try to load API key from secret mount (dev mode), then env var (sub-agent)

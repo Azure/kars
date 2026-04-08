@@ -1,154 +1,135 @@
-# AzureClaw AGT Governance Policy — Native TrustPolicy Format
+# AzureClaw AGT Governance Policy — agentmesh PolicyEngine format
 #
-# Uses agentmesh TrustPolicy + PolicyEvaluator with TrustCondition operators:
-#   eq, ne, gt, gte, lt, lte, in, not_in, matches (regex)
-# All classification (safe commands, destructive patterns, injection detection)
-# is done by AGT's native condition evaluation — zero custom logic.
+# Uses agentmesh PolicyEngine action-pattern matching (glob: shell:*, inference:*).
+# Rules are evaluated by priority (higher = first); first match wins.
+# Type: capability (allow/deny lists), approval, rate_limit.
+#
+# Action format used by AzureClaw router:
+#   inference:chat_completions:<model>   inference:responses:<model>
+#   image_generation:<deployment>        spawn:create:<name>
+#   shell:<command>                      tool:<tool_name>
+#   mesh:send:<peer>   mesh:receive      admin:<operation>
 #
 # Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
-# are handled by AzureClaw at kernel/router level.
+# are handled by AzureClaw at kernel/router level — not duplicated here.
 
-name: azureclaw-default
-description: AzureClaw behavioral governance (tool-level only, no infra overlap)
+version: "1.0"
+agent: azureclaw-default
 
-defaults:
-  min_trust_score: 500
-  max_delegation_depth: 3
-  require_handshake: true
-
-rules:
+policies:
   # ── Shell safety ─────────────────────────────────────────────────────
-  - name: shell-safe-commands
-    description: Allow pre-approved shell commands
-    condition:
-      field: action.command
-      operator: in
-      value: [ls, cat, grep, find, echo, head, tail, wc, sort, uniq, diff,
-              python, python3, pip, node, npm, git, curl, jq, sed, awk]
-    action: allow
-    priority: 10
-
+  # Deny dangerous shell patterns before allowing safe ones.
   - name: shell-destructive-deny
-    description: Deny destructive shell commands (regex match)
-    condition:
-      field: action.full
-      operator: matches
-      value: "rm\\s+-rf\\s+/|mkfs|shutdown|reboot|chmod\\s+777|dd\\s+if="
-    action: deny
-    priority: 5
+    type: capability
+    denied_actions:
+      - "shell:rm"
+      - "shell:mkfs"
+      - "shell:shutdown"
+      - "shell:reboot"
+      - "shell:dd"
+      - "shell:nmap"
+      - "shell:nc"
+      - "shell:netcat"
+      - "shell:socat"
+      - "shell:nsenter"
+      - "shell:unshare"
+      - "shell:chroot"
+    priority: 100
 
-  - name: shell-sensitive-file-deny
-    description: Deny access to sensitive system files
-    condition:
-      field: action.full
-      operator: matches
-      value: "/etc/shadow|/etc/gshadow|/etc/sudoers|/root/\\.ssh|/proc/[0-9]+/environ"
-    action: deny
-    priority: 5
+  - name: shell-safe-commands
+    type: capability
+    allowed_actions:
+      - "shell:ls"
+      - "shell:cat"
+      - "shell:grep"
+      - "shell:find"
+      - "shell:echo"
+      - "shell:head"
+      - "shell:tail"
+      - "shell:wc"
+      - "shell:sort"
+      - "shell:uniq"
+      - "shell:diff"
+      - "shell:python"
+      - "shell:python3"
+      - "shell:pip"
+      - "shell:node"
+      - "shell:npm"
+      - "shell:git"
+      - "shell:curl"
+      - "shell:jq"
+      - "shell:sed"
+      - "shell:awk"
+    priority: 90
 
-  - name: shell-recon-deny
-    description: Deny network reconnaissance and reverse shell tools
-    condition:
-      field: action.full
-      operator: matches
-      value: "(?:^|[\\s;|&(/])nmap(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])nc\\s+-[elp]|(?:^|[\\s;|&(/])netcat(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])socat(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])nsenter(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])unshare(?:\\s|$|;|\\||&)|(?:^|[\\s;|&(/])chroot(?:\\s|$|;|\\||&)"
-    action: deny
-    priority: 5
-
-  - name: network-metadata-deny
-    description: Deny access to cloud metadata endpoints
-    condition:
-      field: action.full
-      operator: matches
-      value: "169\\.254\\.169\\.254|metadata\\.google\\.internal"
-    action: deny
-    priority: 5
-
-  # ── Inference rate-limited allow (#7, #12) ───────────────────────────
+  # ── Inference ────────────────────────────────────────────────────────
   - name: inference-allow
-    description: Allow inference requests (rate limiting via RateLimiter)
-    condition:
-      field: action.category
-      operator: eq
-      value: inference
-    action: allow
-    priority: 20
+    type: capability
+    allowed_actions:
+      - "inference:*"
+      - "image_generation:*"
+    priority: 80
 
-  # ── Spawn allow (#8) ────────────────────────────────────────────────
+  # ── Foundry tools ────────────────────────────────────────────────────
+  - name: foundry-allow
+    type: capability
+    allowed_actions:
+      - "foundry:web_search:*"
+      - "foundry:code_execute:*"
+      - "foundry:file_search:*"
+      - "foundry:memory:*"
+      - "foundry:image_generation:*"
+      - "foundry:conversations:*"
+      - "foundry:evaluations:*"
+      - "foundry:deployments:*"
+      - "foundry:agents:*"
+    priority: 80
+
+  # ── Sub-agent spawning ──────────────────────────────────────────────
   - name: spawn-allow
-    description: Allow sub-agent spawns (rate limiting via RateLimiter)
-    condition:
-      field: action.category
-      operator: eq
-      value: spawn
-    action: allow
-    priority: 20
+    type: capability
+    allowed_actions:
+      - "spawn:*"
+    priority: 80
 
-  # ── Response content safety (#9) ────────────────────────────────────
-  - name: output-injection-deny
-    description: Block model responses containing prompt injection patterns
-    condition:
-      field: action.detail
-      operator: matches
-      value: "(?i)ignore previous instructions|ignore all prior|you are now|new system prompt|DROP TABLE|UNION SELECT|rm -rf /|; curl |<script>"
-    action: deny
-    priority: 5
+  # ── Mesh messaging ──────────────────────────────────────────────────
+  - name: mesh-allow
+    type: capability
+    allowed_actions:
+      - "mesh:*"
+    priority: 80
 
-  - name: output-clean-allow
-    description: Allow clean model output
-    condition:
-      field: action.category
-      operator: eq
-      value: output
-    action: allow
-    priority: 30
+  # ── Tool calls ──────────────────────────────────────────────────────
+  - name: tool-allow
+    type: capability
+    allowed_actions:
+      - "tool:*"
+    priority: 70
 
-  # ── Mesh message policy (#10) ───────────────────────────────────────
-  - name: mesh-untrusted-deny
-    description: Deny messages from agents below trust threshold
-    condition:
-      field: trust_score
-      operator: lt
-      value: 500
-    action: deny
-    priority: 5
-
-  - name: mesh-trusted-allow
-    description: Allow messages from trusted agents
-    condition:
-      field: action.category
-      operator: eq
-      value: mesh
-    action: allow
-    priority: 20
-
-  # ── Bulk operations gate (#14) ──────────────────────────────────────
+  # ── Admin operations ────────────────────────────────────────────────
+  # Bulk/promote operations need human approval.
   - name: admin-bulk-approval
-    description: Bulk admin operations require operator approval
-    condition:
-      field: action.detail
-      operator: matches
-      value: "^(bulk|promote)"
-    action: require_approval
-    priority: 10
+    type: approval
+    actions:
+      - "admin:bulk*"
+      - "admin:promote*"
+    min_approvals: 1
+    priority: 60
 
   - name: admin-allow
-    description: Allow non-bulk admin operations
-    condition:
-      field: action.category
-      operator: eq
-      value: admin
-    action: allow
-    priority: 25
+    type: capability
+    allowed_actions:
+      - "admin:*"
+    priority: 50
 
-  - name: tool-general-allow
-    description: Allow general tool calls (non-shell, non-egress)
-    condition:
-      field: action.category
-      operator: eq
-      value: tool
-    action: allow
-    priority: 25
+  # ── Inference rate limit (per-agent, 60s window) ────────────────────
+  - name: inference-rate-limit
+    type: rate_limit
+    actions:
+      - "inference:*"
+    max_calls: 120
+    window: "60s"
+    priority: 40
 
 # NOT included — AzureClaw handles these at infrastructure level:
 # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)

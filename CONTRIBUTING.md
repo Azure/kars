@@ -17,11 +17,10 @@ make lint     # clippy + oxlint + ruff
 | Directory | Language | What It Is |
 |-----------|----------|------------|
 | `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs into sandboxes |
-| `inference-router/` | Rust (axum) | Per-sandbox sidecar — auth, safety, budgets, 18 Foundry APIs, AGT governance |
+| `inference-router/` | Rust (axum) | Per-sandbox router — auth, safety, budgets, 18 Foundry APIs, native AGT governance |
 | `cli/` | TypeScript | 15+ CLI commands + OpenClaw plugin + 9 Foundry skills |
 | `cli/skills/` | Markdown | 10 SKILL.md files teaching the agent to use Foundry services |
 | `cli/policies/` | YAML | AGT policy profiles (shell-safety, approval, rate-limit) |
-| `sidecar-images/` | Python | AGT governance sidecar (PolicyEvaluator, TrustStore, AuditChain) |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
 | `deploy/seccomp/` | JSON | seccomp profile (`azureclaw-strict.json`) |
@@ -48,15 +47,6 @@ cargo build --release     # builds controller + inference-router
 cargo test --all          # 21 unit tests (16 controller + 5 budget)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all           # format
-```
-
-### Python AGT Sidecar (Python 3.12+)
-
-```bash
-cd sidecar-images/agt-governance
-pip install -r requirements.txt         # install agentmesh SDK + deps
-python3 -m pytest test_server.py -v     # sidecar unit tests
-ruff check .                            # lint
 ```
 
 ### Docker Sandbox Image

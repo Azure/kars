@@ -37,8 +37,9 @@ prometheus.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 
-# AGT governance (policy YAML parsing)
+# AGT governance (policy YAML parsing + native policy/trust/audit)
 serde_yaml = "0.9"
+agentmesh.workspace = true
 
 # TCP keepalive for tunnel dead-connection detection
 socket2 = "0.5"

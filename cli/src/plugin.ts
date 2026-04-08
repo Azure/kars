@@ -917,7 +917,7 @@ async function processTaskWithTools(
                   ? JSON.stringify(messages.map((m: any) => ({ from: m.from_agent || m.sender, content: m.content || m.text, timestamp: m.timestamp })))
                   : "No pending messages";
               } else {
-                // Fallback: check via AGT inbox (pending messages stored by sidecar)
+                // Fallback: check via AGT inbox (pending messages stored by router)
                 const agtInbox = (globalThis as any).__agtInbox || [];
                 result = agtInbox.length > 0
                   ? JSON.stringify(agtInbox)
@@ -935,7 +935,7 @@ async function processTaskWithTools(
               const policyHttp = await import("node:http");
               const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
               const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request("http://127.0.0.1:8081/evaluate", {
+                const req = policyHttp.request("http://127.0.0.1:8443/agt/evaluate", {
                   method: "POST", timeout: 2000,
                   headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
                 }, (res) => {
@@ -950,7 +950,7 @@ async function processTaskWithTools(
               });
               policyAllowed = policyResult.allowed !== false;
               policyReason = policyResult.reason || "";
-            } catch { /* sidecar unavailable — allow */ }
+            } catch { /* router unavailable — allow */ }
             if (!policyAllowed) {
               result = `Blocked by policy: ${policyReason || "denied"}`;
             } else {
@@ -1180,7 +1180,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${sanitizeLog(fromName, 50)} (${fromAmid.slice(0, 12)}...): ${sanitizeLog(JSON.stringify(content), 200)}`);
 
-      // AGT policy gate — validate incoming mesh message via sidecar PolicyEngine.
+      // AGT policy gate — validate incoming mesh message via router PolicyEngine.
       // Checks trust score of sender against mesh-receive-untrusted rule.
       // Non-blocking: on error or timeout, fail-open (log and continue).
       // This runs AFTER E2E decryption (handled by SDK) — encryption is not affected.
@@ -1202,7 +1202,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { trust_score: senderTrustScore, from_agent: fromName },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8081/evaluate", {
+            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -1231,7 +1231,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           }
           log.info(`AGT policy allowed mesh:receive from ${fromName} (trust=${senderTrustScore})`);
         } catch (policyErr: any) {
-          // Fail-open: sidecar unreachable or error — log and continue processing
+          // Fail-open: router unreachable or error — log and continue processing
           log.warn(`AGT mesh policy check failed (proceeding): ${policyErr.message}`);
         }
       }
@@ -1256,7 +1256,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8081/evaluate", {
+            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -1280,7 +1280,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               });
             } catch { /* best effort */ }
           }
-        } catch { /* sidecar unavailable — allow (fail-open) */ }
+        } catch { /* router unavailable — allow (fail-open) */ }
 
         if (!taskAllowed) return;
 
@@ -1302,13 +1302,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             timestamp: new Date().toISOString(),
           });
           log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
-          // Submit positive reputation after successful task completion
+          // Sub-agent rates parent — this bumps the parent's feedback_count.
+          // The sub-agent is still alive and registered here (just sent a relay
+          // message above), so the registry should accept the review.
           try {
             const sessionId = crypto.randomUUID();
-            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["reliable"]);
+            const ok = await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["reliable"]);
+            if (!ok) log.warn(`AGT reputation: registry rejected review for ${fromName} (from_amid=${agtIdentity?.amid})`);
             pushTrustToRouter(fromName, 0.8);
-            recordMeshSession(fromAmid, sessionId, "task_request", "success", new Date().toISOString());
-            log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
+            await recordMeshSession(fromAmid, sessionId, "task_request", "success", new Date().toISOString());
+            log.info(`AGT reputation: submitted +0.8 for ${fromName} (accepted=${ok})`);
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
@@ -1324,9 +1327,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // Submit negative reputation on failure
           try {
             const sessionId = crypto.randomUUID();
-            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["unreliable"]);
+            const ok = await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["unreliable"]);
+            if (!ok) log.warn(`AGT reputation: registry rejected negative review for ${fromName}`);
             pushTrustToRouter(fromName, 0.3);
-            recordMeshSession(fromAmid, sessionId, "task_request", "failed", new Date().toISOString());
+            await recordMeshSession(fromAmid, sessionId, "task_request", "failed", new Date().toISOString());
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
@@ -2019,14 +2023,14 @@ const azureClawPlugin = definePluginEntry({
 
     // ── Periodic Foundry memory sync + AGT policy gate middleware ────
     // Wraps every tool's execute() to:
-    // 1. Forward action to AGT sidecar for policy evaluation BEFORE execution
+    // 1. Forward action to AGT router for policy evaluation BEFORE execution
     // 2. Track calls and periodically push activity summaries to Foundry memory
     // When Rust SDK ships, this will be a direct SDK call instead of HTTP.
     memorySyncToolCount = 0;
     memorySyncBuffer = [];
 
-    // Consecutive sidecar failure counter for fail-closed behavior
-    let sidecarFailCount = { value: 0 };
+    // Consecutive governance failure counter for fail-closed behavior
+    let govFailCount = { value: 0 };
     const FAIL_CLOSED_THRESHOLD = 3;
 
     async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
@@ -2046,7 +2050,7 @@ const azureClawPlugin = definePluginEntry({
         const http = await import("node:http");
         const postData = JSON.stringify({ action, context: { tool: toolName } });
         const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, reject) => {
-          const req = http.request("http://127.0.0.1:8081/evaluate", {
+          const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
             method: "POST", timeout: 2000,
             headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
           }, (res) => {
@@ -2057,33 +2061,33 @@ const azureClawPlugin = definePluginEntry({
             });
           });
           req.on("error", () => {
-            sidecarFailCount.value++;
-            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-              resolve({ allowed: false, reason: "AGT sidecar unreachable (fail-closed)" });
+            govFailCount.value++;
+            if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT governance unreachable (fail-closed)" });
             } else {
-              log.warn(`AGT sidecar unreachable (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              log.warn(`AGT governance unreachable (${govFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
               resolve({ allowed: true });
             }
           });
           req.on("timeout", () => {
             req.destroy();
-            sidecarFailCount.value++;
-            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-              resolve({ allowed: false, reason: "AGT sidecar timeout (fail-closed)" });
+            govFailCount.value++;
+            if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT governance timeout (fail-closed)" });
             } else {
-              log.warn(`AGT sidecar timeout (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              log.warn(`AGT governance timeout (${govFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
               resolve({ allowed: true });
             }
           });
           req.write(postData);
           req.end();
         });
-        if (result.allowed !== false) sidecarFailCount.value = 0; // reset on success
+        if (result.allowed !== false) govFailCount.value = 0; // reset on success
         return { allowed: result.allowed, rule: result.matched_rule, reason: result.reason };
       } catch {
-        sidecarFailCount.value++;
-        if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-          return { allowed: false, reason: "AGT sidecar error (fail-closed)" };
+        govFailCount.value++;
+        if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+          return { allowed: false, reason: "AGT governance error (fail-closed)" };
         }
         return { allowed: true };
       }
@@ -2095,7 +2099,7 @@ const azureClawPlugin = definePluginEntry({
       _origRegisterTool({
         ...tool,
         execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => {
-          // AGT policy gate — forward to sidecar for evaluation
+          // AGT policy gate — forward to router for evaluation
           const decision = await evaluateAGTPolicy(tool.name, params);
           if (!decision.allowed) {
             const msg = `⛔ Blocked by AGT policy: rule "${decision.rule}" — ${decision.reason || "action denied"}`;
@@ -2465,12 +2469,14 @@ const azureClawPlugin = definePluginEntry({
                 };
                 if (replyContent) {
                   result.reply = replyContent;
-                  // Submit positive reputation — peer completed the task
+                  // Parent rates sub-agent — only meaningful for long-lived sub-agents
+                  // whose reputation will be queried again. Short-lived ones will die
+                  // and their score is lost, but the audit trail remains.
                   try {
-                    await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
+                    const ok = await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
                     pushTrustToRouter(agentName, 0.9);
-                    recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
-                    log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
+                    await recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
+                    log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
                   } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
                 } else {
                   result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";

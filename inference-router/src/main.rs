@@ -22,18 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-mod auth;
-mod blocklist;
-mod budget;
-mod config;
-mod forward_proxy;
-mod mesh;
-mod metrics;
-mod proxy;
-mod routes;
-mod safety;
-mod sidecar;
-mod spawn;
+use azureclaw_inference_router::{config, forward_proxy, governance, routes};
 
 use anyhow::Result;
 use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};
@@ -55,6 +44,9 @@ async fn main() -> Result<()> {
 
     let config = config::Config::from_env()?;
     let state = routes::AppState::new(&config).await?;
+
+    // Start policy hot-reload watcher (polls AGT_POLICY_DIR for mtime changes).
+    governance::Governance::spawn_policy_watcher(state.governance.clone());
 
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
@@ -183,7 +175,7 @@ async fn shutdown_signal() {
 }
 
 /// Prevent HTTP/1.1 keep-alive connection accumulation (Envoy-style
-/// `max_requests_per_connection: 1`).  On a localhost sidecar the overhead
+/// `max_requests_per_connection: 1`).  On a localhost router the overhead
 /// of a fresh TCP handshake is ~100 µs — negligible vs. the risk of FD
 /// exhaustion that stalls the Telegram CONNECT proxy sharing this process.
 /// WebSocket upgrades are excluded so mesh relay connections work normally.

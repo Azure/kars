@@ -17,7 +17,7 @@ Zero-credential inference through Azure AI Foundry. Optional Kata VM isolation. 
 
 ## What is AzureClaw?
 
-AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside a hardened sandbox on AKS — with a Rust sidecar that mediates all external access. Agents never see Azure credentials (the sidecar authenticates via Workload Identity), every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. For maximum isolation, upgrade to Kata Confidential VMs — per-pod dedicated kernels where container escapes hit a hardware boundary. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
+AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside a hardened sandbox on AKS — with a Rust inference router that mediates all external access. Agents never see Azure credentials (the router authenticates via Workload Identity), every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. AGT governance (policy, trust, audit) runs natively inside the router — no sidecar needed. For maximum isolation, upgrade to Kata Confidential VMs — per-pod dedicated kernels where container escapes hit a hardware boundary. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
 
 ---
 
@@ -39,20 +39,20 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
    │  │                                                                   │  │
    │  │  ┌──────────────┐   localhost    ┌──────────────────┐             │  │
    │  │  │  OpenClaw    │──────:8443────►│ Inference Router  │────────────┼──┼──► Azure AI Foundry
-   │  │  │  (agent)     │               │ (Rust sidecar)    │            │  │     (200+ models)
+   │  │  │  (agent)     │               │ (Rust)            │            │  │     (200+ models)
    │  │  └──────────────┘               │                   │            │  │
    │  │   read-only rootfs              │ • WI/IMDS auth    │            │  │
    │  │   drop ALL caps                 │ • Content Safety   │            │  │
    │  │   no Azure credentials          │ • Token budgets    │            │  │
    │  │                                 │ • Domain blocklist │            │  │
-   │  │  ┌──────────────────┐           │ • Egress proxy     │            │  │
-   │  │  │ AGT Governance   │           │ • AGT governance   │            │  │
-   │  │  │ Sidecar (Python) │◄─:8081───►│                    │            │  │
-   │  │  │ • PolicyEvaluator│           └────────────────────┘            │  │
-   │  │  │ • TrustStore     │                                             │  │
-   │  │  │ • AuditLog       │                                             │  │
-   │  │  │ • RateLimiter    │                                             │  │
-   │  │  └──────────────────┘                                             │  │
+   │  │                                 │ • Egress proxy     │            │  │
+   │  │                                 │ • AGT governance   │            │  │
+   │  │                                 │   (native Rust)    │            │  │
+   │  │                                 │   • PolicyEngine   │            │  │
+   │  │                                 │   • TrustManager   │            │  │
+   │  │                                 │   • AuditLogger    │            │  │
+   │  │                                 │   • RateLimiter    │            │  │
+   │  │                                 └────────────────────┘            │  │
    │  │  NetworkPolicy: default-deny egress                               │  │
    │  └───────────────────────────────────────────────────────────────────┘  │
    │                                                                         │
@@ -75,9 +75,8 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 | Image | Language | Purpose |
 |-------|----------|---------|
 | `azureclaw-controller` | Rust | K8s operator — reconciles ClawSandbox CRDs into pods |
-| `azureclaw-inference-router` | Rust | Inference proxy — Content Safety, AGT policy evaluation, egress filtering |
+| `azureclaw-inference-router` | Rust | Inference proxy — Content Safety, native AGT governance, egress filtering |
 | `azureclaw-sandbox` / `openclaw-sandbox` | Node.js | Main agent container (OpenClaw + AGT SDK + Python tools) |
-| `agt-governance-sidecar` | Python | AGT policy engine (AGT SDK v3.0.0) — per-request governance *(temporary, until Rust SDK)* |
 | `agentmesh-relay` | Rust | WebSocket relay for E2E encrypted inter-agent messaging |
 | `agentmesh-registry` | Rust + PostgreSQL | Agent discovery, prekey storage, React admin UI |
 
@@ -91,12 +90,12 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 
 **Always on (all isolation levels):**
 
-- **iptables egress guard** — agent process can only reach `localhost`; all external traffic forced through sidecar
+- **iptables egress guard** — agent process can only reach `localhost`; all external traffic forced through router
 - **NetworkPolicy** — default-deny egress at the cluster level
 - **Read-only rootfs** — non-root, drop ALL capabilities, no privilege escalation
 - **Domain blocklist** — 51k+ domains auto-refreshed from OISD + URLhaus every 6h
 - **Content Safety + Prompt Shields** — Azure AI Content Safety on every inference call
-- **Zero Azure credentials** — agents never see Azure auth tokens; the sidecar authenticates via IMDS/Workload Identity
+- **Zero Azure credentials** — agents never see Azure auth tokens; the router authenticates via IMDS/Workload Identity
 
 **Per isolation level (`--isolation`):**
 
@@ -106,7 +105,7 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 | `enhanced` (default) | runc | Custom strict seccomp profile (~219 allowed syscalls) |
 | `confidential` | Kata VM | Per-pod dedicated kernel on AMD SEV-SNP hardware — container escapes hit a VM boundary |
 
-> **Note on plugin credentials:** Channel tokens (Telegram, Slack) and third-party API keys (Brave, Tavily) are accessible to the agent process — plugins need them to function. However, the agent cannot exfiltrate them: iptables blocks all outbound traffic except through the governed sidecar. Azure auth tokens remain isolated in the sidecar at all times.
+> **Note on plugin credentials:** Channel tokens (Telegram, Slack) and third-party API keys (Brave, Tavily) are accessible to the agent process — plugins need them to function. However, the agent cannot exfiltrate them: iptables blocks all outbound traffic except through the governed router. Azure auth tokens remain isolated in the router at all times.
 
 ### 🤖 AI Agent
 
@@ -119,15 +118,14 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 - **200+ models** — hot-switch between GPT-4.1, GPT-5-mini, DeepSeek-V3.2, Phi-4, Llama, etc.
 - **Multi-frontend** — TUI, Telegram, Web UI at `localhost:18789`
 
-### 🏛️ Governance (AGT v3.0.0)
+### 🏛️ Governance (AGT — native Rust)
 
-- **AGT governance sidecar** — dedicated Python sidecar evaluates every inference, spawn, mesh-receive, and response request
+- **Native governance** — policy evaluation, trust management, and audit run in-process inside the Rust inference router (no sidecar, <1µs eval latency)
 - **Trust scoring** — per-agent scores 0–1000, threshold 500, clamped ±200/update, Ed25519 signed
-- **Policy engine** — YAML-driven rules (10 default rules) covering shell safety, inference rate-limiting, content safety, mesh trust gates
+- **Policy engine** — YAML-driven rules (hot-reloaded) covering shell safety, inference rate-limiting, content safety, mesh trust gates
 - **Audit trail** — SHA-256 Merkle tree append-only chain with tamper detection and integrity verification
-- **Components** — PolicyEvaluator, FileTrustStore, AuditLog, RateLimiter, AgentBehaviorMonitor
-
-> **⏳ Sidecar sunset:** The AGT governance sidecar is a temporary bridge — it wraps the Python-only AGT SDK v3.0.0. Once a native Rust SDK ships, governance will be compiled directly into the inference router, eliminating the sidecar and its extra container.
+- **Components** — PolicyEngine, TrustManager, AuditLogger, RateLimiter, BehaviorMonitor (via `agentmesh` crate v3.0.2)
+- **Prometheus metrics** — `azureclaw_agt_policy_evaluations_total`, `azureclaw_agt_eval_latency_seconds`, `azureclaw_agt_behavior_alerts_total`, and more
 
 ### 🔐 E2E Encryption (Signal Protocol)
 
@@ -219,7 +217,7 @@ Full production deployment with all 9 security layers:
 # 1. Login to Azure
 az login
 
-# 2. Build all 6 container images (controller, router, sandbox, AGT sidecar, relay, registry)
+# 2. Build all 5 container images (controller, router, sandbox, relay, registry)
 #    First run takes ~10 min; subsequent builds are cached
 azureclaw push
 
@@ -239,7 +237,7 @@ azureclaw connect my-assistant
 2. Deploys Azure infrastructure via Bicep (AKS, ACR, Key Vault, AOAI)
 3. Installs AzureClaw Helm chart (CRD, controller, RBAC, seccomp profiles)
 4. Deploys AgentMesh (relay + registry) for E2E encrypted inter-agent comms
-5. Creates your first agent sandbox with AGT governance sidecar
+5. Creates your first agent sandbox with native AGT governance
 
 **After deployment:**
 
@@ -353,12 +351,12 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 | Layer | Control |
 |---|---|
 | **Container hardening** | Read-only rootfs, non-root, drop ALL capabilities, no privilege escalation |
-| **iptables egress guard** | Agent process restricted to localhost + DNS; all internet traffic goes through sidecar |
+| **iptables egress guard** | Agent process restricted to localhost + DNS; all internet traffic goes through router |
 | **NetworkPolicy** | Default-deny egress at the Kubernetes level (Cilium-enforced) |
 | **Domain blocklist** | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus every 6h |
 | **Inference safety** | Content Safety + Prompt Shields on every request + per-agent token budgets |
 | **Content Safety circuit breaker** | Fail-open with 60s cooldown — inference continues if Content Safety is unavailable |
-| **Zero Azure credentials** | Agent never sees Azure auth tokens — sidecar authenticates via IMDS/Workload Identity |
+| **Zero Azure credentials** | Agent never sees Azure auth tokens — router authenticates via IMDS/Workload Identity |
 | **Admin token** | From K8s Secret mounted at `/etc/azureclaw/secrets/` — never hardcoded; required for trust mutation via `x-azureclaw-admin` header |
 | **AGT policy evaluation** | Per-request governance on inference, spawn, mesh receive, and response actions |
 | **Audit chain** | SHA-256 Merkle tree with integrity verification (validated on AKS: `integrity=valid`) |
@@ -375,9 +373,9 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 
 | Credential type | Where it lives | Agent can see it? |
 |---|---|---|
-| Azure auth tokens (IMDS, WI) | Sidecar only (projected file) | ❌ No — iptables blocks IMDS, file permissions enforce separation |
-| Azure OpenAI API key | Sidecar only (`/run/secrets/`) | ❌ No — mounted only in sidecar container |
-| Admin token | K8s Secret (`/etc/azureclaw/secrets/`) | ❌ No — mounted only in sidecar; required for trust mutation |
+| Azure auth tokens (IMDS, WI) | Router only (projected file) | ❌ No — iptables blocks IMDS, file permissions enforce separation |
+| Azure OpenAI API key | Router only (`/run/secrets/`) | ❌ No — mounted only in router container |
+| Admin token | K8s Secret (`/etc/azureclaw/secrets/`) | ❌ No — mounted only in router; required for trust mutation |
 | Plugin API keys (Brave, Tavily, etc.) | Agent env vars | ✅ Yes — plugins need them. Agent cannot exfiltrate: egress blocked by iptables |
 | Channel tokens (Telegram, Slack) | Agent env vars | ✅ Yes — channels need them. Same egress protection applies |
 
@@ -437,7 +435,7 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 
 ## Egress Proxy
 
-All agent network traffic is mediated by the inference router sidecar:
+All agent network traffic is mediated by the inference router:
 
 | Mode | Behavior |
 |---|---|
@@ -461,15 +459,14 @@ azureclaw/
 │   ├── skills/           # Foundry skill definitions (10 skills)
 │   └── policies/         # AGT governance policy YAML (default rules)
 ├── controller/           # Rust K8s operator (ClawSandbox CRDs)
-├── inference-router/     # Rust sidecar proxy (axum)
-├── sidecar-images/       # AGT governance sidecar (Python) — temporary until Rust SDK
+├── inference-router/     # Rust inference proxy (axum) — includes native AGT governance
 ├── sandbox-images/       # OpenClaw container images
 ├── policy-engine/        # Seccomp profiles & security policies
 ├── deploy/               # Bicep IaC, Helm charts, AgentMesh K8s manifests
 ├── docs/                 # Architecture, security, E2E encryption, demo guides
 ├── examples/             # Sample agents (basic, confidential, telegram, demo)
 ├── tests/                # E2E tests (Docker + Kind)
-└── vendor/               # AgentMesh SDK, relay, registry, AGT wheels (patched forks)
+└── vendor/               # AgentMesh SDK, relay, registry (patched forks)
 ```
 
 > **📦 Why `vendor/`?** AgentMesh is pre-release — we found and fixed 8 bugs in the relay, registry, and SDK (see `vendor/*/README.md` for each patch). These are carried as patched forks until fixes land upstream. The AGT governance wheels are also vendored here since the SDK isn't published to PyPI yet. Once AgentMesh and AGT ship stable releases, `vendor/` goes away entirely.

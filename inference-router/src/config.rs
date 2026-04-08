@@ -23,7 +23,7 @@ pub struct Config {
 
     /// Enable Foundry guardrail annotation parsing (default: true).
     /// When true, the router reads prompt_filter_results from Foundry
-    /// responses and reports content flags to the AGT sidecar.
+    /// responses and reports content flags to the AGT governance engine.
     #[allow(dead_code)]
     pub content_safety_enabled: bool,
 

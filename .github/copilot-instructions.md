@@ -2,7 +2,7 @@
 
 ## What is AzureClaw?
 
-A secure AI agent runtime on Azure AKS. OpenClaw agents run in isolated K8s sandbox pods with E2E encrypted inter-agent communication (Signal Protocol via AgentMesh). Each agent gets its own namespace, NetworkPolicy, seccomp profile, and inference router sidecar.
+A secure AI agent runtime on Azure AKS. OpenClaw agents run in isolated K8s sandbox pods with E2E encrypted inter-agent communication (Signal Protocol via AgentMesh). Each agent gets its own namespace, NetworkPolicy, seccomp profile, and inference router.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ Four components, two languages:
 | Component | Language | Package Name | Role |
 |-----------|----------|-------------|------|
 | **Controller** | Rust (kube-rs) | `azureclaw-controller` | K8s operator — reconciles `ClawSandbox` CRDs into isolated sandboxes (namespace, deployment, service, NetworkPolicy, ConfigMap) |
-| **Inference Router** | Rust (axum) | `azureclaw-inference-router` | Per-sandbox sidecar proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, 18 Foundry API groups, AGT governance, sub-agent spawn |
+| **Inference Router** | Rust (axum) | `azureclaw-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, 18 Foundry API groups, AGT governance, sub-agent spawn |
 | **CLI** | TypeScript | `@azure/azureclaw` | 13 CLI commands (`azureclaw up/add/dev/connect/...`) + OpenClaw plugin + 9 Foundry skills |
 | **Policy Engine** | YAML profiles | — | AGT governance policy profiles (allow/deny/approval/rate-limit) |
 
@@ -22,7 +22,7 @@ Four components, two languages:
 Each sandbox pod has 2 containers + 1 init container:
 - **init: egress-guard** — iptables rules restricting UID 1000 to localhost + DNS only
 - **openclaw** (UID 1000) — runs the OpenClaw agent with the AzureClaw plugin
-- **inference-router** (UID 1001) — Rust sidecar on port 8443, all agent traffic flows through it
+- **inference-router** (UID 1001) — Rust router on port 8443, all agent traffic flows through it
 
 Agents never see API keys. The router authenticates via IMDS/Workload Identity.
 

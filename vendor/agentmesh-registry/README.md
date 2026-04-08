@@ -35,6 +35,23 @@ Files changed:
 - `src/handlers.rs` — ghost cleanup in `register_agent`, new `heartbeat` handler + route
 - `src/db.rs` — `delete_stale_by_display_name`, `heartbeat_agent`, search freshness filter
 
+### 3. feedback_count always 0 — wrong table name in reputation queries
+
+The submit handler (`handlers.rs:submit_reputation`) calls a PG stored function
+that inserts into `reputation_feedback` (singular, from migration 001). But the
+score calculation (`reputation.rs:get_feedback_stats`) queried `reputation_feedbacks`
+(plural, from migration 006) — a table that was never written to.
+
+Also affected: `get_tag_aggregates` and `get_reputation_leaderboard` — same wrong
+table. All three functions converted from `sqlx::query!` (compile-time checked
+against stale `.sqlx/` cache) to `sqlx::query_as` (dynamic) targeting the correct
+`reputation_feedback` table.
+
+Files changed:
+- `src/reputation.rs` — `get_feedback_stats`, `get_tag_aggregates`,
+  `get_reputation_leaderboard`: `reputation_feedbacks` → `reputation_feedback`,
+  `from_tier` → `rater_tier`, `sqlx::query!` → `sqlx::query_as`
+
 ## Build
 
 ```sh

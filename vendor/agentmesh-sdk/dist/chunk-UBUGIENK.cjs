@@ -809,8 +809,13 @@ var RegistryClient = class {
         method: "POST",
         body: JSON.stringify(payload)
       });
+      if (response.status !== 200) {
+        const errText = await response.text().catch(() => "");
+        console.error(`[agentmesh-sdk] submitReputation rejected: ${response.status} ${errText} (from=${identity.amid} target=${targetAmid})`);
+      }
       return response.status === 200;
-    } catch {
+    } catch (err) {
+      console.error(`[agentmesh-sdk] submitReputation error: ${err?.message || err} (from=${identity.amid} target=${targetAmid})`);
       return false;
     }
   }

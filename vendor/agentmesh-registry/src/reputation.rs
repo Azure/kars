@@ -487,33 +487,30 @@ async fn get_session_stats(pool: &PgPool, amid: &str) -> Result<(i64, i64), sqlx
 }
 
 async fn get_feedback_stats(pool: &PgPool, amid: &str) -> Result<(i64, f64, f64), sqlx::Error> {
-    // Get all feedback with tier information for weighting
-    let query_rows = sqlx::query!(
+    // Query the actual table used by the submit handler (001_initial.sql),
+    // NOT the unused reputation_feedbacks table from 006_reputation.sql.
+    // Column names differ: rater_tier (001) vs from_tier (006).
+    let query_rows = sqlx::query_as::<_, (f64, String)>(
         r#"
-        SELECT score, from_tier
-        FROM reputation_feedbacks
+        SELECT score::float8, rater_tier::text
+        FROM reputation_feedback
         WHERE target_amid = $1
-        "#,
-        amid
+        "#
     )
+    .bind(amid)
     .fetch_all(pool)
     .await?;
 
-    let mut feedback_data: Vec<(f64, String)> = Vec::new();
-    for r in query_rows {
-        feedback_data.push((r.score, r.from_tier.clone()));
-    }
-
-    if feedback_data.is_empty() {
+    if query_rows.is_empty() {
         return Ok((0, 0.5, 0.5));
     }
 
-    let count = feedback_data.len() as i64;
+    let count = query_rows.len() as i64;
     let mut total_score = 0.0;
     let mut weighted_score = 0.0;
     let mut total_weight = 0.0;
 
-    for (score, from_tier) in &feedback_data {
+    for (score, from_tier) in &query_rows {
         total_score += score;
 
         // Apply tier-based weight discount
@@ -537,26 +534,23 @@ async fn get_feedback_stats(pool: &PgPool, amid: &str) -> Result<(i64, f64, f64)
 }
 
 async fn get_tag_aggregates(pool: &PgPool, amid: &str) -> Result<Vec<TagAggregate>, sqlx::Error> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, (String, i64)>(
         r#"
-        SELECT tag, COUNT(*) as count
-        FROM reputation_feedbacks, UNNEST(tags) as tag
+        SELECT tag::text, COUNT(*)::int8 as count
+        FROM reputation_feedback, UNNEST(tags) as tag
         WHERE target_amid = $1
         GROUP BY tag
         ORDER BY count DESC
         LIMIT 10
-        "#,
-        amid
+        "#
     )
+    .bind(amid)
     .fetch_all(pool)
     .await?;
 
     let mut result = Vec::new();
-    for r in rows {
-        result.push(TagAggregate {
-            tag: r.tag.unwrap_or_default(),
-            count: r.count.unwrap_or(0),
-        });
+    for (tag, count) in rows {
+        result.push(TagAggregate { tag, count });
     }
     Ok(result)
 }
@@ -669,37 +663,37 @@ async fn get_reputation_leaderboard(
     intent: Option<&str>,
 ) -> Result<Vec<ReputationScore>, sqlx::Error> {
     // Get top agents by reputation score that have minimum ratings
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, (String, String, f32, chrono::DateTime<Utc>, i64)>(
         r#"
-        SELECT a.amid, a.tier::text as "tier!", a.reputation_score, a.created_at,
-               (SELECT COUNT(*) FROM reputation_feedbacks rf WHERE rf.target_amid = a.amid) as feedback_count
+        SELECT a.amid, a.tier::text, a.reputation_score, a.created_at,
+               (SELECT COUNT(*) FROM reputation_feedback rf WHERE rf.target_amid = a.amid) as feedback_count
         FROM agents a
         WHERE a.reputation_score > 0
-          AND (SELECT COUNT(*) FROM reputation_feedbacks rf WHERE rf.target_amid = a.amid) >= $2
+          AND (SELECT COUNT(*) FROM reputation_feedback rf WHERE rf.target_amid = a.amid) >= $2
         ORDER BY a.reputation_score DESC
         LIMIT $1
-        "#,
-        limit,
-        MIN_RATINGS_FOR_RANKING
+        "#
     )
+    .bind(limit)
+    .bind(MIN_RATINGS_FOR_RANKING)
     .fetch_all(pool)
     .await?;
 
     let mut results = Vec::new();
-    for row in rows {
-        let (total, successful) = get_session_stats(pool, &row.amid).await.unwrap_or((0, 0));
-        let tags = get_tag_aggregates(pool, &row.amid).await.unwrap_or_default();
-        let age_days = Utc::now().signed_duration_since(row.created_at).num_days();
+    for (amid, tier, reputation_score, created_at, feedback_count) in &rows {
+        let (total, successful) = get_session_stats(pool, amid).await.unwrap_or((0, 0));
+        let tags = get_tag_aggregates(pool, amid).await.unwrap_or_default();
+        let age_days = Utc::now().signed_duration_since(*created_at).num_days();
 
         results.push(ReputationScore {
-            amid: row.amid,
-            score: row.reputation_score as f64,
+            amid: amid.clone(),
+            score: *reputation_score as f64,
             completion_rate: if total > 0 { successful as f64 / total as f64 } else { 0.5 },
             total_sessions: total,
             successful_sessions: successful,
-            feedback_count: row.feedback_count.unwrap_or(0),
-            average_feedback: row.reputation_score as f64, // Approximation
-            tier: row.tier,
+            feedback_count: *feedback_count,
+            average_feedback: *reputation_score as f64,
+            tier: tier.clone(),
             age_days,
             tags,
             last_updated: Utc::now(),

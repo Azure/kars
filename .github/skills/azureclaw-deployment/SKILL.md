@@ -23,7 +23,7 @@ azureclaw up --resource-group <rg> --isolation confidential
 | Image | Source | Purpose |
 |-------|--------|---------|
 | `openclaw-sandbox:latest` | `sandbox-images/openclaw/Dockerfile` | Agent container (OpenClaw + plugin + AGT SDK) |
-| `azureclaw-inference-router:latest` | `inference-router/Dockerfile` | Sidecar (AOAI proxy, relay/registry proxy) |
+| `azureclaw-inference-router:latest` | `inference-router/Dockerfile` | Per-pod proxy (AOAI, relay/registry, native AGT governance) |
 | `azureclaw-controller:latest` | `controller/Dockerfile` | K8s controller (CRD reconciler) |
 | `agentmesh-relay:latest` | `vendor/agentmesh-relay/Dockerfile` | WebSocket relay server |
 | `agentmesh-registry:latest` | `vendor/agentmesh-registry/Dockerfile` | Agent discovery + prekey storage |
