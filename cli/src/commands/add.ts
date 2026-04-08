@@ -239,7 +239,8 @@ export function addCommand(): Command {
               process.exit(0);
             }
 
-            const kataSpinner = ora("Provisioning Kata nodepool (Standard_D4as_v6, AzureLinux)...").start();
+            // DC-series for confidential Kata — AMD SEV-SNP (matches up.ts --isolation confidential)
+            const kataSpinner = ora("Provisioning Kata nodepool (Standard_DC4as_v5, AzureLinux)...").start();
             try {
               await execa("az", [
                 "aks", "nodepool", "add",
@@ -247,7 +248,7 @@ export function addCommand(): Command {
                 "--cluster-name", ctx.aksCluster,
                 "--name", "katapool",
                 "--node-count", "1",
-                "--node-vm-size", "Standard_D4as_v6",
+                "--node-vm-size", "Standard_DC4as_v5",
                 "--os-sku", "AzureLinux",
                 "--workload-runtime", "KataVmIsolation",
                 "--labels", "azureclaw.azure.com/pool=sandbox-kata",

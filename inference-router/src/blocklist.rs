@@ -369,7 +369,7 @@ impl Blocklist {
             let mut pending = self.pending_approvals.write().await;
             let already_pending = pending.iter().any(|p| p.domain == domain);
             if !already_pending && pending.len() < MAX_PENDING {
-                let id = format!("{:x}", md5_hash(&format!("{}{}", domain, sandbox)));
+                let id = format!("{:x}", hash_for_id(&format!("{}{}", domain, sandbox)));
                 pending.push(PendingApproval {
                     id,
                     domain: domain.clone(),
@@ -439,7 +439,7 @@ impl Blocklist {
         // Dedup by domain + kind
         let already = pending.iter().any(|p| p.domain == domain && p.kind == kind);
         if !already && pending.len() < MAX_PENDING {
-            let id = format!("{:x}", md5_hash(&format!("proxy:{}:{}", domain, kind)));
+            let id = format!("{:x}", hash_for_id(&format!("proxy:{}:{}", domain, kind)));
             pending.push(PendingApproval {
                 id,
                 domain: domain.to_string(),
@@ -459,8 +459,8 @@ impl Blocklist {
     }
 }
 
-/// Simple hash for generating approval IDs.
-fn md5_hash(input: &str) -> u64 {
+/// Simple hash for generating approval IDs (SipHash via DefaultHasher).
+fn hash_for_id(input: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.hash(&mut hasher);
