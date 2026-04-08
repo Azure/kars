@@ -1418,9 +1418,17 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     if (sec.agtTrustScores.length > 0) {
       const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
-      const peers = sec.agtTrustScores.filter((t) =>
-        t.agent !== sb.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)
-      );
+      // Show peers that are either known sandboxes OR recently active
+      // (sub-agents are spawned dynamically and won't be in the sandboxes list).
+      // "Recently active" = lastSeen within the last 30 minutes.
+      const recentThreshold = Date.now() - 30 * 60_000;
+      const peers = sec.agtTrustScores.filter((t) => {
+        if (t.agent === sb.name) return false;
+        if (sandboxes.some((s) => s.name === t.agent)) return true;
+        if (!t.lastSeen) return false;
+        const seen = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
+        return !isNaN(seen.getTime()) && seen.getTime() > recentThreshold;
+      });
 
       if (peers.length > 0) {
         lines.push("", `{bold}Mesh Traffic{/}`);
