@@ -21,7 +21,6 @@ use crate::governance::Governance;
 use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
-use crate::sidecar::SidecarProxy;
 use crate::spawn;
 use futures::stream::StreamExt;
 
@@ -32,8 +31,6 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
-    #[allow(dead_code)] // Phase 3: sidecar field will be removed
-    pub sidecar: SidecarProxy,
     pub governance: Arc<Governance>,
     pub blocklist: Blocklist,
     pub sandbox_name: Arc<String>,
@@ -110,7 +107,6 @@ impl AppState {
             client: client.clone(),
             config: Arc::new(config),
             budget,
-            sidecar: SidecarProxy::new(&client),
             governance,
             blocklist,
             sandbox_name: Arc::new(sandbox_name),

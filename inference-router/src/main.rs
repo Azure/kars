@@ -33,8 +33,6 @@ mod metrics;
 mod proxy;
 mod routes;
 mod safety;
-#[allow(dead_code)] // Phase 3: sidecar module will be removed entirely
-mod sidecar;
 mod spawn;
 
 use anyhow::Result;
