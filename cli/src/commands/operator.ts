@@ -1136,6 +1136,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         JSON.stringify({ spec: { networkPolicy: { learnEgress: false } } }),
       ], kubeContext), { stdio: "pipe" }).catch(() => {});
       activityLog.log(`{green-fg}🔒 Enforced{/} ${sb.name}`);
+      activityLog.log(`{gray-fg}   ↳ saved to CRD — may trigger pod restart{/}`);
     } catch (e: any) {
       activityLog.log(`{red-fg}✗ Enforce fail:{/} ${e.message?.substring(0, 50)}`);
     }
@@ -1157,6 +1158,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         JSON.stringify({ spec: { networkPolicy: { learnEgress: true } } }),
       ], kubeContext), { stdio: "pipe" }).catch(() => {});
       activityLog.log(`{yellow-fg}📖 Learning{/} ${sb.name}`);
+      activityLog.log(`{gray-fg}   ↳ saved to CRD — may trigger pod restart{/}`);
     } catch (e: any) {
       activityLog.log(`{red-fg}✗ Learn fail:{/} ${e.message?.substring(0, 50)}`);
     }
