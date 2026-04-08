@@ -99,7 +99,7 @@ interface SecurityState {
   agtTrustUpdates: number;
   agtTotalInteractions: number;
   // Native governance stats (from /agt/status when governance_mode === "native")
-  agtGovernanceMode: string;     // "native" | "sidecar" | ""
+  agtGovernanceMode: string;     // "native" | ""
   agtPolicyEvaluations: number;
   agtPolicyDenials: number;
   agtPolicyRateLimits: number;

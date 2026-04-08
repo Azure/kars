@@ -84,9 +84,9 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 
 **Kata auto-provisioning:** `azureclaw add --isolation confidential` checks for a Kata-capable nodepool. If none exists, it offers to provision one automatically via `az aks nodepool add` with `--workload-runtime KataVmIsolation`, SKU `Standard_D4as_v6`, and appropriate labels/taints.
 
-### Inference Router (Rust, axum sidecar)
+### Inference Router (Rust, axum)
 
-Per-sandbox sidecar on port 8443. Runs as UID 1001 (unrestricted network). The agent (UID 1000) can only reach `localhost:8443` — the router is the sole external path.
+Per-sandbox router on port 8443. Runs as UID 1001 (unrestricted network). The agent (UID 1000) can only reach `localhost:8443` — the router is the sole external path.
 
 **Request pipeline (inference):**
 

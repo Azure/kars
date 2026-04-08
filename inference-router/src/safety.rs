@@ -230,7 +230,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
 
 // ─── AGT Content Flag Reporting ──────────────────────────────────────────────
 
-/// Report detected content flags to the AGT sidecar for trust scoring and audit.
+/// Report detected content flags to the AGT governance engine for trust scoring and audit.
 /// Fire-and-forget — does not block the response.
 pub async fn report_content_flags_to_agt(
     governance: &Governance,

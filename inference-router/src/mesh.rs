@@ -1,7 +1,7 @@
 //! Local mesh state — inbox buffer and metrics counters.
 //!
 //! These are the only pieces of governance.rs that survive: simple data
-//! structures for mesh communication that the sidecar doesn't own.
+//! structures for mesh communication that governance doesn't own.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;

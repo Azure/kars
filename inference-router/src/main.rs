@@ -186,7 +186,7 @@ async fn shutdown_signal() {
 }
 
 /// Prevent HTTP/1.1 keep-alive connection accumulation (Envoy-style
-/// `max_requests_per_connection: 1`).  On a localhost sidecar the overhead
+/// `max_requests_per_connection: 1`).  On a localhost router the overhead
 /// of a fresh TCP handshake is ~100 µs — negligible vs. the risk of FD
 /// exhaustion that stalls the Telegram CONNECT proxy sharing this process.
 /// WebSocket upgrades are excluded so mesh relay connections work normally.

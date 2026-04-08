@@ -470,7 +470,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Allow HTTPS egress for inference-router only (Workload Identity,
         // Azure OpenAI, Foundry, Content Safety). The openclaw agent container
         // is blocked from all external HTTPS by the iptables init container —
-        // it can only reach localhost:8443 (inference-router sidecar) and DNS.
+        // it can only reach localhost:8443 (inference-router) and DNS.
         json!({
             "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}],
             "ports": [{"protocol": "TCP", "port": 443}]
@@ -672,7 +672,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         //  - Data exfiltration to any external host
         //  - Lateral movement to other pods
         //
-        // The agent can only reach the inference-router sidecar on localhost:8443.
+        // The agent can only reach the inference-router on localhost:8443.
         // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
         "initContainers": [{
             "name": "egress-guard",
@@ -687,7 +687,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
                 "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
                 // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
-                // forward proxy (port 8444) in the inference-router sidecar. This
+                // forward proxy (port 8444) in the inference-router. This
                 // enables learn mode (domain discovery) and per-domain enforcement.
                 // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
                 // rule above. The proxy (UID 1001) then connects to the real destination.
@@ -1887,7 +1887,7 @@ mod tests {
         assert_eq!(router["securityContext"]["runAsUser"], 1001);
     }
 
-    // ── Pod spec: sidecar security ──────────────────────────────────────
+    // ── Pod spec: router security ──────────────────────────────────────
 
     #[test]
     fn router_denies_privilege_escalation() {
@@ -1913,7 +1913,7 @@ mod tests {
         );
     }
 
-    // ── Pod spec: sidecar probes ────────────────────────────────────────
+    // ── Pod spec: router probes ────────────────────────────────────────
 
     #[test]
     fn router_probes_use_httpget_no_host() {

@@ -30,10 +30,7 @@ graph TB
             blocklist["Domain Blocklist<br/>51K+ domains"]
             spawn_ep["/sandbox/spawn<br/>/agt/trust"]
             metrics_ep["Prometheus<br/>:9090"]
-        end
-
-        subgraph ag["Container: agt-governance (UID 1002)"]
-            policy["Policy Evaluator<br/>:8081"]
+            policy["AGT PolicyEngine"]
             trust_store["Trust Store<br/>/tmp/agt/"]
             audit["Audit Chain<br/>(SHA-256 Merkle)"]
         end
@@ -53,12 +50,11 @@ graph TB
     oc --- v2
     ir --- v3
     ir --- v4
-    ag --- v5
+    ir --- v5
 
     style init fill:#f9f,stroke:#333,stroke-width:1px
     style oc fill:#4a9eff,stroke:#333,stroke-width:2px,color:#fff
     style ir fill:#ff6b35,stroke:#333,stroke-width:2px,color:#fff
-    style ag fill:#2ecc71,stroke:#333,stroke-width:2px,color:#fff
 ```
 
 ### Network Access Matrix
@@ -168,8 +164,7 @@ graph TD
 
     DEP --> IC["Init: egress-guard"]
     DEP --> C1["Container: openclaw<br/>UID 1000 · :18789"]
-    DEP --> C2["Container: inference-router<br/>UID 1001 · :8443 :8444 :9090"]
-    DEP --> C3["Container: agt-governance<br/>UID 1002 · :8081"]
+    DEP --> C2["Container: inference-router<br/>UID 1001 · :8443 :8444 :9090<br/>+ native AGT governance"]
 
     NP --> NP1["Egress: DNS ✅"]
     NP --> NP2["Egress: IMDS ✅ (router only)"]
@@ -301,17 +296,15 @@ flowchart TD
 sequenceDiagram
     participant Agent as Agent<br/>(UID 1000)
     participant Router as Inference Router<br/>(UID 1001)
-    participant AGT as AGT Sidecar<br/>(:8081)
     participant IMDS as IMDS<br/>(169.254.169.254)
     participant Foundry as Azure AI Foundry
 
     Agent->>Router: POST /v1/chat/completions<br/>{model, messages, stream}
 
     rect rgb(255, 240, 240)
-        Note over Router,AGT: Gate 1: Governance Policy
-        Router->>AGT: POST /evaluate<br/>{action: "inference:chat_completions"}
-        AGT->>AGT: Check policy rules
-        AGT-->>Router: ✅ allow (or ❌ 403 deny)
+        Note over Router: Gate 1: Governance Policy
+        Router->>Router: PolicyEngine.evaluate()<br/>{action: "inference:chat_completions"}
+        Note right of Router: ✅ allow (or ❌ 403 deny)
     end
 
     rect rgb(255, 248, 220)
@@ -539,7 +532,7 @@ graph TB
     end
 
     subgraph L7["Layer 7: Zero Credentials"]
-        CRED["Workload Identity via sidecar<br/>Agent never sees tokens<br/>IMDS blocked for agent"]
+        CRED["Workload Identity via router<br/>Agent never sees tokens<br/>IMDS blocked for agent"]
     end
 
     subgraph L8["Layer 8: E2E Encryption"]

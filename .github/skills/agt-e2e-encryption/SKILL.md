@@ -19,7 +19,7 @@ Parent Agent                    Sub-Agent
      │── Send KNOCK via relay ──────│── Receive KNOCK, auto-accept
      │── Encrypt with Double Ratchet│
      │── Send encrypted msg ────────│── Decrypt with Double Ratchet
-     │                              │── Call local LLM via sidecar
+     │                              │── Call local LLM via router
      │── Receive encrypted reply ◄──│── Encrypt reply, send via relay
 ```
 

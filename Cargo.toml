@@ -47,7 +47,7 @@ prometheus = "0.14"
 thiserror = "2"
 anyhow = "1"
 
-# AGT governance (native — replaces Python sidecar)
+# AGT governance (native — replaces former Python sidecar)
 agentmesh = "3.0.2"
 
 [profile.release]

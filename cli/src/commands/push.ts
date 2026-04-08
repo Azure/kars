@@ -121,7 +121,7 @@ export function pushCommand(): Command {
         const ns = "azureclaw-system";
         const deploymentMap: Record<string, string> = {
           controller: "azureclaw-controller",
-          router: "azureclaw-controller",   // router runs as sidecar in sandbox pods
+          router: "azureclaw-controller",   // router runs in sandbox pods
           sandbox: "azureclaw-controller",   // controller manages sandbox pods
         };
 

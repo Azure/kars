@@ -3,7 +3,7 @@
 # Configures OpenClaw automatically from mounted secrets and env vars.
 # The user never needs to manually configure anything.
 #
-# UID model (mirrors AKS sidecar architecture):
+# UID model (mirrors AKS pod architecture):
 #   UID 1001 (router)  — inference router, can reach internet
 #   UID 1000 (sandbox) — agent processes, restricted to localhost + DNS
 
@@ -25,7 +25,7 @@ ulimit -n 65536 2>/dev/null || true
 # In dev: Dockerfile has no USER directive, entrypoint runs as root, uses runuser to
 #   start router as UID 1001 and everything else as UID 1000.
 # In AKS: pod spec sets runAsUser:1000, so entrypoint is already UID 1000. Router runs
-#   as a separate sidecar (UID 1001). No runuser needed.
+#   as a separate container (UID 1001). No runuser needed.
 if [ "$(id -u)" = "0" ]; then
   AS_SANDBOX="runuser -u sandbox --"
   AS_ROUTER="runuser -u router --"
@@ -573,7 +573,7 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"
     cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
-    # AGT sidecar runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
+    # AGT governance runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
     # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
     # chown -R sandbox:sandbox /sandbox — see below.
     chmod o+x "$OPENCLAW_DIR"
@@ -602,9 +602,9 @@ if [ "$IS_ROOT" = "true" ] && [ -d "$OPENCLAW_DIR/policies" ]; then
 fi
 
 # Start AzureClaw inference router as UID 1001 (router user) — only in dev mode.
-# UID 1001 is exempt from iptables egress guard, matching the AKS sidecar model
+# UID 1001 is exempt from iptables egress guard, matching the AKS pod model
 # where the router runs in a separate container with internet access.
-# In AKS, the controller deploys the router as a separate sidecar container.
+# In AKS, the controller deploys the router as a separate container.
 if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   # Generate admin token BEFORE starting any services that need it
   ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
@@ -660,7 +660,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   done
   echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
 else
-  echo "[azureclaw] Inference router provided by sidecar (workload-identity mode)"
+  echo "[azureclaw] Inference router provided by AKS container (workload-identity mode)"
 fi
 
 # Start OpenClaw gateway in the background (needed for TUI)

@@ -222,7 +222,7 @@ LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
 # Entrypoint runs as root to set up iptables and start services under correct UIDs:
 #   UID 1001 (router)  — can reach the internet (Foundry API, blocklist feeds)
 #   UID 1000 (sandbox) — restricted to localhost + DNS by iptables egress guard
-# This mirrors AKS where router is a separate sidecar container.
+# This mirrors AKS where router is a separate container in the pod.
 WORKDIR /sandbox
 
 # Entrypoint auto-configures OpenClaw, then runs the command

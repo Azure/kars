@@ -40,7 +40,6 @@ body:
         - Controller
         - Inference Router
         - Sandbox
-        - AGT Sidecar
         - CLI
         - AgentMesh Relay
         - AgentMesh Registry

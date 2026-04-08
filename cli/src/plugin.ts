@@ -935,7 +935,7 @@ async function processTaskWithTools(
               const policyHttp = await import("node:http");
               const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
               const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request("http://127.0.0.1:8081/evaluate", {
+                const req = policyHttp.request("http://127.0.0.1:8443/agt/evaluate", {
                   method: "POST", timeout: 2000,
                   headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
                 }, (res) => {
@@ -1202,7 +1202,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { trust_score: senderTrustScore, from_agent: fromName },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8081/evaluate", {
+            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -1256,7 +1256,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8081/evaluate", {
+            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -2046,7 +2046,7 @@ const azureClawPlugin = definePluginEntry({
         const http = await import("node:http");
         const postData = JSON.stringify({ action, context: { tool: toolName } });
         const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, reject) => {
-          const req = http.request("http://127.0.0.1:8081/evaluate", {
+          const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
             method: "POST", timeout: 2000,
             headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
           }, (res) => {

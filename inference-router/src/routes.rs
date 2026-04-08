@@ -58,7 +58,7 @@ impl AppState {
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
-        // Initialize native AGT governance (replaces Python sidecar)
+        // Initialize native AGT governance
         let governance = Arc::new(Governance::new(&sandbox_name));
 
         // Load policy YAML from AGT_POLICY_DIR if set
@@ -1588,8 +1588,7 @@ async fn foundry_proxy(
 }
 
 // ── AGT Governance Handlers ──────────────────────────────────────────────────
-// When the sidecar is enabled, these proxy to localhost:8081.
-// When disabled, they fall back to the local governance.rs engine.
+// These call into the native governance.rs engine directly.
 
 /// POST /agt/evaluate — evaluate a tool action against loaded policy.
 async fn agt_evaluate(

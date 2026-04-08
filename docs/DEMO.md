@@ -175,7 +175,7 @@ curl -s http://localhost:11434/v1/chat/completions \
 # ✅ Normal inference — Content Safety passes, Prompt Shields pass, within token budget
 ```
 
-**Talking point**: Each agent accesses the same Azure AI Foundry endpoint, but through its own inference router sidecar. No agent ever sees the Azure credentials — the Rust router handles auth via IMDS.
+**Talking point**: Each agent accesses the same Azure AI Foundry endpoint, but through its own inference router. No agent ever sees the Azure credentials — the Rust router handles auth via IMDS.
 
 ---
 
@@ -281,7 +281,7 @@ curl: (7) Failed to connect to evil-c2.attacker.com port 443:
 # iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP
 #
 # Only these targets are reachable from the agent:
-# ✅ localhost:8443 (inference-router sidecar)
+# ✅ localhost:8443 (inference router)
 # ✅ DNS (kube-dns:53)
 # ✗ EVERYTHING ELSE — iptables DROP for UID 1000
 #
@@ -465,7 +465,7 @@ curl -H "Metadata:true" "http://169.254.169.254/metadata/identity/oauth2/token?a
 # per-UID egress rules BEFORE the main containers start:
 #
 #   OpenClaw agent (UID 1000):
-#     ✅ localhost (loopback)        → ACCEPT  (reach inference-router sidecar)
+#     ✅ localhost (loopback)        → ACCEPT  (reach inference router)
 #     ✅ DNS (UDP/TCP port 53)       → ACCEPT  (name resolution)
 #     ✗  169.254.169.254 (IMDS)     → DROP    (credential theft blocked)
 #     ✗  ALL other egress            → DROP    (exfiltration blocked)
@@ -478,7 +478,7 @@ curl -H "Metadata:true" "http://169.254.169.254/metadata/identity/oauth2/token?a
 # iptables UID-based rules solve this within the shared network namespace.
 #
 # The agent never touches Azure credentials.
-# The Rust sidecar (UID 1001) is the sole auth gateway.
+# The Rust router (UID 1001) is the sole auth gateway.
 ```
 
 **Talking point**: This is a critical security design. Kubernetes NetworkPolicy operates at the pod level — it can't distinguish between containers in the same pod. AzureClaw solves this with an `egress-guard` init container that installs iptables rules keyed on UID. The agent container (UID 1000) is locked to localhost + DNS only. It can't reach IMDS, can't reach external hosts, can't exfiltrate data. The inference router (UID 1001) is the sole gateway to Azure — and it's written in memory-safe Rust, not user code.

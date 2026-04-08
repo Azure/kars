@@ -1,9 +1,9 @@
-//! Native AGT governance — replaces the Python sidecar with in-process
-//! policy evaluation, trust management, audit logging, and agent identity.
+//! Native AGT governance — in-process policy evaluation, trust management,
+//! audit logging, and agent identity.
 //!
 //! Uses the `agentmesh` crate (v3.0.2) for core primitives.  The `/agt/*`
 //! route handlers call these functions directly instead of forwarding HTTP
-//! to `localhost:8081`.
+//! to a separate service.
 
 use agentmesh::identity::AgentIdentity;
 use agentmesh::policy::PolicyEngine;
@@ -57,7 +57,7 @@ impl GovernanceMetrics {
 
 // ── Token-bucket rate limiter ────────────────────────────────────────────────
 
-/// Simple token-bucket rate limiter matching the Python sidecar's semantics.
+/// Simple token-bucket rate limiter matching the original governance semantics.
 pub struct RateLimiter {
     global: Mutex<TokenBucket>,
     per_agent: Mutex<HashMap<String, TokenBucket>>,
@@ -126,7 +126,7 @@ impl RateLimiter {
 
 // ── Behavior monitor ─────────────────────────────────────────────────────────
 
-/// Simple anomaly detector matching the Python sidecar's AgentBehaviorMonitor.
+/// Simple anomaly detector matching the original AgentBehaviorMonitor.
 pub struct BehaviorMonitor {
     burst_threshold: u32,
     consecutive_failure_threshold: u32,
@@ -224,7 +224,7 @@ pub struct Governance {
 }
 
 impl Governance {
-    /// Initialize governance from environment variables (same env the sidecar used).
+    /// Initialize governance from environment variables.
     pub fn new(sandbox_name: &str) -> Self {
         let trust_threshold: u32 = std::env::var("AGT_TRUST_THRESHOLD")
             .ok()
@@ -240,7 +240,7 @@ impl Governance {
             decay_rate: 0.95,
         };
 
-        // Create persistent trust dir (same path the Python sidecar used)
+        // Create persistent trust dir
         let _ = std::fs::create_dir_all("/tmp/agt");
 
         let identity = AgentIdentity::generate(
@@ -351,7 +351,7 @@ impl Governance {
     /// Evaluate an action through the full governance pipeline
     /// (rate limiter → policy engine → behavior monitor → audit).
     ///
-    /// Returns JSON matching the sidecar's contract:
+    /// Returns JSON matching the API contract:
     /// `{allowed, action, decision, matched_rule, reason, rate_limited}`
     pub fn evaluate(&self, agent_id: &str, action: &str, extra: Option<&Value>) -> Value {
         let start = Instant::now();
@@ -467,7 +467,7 @@ impl Governance {
 
     // ── Trust ────────────────────────────────────────────────────────────
 
-    /// Update trust score with sidecar-compatible clamping.
+    /// Update trust score with clamped semantics.
     ///
     /// Matches server.py: ±200 delta per update, max 500 for new agents,
     /// self-trust rejection, clamped to 0–1000.
@@ -486,12 +486,12 @@ impl Governance {
         let old_score = existing.score;
         let is_new = existing.interactions == 0;
 
-        // Clamp delta: ±200 per update, max 500 absolute for first interaction
-        // Python sidecar used initial_score=0 for unknown; Rust SDK uses initial_score=500.
-        // Preserve sidecar semantics: new agents can reach at most 500, existing ±200.
+        // Clamp delta: ±200 per update, max 500 absolute for first interaction.
+        // Original governance used initial_score=0 for unknown; Rust SDK uses initial_score=500.
+        // Preserve original semantics: new agents can reach at most 500, existing ±200.
         const MAX_DELTA: u32 = 200;
         let clamped = if is_new {
-            // New agent: cap at 500 absolute (matching sidecar behavior)
+            // New agent: cap at 500 absolute (original governance behavior)
             requested_score.min(500).min(1000)
         } else if requested_score > old_score {
             (old_score + MAX_DELTA).min(requested_score).min(1000)
@@ -516,7 +516,7 @@ impl Governance {
         }))
     }
 
-    /// Get all trust scores with tier labels (matching sidecar JSON shape).
+    /// Get all trust scores with tier labels (matching API JSON shape).
     pub fn all_trust_scores(&self) -> Vec<Value> {
         self.trust
             .all_agents()
@@ -533,7 +533,7 @@ impl Governance {
             .collect()
     }
 
-    /// Get trust score for a single agent (matching sidecar JSON shape).
+    /// Get trust score for a single agent (matching API JSON shape).
     #[allow(dead_code)] // Used by individual trust route
     pub fn get_trust_score_json(&self, agent_id: &str) -> Value {
         let ts = self.trust.get_trust_score(agent_id);
@@ -712,7 +712,7 @@ fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
         .max()
 }
 
-/// Convert trust score to tier label (matches Python sidecar _score_to_tier).
+/// Convert trust score to tier label (matches _score_to_tier convention).
 pub fn tier_label(score: u32) -> &'static str {
     if score >= 800 {
         "Sovereign"
@@ -732,7 +732,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tier_labels_match_sidecar() {
+    fn tier_labels_are_correct() {
         assert_eq!(tier_label(1000), "Sovereign");
         assert_eq!(tier_label(800), "Sovereign");
         assert_eq!(tier_label(799), "Verified");
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn governance_trust_clamping_caps_delta() {
         let gov = Governance::new("test-sandbox");
-        // New agent: cap at 500 absolute (sidecar semantics)
+        // New agent: cap at 500 absolute (original semantics)
         let _ = gov.update_trust("other-agent", 1000, 0);
         let score = gov.trust.get_trust_score("other-agent");
         assert!(score.score <= 500, "New agent score {} should be capped at 500", score.score);

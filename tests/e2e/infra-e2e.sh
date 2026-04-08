@@ -2,7 +2,7 @@
 # AzureClaw Infrastructure E2E Test Suite
 #
 # Runs against a LIVE AKS cluster with Azure AI Foundry connectivity.
-# Validates all Foundry API routes through the inference router sidecar.
+# Validates all Foundry API routes through the inference router.
 #
 # Prerequisites:
 #   - kubectl configured with target AKS cluster

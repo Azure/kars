@@ -252,7 +252,7 @@ describe("--apply restart logic", () => {
     expect(deploymentMap.controller).toBe("azureclaw-controller");
   });
 
-  it("maps router to azureclaw-controller (sidecar in sandbox pods)", () => {
+  it("maps router to azureclaw-controller (router in sandbox pods)", () => {
     expect(deploymentMap.router).toBe("azureclaw-controller");
   });
 
