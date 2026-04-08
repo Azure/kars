@@ -448,7 +448,6 @@ vendor/agentmesh-sdk/openspec/
 vendor/agentmesh-sdk/AUDIT_REPORT.md
 vendor/agentmesh-sdk/vitest.config.ts
 vendor/agentmesh-sdk/package-lock.json
-vendor/agentmesh-registry/.sqlx/
 vendor/agentmesh-registry/frontend/node_modules/
 vendor/agentmesh-registry/frontend/dist/
 vendor/agentmesh-registry/frontend/package-lock.json
