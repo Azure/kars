@@ -801,7 +801,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         state.agtPolicyRules = agt.policy_rules || 0;
         // If no trust states but governance is enabled, show self
         if (state.agtEnabled && ts.length === 0) {
-          const threshold = agt.trust_threshold ?? 500;
           state.agtTrustScores = [{
             agent: agt.sandbox || sb.name,
             score: 500,
@@ -1110,7 +1109,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         const [time, reason, object, ...rest] = line.split("|");
         if (reason) result.warnings.push({
           time: time ? timeSince(new Date(time)) : "-",
-          reason: reason || "-",
+          reason,
           object: (object || "-").substring(0, 40),
           message: (rest.join("|") || "").substring(0, 60),
         });
@@ -1558,14 +1557,6 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const COL_W = 26;  // inner content width
     const BOX_W = COL_W + 4; // +4 for "│ " and " │"
     const CELL_W = BOX_W + 2; // +2 gap between columns
-
-    function padC(text: string, w: number): string {
-      // Strip blessed tags for length calculation
-      const plain = text.replace(/\{[^}]+\}/g, "");
-      const pad = Math.max(0, w - plain.length);
-      const left = Math.floor(pad / 2);
-      return " ".repeat(left) + text + " ".repeat(pad - left);
-    }
 
     // Visual width of a string, counting emoji (surrogate pairs) as 2 cells
     function visualLen(s: string): number {

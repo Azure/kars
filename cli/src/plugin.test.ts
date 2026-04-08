@@ -7,9 +7,7 @@
  * 3. Direct plugin object property checks (id, name, configSchema, etc.)
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
-import type { IncomingMessage, ClientRequest } from "node:http";
-import { EventEmitter } from "node:events";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Test helpers — mock OpenClaw plugin API and HTTP
@@ -47,31 +45,6 @@ function createMockApi(pluginConfig: Record<string, unknown> = {}) {
   };
 
   return { api, tools, commands, providers, logMessages };
-}
-
-/** Create a mock HTTP response (IncomingMessage-like) */
-function createMockResponse(statusCode: number, body: string): EventEmitter & { statusCode: number } {
-  const res = new EventEmitter() as EventEmitter & { statusCode: number; resume: () => void };
-  res.statusCode = statusCode;
-  res.resume = () => {};
-  // Simulate async data + end emission
-  process.nextTick(() => {
-    res.emit("data", Buffer.from(body));
-    res.emit("end");
-  });
-  return res;
-}
-
-/** Create a mock HTTP request (ClientRequest-like) */
-function createMockRequest(response: EventEmitter): EventEmitter & { write: Mock; end: Mock; destroy: Mock; setTimeout: Mock } {
-  const req = new EventEmitter() as any;
-  req.write = vi.fn();
-  req.end = vi.fn();
-  req.destroy = vi.fn();
-  req.setTimeout = vi.fn();
-
-  // When end() is called, emit the response on next tick via the callback
-  return req;
 }
 
 // ---------------------------------------------------------------------------

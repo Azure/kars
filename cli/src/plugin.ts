@@ -58,10 +58,8 @@ const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; tim
 
 // AGT reconnect & heartbeat state
 let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
-let agtHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let agtInboxNotifyTimer: ReturnType<typeof setInterval> | null = null;
 let agtConnected = false;
-let agtSdk: any = null; // cached SDK module for reconnect
 
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
@@ -153,7 +151,7 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
       req.write(body);
       req.end();
     });
-  } catch (e: any) {
+  } catch {
     console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}`);
   }
 }
@@ -858,7 +856,7 @@ async function processTaskWithTools(
 
               if (!targetAmid) {
                 result = `Agent '${toAgent}' not found in registry after retries. It may not be running yet.`;
-              } else if (typeof agtMeshClient !== "undefined" && agtMeshClient) {
+              } else if (agtMeshClient) {
                 // Retry send — target may still be uploading prekeys after registration
                 let sendErr: Error | null = null;
                 for (let sendAttempt = 0; sendAttempt < 5; sendAttempt++) {
@@ -911,7 +909,7 @@ async function processTaskWithTools(
             // Check for incoming messages via AGT mesh
             log.info("AGT sub-agent mesh_inbox check");
             try {
-              if (typeof agtMeshClient !== "undefined" && agtMeshClient && typeof agtMeshClient.drain === "function") {
+              if (agtMeshClient && typeof agtMeshClient.drain === "function") {
                 const messages = await agtMeshClient.drain();
                 result = messages.length > 0
                   ? JSON.stringify(messages.map((m: any) => ({ from: m.from_agent || m.sender, content: m.content || m.text, timestamp: m.timestamp })))
@@ -1015,7 +1013,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   const initPromise = (async () => {
   try {
     const sdk: any = await import("@agentmesh/sdk");
-    agtSdk = sdk;
 
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
@@ -1616,9 +1613,10 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
   // Write to /tmp/ first, then rename — avoids triggering chokidar mid-write
   try {
     const fs = await import("node:fs");
+    const crypto = await import("node:crypto");
     const memoryDir = "/sandbox/.openclaw/workspace/memory";
     const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
-    const tmpFile = "/tmp/azureclaw-MEMORY.md";
+    const tmpFile = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
     try { fs.mkdirSync(memoryDir, { recursive: true }); } catch { /* read-only fs */ }
 
     const sections: string[] = ["# AzureClaw Environment\n"];
@@ -1697,19 +1695,19 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     if (existingMemory.includes(envMarker)) {
       const start = existingMemory.indexOf(envMarker);
       const end = existingMemory.indexOf(endMarker, start);
-      const before = existingMemory.slice(0, start);
       const after = end >= 0 ? existingMemory.slice(end + endMarker.length) : "";
       content = envSection + after;
     } else {
       content = envSection + existingMemory;
     }
     // Write to /tmp/ first, then atomic rename — reduces chokidar watcher churn
-    fs.writeFileSync(tmpFile, content);
+    fs.writeFileSync(tmpFile, content, { mode: 0o600 });
     try {
       fs.renameSync(tmpFile, memoryFile);
     } catch {
       // rename across filesystems fails — fall back to direct write
       fs.writeFileSync(memoryFile, content);
+      try { fs.unlinkSync(tmpFile); } catch { /* best-effort cleanup */ }
     }
     log.info("Foundry project context written to MEMORY.md");
 
@@ -1745,8 +1743,9 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
           const sepIdx = current.indexOf("\n---\n");
           if (sepIdx >= 0) {
             const updated = current.slice(0, sepIdx) + recallSection.join("\n") + current.slice(sepIdx);
-            fs.writeFileSync(tmpFile, updated);
-            try { fs.renameSync(tmpFile, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); }
+            const tmpFile2 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
+            fs.writeFileSync(tmpFile2, updated, { mode: 0o600 });
+            try { fs.renameSync(tmpFile2, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile2); } catch { /* */ } }
           }
         }
         log.info(`Foundry memory: recalled ${memories.length} memories on startup`);
@@ -2049,7 +2048,7 @@ const azureClawPlugin = definePluginEntry({
       try {
         const http = await import("node:http");
         const postData = JSON.stringify({ action, context: { tool: toolName } });
-        const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, reject) => {
+        const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, _reject) => {
           const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
             method: "POST", timeout: 2000,
             headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
@@ -3159,7 +3158,7 @@ const azureClawPlugin = definePluginEntry({
               return { content: [{ type: "text", text: `Memory update failed: ${e.message}. The memory service may still be initializing.` }] };
             }
           } else if (op === "delete_scope") {
-            const result = await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, { scope });
+            await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, { scope });
             return { content: [{ type: "text", text: `Scope '${scope}' deleted from memory store '${store}'.` }] };
           }
           return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
@@ -3596,8 +3595,6 @@ const azureClawPlugin = definePluginEntry({
       const prevModel = process.env.OPENCLAW_MODEL || config.model || "gpt-4.1";
 
       // 1. Flush conversation context to Foundry memory before switching
-      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-      const store = `memory-${agentName}`;
       try {
         // Flush any buffered tool calls
         if (memorySyncBuffer.length > 0) {
@@ -4073,7 +4070,7 @@ const azureClawPlugin = definePluginEntry({
               "- Tear down: `/azureclaw-spawn-destroy " + name + "`",
             ].join("\n"),
           };
-        } catch (e) {
+        } catch {
           return { text: `**Spawn error:** Could not reach the inference router. Is it running?` };
         }
       },

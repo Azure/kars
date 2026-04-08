@@ -60,7 +60,7 @@ export function logsCommand(): Command {
               ], { stdio: "pipe" });
               console.log(stdout);
             }
-          } catch (e: any) {
+          } catch {
             console.log(chalk.dim(`  (no logs available)`));
           }
         }

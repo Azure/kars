@@ -3,7 +3,7 @@
  * Handles JSON Schema validation, capability negotiation, and message sequencing.
  */
 
-import { ValidationError } from '../errors';
+
 
 /**
  * JSON Schema definition (simplified).
@@ -380,7 +380,7 @@ export class CapabilityNegotiator {
       ? new RegExp('^' + requested.replace(/\*/g, '.*') + '$')
       : null;
 
-    for (const [id, cap] of this.capabilities) {
+    for (const [id] of this.capabilities) {
       // Exact match
       if (id === requested) {
         matches.push({

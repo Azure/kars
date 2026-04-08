@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -51,7 +51,7 @@ describe("loadConfig", () => {
 
   it("returns null when credentials file does not exist", () => {
     mockExistsSync.mockImplementation((p) =>
-      String(p).endsWith("config.json") ? true : false,
+      String(p).endsWith("config.json"),
     );
     expect(loadConfig()).toBeNull();
   });

@@ -27,13 +27,6 @@ export function traceCommand(): Command {
         return;
       }
 
-      const gadgetMap: Record<string, string> = {
-        network: "trace_tcp",
-        files: "trace_open",
-        dns: "trace_dns",
-        exec: "trace_exec",
-      };
-
       const gadget = options.network ? "trace_tcp" :
         options.files ? "trace_open" :
         options.dns ? "trace_dns" : "trace_exec";

@@ -4,7 +4,7 @@
  */
 
 import { Identity } from '../identity';
-import { ValidationError, SessionError } from '../errors';
+
 import type { Policy, KnockContext, PolicyResult } from '../config';
 import type { Certificate, CertificateManager } from '../certs';
 
@@ -118,15 +118,6 @@ export interface SessionState {
 }
 
 /**
- * Helper to convert ArrayBuffer to Uint8Array.
- */
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(data.length);
-  new Uint8Array(buffer).set(data);
-  return buffer;
-}
-
-/**
  * Generate a random nonce.
  */
 function generateNonce(): string {
@@ -146,17 +137,6 @@ function generateSessionId(): string {
   return 'sess_' + Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
-}
-
-/**
- * Serialize an intent for signing.
- */
-function serializeIntent(intent: Intent): string {
-  return JSON.stringify({
-    capability: intent.capability,
-    action: intent.action,
-    params: intent.params || {},
-  });
 }
 
 /**
@@ -213,7 +193,7 @@ export class KnockProtocol {
       nonce,
     };
 
-    const messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
+    const _messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
     const signature = await this.identity.sign(messageBytes);
 
     const knock: KnockMessage = {
@@ -260,8 +240,8 @@ export class KnockProtocol {
       return { valid: false, error: 'Replay attack detected: duplicate nonce' };
     }
 
-    // Verify signature
-    const signatureBytes = this.base64Decode(knock.signature);
+    // Verify signature (placeholder — real implementation uses registry lookup)
+    const _signatureBytes = this.base64Decode(knock.signature);
     const messageData = {
       version: knock.version,
       from: knock.from,
@@ -270,7 +250,7 @@ export class KnockProtocol {
       timestamp: knock.timestamp,
       nonce: knock.nonce,
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
+    const _messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
 
     // For now, we'll need the sender's public key from the registry
     // This is a placeholder - real implementation gets key from registry lookup
@@ -334,7 +314,7 @@ export class KnockProtocol {
       knockNonce: knock.nonce,
     };
 
-    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
+    const _messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
 
     return {
@@ -361,7 +341,7 @@ export class KnockProtocol {
       knockNonce: knock.nonce,
     };
 
-    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
+    const _messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
 
     return {

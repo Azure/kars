@@ -5,9 +5,9 @@
 
 import { Identity } from '../identity';
 import { Storage } from '../storage/interface';
-import { X3DHKeyExchange, X3DHInitiatorMessage, deserializeX3DHMessage } from './x3dh';
-import { DoubleRatchetSession, EncryptedMessage, serializeRatchetHeader, deserializeRatchetHeader } from './ratchet';
-import { PrekeyManager, PrekeyBundle, deserializePrekeyBundle } from './prekey';
+import { X3DHKeyExchange, X3DHInitiatorMessage } from './x3dh';
+import { DoubleRatchetSession, serializeRatchetHeader, deserializeRatchetHeader } from './ratchet';
+import { PrekeyManager, PrekeyBundle } from './prekey';
 
 /**
  * Session state enumeration.
@@ -375,7 +375,7 @@ export class SessionManager {
   /**
    * Close a session.
    */
-  async closeSession(sessionId: string, reason = 'normal'): Promise<void> {
+  async closeSession(sessionId: string, _reason = 'normal'): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 

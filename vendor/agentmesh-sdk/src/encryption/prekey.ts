@@ -5,7 +5,7 @@
 
 import { Identity } from '../identity';
 import { Storage } from '../storage/interface';
-import { hkdfSimple } from './hkdf';
+
 
 /**
  * X25519 PKCS8 prefix for key wrapping.

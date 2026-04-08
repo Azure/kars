@@ -455,7 +455,7 @@ export class DIDResolver {
       };
     }
 
-    const [, method, identifier] = match;
+    const [, method] = match;
 
     // For agentmesh method, we need to look up in registry
     if (method === 'agentmesh') {

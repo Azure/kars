@@ -14,7 +14,7 @@ import { KnockProtocol, ProtocolSessionManager, SessionRequest, SessionStateType
 import { AuditLogger, createAuditLogger } from './audit';
 import { MemoryStorage, Storage } from './storage';
 import { AgentMeshError, NetworkError, SessionError } from './errors';
-import { RateLimiter, RateLimitConfig, RateLimitStatus, RateLimitError } from './rate-limiter';
+import { RateLimiter, RateLimitConfig, RateLimitStatus } from './rate-limiter';
 import { SessionCache, SessionCacheConfig, CacheStats } from './session/cache';
 
 /**

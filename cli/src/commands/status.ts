@@ -42,9 +42,7 @@ export function statusCommand(): Command {
           }
         }
         const seccomp = info.HostConfig?.SecurityOpt
-          ?.some((s: string) => s.includes("seccomp")) || false;
-        const hostname = info.Config?.Hostname || name;
-
+          ?.some((s: string) => s.includes("seccomp")) ?? false;
         // Calculate uptime
         let uptime = "unknown";
         if (startedAt) {

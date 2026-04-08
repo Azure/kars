@@ -51,7 +51,7 @@ export class KVStorage implements Storage {
         return null;
       }
       return new Uint8Array(buffer);
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to get from KV: ${key}`, 'KV_GET_ERROR');
     }
   }
@@ -69,7 +69,7 @@ export class KVStorage implements Storage {
       }
 
       await this.namespace.put(key, value, putOptions);
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to put to KV: ${key}`, 'KV_PUT_ERROR');
     }
   }
@@ -77,7 +77,7 @@ export class KVStorage implements Storage {
   async delete(key: string): Promise<void> {
     try {
       await this.namespace.delete(key);
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to delete from KV: ${key}`, 'KV_DELETE_ERROR');
     }
   }
@@ -102,7 +102,7 @@ export class KVStorage implements Storage {
       } while (cursor);
 
       return keys.sort();
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to list KV: ${prefix}`, 'KV_LIST_ERROR');
     }
   }
@@ -129,7 +129,7 @@ export class KVStorage implements Storage {
         value: result.value ? new Uint8Array(result.value) : null,
         metadata: result.metadata as Record<string, unknown> | null,
       };
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to get with metadata from KV: ${key}`, 'KV_GET_ERROR');
     }
   }
