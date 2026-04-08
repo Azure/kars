@@ -32,14 +32,38 @@ ARG OPENCLAW_VERSION=latest
 ARG OPENCLAW_CACHE_BUST=0
 RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
 
-# OpenClaw ≥2026.4 hoists Telegram bundle chunks to dist/ but grammy lives in
-# extensions/telegram/node_modules/. Symlink so the top-level require resolves.
-RUN TGMOD="/usr/local/lib/node_modules/openclaw/dist/extensions/telegram/node_modules" && \
-    TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
-    if [ -d "$TGMOD/grammy" ] && [ ! -d "$TOPMOD/grammy" ]; then \
-      ln -s "$TGMOD/grammy" "$TOPMOD/grammy" && \
-      ln -s "$TGMOD/@grammyjs" "$TOPMOD/@grammyjs" 2>/dev/null || true; \
-    fi
+# OpenClaw ≥2026.4 hoists channel bundle chunks to dist/ but npm installs don't
+# stage extension deps into the top-level node_modules/ (openclaw/openclaw#62749).
+# Symlink each missing package so Node's require() resolves from dist/.
+# This is a no-op once upstream ships the stageRuntimeDependencies fix.
+RUN TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
+    EXTDIR="/usr/local/lib/node_modules/openclaw/dist/extensions" && \
+    link_pkg() { \
+      ext="$1"; pkg="$2"; \
+      src="$EXTDIR/$ext/node_modules/$pkg"; \
+      dst="$TOPMOD/$pkg"; \
+      if [ -d "$src" ] && [ ! -e "$dst" ]; then \
+        mkdir -p "$(dirname "$dst")" && ln -s "$src" "$dst"; \
+      fi; \
+    } && \
+    # Telegram (3 packages)
+    link_pkg telegram grammy && \
+    link_pkg telegram @grammyjs/runner && \
+    link_pkg telegram @grammyjs/transformer-throttler && \
+    # Discord (6 packages)
+    link_pkg discord @buape/carbon && \
+    link_pkg discord @discordjs/opus && \
+    link_pkg discord debug && \
+    link_pkg discord https-proxy-agent && \
+    link_pkg discord opusscript && \
+    link_pkg discord discord-api-types && \
+    # Slack (3 packages)
+    link_pkg slack @slack/bolt && \
+    link_pkg slack @slack/web-api && \
+    link_pkg slack p-queue && \
+    # Feishu (1 package)
+    link_pkg feishu @larksuiteoapi/node-sdk && \
+    echo "OpenClaw extension dep symlinks applied"
 
 # Patch vulnerable transitive npm deps (tar, minimatch, glob, brace-expansion)
 # without waiting for upstream OpenClaw to update them.
