@@ -471,11 +471,10 @@ impl Governance {
         let start = Instant::now();
         self.metrics.evaluations.fetch_add(1, Ordering::Relaxed);
 
-        // Rate limit check first
+        // Rate limit check first (token bucket — not a capability denial)
         if !self.rate_limiter.allow(agent_id) {
             self.metrics.rate_limits.fetch_add(1, Ordering::Relaxed);
             self.audit.log(agent_id, action, "denied");
-            self.behavior.record(agent_id, false);
             let elapsed = start.elapsed();
             self.metrics
                 .eval_latency_sum_us
