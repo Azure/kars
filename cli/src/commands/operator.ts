@@ -164,8 +164,11 @@ export function operatorCommand(): Command {
     .option("--context <name>", "Kubernetes context to use")
     .option("--dev", "Dev mode — discover Docker containers instead of K8s pods")
     .action(async (options) => {
-      const refreshInterval = parseInt(options.refresh, 10) * 1000;
-      await startDashboard(refreshInterval, options.context, !!options.dev);
+      const isDevMode = !!options.dev;
+      // Dev mode: default 3s refresh (local Docker, no K8s latency)
+      const defaultRefresh = isDevMode ? 3 : 10;
+      const refreshInterval = (options.refresh ? parseInt(options.refresh, 10) : defaultRefresh) * 1000;
+      await startDashboard(refreshInterval, options.context, isDevMode);
     });
 
   return cmd;
@@ -347,9 +350,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   let agtOverlayOpen = false;
 
   // Tiered refresh: not everything needs to refresh every cycle.
-  // Sandboxes: every cycle (10s). Security/egress: every 3rd (30s). Cluster: every 6th (60s).
-  const TIER_DETAIL = 3;   // security + egress every 3 cycles
-  const TIER_CLUSTER = 6;  // cluster health every 6 cycles
+  // AKS: Sandboxes every cycle (10s). Security/egress every 3rd (30s). Cluster every 6th (60s).
+  // Dev:  Everything every cycle (3s) — local Docker, negligible overhead.
+  const TIER_DETAIL = devMode ? 1 : 3;
+  const TIER_CLUSTER = devMode ? 2 : 6;
 
   /** Egress domains for the currently selected agent. */
   function selectedEgressDomains(): EgressDomain[] {
@@ -1374,14 +1378,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       const denyRate = sec.agtPolicyEvaluations > 0
         ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
         : "0%";
+      const rlColor = sec.agtPolicyRateLimits > 0 ? "yellow" : "green";
+      const behavColor = sec.agtBehaviorAlerts > 0 ? "red" : "green";
+      const contentColor = sec.agtContentFlags > 0 ? "yellow" : "green";
       lines.push(
         "",
-        `{bold}Policy Engine{/}`,
-        ` Evaluations  ${sec.agtPolicyEvaluations}  deny ${denyRate}`,
-        ` Rate limits  ${sec.agtPolicyRateLimits}`,
-        ` Avg latency  ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"}`,
-        ` Behavior     ${sec.agtBehaviorAlerts > 0 ? `{red-fg}${sec.agtBehaviorAlerts} alerts{/}` : "0 alerts"}`,
-        ` Content      ${sec.agtContentFlags > 0 ? `{yellow-fg}${sec.agtContentFlags} flags{/}` : "0 flags"}`,
+        `{bold}Policy Engine{/}  ${sec.agtPolicyRules} rules loaded`,
+        ` Evals    ${sec.agtPolicyEvaluations}  deny ${denyRate}  {${rlColor}-fg}${sec.agtPolicyRateLimits} rate-limited{/}`,
+        ` Latency  ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"} avg`,
+        ` Safety   {${behavColor}-fg}${sec.agtBehaviorAlerts} behavior{/}  {${contentColor}-fg}${sec.agtContentFlags} content{/}`,
       );
     }
 
@@ -1445,7 +1450,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       lines.push("", "{gray-fg}No audit entries yet{/}");
     }
 
-    return lines.join("\n");
+    return lines.filter(Boolean).join("\n");
   }
 
   /** Compact AGT summary for the small panel. */
