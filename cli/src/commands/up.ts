@@ -587,7 +587,7 @@ export function upCommand(): Command {
 
       const clusterName = options.clusterName ?? "azureclaw";
       const baseName = clusterName.replace(/-aks$/, "");
-      const acrName = baseName.replace(/-/g, "") + "acr";
+      let acrName = ""; // resolved from Bicep output after deployment
       const stepper = new Stepper({ totalSteps: 7 });
 
       try {
@@ -749,6 +749,7 @@ export function upCommand(): Command {
 
             const outputs = JSON.parse(deployOutput);
             acrLoginServer = outputs.acrLoginServer.value;
+            acrName = outputs.acrName?.value || acrLoginServer.replace(".azurecr.io", "");
             openAiEndpoint = options.openaiEndpoint || outputs.openAiEndpoint?.value || options.foundryEndpoint || "";
             wiClientId = outputs.sandboxIdentityClientId.value;
             kvName = outputs.keyVaultName.value;
@@ -789,6 +790,7 @@ export function upCommand(): Command {
 
           const outputs = JSON.parse(existingOutput);
           acrLoginServer = outputs.acrLoginServer.value;
+          acrName = outputs.acrName?.value || acrLoginServer.replace(".azurecr.io", "");
           openAiEndpoint = options.openaiEndpoint || outputs.openAiEndpoint?.value || options.foundryEndpoint || "";
           wiClientId = outputs.sandboxIdentityClientId.value;
           kvName = outputs.keyVaultName.value;
