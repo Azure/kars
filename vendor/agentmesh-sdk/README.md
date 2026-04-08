@@ -63,6 +63,18 @@ aren't ready is handled by **sender-side retry** in plugin.ts: both parent
 and sub-agent `mesh_send` retry `agtMeshClient.send()` on prekey errors
 (parent: 8×2s, sub-agent: 5×1s).
 
+### 7. submitReputation — silent error swallowing
+**Files:** `dist/chunk-NMOWWZKF.js`, `dist/chunk-UBUGIENK.cjs`
+
+Upstream `submitReputation()` has `catch { return false }` — errors are
+completely swallowed, making reputation failures invisible. The registry
+may reject reviews (400 "Rater agent not found" for deregistered sub-agents)
+and the caller never knows.
+
+Fix: Log the HTTP status + response body on non-200, and log the error
+message on exception. Returns `false` as before (no behavior change for
+callers) but now surfaces the actual failure reason in container logs.
+
 ## Known Remaining Gap
 
 The SDK's relay transport `receive` events are not wired to

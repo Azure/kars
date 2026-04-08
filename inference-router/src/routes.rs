@@ -1935,38 +1935,8 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
     let sandbox_name: &str = &state.sandbox_name;
     let base = registry_url.trim_end_matches('/');
 
-    // Step 1: Look up our AMID by searching for our sandbox name as a capability.
-    // The plugin registers with capabilities: ["azureclaw-agent", "task-execution", sandbox_name]
-    let amid = match state
-        .client
-        .get(&format!(
-            "{}/v1/registry/search?capability={}",
-            base, sandbox_name
-        ))
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            resp.json::<serde_json::Value>().await.ok().and_then(|v| {
-                // Pick the most recently seen agent matching our name
-                v.get("results")?
-                    .as_array()?
-                    .iter()
-                    .filter(|a| {
-                        a.get("display_name").and_then(|n| n.as_str()) == Some(sandbox_name)
-                    })
-                    .max_by_key(|a| {
-                        a.get("last_seen")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string()
-                    })
-                    .and_then(|a| a.get("amid").and_then(|v| v.as_str()).map(String::from))
-            })
-        }
-        _ => None,
-    };
+    // Step 1: Look up our AMID from the registry
+    let amid = lookup_parent_amid(&state.client, &registry_url, sandbox_name).await;
 
     // Step 2: If we found our AMID, fetch reputation score
     let registry = if let Some(ref agent_amid) = amid {
@@ -2277,11 +2247,26 @@ async fn agt_registry_proxy(
         Ok(resp) => {
             let status =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let body = resp.bytes().await.unwrap_or_default();
+            let resp_body = resp.bytes().await.unwrap_or_default();
+
+            // Log reputation submission failures so we can diagnose why
+            // feedback_count stays 0 (the SDK silently returns false).
+            if path == "registry/reputation"
+                && method == axum::http::Method::POST
+                && !status.is_success()
+            {
+                let error_text = std::str::from_utf8(&resp_body).unwrap_or("<binary>");
+                tracing::warn!(
+                    status = %status,
+                    error = %error_text,
+                    "AGT reputation submission failed"
+                );
+            }
+
             (
                 status,
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
-                body,
+                resp_body,
             )
                 .into_response()
         }
@@ -2296,6 +2281,42 @@ async fn agt_registry_proxy(
                 .into_response()
         }
     }
+}
+
+/// Look up an agent's AMID from the registry by searching for its sandbox name.
+async fn lookup_parent_amid(
+    client: &reqwest::Client,
+    registry_url: &str,
+    sandbox_name: &str,
+) -> Option<String> {
+    let base = registry_url.trim_end_matches('/');
+    let resp = client
+        .get(&format!(
+            "{}/v1/registry/search?capability={}",
+            base, sandbox_name
+        ))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+        v.get("results")?
+            .as_array()?
+            .iter()
+            .filter(|a| a.get("display_name").and_then(|n| n.as_str()) == Some(sandbox_name))
+            .max_by_key(|a| {
+                a.get("last_seen")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .and_then(|a| a.get("amid").and_then(|v| v.as_str()).map(String::from))
+    })
 }
 
 /// GET /blocklist/status — blocklist health and domain count.

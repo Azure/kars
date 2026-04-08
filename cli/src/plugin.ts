@@ -1302,13 +1302,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             timestamp: new Date().toISOString(),
           });
           log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
-          // Submit positive reputation after successful task completion
+          // Sub-agent rates parent — this bumps the parent's feedback_count.
+          // The sub-agent is still alive and registered here (just sent a relay
+          // message above), so the registry should accept the review.
           try {
             const sessionId = crypto.randomUUID();
-            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["reliable"]);
+            const ok = await agtMeshClient.submitReputation(fromAmid, sessionId, 0.8, ["reliable"]);
+            if (!ok) log.warn(`AGT reputation: registry rejected review for ${fromName} (from_amid=${agtIdentity?.amid})`);
             pushTrustToRouter(fromName, 0.8);
-            recordMeshSession(fromAmid, sessionId, "task_request", "success", new Date().toISOString());
-            log.info(`AGT reputation: submitted +0.8 for ${fromName}`);
+            await recordMeshSession(fromAmid, sessionId, "task_request", "success", new Date().toISOString());
+            log.info(`AGT reputation: submitted +0.8 for ${fromName} (accepted=${ok})`);
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         } catch (replyErr: any) {
           // Fallback: send error message back so parent knows what happened
@@ -1324,9 +1327,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // Submit negative reputation on failure
           try {
             const sessionId = crypto.randomUUID();
-            await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["unreliable"]);
+            const ok = await agtMeshClient.submitReputation(fromAmid, sessionId, 0.3, ["unreliable"]);
+            if (!ok) log.warn(`AGT reputation: registry rejected negative review for ${fromName}`);
             pushTrustToRouter(fromName, 0.3);
-            recordMeshSession(fromAmid, sessionId, "task_request", "failed", new Date().toISOString());
+            await recordMeshSession(fromAmid, sessionId, "task_request", "failed", new Date().toISOString());
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
@@ -2465,12 +2469,14 @@ const azureClawPlugin = definePluginEntry({
                 };
                 if (replyContent) {
                   result.reply = replyContent;
-                  // Submit positive reputation — peer completed the task
+                  // Parent rates sub-agent — only meaningful for long-lived sub-agents
+                  // whose reputation will be queried again. Short-lived ones will die
+                  // and their score is lost, but the audit trail remains.
                   try {
-                    await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
+                    const ok = await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
                     pushTrustToRouter(agentName, 0.9);
-                    recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
-                    log.info(`AGT reputation: submitted +0.9 for '${agentName}'`);
+                    await recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
+                    log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
                   } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
                 } else {
                   result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
