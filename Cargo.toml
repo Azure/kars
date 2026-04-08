@@ -4,6 +4,10 @@ members = [
     "inference-router",
     "controller",
 ]
+exclude = [
+    "vendor/agentmesh-registry",
+    "vendor/agentmesh-relay",
+]
 
 [workspace.package]
 version = "0.1.0"
