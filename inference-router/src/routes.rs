@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use bytes::Bytes;
 use std::sync::Arc;
@@ -340,6 +340,8 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/status", get(agt_status))
         // Trust update (plugin pushes reputation changes to the router's trust store)
         .route("/agt/trust", post(agt_trust_update))
+        // Dynamic rate-limit update (admin only)
+        .route("/agt/rate-limit", put(agt_rate_limit_update).get(agt_rate_limit_get))
         // Registry reputation (proxied from agentmesh-registry)
         .route("/agt/reputation", get(agt_reputation))
 }
@@ -1862,6 +1864,65 @@ async fn agt_trust_update(
             Json(serde_json::json!({"error": msg})),
         ),
     }
+}
+
+/// GET /agt/rate-limit — current token-bucket rate limit config.
+async fn agt_rate_limit_get(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "global_rate": state.governance.rate_limiter.global_rate(),
+        "global_capacity": state.governance.rate_limiter.global_capacity(),
+        "per_agent_rate": state.governance.rate_limiter.per_agent_rate(),
+        "per_agent_capacity": state.governance.rate_limiter.per_agent_capacity(),
+    }))
+}
+
+/// PUT /agt/rate-limit — update token-bucket rate limits at runtime (admin only).
+///
+/// Body: `{ "global_rate": 200, "global_capacity": 400, "per_agent_rate": 20, "per_agent_capacity": 40 }`
+/// All fields optional — only provided fields are updated.
+async fn agt_rate_limit_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(ref expected) = state.admin_token {
+        let provided = headers
+            .get("x-azureclaw-admin")
+            .or_else(|| headers.get("authorization"))
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
+        match provided {
+            Some(tok) if tok == expected.as_str() => {}
+            _ => {
+                tracing::warn!("PUT /agt/rate-limit denied: missing or invalid admin token");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "Admin token required"})),
+                );
+            }
+        }
+    }
+
+    let rl = &state.governance.rate_limiter;
+    let global_rate = body["global_rate"].as_f64().unwrap_or(rl.global_rate());
+    let global_capacity = body["global_capacity"].as_f64().unwrap_or(rl.global_capacity());
+    let per_agent_rate = body["per_agent_rate"].as_f64().unwrap_or(rl.per_agent_rate());
+    let per_agent_capacity = body["per_agent_capacity"].as_f64().unwrap_or(rl.per_agent_capacity());
+
+    rl.update_rates(global_rate, global_capacity, per_agent_rate, per_agent_capacity);
+
+    tracing::info!(
+        global_rate, global_capacity, per_agent_rate, per_agent_capacity,
+        "Rate limits updated dynamically"
+    );
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "global_rate": global_rate,
+        "global_capacity": global_capacity,
+        "per_agent_rate": per_agent_rate,
+        "per_agent_capacity": per_agent_capacity,
+        "message": "Rate limits updated",
+    })))
 }
 
 /// GET /agt/reputation — fetch this agent's reputation from the AgentMesh registry.

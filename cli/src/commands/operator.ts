@@ -105,6 +105,7 @@ interface SecurityState {
   agtPolicyRateLimits: number;
   agtEvalLatencyUs: number;      // average eval latency in microseconds
   agtBehaviorAlerts: number;
+  agtBehaviorDetail: Array<{ agent: string; reasons: string[] }>;
   agtContentFlags: number;
   agtPolicyRules: number;
   // Registry reputation (from agentmesh-registry)
@@ -688,6 +689,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       agtPolicyRateLimits: 0,
       agtEvalLatencyUs: 0,
       agtBehaviorAlerts: 0,
+      agtBehaviorDetail: [],
       agtContentFlags: 0,
       agtPolicyRules: 0,
       agtReputation: null,
@@ -793,6 +795,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         state.agtPolicyRateLimits = agt.policy_rate_limits || 0;
         state.agtEvalLatencyUs = agt.eval_latency_avg_us || 0;
         state.agtBehaviorAlerts = agt.behavior_alerts || 0;
+        state.agtBehaviorDetail = agt.behavior_alerts_detail || [];
         state.agtContentFlags = agt.content_flags || 0;
         state.agtPolicyRules = agt.policy_rules || 0;
         // If no trust states but governance is enabled, show self
@@ -938,6 +941,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       existing.agtPolicyRateLimits = agt.policy_rate_limits || 0;
       existing.agtEvalLatencyUs = agt.eval_latency_avg_us || 0;
       existing.agtBehaviorAlerts = agt.behavior_alerts || 0;
+      existing.agtBehaviorDetail = agt.behavior_alerts_detail || [];
       existing.agtContentFlags = agt.content_flags || 0;
       existing.agtPolicyRules = agt.policy_rules || existing.agtPolicyRules;
     } catch { /* non-fatal — full refresh on next TIER_DETAIL cycle */ }
@@ -1347,7 +1351,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         ` Mode       ${modeLabel}  ${sec.agtPolicyRules} rules`,
         ` Evals      ${sec.agtPolicyEvaluations}  deny ${denyRate}  RL ${sec.agtPolicyRateLimits}`,
         ` Latency    ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"}`,
-        ` Alerts     ${sec.agtBehaviorAlerts > 0 ? `{red-fg}${sec.agtBehaviorAlerts}{/}` : "0"}  flags ${sec.agtContentFlags}`,
+        sec.agtBehaviorAlerts > 0 && sec.agtBehaviorDetail.length > 0
+          ? ` {red-fg}⚠ ${sec.agtBehaviorDetail.map((a: { agent: string; reasons: string[] }) => `${a.agent}: ${a.reasons[0]}`).join("; ")}{/}`
+          : ` Safety    {green-fg}✓{/}  flags ${sec.agtContentFlags}`,
         ` {gray-fg}[g] full detail{/}`,
       );
     }
@@ -1379,15 +1385,22 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
         : "0%";
       const rlColor = sec.agtPolicyRateLimits > 0 ? "yellow" : "green";
-      const behavColor = sec.agtBehaviorAlerts > 0 ? "red" : "green";
       const contentColor = sec.agtContentFlags > 0 ? "yellow" : "green";
       lines.push(
         "",
         `{bold}Policy Engine{/}  ${sec.agtPolicyRules} rules loaded`,
         ` Evals    ${sec.agtPolicyEvaluations}  deny ${denyRate}  {${rlColor}-fg}${sec.agtPolicyRateLimits} rate-limited{/}`,
         ` Latency  ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"} avg`,
-        ` Safety   {${behavColor}-fg}${sec.agtBehaviorAlerts} behavior{/}  {${contentColor}-fg}${sec.agtContentFlags} content{/}`,
       );
+      // Behavior: show reasons when alerts fire, ✓ when clean
+      if (sec.agtBehaviorAlerts > 0 && sec.agtBehaviorDetail.length > 0) {
+        for (const alert of sec.agtBehaviorDetail) {
+          const why = alert.reasons.join(", ");
+          lines.push(` {red-fg}⚠ ${alert.agent}: ${why}{/}`);
+        }
+      } else {
+        lines.push(` Safety   {green-fg}✓ behavior{/}  {${contentColor}-fg}${sec.agtContentFlags > 0 ? `⚠ ${sec.agtContentFlags} content` : "✓ content"}{/}`);
+      }
     }
 
     if (sec.agtReputation) {

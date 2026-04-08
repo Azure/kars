@@ -67,8 +67,7 @@ impl GovernanceMetrics {
 pub struct RateLimiter {
     global: Mutex<TokenBucket>,
     per_agent: Mutex<HashMap<String, TokenBucket>>,
-    per_agent_rate: f64,
-    per_agent_capacity: f64,
+    per_agent_config: Mutex<(f64, f64)>, // (rate, capacity)
 }
 
 struct TokenBucket {
@@ -112,8 +111,7 @@ impl RateLimiter {
         Self {
             global: Mutex::new(TokenBucket::new(global_rate, global_capacity)),
             per_agent: Mutex::new(HashMap::new()),
-            per_agent_rate,
-            per_agent_capacity,
+            per_agent_config: Mutex::new((per_agent_rate, per_agent_capacity)),
         }
     }
 
@@ -122,11 +120,39 @@ impl RateLimiter {
         if !global_ok {
             return false;
         }
+        let (pa_rate, pa_cap) = *self.per_agent_config.lock().unwrap();
         let mut per_agent = self.per_agent.lock().unwrap();
         let bucket = per_agent
             .entry(agent_id.to_string())
-            .or_insert_with(|| TokenBucket::new(self.per_agent_rate, self.per_agent_capacity));
+            .or_insert_with(|| TokenBucket::new(pa_rate, pa_cap));
         bucket.allow()
+    }
+
+    /// Update rate limits at runtime (e.g. from API endpoint).
+    pub fn update_rates(&self, global_rate: f64, global_capacity: f64, per_agent_rate: f64, per_agent_capacity: f64) {
+        let mut global = self.global.lock().unwrap();
+        global.rate = global_rate;
+        global.capacity = global_capacity;
+        drop(global);
+        *self.per_agent_config.lock().unwrap() = (per_agent_rate, per_agent_capacity);
+        // Clear per-agent buckets so they pick up new rates on next call
+        self.per_agent.lock().unwrap().clear();
+    }
+
+    pub fn global_rate(&self) -> f64 {
+        self.global.lock().unwrap().rate
+    }
+
+    pub fn global_capacity(&self) -> f64 {
+        self.global.lock().unwrap().capacity
+    }
+
+    pub fn per_agent_rate(&self) -> f64 {
+        self.per_agent_config.lock().unwrap().0
+    }
+
+    pub fn per_agent_capacity(&self) -> f64 {
+        self.per_agent_config.lock().unwrap().1
     }
 }
 
@@ -155,6 +181,37 @@ impl Default for BehaviorState {
             consecutive_failures: 0,
             capability_denials: 0,
         }
+    }
+}
+
+impl BehaviorState {
+    /// Which thresholds this state exceeds, if any.
+    fn triggered_reasons(
+        &self,
+        burst_t: u32,
+        fail_t: u32,
+        denial_t: u32,
+    ) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if self.recent_calls > burst_t {
+            reasons.push(format!(
+                "burst: {} calls/60s (threshold {})",
+                self.recent_calls, burst_t
+            ));
+        }
+        if self.consecutive_failures > fail_t {
+            reasons.push(format!(
+                "consecutive failures: {} (threshold {})",
+                self.consecutive_failures, fail_t
+            ));
+        }
+        if self.capability_denials > denial_t {
+            reasons.push(format!(
+                "capability denials: {} (threshold {})",
+                self.capability_denials, denial_t
+            ));
+        }
+        reasons
     }
 }
 
@@ -191,9 +248,13 @@ impl BehaviorMonitor {
         }
 
         // Return true if anomaly detected
-        entry.recent_calls > self.burst_threshold
-            || entry.consecutive_failures > self.consecutive_failure_threshold
-            || entry.capability_denials > self.capability_denial_threshold
+        !entry
+            .triggered_reasons(
+                self.burst_threshold,
+                self.consecutive_failure_threshold,
+                self.capability_denial_threshold,
+            )
+            .is_empty()
     }
 
     pub fn alert_count(&self) -> u64 {
@@ -201,11 +262,40 @@ impl BehaviorMonitor {
         state
             .values()
             .filter(|s| {
-                s.recent_calls > self.burst_threshold
-                    || s.consecutive_failures > self.consecutive_failure_threshold
-                    || s.capability_denials > self.capability_denial_threshold
+                !s.triggered_reasons(
+                    self.burst_threshold,
+                    self.consecutive_failure_threshold,
+                    self.capability_denial_threshold,
+                )
+                .is_empty()
             })
             .count() as u64
+    }
+
+    /// Per-agent alert details: which agents are flagged and why.
+    pub fn alerts_detail(&self) -> Vec<serde_json::Value> {
+        let state = self.state.lock().unwrap();
+        state
+            .iter()
+            .filter_map(|(agent, s)| {
+                let reasons = s.triggered_reasons(
+                    self.burst_threshold,
+                    self.consecutive_failure_threshold,
+                    self.capability_denial_threshold,
+                );
+                if reasons.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "agent": agent,
+                        "reasons": reasons,
+                        "calls_in_window": s.recent_calls,
+                        "consecutive_failures": s.consecutive_failures,
+                        "capability_denials": s.capability_denials,
+                    }))
+                }
+            })
+            .collect()
     }
 }
 
@@ -430,10 +520,16 @@ impl Governance {
         let outcome = if allowed { "allow" } else { "deny" };
         self.audit.log(agent_id, action, outcome);
 
-        let is_anomaly = self.behavior.record(agent_id, allowed);
-        if is_anomaly {
-            self.metrics.behavior_alerts.fetch_add(1, Ordering::Relaxed);
-            metrics::AGT_BEHAVIOR_ALERTS.set(self.behavior.alert_count() as i64);
+        // Rate-limited calls are not capability denials — don't feed them
+        // into behavior monitoring (they'd inflate capability_denials and
+        // trigger false-positive anomaly alerts).
+        let is_rate_limited = matches!(decision, PolicyDecision::RateLimited { .. });
+        if !is_rate_limited {
+            let is_anomaly = self.behavior.record(agent_id, allowed);
+            if is_anomaly {
+                self.metrics.behavior_alerts.fetch_add(1, Ordering::Relaxed);
+                metrics::AGT_BEHAVIOR_ALERTS.set(self.behavior.alert_count() as i64);
+            }
         }
 
         let elapsed = start.elapsed();
@@ -684,8 +780,15 @@ impl Governance {
             "policy_rate_limits": self.metrics.rate_limits.load(Ordering::Relaxed),
             "eval_latency_avg_us": self.metrics.avg_eval_latency_us(),
             "behavior_alerts": self.behavior.alert_count(),
+            "behavior_alerts_detail": self.behavior.alerts_detail(),
             "content_flags": self.metrics.content_flags.load(Ordering::Relaxed),
             "uptime_secs": self.start_time.elapsed().as_secs(),
+            "rate_limit": {
+                "global_rate": self.rate_limiter.global_rate(),
+                "global_capacity": self.rate_limiter.global_capacity(),
+                "per_agent_rate": self.rate_limiter.per_agent_rate(),
+                "per_agent_capacity": self.rate_limiter.per_agent_capacity(),
+            },
         })
     }
 
