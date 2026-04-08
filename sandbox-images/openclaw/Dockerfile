@@ -32,6 +32,15 @@ ARG OPENCLAW_VERSION=latest
 ARG OPENCLAW_CACHE_BUST=0
 RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
 
+# OpenClaw ≥2026.4 hoists Telegram bundle chunks to dist/ but grammy lives in
+# extensions/telegram/node_modules/. Symlink so the top-level require resolves.
+RUN TGMOD="/usr/local/lib/node_modules/openclaw/dist/extensions/telegram/node_modules" && \
+    TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
+    if [ -d "$TGMOD/grammy" ] && [ ! -d "$TOPMOD/grammy" ]; then \
+      ln -s "$TGMOD/grammy" "$TOPMOD/grammy" && \
+      ln -s "$TGMOD/@grammyjs" "$TOPMOD/@grammyjs" 2>/dev/null || true; \
+    fi
+
 # Patch vulnerable transitive npm deps (tar, minimatch, glob, brace-expansion)
 # without waiting for upstream OpenClaw to update them.
 RUN cd /usr/local/lib/node_modules && npm audit fix --force 2>/dev/null || true
