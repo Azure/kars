@@ -20,7 +20,7 @@ use azureclaw_inference_router::budget::TokenBudgetTracker;
 use azureclaw_inference_router::config::Config;
 use azureclaw_inference_router::governance::Governance;
 use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
-use azureclaw_inference_router::routes::{AppState, sensitive_agt_routes, mesh_routes};
+use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -643,19 +643,17 @@ async fn trust_update_then_delete_cleans_up() {
 
     // Verify it exists
     let (_, body) = get(&app, "/agt/trust").await;
-    assert!(body["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|a| a["agent_id"] == "temp-peer"));
+    assert!(
+        body["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["agent_id"] == "temp-peer")
+    );
 
     // Delete it
-    let (s, body) = delete_with_headers(
-        &app,
-        "/agt/trust/temp-peer",
-        &[("x-azureclaw-admin", "tk")],
-    )
-    .await;
+    let (s, body) =
+        delete_with_headers(&app, "/agt/trust/temp-peer", &[("x-azureclaw-admin", "tk")]).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["deleted"], true);
 }

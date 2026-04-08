@@ -5,16 +5,16 @@
 //! route handlers call these functions directly instead of forwarding HTTP
 //! to a separate service.
 
+use agentmesh::AuditLogger;
 use agentmesh::identity::AgentIdentity;
 use agentmesh::policy::PolicyEngine;
 use agentmesh::trust::{TrustConfig, TrustManager};
 use agentmesh::types::PolicyDecision;
-use agentmesh::AuditLogger;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::metrics;
@@ -174,9 +174,7 @@ impl BehaviorMonitor {
 
     pub fn record(&self, agent_id: &str, success: bool) -> bool {
         let mut state = self.state.lock().unwrap();
-        let entry = state
-            .entry(agent_id.to_string())
-            .or_default();
+        let entry = state.entry(agent_id.to_string()).or_default();
 
         // Reset window every 60 seconds
         if entry.window_start.elapsed() > Duration::from_secs(60) {
@@ -290,7 +288,10 @@ impl Governance {
     pub fn load_policies_from_dir(&self, dir: &str) -> Result<usize, String> {
         let path = Path::new(dir);
         if !path.is_dir() {
-            tracing::debug!(dir, "Policy directory not found — starting with empty policy");
+            tracing::debug!(
+                dir,
+                "Policy directory not found — starting with empty policy"
+            );
             return Ok(0);
         }
 
@@ -311,7 +312,8 @@ impl Governance {
                 }
             }
         }
-        self.policy_rule_count.store(total_rules as u64, Ordering::Relaxed);
+        self.policy_rule_count
+            .store(total_rules as u64, Ordering::Relaxed);
         metrics::AGT_POLICY_RULES.set(total_rules as i64);
         Ok(total_rules)
     }
@@ -366,17 +368,15 @@ impl Governance {
         // Rate limit check first
         if !self.rate_limiter.allow(agent_id) {
             self.metrics.rate_limits.fetch_add(1, Ordering::Relaxed);
-            self.audit.log(
-                agent_id,
-                action,
-                "denied",
-            );
+            self.audit.log(agent_id, action, "denied");
             self.behavior.record(agent_id, false);
             let elapsed = start.elapsed();
             self.metrics
                 .eval_latency_sum_us
                 .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
-            metrics::AGT_POLICY_EVALUATIONS.with_label_values(&["rate_limited"]).inc();
+            metrics::AGT_POLICY_EVALUATIONS
+                .with_label_values(&["rate_limited"])
+                .inc();
             metrics::AGT_EVAL_LATENCY.observe(elapsed.as_secs_f64());
             metrics::AGT_AUDIT_ENTRIES.set(self.audit.entries().len() as i64);
             return serde_json::json!({
@@ -394,21 +394,22 @@ impl Governance {
         // Evaluate through agentmesh PolicyEngine
         let decision = self.policy.evaluate(action, context.as_ref());
 
-        let (allowed, action_str, rule, reason): (bool, &str, Option<&str>, Option<&str>) = match &decision {
-            PolicyDecision::Allow => (true, "allow", None, None),
-            PolicyDecision::Deny(reason) => {
-                self.metrics.denials.fetch_add(1, Ordering::Relaxed);
-                (false, "deny", None, Some(reason.as_str()))
-            }
-            PolicyDecision::RequiresApproval(reason) => {
-                self.metrics.approvals.fetch_add(1, Ordering::Relaxed);
-                (false, "requires_approval", None, Some(reason.as_str()))
-            }
-            PolicyDecision::RateLimited { .. } => {
-                self.metrics.rate_limits.fetch_add(1, Ordering::Relaxed);
-                (false, "deny", None, Some("Policy rate limited"))
-            }
-        };
+        let (allowed, action_str, rule, reason): (bool, &str, Option<&str>, Option<&str>) =
+            match &decision {
+                PolicyDecision::Allow => (true, "allow", None, None),
+                PolicyDecision::Deny(reason) => {
+                    self.metrics.denials.fetch_add(1, Ordering::Relaxed);
+                    (false, "deny", None, Some(reason.as_str()))
+                }
+                PolicyDecision::RequiresApproval(reason) => {
+                    self.metrics.approvals.fetch_add(1, Ordering::Relaxed);
+                    (false, "requires_approval", None, Some(reason.as_str()))
+                }
+                PolicyDecision::RateLimited { .. } => {
+                    self.metrics.rate_limits.fetch_add(1, Ordering::Relaxed);
+                    (false, "deny", None, Some("Policy rate limited"))
+                }
+            };
 
         let outcome = if allowed { "allow" } else { "deny" };
         self.audit.log(agent_id, action, outcome);
@@ -425,7 +426,9 @@ impl Governance {
             .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
 
         // Prometheus
-        metrics::AGT_POLICY_EVALUATIONS.with_label_values(&[action_str]).inc();
+        metrics::AGT_POLICY_EVALUATIONS
+            .with_label_values(&[action_str])
+            .inc();
         metrics::AGT_EVAL_LATENCY.observe(elapsed.as_secs_f64());
         metrics::AGT_AUDIT_ENTRIES.set(self.audit.entries().len() as i64);
 
@@ -440,7 +443,10 @@ impl Governance {
     }
 
     /// Build structured context from an action string (matches server.py).
-    fn build_context(action: &str, extra: Option<&Value>) -> Option<HashMap<String, serde_yaml::Value>> {
+    fn build_context(
+        action: &str,
+        extra: Option<&Value>,
+    ) -> Option<HashMap<String, serde_yaml::Value>> {
         let parts: Vec<&str> = action.splitn(2, ':').collect();
         let category = parts.first().copied().unwrap_or("unknown");
         let detail = parts.get(1).copied().unwrap_or("");
@@ -509,11 +515,8 @@ impl Governance {
         self.trust.set_trust(agent_id, clamped);
         metrics::AGT_KNOWN_AGENTS.set(self.trust.all_agents().len() as i64);
 
-        self.audit.log(
-            agent_id,
-            &format!("trust_update:{}", agent_id),
-            "success",
-        );
+        self.audit
+            .log(agent_id, &format!("trust_update:{}", agent_id), "success");
 
         Ok(serde_json::json!({
             "ok": true,
@@ -583,7 +586,9 @@ impl Governance {
             metrics::AGT_CONTENT_FLAGS.with_label_values(&[cat]).inc();
         }
         if filtered.is_empty() && detected.is_empty() {
-            metrics::AGT_CONTENT_FLAGS.with_label_values(&["unknown"]).inc();
+            metrics::AGT_CONTENT_FLAGS
+                .with_label_values(&["unknown"])
+                .inc();
         }
 
         let flag_summary: String = filtered
@@ -782,8 +787,7 @@ mod tests {
     fn build_context_parses_action_string() {
         let ctx = Governance::build_context("shell:ls -la /tmp", None).unwrap();
         let action = ctx.get("action").unwrap();
-        let action_map: serde_json::Value =
-            serde_yaml::from_value(action.clone()).unwrap();
+        let action_map: serde_json::Value = serde_yaml::from_value(action.clone()).unwrap();
         assert_eq!(action_map["category"], "shell");
         assert_eq!(action_map["detail"], "ls -la /tmp");
         assert_eq!(action_map["command"], "ls");
@@ -823,11 +827,19 @@ mod tests {
         // New agent: cap at 500 absolute (original semantics)
         let _ = gov.update_trust("other-agent", 1000, 0);
         let score = gov.trust.get_trust_score("other-agent");
-        assert!(score.score <= 500, "New agent score {} should be capped at 500", score.score);
+        assert!(
+            score.score <= 500,
+            "New agent score {} should be capped at 500",
+            score.score
+        );
         // Second update: existing agent, delta capped at ±200
         let _ = gov.update_trust("other-agent", 1000, 0);
         let score2 = gov.trust.get_trust_score("other-agent");
-        assert!(score2.score <= 700, "Score {} should be capped at 700 (500 + 200)", score2.score);
+        assert!(
+            score2.score <= 700,
+            "Score {} should be capped at 700 (500 + 200)",
+            score2.score
+        );
     }
 
     #[test]
@@ -856,7 +868,12 @@ mod tests {
         assert_eq!(status["governance_mode"], "native");
         assert_eq!(status["sandbox"], "test-sandbox");
         assert_eq!(status["policy_evaluations"], 1);
-        assert!(status["agent_did"].as_str().unwrap().starts_with("did:agentmesh:"));
+        assert!(
+            status["agent_did"]
+                .as_str()
+                .unwrap()
+                .starts_with("did:agentmesh:")
+        );
     }
 
     #[test]

@@ -66,7 +66,9 @@ impl AppState {
         if let Some(ref dir) = policy_dir {
             match governance.load_policies_from_dir(dir) {
                 Ok(count) => tracing::info!(dir, count, "AGT governance: loaded policy rules"),
-                Err(e) => tracing::warn!(dir, error = %e, "AGT governance: failed to load policies"),
+                Err(e) => {
+                    tracing::warn!(dir, error = %e, "AGT governance: failed to load policies")
+                }
             }
         }
 
@@ -327,7 +329,10 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/evaluate", post(agt_evaluate))
         // Trust management
         .route("/agt/trust", get(agt_trust_list))
-        .route("/agt/trust/{agent_id}", get(agt_trust_get).delete(agt_trust_delete))
+        .route(
+            "/agt/trust/{agent_id}",
+            get(agt_trust_get).delete(agt_trust_delete),
+        )
         // Audit log
         .route("/agt/audit", get(agt_audit))
         .route("/agt/audit/verify", get(agt_audit_verify))
@@ -401,7 +406,10 @@ async fn chat_completions(
             .unwrap_or_default();
         let action = format!("inference:chat_completions:{}", model);
         let result = state.governance.evaluate(sandbox_name, &action, None);
-        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let allowed = result
+            .get("allowed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let decision = result
             .get("decision")
             .and_then(|d| d.as_str())
@@ -705,7 +713,8 @@ async fn chat_completions(
                                     let gov = governance_for_stream.clone();
                                     let sb = sandbox_for_flags.clone();
                                     tokio::spawn(async move {
-                                        safety::report_content_flags_to_agt(&gov, &sb, &flags).await;
+                                        safety::report_content_flags_to_agt(&gov, &sb, &flags)
+                                            .await;
                                     });
                                 }
                             }
@@ -856,8 +865,7 @@ async fn chat_completions(
                             let gov = state.governance.clone();
                             let sandbox = sandbox_name.to_string();
                             tokio::spawn(async move {
-                                safety::report_content_flags_to_agt(&gov, &sandbox, &flags)
-                                    .await;
+                                safety::report_content_flags_to_agt(&gov, &sandbox, &flags).await;
                             });
                         }
 
@@ -874,9 +882,15 @@ async fn chat_completions(
                             let gov = state.governance.clone();
                             let sandbox = sandbox_name.to_string();
                             tokio::spawn(async move {
-                                let action = format!("output:{}", &response_text[..response_text.len().min(200)]);
+                                let action = format!(
+                                    "output:{}",
+                                    &response_text[..response_text.len().min(200)]
+                                );
                                 let result = gov.evaluate(&sandbox, &action, None);
-                                let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+                                let allowed = result
+                                    .get("allowed")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
                                 if !allowed {
                                     let reason = result
                                         .get("reason")
@@ -972,7 +986,10 @@ async fn responses(
             .unwrap_or_default();
         let action = format!("inference:responses:{}", model);
         let result = state.governance.evaluate(sandbox_name, &action, None);
-        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let allowed = result
+            .get("allowed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         if !allowed {
             let reason = result
                 .get("reason")
@@ -1106,7 +1123,10 @@ async fn images_generations(
     {
         let action = format!("image_generation:{}", deployment);
         let result = state.governance.evaluate(sandbox_name, &action, None);
-        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let allowed = result
+            .get("allowed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         if !allowed {
             let reason = result
                 .get("reason")
@@ -1648,7 +1668,10 @@ async fn agt_trust_delete(
         match provided {
             Some(tok) if tok == expected.as_str() => {}
             _ => {
-                tracing::warn!("DELETE /agt/trust/{} denied: missing or invalid admin token", agent_id);
+                tracing::warn!(
+                    "DELETE /agt/trust/{} denied: missing or invalid admin token",
+                    agent_id
+                );
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({"error": "Admin token required for trust mutations"})),
@@ -1771,10 +1794,7 @@ async fn agt_trust_update(
         .get("agent_id")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let score = body
-        .get("score")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(500) as u32;
+    let score = body.get("score").and_then(|v| v.as_u64()).unwrap_or(500) as u32;
     let interactions = body
         .get("interactions")
         .and_then(|v| v.as_u64())
@@ -1878,10 +1898,7 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 /// GET /agt/relay — WebSocket proxy to the self-hosted AgentMesh relay.
 /// The plugin (UID 1000) can only reach localhost. The router (UID 1001) proxies
 /// WebSocket connections to the relay at agentmesh-relay.agentmesh.svc.cluster.local:8765.
-async fn agt_relay_proxy(
-    State(state): State<AppState>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn agt_relay_proxy(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     let relay_url = std::env::var("AGT_RELAY_URL")
         .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
 
@@ -1892,7 +1909,11 @@ async fn agt_relay_proxy(
 }
 
 /// Bidirectional WebSocket bridge: client ↔ relay.
-async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str, mesh_metrics: &std::sync::Arc<MeshMetrics>) {
+async fn relay_websocket_bridge(
+    mut client_socket: WebSocket,
+    relay_url: &str,
+    mesh_metrics: &std::sync::Arc<MeshMetrics>,
+) {
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2021,7 +2042,9 @@ async fn relay_websocket_bridge(mut client_socket: WebSocket, relay_url: &str, m
             };
             in_count.fetch_add(1, Ordering::Relaxed);
             in_bytes.fetch_add(size as u64, Ordering::Relaxed);
-            recv_metrics.messages_received.fetch_add(1, Ordering::Relaxed);
+            recv_metrics
+                .messages_received
+                .fetch_add(1, Ordering::Relaxed);
             // Hex-dump first 128 bytes of each inbound frame for traffic capture.
             let raw_bytes: Vec<u8> = match &msg {
                 tungstenite::Message::Text(t) => t.as_bytes().to_vec(),
@@ -2582,7 +2605,10 @@ async fn sandbox_spawn(
     {
         let action = format!("spawn:create:{}", req.name);
         let result = state.governance.evaluate(&parent_name, &action, None);
-        let allowed = result.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let allowed = result
+            .get("allowed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         if !allowed {
             let reason = result
                 .get("reason")
@@ -2591,8 +2617,11 @@ async fn sandbox_spawn(
             tracing::warn!(parent = %parent_name, child = %req.name, %reason, "AGT policy DENIED spawn");
             return (
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": format!("Spawn blocked by policy: {}", reason) })),
-            ).into_response();
+                Json(
+                    serde_json::json!({ "error": format!("Spawn blocked by policy: {}", reason) }),
+                ),
+            )
+                .into_response();
         }
     }
 

@@ -64,23 +64,19 @@ pub static AGT_EVAL_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
 
 /// Number of known agents in the trust store.
 pub static AGT_KNOWN_AGENTS: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        opts!(
-            "azureclaw_agt_known_agents",
-            "Number of agents in the trust store"
-        )
-    )
+    register_int_gauge!(opts!(
+        "azureclaw_agt_known_agents",
+        "Number of agents in the trust store"
+    ))
     .unwrap()
 });
 
 /// Total AGT audit log entries.
 pub static AGT_AUDIT_ENTRIES: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        opts!(
-            "azureclaw_agt_audit_entries_total",
-            "Total AGT audit log entries"
-        )
-    )
+    register_int_gauge!(opts!(
+        "azureclaw_agt_audit_entries_total",
+        "Total AGT audit log entries"
+    ))
     .unwrap()
 });
 
@@ -98,22 +94,18 @@ pub static AGT_CONTENT_FLAGS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 
 /// Total behavior anomaly alerts.
 pub static AGT_BEHAVIOR_ALERTS: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        opts!(
-            "azureclaw_agt_behavior_alerts_total",
-            "Cumulative behavior anomaly alerts"
-        )
-    )
+    register_int_gauge!(opts!(
+        "azureclaw_agt_behavior_alerts_total",
+        "Cumulative behavior anomaly alerts"
+    ))
     .unwrap()
 });
 
 /// Number of loaded policy rules.
 pub static AGT_POLICY_RULES: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        opts!(
-            "azureclaw_agt_policy_rules",
-            "Number of loaded AGT policy rules"
-        )
-    )
+    register_int_gauge!(opts!(
+        "azureclaw_agt_policy_rules",
+        "Number of loaded AGT policy rules"
+    ))
     .unwrap()
 });
