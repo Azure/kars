@@ -1456,8 +1456,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     // Visual width of a string, counting emoji (surrogate pairs) as 2 cells
     function visualLen(s: string): number {
+      const plain = s.replace(/\{[^}]+\}/g, "");
       let w = 0;
-      for (const ch of s) {
+      for (const ch of plain) {
         w += ch.codePointAt(0)! > 0xFFFF ? 2 : 1;
       }
       return w;
@@ -1469,10 +1470,17 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       if (vw <= w) return s + " ".repeat(w - vw);
       let used = 0;
       let result = "";
-      for (const ch of s) {
-        const cw = ch.codePointAt(0)! > 0xFFFF ? 2 : 1;
+      let i = 0;
+      while (i < s.length) {
+        if (s[i] === "{") {
+          const end = s.indexOf("}", i);
+          if (end !== -1) { result += s.slice(i, end + 1); i = end + 1; continue; }
+        }
+        const cp = s.codePointAt(i)!;
+        const cw = cp > 0xFFFF ? 2 : 1;
         if (used + cw > w - 1) break;
-        result += ch;
+        result += String.fromCodePoint(cp);
+        i += cp > 0xFFFF ? 2 : 1;
         used += cw;
       }
       return result + "…" + " ".repeat(Math.max(0, w - used - 1));
@@ -1492,8 +1500,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     for (const p of parents) {
       const sec = securityStates.get(p.name);
       const icon = statusIcon(p.health);
-      const mode = sec?.egressMode === "enforcing" ? "🔒 enforce" :
-                   sec?.egressMode === "learning" ? "📖 learn" : "";
+      const mode = sec?.egressMode === "enforcing" ? "{green-fg}enforce{/}" :
+                   sec?.egressMode === "learning" ? "{yellow-fg}learn{/}" : "";
       const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
       const peerCount = sec?.agtTrustScores.filter((t) => t.agent !== p.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)).length || 0;
 
@@ -1942,6 +1950,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   // ── Keyboard ──────────────────────────────────────────────────────
 
   screen.key(["q", "escape"], () => {
+    if (dialogOpen) return;
     if (agtOverlayOpen) {
       (agtOverlay as any).hide();
       agtOverlayOpen = false;
@@ -2063,26 +2072,37 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       await refresh();
     } else if (mode === "enforcing") {
       dialogOpen = true;
-      const confirmBox = blessed.question({
+      const confirmBox = blessed.box({
         parent: screen,
         border: { type: "line" },
-        height: "shrink",
+        height: 5,
         width: "half",
         top: "center",
         left: "center",
         tags: true,
+        content: `{bold}Switch ${sb.name} to learning mode?{/}\n\n  {green-fg}[y]{/} Yes   {gray-fg}[esc]{/} Cancel`,
         style: { border: { fg: "yellow" }, fg: "white" },
       });
-      confirmBox.ask(`Switch ${sb.name} to learning mode?`, async (err: any, value: string) => {
+      screen.render();
+
+      const yesHandler = async () => {
+        screen.unkey("y", yesHandler);
+        screen.unkey("escape", cancelHandler);
+        (confirmBox as any).destroy();
+        await learnEgress(sb);
+        await refresh();
+        dialogOpen = false;
+        screen.render();
+      };
+      const cancelHandler = () => {
+        screen.unkey("y", yesHandler);
+        screen.unkey("escape", cancelHandler);
         (confirmBox as any).destroy();
         dialogOpen = false;
-        if (!err && value) {
-          await learnEgress(sb);
-          await refresh();
-        }
         screen.render();
-      });
-      screen.render();
+      };
+      screen.key(["y"], yesHandler);
+      screen.key(["escape"], cancelHandler);
     }
   });
 
