@@ -498,21 +498,20 @@ impl Governance {
         let old_score = existing.score;
         let is_new = existing.interactions == 0;
 
-        // Clamp delta: ±200 per update, max 500 absolute for first interaction.
-        // Original governance used initial_score=0 for unknown; Rust SDK uses initial_score=500.
-        // Preserve original semantics: new agents can reach at most 500, existing ±200.
-        const MAX_DELTA: u32 = 200;
-        let clamped = if is_new {
-            // New agent: cap at 500 absolute (original governance behavior)
-            requested_score.min(500).min(1000)
-        } else if requested_score > old_score {
-            (old_score + MAX_DELTA).min(requested_score).min(1000)
+        if is_new {
+            // Bootstrap: set initial score (capped at 500) then record first interaction.
+            let initial = requested_score.min(500);
+            self.trust.set_trust(agent_id, initial);
+            self.trust.record_success(agent_id);
+        } else if requested_score >= old_score {
+            // Positive interaction — use SDK's built-in reward + decay + interaction bump.
+            self.trust.record_success(agent_id);
         } else {
-            old_score.saturating_sub(MAX_DELTA).max(requested_score)
-        };
-        let clamped = clamped.min(1000);
+            // Negative interaction — use SDK's built-in penalty + decay + interaction bump.
+            self.trust.record_failure(agent_id);
+        }
 
-        self.trust.set_trust(agent_id, clamped);
+        let updated = self.trust.get_trust_score(agent_id);
         metrics::AGT_KNOWN_AGENTS.set(self.trust.all_agents().len() as i64);
 
         self.audit
@@ -521,7 +520,8 @@ impl Governance {
         Ok(serde_json::json!({
             "ok": true,
             "agent_id": agent_id,
-            "score": clamped,
+            "score": updated.score,
+            "interactions": updated.interactions,
         }))
     }
 
@@ -824,21 +824,33 @@ mod tests {
     #[test]
     fn governance_trust_clamping_caps_delta() {
         let gov = Governance::new("test-sandbox");
-        // New agent: cap at 500 absolute (original semantics)
-        let _ = gov.update_trust("other-agent", 1000, 0);
-        let score = gov.trust.get_trust_score("other-agent");
+        let peer = format!("clamp-test-{}", std::process::id());
+        // New agent: bootstrap at 500, then record_success adds reward (10) → ~510
+        let result = gov.update_trust(&peer, 1000, 0);
+        assert!(result.is_ok());
+        let score = gov.trust.get_trust_score(&peer);
         assert!(
-            score.score <= 500,
-            "New agent score {} should be capped at 500",
+            score.interactions >= 1,
+            "First update should record at least one interaction (got {})",
+            score.interactions,
+        );
+        assert!(
+            score.score <= 520,
+            "New agent score {} should be bootstrapped near 500 + reward",
             score.score
         );
-        // Second update: existing agent, delta capped at ±200
-        let _ = gov.update_trust("other-agent", 1000, 0);
-        let score2 = gov.trust.get_trust_score("other-agent");
+        let prev = score.score;
+        // Second update (positive): record_success adds another reward
+        let _ = gov.update_trust(&peer, 1000, 0);
+        let score2 = gov.trust.get_trust_score(&peer);
         assert!(
-            score2.score <= 700,
-            "Score {} should be capped at 700 (500 + 200)",
-            score2.score
+            score2.interactions > score.interactions,
+            "Second update should bump interactions",
+        );
+        assert!(
+            score2.score > prev,
+            "Score {} should increase after positive interaction (was {})",
+            score2.score, prev
         );
     }
 
