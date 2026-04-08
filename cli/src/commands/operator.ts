@@ -1129,6 +1129,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         "curl", "-s", "-X", "POST",
         "http://localhost:8443/egress/enforce",
       ], kubeContext), { stdio: "pipe" });
+      // Persist to CRD so the controller preserves the mode across restarts
+      await execa("kubectl", kctl([
+        "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
+        "--type", "merge", "-p",
+        JSON.stringify({ spec: { networkPolicy: { learnEgress: false } } }),
+      ], kubeContext), { stdio: "pipe" }).catch(() => {});
       activityLog.log(`{green-fg}🔒 Enforced{/} ${sb.name}`);
     } catch (e: any) {
       activityLog.log(`{red-fg}✗ Enforce fail:{/} ${e.message?.substring(0, 50)}`);
@@ -1144,6 +1150,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         "curl", "-s", "-X", "POST",
         "http://localhost:8443/egress/learn",
       ], kubeContext), { stdio: "pipe" });
+      // Persist to CRD so the controller preserves the mode across restarts
+      await execa("kubectl", kctl([
+        "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
+        "--type", "merge", "-p",
+        JSON.stringify({ spec: { networkPolicy: { learnEgress: true } } }),
+      ], kubeContext), { stdio: "pipe" }).catch(() => {});
       activityLog.log(`{yellow-fg}📖 Learning{/} ${sb.name}`);
     } catch (e: any) {
       activityLog.log(`{red-fg}✗ Learn fail:{/} ${e.message?.substring(0, 50)}`);
