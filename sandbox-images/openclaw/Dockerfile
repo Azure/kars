@@ -153,7 +153,7 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
-    curl -fsSL "https://github.com/cli/cli/releases/download/v2.88.1/gh_2.88.1_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v2.89.0/gh_2.89.0_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
     tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/gh.tar.gz
 
@@ -166,7 +166,7 @@ RUN RG_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64-
 
 # Install 1Password CLI (enables 1password skill)
 RUN OP_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
-    OP_VER="2.30.3" && \
+    OP_VER="2.33.1" && \
     curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VER}/op_linux_${OP_ARCH}_v${OP_VER}.zip" -o /tmp/op.zip && \
     unzip -qo /tmp/op.zip -d /usr/local/bin/ && \
     rm /tmp/op.zip

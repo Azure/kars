@@ -154,7 +154,7 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
       req.end();
     });
   } catch (e: any) {
-    console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}: ${e.message}`);
+    console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}`);
   }
 }
 

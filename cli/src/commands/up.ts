@@ -4,6 +4,15 @@ import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { saveContext, loadContext } from "../config.js";
 
+function isValidAzureHost(url: string, expectedSuffix: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === expectedSuffix || parsed.hostname.endsWith(`.${expectedSuffix}`);
+  } catch {
+    return false;
+  }
+}
+
 export function upCommand(): Command {
   const cmd = new Command("up");
 
@@ -447,7 +456,7 @@ export function upCommand(): Command {
               message: "Foundry project endpoint (e.g. https://<name>.services.ai.azure.com/api/projects/<project>):",
               validate: (input: string) => {
                 if (!input.startsWith("https://")) return "Must be an https:// URL";
-                if (!input.includes("services.ai.azure.com")) return "Expected services.ai.azure.com URL. For openai.azure.com, choose 'Azure OpenAI endpoint only'.";
+                if (!isValidAzureHost(input, "services.ai.azure.com")) return "Expected services.ai.azure.com URL. For openai.azure.com, choose 'Azure OpenAI endpoint only'.";
                 return true;
               },
             }]);
@@ -465,7 +474,7 @@ export function upCommand(): Command {
               message: "Azure OpenAI endpoint (*.openai.azure.com):",
               validate: (input: string) => {
                 if (!input.startsWith("https://")) return "Must be an https:// URL";
-                if (!input.includes("openai.azure.com")) return "Expected openai.azure.com URL. For Foundry, choose the Foundry option.";
+                if (!isValidAzureHost(input, "openai.azure.com")) return "Expected openai.azure.com URL. For Foundry, choose the Foundry option.";
                 return true;
               },
             }]);
@@ -531,7 +540,7 @@ export function upCommand(): Command {
         };
         checkLine(true, `Region — ${options.region}`);
         checkLine(true, `Isolation — ${isolationLabels[options.isolation] || options.isolation}`);
-        if (options.foundryEndpoint && options.foundryEndpoint.includes("services.ai.azure.com")) {
+        if (options.foundryEndpoint && isValidAzureHost(options.foundryEndpoint, "services.ai.azure.com")) {
           checkLine(true, `Foundry — ${options.foundryEndpoint}`);
           if (options.openaiEndpoint) {
             checkLine(true, `OpenAI — ${options.openaiEndpoint} (derived)`);
@@ -1123,7 +1132,7 @@ export function upCommand(): Command {
         if (foundryEndpoint) {
           helmArgs.push("--set", `foundry.endpoint=${foundryEndpoint}`);
           // If the endpoint is a Foundry project URL, also set it as the project endpoint
-          if (foundryEndpoint.includes("services.ai.azure.com") && foundryEndpoint.includes("/api/projects/")) {
+          if (isValidAzureHost(foundryEndpoint, "services.ai.azure.com") && foundryEndpoint.includes("/api/projects/")) {
             helmArgs.push("--set", `foundry.projectEndpoint=${foundryEndpoint}`);
           }
           if (imdsClientId) {
