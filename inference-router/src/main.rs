@@ -22,18 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-mod auth;
-mod blocklist;
-mod budget;
-mod config;
-mod forward_proxy;
-mod governance;
-mod mesh;
-mod metrics;
-mod proxy;
-mod routes;
-mod safety;
-mod spawn;
+use azureclaw_inference_router::{config, forward_proxy, governance, routes};
 
 use anyhow::Result;
 use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};

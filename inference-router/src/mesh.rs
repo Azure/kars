@@ -23,6 +23,12 @@ pub struct MeshInbox {
     messages: RwLock<Vec<MeshMessage>>,
 }
 
+impl Default for MeshInbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MeshInbox {
     pub fn new() -> Self {
         Self {
@@ -46,6 +52,12 @@ pub struct MeshMetrics {
     pub messages_sent: AtomicU64,
     pub messages_received: AtomicU64,
     pub trust_updates: AtomicU64,
+}
+
+impl Default for MeshMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MeshMetrics {

@@ -280,6 +280,11 @@ impl Blocklist {
         self.domains.read().await.len()
     }
 
+    /// Returns true if the blocklist has no entries.
+    pub async fn is_empty(&self) -> bool {
+        self.domains.read().await.is_empty()
+    }
+
     /// Enable or disable learn mode at runtime.
     pub fn set_learn_mode(&self, enabled: bool) {
         self.learn_mode.store(enabled, Ordering::Relaxed);

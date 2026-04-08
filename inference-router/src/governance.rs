@@ -33,6 +33,12 @@ pub struct GovernanceMetrics {
     pub behavior_alerts: AtomicU64,
 }
 
+impl Default for GovernanceMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GovernanceMetrics {
     pub fn new() -> Self {
         Self {
