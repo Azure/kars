@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::metrics;
+
 // ── Governance metrics ───────────────────────────────────────────────────────
 
 /// Counters tracked by the governance engine, exposed via `/agt/status`
@@ -304,11 +306,11 @@ impl Governance {
             }
         }
         self.policy_rule_count.store(total_rules as u64, Ordering::Relaxed);
+        metrics::AGT_POLICY_RULES.set(total_rules as i64);
         Ok(total_rules)
     }
 
     /// Reload policies from disk (for hot-reload).
-    #[allow(dead_code)] // Used by policy hot-reload (Phase 2)
     pub fn reload_policies(&self) {
         let dir = std::env::var("AGT_POLICY_DIR")
             .unwrap_or_else(|_| "/sandbox/.openclaw/policies".into());
@@ -316,6 +318,32 @@ impl Governance {
             Ok(count) => tracing::info!(rules = count, "Policy hot-reloaded"),
             Err(e) => tracing::warn!(error = %e, "Policy hot-reload failed"),
         }
+    }
+
+    /// Spawn a background task that watches AGT_POLICY_DIR for changes
+    /// and reloads policies when file mtimes change.
+    pub fn spawn_policy_watcher(governance: std::sync::Arc<Self>) {
+        let dir = std::env::var("AGT_POLICY_DIR")
+            .unwrap_or_else(|_| "/sandbox/.openclaw/policies".into());
+        let interval_secs: u64 = std::env::var("AGT_POLICY_WATCH_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+
+        tokio::spawn(async move {
+            let mut last_mtime = dir_max_mtime(&dir);
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await; // skip immediate tick
+            loop {
+                interval.tick().await;
+                let current = dir_max_mtime(&dir);
+                if current != last_mtime {
+                    tracing::info!("Policy directory changed, reloading");
+                    governance.reload_policies();
+                    last_mtime = current;
+                }
+            }
+        });
     }
 
     // ── Evaluate ─────────────────────────────────────────────────────────
@@ -338,10 +366,13 @@ impl Governance {
                 "denied",
             );
             self.behavior.record(agent_id, false);
-            let elapsed = start.elapsed().as_micros() as u64;
+            let elapsed = start.elapsed();
             self.metrics
                 .eval_latency_sum_us
-                .fetch_add(elapsed, Ordering::Relaxed);
+                .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
+            metrics::AGT_POLICY_EVALUATIONS.with_label_values(&["rate_limited"]).inc();
+            metrics::AGT_EVAL_LATENCY.observe(elapsed.as_secs_f64());
+            metrics::AGT_AUDIT_ENTRIES.set(self.audit.entries().len() as i64);
             return serde_json::json!({
                 "allowed": false,
                 "action": "deny",
@@ -379,12 +410,18 @@ impl Governance {
         let is_anomaly = self.behavior.record(agent_id, allowed);
         if is_anomaly {
             self.metrics.behavior_alerts.fetch_add(1, Ordering::Relaxed);
+            metrics::AGT_BEHAVIOR_ALERTS.set(self.behavior.alert_count() as i64);
         }
 
-        let elapsed = start.elapsed().as_micros() as u64;
+        let elapsed = start.elapsed();
         self.metrics
             .eval_latency_sum_us
-            .fetch_add(elapsed, Ordering::Relaxed);
+            .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
+
+        // Prometheus
+        metrics::AGT_POLICY_EVALUATIONS.with_label_values(&[action_str]).inc();
+        metrics::AGT_EVAL_LATENCY.observe(elapsed.as_secs_f64());
+        metrics::AGT_AUDIT_ENTRIES.set(self.audit.entries().len() as i64);
 
         serde_json::json!({
             "allowed": allowed,
@@ -464,6 +501,7 @@ impl Governance {
         let clamped = clamped.min(1000);
 
         self.trust.set_trust(agent_id, clamped);
+        metrics::AGT_KNOWN_AGENTS.set(self.trust.all_agents().len() as i64);
 
         self.audit.log(
             agent_id,
@@ -513,6 +551,7 @@ impl Governance {
     pub fn delete_trust(&self, agent_id: &str) -> Value {
         self.trust.set_trust(agent_id, 0);
         self.audit.log(agent_id, "trust_delete", "success");
+        metrics::AGT_KNOWN_AGENTS.set(self.trust.all_agents().len() as i64);
         serde_json::json!({
             "ok": true,
             "agent_id": agent_id,
@@ -532,6 +571,14 @@ impl Governance {
         penalty: i32,
     ) -> Value {
         self.metrics.content_flags.fetch_add(1, Ordering::Relaxed);
+
+        // Prometheus: increment per-category counters
+        for cat in filtered.iter().chain(detected.iter()) {
+            metrics::AGT_CONTENT_FLAGS.with_label_values(&[cat]).inc();
+        }
+        if filtered.is_empty() && detected.is_empty() {
+            metrics::AGT_CONTENT_FLAGS.with_label_values(&["unknown"]).inc();
+        }
 
         let flag_summary: String = filtered
             .iter()
@@ -645,6 +692,24 @@ impl Governance {
             "message": if valid { "Hash chain verified" } else { "Hash chain broken" },
         })
     }
+}
+
+/// Get the maximum mtime of YAML files in a directory (for change detection).
+fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
+    let path = Path::new(dir);
+    if !path.is_dir() {
+        return None;
+    }
+    std::fs::read_dir(path)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "yaml" || ext == "yml")
+        })
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
 }
 
 /// Convert trust score to tier label (matches Python sidecar _score_to_tier).

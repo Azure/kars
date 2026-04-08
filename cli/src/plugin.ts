@@ -917,7 +917,7 @@ async function processTaskWithTools(
                   ? JSON.stringify(messages.map((m: any) => ({ from: m.from_agent || m.sender, content: m.content || m.text, timestamp: m.timestamp })))
                   : "No pending messages";
               } else {
-                // Fallback: check via AGT inbox (pending messages stored by sidecar)
+                // Fallback: check via AGT inbox (pending messages stored by router)
                 const agtInbox = (globalThis as any).__agtInbox || [];
                 result = agtInbox.length > 0
                   ? JSON.stringify(agtInbox)
@@ -950,7 +950,7 @@ async function processTaskWithTools(
               });
               policyAllowed = policyResult.allowed !== false;
               policyReason = policyResult.reason || "";
-            } catch { /* sidecar unavailable — allow */ }
+            } catch { /* router unavailable — allow */ }
             if (!policyAllowed) {
               result = `Blocked by policy: ${policyReason || "denied"}`;
             } else {
@@ -1180,7 +1180,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       agtInbox.push(entry);
       log.info(`AGT relay message from ${sanitizeLog(fromName, 50)} (${fromAmid.slice(0, 12)}...): ${sanitizeLog(JSON.stringify(content), 200)}`);
 
-      // AGT policy gate — validate incoming mesh message via sidecar PolicyEngine.
+      // AGT policy gate — validate incoming mesh message via router PolicyEngine.
       // Checks trust score of sender against mesh-receive-untrusted rule.
       // Non-blocking: on error or timeout, fail-open (log and continue).
       // This runs AFTER E2E decryption (handled by SDK) — encryption is not affected.
@@ -1231,7 +1231,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           }
           log.info(`AGT policy allowed mesh:receive from ${fromName} (trust=${senderTrustScore})`);
         } catch (policyErr: any) {
-          // Fail-open: sidecar unreachable or error — log and continue processing
+          // Fail-open: router unreachable or error — log and continue processing
           log.warn(`AGT mesh policy check failed (proceeding): ${policyErr.message}`);
         }
       }
@@ -1280,7 +1280,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               });
             } catch { /* best effort */ }
           }
-        } catch { /* sidecar unavailable — allow (fail-open) */ }
+        } catch { /* router unavailable — allow (fail-open) */ }
 
         if (!taskAllowed) return;
 
@@ -2019,14 +2019,14 @@ const azureClawPlugin = definePluginEntry({
 
     // ── Periodic Foundry memory sync + AGT policy gate middleware ────
     // Wraps every tool's execute() to:
-    // 1. Forward action to AGT sidecar for policy evaluation BEFORE execution
+    // 1. Forward action to AGT router for policy evaluation BEFORE execution
     // 2. Track calls and periodically push activity summaries to Foundry memory
     // When Rust SDK ships, this will be a direct SDK call instead of HTTP.
     memorySyncToolCount = 0;
     memorySyncBuffer = [];
 
-    // Consecutive sidecar failure counter for fail-closed behavior
-    let sidecarFailCount = { value: 0 };
+    // Consecutive governance failure counter for fail-closed behavior
+    let govFailCount = { value: 0 };
     const FAIL_CLOSED_THRESHOLD = 3;
 
     async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
@@ -2057,33 +2057,33 @@ const azureClawPlugin = definePluginEntry({
             });
           });
           req.on("error", () => {
-            sidecarFailCount.value++;
-            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-              resolve({ allowed: false, reason: "AGT sidecar unreachable (fail-closed)" });
+            govFailCount.value++;
+            if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT governance unreachable (fail-closed)" });
             } else {
-              log.warn(`AGT sidecar unreachable (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              log.warn(`AGT governance unreachable (${govFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
               resolve({ allowed: true });
             }
           });
           req.on("timeout", () => {
             req.destroy();
-            sidecarFailCount.value++;
-            if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-              resolve({ allowed: false, reason: "AGT sidecar timeout (fail-closed)" });
+            govFailCount.value++;
+            if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+              resolve({ allowed: false, reason: "AGT governance timeout (fail-closed)" });
             } else {
-              log.warn(`AGT sidecar timeout (${sidecarFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
+              log.warn(`AGT governance timeout (${govFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
               resolve({ allowed: true });
             }
           });
           req.write(postData);
           req.end();
         });
-        if (result.allowed !== false) sidecarFailCount.value = 0; // reset on success
+        if (result.allowed !== false) govFailCount.value = 0; // reset on success
         return { allowed: result.allowed, rule: result.matched_rule, reason: result.reason };
       } catch {
-        sidecarFailCount.value++;
-        if (sidecarFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-          return { allowed: false, reason: "AGT sidecar error (fail-closed)" };
+        govFailCount.value++;
+        if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
+          return { allowed: false, reason: "AGT governance error (fail-closed)" };
         }
         return { allowed: true };
       }
@@ -2095,7 +2095,7 @@ const azureClawPlugin = definePluginEntry({
       _origRegisterTool({
         ...tool,
         execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => {
-          // AGT policy gate — forward to sidecar for evaluation
+          // AGT policy gate — forward to router for evaluation
           const decision = await evaluateAGTPolicy(tool.name, params);
           if (!decision.allowed) {
             const msg = `⛔ Blocked by AGT policy: rule "${decision.rule}" — ${decision.reason || "action denied"}`;

@@ -56,6 +56,9 @@ async fn main() -> Result<()> {
     let config = config::Config::from_env()?;
     let state = routes::AppState::new(&config).await?;
 
+    // Start policy hot-reload watcher (polls AGT_POLICY_DIR for mtime changes).
+    governance::Governance::spawn_policy_watcher(state.governance.clone());
+
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
 

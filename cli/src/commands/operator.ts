@@ -98,6 +98,15 @@ interface SecurityState {
   agtMeshReceived: number;
   agtTrustUpdates: number;
   agtTotalInteractions: number;
+  // Native governance stats (from /agt/status when governance_mode === "native")
+  agtGovernanceMode: string;     // "native" | "sidecar" | ""
+  agtPolicyEvaluations: number;
+  agtPolicyDenials: number;
+  agtPolicyRateLimits: number;
+  agtEvalLatencyUs: number;      // average eval latency in microseconds
+  agtBehaviorAlerts: number;
+  agtContentFlags: number;
+  agtPolicyRules: number;
   // Registry reputation (from agentmesh-registry)
   agtReputation: {
     score: number;       // 0.0–1.0 composite
@@ -669,6 +678,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       agtMeshReceived: 0,
       agtTrustUpdates: 0,
       agtTotalInteractions: 0,
+      agtGovernanceMode: "",
+      agtPolicyEvaluations: 0,
+      agtPolicyDenials: 0,
+      agtPolicyRateLimits: 0,
+      agtEvalLatencyUs: 0,
+      agtBehaviorAlerts: 0,
+      agtContentFlags: 0,
+      agtPolicyRules: 0,
       agtReputation: null,
       totalRequests: 0,
       errorRequests: 0,
@@ -765,6 +782,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         state.agtMeshReceived = agt.mesh_messages_received || 0;
         state.agtTrustUpdates = agt.trust_updates || 0;
         state.agtTotalInteractions = agt.total_interactions || 0;
+        // Native governance stats
+        state.agtGovernanceMode = agt.governance_mode || "";
+        state.agtPolicyEvaluations = agt.policy_evaluations || 0;
+        state.agtPolicyDenials = agt.policy_denials || 0;
+        state.agtPolicyRateLimits = agt.policy_rate_limits || 0;
+        state.agtEvalLatencyUs = agt.eval_latency_avg_us || 0;
+        state.agtBehaviorAlerts = agt.behavior_alerts || 0;
+        state.agtContentFlags = agt.content_flags || 0;
+        state.agtPolicyRules = agt.policy_rules || 0;
         // If no trust states but governance is enabled, show self
         if (state.agtEnabled && ts.length === 0) {
           const threshold = agt.trust_threshold ?? 500;
@@ -902,6 +928,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       existing.agtTotalInteractions = agt.total_interactions || 0;
       existing.agtAuditEntries = agt.audit_entries || 0;
       existing.agtAuditIntegrity = agt.audit_integrity ?? false;
+      existing.agtGovernanceMode = agt.governance_mode || existing.agtGovernanceMode;
+      existing.agtPolicyEvaluations = agt.policy_evaluations || 0;
+      existing.agtPolicyDenials = agt.policy_denials || 0;
+      existing.agtPolicyRateLimits = agt.policy_rate_limits || 0;
+      existing.agtEvalLatencyUs = agt.eval_latency_avg_us || 0;
+      existing.agtBehaviorAlerts = agt.behavior_alerts || 0;
+      existing.agtContentFlags = agt.content_flags || 0;
+      existing.agtPolicyRules = agt.policy_rules || existing.agtPolicyRules;
     } catch { /* non-fatal — full refresh on next TIER_DETAIL cycle */ }
   }
 
@@ -1298,10 +1332,19 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     ];
 
     if (sec.agtEnabled) {
+      const modeLabel = sec.agtGovernanceMode === "native"
+        ? "{green-fg}native{/}" : sec.agtGovernanceMode || "unknown";
+      const denyRate = sec.agtPolicyEvaluations > 0
+        ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
+        : "0%";
       lines.push(
         "",
-        `{bold}{underline}AGT{/}`,
-        ` ${ok(sec.agtEnabled)} enabled  │  see AGT panel →`,
+        `{bold}{underline}AGT Governance{/}`,
+        ` Mode       ${modeLabel}  ${sec.agtPolicyRules} rules`,
+        ` Evals      ${sec.agtPolicyEvaluations}  deny ${denyRate}  RL ${sec.agtPolicyRateLimits}`,
+        ` Latency    ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"}`,
+        ` Alerts     ${sec.agtBehaviorAlerts > 0 ? `{red-fg}${sec.agtBehaviorAlerts}{/}` : "0"}  flags ${sec.agtContentFlags}`,
+        ` {gray-fg}[g] full detail{/}`,
       );
     }
 
@@ -1320,10 +1363,27 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     const lines: string[] = [
       `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid}{/}` : ""),
+      ` Mode    ${sec.agtGovernanceMode === "native" ? "{green-fg}native{/}" : sec.agtGovernanceMode || "unknown"}  ${sec.agtPolicyRules} policy rules`,
       ` Chain   ${sec.agtAuditEntries} entries ${ok(sec.agtAuditIntegrity)} ${sec.agtAuditIntegrity ? "valid" : "BROKEN"}`,
       ` Agents  ${sec.agtRegistryAgents > 0 ? sec.agtRegistryAgents : activePeerCount} known`,
       ` Mesh    ${sec.agtMeshSessions} sessions  ↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}  ${sec.agtTrustUpdates} trust updates`,
     ];
+
+    // Native governance policy stats
+    if (sec.agtPolicyEvaluations > 0 || sec.agtGovernanceMode === "native") {
+      const denyRate = sec.agtPolicyEvaluations > 0
+        ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
+        : "0%";
+      lines.push(
+        "",
+        `{bold}Policy Engine{/}`,
+        ` Evaluations  ${sec.agtPolicyEvaluations}  deny ${denyRate}`,
+        ` Rate limits  ${sec.agtPolicyRateLimits}`,
+        ` Avg latency  ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"}`,
+        ` Behavior     ${sec.agtBehaviorAlerts > 0 ? `{red-fg}${sec.agtBehaviorAlerts} alerts{/}` : "0 alerts"}`,
+        ` Content      ${sec.agtContentFlags > 0 ? `{yellow-fg}${sec.agtContentFlags} flags{/}` : "0 flags"}`,
+      );
+    }
 
     if (sec.agtReputation) {
       const r = sec.agtReputation;
