@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT signing_public_key, tier::text as \"tier!\", created_at FROM agents WHERE amid = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "signing_public_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "tier!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "74b280bc2f74c39aefba2bcaf8dfc95b8e6e9f5d0cb5edbae84a0acdb5e1a9a9"
+}

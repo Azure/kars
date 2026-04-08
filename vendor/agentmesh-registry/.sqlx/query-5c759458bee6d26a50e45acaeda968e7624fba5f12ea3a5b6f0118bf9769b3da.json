@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, amid, reason, revoked_by, revoked_at, notes\n        FROM revocations\n        ORDER BY revoked_at DESC\n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "amid",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "reason",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "revoked_by",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "notes",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5c759458bee6d26a50e45acaeda968e7624fba5f12ea3a5b6f0118bf9769b3da"
+}

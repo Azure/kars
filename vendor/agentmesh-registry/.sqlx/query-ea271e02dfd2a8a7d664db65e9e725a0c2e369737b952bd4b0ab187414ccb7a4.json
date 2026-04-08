@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO revocations (id, amid, reason, revoked_by, revoked_at, notes)\n        VALUES ($1, $2, $3, $4, NOW(), $5)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ea271e02dfd2a8a7d664db65e9e725a0c2e369737b952bd4b0ab187414ccb7a4"
+}

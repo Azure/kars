@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, amid, reason, revoked_by, revoked_at, notes\n        FROM revocations\n        WHERE amid = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "amid",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "reason",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "revoked_by",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "notes",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "72af6a6f8c19f85d9bf1da72f0426aa8fbdf1b9265a52337cda5728e45090fce"
+}
