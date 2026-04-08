@@ -119,12 +119,6 @@ export function pushCommand(): Command {
       // Rollout restart if --apply
       if (options.apply) {
         const ns = "azureclaw-system";
-        const deploymentMap: Record<string, string> = {
-          controller: "azureclaw-controller",
-          router: "azureclaw-controller",   // router runs in sandbox pods
-          sandbox: "azureclaw-controller",   // controller manages sandbox pods
-        };
-
         // Restart controller (manages all sandbox pods)
         const spin = ora("Restarting deployments...").start();
         try {

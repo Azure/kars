@@ -4,7 +4,7 @@
  */
 
 import { Identity } from '../identity';
-import { NetworkError, ValidationError } from '../errors';
+
 
 /**
  * DHT node information.

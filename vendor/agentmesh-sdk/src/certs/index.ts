@@ -3,7 +3,7 @@
  * Handles X.509 certificate parsing, chain building, and validation.
  */
 
-import { CryptoError, ValidationError } from '../errors';
+import { ValidationError } from '../errors';
 
 /**
  * Parsed X.509 certificate.

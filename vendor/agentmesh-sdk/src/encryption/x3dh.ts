@@ -9,7 +9,7 @@ import {
   x25519DH,
   generateX25519Keypair,
   PrekeyBundle,
-  deserializePrekeyBundle,
+
 } from './prekey';
 
 /**

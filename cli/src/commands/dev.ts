@@ -462,7 +462,8 @@ export function devCommand(): Command {
               ], { stdio: "pipe" });
               routerHealthy = true;
             }
-            if (hasIptables && gatewayHealthy && routerHealthy) break;
+            // All three checks passed without throwing — we're ready
+            break;
           } catch {
             await new Promise(r => setTimeout(r, 1000));
           }

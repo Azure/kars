@@ -17,7 +17,6 @@ export function policyCommand(): Command {
     .action(async (name: string, host: string, options) => {
       const { execa } = await import("execa");
       const spinner = ora(`Allowing ${host}:${options.port} for '${name}'...`).start();
-      const namespace = `azureclaw-${name}`;
 
       try {
         // First get the current allowed endpoints
@@ -53,13 +52,12 @@ export function policyCommand(): Command {
     .argument("<name>", "Sandbox name")
     .action(async (name: string) => {
       const { execa } = await import("execa");
-      const namespace = `azureclaw-${name}`;
-
+      const ns = `azureclaw-${name}`;
       try {
         // Get NetworkPolicy from the sandbox namespace
         const { stdout } = await execa("kubectl", [
           "get", "networkpolicy", "sandbox-policy",
-          "-n", namespace,
+          "-n", ns,
           "-o", "json",
         ], { stdio: "pipe" });
 

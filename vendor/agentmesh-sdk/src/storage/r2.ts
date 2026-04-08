@@ -53,7 +53,7 @@ export class R2Storage implements Storage {
 
       const buffer = await object.arrayBuffer();
       return new Uint8Array(buffer);
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to get from R2: ${key}`, 'R2_GET_ERROR');
     }
   }
@@ -79,7 +79,7 @@ export class R2Storage implements Storage {
       }
 
       await this.bucket.put(key, value, putOptions);
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to put to R2: ${key}`, 'R2_PUT_ERROR');
     }
   }
@@ -87,7 +87,7 @@ export class R2Storage implements Storage {
   async delete(key: string): Promise<void> {
     try {
       await this.bucket.delete(key);
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to delete from R2: ${key}`, 'R2_DELETE_ERROR');
     }
   }
@@ -112,7 +112,7 @@ export class R2Storage implements Storage {
       } while (cursor);
 
       return keys.sort();
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to list R2: ${prefix}`, 'R2_LIST_ERROR');
     }
   }

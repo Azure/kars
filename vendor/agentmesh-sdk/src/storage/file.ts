@@ -67,7 +67,7 @@ export class FileStorage implements Storage {
     try {
       const data = await this.fs!.readFile(filePath);
       return new Uint8Array(data);
-    } catch (error) {
+    } catch {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return null;
       }
@@ -94,7 +94,7 @@ export class FileStorage implements Storage {
         };
         await this.fs!.writeFile(metaPath, JSON.stringify(metaData), { mode: 0o600 });
       }
-    } catch (error) {
+    } catch {
       throw new StorageError(`Failed to write file: ${key}`, 'WRITE_ERROR');
     }
   }
@@ -105,7 +105,7 @@ export class FileStorage implements Storage {
 
     try {
       await this.fs!.unlink(filePath);
-    } catch (error) {
+    } catch {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw new StorageError(`Failed to delete file: ${key}`, 'DELETE_ERROR');
       }
@@ -140,7 +140,7 @@ export class FileStorage implements Storage {
       }
 
       return keys.sort();
-    } catch (error) {
+    } catch {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];
       }

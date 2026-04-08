@@ -45,7 +45,6 @@ export function upCommand(): Command {
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
-      const bold = chalk.bold;
       const { default: inquirer } = await import("inquirer");
       const { execa } = await import("execa");
       const ora = (await import("ora")).default;
@@ -373,7 +372,6 @@ export function upCommand(): Command {
       const userProvidedRegion = process.argv.includes("--region") || !!cachedCtx?.region;
       const userProvidedName = process.argv.includes("--name");
       const userProvidedIsolation = process.argv.includes("--isolation");
-      const userProvidedRg = process.argv.includes("-g") || process.argv.includes("--resource-group") || !!cachedCtx?.resourceGroup;
 
       if (!options.dryRun && (!userProvidedRegion || !userProvidedName || !userProvidedIsolation)) {
         console.log();
