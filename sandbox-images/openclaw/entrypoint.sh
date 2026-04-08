@@ -619,30 +619,13 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
     chmod 400 /tmp/.agt-admin-token
   fi
 
-  # ── AGT governance sidecar (dev mode) ─────────────────────────────────────
-  # In AKS, the controller injects this as a separate container (UID 1002).
-  # In dev mode, we start it here inside the sandbox container.
-  if [ "${AGT_GOVERNANCE_ENABLED:-false}" = "true" ] && [ -f /opt/agt-governance/server.py ]; then
-    rm -f /tmp/agt-governance.log
-    touch /tmp/agt-governance.log
-    mkdir -p /tmp/agt
-    if [ "$IS_ROOT" = "true" ]; then
-      # Dev mode: sidecar runs as UID 1001 (router) via $AS_ROUTER.
-      # AKS mode: sidecar runs in its own container as UID 1002.
-      chown 1001:1001 /tmp/agt-governance.log /tmp/agt
-      chmod 700 /tmp/agt
-    fi
-    AGT_POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
-    POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
-    AGT_PORT=8081 \
-    AGT_METRICS_PORT=9091 \
-    SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
-    AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
-    AGT_TRUST_DB="/tmp/agt/trust_scores.json" \
-    ADMIN_TOKEN="$ROUTER_ADMIN_TOKEN" \
-    $AS_ROUTER python3 /opt/agt-governance/server.py > /tmp/agt-governance.log 2>&1 &
-    AGT_PID=$!
-    echo "[azureclaw] AGT governance sidecar running (PID: $AGT_PID, port: 8081)"
+  # ── AGT governance (native in router) ─────────────────────────────────────
+  # The inference-router handles governance natively via the agentmesh crate.
+  # Ensure trust store directory exists for the router (UID 1001).
+  mkdir -p /tmp/agt
+  if [ "$IS_ROOT" = "true" ]; then
+    chown 1001:1001 /tmp/agt
+    chmod 700 /tmp/agt
   fi
 
   # Ensure router can write its log file (remove stale file from previous runs)
@@ -661,8 +644,9 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   CONTENT_SAFETY_ENABLED=true \
   AGT_RELAY_URL="${AGT_RELAY_URL:-}" \
   AGT_REGISTRY_URL="${AGT_REGISTRY_URL:-}" \
-  AGT_GOVERNANCE_ENABLED="${AGT_GOVERNANCE_ENABLED:-false}" \
-  AGT_SIDECAR_URL="http://127.0.0.1:8081" \
+  AGT_GOVERNANCE_ENABLED="${AGT_GOVERNANCE_ENABLED:-true}" \
+  AGT_POLICY_DIR="${AGT_POLICY_DIR:-/etc/agt/policies}" \
+  AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
   SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
   SANDBOX_ISOLATION="${SANDBOX_ISOLATION:-enhanced}" \
   AZURECLAW_DEV_MODE="${AZURECLAW_DEV_MODE:-}" \

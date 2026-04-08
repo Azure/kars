@@ -52,8 +52,6 @@ spec:
               value: {{ .Values.foundry.imdsClientId | default "" | quote }}
             - name: CONTENT_SAFETY_ENDPOINT
               value: {{ .Values.contentSafety.endpoint | default .Values.foundry.endpoint | default "" | quote }}
-            - name: AGT_SIDECAR_IMAGE
-              value: "{{ .Values.agtGovernance.image.repository }}:{{ .Values.agtGovernance.image.tag }}"
             {{- if .Values.fedcred }}
             - name: AZURE_SUBSCRIPTION_ID
               value: {{ .Values.fedcred.subscriptionId | default "" | quote }}
