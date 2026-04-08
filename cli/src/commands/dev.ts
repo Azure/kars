@@ -19,10 +19,12 @@ export function devCommand(): Command {
 
   cmd
     .description(
-      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop."
+      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop.\n" +
+      "Requires an existing Azure OpenAI resource with at least one model deployment (e.g. gpt-4.1).\n" +
+      "On first run, you will be prompted for your endpoint, model deployment name, and resource-level API key."
     )
     .option("--name <name>", "Sandbox name", "dev-agent")
-    .option("--model <model>", "AI model", "gpt-4.1")
+    .option("--model <model>", "Existing model deployment name in your Azure OpenAI resource", "gpt-4.1")
     .option(
       "--policy <preset>",
       "Policy preset: minimal, developer, web, azure",
@@ -82,7 +84,8 @@ export function devCommand(): Command {
         if (!creds) {
           // Stop spinner so inquirer interactive prompts display correctly
           stepper.stop();
-          console.log(chalk.yellow("\n  No Azure OpenAI credentials found. Let's set them up:\n"));
+          console.log(chalk.yellow("\n  No Azure OpenAI credentials found. Let's set them up."));
+          console.log(chalk.yellow("  You need an existing Azure OpenAI resource with a deployed model (e.g. gpt-4.1).\n"));
           creds = await promptAndSaveCredentials();
           stepper.done("Credentials configured");
         } else {
