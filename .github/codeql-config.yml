@@ -1,0 +1,10 @@
+name: "AzureClaw CodeQL Config"
+
+# Exclude vendored upstream source files from analysis.
+# We only patch dist/ (compiled JS) — the src/ TypeScript is upstream code
+# that CodeQL scans but we don't compile or ship.
+paths-ignore:
+  - vendor/agentmesh-sdk/src
+  - vendor/agentmesh-sdk/tests
+  - vendor/agentmesh-relay
+  - vendor/agentmesh-registry

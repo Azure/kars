@@ -142,11 +142,12 @@ RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
       ftfy unidecode qrcode fpdf2 nano-pdf && \
     rm -rf /tmp/sandbox-wheels
 
-# Node.js (vendored binary)
+# Node.js (vendored binary) + update npm to fix tar/minimatch/glob CVEs
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
     curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
-    rm /tmp/node.tar.gz
+    rm /tmp/node.tar.gz && \
+    npm install -g npm@latest
 
 # AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
 # Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
