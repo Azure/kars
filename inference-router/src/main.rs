@@ -22,7 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{config, forward_proxy, governance, routes};
+use azureclaw_inference_router::{config, forward_proxy, governance, ingress, routes};
 
 use anyhow::Result;
 use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};
@@ -97,6 +97,7 @@ async fn main() -> Result<()> {
         let protected = Router::new()
             .merge(routes::admin_routes())
             .merge(routes::egress_routes())
+            .merge(ingress::ingress_routes())
             .merge(routes::spawn_routes())
             .merge(routes::sensitive_agt_routes());
 

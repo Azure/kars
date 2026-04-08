@@ -49,6 +49,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         sandbox_name: Arc::new(sandbox.to_string()),
         inbox: Arc::new(MeshInbox::new()),
         mesh_metrics: Arc::new(MeshMetrics::new()),
+        ingress_acl: Arc::new(azureclaw_inference_router::ingress::IngressAcl::new(500)),
         model_override: Arc::new(std::sync::RwLock::new(None)),
         admin_token: admin_token.map(|t| Arc::new(t.to_string())),
         responses_only_models: Arc::new(std::sync::RwLock::new(Default::default())),

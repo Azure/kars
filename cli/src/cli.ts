@@ -12,6 +12,7 @@ import { modelCommand } from "./commands/model.js";
 import { traceCommand } from "./commands/trace.js";
 import { policyCommand } from "./commands/policy.js";
 import { egressCommand } from "./commands/egress.js";
+import { ingressCommand } from "./commands/ingress.js";
 import { destroyCommand } from "./commands/destroy.js";
 import { evalCommand } from "./commands/eval.js";
 import { operatorCommand } from "./commands/operator.js";
@@ -44,6 +45,7 @@ export function createCli(): Command {
   program.addCommand(modelCommand());
   program.addCommand(policyCommand());
   program.addCommand(egressCommand());
+  program.addCommand(ingressCommand());
 
   // Observability
   program.addCommand(traceCommand());

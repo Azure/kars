@@ -18,6 +18,7 @@ use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
 use crate::governance::Governance;
+use crate::ingress::IngressAcl;
 use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
@@ -36,6 +37,8 @@ pub struct AppState {
     pub sandbox_name: Arc<String>,
     pub inbox: Arc<MeshInbox>,
     pub mesh_metrics: Arc<MeshMetrics>,
+    /// Runtime ingress ACL — per-agent block/allow lists and dynamic trust threshold.
+    pub ingress_acl: Arc<IngressAcl>,
     /// Live model override (set via /admin/model). Takes priority over config.default_model.
     pub model_override: Arc<std::sync::RwLock<Option<String>>>,
     /// Admin token for sensitive mutations (trust updates). None = no auth required.
@@ -104,6 +107,9 @@ impl AppState {
             blocklist.set_learn_mode(true);
         }
 
+        // Initialize ingress ACL with the same trust threshold as governance
+        let ingress_acl = Arc::new(IngressAcl::new(governance.trust_threshold));
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             client: client.clone(),
@@ -114,6 +120,7 @@ impl AppState {
             sandbox_name: Arc::new(sandbox_name),
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
+            ingress_acl,
             model_override: Arc::new(std::sync::RwLock::new(None)),
             responses_only_models: Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
