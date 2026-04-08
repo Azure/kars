@@ -1990,6 +1990,9 @@ async fn relay_websocket_bridge(
         }
     };
 
+    mesh_metrics
+        .sessions
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tracing::info!(url = %relay_url, "AGT relay WebSocket proxy connected");
 
     let (mut client_tx, mut client_rx) = client_socket.split();
