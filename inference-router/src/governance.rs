@@ -302,8 +302,10 @@ impl Governance {
                 if p.extension().is_some_and(|e| e == "yaml" || e == "yml") {
                     match self.policy.load_from_file(p.to_str().unwrap_or_default()) {
                         Ok(()) => {
-                            tracing::info!(file = %p.display(), "Loaded policy file");
-                            total_rules += 1;
+                            // Count actual rules inside the file, not just files
+                            let rules_in_file = Self::count_rules_in_file(&p);
+                            tracing::info!(file = %p.display(), rules = rules_in_file, "Loaded policy file");
+                            total_rules += rules_in_file;
                         }
                         Err(e) => {
                             tracing::warn!(file = %p.display(), error = %e, "Failed to load policy");
@@ -316,6 +318,20 @@ impl Governance {
             .store(total_rules as u64, Ordering::Relaxed);
         metrics::AGT_POLICY_RULES.set(total_rules as i64);
         Ok(total_rules)
+    }
+
+    /// Count the number of policy rules in a YAML file by parsing the `policies` array.
+    fn count_rules_in_file(path: &Path) -> usize {
+        let Ok(yaml) = std::fs::read_to_string(path) else {
+            return 1; // fallback: count as 1 file
+        };
+        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
+            return 1;
+        };
+        value
+            .get("policies")
+            .and_then(|p| p.as_sequence())
+            .map_or(1, |seq| seq.len())
     }
 
     /// Reload policies from disk (for hot-reload).
