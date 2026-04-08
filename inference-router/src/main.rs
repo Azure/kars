@@ -22,7 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{config, forward_proxy, governance, routes};
+use azureclaw_inference_router::{config, forward_proxy, governance, handoff, routes};
 
 use anyhow::Result;
 use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};
@@ -112,8 +112,37 @@ async fn main() -> Result<()> {
             protected
         };
 
+        // Handoff routes — three auth tiers, all stricter than admin_auth_middleware:
+        //
+        // 1. handoff/init: admin token only, NO localhost bypass
+        // 2. handoff/* mutations: admin token + handoff token, NO localhost bypass
+        // 3. handoff/status: admin token, localhost allowed (read-only)
+        let handoff_init = routes::handoff_init_routes().layer(
+            axum::middleware::from_fn_with_state(
+                state.clone(),
+                handoff::handoff_init_auth_middleware,
+            ),
+        );
+
+        let handoff_mutations = routes::handoff_protected_routes().layer(
+            axum::middleware::from_fn_with_state(
+                state.clone(),
+                handoff::handoff_auth_middleware,
+            ),
+        );
+
+        let handoff_status = routes::handoff_status_routes().layer(
+            axum::middleware::from_fn_with_state(
+                state.clone(),
+                handoff::handoff_status_auth_middleware,
+            ),
+        );
+
         public
             .merge(protected)
+            .merge(handoff_init)
+            .merge(handoff_mutations)
+            .merge(handoff_status)
             .with_state(state)
             .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(

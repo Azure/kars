@@ -18,6 +18,7 @@ use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
 use crate::governance::Governance;
+use crate::handoff::{self, DrainState, HandoffSession, HandoffTokenStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
@@ -43,6 +44,12 @@ pub struct AppState {
     /// Models that don't support chat/completions (need Responses API).
     /// Populated on first 400 "unsupported" — avoids redundant round-trips.
     pub responses_only_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    /// Handoff token store (in-memory, TTL-based, one-at-a-time).
+    pub handoff_tokens: HandoffTokenStore,
+    /// Handoff session tracker (phase, direction, progress).
+    pub handoff_session: HandoffSession,
+    /// Drain state (stops new work during handoff).
+    pub drain_state: DrainState,
 }
 
 impl AppState {
@@ -123,6 +130,9 @@ impl AppState {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| Arc::new(s.trim().to_string())),
+            handoff_tokens: HandoffTokenStore::new(),
+            handoff_session: HandoffSession::new(),
+            drain_state: DrainState::new(),
         })
     }
 
@@ -2851,6 +2861,718 @@ async fn sandbox_delete(
         )
             .into_response(),
     }
+}
+
+// ==========================================================================
+// Handoff routes — agent live migration (local ↔ cloud)
+// ==========================================================================
+
+/// Handoff init route — admin token only (no handoff token yet).
+pub fn handoff_init_routes() -> Router<AppState> {
+    Router::new().route("/agt/handoff/init", post(handoff_init_handler))
+}
+
+/// Handoff mutation routes — require BOTH admin token AND handoff token.
+/// NO localhost bypass (critical for prompt injection protection).
+pub fn handoff_protected_routes() -> Router<AppState> {
+    Router::new()
+        .route("/agt/handoff/snapshot", post(handoff_snapshot))
+        .route("/agt/handoff/restore", post(handoff_restore))
+        .route("/agt/handoff/verify", post(handoff_verify))
+        .route("/agt/handoff/drain", post(handoff_drain))
+        .route("/agt/handoff/decommission", post(handoff_decommission))
+        .route("/agt/handoff/abort", post(handoff_abort))
+}
+
+/// Handoff status route — admin token required, localhost allowed (read-only).
+pub fn handoff_status_routes() -> Router<AppState> {
+    Router::new().route("/agt/handoff/status", get(handoff_status))
+}
+
+/// POST /agt/handoff/init — create a one-time handoff token.
+///
+/// Only the CLI calls this. The token is stored in memory (never persisted).
+/// Must be called before any other handoff endpoint (except status).
+async fn handoff_init_handler(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    // Check if a handoff can be started
+    if !state.handoff_session.can_start().await {
+        let current = state.handoff_session.status().await;
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Handoff already in progress (phase: {})", current.phase),
+                "phase": current.phase,
+            })),
+        )
+            .into_response();
+    }
+
+    let ttl_secs = body
+        .get("ttl_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(handoff::DEFAULT_TOKEN_TTL_SECS);
+
+    let direction = match body.get("direction").and_then(|v| v.as_str()) {
+        Some("aks_to_local") => handoff::HandoffDirection::AksToLocal,
+        _ => handoff::HandoffDirection::LocalToAks,
+    };
+
+    let predecessor_amid = body
+        .get("predecessor_amid")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let (token, token_hash) = state.handoff_tokens.create_token(ttl_secs).await;
+
+    state
+        .handoff_session
+        .initialize(direction, predecessor_amid)
+        .await;
+
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:init",
+        &format!("token_hash={}", &token_hash[..16]),
+    );
+
+    tracing::info!(
+        token_hash = &token_hash[..16],
+        ttl_secs,
+        direction = %direction,
+        "Handoff initialized — token created"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "handoff_token": token,
+            "token_hash": token_hash,
+            "ttl_seconds": ttl_secs,
+            "direction": direction.to_string(),
+            "phase": "initialized",
+        })),
+    )
+        .into_response()
+}
+
+/// POST /agt/handoff/snapshot — serialize and encrypt agent state.
+///
+/// Returns an encrypted blob that can be transferred to the target agent.
+async fn handoff_snapshot(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    state
+        .handoff_session
+        .set_phase(handoff::HandoffPhase::Snapshotting)
+        .await;
+
+    let predecessor_amid = body
+        .get("predecessor_amid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let successor_amid = body
+        .get("successor_amid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let shared_secret = body
+        .get("shared_secret")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if shared_secret.is_empty() {
+        state
+            .handoff_session
+            .fail("Missing shared_secret".into())
+            .await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "shared_secret is required"})),
+        )
+            .into_response();
+    }
+
+    let direction = state
+        .handoff_session
+        .status()
+        .await
+        .direction
+        .unwrap_or(handoff::HandoffDirection::LocalToAks);
+
+    // Build snapshot from current state
+    let mut snapshot = match handoff::build_snapshot(
+        &state,
+        direction,
+        predecessor_amid,
+        successor_amid,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            state.handoff_session.fail(e.clone()).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // Inject workspace/chat if provided in request body
+    if let Some(workspace) = body.get("workspace_tar").and_then(|v| v.as_str()) {
+        if let Ok(bytes) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            workspace,
+        ) {
+            snapshot.workspace_tar = bytes;
+        }
+    }
+    if let Some(chat) = body.get("chat_snapshot").and_then(|v| v.as_str()) {
+        if let Ok(bytes) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            chat,
+        ) {
+            snapshot.chat_snapshot = Some(bytes);
+        }
+    }
+
+    // Inject sub-agent snapshots if provided
+    if let Some(subs) = body.get("sub_agent_snapshots") {
+        if let Ok(sub_snaps) = serde_json::from_value::<Vec<handoff::SubAgentSnapshot>>(subs.clone()) {
+            snapshot.sub_agent_snapshots = sub_snaps;
+        }
+    }
+
+    // Inject credential refs if provided
+    if let Some(creds) = body.get("credentials") {
+        if let Ok(cred_refs) = serde_json::from_value::<Vec<handoff::CredentialRef>>(creds.clone()) {
+            snapshot.credentials = cred_refs;
+        }
+    }
+
+    // Serialize and compress
+    let compressed = match handoff::serialize_state(&snapshot) {
+        Ok(c) => c,
+        Err(e) => {
+            state.handoff_session.fail(e.clone()).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // Compute verification hash BEFORE encryption
+    let verification_hash = handoff::compute_verification_hash(&compressed);
+
+    // Generate HKDF salt (ThreadRng is !Send — scope before await)
+    let salt = {
+        let mut s = [0u8; 32];
+        rand::Rng::fill(&mut rand::rng(), &mut s);
+        s
+    };
+
+    // Decrypt the shared secret from base64
+    let secret_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        shared_secret,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            state
+                .handoff_session
+                .fail(format!("Invalid shared_secret: {e}"))
+                .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid shared_secret base64: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Encrypt with AES-256-GCM
+    let blob = match handoff::encrypt_state(&compressed, &secret_bytes, &salt) {
+        Ok(b) => b,
+        Err(e) => {
+            state.handoff_session.fail(e.clone()).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // Record snapshot stats
+    let items = handoff::SnapshotItemCounts {
+        chat_messages: snapshot.chat_snapshot.as_ref().map(|_| 1).unwrap_or(0),
+        trust_scores: snapshot
+            .trust_scores
+            .as_array()
+            .map(|a| a.len() as u32)
+            .unwrap_or(0),
+        audit_entries: snapshot.audit_entries.len() as u32,
+        sub_agents: snapshot.sub_agent_snapshots.len() as u32,
+        workspace_files: if snapshot.workspace_tar.is_empty() {
+            0
+        } else {
+            1
+        },
+        credentials: snapshot.credentials.len() as u32,
+    };
+    state
+        .handoff_session
+        .record_snapshot(compressed.len(), items)
+        .await;
+
+    // Audit log
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:snapshot",
+        &format!(
+            "size={}B hash={}",
+            compressed.len(),
+            &verification_hash[..16]
+        ),
+    );
+
+    tracing::info!(
+        size_bytes = compressed.len(),
+        verification_hash = &verification_hash[..16],
+        "Handoff snapshot created"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "blob": blob,
+            "verification_hash": verification_hash,
+            "size_bytes": compressed.len(),
+            "phase": "snapshotting",
+        })),
+    )
+        .into_response()
+}
+
+/// POST /agt/handoff/restore — accept encrypted state blob and restore.
+async fn handoff_restore(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    state
+        .handoff_session
+        .set_phase(handoff::HandoffPhase::Restoring)
+        .await;
+
+    let shared_secret = body
+        .get("shared_secret")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if shared_secret.is_empty() {
+        state
+            .handoff_session
+            .fail("Missing shared_secret".into())
+            .await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "shared_secret is required"})),
+        )
+            .into_response();
+    }
+
+    // Parse the encrypted blob
+    let blob: handoff::EncryptedHandoffBlob = match body.get("blob") {
+        Some(b) => match serde_json::from_value(b.clone()) {
+            Ok(blob) => blob,
+            Err(e) => {
+                state
+                    .handoff_session
+                    .fail(format!("Invalid blob: {e}"))
+                    .await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Invalid blob format: {e}")})),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            state
+                .handoff_session
+                .fail("Missing blob".into())
+                .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "blob is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let secret_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        shared_secret,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            state
+                .handoff_session
+                .fail(format!("Invalid shared_secret: {e}"))
+                .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid shared_secret: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Decrypt and verify
+    let compressed = match handoff::decrypt_state(&blob, &secret_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            state.handoff_session.fail(e.clone()).await;
+
+            // Audit: failed restore (potential tampering or wrong key)
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:restore:failed",
+                &format!("decryption_error={e}"),
+            );
+
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "State decryption/verification failed",
+                    "detail": e,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Deserialize
+    let restored_state = match handoff::deserialize_state(&compressed) {
+        Ok(s) => s,
+        Err(e) => {
+            state.handoff_session.fail(e.clone()).await;
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": format!("State deserialization failed: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Version check
+    if restored_state.version > handoff::HANDOFF_STATE_VERSION {
+        let msg = format!(
+            "State version {} is newer than supported ({})",
+            restored_state.version,
+            handoff::HANDOFF_STATE_VERSION
+        );
+        state.handoff_session.fail(msg.clone()).await;
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // Restore trust scores
+    if let Some(scores) = restored_state.trust_scores.as_array() {
+        for score_entry in scores {
+            if let (Some(agent_id), Some(score)) = (
+                score_entry.get("agent_id").and_then(|v| v.as_str()),
+                score_entry.get("score").and_then(|v| v.as_u64()),
+            ) {
+                state
+                    .governance
+                    .trust
+                    .set_trust(agent_id, score as u32);
+            }
+        }
+        tracing::info!(count = scores.len(), "Restored trust scores from handoff");
+    }
+
+    // Restore token budget usage
+    state
+        .budget
+        .record_usage(
+            &state.sandbox_name,
+            restored_state.token_budget_used.total_tokens,
+        )
+        .await;
+
+    // Audit log the restore
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:restore",
+        &format!(
+            "from={} size={}B",
+            restored_state.predecessor_amid,
+            compressed.len()
+        ),
+    );
+
+    tracing::info!(
+        from = %restored_state.predecessor_amid,
+        to = %restored_state.successor_amid,
+        direction = %restored_state.metadata.direction,
+        "Handoff state restored successfully"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "restored": true,
+            "agent_name": restored_state.agent_name,
+            "predecessor_amid": restored_state.predecessor_amid,
+            "successor_amid": restored_state.successor_amid,
+            "trust_scores_count": restored_state.trust_scores.as_array().map(|a| a.len()).unwrap_or(0),
+            "audit_entries_count": restored_state.audit_entries.len(),
+            "sub_agent_snapshots": restored_state.sub_agent_snapshots.len(),
+            "credentials": restored_state.credentials.len(),
+            "phase": "restoring",
+        })),
+    )
+        .into_response()
+}
+
+/// POST /agt/handoff/verify — return verification digest of current state.
+async fn handoff_verify(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    state
+        .handoff_session
+        .set_phase(handoff::HandoffPhase::Verifying)
+        .await;
+
+    // Build snapshot of current state for verification
+    let direction = state
+        .handoff_session
+        .status()
+        .await
+        .direction
+        .unwrap_or(handoff::HandoffDirection::LocalToAks);
+
+    let predecessor = body
+        .get("predecessor_amid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let successor = body
+        .get("successor_amid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let snapshot = match handoff::build_snapshot(&state, direction, predecessor, successor).await {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let compressed = match handoff::serialize_state(&snapshot) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let verification_hash = handoff::compute_verification_hash(&compressed);
+
+    // Also compare with expected hash if provided
+    let expected = body.get("expected_hash").and_then(|v| v.as_str());
+    let matches = expected.map(|e| e == verification_hash);
+
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:verify",
+        &format!(
+            "hash={} match={}",
+            &verification_hash[..16],
+            matches.map(|m| m.to_string()).unwrap_or("n/a".into())
+        ),
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "verification_hash": verification_hash,
+            "matches": matches,
+            "trust_scores_count": snapshot.trust_scores.as_array().map(|a| a.len()).unwrap_or(0),
+            "audit_entries_count": snapshot.audit_entries.len(),
+            "phase": "verifying",
+        })),
+    )
+        .into_response()
+}
+
+/// POST /agt/handoff/drain — enter drain mode (stop new work, complete in-flight).
+async fn handoff_drain(State(state): State<AppState>) -> impl IntoResponse {
+    if state.drain_state.is_draining().await {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Already in drain mode",
+                "drain_duration_secs": state.drain_state.drain_duration().await
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            })),
+        )
+            .into_response();
+    }
+
+    state.drain_state.start_drain().await;
+    state
+        .handoff_session
+        .set_phase(handoff::HandoffPhase::Draining)
+        .await;
+
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:drain",
+        "drain_started",
+    );
+
+    tracing::info!("Handoff: entering drain mode");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "draining": true,
+            "phase": "draining",
+        })),
+    )
+        .into_response()
+}
+
+/// POST /agt/handoff/decommission — deregister from relay, enter dormant state.
+async fn handoff_decommission(State(state): State<AppState>) -> impl IntoResponse {
+    state
+        .handoff_session
+        .set_phase(handoff::HandoffPhase::Decommissioning)
+        .await;
+
+    // Stop drain if still active
+    state.drain_state.stop_drain().await;
+
+    // Revoke the handoff token
+    state.handoff_tokens.revoke().await;
+
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:decommission",
+        "agent_dormant",
+    );
+
+    // Mark session complete
+    state.handoff_session.complete().await;
+
+    tracing::info!("Handoff: agent decommissioned (dormant)");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "decommissioned": true,
+            "phase": "complete",
+            "agent_name": state.sandbox_name.as_ref(),
+        })),
+    )
+        .into_response()
+}
+
+/// POST /agt/handoff/abort — cancel an in-progress handoff.
+async fn handoff_abort(State(state): State<AppState>) -> impl IntoResponse {
+    let current_phase = state.handoff_session.phase().await;
+
+    if matches!(
+        current_phase,
+        handoff::HandoffPhase::Idle
+            | handoff::HandoffPhase::Complete
+            | handoff::HandoffPhase::Aborted
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "No handoff in progress to abort",
+                "phase": current_phase.to_string(),
+            })),
+        )
+            .into_response();
+    }
+
+    // Stop drain if active
+    state.drain_state.stop_drain().await;
+
+    // Revoke handoff token
+    state.handoff_tokens.revoke().await;
+
+    // Mark aborted
+    state.handoff_session.abort().await;
+
+    state.governance.audit.log(
+        &state.sandbox_name,
+        "handoff:abort",
+        &format!("aborted_from_phase={current_phase}"),
+    );
+
+    tracing::info!(
+        from_phase = %current_phase,
+        "Handoff aborted"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "aborted": true,
+            "previous_phase": current_phase.to_string(),
+            "phase": "aborted",
+        })),
+    )
+        .into_response()
+}
+
+/// GET /agt/handoff/status — read-only handoff status.
+async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
+    let session = state.handoff_session.status().await;
+    let token_active = state.handoff_tokens.is_active().await;
+    let draining = state.drain_state.is_draining().await;
+    let drain_duration = state
+        .drain_state
+        .drain_duration()
+        .await
+        .map(|d| d.as_secs());
+
+    Json(serde_json::json!({
+        "phase": session.phase,
+        "direction": session.direction,
+        "started_at": session.started_at,
+        "predecessor_amid": session.predecessor_amid,
+        "successor_amid": session.successor_amid,
+        "snapshot_size_bytes": session.snapshot_size_bytes,
+        "snapshot_items": session.snapshot_items,
+        "error": session.error,
+        "handoff_token_active": token_active,
+        "draining": draining,
+        "drain_duration_secs": drain_duration,
+    }))
 }
 
 // ── Chat ↔ Responses format translation ────────────────────────────────────

@@ -27,7 +27,7 @@ fn claw_sandbox_api_resource() -> ApiResource {
 }
 
 /// Request body for `POST /sandbox/spawn`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SpawnRequest {
     /// Name for the sub-agent sandbox (must be DNS-safe).
     pub name: String,
