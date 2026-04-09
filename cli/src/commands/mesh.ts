@@ -511,7 +511,8 @@ export function meshCommand(): Command {
     .command("promote")
     .description("Promote the AKS cluster registry to a public global endpoint")
     .option("--allow-ip <cidr>", "Restrict access to this IP/CIDR (e.g. 203.0.113.42 or 203.0.113.0/24). Omit for auto-detect.")
-    .action(async (opts: { allowIp?: string }) => {
+    .option("--domain <domain>", "Custom domain (e.g. mesh.example.com). Omit for auto sslip.io.")
+    .action(async (opts: { allowIp?: string; domain?: string }) => {
       banner("AzureClaw · Mesh Promote", "Promote Registry to Global");
 
       // Load deployment context
@@ -598,9 +599,9 @@ export function meshCommand(): Command {
 
       // Find the ingress manifest
       section("Ingress");
-      // Walk up from dist/ to find the repo root deploy/ directory
+      // Compiled JS is at cli/dist/commands/mesh.js — go up 3 levels to repo root
       const cliDir = path.dirname(new URL(import.meta.url).pathname);
-      const repoRoot = path.resolve(cliDir, "..", "..");
+      const repoRoot = path.resolve(cliDir, "..", "..", "..");
       const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
 
       if (!fs.existsSync(ingressManifest)) {
@@ -608,11 +609,74 @@ export function meshCommand(): Command {
         process.exit(1);
       }
 
-      // Derive domain from cluster name (matches azureclaw up convention)
-      const baseName = ctx.aksCluster.replace(/-aks$/, "");
-      const domain = `${baseName}.azureclaw.dev`;
+      // Resolve domain — custom or auto-detect via AppGW public IP + sslip.io
+      let domain: string;
+      if (opts.domain) {
+        domain = opts.domain;
+        kvLine("Domain", domain + " (custom)");
+      } else {
+        // Find the Application Gateway public IP
+        console.log(chalk.dim("  Detecting AppGW public IP..."));
+        let appGwIp = "";
+        try {
+          // AGIC uses an AppGW whose public IP we can find via the AKS add-on
+          const { stdout: appGwName } = await execa("az", [
+            "aks", "show",
+            "--resource-group", ctx.resourceGroup,
+            "--name", ctx.aksCluster,
+            "--query", "addonProfiles.ingressApplicationGateway.config.applicationGatewayName",
+            "--output", "tsv",
+          ], { stdio: "pipe", timeout: 15000 });
 
-      // Get subscription ID
+          if (appGwName.trim()) {
+            // Get the frontend IP config → public IP resource ID
+            const { stdout: pipId } = await execa("az", [
+              "network", "application-gateway", "show",
+              "--resource-group", ctx.resourceGroup,
+              "--name", appGwName.trim(),
+              "--query", "frontendIPConfigurations[0].publicIPAddress.id",
+              "--output", "tsv",
+            ], { stdio: "pipe", timeout: 15000 });
+
+            if (pipId.trim()) {
+              const { stdout: ip } = await execa("az", [
+                "network", "public-ip", "show",
+                "--ids", pipId.trim(),
+                "--query", "ipAddress",
+                "--output", "tsv",
+              ], { stdio: "pipe", timeout: 10000 });
+              appGwIp = ip.trim();
+            }
+          }
+        } catch { /* fall through */ }
+
+        // Fallback: check existing Ingress for an IP
+        if (!appGwIp) {
+          try {
+            const { stdout: ingressIp } = await execa("kubectl", [
+              "get", "ingress", "-n", "agentmesh",
+              "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}",
+            ], { stdio: "pipe", timeout: 10000 });
+            if (ingressIp.trim() && /^\d/.test(ingressIp.trim())) {
+              appGwIp = ingressIp.trim();
+            }
+          } catch { /* fall through */ }
+        }
+
+        if (!appGwIp) {
+          console.error(chalk.red("  ✘ Could not detect AppGW public IP."));
+          console.error(chalk.dim("    Use --domain <your-domain> to specify manually."));
+          process.exit(1);
+        }
+
+        // sslip.io: dots in IP replaced with dashes
+        const sslipHost = appGwIp.replace(/\./g, "-") + ".sslip.io";
+        domain = sslipHost;
+        kvLine("AppGW IP", appGwIp);
+        kvLine("Domain", domain + " (sslip.io — auto)");
+      }
+
+      // Get subscription ID (for WAF policy reference in Ingress)
       const { stdout: subId } = await execa("az", [
         "account", "show", "--query", "id", "--output", "tsv",
       ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
@@ -629,6 +693,17 @@ export function meshCommand(): Command {
         .replace(/SUBSCRIPTION_ID/g, subId.trim())
         .replace(/RESOURCE_GROUP/g, ctx.resourceGroup)
         .replace(/azureclawacr\.azurecr\.io/g, ctx.acrLoginServer ?? "azureclawacr.azurecr.io");
+
+      // For sslip.io: disable TLS (no valid cert) and SSL redirect
+      if (domain.endsWith(".sslip.io")) {
+        // Remove TLS blocks (spec.tls and secretName lines)
+        patchedIngress = patchedIngress.replace(/\s*tls:\n\s*- hosts:\n\s*-[^\n]*\n\s*secretName:[^\n]*/g, "");
+        // Disable SSL redirect
+        patchedIngress = patchedIngress.replace(
+          /appgw\.ingress\.kubernetes\.io\/ssl-redirect: "true"/g,
+          'appgw.ingress.kubernetes.io/ssl-redirect: "false"'
+        );
+      }
 
       // Inject IP allowlist annotation into both Ingress resources
       if (allowCidr) {
@@ -653,8 +728,10 @@ export function meshCommand(): Command {
         try { fs.unlinkSync(tmpIngress); } catch { /* noop */ }
       }
 
-      const globalRegistryUrl = `https://registry.${domain}`;
-      const globalRelayUrl = `wss://relay.${domain}`;
+      const proto = domain.endsWith(".sslip.io") ? "http" : "https";
+      const wsProto = domain.endsWith(".sslip.io") ? "ws" : "wss";
+      const globalRegistryUrl = `${proto}://registry.${domain}`;
+      const globalRelayUrl = `${wsProto}://relay.${domain}`;
 
       // Update deployment context
       ctx.registryMode = "global";
@@ -669,7 +746,12 @@ export function meshCommand(): Command {
 
       console.log();
       console.log(chalk.green("  ✓ ") + chalk.bold("Registry promoted to global."));
-      console.log(chalk.dim(`    DNS: point registry.${domain} and relay.${domain} to AppGW public IP`));
+      if (domain.endsWith(".sslip.io")) {
+        console.log(chalk.dim("    Using sslip.io for DNS (auto-resolved, no setup needed)."));
+        console.log(chalk.dim("    Note: HTTP only (no TLS) — secured by IP allowlist."));
+      } else {
+        console.log(chalk.dim(`    DNS: point registry.${domain} and relay.${domain} to AppGW public IP`));
+      }
       console.log(chalk.dim(`    Then: azureclaw dev --global-registry ${globalRegistryUrl}`));
       console.log();
     });
