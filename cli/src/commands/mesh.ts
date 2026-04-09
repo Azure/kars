@@ -510,7 +510,8 @@ export function meshCommand(): Command {
   cmd
     .command("promote")
     .description("Promote the AKS cluster registry to a public global endpoint")
-    .action(async () => {
+    .option("--allow-ip <cidr>", "Restrict access to this IP/CIDR (e.g. 203.0.113.42 or 203.0.113.0/24). Omit for auto-detect.")
+    .action(async (opts: { allowIp?: string }) => {
       banner("AzureClaw · Mesh Promote", "Promote Registry to Global");
 
       // Load deployment context
@@ -569,6 +570,32 @@ export function meshCommand(): Command {
         process.exit(1);
       }
 
+      // Resolve IP allowlist
+      section("Access Control");
+      let allowCidr: string | null = null;
+
+      if (opts.allowIp) {
+        allowCidr = opts.allowIp.includes("/") ? opts.allowIp : `${opts.allowIp}/32`;
+        kvLine("Allow IP", allowCidr + " (from --allow-ip)");
+      } else {
+        // Auto-detect public IP
+        try {
+          const resp = await fetch("https://ifconfig.me/ip", { signal: AbortSignal.timeout(5000) });
+          if (resp.ok) {
+            const ip = (await resp.text()).trim();
+            if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+              allowCidr = `${ip}/32`;
+              kvLine("Allow IP", allowCidr + " (auto-detected)");
+            }
+          }
+        } catch { /* fall through to unrestricted */ }
+
+        if (!allowCidr) {
+          console.log(chalk.yellow("  ⚠ Could not detect public IP — registry will be open."));
+          console.log(chalk.dim("    Re-run with --allow-ip <your-ip> to restrict access."));
+        }
+      }
+
       // Find the ingress manifest
       section("Ingress");
       // Walk up from dist/ to find the repo root deploy/ directory
@@ -597,18 +624,28 @@ export function meshCommand(): Command {
       }
 
       // Patch and apply the ingress manifest
-      const ingressYaml = fs.readFileSync(ingressManifest, "utf-8");
-      const patchedIngress = ingressYaml
+      let patchedIngress = fs.readFileSync(ingressManifest, "utf-8")
         .replace(/DOMAIN_PLACEHOLDER/g, domain)
         .replace(/SUBSCRIPTION_ID/g, subId.trim())
         .replace(/RESOURCE_GROUP/g, ctx.resourceGroup)
         .replace(/azureclawacr\.azurecr\.io/g, ctx.acrLoginServer ?? "azureclawacr.azurecr.io");
+
+      // Inject IP allowlist annotation into both Ingress resources
+      if (allowCidr) {
+        patchedIngress = patchedIngress.replace(
+          /kubernetes\.io\/ingress\.class: azure\/application-gateway/g,
+          `kubernetes.io/ingress.class: azure/application-gateway\n    appgw.ingress.kubernetes.io/whitelist-source-range: "${allowCidr}"`
+        );
+      }
 
       const tmpIngress = path.join(os.tmpdir(), `.azureclaw-ingress-${Date.now()}.yaml`);
       try {
         fs.writeFileSync(tmpIngress, patchedIngress);
         await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
         checkLine(true, "Ingress + NetworkPolicies applied");
+        if (allowCidr) {
+          checkLine(true, `IP allowlist: ${allowCidr}`);
+        }
       } catch (e: any) {
         console.error(chalk.red(`  ✘ kubectl apply failed: ${e.message}`));
         process.exit(1);
