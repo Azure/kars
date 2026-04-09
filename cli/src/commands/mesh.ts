@@ -1,0 +1,506 @@
+import { Command } from "commander";
+import chalk from "chalk";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import * as http from "node:http";
+import * as crypto from "node:crypto";
+import { banner, section, kvLine, checkLine } from "../stepper.js";
+
+// ---------------------------------------------------------------------------
+// Identity file
+// ---------------------------------------------------------------------------
+
+const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
+const IDENTITY_FILE = path.join(IDENTITY_DIR, "mesh-identity.json");
+
+interface MeshIdentity {
+  amid: string;
+  publicKey: string;
+  /** Encrypted private key (AES-256-GCM, key derived from machine ID) */
+  encryptedPrivateKey: string;
+  /** Initialization vector for AES-GCM */
+  iv: string;
+  /** Auth tag for AES-GCM */
+  authTag: string;
+  provider?: string;
+  email?: string;
+  username?: string;
+  verifiedAt?: string;
+  registryUrl?: string;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Encryption helpers for at-rest key protection
+// ---------------------------------------------------------------------------
+
+/** Derive an encryption key from a stable machine-specific seed. */
+function deriveEncryptionKey(): Buffer {
+  // Use a combination of hostname + homedir as a machine-bound seed.
+  // This isn't HSM-grade but protects against casual file theft.
+  const seed = `azureclaw:mesh-identity:${os.hostname()}:${os.homedir()}`;
+  return crypto.createHash("sha256").update(seed).digest();
+}
+
+function encryptPrivateKey(privateKey: Buffer): {
+  encrypted: string;
+  iv: string;
+  authTag: string;
+} {
+  const key = deriveEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(privateKey),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+  return {
+    encrypted: encrypted.toString("base64"),
+    iv: iv.toString("base64"),
+    authTag: authTag.toString("base64"),
+  };
+}
+
+function decryptPrivateKey(identity: MeshIdentity): Buffer {
+  const key = deriveEncryptionKey();
+  const iv = Buffer.from(identity.iv, "base64");
+  const authTag = Buffer.from(identity.authTag, "base64");
+  const encrypted = Buffer.from(identity.encryptedPrivateKey, "base64");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+}
+
+// ---------------------------------------------------------------------------
+// Ed25519 key generation + AMID derivation
+// ---------------------------------------------------------------------------
+
+function generateKeypair(): {
+  publicKey: Buffer;
+  privateKey: Buffer;
+  amid: string;
+} {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+    publicKeyEncoding: { type: "spki", format: "der" },
+    privateKeyEncoding: { type: "pkcs8", format: "der" },
+  });
+
+  // Extract raw 32-byte keys from DER encoding
+  // Ed25519 SPKI: last 32 bytes are the raw public key
+  const rawPub = publicKey.subarray(publicKey.length - 32);
+  // Ed25519 PKCS8: last 32 bytes are the raw private key
+  const rawPriv = privateKey.subarray(privateKey.length - 32);
+
+  // AMID = base58(sha256(publicKey)[:20])
+  const hash = crypto.createHash("sha256").update(rawPub).digest();
+  const amid = base58Encode(hash.subarray(0, 20));
+
+  return { publicKey: rawPub, privateKey: rawPriv, amid };
+}
+
+// Minimal base58 encoder (Bitcoin alphabet)
+const BASE58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58Encode(buffer: Buffer): string {
+  let num = BigInt("0x" + buffer.toString("hex"));
+  const chars: string[] = [];
+  while (num > 0n) {
+    chars.unshift(BASE58_ALPHABET[Number(num % 58n)]);
+    num = num / 58n;
+  }
+  // Preserve leading zeros
+  for (const byte of buffer) {
+    if (byte === 0) chars.unshift("1");
+    else break;
+  }
+  return chars.join("");
+}
+
+// ---------------------------------------------------------------------------
+// Identity loading / saving
+// ---------------------------------------------------------------------------
+
+function loadIdentity(): MeshIdentity | null {
+  if (!fs.existsSync(IDENTITY_FILE)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(IDENTITY_FILE, "utf-8"));
+    return data as MeshIdentity;
+  } catch {
+    return null;
+  }
+}
+
+function saveIdentity(identity: MeshIdentity): void {
+  fs.mkdirSync(IDENTITY_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(IDENTITY_FILE, JSON.stringify(identity, null, 2), {
+    mode: 0o600,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// OAuth callback server
+// ---------------------------------------------------------------------------
+
+interface OAuthResult {
+  success: boolean;
+  amid: string;
+  provider: string;
+  verified_identity?: {
+    provider: string;
+    provider_id: string;
+    email?: string;
+    username?: string;
+    display_name?: string;
+  };
+  certificate?: string;
+  error?: string;
+}
+
+async function waitForOAuthCallback(
+  port: number,
+  timeoutMs: number = 300_000
+): Promise<OAuthResult> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url ?? "/", `http://localhost:${port}`);
+
+      if (url.pathname === "/callback") {
+        // The registry redirects here with the verification result as query params
+        const resultJson = url.searchParams.get("result");
+        if (resultJson) {
+          try {
+            const result = JSON.parse(
+              Buffer.from(resultJson, "base64").toString("utf-8")
+            ) as OAuthResult;
+
+            // Return a nice HTML page
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end(`
+              <html><body style="font-family: system-ui; text-align: center; padding-top: 80px;">
+                <h2>${result.success ? "✅ Authenticated!" : "❌ Authentication failed"}</h2>
+                <p>${result.success ? "You can close this tab and return to the terminal." : result.error ?? "Unknown error"}</p>
+              </body></html>
+            `);
+
+            server.close();
+            resolve(result);
+          } catch {
+            res.writeHead(400, { "Content-Type": "text/plain" });
+            res.end("Invalid callback data");
+          }
+        } else {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("Missing result parameter");
+        }
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    server.listen(port, "127.0.0.1");
+
+    const timer = setTimeout(() => {
+      server.close();
+      reject(new Error("OAuth callback timed out after 5 minutes"));
+    }, timeoutMs);
+
+    server.on("close", () => clearTimeout(timer));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Command implementation
+// ---------------------------------------------------------------------------
+
+export function meshCommand(): Command {
+  const cmd = new Command("mesh");
+  cmd.description(
+    "Manage AgentMesh identity and authentication for cross-environment handoff"
+  );
+
+  // -----------------------------------------------------------------------
+  // mesh auth
+  // -----------------------------------------------------------------------
+  cmd
+    .command("auth")
+    .description("Authenticate with an AgentMesh registry via OAuth")
+    .requiredOption(
+      "--registry <url>",
+      "Registry URL (e.g. https://registry.example.com)"
+    )
+    .option("--provider <provider>", "OAuth provider (github, entra)", "github")
+    .option("--no-browser", "Print URL instead of opening browser")
+    .action(async (opts: { registry: string; provider: string; browser: boolean }) => {
+      banner("AzureClaw · Mesh Auth", "AgentMesh Identity & Registration");
+
+      const registryUrl = opts.registry.replace(/\/+$/, "");
+      const provider = opts.provider.toLowerCase();
+
+      if (!["github", "entra", "google"].includes(provider)) {
+        console.error(
+          chalk.red(`  ✘ Unknown provider: ${provider}. Use github, entra, or google.`)
+        );
+        process.exit(1);
+      }
+
+      // Step 1: Check existing identity
+      section("Identity");
+      let identity = loadIdentity();
+      let amid: string;
+      let publicKeyB64: string;
+
+      if (identity) {
+        amid = identity.amid;
+        publicKeyB64 = identity.publicKey;
+        kvLine("Existing AMID", amid);
+        kvLine("Created", identity.createdAt);
+        if (identity.provider) {
+          kvLine("Verified via", `${identity.provider} (${identity.email ?? identity.username ?? "—"})`);
+        }
+      } else {
+        console.log(chalk.dim("  Generating new Ed25519 keypair..."));
+        const kp = generateKeypair();
+        publicKeyB64 = kp.publicKey.toString("base64");
+        amid = kp.amid;
+
+        const enc = encryptPrivateKey(kp.privateKey);
+        identity = {
+          amid,
+          publicKey: publicKeyB64,
+          encryptedPrivateKey: enc.encrypted,
+          iv: enc.iv,
+          authTag: enc.authTag,
+          createdAt: new Date().toISOString(),
+        };
+        saveIdentity(identity);
+        kvLine("New AMID", amid);
+        checkLine(true, `Keypair saved to ${IDENTITY_FILE}`);
+      }
+
+      // Step 2: Check registry providers
+      section("Registry");
+      kvLine("URL", registryUrl);
+
+      let providers: Array<{ name: string; enabled: boolean; display_name: string }>;
+      try {
+        const resp = await fetch(`${registryUrl}/v1/auth/oauth/providers`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = (await resp.json()) as { providers: typeof providers };
+        providers = data.providers;
+      } catch (e: any) {
+        console.error(chalk.red(`  ✘ Cannot reach registry: ${e.message}`));
+        process.exit(1);
+      }
+
+      const selected = providers.find((p) => p.name === provider);
+      if (!selected || !selected.enabled) {
+        console.error(
+          chalk.red(
+            `  ✘ Provider "${provider}" is not enabled on this registry.`
+          )
+        );
+        const enabled = providers
+          .filter((p) => p.enabled)
+          .map((p) => p.name);
+        if (enabled.length > 0) {
+          console.log(
+            chalk.dim(`  Available: ${enabled.join(", ")}`)
+          );
+        }
+        process.exit(1);
+      }
+
+      checkLine(true, `Provider ${selected.display_name} enabled`);
+
+      // Step 3: Start OAuth flow
+      section("OAuth Flow");
+
+      // Find a free port for the callback
+      const callbackPort = 19876 + Math.floor(Math.random() * 100);
+      const timestamp = new Date().toISOString();
+
+      // Sign the timestamp to prove AMID ownership
+      const privateKeyBuf = decryptPrivateKey(identity);
+      const privateKeyObj = crypto.createPrivateKey({
+        key: Buffer.concat([
+          // Wrap raw 32-byte key in PKCS8 DER envelope for Ed25519
+          Buffer.from(
+            "302e020100300506032b657004220420",
+            "hex"
+          ),
+          privateKeyBuf,
+        ]),
+        format: "der",
+        type: "pkcs8",
+      });
+      const signature = crypto.sign(null, Buffer.from(timestamp), privateKeyObj);
+      const signatureB64 = signature.toString("base64");
+
+      // Call authorize endpoint
+      let authUrl: string;
+      try {
+        const resp = await fetch(`${registryUrl}/v1/auth/oauth/authorize`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amid,
+            provider,
+            signature: signatureB64,
+            timestamp,
+          }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: "Unknown error" })) as { error: string };
+          throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as { authorization_url: string };
+        authUrl = data.authorization_url;
+      } catch (e: any) {
+        console.error(chalk.red(`  ✘ Failed to start OAuth flow: ${e.message}`));
+        process.exit(1);
+      }
+
+      if (opts.browser) {
+        console.log(chalk.dim("  Opening browser for authentication..."));
+        const open = await import("open").catch(() => null);
+        if (open) {
+          await open.default(authUrl);
+        } else {
+          console.log(
+            chalk.yellow("  Could not open browser. Visit this URL:")
+          );
+          console.log(`  ${chalk.cyan(authUrl)}\n`);
+        }
+      } else {
+        console.log(chalk.dim("  Visit this URL to authenticate:"));
+        console.log(`  ${chalk.cyan(authUrl)}\n`);
+      }
+
+      console.log(chalk.dim("  Waiting for OAuth callback..."));
+
+      // Step 4: Wait for callback
+      try {
+        const result = await waitForOAuthCallback(callbackPort);
+
+        if (result.success && result.verified_identity) {
+          section("Verified");
+          checkLine(true, `Provider: ${result.verified_identity.provider}`);
+          if (result.verified_identity.email) {
+            kvLine("Email", result.verified_identity.email);
+          }
+          if (result.verified_identity.username) {
+            kvLine("Username", result.verified_identity.username);
+          }
+
+          // Update identity with verification info
+          identity.provider = result.provider;
+          identity.email = result.verified_identity.email ?? undefined;
+          identity.username = result.verified_identity.username ?? undefined;
+          identity.verifiedAt = new Date().toISOString();
+          identity.registryUrl = registryUrl;
+          saveIdentity(identity);
+
+          checkLine(true, `Identity updated: ${IDENTITY_FILE}`);
+          console.log();
+          console.log(
+            chalk.green("  ✓ ") +
+              chalk.bold("Mesh identity verified and registered.")
+          );
+          console.log(
+            chalk.dim(
+              `    Use ${chalk.cyan(
+                `azureclaw dev --global-registry ${registryUrl}`
+              )} to connect agents.`
+            )
+          );
+        } else {
+          console.error(
+            chalk.red(`  ✘ Verification failed: ${result.error ?? "Unknown error"}`)
+          );
+          process.exit(1);
+        }
+      } catch (e: any) {
+        console.error(chalk.red(`  ✘ ${e.message}`));
+        process.exit(1);
+      }
+    });
+
+  // -----------------------------------------------------------------------
+  // mesh status
+  // -----------------------------------------------------------------------
+  cmd
+    .command("status")
+    .description("Show current mesh identity")
+    .action(async () => {
+      banner("AzureClaw · Mesh Identity", "AgentMesh Identity Status");
+
+      const identity = loadIdentity();
+      if (!identity) {
+        console.log(chalk.dim("  No mesh identity found."));
+        console.log(
+          chalk.dim(
+            `  Run ${chalk.cyan("azureclaw mesh auth --registry <url>")} to create one.`
+          )
+        );
+        return;
+      }
+
+      kvLine("AMID", identity.amid);
+      kvLine("Public Key", identity.publicKey.substring(0, 20) + "...");
+      kvLine("Created", identity.createdAt);
+
+      if (identity.provider) {
+        kvLine("Provider", identity.provider);
+        if (identity.email) kvLine("Email", identity.email);
+        if (identity.username) kvLine("Username", identity.username);
+        if (identity.verifiedAt) kvLine("Verified", identity.verifiedAt);
+      } else {
+        console.log(chalk.yellow("  ⚠ Not verified (anonymous)"));
+      }
+
+      if (identity.registryUrl) {
+        kvLine("Registry", identity.registryUrl);
+      }
+
+      console.log(
+        chalk.dim(`\n  Identity file: ${IDENTITY_FILE}`)
+      );
+    });
+
+  // -----------------------------------------------------------------------
+  // mesh reset
+  // -----------------------------------------------------------------------
+  cmd
+    .command("reset")
+    .description("Delete mesh identity (requires re-authentication)")
+    .action(async () => {
+      if (!fs.existsSync(IDENTITY_FILE)) {
+        console.log(chalk.dim("  No mesh identity to reset."));
+        return;
+      }
+
+      const { default: inquirer } = await import("inquirer");
+      const { confirm } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "confirm",
+          message:
+            "This will delete your mesh identity. You will need to re-authenticate. Continue?",
+          default: false,
+        },
+      ]);
+
+      if (confirm) {
+        fs.unlinkSync(IDENTITY_FILE);
+        checkLine(true, `Identity deleted: ${IDENTITY_FILE}`);
+      } else {
+        console.log(chalk.dim("  Cancelled."));
+      }
+    });
+
+  return cmd;
+}

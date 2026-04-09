@@ -11,9 +11,11 @@ mod message;
 mod store_forward;
 mod types;
 mod ice;
+mod registry_verify;
 
 use connection::ConnectionManager;
 use store_forward::StoreForward;
+use registry_verify::RegistryVerifier;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     // Create shared state
     let connection_manager = Arc::new(ConnectionManager::new());
     let store_forward = Arc::new(StoreForward::new());
+    let registry_verifier = Arc::new(RegistryVerifier::from_env());
 
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -56,11 +59,12 @@ async fn main() -> anyhow::Result<()> {
             Ok((stream, peer_addr)) => {
                 let cm = connection_manager.clone();
                 let sf = store_forward.clone();
+                let rv = registry_verifier.clone();
                 let mut shutdown_rx = shutdown_tx.subscribe();
 
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = connection::handle_connection(stream, peer_addr, cm, sf) => {
+                        result = connection::handle_connection(stream, peer_addr, cm, sf, rv) => {
                             if let Err(e) = result {
                                 warn!("Connection error from {}: {}", peer_addr, e);
                             }

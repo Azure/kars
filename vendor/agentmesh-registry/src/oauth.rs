@@ -24,19 +24,39 @@ pub struct OAuthConfig {
     pub github_client_secret: Option<String>,
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
+    pub entra_client_id: Option<String>,
+    pub entra_client_secret: Option<String>,
+    pub entra_tenant_id: Option<String>,
     pub callback_base_url: String,
+    /// Allowed CORS origins for browser-based OAuth redirects
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl OAuthConfig {
     pub fn from_env() -> Self {
+        let callback_base_url = std::env::var("OAUTH_CALLBACK_BASE_URL")
+            .unwrap_or_else(|_| "https://agentmesh.online".to_string());
+
+        let cors_allowed_origins = std::env::var("CORS_ALLOWED_ORIGINS")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|_| vec![callback_base_url.clone()]);
+
         Self {
             github_client_id: std::env::var("GITHUB_CLIENT_ID").ok(),
             github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").ok(),
             google_client_id: std::env::var("GOOGLE_CLIENT_ID").ok(),
             google_client_secret: std::env::var("GOOGLE_CLIENT_SECRET").ok(),
-            callback_base_url: std::env::var("OAUTH_CALLBACK_BASE_URL")
-                .unwrap_or_else(|_| "https://agentmesh.online".to_string()),
+            entra_client_id: std::env::var("ENTRA_CLIENT_ID").ok(),
+            entra_client_secret: std::env::var("ENTRA_CLIENT_SECRET").ok(),
+            entra_tenant_id: std::env::var("ENTRA_TENANT_ID").ok(),
+            callback_base_url,
+            cors_allowed_origins,
         }
+    }
+
+    /// Get the Entra ID tenant, defaulting to "common" for multi-tenant
+    pub fn entra_tenant(&self) -> &str {
+        self.entra_tenant_id.as_deref().unwrap_or("common")
     }
 }
 
@@ -46,6 +66,7 @@ impl OAuthConfig {
 pub enum OAuthProvider {
     GitHub,
     Google,
+    EntraId,
 }
 
 impl std::fmt::Display for OAuthProvider {
@@ -53,6 +74,7 @@ impl std::fmt::Display for OAuthProvider {
         match self {
             OAuthProvider::GitHub => write!(f, "github"),
             OAuthProvider::Google => write!(f, "google"),
+            OAuthProvider::EntraId => write!(f, "entra"),
         }
     }
 }
@@ -152,6 +174,27 @@ struct GoogleUserInfo {
     name: Option<String>,
 }
 
+/// Microsoft Entra ID token response
+#[derive(Debug, Deserialize)]
+struct EntraTokenResponse {
+    access_token: String,
+    #[allow(dead_code)]
+    token_type: String,
+    #[allow(dead_code)]
+    expires_in: u32,
+}
+
+/// Microsoft Graph /me response
+#[derive(Debug, Deserialize)]
+struct EntraUserInfo {
+    id: String,
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+    mail: Option<String>,
+    #[serde(rename = "userPrincipalName")]
+    user_principal_name: Option<String>,
+}
+
 /// Validated user info returned from token validation
 #[derive(Debug, Clone)]
 pub struct ValidatedUser {
@@ -209,6 +252,27 @@ pub async fn validate_oauth_token(token: &str) -> Result<ValidatedUser, String> 
         }
     }
 
+    // Try Microsoft Entra ID token (validates against Microsoft Graph)
+    let entra_result = client
+        .get("https://graph.microsoft.com/v1.0/me")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/json")
+        .send()
+        .await;
+
+    if let Ok(response) = entra_result {
+        if response.status().is_success() {
+            if let Ok(user) = response.json::<EntraUserInfo>().await {
+                return Ok(ValidatedUser {
+                    provider: "entra".to_string(),
+                    provider_id: user.id,
+                    email: user.mail.or(user.user_principal_name.clone()),
+                    name: user.display_name,
+                });
+            }
+        }
+    }
+
     Err("Invalid or expired OAuth token".to_string())
 }
 
@@ -235,6 +299,11 @@ pub async fn get_providers(
             name: "google".to_string(),
             enabled: config.google_client_id.is_some() && config.google_client_secret.is_some(),
             display_name: "Google".to_string(),
+        },
+        ProviderInfo {
+            name: "entra".to_string(),
+            enabled: config.entra_client_id.is_some() && config.entra_client_secret.is_some(),
+            display_name: "Microsoft Entra ID".to_string(),
         },
     ];
 
@@ -322,6 +391,42 @@ pub async fn authorize(
 
             let url = format!(
                 "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&state={}&response_type=code&scope=openid%20email%20profile",
+                client_id,
+                urlencoding::encode(&redirect_uri),
+                urlencoding::encode(&oauth_state)
+            );
+
+            AuthorizeResponse {
+                authorization_url: url,
+                state: oauth_state,
+                expires_in: 600,
+            }
+        }
+        "entra" => {
+            let client_id = match &config.entra_client_id {
+                Some(id) => id,
+                None => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "Microsoft Entra ID OAuth not configured"
+                    }));
+                }
+            };
+
+            let tenant = config.entra_tenant();
+            let oauth_state = generate_state();
+            let redirect_uri = format!("{}/v1/auth/oauth/callback", config.callback_base_url);
+
+            // Store state in database
+            if let Err(e) = store_oauth_state(pool, &oauth_state, &req.amid, "entra").await {
+                error!("Failed to store OAuth state: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to initiate OAuth flow"
+                }));
+            }
+
+            let url = format!(
+                "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize?client_id={}&redirect_uri={}&state={}&response_type=code&scope=openid%20profile%20email%20User.Read",
+                tenant,
                 client_id,
                 urlencoding::encode(&redirect_uri),
                 urlencoding::encode(&oauth_state)
@@ -428,6 +533,22 @@ pub async fn callback(
                         verified_identity: None,
                         certificate: None,
                         error: Some(format!("Google verification failed: {}", e)),
+                    });
+                }
+            }
+        }
+        "entra" => {
+            match exchange_entra_code(&config, &params.code).await {
+                Ok(identity) => identity,
+                Err(e) => {
+                    error!("Entra ID OAuth failed: {}", e);
+                    return HttpResponse::BadRequest().json(VerificationResult {
+                        success: false,
+                        amid: oauth_state.amid,
+                        provider: oauth_state.provider,
+                        verified_identity: None,
+                        certificate: None,
+                        error: Some(format!("Microsoft Entra ID verification failed: {}", e)),
                     });
                 }
             }
@@ -575,6 +696,66 @@ async fn exchange_google_code(
         email: user_info.email,
         username: None,
         display_name: user_info.name,
+        verified_at: Utc::now(),
+    })
+}
+
+/// Exchange Microsoft Entra ID authorization code for access token and get user info
+async fn exchange_entra_code(
+    config: &OAuthConfig,
+    code: &str,
+) -> Result<VerifiedIdentity, String> {
+    let client_id = config.entra_client_id.as_ref().ok_or("Entra ID not configured")?;
+    let client_secret = config.entra_client_secret.as_ref().ok_or("Entra ID not configured")?;
+    let tenant = config.entra_tenant();
+    let redirect_uri = format!("{}/v1/auth/oauth/callback", config.callback_base_url);
+
+    let client = reqwest::Client::new();
+
+    // Exchange code for token
+    let token_url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        tenant
+    );
+    let token_response: EntraTokenResponse = client
+        .post(&token_url)
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("code", code),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("grant_type", "authorization_code"),
+            ("scope", "openid profile email User.Read"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Entra token request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Entra token parsing failed: {}", e))?;
+
+    // Get user info from Microsoft Graph (validates token server-side)
+    let user_info: EntraUserInfo = client
+        .get("https://graph.microsoft.com/v1.0/me")
+        .header("Authorization", format!("Bearer {}", token_response.access_token))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Graph API request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Graph API parsing failed: {}", e))?;
+
+    // Use mail if available, fall back to UPN (which is typically an email for AAD users)
+    let email = user_info.mail.or(user_info.user_principal_name.clone());
+    let username = user_info.user_principal_name;
+
+    Ok(VerifiedIdentity {
+        provider: "entra".to_string(),
+        provider_id: user_info.id,
+        email,
+        username,
+        display_name: user_info.display_name,
         verified_at: Utc::now(),
     })
 }
