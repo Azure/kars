@@ -1080,6 +1080,29 @@ async fn succession_handler(
         "Succession request received"
     );
 
+    // §9.9.8: Rate limit — max 1 succession per AMID per 5 minutes
+    match db::check_succession_rate_limit(pool, &req.predecessor_amid, "succession", 300).await {
+        Ok(Some(retry_after)) => {
+            warn!(
+                predecessor = %req.predecessor_amid,
+                retry_after_secs = retry_after,
+                "Succession rate limited"
+            );
+            return HttpResponse::TooManyRequests().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: None,
+                error: Some(format!("Rate limited — retry after {retry_after}s")),
+            });
+        }
+        Ok(None) => {} // Not rate limited
+        Err(e) => {
+            error!("Rate limit check failed: {}", e);
+            // Fail open on DB error (don't block legitimate succession)
+        }
+    }
+
     // 1. Verify predecessor is registered and signing key matches
     let predecessor = match db::get_agent_by_amid(pool, &req.predecessor_amid).await {
         Ok(Some(agent)) => agent,
@@ -1290,6 +1313,28 @@ async fn reclamation_handler(
         reason = %req.reason,
         "Reclamation request received"
     );
+
+    // §9.9.3: Rate limit — max 1 reclamation per AMID per hour
+    match db::check_succession_rate_limit(pool, &req.original_amid, "reclamation", 3600).await {
+        Ok(Some(retry_after)) => {
+            warn!(
+                original = %req.original_amid,
+                retry_after_secs = retry_after,
+                "Reclamation rate limited"
+            );
+            return HttpResponse::TooManyRequests().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.original_amid.clone()),
+                successor_amid: Some(req.departing_amid.clone()),
+                error: Some(format!("Rate limited — retry after {retry_after}s")),
+            });
+        }
+        Ok(None) => {} // Not rate limited
+        Err(e) => {
+            error!("Reclamation rate limit check failed: {}", e);
+        }
+    }
 
     // 1. Find the active succession referenced by original_succession_ref
     let succession = match db::get_active_succession(pool, &req.original_amid).await {

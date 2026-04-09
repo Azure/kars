@@ -19,7 +19,7 @@ use azureclaw_inference_router::blocklist::Blocklist;
 use azureclaw_inference_router::budget::TokenBudgetTracker;
 use azureclaw_inference_router::config::{Config, RegistryMode};
 use azureclaw_inference_router::governance::Governance;
-use azureclaw_inference_router::handoff::{DrainState, HandoffSession, HandoffTokenStore};
+use azureclaw_inference_router::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
 use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
 
@@ -58,6 +58,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         handoff_tokens: HandoffTokenStore::new(),
         handoff_session: HandoffSession::new(),
         drain_state: DrainState::new(),
+        pending_handoff: PendingHandoffStore::new(),
     }
 }
 

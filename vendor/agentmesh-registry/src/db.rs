@@ -564,6 +564,41 @@ pub const RATING_TAGS: &[&str] = &[
 
 // ── Succession DB operations ────────────────────────────────────────────────
 
+/// Check if a succession/reclamation event happened too recently for a given AMID.
+///
+/// §9.9.8: Rate limit — max 1 succession per AMID per `min_interval_secs`.
+/// §9.9.3: Rate limit — max 1 reclamation per AMID per `min_interval_secs`.
+pub async fn check_succession_rate_limit(
+    pool: &PgPool,
+    amid: &str,
+    event_type: &str,
+    min_interval_secs: i64,
+) -> Result<Option<i64>> {
+    // Find the most recent event of this type involving this AMID
+    let row: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
+        r#"
+        SELECT created_at FROM succession_log
+        WHERE (predecessor_amid = $1 OR successor_amid = $1)
+          AND event_type = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(amid)
+    .bind(event_type)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((last_at,)) = row {
+        let elapsed = (Utc::now() - last_at).num_seconds();
+        if elapsed < min_interval_secs {
+            return Ok(Some(min_interval_secs - elapsed)); // seconds until allowed
+        }
+    }
+
+    Ok(None) // No rate limit hit
+}
+
 /// Record an identity succession event (A→B).
 pub async fn create_succession(
     pool: &PgPool,

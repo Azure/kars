@@ -18,7 +18,7 @@ use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::{Config, RegistryMode};
 use crate::governance::Governance;
-use crate::handoff::{self, DrainState, HandoffSession, HandoffTokenStore};
+use crate::handoff::{self, DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::{self, UpstreamConfig};
 use crate::safety;
@@ -50,6 +50,8 @@ pub struct AppState {
     pub handoff_session: HandoffSession,
     /// Drain state (stops new work during handoff).
     pub drain_state: DrainState,
+    /// Pending handoff confirmation store (§9.9.9 two-stage gate).
+    pub pending_handoff: PendingHandoffStore,
 }
 
 impl AppState {
@@ -133,6 +135,7 @@ impl AppState {
             handoff_tokens: HandoffTokenStore::new(),
             handoff_session: HandoffSession::new(),
             drain_state: DrainState::new(),
+            pending_handoff: PendingHandoffStore::new(),
         })
     }
 
@@ -2886,7 +2889,11 @@ pub fn handoff_protected_routes() -> Router<AppState> {
 
 /// Handoff status route — admin token required, localhost allowed (read-only).
 pub fn handoff_status_routes() -> Router<AppState> {
-    Router::new().route("/agt/handoff/status", get(handoff_status))
+    Router::new()
+        .route("/agt/handoff/status", get(handoff_status))
+        // Two-stage confirmation gate (§9.9.9) — localhost allowed (agent tool calls these)
+        .route("/agt/handoff/pending", post(handoff_pending))
+        .route("/agt/handoff/confirm", post(handoff_confirm))
 }
 
 /// POST /agt/handoff/init — create a one-time handoff token.
@@ -3082,6 +3089,21 @@ async fn handoff_snapshot(
         }
     };
 
+    // §9.9.4: Enforce blob size limit
+    if compressed.len() > handoff::MAX_BLOB_SIZE_BYTES {
+        let msg = format!(
+            "State blob too large: {}MB (max {}MB)",
+            compressed.len() / (1024 * 1024),
+            handoff::MAX_BLOB_SIZE_BYTES / (1024 * 1024)
+        );
+        state.handoff_session.fail(msg.clone()).await;
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
     // Compute verification hash BEFORE encryption
     let verification_hash = handoff::compute_verification_hash(&compressed);
 
@@ -3274,7 +3296,7 @@ async fn handoff_restore(
     };
 
     // Deserialize
-    let restored_state = match handoff::deserialize_state(&compressed) {
+    let mut restored_state = match handoff::deserialize_state(&compressed) {
         Ok(s) => s,
         Err(e) => {
             state.handoff_session.fail(e.clone()).await;
@@ -3301,20 +3323,86 @@ async fn handoff_restore(
             .into_response();
     }
 
-    // Restore trust scores
+    // ── §9.9.4: State blob size/DoS limits ──────────────────────────────────
+
+    if compressed.len() > handoff::MAX_BLOB_SIZE_BYTES {
+        let msg = format!(
+            "State blob too large: {}MB (max {}MB)",
+            compressed.len() / (1024 * 1024),
+            handoff::MAX_BLOB_SIZE_BYTES / (1024 * 1024)
+        );
+        state.handoff_session.fail(msg.clone()).await;
+        state.governance.audit.log(
+            &state.sandbox_name,
+            "handoff:restore:rejected",
+            &format!("blob_too_large size={}B", compressed.len()),
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // Workspace tar size check
+    if restored_state.workspace_tar.len() > handoff::MAX_BLOB_SIZE_BYTES {
+        let msg = "Workspace tar exceeds size limit";
+        state.handoff_session.fail(msg.into()).await;
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response();
+    }
+
+    // ── §9.9.1: State blob prompt injection protections ─────────────────────
+
+    // 1. Sanitize chat history — strip messages that look like system prompt injections
+    if let Some(ref chat_bytes) = restored_state.chat_snapshot {
+        let sanitized = handoff::sanitize_chat_snapshot(chat_bytes);
+        let original_len = chat_bytes.len();
+        let sanitized_len = sanitized.len();
+        if original_len != sanitized_len {
+            tracing::warn!(
+                original_bytes = original_len,
+                sanitized_bytes = sanitized_len,
+                "Chat snapshot sanitized — removed suspicious system-prompt patterns"
+            );
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:restore:sanitized",
+                &format!(
+                    "chat_sanitized original={}B sanitized={}B",
+                    original_len, sanitized_len
+                ),
+            );
+        }
+        restored_state.chat_snapshot = Some(sanitized);
+    }
+
+    // 2. Restore trust scores — tagged as "transferred" (§9.9.10)
+    let mut trust_count = 0u32;
     if let Some(scores) = restored_state.trust_scores.as_array() {
         for score_entry in scores {
             if let (Some(agent_id), Some(score)) = (
                 score_entry.get("agent_id").and_then(|v| v.as_str()),
                 score_entry.get("score").and_then(|v| v.as_u64()),
             ) {
+                // Set transferred trust — capped at 750 (cannot import max trust)
+                let capped_score = (score as u32).min(750);
                 state
                     .governance
                     .trust
-                    .set_trust(agent_id, score as u32);
+                    .set_trust(agent_id, capped_score);
+                trust_count += 1;
             }
         }
-        tracing::info!(count = scores.len(), "Restored trust scores from handoff");
+        if trust_count > 0 {
+            tracing::info!(
+                count = trust_count,
+                "Restored trust scores from handoff (capped at 750, tagged as transferred)"
+            );
+        }
     }
 
     // Restore token budget usage
@@ -3351,7 +3439,8 @@ async fn handoff_restore(
             "agent_name": restored_state.agent_name,
             "predecessor_amid": restored_state.predecessor_amid,
             "successor_amid": restored_state.successor_amid,
-            "trust_scores_count": restored_state.trust_scores.as_array().map(|a| a.len()).unwrap_or(0),
+            "trust_scores_count": trust_count,
+            "trust_scores_capped_at": 750,
             "audit_entries_count": restored_state.audit_entries.len(),
             "sub_agent_snapshots": restored_state.sub_agent_snapshots.len(),
             "credentials": restored_state.credentials.len(),
@@ -3565,6 +3654,211 @@ async fn handoff_abort(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// GET /agt/handoff/status — read-only handoff status.
+/// POST /agt/handoff/pending — create a pending handoff request (§9.9.9 Stage 1).
+///
+/// Called by the agent tool (`azureclaw_handoff_request`). Generates a confirmation
+/// token that the user must echo back to confirm.
+///
+/// Rate limited: max 1 request per 5 minutes.
+async fn handoff_pending(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    // Registry mode guard
+    if state.config.registry_mode == RegistryMode::Local {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Handoff requires global registry mode",
+                "registry_mode": "local",
+                "hint": "Start with --global-registry <url>"
+            })),
+        )
+            .into_response();
+    }
+
+    // Prevent creating a pending request while a handoff is already in progress
+    if !state.handoff_session.can_start().await {
+        let current = state.handoff_session.status().await;
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Handoff already in progress (phase: {})", current.phase),
+                "phase": current.phase,
+            })),
+        )
+            .into_response();
+    }
+
+    let direction = match body.get("direction").and_then(|v| v.as_str()) {
+        Some("local") | Some("aks_to_local") => handoff::HandoffDirection::AksToLocal,
+        _ => handoff::HandoffDirection::LocalToAks,
+    };
+
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("user_requested")
+        .to_string();
+
+    match state.pending_handoff.create_pending(direction, reason.clone()).await {
+        Ok(token) => {
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:pending",
+                &format!("direction={direction} reason={reason}"),
+            );
+
+            tracing::info!(
+                direction = %direction,
+                reason = %reason,
+                "Handoff pending — confirmation token generated"
+            );
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "pending_confirmation",
+                    "confirmation_token": token,
+                    "direction": direction.to_string(),
+                    "reason": reason,
+                    "expires_in_secs": handoff::PENDING_HANDOFF_TTL_SECS,
+                    "min_confirm_delay_secs": handoff::CONFIRMATION_MIN_DELAY_SECS,
+                    "instruction": format!(
+                        "Ask the user to confirm handoff by replying with code: {token}"
+                    ),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let status = match &e {
+                handoff::PendingHandoffError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+                _ => StatusCode::BAD_REQUEST,
+            };
+
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:pending:rejected",
+                &format!("{e}"),
+            );
+
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+/// POST /agt/handoff/confirm — confirm a pending handoff request (§9.9.9 Stage 2).
+///
+/// Validates the confirmation token, enforces minimum delay (3s), and on success
+/// generates the real handoff token (Layer 1) and initializes the handoff session.
+///
+/// This is the bridge: user-confirmed intent → actual handoff execution.
+async fn handoff_confirm(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    // Registry mode guard (defense in depth — /pending is also gated)
+    if state.config.registry_mode == RegistryMode::Local {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Handoff requires global registry mode",
+                "registry_mode": "local",
+            })),
+        )
+            .into_response();
+    }
+
+    let token = match body.get("confirmation_token").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "confirmation_token is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    match state.pending_handoff.confirm(token).await {
+        Ok((direction, reason)) => {
+            // Confirmation successful — now create the real handoff token
+            let ttl_secs = body
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(handoff::DEFAULT_TOKEN_TTL_SECS);
+
+            let (handoff_token, token_hash) = state.handoff_tokens.create_token(ttl_secs).await;
+
+            let predecessor_amid = body
+                .get("predecessor_amid")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            state
+                .handoff_session
+                .initialize(direction, predecessor_amid)
+                .await;
+
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:confirmed",
+                &format!(
+                    "direction={direction} reason={reason} token_hash={}",
+                    &token_hash[..16]
+                ),
+            );
+
+            tracing::info!(
+                direction = %direction,
+                token_hash = &token_hash[..16],
+                "Handoff confirmed by user — token created"
+            );
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "confirmed",
+                    "handoff_token": handoff_token,
+                    "token_hash": token_hash,
+                    "ttl_seconds": ttl_secs,
+                    "direction": direction.to_string(),
+                    "reason": reason,
+                    "phase": "initialized",
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let status = match &e {
+                handoff::PendingHandoffError::TooFast { .. } => StatusCode::TOO_MANY_REQUESTS,
+                handoff::PendingHandoffError::InvalidToken => StatusCode::UNAUTHORIZED,
+                handoff::PendingHandoffError::Expired => StatusCode::GONE,
+                handoff::PendingHandoffError::NoPending => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
+
+            let is_too_fast = matches!(e, handoff::PendingHandoffError::TooFast { .. });
+
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:confirm:rejected",
+                &format!("{e}"),
+            );
+
+            if is_too_fast {
+                tracing::warn!(
+                    error = %e,
+                    "Handoff confirm rejected — possible LLM self-confirm attempt"
+                );
+            }
+
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
 async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
     let session = state.handoff_session.status().await;
     let token_active = state.handoff_tokens.is_active().await;
@@ -3574,6 +3868,8 @@ async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
         .drain_duration()
         .await
         .map(|d| d.as_secs());
+
+    let pending = state.pending_handoff.status().await;
 
     Json(serde_json::json!({
         "phase": session.phase,
@@ -3589,6 +3885,7 @@ async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
         "drain_duration_secs": drain_duration,
         "registry_mode": state.config.registry_mode.to_string(),
         "handoff_available": state.config.registry_mode == RegistryMode::Global,
+        "pending_confirmation": pending,
     }))
 }
 
