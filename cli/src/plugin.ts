@@ -2653,7 +2653,75 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, http_fetch");
+    // ── Handoff tools (agent migration) ──────────────────────────────────
+    // These allow the LLM to check handoff readiness and trigger migration
+    // when the user asks to "continue from the cloud" or similar.
+
+    api.registerTool({
+      name: "azureclaw_handoff_status",
+      label: "Handoff Status",
+      description: "Check if agent handoff (live migration) is available and get current handoff state. Returns registry mode (local/global), whether handoff is available, current phase, and any active transfer details. Use this when the user asks about moving to the cloud or migrating the agent.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+      async execute() {
+        try {
+          const result = await routerCall("GET", "/agt/handoff/status");
+          return { content: [{ type: "text", text: safeJson(result) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Handoff status check failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "azureclaw_handoff_request",
+      label: "Request Handoff",
+      description: "Request a live handoff (migration) of this agent to the cloud or back to local. This is a SECURITY-SENSITIVE operation — it will migrate the agent's full state including chat history, sub-agents, trust scores, and workspace. The user MUST confirm before this proceeds. Direction: 'cloud' to migrate to AKS, 'local' to migrate back. Requires global registry mode (--global-registry).",
+      parameters: {
+        type: "object",
+        properties: {
+          direction: { type: "string", description: "Migration direction: 'cloud' (local→AKS) or 'local' (AKS→local)" },
+          reason: { type: "string", description: "Why the handoff is requested (shown in audit log)" },
+        },
+        required: ["direction"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        const direction = (params.direction as string) === "local" ? "aks_to_local" : "local_to_aks";
+        const reason = (params.reason as string) || "user_requested";
+
+        try {
+          // First check if handoff is available
+          const status = await routerCall("GET", "/agt/handoff/status");
+          if (!(status as any)?.handoff_available) {
+            return { content: [{ type: "text", text: safeJson({
+              error: "Handoff is not available — requires global registry mode.",
+              registry_mode: (status as any)?.registry_mode,
+              hint: "Restart with: azureclaw dev --global-registry <url>",
+            }) }] };
+          }
+
+          // Report that handoff should be initiated from the CLI
+          // The agent cannot initiate a full handoff because the handoff
+          // token is designed to be held by the CLI process (not the LLM).
+          // This prevents prompt injection from triggering unauthorized handoff.
+          return { content: [{ type: "text", text: safeJson({
+            status: "handoff_ready",
+            direction,
+            reason,
+            registry_mode: (status as any)?.registry_mode,
+            instruction: "Handoff is available. Tell the user to run the CLI command to initiate.",
+            command: `azureclaw handoff ${process.env.SANDBOX_NAME || "<name>"} --to ${direction === "local_to_aks" ? "cloud" : "local"}`,
+            security_note: "Handoff tokens are CLI-only (not LLM-accessible) to prevent prompt injection attacks.",
+          }) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Handoff request failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, azureclaw_handoff_status, azureclaw_handoff_request, http_fetch");
 
     // ── http_fetch: routed through the inference router's egress proxy ──
     // The sandbox (UID 1000) cannot reach the internet directly (iptables).
