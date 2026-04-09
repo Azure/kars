@@ -14,7 +14,7 @@ import { banner, section, kvLine, checkLine } from "../stepper.js";
 const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
 const IDENTITY_FILE = path.join(IDENTITY_DIR, "mesh-identity.json");
 
-interface MeshIdentity {
+export interface MeshIdentity {
   amid: string;
   publicKey: string;
   /** Encrypted private key (AES-256-GCM, key derived from machine ID) */
@@ -504,3 +504,6 @@ export function meshCommand(): Command {
 
   return cmd;
 }
+
+// Exported for testing
+export { generateKeypair, base58Encode, encryptPrivateKey, decryptPrivateKey };

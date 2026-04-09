@@ -150,4 +150,54 @@ impl RegistryVerifier {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
+
+    #[cfg(test)]
+    fn new_disabled() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            registry_url: String::new(),
+            enabled: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_disabled_verifier_allows_all() {
+        let verifier = RegistryVerifier::new_disabled();
+        assert!(!verifier.is_enabled());
+
+        // Any AMID should pass when verification is disabled
+        let amid: Amid = "agent:alice@example.com".into();
+        assert!(verifier.verify_registered(&amid).await.is_ok());
+
+        let amid2: Amid = "agent:unknown@nowhere".into();
+        assert!(verifier.verify_registered(&amid2).await.is_ok());
+    }
+
+    #[test]
+    fn test_from_env_disabled_by_default() {
+        // Clear relevant env vars to ensure default behavior
+        std::env::remove_var("REGISTRY_URL");
+        std::env::remove_var("REQUIRE_REGISTRATION");
+
+        let verifier = RegistryVerifier::from_env();
+        assert!(!verifier.is_enabled());
+    }
+
+    #[test]
+    fn test_from_env_enabled() {
+        std::env::set_var("REGISTRY_URL", "http://localhost:9999");
+        std::env::set_var("REQUIRE_REGISTRATION", "true");
+
+        let verifier = RegistryVerifier::from_env();
+        assert!(verifier.is_enabled());
+
+        // Clean up
+        std::env::remove_var("REGISTRY_URL");
+        std::env::remove_var("REQUIRE_REGISTRATION");
+    }
 }
