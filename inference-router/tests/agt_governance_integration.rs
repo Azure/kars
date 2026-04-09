@@ -17,7 +17,7 @@ use tower::ServiceExt; // for oneshot()
 use azureclaw_inference_router::auth::WorkloadIdentityAuth;
 use azureclaw_inference_router::blocklist::Blocklist;
 use azureclaw_inference_router::budget::TokenBudgetTracker;
-use azureclaw_inference_router::config::Config;
+use azureclaw_inference_router::config::{Config, RegistryMode};
 use azureclaw_inference_router::governance::Governance;
 use azureclaw_inference_router::handoff::{DrainState, HandoffSession, HandoffTokenStore};
 use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
@@ -43,6 +43,8 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
             content_safety_endpoint: None,
             token_budget_daily: 1_000_000,
             token_budget_per_request: 100_000,
+            registry_mode: RegistryMode::Local,
+            registry_url: None,
         }),
         budget: TokenBudgetTracker::new(1_000_000, 100_000),
         governance: Arc::new(Governance::new(sandbox)),

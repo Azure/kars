@@ -42,6 +42,10 @@ export function devCommand(): Command {
       "--no-agt",
       "Skip AGT relay/registry stack (single-agent only)"
     )
+    .option(
+      "--global-registry <url>",
+      "Use a shared external registry (enables handoff). Skips local relay/registry/postgres."
+    )
     .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
     .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
     .option("--telegram-allow-from <ids>", "Telegram user IDs allowed to DM (comma-separated numeric IDs)")
@@ -226,8 +230,11 @@ export function devCommand(): Command {
 
         // ── AGT infrastructure (relay, registry, postgres) ───────────
         let agtReady = false;
-        if (options.agt) {
-          stepper.step("Starting AGT infrastructure...");
+        const useGlobalRegistry = !!options.globalRegistry;
+
+        if (options.agt && !useGlobalRegistry) {
+          // Local registry mode — deploy relay/registry/postgres locally
+          stepper.step("Starting AGT infrastructure (local registry)...");
 
           // Helper: check if a container exists and is running
           async function isContainerRunning(name: string): Promise<boolean> {
@@ -313,6 +320,23 @@ export function devCommand(): Command {
           }
 
           stepper.done(agtReady ? "AGT infrastructure ready (relay + registry + postgres)" : "AGT infrastructure started (health check pending)");
+        } else if (useGlobalRegistry) {
+          // Global registry mode — skip local deployment, verify connectivity
+          stepper.step("Connecting to global registry...");
+          const registryUrl = options.globalRegistry as string;
+          stepper.update(`Checking ${registryUrl}...`);
+
+          try {
+            const healthUrl = `${registryUrl.replace(/\/$/, "")}/v1/health`;
+            const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(10000) });
+            agtReady = resp.ok;
+            stepper.done(agtReady
+              ? `Global registry connected (${registryUrl}) — handoff enabled`
+              : `Global registry returned ${resp.status} — may not be ready`
+            );
+          } catch (e: any) {
+            stepper.done(`Global registry health check failed: ${e.message ?? e} — will retry on first use`);
+          }
         }
 
         // ── Container startup ────────────────────────────────────────
@@ -367,16 +391,29 @@ export function devCommand(): Command {
 
         // AGT network args: connect sandbox to the shared Docker network
         // so the router can reach relay/registry by container hostname
-        const networkArgs = options.agt ? ["--network", AGT_NETWORK] : [];
-        const agtEnvArgs = options.agt ? [
-          "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:8765`,
-          "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:8080`,
-          "-e", "AGT_GOVERNANCE_ENABLED=true",
-        ] : [];
+        const networkArgs = (options.agt && !useGlobalRegistry) ? ["--network", AGT_NETWORK] : [];
+        const agtEnvArgs: string[] = [];
+        if (useGlobalRegistry) {
+          // Global registry mode — router connects to external registry
+          const registryUrl = options.globalRegistry as string;
+          agtEnvArgs.push(
+            "-e", `AGT_REGISTRY_URL=${registryUrl}`,
+            "-e", "AGT_REGISTRY_MODE=global",
+            "-e", "AGT_GOVERNANCE_ENABLED=true",
+          );
+        } else if (options.agt) {
+          // Local registry mode — router connects to colocated containers
+          agtEnvArgs.push(
+            "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:8765`,
+            "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:8080`,
+            "-e", "AGT_REGISTRY_MODE=local",
+            "-e", "AGT_GOVERNANCE_ENABLED=true",
+          );
+        }
 
         // Dev mode: mount Docker socket so sub-agents can be spawned as sibling containers.
         // Not :ro — entrypoint chmod's it so the router (UID 1001) can use the Docker API.
-        const dockerSockArgs = options.agt ? [
+        const dockerSockArgs = (options.agt || useGlobalRegistry) ? [
           "-v", "/var/run/docker.sock:/var/run/docker.sock",
         ] : [];
 
@@ -479,8 +516,11 @@ export function devCommand(): Command {
         checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
         checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → transparent proxy)" : "(not available)"}`);
         checkLine(true, "API key mounted as read-only secret");
-        if (options.agt) {
-          checkLine(agtReady, `AGT mesh ${agtReady ? "(relay + registry + E2E encryption)" : "(starting...)"}`);
+        if (options.agt || useGlobalRegistry) {
+          const registryLabel = useGlobalRegistry
+            ? `(global registry — handoff enabled)`
+            : `(relay + registry + E2E encryption)`;
+          checkLine(agtReady, `AGT mesh ${agtReady ? registryLabel : "(starting...)"}`);
         }
 
         section("Services");

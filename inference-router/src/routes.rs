@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::auth::WorkloadIdentityAuth;
 use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
-use crate::config::Config;
+use crate::config::{Config, RegistryMode};
 use crate::governance::Governance;
 use crate::handoff::{self, DrainState, HandoffSession, HandoffTokenStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
@@ -2897,6 +2897,21 @@ async fn handoff_init_handler(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    // ── Registry mode guard ──────────────────────────────────────────────────
+    // Handoff requires a global registry — both agents must be in the same
+    // registry for identity succession to work.
+    if state.config.registry_mode == RegistryMode::Local {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Handoff requires a global registry. Start with --global-registry <url> to enable handoff.",
+                "registry_mode": "local",
+                "hint": "Run `azureclaw dev --global-registry <url>` or `azureclaw up --global-registry <url>`"
+            })),
+        )
+            .into_response();
+    }
+
     // Check if a handoff can be started
     if !state.handoff_session.can_start().await {
         let current = state.handoff_session.status().await;
@@ -3572,6 +3587,8 @@ async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
         "handoff_token_active": token_active,
         "draining": draining,
         "drain_duration_secs": drain_duration,
+        "registry_mode": state.config.registry_mode.to_string(),
+        "handoff_available": state.config.registry_mode == RegistryMode::Global,
     }))
 }
 
