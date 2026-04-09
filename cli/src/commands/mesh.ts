@@ -5,7 +5,9 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as http from "node:http";
 import * as crypto from "node:crypto";
+import { execa } from "execa";
 import { banner, section, kvLine, checkLine } from "../stepper.js";
+import { loadContext, saveContext } from "../config.js";
 
 // ---------------------------------------------------------------------------
 // Identity file
@@ -500,6 +502,197 @@ export function meshCommand(): Command {
       } else {
         console.log(chalk.dim("  Cancelled."));
       }
+    });
+
+  // -----------------------------------------------------------------------
+  // mesh promote — expose cluster registry as a global endpoint
+  // -----------------------------------------------------------------------
+  cmd
+    .command("promote")
+    .description("Promote the AKS cluster registry to a public global endpoint")
+    .action(async () => {
+      banner("AzureClaw · Mesh Promote", "Promote Registry to Global");
+
+      // Load deployment context
+      const ctx = loadContext();
+      if (!ctx?.aksCluster || !ctx?.resourceGroup) {
+        console.error(chalk.red("  ✘ No deployment context found."));
+        console.error(chalk.dim("    Run azureclaw up first to deploy an AKS cluster."));
+        process.exit(1);
+      }
+
+      if (ctx.registryMode === "global" && ctx.globalRegistryUrl) {
+        console.log(chalk.yellow("  ⚠ Registry is already global."));
+        kvLine("Registry", ctx.globalRegistryUrl);
+        kvLine("Relay", ctx.globalRelayUrl ?? "—");
+        return;
+      }
+
+      section("Cluster");
+      kvLine("AKS", ctx.aksCluster);
+      kvLine("Resource Group", ctx.resourceGroup);
+      kvLine("ACR", ctx.acrLoginServer ?? "—");
+
+      // Verify agentmesh namespace exists
+      section("AgentMesh");
+      try {
+        await execa("kubectl", [
+          "get", "namespace", "agentmesh",
+        ], { stdio: "pipe" });
+        checkLine(true, "agentmesh namespace exists");
+      } catch {
+        console.error(chalk.red("  ✘ agentmesh namespace not found."));
+        console.error(chalk.dim("    Deploy an agent first: azureclaw up <name> --model <model>"));
+        process.exit(1);
+      }
+
+      // Verify registry and relay pods are running
+      try {
+        await execa("kubectl", [
+          "get", "pod", "-n", "agentmesh", "-l", "app=agentmesh-registry",
+          "--field-selector", "status.phase=Running", "-o", "name",
+        ], { stdio: "pipe" });
+        checkLine(true, "Registry pod running");
+      } catch {
+        console.error(chalk.red("  ✘ Registry pod not running."));
+        process.exit(1);
+      }
+
+      try {
+        await execa("kubectl", [
+          "get", "pod", "-n", "agentmesh", "-l", "app=agentmesh-relay",
+          "--field-selector", "status.phase=Running", "-o", "name",
+        ], { stdio: "pipe" });
+        checkLine(true, "Relay pod running");
+      } catch {
+        console.error(chalk.red("  ✘ Relay pod not running."));
+        process.exit(1);
+      }
+
+      // Find the ingress manifest
+      section("Ingress");
+      // Walk up from dist/ to find the repo root deploy/ directory
+      const cliDir = path.dirname(new URL(import.meta.url).pathname);
+      const repoRoot = path.resolve(cliDir, "..", "..");
+      const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
+
+      if (!fs.existsSync(ingressManifest)) {
+        console.error(chalk.red(`  ✘ Ingress manifest not found: ${ingressManifest}`));
+        process.exit(1);
+      }
+
+      // Derive domain from cluster name (matches azureclaw up convention)
+      const baseName = ctx.aksCluster.replace(/-aks$/, "");
+      const domain = `${baseName}.azureclaw.dev`;
+
+      // Get subscription ID
+      const { stdout: subId } = await execa("az", [
+        "account", "show", "--query", "id", "--output", "tsv",
+      ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
+
+      if (!subId.trim()) {
+        console.error(chalk.red("  ✘ Cannot determine Azure subscription ID."));
+        console.error(chalk.dim("    Run: az login"));
+        process.exit(1);
+      }
+
+      // Patch and apply the ingress manifest
+      const ingressYaml = fs.readFileSync(ingressManifest, "utf-8");
+      const patchedIngress = ingressYaml
+        .replace(/DOMAIN_PLACEHOLDER/g, domain)
+        .replace(/SUBSCRIPTION_ID/g, subId.trim())
+        .replace(/RESOURCE_GROUP/g, ctx.resourceGroup)
+        .replace(/azureclawacr\.azurecr\.io/g, ctx.acrLoginServer ?? "azureclawacr.azurecr.io");
+
+      const tmpIngress = path.join(os.tmpdir(), `.azureclaw-ingress-${Date.now()}.yaml`);
+      try {
+        fs.writeFileSync(tmpIngress, patchedIngress);
+        await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
+        checkLine(true, "Ingress + NetworkPolicies applied");
+      } catch (e: any) {
+        console.error(chalk.red(`  ✘ kubectl apply failed: ${e.message}`));
+        process.exit(1);
+      } finally {
+        try { fs.unlinkSync(tmpIngress); } catch { /* noop */ }
+      }
+
+      const globalRegistryUrl = `https://registry.${domain}`;
+      const globalRelayUrl = `wss://relay.${domain}`;
+
+      // Update deployment context
+      ctx.registryMode = "global";
+      ctx.globalRegistryUrl = globalRegistryUrl;
+      ctx.globalRelayUrl = globalRelayUrl;
+      saveContext(ctx);
+
+      section("Global Endpoints");
+      kvLine("Registry", chalk.cyan(globalRegistryUrl));
+      kvLine("Relay", chalk.cyan(globalRelayUrl));
+      kvLine("Domain", domain);
+
+      console.log();
+      console.log(chalk.green("  ✓ ") + chalk.bold("Registry promoted to global."));
+      console.log(chalk.dim(`    DNS: point registry.${domain} and relay.${domain} to AppGW public IP`));
+      console.log(chalk.dim(`    Then: azureclaw dev --global-registry ${globalRegistryUrl}`));
+      console.log();
+    });
+
+  // -----------------------------------------------------------------------
+  // mesh demote — revert to cluster-local registry
+  // -----------------------------------------------------------------------
+  cmd
+    .command("demote")
+    .description("Demote the registry back to cluster-local (remove public endpoints)")
+    .action(async () => {
+      banner("AzureClaw · Mesh Demote", "Demote Registry to Local");
+
+      const ctx = loadContext();
+      if (!ctx?.aksCluster || !ctx?.resourceGroup) {
+        console.error(chalk.red("  ✘ No deployment context found."));
+        process.exit(1);
+      }
+
+      if (ctx.registryMode !== "global") {
+        console.log(chalk.yellow("  ⚠ Registry is already local."));
+        return;
+      }
+
+      section("Removing Ingress");
+
+      // Delete the ingress resources (reverse of promote)
+      const ingressResources = [
+        "ingress/agentmesh-registry",
+        "ingress/agentmesh-relay",
+        "networkpolicy/postgres-restrict",
+        "networkpolicy/registry-restrict",
+        "networkpolicy/relay-restrict",
+      ];
+
+      for (const resource of ingressResources) {
+        try {
+          await execa("kubectl", [
+            "delete", resource, "-n", "agentmesh", "--ignore-not-found",
+          ], { stdio: "pipe" });
+          checkLine(true, `Deleted ${resource}`);
+        } catch {
+          console.log(chalk.yellow(`  ⚠ Could not delete ${resource}`));
+        }
+      }
+
+      // Update deployment context
+      ctx.registryMode = "local";
+      ctx.globalRegistryUrl = undefined;
+      ctx.globalRelayUrl = undefined;
+      saveContext(ctx);
+
+      section("Status");
+      kvLine("Registry mode", "local (cluster-only)");
+
+      console.log();
+      console.log(chalk.green("  ✓ ") + chalk.bold("Registry demoted to local."));
+      console.log(chalk.dim("    Public endpoints removed. Agents in this cluster still work."));
+      console.log(chalk.dim("    Cross-environment handoff is no longer available."));
+      console.log();
     });
 
   return cmd;
