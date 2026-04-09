@@ -2675,10 +2675,16 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
+    // Only register mutation handoff tools when global registry is active.
+    // In local mode the LLM only sees azureclaw_handoff_status which reports
+    // handoff_available: false — no point exposing tools that would 409.
+    const registryMode = process.env.AGT_REGISTRY_MODE || "local";
+    if (registryMode === "global") {
+
     api.registerTool({
       name: "azureclaw_handoff_request",
       label: "Request Handoff",
-      description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that the user must echo back. This is a SECURITY-SENSITIVE operation — it will migrate the agent's full state including chat history, sub-agents, trust scores, and workspace. Direction: 'cloud' to migrate to AKS, 'local' to migrate back. Requires global registry mode (--global-registry).",
+      description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that the user must echo back. This is a SECURITY-SENSITIVE operation — it will migrate the agent's full state including chat history, sub-agents, trust scores, and workspace. Direction: 'cloud' to migrate to AKS, 'local' to migrate back. IMPORTANT: Always call azureclaw_handoff_status first to check if handoff is available.",
       parameters: {
         type: "object",
         properties: {
@@ -2767,7 +2773,13 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, azureclaw_handoff_status, azureclaw_handoff_request, azureclaw_handoff_confirm, http_fetch");
+    log.info(`AzureClaw handoff tools registered (registry_mode=${registryMode}): azureclaw_handoff_request, azureclaw_handoff_confirm`);
+
+    } else {
+      log.info(`AzureClaw handoff mutation tools skipped (registry_mode=${registryMode}) — only azureclaw_handoff_status available`);
+    }
+
+    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, azureclaw_handoff_status, http_fetch");
 
     // ── http_fetch: routed through the inference router's egress proxy ──
     // The sandbox (UID 1000) cannot reach the internet directly (iptables).
