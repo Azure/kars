@@ -511,8 +511,7 @@ export function meshCommand(): Command {
     .command("promote")
     .description("Promote the AKS cluster registry to a public global endpoint")
     .option("--allow-ip <cidr>", "Restrict access to this IP/CIDR (e.g. 203.0.113.42 or 203.0.113.0/24). Omit for auto-detect.")
-    .option("--domain <domain>", "Custom domain (e.g. mesh.example.com). Omit for auto sslip.io.")
-    .action(async (opts: { allowIp?: string; domain?: string }) => {
+    .action(async (opts: { allowIp?: string }) => {
       banner("AzureClaw · Mesh Promote", "Promote Registry to Global");
 
       // Load deployment context
@@ -527,6 +526,7 @@ export function meshCommand(): Command {
         console.log(chalk.yellow("  ⚠ Registry is already global."));
         kvLine("Registry", ctx.globalRegistryUrl);
         kvLine("Relay", ctx.globalRelayUrl ?? "—");
+        console.log(chalk.dim("\n    Run azureclaw mesh demote first to reset."));
         return;
       }
 
@@ -538,9 +538,7 @@ export function meshCommand(): Command {
       // Verify agentmesh namespace exists
       section("AgentMesh");
       try {
-        await execa("kubectl", [
-          "get", "namespace", "agentmesh",
-        ], { stdio: "pipe" });
+        await execa("kubectl", ["get", "namespace", "agentmesh"], { stdio: "pipe" });
         checkLine(true, "agentmesh namespace exists");
       } catch {
         console.error(chalk.red("  ✘ agentmesh namespace not found."));
@@ -548,190 +546,115 @@ export function meshCommand(): Command {
         process.exit(1);
       }
 
-      // Verify registry and relay pods are running
-      try {
-        await execa("kubectl", [
-          "get", "pod", "-n", "agentmesh", "-l", "app=agentmesh-registry",
-          "--field-selector", "status.phase=Running", "-o", "name",
-        ], { stdio: "pipe" });
-        checkLine(true, "Registry pod running");
-      } catch {
-        console.error(chalk.red("  ✘ Registry pod not running."));
-        process.exit(1);
-      }
-
-      try {
-        await execa("kubectl", [
-          "get", "pod", "-n", "agentmesh", "-l", "app=agentmesh-relay",
-          "--field-selector", "status.phase=Running", "-o", "name",
-        ], { stdio: "pipe" });
-        checkLine(true, "Relay pod running");
-      } catch {
-        console.error(chalk.red("  ✘ Relay pod not running."));
-        process.exit(1);
+      // Verify pods are running
+      for (const app of ["agentmesh-registry", "agentmesh-relay"]) {
+        try {
+          await execa("kubectl", [
+            "get", "pod", "-n", "agentmesh", "-l", `app=${app}`,
+            "--field-selector", "status.phase=Running", "-o", "name",
+          ], { stdio: "pipe" });
+          checkLine(true, `${app.replace("agentmesh-", "")} pod running`);
+        } catch {
+          console.error(chalk.red(`  ✘ ${app} pod not running.`));
+          process.exit(1);
+        }
       }
 
       // Resolve IP allowlist
       section("Access Control");
-      let allowCidr: string | null = null;
+      let allowCidr: string;
 
       if (opts.allowIp) {
         allowCidr = opts.allowIp.includes("/") ? opts.allowIp : `${opts.allowIp}/32`;
         kvLine("Allow IP", allowCidr + " (from --allow-ip)");
       } else {
         // Auto-detect public IP
+        let detectedIp = "";
         try {
           const resp = await fetch("https://ifconfig.me/ip", { signal: AbortSignal.timeout(5000) });
           if (resp.ok) {
             const ip = (await resp.text()).trim();
             if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
-              allowCidr = `${ip}/32`;
-              kvLine("Allow IP", allowCidr + " (auto-detected)");
-            }
-          }
-        } catch { /* fall through to unrestricted */ }
-
-        if (!allowCidr) {
-          console.log(chalk.yellow("  ⚠ Could not detect public IP — registry will be open."));
-          console.log(chalk.dim("    Re-run with --allow-ip <your-ip> to restrict access."));
-        }
-      }
-
-      // Find the ingress manifest
-      section("Ingress");
-      // Compiled JS is at cli/dist/commands/mesh.js — go up 3 levels to repo root
-      const cliDir = path.dirname(new URL(import.meta.url).pathname);
-      const repoRoot = path.resolve(cliDir, "..", "..", "..");
-      const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
-
-      if (!fs.existsSync(ingressManifest)) {
-        console.error(chalk.red(`  ✘ Ingress manifest not found: ${ingressManifest}`));
-        process.exit(1);
-      }
-
-      // Resolve domain — custom or auto-detect via AppGW public IP + sslip.io
-      let domain: string;
-      if (opts.domain) {
-        domain = opts.domain;
-        kvLine("Domain", domain + " (custom)");
-      } else {
-        // Find the Application Gateway public IP
-        console.log(chalk.dim("  Detecting AppGW public IP..."));
-        let appGwIp = "";
-        try {
-          // AGIC uses an AppGW whose public IP we can find via the AKS add-on
-          const { stdout: appGwName } = await execa("az", [
-            "aks", "show",
-            "--resource-group", ctx.resourceGroup,
-            "--name", ctx.aksCluster,
-            "--query", "addonProfiles.ingressApplicationGateway.config.applicationGatewayName",
-            "--output", "tsv",
-          ], { stdio: "pipe", timeout: 15000 });
-
-          if (appGwName.trim()) {
-            // Get the frontend IP config → public IP resource ID
-            const { stdout: pipId } = await execa("az", [
-              "network", "application-gateway", "show",
-              "--resource-group", ctx.resourceGroup,
-              "--name", appGwName.trim(),
-              "--query", "frontendIPConfigurations[0].publicIPAddress.id",
-              "--output", "tsv",
-            ], { stdio: "pipe", timeout: 15000 });
-
-            if (pipId.trim()) {
-              const { stdout: ip } = await execa("az", [
-                "network", "public-ip", "show",
-                "--ids", pipId.trim(),
-                "--query", "ipAddress",
-                "--output", "tsv",
-              ], { stdio: "pipe", timeout: 10000 });
-              appGwIp = ip.trim();
+              detectedIp = ip;
             }
           }
         } catch { /* fall through */ }
 
-        // Fallback: check existing Ingress for an IP
-        if (!appGwIp) {
-          try {
-            const { stdout: ingressIp } = await execa("kubectl", [
-              "get", "ingress", "-n", "agentmesh",
-              "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}",
-            ], { stdio: "pipe", timeout: 10000 });
-            if (ingressIp.trim() && /^\d/.test(ingressIp.trim())) {
-              appGwIp = ingressIp.trim();
-            }
-          } catch { /* fall through */ }
-        }
-
-        if (!appGwIp) {
-          console.error(chalk.red("  ✘ Could not detect AppGW public IP."));
-          console.error(chalk.dim("    Use --domain <your-domain> to specify manually."));
+        if (!detectedIp) {
+          console.error(chalk.red("  ✘ Could not detect public IP."));
+          console.error(chalk.dim("    Use --allow-ip <your-ip> to specify manually."));
           process.exit(1);
         }
-
-        // sslip.io: dots in IP replaced with dashes
-        const sslipHost = appGwIp.replace(/\./g, "-") + ".sslip.io";
-        domain = sslipHost;
-        kvLine("AppGW IP", appGwIp);
-        kvLine("Domain", domain + " (sslip.io — auto)");
+        allowCidr = `${detectedIp}/32`;
+        kvLine("Allow IP", allowCidr + " (auto-detected)");
       }
 
-      // Get subscription ID (for WAF policy reference in Ingress)
-      const { stdout: subId } = await execa("az", [
-        "account", "show", "--query", "id", "--output", "tsv",
-      ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
+      // Patch registry and relay services to LoadBalancer with IP restriction
+      section("LoadBalancer Services");
 
-      if (!subId.trim()) {
-        console.error(chalk.red("  ✘ Cannot determine Azure subscription ID."));
-        console.error(chalk.dim("    Run: az login"));
-        process.exit(1);
-      }
+      const services = [
+        { name: "agentmesh-registry", port: 8080, label: "Registry" },
+        { name: "agentmesh-relay", port: 8765, label: "Relay" },
+      ];
 
-      // Patch and apply the ingress manifest
-      let patchedIngress = fs.readFileSync(ingressManifest, "utf-8")
-        .replace(/DOMAIN_PLACEHOLDER/g, domain)
-        .replace(/SUBSCRIPTION_ID/g, subId.trim())
-        .replace(/RESOURCE_GROUP/g, ctx.resourceGroup)
-        .replace(/azureclawacr\.azurecr\.io/g, ctx.acrLoginServer ?? "azureclawacr.azurecr.io");
-
-      // For sslip.io: disable TLS (no valid cert) and SSL redirect
-      if (domain.endsWith(".sslip.io")) {
-        // Remove TLS blocks (spec.tls and secretName lines)
-        patchedIngress = patchedIngress.replace(/\s*tls:\n\s*- hosts:\n\s*-[^\n]*\n\s*secretName:[^\n]*/g, "");
-        // Disable SSL redirect
-        patchedIngress = patchedIngress.replace(
-          /appgw\.ingress\.kubernetes\.io\/ssl-redirect: "true"/g,
-          'appgw.ingress.kubernetes.io/ssl-redirect: "false"'
-        );
-      }
-
-      // Inject IP allowlist annotation into both Ingress resources
-      if (allowCidr) {
-        patchedIngress = patchedIngress.replace(
-          /kubernetes\.io\/ingress\.class: azure\/application-gateway/g,
-          `kubernetes.io/ingress.class: azure/application-gateway\n    appgw.ingress.kubernetes.io/whitelist-source-range: "${allowCidr}"`
-        );
-      }
-
-      const tmpIngress = path.join(os.tmpdir(), `.azureclaw-ingress-${Date.now()}.yaml`);
-      try {
-        fs.writeFileSync(tmpIngress, patchedIngress);
-        await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
-        checkLine(true, "Ingress + NetworkPolicies applied");
-        if (allowCidr) {
-          checkLine(true, `IP allowlist: ${allowCidr}`);
+      for (const svc of services) {
+        console.log(chalk.dim(`  Patching ${svc.name} → LoadBalancer...`));
+        const patch = {
+          spec: {
+            type: "LoadBalancer",
+            loadBalancerSourceRanges: [allowCidr],
+          },
+        };
+        try {
+          await execa("kubectl", [
+            "patch", "svc", svc.name, "-n", "agentmesh",
+            "--type", "merge",
+            "-p", JSON.stringify(patch),
+          ], { stdio: "pipe" });
+          checkLine(true, `${svc.label} → LoadBalancer (restricted to ${allowCidr})`);
+        } catch (e: any) {
+          console.error(chalk.red(`  ✘ Failed to patch ${svc.name}: ${e.message}`));
+          process.exit(1);
         }
-      } catch (e: any) {
-        console.error(chalk.red(`  ✘ kubectl apply failed: ${e.message}`));
-        process.exit(1);
-      } finally {
-        try { fs.unlinkSync(tmpIngress); } catch { /* noop */ }
       }
 
-      const proto = domain.endsWith(".sslip.io") ? "http" : "https";
-      const wsProto = domain.endsWith(".sslip.io") ? "ws" : "wss";
-      const globalRegistryUrl = `${proto}://registry.${domain}`;
-      const globalRelayUrl = `${wsProto}://relay.${domain}`;
+      // Wait for external IPs to be assigned
+      section("Waiting for External IPs");
+      const externalIps: Record<string, string> = {};
+
+      for (const svc of services) {
+        console.log(chalk.dim(`  Waiting for ${svc.label} IP...`));
+        let ip = "";
+        for (let i = 0; i < 30; i++) {
+          try {
+            const { stdout } = await execa("kubectl", [
+              "get", "svc", svc.name, "-n", "agentmesh",
+              "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
+            ], { stdio: "pipe" });
+            if (stdout.trim() && /^\d/.test(stdout.trim())) {
+              ip = stdout.trim();
+              break;
+            }
+          } catch { /* retry */ }
+          await new Promise(r => setTimeout(r, 5000));
+        }
+
+        if (!ip) {
+          console.error(chalk.red(`  ✘ Timed out waiting for ${svc.label} external IP.`));
+          process.exit(1);
+        }
+        externalIps[svc.name] = ip;
+        checkLine(true, `${svc.label}: ${ip}:${svc.port}`);
+      }
+
+      // Build URLs using sslip.io for automatic DNS
+      const registryIp = externalIps["agentmesh-registry"];
+      const relayIp = externalIps["agentmesh-relay"];
+      const registrySslip = registryIp.replace(/\./g, "-") + ".sslip.io";
+      const relaySslip = relayIp.replace(/\./g, "-") + ".sslip.io";
+
+      const globalRegistryUrl = `http://${registrySslip}:8080`;
+      const globalRelayUrl = `ws://${relaySslip}:8765`;
 
       // Update deployment context
       ctx.registryMode = "global";
@@ -742,17 +665,13 @@ export function meshCommand(): Command {
       section("Global Endpoints");
       kvLine("Registry", chalk.cyan(globalRegistryUrl));
       kvLine("Relay", chalk.cyan(globalRelayUrl));
-      kvLine("Domain", domain);
 
       console.log();
       console.log(chalk.green("  ✓ ") + chalk.bold("Registry promoted to global."));
-      if (domain.endsWith(".sslip.io")) {
-        console.log(chalk.dim("    Using sslip.io for DNS (auto-resolved, no setup needed)."));
-        console.log(chalk.dim("    Note: HTTP only (no TLS) — secured by IP allowlist."));
-      } else {
-        console.log(chalk.dim(`    DNS: point registry.${domain} and relay.${domain} to AppGW public IP`));
-      }
-      console.log(chalk.dim(`    Then: azureclaw dev --global-registry ${globalRegistryUrl}`));
+      console.log(chalk.dim("    Using sslip.io for DNS (auto-resolved, no setup needed)."));
+      console.log(chalk.dim("    HTTP only — secured by LoadBalancer IP allowlist."));
+      console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/v1/health`));
+      console.log(chalk.dim(`    Then:  azureclaw dev --global-registry ${globalRegistryUrl}`));
       console.log();
     });
 
@@ -776,26 +695,37 @@ export function meshCommand(): Command {
         return;
       }
 
-      section("Removing Ingress");
+      section("Reverting Services to ClusterIP");
 
-      // Delete the ingress resources (reverse of promote)
+      // Patch services back to ClusterIP (reverse of promote)
+      const services = ["agentmesh-registry", "agentmesh-relay"];
+      for (const svc of services) {
+        try {
+          // kubectl patch can't remove loadBalancerSourceRanges with merge patch,
+          // so we use a strategic merge that sets type back to ClusterIP.
+          // The LB will be deallocated and the public IP released.
+          await execa("kubectl", [
+            "patch", "svc", svc, "-n", "agentmesh",
+            "--type", "merge",
+            "-p", JSON.stringify({ spec: { type: "ClusterIP", loadBalancerSourceRanges: null } }),
+          ], { stdio: "pipe" });
+          checkLine(true, `${svc} → ClusterIP`);
+        } catch {
+          console.log(chalk.yellow(`  ⚠ Could not revert ${svc}`));
+        }
+      }
+
+      // Also clean up any leftover Ingress resources from earlier attempts
       const ingressResources = [
-        "ingress/agentmesh-registry",
-        "ingress/agentmesh-relay",
-        "networkpolicy/postgres-restrict",
-        "networkpolicy/registry-restrict",
-        "networkpolicy/relay-restrict",
+        "ingress/agentmesh-registry-ingress",
+        "ingress/agentmesh-relay-ingress",
       ];
-
       for (const resource of ingressResources) {
         try {
           await execa("kubectl", [
             "delete", resource, "-n", "agentmesh", "--ignore-not-found",
           ], { stdio: "pipe" });
-          checkLine(true, `Deleted ${resource}`);
-        } catch {
-          console.log(chalk.yellow(`  ⚠ Could not delete ${resource}`));
-        }
+        } catch { /* ignore */ }
       }
 
       // Update deployment context
