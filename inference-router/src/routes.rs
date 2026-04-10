@@ -2894,6 +2894,7 @@ pub fn handoff_status_routes() -> Router<AppState> {
         // Two-stage confirmation gate (§9.9.9) — localhost allowed (agent tool calls these)
         .route("/agt/handoff/pending", post(handoff_pending))
         .route("/agt/handoff/confirm", post(handoff_confirm))
+        .route("/agt/handoff/resume", post(handoff_resume))
 }
 
 /// POST /agt/handoff/init — create a one-time handoff token.
@@ -3651,6 +3652,37 @@ async fn handoff_abort(State(state): State<AppState>) -> impl IntoResponse {
         })),
     )
         .into_response()
+}
+
+/// POST /agt/handoff/resume — resume from a drained/aborted state.
+async fn handoff_resume(State(state): State<AppState>) -> impl IntoResponse {
+    match state.handoff_session.resume().await {
+        Ok(()) => {
+            state.governance.audit.log(
+                &state.sandbox_name,
+                "handoff:resume",
+                "resumed_to_idle",
+            );
+
+            tracing::info!("Handoff resumed to idle");
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "resumed",
+                    "phase": "idle",
+                })),
+            )
+                .into_response()
+        }
+        Err(msg) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": msg,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /agt/handoff/status — read-only handoff status.

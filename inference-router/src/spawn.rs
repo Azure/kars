@@ -521,7 +521,7 @@ async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<Stri
     ];
     if body.is_some() {
         args.extend(["-H".into(), "Content-Type: application/json".into()]);
-        args.extend(["-d".into(), body.unwrap().into()]);
+        args.extend(["-d".into(), body.expect("body presence checked at line 522").into()]);
     }
     // The hostname is ignored when using --unix-socket; "docker" is just a placeholder
     args.push(format!("http://docker/v1.44{}", path));

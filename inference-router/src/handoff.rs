@@ -216,8 +216,6 @@ struct ActiveToken {
     created_at: Instant,
     /// Time-to-live.
     ttl: Duration,
-    /// Whether this token has been used (reserved for future one-time enforcement).
-    _used: bool,
 }
 
 impl Default for HandoffTokenStore {
@@ -255,7 +253,6 @@ impl HandoffTokenStore {
             token_hash: token_hash.clone(),
             created_at: Instant::now(),
             ttl: Duration::from_secs(ttl_secs),
-            _used: false,
         };
 
         *self.inner.write().await = Some(active);
@@ -264,8 +261,8 @@ impl HandoffTokenStore {
 
     /// Validate a handoff token. Returns Ok(token_hash) on success.
     ///
-    /// The token is consumed on first successful validation (one-time use
-    /// is enforced by marking it used, not deleting — audit trail preserved).
+    /// Tokens are validated against the store but not consumed — reuse within
+    /// a session is allowed (e.g. for snapshot/restore retries).
     pub async fn validate(&self, provided: &str) -> Result<String, HandoffTokenError> {
         let mut guard = self.inner.write().await;
 
@@ -624,12 +621,39 @@ impl HandoffSession {
         self.inner.read().await.clone()
     }
 
+    /// Set the phase directly (no transition validation).
+    /// Kept for backward compatibility — prefer `try_transition()` for new code.
     pub async fn set_phase(&self, phase: HandoffPhase) {
         self.inner.write().await.phase = phase;
     }
 
     pub async fn phase(&self) -> HandoffPhase {
         self.inner.read().await.phase
+    }
+
+    /// Transition to a new phase, enforcing valid ordering.
+    /// Returns Err if the transition is not allowed from the current phase.
+    pub async fn try_transition(&self, target: HandoffPhase) -> Result<(), String> {
+        let mut inner = self.inner.write().await;
+        let allowed = match target {
+            HandoffPhase::Initialized => matches!(inner.phase, HandoffPhase::Idle | HandoffPhase::Complete | HandoffPhase::Failed | HandoffPhase::Aborted),
+            HandoffPhase::Snapshotting => matches!(inner.phase, HandoffPhase::Initialized),
+            HandoffPhase::Draining => matches!(inner.phase, HandoffPhase::Snapshotting),
+            HandoffPhase::Transferring => matches!(inner.phase, HandoffPhase::Draining),
+            HandoffPhase::Restoring => matches!(inner.phase, HandoffPhase::Initialized | HandoffPhase::Transferring),
+            HandoffPhase::Verifying => matches!(inner.phase, HandoffPhase::Restoring),
+            HandoffPhase::Decommissioning => matches!(inner.phase, HandoffPhase::Verifying | HandoffPhase::Complete),
+            HandoffPhase::Complete => matches!(inner.phase, HandoffPhase::Verifying | HandoffPhase::Decommissioning),
+            HandoffPhase::Aborted => !matches!(inner.phase, HandoffPhase::Idle | HandoffPhase::Complete),
+            HandoffPhase::Failed => true,  // can fail from any phase
+            HandoffPhase::Idle => true,    // reset always allowed
+        };
+        if allowed {
+            inner.phase = target;
+            Ok(())
+        } else {
+            Err(format!("Invalid transition: {} → {}", inner.phase, target))
+        }
     }
 
     pub async fn initialize(
@@ -678,6 +702,19 @@ impl HandoffSession {
                 | HandoffPhase::Failed
                 | HandoffPhase::Aborted
         )
+    }
+
+    /// Resume from a drained state (cancel an aborted handoff's drain).
+    /// Only valid when phase is Aborted or Draining.
+    pub async fn resume(&self) -> Result<(), String> {
+        let mut inner = self.inner.write().await;
+        if matches!(inner.phase, HandoffPhase::Aborted | HandoffPhase::Draining) {
+            inner.phase = HandoffPhase::Idle;
+            inner.error = None;
+            Ok(())
+        } else {
+            Err(format!("Cannot resume from phase: {}", inner.phase))
+        }
     }
 }
 
@@ -1835,5 +1872,133 @@ mod tests {
         assert_eq!(MAX_BLOB_SIZE_BYTES, 50 * 1024 * 1024);
         assert_eq!(MAX_WORKSPACE_FILES, 100);
         assert_eq!(MAX_WORKSPACE_FILE_SIZE, 10 * 1024 * 1024);
+    }
+
+    // ── State machine transition tests (Fix 5) ─────────────────────────
+
+    #[tokio::test]
+    async fn test_session_try_transition_valid_sequence() {
+        let session = HandoffSession::new();
+        assert!(session.try_transition(HandoffPhase::Initialized).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Snapshotting).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Draining).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Transferring).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Restoring).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Verifying).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Decommissioning).await.is_ok());
+        assert!(session.try_transition(HandoffPhase::Complete).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_session_try_transition_invalid_skip() {
+        let session = HandoffSession::new();
+        // Can't skip from Idle to Draining
+        assert!(session.try_transition(HandoffPhase::Draining).await.is_err());
+        // Can't skip from Idle to Verifying
+        assert!(session.try_transition(HandoffPhase::Verifying).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_session_try_transition_abort_from_any_active() {
+        let session = HandoffSession::new();
+        session.try_transition(HandoffPhase::Initialized).await.unwrap();
+        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
+        assert!(session.try_transition(HandoffPhase::Aborted).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_session_try_transition_cannot_abort_from_idle() {
+        let session = HandoffSession::new();
+        assert!(session.try_transition(HandoffPhase::Aborted).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_session_try_transition_fail_from_any() {
+        let session = HandoffSession::new();
+        session.try_transition(HandoffPhase::Initialized).await.unwrap();
+        assert!(session.try_transition(HandoffPhase::Failed).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_session_resume_from_aborted() {
+        let session = HandoffSession::new();
+        session.try_transition(HandoffPhase::Initialized).await.unwrap();
+        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
+        session.try_transition(HandoffPhase::Draining).await.unwrap();
+        session.try_transition(HandoffPhase::Aborted).await.unwrap();
+        assert!(session.resume().await.is_ok());
+        assert_eq!(session.phase().await, HandoffPhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_session_resume_from_draining() {
+        let session = HandoffSession::new();
+        session.try_transition(HandoffPhase::Initialized).await.unwrap();
+        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
+        session.try_transition(HandoffPhase::Draining).await.unwrap();
+        assert!(session.resume().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_session_resume_not_from_idle() {
+        let session = HandoffSession::new();
+        assert!(session.resume().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_session_restart_after_complete() {
+        let session = HandoffSession::new();
+        session.try_transition(HandoffPhase::Initialized).await.unwrap();
+        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
+        session.try_transition(HandoffPhase::Draining).await.unwrap();
+        session.try_transition(HandoffPhase::Transferring).await.unwrap();
+        session.try_transition(HandoffPhase::Restoring).await.unwrap();
+        session.try_transition(HandoffPhase::Verifying).await.unwrap();
+        session.try_transition(HandoffPhase::Complete).await.unwrap();
+        // Can start again from Complete
+        assert!(session.try_transition(HandoffPhase::Initialized).await.is_ok());
+    }
+
+    // ── Auth middleware tests (Fix 6) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_token_validate_wrong_value() {
+        let store = HandoffTokenStore::new();
+        let (_, _) = store.create_token(300).await;
+        assert!(matches!(
+            store.validate("wrong-token").await,
+            Err(HandoffTokenError::Invalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_token_validate_no_active_token() {
+        let store = HandoffTokenStore::new();
+        assert!(matches!(
+            store.validate("any-token").await,
+            Err(HandoffTokenError::NoActiveToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_token_validate_after_revoke() {
+        let store = HandoffTokenStore::new();
+        let (token, _) = store.create_token(300).await;
+        store.revoke().await;
+        assert!(matches!(
+            store.validate(&token).await,
+            Err(HandoffTokenError::NoActiveToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_pending_confirm_wrong_token() {
+        let store = PendingHandoffStore::new();
+        store.create_pending(HandoffDirection::LocalToAks, "test".to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(matches!(
+            store.confirm("wrong-code").await,
+            Err(PendingHandoffError::InvalidToken)
+        ));
     }
 }
