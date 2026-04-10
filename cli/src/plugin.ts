@@ -1417,19 +1417,36 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               const agentName = process.env.SANDBOX_NAME || "dev-agent";
               const apiVer = "api-version=2025-11-15-preview";
 
-              // Read chat snapshot written by the router during restore
+              // Parse chat snapshot from restore response (returned by router)
               let chatMessages: Array<{ role: string; content: string; timestamp?: string }> = [];
               try {
-                const raw = fs.readFileSync("/tmp/handoff/chat_snapshot.json", "utf-8");
-                chatMessages = JSON.parse(raw);
-                log.info(`📜 Handoff: loaded ${chatMessages.length} chat messages from snapshot`);
-              } catch { /* no chat snapshot — that's OK */ }
+                if (restoreResp.chat_snapshot) {
+                  chatMessages = JSON.parse(restoreResp.chat_snapshot);
+                  log.info(`📜 Handoff: loaded ${chatMessages.length} chat messages from snapshot`);
+                }
+              } catch { /* no valid chat snapshot — that's OK */ }
 
-              // Read handoff metadata
-              let meta: Record<string, string> = {};
-              try {
-                meta = JSON.parse(fs.readFileSync("/tmp/handoff/metadata.json", "utf-8"));
-              } catch { /* ok */ }
+              // Extract workspace tar to /sandbox/ (plugin runs in openclaw container)
+              if (restoreResp.workspace_tar) {
+                try {
+                  const { execSync } = await import("node:child_process");
+                  const tarBuf = Buffer.from(restoreResp.workspace_tar, "base64");
+                  fs.mkdirSync("/tmp/handoff", { recursive: true });
+                  fs.writeFileSync("/tmp/handoff/workspace.tar.gz", tarBuf);
+                  execSync("tar xzf /tmp/handoff/workspace.tar.gz -C /sandbox/ 2>/dev/null || true", { timeout: 10000 });
+                  log.info(`📦 Handoff: extracted workspace tar to /sandbox/`);
+                } catch (tarErr: any) {
+                  log.warn(`Handoff: workspace tar extraction failed: ${tarErr.message}`);
+                }
+              }
+
+              const meta = {
+                predecessor_amid: restoreResp.predecessor_amid || fromAmid,
+                direction: restoreResp.direction || "local_to_aks",
+                trust_scores_count: restoreResp.trust_scores_count || 0,
+                audit_entries_count: restoreResp.audit_entries_count || 0,
+                restored_at: restoreResp.restored_at || new Date().toISOString(),
+              };
 
               // 1. Create a Foundry Conversation with the transferred chat history
               if (chatMessages.length > 0) {
