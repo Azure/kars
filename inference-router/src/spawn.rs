@@ -4,9 +4,10 @@
 //! HTTP endpoints that the plugin's `/azureclaw-spawn` slash command calls to
 //! manage sub-agent sandboxes through the pod's ServiceAccount.
 
+use k8s_openapi::api::core::v1::{Namespace, Secret};
 use kube::{
     Api, Client, ResourceExt,
-    api::{DynamicObject, ListParams, PostParams},
+    api::{DynamicObject, ListParams, Patch, PatchParams, PostParams},
     discovery::ApiResource,
 };
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,26 @@ pub async fn create_sandbox(
     match api.create(&PostParams::default(), &obj).await {
         Ok(_created) => {
             tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent sandbox created");
+
+            // For handoff targets, propagate channel/plugin credentials to the
+            // target namespace so the cloud agent gets Telegram, Slack, etc.
+            if req.handoff.is_some() {
+                let child_name = req.name.clone();
+                let client_clone = Client::try_default().await.ok();
+                if let Some(kc) = client_clone {
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            propagate_credentials(&kc, &child_name).await
+                        {
+                            tracing::warn!(
+                                child = %child_name,
+                                "Credential propagation failed (non-fatal): {e}"
+                            );
+                        }
+                    });
+                }
+            }
+
             Ok(SpawnResponse {
                 status: "created".into(),
                 name: req.name.clone(),
@@ -284,6 +305,97 @@ pub async fn create_sandbox(
             Err(format!("Failed to create sandbox: {e}"))
         }
     }
+}
+
+// ── Credential propagation for handoff targets ──────────────────────────────
+//
+// The controller mounts `{name}-credentials` secret as envFrom (optional: true).
+// For handoff targets we propagate channel/plugin credentials from the source's
+// environment so the cloud agent inherits Telegram, Slack, etc.
+
+/// Env vars that carry channel and plugin credentials (safe to propagate).
+const CREDENTIAL_ENV_VARS: &[&str] = &[
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_ALLOW_FROM",
+    "SLACK_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "WHATSAPP_ENABLED",
+    "BRAVE_API_KEY",
+    "TAVILY_API_KEY",
+    "EXA_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "PERPLEXITY_API_KEY",
+];
+
+async fn propagate_credentials(client: &Client, child_name: &str) -> Result<(), String> {
+    // Collect credential env vars that are set in the current environment
+    let mut creds: BTreeMap<String, String> = BTreeMap::new();
+    for &var in CREDENTIAL_ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                creds.insert(var.to_string(), val);
+            }
+        }
+    }
+    if creds.is_empty() {
+        tracing::info!(child = %child_name, "No channel/plugin credentials to propagate");
+        return Ok(());
+    }
+
+    let target_ns = format!("azureclaw-{}", child_name);
+    let secret_name = format!("{}-credentials", child_name);
+
+    // Wait for the namespace to be created by the controller (up to 30s)
+    let ns_api: Api<Namespace> = Api::all(client.clone());
+    let mut ns_ready = false;
+    for i in 0..15 {
+        if ns_api.get_opt(&target_ns).await.ok().flatten().is_some() {
+            ns_ready = true;
+            break;
+        }
+        if i == 0 {
+            tracing::info!(child = %child_name, "Waiting for namespace '{target_ns}' before creating credentials secret");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if !ns_ready {
+        return Err(format!("Namespace '{target_ns}' not created within 30s"));
+    }
+
+    // Build and apply the credentials secret
+    let secret: Secret = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": secret_name,
+            "namespace": target_ns,
+            "labels": {
+                "azureclaw.azure.com/managed-by": "handoff",
+                "azureclaw.azure.com/predecessor": std::env::var("SANDBOX_NAME").unwrap_or_default(),
+            }
+        },
+        "type": "Opaque",
+        "stringData": creds,
+    }))
+    .map_err(|e| format!("Failed to build credentials secret: {e}"))?;
+
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), &target_ns);
+    secret_api
+        .patch(
+            &secret_name,
+            &PatchParams::apply("azureclaw-handoff"),
+            &Patch::Apply(secret),
+        )
+        .await
+        .map_err(|e| format!("Failed to create credentials secret: {e}"))?;
+
+    tracing::info!(
+        child = %child_name,
+        creds = creds.len(),
+        "Propagated {} credential(s) to {target_ns}/{secret_name}",
+        creds.len()
+    );
+    Ok(())
 }
 
 /// List sub-agents spawned by a parent sandbox.
