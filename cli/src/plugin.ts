@@ -1343,7 +1343,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (message?.type === "handoff_transfer" && fromAmid && agtMeshClient) {
         log.info(`🔄 Handoff transfer received from '${fromName}' — restoring state...`);
         try {
-          const adminToken = _readAdminToken();
+          const adminToken = await _readAdminToken();
           if (!adminToken) throw new Error("No admin token available for handoff restore");
 
           const authH = { Authorization: `Bearer ${adminToken}` };
@@ -1607,8 +1607,8 @@ async function _routerCallStrict(method: string, path: string, body?: unknown, t
 }
 
 // Read admin token from the filesystem (used by handoff orchestration)
-function _readAdminToken(): string {
-  const fs = require("node:fs");
+async function _readAdminToken(): Promise<string> {
+  const fs = await import("node:fs");
   for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
     try { const t = fs.readFileSync(p, "utf-8").trim(); if (t) return t; } catch { /* skip */ }
   }
@@ -2882,7 +2882,7 @@ const azureClawPlugin = definePluginEntry({
 
           // Security: handoff token stays in plugin memory — LLM never sees it (§9.9.9 principle).
           // All subsequent router calls use this token.
-          const adminToken = _readAdminToken();
+          const adminToken = await _readAdminToken();
           if (!adminToken) {
             return { content: [{ type: "text", text: safeJson({
               status: "error",
