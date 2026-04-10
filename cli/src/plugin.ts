@@ -1409,6 +1409,164 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // 5. Decommission our handoff session (we're done receiving)
           await _routerCallStrict("POST", "/agt/handoff/decommission", {}, 15000, hHeaders).catch(() => {});
 
+          // ── Post-restore: hydrate the cloud agent with transferred state ──
+          // This runs async (best-effort) — handoff is already complete at this point.
+          (async () => {
+            try {
+              const fs = await import("node:fs");
+              const agentName = process.env.SANDBOX_NAME || "dev-agent";
+              const apiVer = "api-version=2025-11-15-preview";
+
+              // Read chat snapshot written by the router during restore
+              let chatMessages: Array<{ role: string; content: string; timestamp?: string }> = [];
+              try {
+                const raw = fs.readFileSync("/tmp/handoff/chat_snapshot.json", "utf-8");
+                chatMessages = JSON.parse(raw);
+                log.info(`📜 Handoff: loaded ${chatMessages.length} chat messages from snapshot`);
+              } catch { /* no chat snapshot — that's OK */ }
+
+              // Read handoff metadata
+              let meta: Record<string, string> = {};
+              try {
+                meta = JSON.parse(fs.readFileSync("/tmp/handoff/metadata.json", "utf-8"));
+              } catch { /* ok */ }
+
+              // 1. Create a Foundry Conversation with the transferred chat history
+              if (chatMessages.length > 0) {
+                try {
+                  const convResp = await _routerCall("POST", `/openai/conversations?${apiVer}`, {
+                    metadata: {
+                      user: agentName,
+                      source: "handoff",
+                      predecessor: meta.predecessor_amid || fromAmid,
+                      direction: meta.direction || "local_to_aks",
+                    },
+                  });
+                  const convId = convResp?.id;
+                  if (convId) {
+                    // Replay messages into the conversation (batch in chunks of 10)
+                    const items = chatMessages.map((m: any) => ({
+                      type: "message",
+                      role: m.role === "assistant" ? "assistant" : "user",
+                      content: [{ type: "input_text", text: String(m.content || "").slice(0, 10000) }],
+                    }));
+                    for (let i = 0; i < items.length; i += 10) {
+                      const batch = items.slice(i, i + 10);
+                      await _routerCall("POST", `/openai/conversations/${convId}/items?${apiVer}`, { items: batch }).catch(() => {});
+                    }
+                    log.info(`📝 Handoff: replayed ${items.length} messages into Foundry conversation ${convId}`);
+                  }
+                } catch (e: any) {
+                  log.warn(`Handoff: Foundry conversation replay failed (non-fatal): ${e.message}`);
+                }
+              }
+
+              // 2. Store handoff event in Foundry Memory
+              const store = `memory-${agentName}`;
+              const recentSummary = chatMessages.slice(-5).map((m: any) =>
+                `${m.role}: ${String(m.content || "").slice(0, 200)}`
+              ).join("\n");
+              const memoryText = [
+                `[Handoff event] I was migrated from local dev to cloud (AKS) at ${meta.restored_at || new Date().toISOString()}.`,
+                `Predecessor AMID: ${meta.predecessor_amid || fromAmid}.`,
+                `Direction: ${meta.direction || "local_to_aks"}.`,
+                `Trust scores transferred: ${meta.trust_scores_count || 0}.`,
+                `Audit entries transferred: ${meta.audit_entries_count || 0}.`,
+                chatMessages.length > 0 ? `\nRecent conversation context (last ${Math.min(5, chatMessages.length)} messages):\n${recentSummary}` : "",
+              ].filter(Boolean).join(" ");
+
+              try {
+                await _routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
+                  scope: agentName,
+                  items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: memoryText }] }],
+                  update_delay: 0,
+                });
+                log.info("🧠 Handoff: stored handoff event in Foundry Memory");
+              } catch (e: any) {
+                log.warn(`Handoff: Foundry Memory update failed (non-fatal): ${e.message}`);
+              }
+
+              // 3. Write HANDOFF_CONTEXT.md to workspace (fallback context for the agent)
+              const contextMd = [
+                "# Handoff Context",
+                "",
+                `> This agent was migrated from local dev to cloud (AKS) at ${meta.restored_at || "unknown"}.`,
+                `> Predecessor AMID: \`${meta.predecessor_amid || fromAmid}\``,
+                `> Direction: ${meta.direction || "local_to_aks"}`,
+                "",
+                "## Recent Conversation",
+                "",
+                ...chatMessages.slice(-20).map((m: any) =>
+                  `**${m.role}**: ${String(m.content || "").slice(0, 500)}`
+                ),
+                "",
+                "---",
+                "*This file was created automatically during handoff. The full conversation is also stored in Foundry Conversations and Memory.*",
+              ].join("\n");
+              try {
+                fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
+                fs.writeFileSync("/sandbox/.openclaw/workspace/HANDOFF_CONTEXT.md", contextMd);
+                log.info("📄 Handoff: wrote HANDOFF_CONTEXT.md to workspace");
+              } catch (e: any) {
+                log.warn(`Handoff: HANDOFF_CONTEXT.md write failed: ${e.message}`);
+              }
+
+              // 4. Send Telegram greeting if the channel is configured
+              const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+              const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
+              if (tgToken && tgAllowFrom) {
+                const greetingText = [
+                  "☁️ *AzureClaw — Cloud Handoff Complete*",
+                  "",
+                  "I'm now running in the cloud (AKS)\\!",
+                  `Model: \`${process.env.DEFAULT_MODEL || "gpt-5.4"}\``,
+                  `Sandbox: \`${agentName}\``,
+                  "",
+                  chatMessages.length > 0
+                    ? `I have your conversation history (${chatMessages.length} messages)\\. Let's continue\\!`
+                    : "Ready to help\\!",
+                ].join("\n");
+
+                // Send via router's egress proxy (respects allowlist + transparent proxy)
+                for (const chatId of tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean)) {
+                  try {
+                    await _routerCall("POST", "/egress/fetch", {
+                      url: `https://api.telegram.org/bot${tgToken}/sendMessage`,
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        chat_id: chatId,
+                        text: greetingText,
+                        parse_mode: "MarkdownV2",
+                      }),
+                    });
+                    log.info(`📱 Handoff: sent Telegram greeting to chat ${chatId}`);
+                  } catch (tgErr: any) {
+                    log.warn(`Handoff: Telegram greeting failed for ${chatId}: ${tgErr.message}`);
+                  }
+                }
+              }
+
+              // 5. Send "handoff_ready" mesh message back to predecessor
+              if (agtMeshClient && fromAmid) {
+                try {
+                  await agtMeshClient.send(fromAmid, {
+                    type: "handoff_ready",
+                    from_agent: agentName,
+                    successor_amid: agtIdentity?.amid || "unknown",
+                    chat_messages_loaded: chatMessages.length,
+                    memory_stored: true,
+                    telegram_greeted: !!(tgToken && tgAllowFrom),
+                    timestamp: new Date().toISOString(),
+                  });
+                  log.info(`🤝 Handoff: sent 'handoff_ready' mesh message to predecessor`);
+                } catch { /* predecessor may already be decommissioned */ }
+              }
+            } catch (hydrateErr: any) {
+              log.warn(`Handoff hydration failed (non-fatal): ${hydrateErr.message}`);
+            }
+          })();
+
         } catch (restoreErr: any) {
           log.warn(`❌ Handoff restore failed: ${restoreErr.message}`);
           // Notify source of failure
@@ -1661,9 +1819,59 @@ async function _runHandoffOrchestration(
     .update(`${adminToken}:${handoffToken}`)
     .digest("base64");
 
-  const snapshotResp = await _routerCallStrict("POST", "/agt/handoff/snapshot", {
-    shared_secret: sharedSecret,
-  }, 60000, handoffH);
+  // Collect workspace files and recent conversation context for the snapshot
+  const snapshotPayload: Record<string, unknown> = { shared_secret: sharedSecret };
+
+  // Pack workspace files (/sandbox/) into a tar.gz for transfer
+  try {
+    const { execSync } = await import("node:child_process");
+    // Tar key workspace files (skip large/transient dirs)
+    const tarB64 = execSync(
+      "tar czf - -C /sandbox " +
+      "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+      "--exclude='*.pyc' --exclude='__pycache__' " +
+      ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+      { maxBuffer: 10 * 1024 * 1024, timeout: 10000 },
+    ).toString("utf-8").trim();
+    if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
+      snapshotPayload.workspace_tar = tarB64;
+      _log.info(`Handoff: packed workspace (${(tarB64.length / 1024).toFixed(1)} KB base64)`);
+    }
+  } catch { /* workspace tar is best-effort */ }
+
+  // Collect recent Foundry Memory as conversation context
+  try {
+    const agentName = process.env.SANDBOX_NAME || "dev-agent";
+    const store = `memory-${agentName}`;
+    const apiVer = "api-version=2025-11-15-preview";
+    const memResp = await _routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, {
+      scope: agentName,
+      top: 20,
+    }).catch(() => null);
+    if (memResp?.memories?.length) {
+      const chatContext = memResp.memories.map((m: any) => ({
+        role: "assistant",
+        content: m.content || m.text || JSON.stringify(m),
+        timestamp: m.created_at || new Date().toISOString(),
+      }));
+      snapshotPayload.chat_snapshot = Buffer.from(JSON.stringify(chatContext)).toString("base64");
+      _log.info(`Handoff: included ${chatContext.length} memory items as chat context`);
+    }
+  } catch { /* memory search is best-effort */ }
+
+  // Include credential refs (what channels/plugins are configured, not the secrets)
+  const credRefs: Array<{ name: string; env_key: string }> = [];
+  for (const [envKey, label] of [
+    ["TELEGRAM_BOT_TOKEN", "telegram"], ["SLACK_BOT_TOKEN", "slack"],
+    ["DISCORD_BOT_TOKEN", "discord"], ["BRAVE_API_KEY", "brave"],
+    ["TAVILY_API_KEY", "tavily"],
+  ] as const) {
+    if (process.env[envKey]) credRefs.push({ name: label, env_key: envKey });
+  }
+  if (credRefs.length > 0) snapshotPayload.credentials = credRefs;
+
+  const snapshotResp = await _routerCallStrict("POST", "/agt/handoff/snapshot",
+    snapshotPayload, 60000, handoffH);
 
   const snapshotSize = snapshotResp.size_bytes || 0;
   const verificationHash = snapshotResp.verification_hash;

@@ -3426,6 +3426,50 @@ async fn handoff_restore(
         )
         .await;
 
+    // ── Write restored state to disk so the agent can load it ────────────
+
+    // 1. Extract workspace tar to /sandbox/ (restores files the agent was working with)
+    if !restored_state.workspace_tar.is_empty() {
+        match extract_workspace_tar(&restored_state.workspace_tar) {
+            Ok(count) => {
+                tracing::info!(files = count, "Workspace files extracted from handoff snapshot");
+            }
+            Err(e) => {
+                tracing::warn!("Workspace tar extraction failed (non-fatal): {e}");
+            }
+        }
+    }
+
+    // 2. Write chat snapshot to /tmp/handoff/ for the plugin to read
+    let _ = std::fs::create_dir_all("/tmp/handoff");
+    if let Some(ref chat_bytes) = restored_state.chat_snapshot {
+        if let Err(e) = std::fs::write("/tmp/handoff/chat_snapshot.json", chat_bytes) {
+            tracing::warn!("Failed to write chat snapshot to disk: {e}");
+        }
+    }
+
+    // 3. Write handoff metadata for the plugin
+    let restored_at = {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{}Z", d.as_secs())
+    };
+    let handoff_meta = serde_json::json!({
+        "predecessor_amid": restored_state.predecessor_amid,
+        "successor_amid": restored_state.successor_amid,
+        "agent_name": restored_state.agent_name,
+        "direction": restored_state.metadata.direction.to_string(),
+        "initiated_at": restored_state.metadata.initiated_at,
+        "trust_scores_count": trust_count,
+        "audit_entries_count": restored_state.audit_entries.len(),
+        "restored_at": restored_at,
+    });
+    let _ = std::fs::write(
+        "/tmp/handoff/metadata.json",
+        serde_json::to_string_pretty(&handoff_meta).unwrap_or_default(),
+    );
+
     // Audit log the restore
     state.governance.audit.log(
         &state.sandbox_name,
@@ -3935,6 +3979,49 @@ async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
         "handoff_available": state.config.registry_mode == RegistryMode::Global,
         "pending_confirmation": pending,
     }))
+}
+
+// ── Handoff workspace extraction ────────────────────────────────────────────
+
+/// Extract a gzipped tar archive into /sandbox/ (workspace restore).
+fn extract_workspace_tar(tar_gz_bytes: &[u8]) -> Result<usize, String> {
+    use std::io::Read;
+    let decoder = flate2::read::GzDecoder::new(tar_gz_bytes);
+    let mut archive = tar::Archive::new(decoder);
+
+    let mut count = 0usize;
+    for entry in archive.entries().map_err(|e| format!("tar read error: {e}"))? {
+        let mut entry = entry.map_err(|e| format!("tar entry error: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("tar path error: {e}"))?
+            .to_path_buf();
+
+        // Security: prevent path traversal — all entries must stay under /sandbox/
+        let dest = std::path::Path::new("/sandbox").join(
+            path.strip_prefix("/").unwrap_or(&path),
+        );
+        if !dest.starts_with("/sandbox") {
+            tracing::warn!(?path, "Skipping tar entry with path traversal");
+            continue;
+        }
+
+        if entry.header().entry_type().is_dir() {
+            let _ = std::fs::create_dir_all(&dest);
+        } else {
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut buf = Vec::new();
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("tar read error: {e}"))?;
+            std::fs::write(&dest, &buf)
+                .map_err(|e| format!("write {}: {e}", dest.display()))?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 // ── Chat ↔ Responses format translation ────────────────────────────────────
