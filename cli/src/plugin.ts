@@ -1421,7 +1421,18 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               let chatMessages: Array<{ role: string; content: string; timestamp?: string }> = [];
               try {
                 if (restoreResp.chat_snapshot) {
-                  chatMessages = JSON.parse(restoreResp.chat_snapshot);
+                  const raw = JSON.parse(restoreResp.chat_snapshot);
+                  if (!Array.isArray(raw)) throw new Error("chat_snapshot is not an array");
+                  // Schema validation: only accept {role, content} objects, cap at 100 messages
+                  for (const msg of raw.slice(0, 100)) {
+                    if (typeof msg?.role === "string" && typeof msg?.content === "string") {
+                      chatMessages.push({
+                        role: msg.role.slice(0, 20),
+                        content: msg.content.slice(0, 10000),
+                        ...(typeof msg.timestamp === "string" ? { timestamp: msg.timestamp.slice(0, 30) } : {}),
+                      });
+                    }
+                  }
                   log.info(`📜 Handoff: loaded ${chatMessages.length} chat messages from snapshot`);
                 }
               } catch { /* no valid chat snapshot — that's OK */ }
@@ -1431,10 +1442,38 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 try {
                   const { execSync } = await import("node:child_process");
                   const tarBuf = Buffer.from(restoreResp.workspace_tar, "base64");
-                  fs.mkdirSync("/tmp/handoff", { recursive: true });
-                  fs.writeFileSync("/tmp/handoff/workspace.tar.gz", tarBuf);
-                  execSync("tar xzf /tmp/handoff/workspace.tar.gz -C /sandbox/ 2>/dev/null || true", { timeout: 10000 });
-                  log.info(`📦 Handoff: extracted workspace tar to /sandbox/`);
+
+                  // Size guard: reject decompression bombs (5MB compressed ≈ 50MB limit)
+                  const MAX_TAR_BYTES = 5 * 1024 * 1024;
+                  if (tarBuf.length > MAX_TAR_BYTES) {
+                    throw new Error(`workspace tar too large: ${tarBuf.length} bytes (max ${MAX_TAR_BYTES})`);
+                  }
+
+                  // Write to unique temp path to avoid /tmp race conditions
+                  const tmpDir = `/tmp/handoff-${Date.now()}`;
+                  fs.mkdirSync(tmpDir, { recursive: true });
+                  const tarPath = `${tmpDir}/workspace.tar.gz`;
+                  fs.writeFileSync(tarPath, tarBuf, { mode: 0o600 });
+
+                  // Validate: list entries and reject path traversal / symlinks
+                  const listing = execSync(`tar tzf ${tarPath} 2>/dev/null`, { timeout: 5000 }).toString();
+                  const entries = listing.split("\n").filter(Boolean);
+                  for (const entry of entries) {
+                    if (entry.includes("..") || entry.startsWith("/")) {
+                      throw new Error(`path traversal blocked in workspace tar: ${entry}`);
+                    }
+                  }
+
+                  // Extract safely: --no-same-owner (drop root ownership),
+                  // --no-overwrite-dir, no following symlinks outside target
+                  execSync(
+                    `tar xzf ${tarPath} -C /sandbox/ --no-same-owner --no-overwrite-dir 2>/dev/null`,
+                    { timeout: 10000 },
+                  );
+                  log.info(`📦 Handoff: extracted ${entries.length} workspace entries to /sandbox/`);
+
+                  // Cleanup temp
+                  fs.rmSync(tmpDir, { recursive: true, force: true });
                 } catch (tarErr: any) {
                   log.warn(`Handoff: workspace tar extraction failed: ${tarErr.message}`);
                 }
