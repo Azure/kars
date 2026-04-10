@@ -1648,6 +1648,7 @@ function _hp(phase: string, step: string) {
 async function _runHandoffOrchestration(
   handoffToken: string, adminToken: string, direction: string, dirLabel: string,
 ) {
+ try {
   const authH: Record<string, string> = { Authorization: `Bearer ${adminToken}` };
   const handoffH: Record<string, string> = { ...authH, "X-Handoff-Token": handoffToken };
 
@@ -1661,7 +1662,7 @@ async function _runHandoffOrchestration(
 
   const snapshotResp = await _routerCall("POST", "/agt/handoff/snapshot", {
     shared_secret: sharedSecret,
-  }, 15000, handoffH);
+  }, 60000, handoffH);
 
   const snapshotSize = snapshotResp.size_bytes || 0;
   const verificationHash = snapshotResp.verification_hash;
@@ -1669,7 +1670,7 @@ async function _runHandoffOrchestration(
 
   // ── Step 2: Drain ──
   _hp("drain", "⏳ Draining agent — finishing in-flight work...");
-  await _routerCall("POST", "/agt/handoff/drain", {}, 15000, handoffH);
+  await _routerCall("POST", "/agt/handoff/drain", {}, 30000, handoffH);
   _hp("drain", "⏳ Agent drained — no new work accepted");
 
   // ── Step 3: Spawn cloud target ──
@@ -1823,7 +1824,7 @@ async function _runHandoffOrchestration(
   while (Date.now() - verifyStart < 60_000) {
     for (const checkType of ["handoff_verification"] as const) {
       const idx = agtInbox.findIndex(m => {
-        if (m.from_amid !== targetAmid && m.from_agent !== targetName) return false;
+        if (m.from_amid !== targetAmid || m.from_agent !== targetName) return false;
         if (m.message_type === checkType) return true;
         try {
           const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
@@ -1889,19 +1890,31 @@ async function _runHandoffOrchestration(
   // ── Done! ──
   _hp("complete", "");
   _hp("complete", `🎉 Handoff complete! Agent is now running on ${dirLabel}.`);
+  if (!handoffProgress) return;
   if (direction === "local_to_aks") {
-    handoffProgress!.steps.push("The cloud agent has your full state — chat history, trust scores, audit trail.");
-    handoffProgress!.steps.push("Your local keys are preserved. You can reclaim with a reverse handoff anytime.");
+    handoffProgress.steps.push("The cloud agent has your full state — chat history, trust scores, audit trail.");
+    handoffProgress.steps.push("Your local keys are preserved. You can reclaim with a reverse handoff anytime.");
   }
-  handoffProgress!.status = "complete";
-  handoffProgress!.result = {
+  handoffProgress.status = "complete";
+  handoffProgress.result = {
     direction,
     snapshot_size_kb: (snapshotSize / 1024).toFixed(1),
     predecessor_amid: myAmid,
     successor_amid: successorAmid,
     verification: "passed",
   };
-  handoffProgress!.updated_at = new Date().toISOString();
+  handoffProgress.updated_at = new Date().toISOString();
+
+ } catch (err: any) {
+    _log.warn(`Handoff orchestration failed: ${err.message}`);
+    if (handoffProgress) {
+      handoffProgress.status = "error";
+      handoffProgress.phase = "error";
+      handoffProgress.error = err.message;
+      handoffProgress.steps.push(`❌ ${err.message}`);
+      handoffProgress.updated_at = new Date().toISOString();
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
