@@ -127,7 +127,8 @@ impl AppState {
             responses_only_models: Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
             )),
-            admin_token: std::fs::read_to_string("/run/secrets/admin-token")
+            admin_token: std::fs::read_to_string("/etc/azureclaw/secrets/admin-token")
+                .or_else(|_| std::fs::read_to_string("/run/secrets/admin-token"))
                 .or_else(|_| std::env::var("ADMIN_TOKEN"))
                 .ok()
                 .filter(|s| !s.is_empty())
