@@ -556,3 +556,136 @@ graph TB
     style L8 fill:#55efc4,stroke:#00b894
     style L9 fill:#81ecec,stroke:#00cec9
 ```
+
+---
+
+## 11. Cloud Handoff Flow (Dev → AKS)
+
+LLM-driven agent migration from local Docker to AKS cloud. The LLM requests the handoff but the plugin orchestrates the entire transfer — the handoff token never enters the model context.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 👤 User
+    participant LLM as 🤖 LLM
+    participant Plugin as 🔌 Plugin
+    participant Router as 🛡️ Source Router
+    participant K8s as ☸️ K8s API
+    participant Ctrl as 🎛️ Controller
+    participant Reg as 📋 Registry
+    participant Relay as 📡 Relay
+    participant Target as 🎯 Target (AKS)
+
+    Note over User,Target: Phase 1 — Two-Stage Confirmation Gate
+
+    User->>LLM: "move to the cloud"
+    LLM->>Plugin: handoff_request
+    Plugin->>Router: POST /agt/handoff/pending
+    Router-->>Plugin: confirmation code (5min TTL)
+    LLM-->>User: "confirm with code: f913b1f9"
+    User->>LLM: "f913b1f9"
+    LLM->>Plugin: handoff_confirm(code)
+
+    Note over User,Target: Phase 2 — Plugin Orchestration (LLM excluded)
+
+    Plugin->>Router: POST /agt/handoff/confirm
+    Router-->>Plugin: handoff_token 🔒
+
+    rect rgb(40, 40, 60)
+        Note over Plugin,Router: Snapshot & Drain
+        Plugin->>Router: POST /agt/handoff/snapshot
+        Note right of Router: AES-256-GCM encrypted<br/>key = SHA256(admin + handoff token)
+        Router-->>Plugin: encrypted state blob
+        Plugin->>Router: POST /agt/handoff/drain
+    end
+
+    rect rgb(40, 60, 40)
+        Note over Plugin,Target: Spawn Cloud Target
+        Plugin->>Router: POST /sandbox/spawn {handoff: restore}
+        Router->>K8s: Create ClawSandbox CRD
+        Note right of K8s: governance.trustedPeers = source AMID<br/>governance.registryMode = global
+        Ctrl->>K8s: Reconcile → pod + NetworkPolicy
+        Note right of Ctrl: Injects AGT_TRUSTED_PEERS,<br/>AGT_REGISTRY_MODE=global
+        Target->>Reg: Register AMID (Ed25519)
+    end
+
+    rect rgb(50, 40, 40)
+        Note over Plugin,Reg: Mesh Discovery
+        loop Poll every 2s (90s max)
+            Plugin->>Reg: search for target AMID
+        end
+        Reg-->>Plugin: target AMID found ✓
+    end
+
+    rect rgb(60, 60, 40)
+        Note over Plugin,Target: E2E Encrypted State Transfer
+        Plugin->>Relay: mesh_send(handoff_transfer)
+        Note over Relay: 🔐 Signal Protocol<br/>relay is zero-knowledge
+        Relay->>Target: deliver encrypted message
+        Target->>Target: POST /agt/handoff/init
+        Target->>Target: POST /agt/handoff/restore
+        Target->>Target: POST /agt/handoff/verify
+        Target->>Relay: mesh_send(handoff_verify)
+        Relay->>Plugin: verification ✓
+    end
+
+    rect rgb(50, 40, 60)
+        Note over Plugin,Reg: Succession & Decommission
+        Plugin->>Reg: target inherits source identity
+        Plugin->>Router: POST /agt/handoff/decommission
+    end
+
+    Plugin-->>LLM: "Handoff complete"
+    LLM-->>User: "I'm now running on AKS ☁️"
+```
+
+### Handoff Security Model
+
+```mermaid
+graph TB
+    subgraph human["Human-in-the-Loop"]
+        confirm["Two-stage confirmation<br/>User types code manually"]
+    end
+
+    subgraph isolation["LLM Isolation"]
+        token["Handoff token stays in<br/>plugin memory — LLM never sees it"]
+        execute["LLM can REQUEST<br/>but never EXECUTE"]
+    end
+
+    subgraph encryption["Double Encryption"]
+        aes["AES-256-GCM snapshot<br/>key = SHA256(admin + handoff token)"]
+        signal["Signal Protocol transport<br/>X3DH + Double Ratchet"]
+        relay_zk["Relay is zero-knowledge<br/>cannot read payloads"]
+    end
+
+    subgraph identity["Identity & Trust"]
+        ed25519["Ed25519 keypairs<br/>AMIDs = public keys"]
+        trusted["AGT_TRUSTED_PEERS<br/>K8s-injected, immutable"]
+        knock["KNOCK enforcement<br/>trust-score gating"]
+    end
+
+    subgraph infra["Infrastructure"]
+        netpol["NetworkPolicy: default-deny<br/>+ mesh egress only"]
+        readonly["Read-only rootfs<br/>seccomp + non-root"]
+        kube["Kubeconfig: read-only mount<br/>dev mode only"]
+    end
+
+    human --> isolation --> encryption --> identity --> infra
+```
+
+### Trust Flow — Current vs Future
+
+Currently agents register anonymously (trust score = 0), so `AGT_TRUSTED_PEERS` provides the +500 KNOCK bonus. With Entra OAuth, agents get verified identities and real reputation scores.
+
+```mermaid
+graph LR
+    subgraph current["Current — Unauthenticated"]
+        S1["Source AMID<br/>registry score: 0"] -->|KNOCK| T1["Target<br/>threshold: 500"]
+        T1 -->|"+500 trusted_peers"| A1["✅ 500 ≥ 500"]
+    end
+
+    subgraph future["Future — Entra OAuth"]
+        S2["Source AMID<br/>Entra-verified"] -->|KNOCK| T2["Target<br/>threshold: 500"]
+        T2 -->|"registry score: 800"| A2["✅ 800 ≥ 500"]
+    end
+```
