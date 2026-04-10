@@ -324,8 +324,19 @@ export function devCommand(): Command {
           // Global registry mode — skip local deployment, verify connectivity
           stepper.step("Connecting to global registry...");
           const registryUrl = options.globalRegistry as string;
-          stepper.update(`Checking ${registryUrl}...`);
 
+          // Rewrite localhost URLs for Docker containers — localhost inside
+          // the container refers to the container itself, not the host.
+          const containerRegistryUrl = registryUrl.replace(
+            /\/\/(localhost|127\.0\.0\.1)([:\/])/,
+            "//host.docker.internal$2"
+          );
+          if (containerRegistryUrl !== registryUrl) {
+            stepper.update(`Rewriting ${registryUrl} → ${containerRegistryUrl} for container access`);
+          }
+
+          // Health check from the host (validates port-forward / tunnel is up)
+          stepper.update(`Checking ${registryUrl}...`);
           try {
             const healthUrl = `${registryUrl.replace(/\/$/, "")}/v1/health`;
             const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(10000) });
@@ -337,6 +348,9 @@ export function devCommand(): Command {
           } catch (e: any) {
             stepper.done(`Global registry health check failed: ${e.message ?? e} — will retry on first use`);
           }
+
+          // Store the container-reachable URL for env injection below
+          (options as any)._containerRegistryUrl = containerRegistryUrl;
         }
 
         // ── Container startup ────────────────────────────────────────
@@ -395,9 +409,18 @@ export function devCommand(): Command {
         const agtEnvArgs: string[] = [];
         if (useGlobalRegistry) {
           // Global registry mode — router connects to external registry
-          const registryUrl = options.globalRegistry as string;
+          // Use the container-reachable URL (localhost rewritten to host.docker.internal)
+          const containerRegistryUrl = (options as any)._containerRegistryUrl ?? options.globalRegistry as string;
+
+          // Derive relay URL from registry URL: same host, port 18765, ws:// scheme
+          // Registry: http://host.docker.internal:18080 → Relay: ws://host.docker.internal:18765
+          const registryUrlObj = new URL(containerRegistryUrl);
+          const relayPort = parseInt(registryUrlObj.port || "18080", 10) === 18080 ? 18765 : 8765;
+          const containerRelayUrl = `ws://${registryUrlObj.hostname}:${relayPort}`;
+
           agtEnvArgs.push(
-            "-e", `AGT_REGISTRY_URL=${registryUrl}`,
+            "-e", `AGT_REGISTRY_URL=${containerRegistryUrl}`,
+            "-e", `AGT_RELAY_URL=${containerRelayUrl}`,
             "-e", "AGT_REGISTRY_MODE=global",
             "-e", "AGT_GOVERNANCE_ENABLED=true",
           );
@@ -417,6 +440,13 @@ export function devCommand(): Command {
           "-v", "/var/run/docker.sock:/var/run/docker.sock",
         ] : [];
 
+        // Mount kubeconfig so the router can spawn AKS pods for handoff (K8s CRD path).
+        const kubeConfigPath = `${process.env.HOME}/.kube/config`;
+        const kubeArgs = existsSync(kubeConfigPath) ? [
+          "-v", `${kubeConfigPath}:/run/secrets/kubeconfig:ro`,
+          "-e", "KUBECONFIG=/run/secrets/kubeconfig",
+        ] : [];
+
         await execa("docker", [
           "run", "-d",
           "--name", containerName,
@@ -432,6 +462,7 @@ export function devCommand(): Command {
           // Mount API key as read-only secret (never as env var)
           "-v", `${CREDENTIALS_FILE}:/run/secrets/azure-openai-key:ro`,
           ...dockerSockArgs,
+          ...kubeArgs,
           // Hide unnecessary filesystem paths
           "--tmpfs", "/boot:ro,size=0",
           "--tmpfs", "/home:ro,size=0",
@@ -507,6 +538,34 @@ export function devCommand(): Command {
         }
 
         stepper.done("Sandbox running");
+
+        // ── Global registry availability check from inside the container ──
+        if (useGlobalRegistry) {
+          const containerRegistryUrl = (options as any)._containerRegistryUrl ?? options.globalRegistry as string;
+          const healthEndpoint = `${containerRegistryUrl.replace(/\/$/, "")}/v1/health`;
+          let containerCanReach = false;
+          for (let i = 0; i < 5; i++) {
+            try {
+              const { stdout } = await execa("docker", [
+                "exec", containerName, "sh", "-c",
+                `wget -qO- --timeout=3 "${healthEndpoint}" 2>/dev/null || curl -sf --max-time 3 "${healthEndpoint}" 2>/dev/null`,
+              ], { stdio: "pipe" });
+              if (stdout.includes("healthy")) {
+                containerCanReach = true;
+                break;
+              }
+            } catch {
+              await new Promise(r => setTimeout(r, 1000));
+            }
+          }
+          if (!containerCanReach) {
+            agtReady = false;
+            stepper.update(
+              `⚠ Global registry unreachable from inside container at ${containerRegistryUrl}. ` +
+              `Discovery and handoff will not work.`
+            );
+          }
+        }
 
         // ── Security status ──────────────────────────────────────────
         section("Security");

@@ -51,6 +51,17 @@ pub struct SpawnRequest {
     /// auto-trust (parent + siblings). Passed securely via env var at spawn time,
     /// not self-reported. Format: "name:AMID,name:AMID,..."
     pub trusted_peers: Option<String>,
+    /// Handoff metadata — when present, spawn targets AKS even in dev mode.
+    pub handoff: Option<HandoffMeta>,
+}
+
+/// Handoff metadata attached to a spawn request.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct HandoffMeta {
+    /// "restore" = target will receive state from predecessor via mesh.
+    pub mode: String,
+    /// Name of the agent handing off.
+    pub predecessor: Option<String>,
 }
 
 /// Response from spawn/status endpoints.
@@ -96,9 +107,19 @@ pub async fn create_sandbox(
         return Err("name must not start or end with a hyphen".into());
     }
 
-    // Dev mode: spawn sibling Docker container instead of K8s CRD
-    if std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true" {
+    // Dev mode: spawn sibling Docker container instead of K8s CRD.
+    // Exception: handoff spawns always target AKS (the whole point is moving to cloud).
+    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let is_handoff = req.handoff.as_ref().is_some_and(|h| h.mode == "restore");
+    if is_dev && !is_handoff {
         return create_sandbox_docker(parent_name, req).await;
+    }
+    if is_dev && is_handoff {
+        tracing::info!(
+            parent = %parent_name,
+            child = %req.name,
+            "Handoff spawn — bypassing Docker dev mode, creating K8s CRD on AKS"
+        );
     }
 
     let client = Client::try_default()
