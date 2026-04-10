@@ -6,6 +6,8 @@ import * as os from "node:os";
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import { execa } from "execa";
+import { spawn } from "node:child_process";
+import * as net from "node:net";
 import { banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadContext, saveContext } from "../config.js";
 
@@ -510,8 +512,11 @@ export function meshCommand(): Command {
   cmd
     .command("promote")
     .description("Promote the AKS cluster registry to a public global endpoint")
-    .option("--allow-ip <cidr>", "Restrict access to this IP/CIDR (e.g. 203.0.113.42 or 203.0.113.0/24). Omit for auto-detect.")
-    .action(async (opts: { allowIp?: string }) => {
+    .option("--allow-ip <cidr>", "Restrict access to this IP/CIDR (LoadBalancer mode)")
+    .option("--port-forward", "Use kubectl port-forward instead of LoadBalancer (recommended for Cilium clusters)")
+    .option("--registry-port <port>", "Local port for registry (port-forward mode)", "18080")
+    .option("--relay-port <port>", "Local port for relay (port-forward mode)", "18765")
+    .action(async (opts: { allowIp?: string; portForward?: boolean; registryPort?: string; relayPort?: string }) => {
       banner("AzureClaw · Mesh Promote", "Promote Registry to Global");
 
       // Load deployment context
@@ -523,10 +528,169 @@ export function meshCommand(): Command {
       }
 
       if (ctx.registryMode === "global" && ctx.globalRegistryUrl) {
-        console.log(chalk.yellow("  ⚠ Registry is already global."));
-        kvLine("Registry", ctx.globalRegistryUrl);
-        kvLine("Relay", ctx.globalRelayUrl ?? "—");
-        console.log(chalk.dim("\n    Run azureclaw mesh demote first to reset."));
+        // Already promoted — check health and reconnect if needed
+        const isPortForward = ctx.promoteMode === "port-forward";
+        const regPort = parseInt(opts.registryPort ?? "18080", 10);
+        const relayPort = parseInt(opts.relayPort ?? "18765", 10);
+        const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+
+        console.log(chalk.dim("  Registry was previously promoted — checking health...\n"));
+
+        // ── Health check: registry ──
+        let registryHealthy = false;
+        try {
+          const resp = await fetch(`http://localhost:${regPort}/v1/health`, {
+            signal: AbortSignal.timeout(3000),
+          });
+          if (resp.ok) {
+            const body = await resp.json() as Record<string, unknown>;
+            checkLine(true, `Registry healthy (${body.agents_registered ?? 0} agents, ${body.agents_online ?? 0} online)`);
+            registryHealthy = true;
+          } else {
+            checkLine(false, `Registry returned HTTP ${resp.status}`);
+          }
+        } catch {
+          checkLine(false, "Registry not reachable");
+        }
+
+        // ── Health check: relay ──
+        let relayHealthy = false;
+        try {
+          // Relay is a WebSocket server — TCP connect is enough
+          await new Promise<void>((resolve, reject) => {
+            const sock = net.connect(relayPort, "127.0.0.1", () => { sock.destroy(); resolve(); });
+            sock.on("error", reject);
+            sock.setTimeout(3000, () => { sock.destroy(); reject(new Error("timeout")); });
+          });
+          checkLine(true, `Relay listening on localhost:${relayPort}`);
+          relayHealthy = true;
+        } catch {
+          checkLine(false, "Relay not reachable");
+        }
+
+        if (registryHealthy && relayHealthy) {
+          console.log();
+          console.log(chalk.green("  ✓ ") + chalk.bold("Mesh is healthy — all tunnels active."));
+          kvLine("Registry", chalk.cyan(ctx.globalRegistryUrl));
+          kvLine("Relay", chalk.cyan(ctx.globalRelayUrl ?? "—"));
+          console.log();
+          return;
+        }
+
+        // ── Reconnect: kill stale port-forwards, restart ──
+        if (isPortForward) {
+          section("Reconnecting Port-Forwards");
+
+          // Kill stale PIDs
+          try {
+            const savedPids = JSON.parse(fs.readFileSync(pidFile, "utf-8")) as Record<string, number>;
+            for (const [label, pid] of Object.entries(savedPids)) {
+              try {
+                process.kill(pid, "SIGTERM");
+                console.log(chalk.dim(`  · Stopped stale ${label} tunnel (PID ${pid})`));
+              } catch { /* already dead */ }
+            }
+          } catch { /* no PID file */ }
+          await new Promise(r => setTimeout(r, 1000));
+
+          // Kill anything still holding the ports
+          for (const port of [regPort, relayPort]) {
+            try {
+              const { stdout } = await execa("lsof", ["-ti", `:${port}`], { stdio: "pipe", reject: false });
+              const pidsOnPort = stdout.trim().split("\n").filter(Boolean);
+              for (const p of pidsOnPort) {
+                try { process.kill(parseInt(p, 10), "SIGKILL"); } catch { /* ignore */ }
+              }
+            } catch { /* no process on port */ }
+          }
+          await new Promise(r => setTimeout(r, 1000));
+
+          // Start fresh tunnels
+          const tunnels = [
+            { svc: "svc/agentmesh-registry", localPort: regPort, remotePort: 8080, label: "Registry" },
+            { svc: "svc/agentmesh-relay", localPort: relayPort, remotePort: 8765, label: "Relay" },
+          ];
+
+          const pids: Record<string, number> = {};
+          for (const t of tunnels) {
+            const logDir = path.join(os.homedir(), ".azureclaw", "logs");
+            fs.mkdirSync(logDir, { recursive: true });
+            const outFd = fs.openSync(path.join(logDir, `pf-${t.label.toLowerCase()}.log`), "w");
+
+            const child = spawn("kubectl", [
+              "port-forward", t.svc, `${t.localPort}:${t.remotePort}`,
+              "-n", "agentmesh",
+            ], { stdio: ["ignore", outFd, outFd], detached: true });
+
+            const logPath = path.join(logDir, `pf-${t.label.toLowerCase()}.log`);
+            let ready = false;
+            for (let attempt = 0; attempt < 30; attempt++) {
+              await new Promise(r => setTimeout(r, 500));
+              try {
+                const content = fs.readFileSync(logPath, "utf-8");
+                if (content.includes("Forwarding from")) { ready = true; break; }
+              } catch { /* file not written yet */ }
+            }
+
+            child.unref();
+            fs.closeSync(outFd);
+
+            if (ready) {
+              pids[t.label] = child.pid!;
+              checkLine(true, `${t.label}: localhost:${t.localPort} → ${t.svc}:${t.remotePort} (PID ${child.pid})`);
+            } else {
+              console.error(chalk.red(`  ✘ Port-forward for ${t.label} failed to start.`));
+              process.exit(1);
+            }
+          }
+
+          fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+          fs.writeFileSync(pidFile, JSON.stringify(pids, null, 2));
+
+          // Final health check
+          section("Connectivity Check");
+          try {
+            const resp = await fetch(`http://localhost:${regPort}/v1/health`, {
+              signal: AbortSignal.timeout(5000),
+            });
+            if (resp.ok) {
+              const body = await resp.json() as Record<string, unknown>;
+              checkLine(true, `Registry healthy (${body.agents_registered ?? 0} agents registered)`);
+            } else {
+              checkLine(false, `Registry returned ${resp.status}`);
+            }
+          } catch (e: any) {
+            checkLine(false, `Registry not reachable: ${e.message}`);
+          }
+
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const sock = net.connect(relayPort, "127.0.0.1", () => { sock.destroy(); resolve(); });
+              sock.on("error", reject);
+              sock.setTimeout(3000, () => { sock.destroy(); reject(new Error("timeout")); });
+            });
+            checkLine(true, `Relay listening on localhost:${relayPort}`);
+          } catch (e: any) {
+            checkLine(false, `Relay not reachable: ${e.message}`);
+          }
+
+          // Update context (URLs may have changed if custom ports)
+          ctx.globalRegistryUrl = `http://localhost:${regPort}`;
+          ctx.globalRelayUrl = `ws://localhost:${relayPort}`;
+          saveContext(ctx);
+
+          section("Global Endpoints");
+          kvLine("Registry", chalk.cyan(ctx.globalRegistryUrl));
+          kvLine("Relay", chalk.cyan(ctx.globalRelayUrl));
+
+          console.log();
+          console.log(chalk.green("  ✓ ") + chalk.bold("Port-forwards reconnected."));
+          console.log(chalk.dim(`    PIDs saved to ${pidFile}`));
+          console.log();
+        } else {
+          // LoadBalancer mode — just report the broken state
+          console.log(chalk.yellow("\n  ⚠ Endpoints are not healthy. Run azureclaw mesh demote and re-promote."));
+        }
         return;
       }
 
@@ -560,7 +724,104 @@ export function meshCommand(): Command {
         }
       }
 
-      // Resolve IP allowlist
+      // ── Port-forward mode ──────────────────────────────────────────────
+      if (opts.portForward) {
+        const regPort = parseInt(opts.registryPort ?? "18080", 10);
+        const relayPort = parseInt(opts.relayPort ?? "18765", 10);
+
+        section("Port-Forward Tunnels");
+        console.log(chalk.dim("  Tunnelling through kubectl (bypasses Azure LB/Cilium)"));
+
+        const tunnels = [
+          { svc: "svc/agentmesh-registry", localPort: regPort, remotePort: 8080, label: "Registry" },
+          { svc: "svc/agentmesh-relay", localPort: relayPort, remotePort: 8765, label: "Relay" },
+        ];
+
+        const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+        const pids: Record<string, number> = {};
+
+        for (const t of tunnels) {
+          // Open log files so kubectl port-forward has somewhere to write
+          const logDir = path.join(os.homedir(), ".azureclaw", "logs");
+          fs.mkdirSync(logDir, { recursive: true });
+          const outFd = fs.openSync(path.join(logDir, `pf-${t.label.toLowerCase()}.log`), "w");
+
+          const child = spawn("kubectl", [
+            "port-forward", t.svc, `${t.localPort}:${t.remotePort}`,
+            "-n", "agentmesh",
+          ], { stdio: ["ignore", outFd, outFd], detached: true });
+
+          // Wait for port-forward to be ready by polling the log file
+          const logPath = path.join(logDir, `pf-${t.label.toLowerCase()}.log`);
+          let ready = false;
+          for (let attempt = 0; attempt < 30; attempt++) {
+            await new Promise(r => setTimeout(r, 500));
+            try {
+              const content = fs.readFileSync(logPath, "utf-8");
+              if (content.includes("Forwarding from")) {
+                ready = true;
+                break;
+              }
+            } catch { /* file not written yet */ }
+          }
+
+          child.unref();
+          fs.closeSync(outFd);
+
+          if (ready) {
+            pids[t.label] = child.pid!;
+            checkLine(true, `${t.label}: localhost:${t.localPort} → ${t.svc}:${t.remotePort} (PID ${child.pid})`);
+          } else {
+            console.error(chalk.red(`  ✘ Port-forward for ${t.label} failed to start.`));
+            process.exit(1);
+          }
+        }
+
+        // Save PIDs for demote cleanup
+        fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+        fs.writeFileSync(pidFile, JSON.stringify(pids, null, 2));
+
+        // Verify connectivity
+        section("Connectivity Check");
+        try {
+          const resp = await fetch(`http://localhost:${regPort}/v1/health`, {
+            signal: AbortSignal.timeout(5000),
+          });
+          if (resp.ok) {
+            const body = await resp.json() as Record<string, unknown>;
+            checkLine(true, `Registry healthy (${body.agents_registered ?? 0} agents registered)`);
+          } else {
+            checkLine(false, `Registry returned ${resp.status}`);
+          }
+        } catch (e: any) {
+          checkLine(false, `Registry not reachable: ${e.message}`);
+        }
+
+        const globalRegistryUrl = `http://localhost:${regPort}`;
+        const globalRelayUrl = `ws://localhost:${relayPort}`;
+
+        ctx.registryMode = "global";
+        ctx.globalRegistryUrl = globalRegistryUrl;
+        ctx.globalRelayUrl = globalRelayUrl;
+        ctx.promoteMode = "port-forward";
+        saveContext(ctx);
+
+        section("Global Endpoints");
+        kvLine("Registry", chalk.cyan(globalRegistryUrl));
+        kvLine("Relay", chalk.cyan(globalRelayUrl));
+
+        console.log();
+        console.log(chalk.green("  ✓ ") + chalk.bold("Registry promoted to global (port-forward)."));
+        console.log(chalk.dim("    Tunnels are running in the background."));
+        console.log(chalk.dim(`    PIDs saved to ${pidFile}`));
+        console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/v1/health`));
+        console.log(chalk.dim(`    Then:  azureclaw dev --global-registry ${globalRegistryUrl}`));
+        console.log(chalk.dim(`    Stop:  azureclaw mesh demote`));
+        console.log();
+        return;
+      }
+
+      // ── LoadBalancer mode (original) ───────────────────────────────────
       section("Access Control");
       let allowCidr: string;
 
@@ -568,7 +829,6 @@ export function meshCommand(): Command {
         allowCidr = opts.allowIp.includes("/") ? opts.allowIp : `${opts.allowIp}/32`;
         kvLine("Allow IP", allowCidr + " (from --allow-ip)");
       } else {
-        // Auto-detect public IP
         let detectedIp = "";
         try {
           const resp = await fetch("https://ifconfig.me/ip", { signal: AbortSignal.timeout(5000) });
@@ -589,7 +849,6 @@ export function meshCommand(): Command {
         kvLine("Allow IP", allowCidr + " (auto-detected)");
       }
 
-      // Patch registry and relay services to LoadBalancer with IP restriction
       section("LoadBalancer Services");
 
       const services = [
@@ -618,7 +877,6 @@ export function meshCommand(): Command {
         }
       }
 
-      // Wait for external IPs to be assigned
       section("Waiting for External IPs");
       const externalIps: Record<string, string> = {};
 
@@ -647,7 +905,6 @@ export function meshCommand(): Command {
         checkLine(true, `${svc.label}: ${ip}:${svc.port}`);
       }
 
-      // Build URLs using sslip.io for automatic DNS
       const registryIp = externalIps["agentmesh-registry"];
       const relayIp = externalIps["agentmesh-relay"];
       const registrySslip = registryIp.replace(/\./g, "-") + ".sslip.io";
@@ -656,10 +913,10 @@ export function meshCommand(): Command {
       const globalRegistryUrl = `http://${registrySslip}:8080`;
       const globalRelayUrl = `ws://${relaySslip}:8765`;
 
-      // Update deployment context
       ctx.registryMode = "global";
       ctx.globalRegistryUrl = globalRegistryUrl;
       ctx.globalRelayUrl = globalRelayUrl;
+      ctx.promoteMode = "loadbalancer";
       saveContext(ctx);
 
       section("Global Endpoints");
@@ -695,43 +952,64 @@ export function meshCommand(): Command {
         return;
       }
 
-      section("Reverting Services to ClusterIP");
-
-      // Patch services back to ClusterIP (reverse of promote)
-      const services = ["agentmesh-registry", "agentmesh-relay"];
-      for (const svc of services) {
-        try {
-          // kubectl patch can't remove loadBalancerSourceRanges with merge patch,
-          // so we use a strategic merge that sets type back to ClusterIP.
-          // The LB will be deallocated and the public IP released.
-          await execa("kubectl", [
-            "patch", "svc", svc, "-n", "agentmesh",
-            "--type", "merge",
-            "-p", JSON.stringify({ spec: { type: "ClusterIP", loadBalancerSourceRanges: null } }),
-          ], { stdio: "pipe" });
-          checkLine(true, `${svc} → ClusterIP`);
-        } catch {
-          console.log(chalk.yellow(`  ⚠ Could not revert ${svc}`));
+      if (ctx.promoteMode === "port-forward") {
+        // Kill port-forward processes
+        section("Stopping Port-Forward Tunnels");
+        const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+        if (fs.existsSync(pidFile)) {
+          try {
+            const pids = JSON.parse(fs.readFileSync(pidFile, "utf-8")) as Record<string, number>;
+            for (const [label, pid] of Object.entries(pids)) {
+              try {
+                process.kill(pid, "SIGTERM");
+                checkLine(true, `${label} tunnel stopped (PID ${pid})`);
+              } catch {
+                console.log(chalk.dim(`  · ${label} tunnel already stopped (PID ${pid})`));
+              }
+            }
+            fs.unlinkSync(pidFile);
+          } catch {
+            console.log(chalk.yellow("  ⚠ Could not read PID file"));
+          }
+        } else {
+          console.log(chalk.dim("  · No PID file found (tunnels may have exited)"));
         }
-      }
+      } else {
+        // LoadBalancer mode: revert services to ClusterIP
+        section("Reverting Services to ClusterIP");
+        const services = ["agentmesh-registry", "agentmesh-relay"];
+        for (const svc of services) {
+          try {
+            await execa("kubectl", [
+              "patch", "svc", svc, "-n", "agentmesh",
+              "--type", "merge",
+              "-p", JSON.stringify({ spec: { type: "ClusterIP", loadBalancerSourceRanges: null } }),
+            ], { stdio: "pipe" });
+            checkLine(true, `${svc} → ClusterIP`);
+          } catch {
+            console.log(chalk.yellow(`  ⚠ Could not revert ${svc}`));
+          }
+        }
 
-      // Also clean up any leftover Ingress resources from earlier attempts
-      const ingressResources = [
-        "ingress/agentmesh-registry-ingress",
-        "ingress/agentmesh-relay-ingress",
-      ];
-      for (const resource of ingressResources) {
-        try {
-          await execa("kubectl", [
-            "delete", resource, "-n", "agentmesh", "--ignore-not-found",
-          ], { stdio: "pipe" });
-        } catch { /* ignore */ }
+        // Clean up any leftover Ingress resources from earlier attempts
+        const ingressResources = [
+          "ingress/agentmesh-registry-ingress",
+          "ingress/agentmesh-relay-ingress",
+        ];
+        for (const resource of ingressResources) {
+          try {
+            await execa("kubectl", [
+              "delete", resource, "-n", "agentmesh", "--ignore-not-found",
+            ], { stdio: "pipe" });
+          } catch { /* ignore */ }
+        }
       }
 
       // Update deployment context
       ctx.registryMode = "local";
       ctx.globalRegistryUrl = undefined;
       ctx.globalRelayUrl = undefined;
+      delete ctx.promoteMode;
       saveContext(ctx);
 
       section("Status");
