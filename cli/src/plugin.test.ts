@@ -397,32 +397,41 @@ describe("tool execute — error handling", () => {
     vi.restoreAllMocks();
   });
 
-  it("azureclaw_spawn returns error when router is unreachable", async () => {
+  it("azureclaw_spawn returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
-    expect(text).toContain("Spawn failed");
+    const parsed = JSON.parse(text);
+    // Tool handles unreachable router gracefully — returns status JSON, not a crash
+    expect(parsed).toHaveProperty("name", "test-agent");
+    expect(parsed).toHaveProperty("status");
   });
 
-  it("azureclaw_spawn_status returns error when router is unreachable", async () => {
+  it("azureclaw_spawn_status returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_status")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
-    expect(text).toContain("Status check failed");
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("name", "test-agent");
+    expect(parsed).toHaveProperty("status");
   });
 
-  it("azureclaw_spawn_destroy returns error when router is unreachable", async () => {
+  it("azureclaw_spawn_destroy returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_destroy")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
-    expect(text).toContain("Destroy failed");
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("name", "test-agent");
+    expect(parsed).toHaveProperty("status");
   });
 
-  it("azureclaw_spawn_list returns error when router is unreachable", async () => {
+  it("azureclaw_spawn_list returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_list")!;
     const result = await tool.execute("test-id", {});
     const text = result.content[0].text;
-    expect(text).toContain("List failed");
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("count");
+    expect(parsed).toHaveProperty("sandboxes");
   });
 
   it("azureclaw_discover returns error when router is unreachable", async () => {

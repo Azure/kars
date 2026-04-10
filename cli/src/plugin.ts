@@ -1731,6 +1731,11 @@ async function _runHandoffOrchestration(
     if (!targetAmid) {
       _hp("mesh_wait", "⚠️ Target spawned but not yet registered on mesh — transfer deferred");
       await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+      // Clean up orphaned CRD to avoid stale pods on AKS
+      if (direction === "local_to_aks") {
+        _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
+        await _routerCall("DELETE", `/sandbox/spawn/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
+      }
       if (handoffProgress) {
         handoffProgress.status = "partial";
         handoffProgress.error = "Cloud target did not register on mesh within 90s";
@@ -1810,6 +1815,10 @@ async function _runHandoffOrchestration(
   if (!sendSuccess) {
     _hp("transfer", "❌ Mesh send failed after 5 attempts");
     await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+    if (direction === "local_to_aks") {
+      _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
+      await _routerCall("DELETE", `/sandbox/spawn/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
+    }
     if (handoffProgress) { handoffProgress.status = "error"; }
     return;
   }
@@ -3187,6 +3196,14 @@ const azureClawPlugin = definePluginEntry({
           const handoffToken = r.handoff_token;
           const direction = r.direction;
           const dirLabel = direction === "local_to_aks" ? "cloud (AKS)" : "local";
+
+          // Guard against concurrent handoff — don't overwrite in-progress tracker
+          if (handoffProgress?.status === "running") {
+            return { content: [{ type: "text", text: safeJson({
+              status: "error",
+              error: "A handoff is already in progress. Use azureclaw_handoff_status to check.",
+            }) }] };
+          }
 
           // Initialize progress tracker
           handoffProgress = {

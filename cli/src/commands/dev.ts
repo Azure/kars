@@ -441,7 +441,8 @@ export function devCommand(): Command {
         ] : [];
 
         // Mount kubeconfig so the router can spawn AKS pods for handoff (K8s CRD path).
-        const kubeConfigPath = `${process.env.HOME}/.kube/config`;
+        // Respect $KUBECONFIG if set, fall back to default ~/.kube/config
+        const kubeConfigPath = process.env.KUBECONFIG || `${process.env.HOME}/.kube/config`;
         const kubeArgs = existsSync(kubeConfigPath) ? [
           "-v", `${kubeConfigPath}:/run/secrets/kubeconfig:ro`,
           "-e", "KUBECONFIG=/run/secrets/kubeconfig",

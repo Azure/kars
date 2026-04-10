@@ -5,6 +5,19 @@ import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 /**
  * azureclaw handoff — live agent migration between local and cloud.
  *
+ * OPERATOR-MODE ORCHESTRATION (CLI-driven)
+ * This command is for direct operator use from the terminal. It calls router
+ * endpoints directly (POST /init, /snapshot, /drain, etc.) without the
+ * two-stage confirmation gate used by the LLM-driven path.
+ *
+ * The LLM-driven path lives in plugin.ts (azureclaw_handoff_request →
+ * azureclaw_handoff_confirm → _runHandoffOrchestration). That path uses
+ * the POST /pending + /confirm two-stage gate, transfers state via E2E mesh
+ * (Signal Protocol), and reports progress via azureclaw_handoff_status.
+ *
+ * Both paths are intentional — CLI for operators, plugin for interactive
+ * webchat. See docs/architecture-diagrams.md §11.5 for the comparison.
+ *
  * Forward:  azureclaw handoff <name> --to cloud
  * Reverse:  azureclaw handoff <name> --to local
  * Status:   azureclaw handoff <name> --status
@@ -75,7 +88,16 @@ export function handoffCommand(): Command {
             ], { stdio: "pipe" });
             return stdout.trim() || undefined;
           } catch {
-            return undefined;
+            // Fallback: entrypoint saves the token to /tmp/.agt-admin-token
+            try {
+              const { stdout } = await execa("docker", [
+                "exec", containerName,
+                "cat", "/tmp/.agt-admin-token",
+              ], { stdio: "pipe" });
+              return stdout.trim() || undefined;
+            } catch {
+              return undefined;
+            }
           }
         }
       }
@@ -259,18 +281,134 @@ export function handoffCommand(): Command {
 
         stepper.done("Source agent drained (no new work accepted)");
 
-        // Step 5: Transfer to target (placeholder — full implementation in H3/H4)
+        // Step 5: Transfer to target
         stepper.step("Transferring state to target...");
 
         if (direction === "local_to_aks") {
-          // In a full implementation, this would:
-          // 1. Create AKS sandbox via ClawSandbox CRD
-          // 2. Wait for target pod to be ready
-          // 3. POST /agt/handoff/restore on the TARGET agent
-          // 4. POST /agt/handoff/verify on the TARGET agent
-          //
-          // For now, we store the snapshot and report what would happen.
-          stepper.done("State snapshot ready for transfer (target provisioning pending)");
+          // ── H4: Provision target on AKS via ClawSandbox CRD ──────────────
+          // 1. Apply a ClawSandbox CRD for the target agent
+          const targetName = name; // same name on AKS
+          const targetNs = `azureclaw-${targetName}`;
+
+          // Check if there's already a ClawSandbox for this agent
+          let targetExists = false;
+          try {
+            const { stdout } = await execa("kubectl", [
+              "get", "clawsandbox", targetName,
+              "-n", "azureclaw-system",
+              "-o", "jsonpath={.status.phase}",
+            ], { stdio: "pipe", reject: false });
+            targetExists = stdout.trim().length > 0;
+          } catch { /* doesn't exist yet */ }
+
+          if (!targetExists) {
+            // Create ClawSandbox CRD — the controller will reconcile it into a full sandbox
+            const crdManifest = JSON.stringify({
+              apiVersion: "azureclaw.io/v1alpha1",
+              kind: "ClawSandbox",
+              metadata: { name: targetName, namespace: "azureclaw-system" },
+              spec: {
+                model: process.env.DEFAULT_MODEL || "gpt-5.4",
+                handoff: { mode: "restore", predecessor: name },
+              },
+            });
+            try {
+              await execa("kubectl", ["apply", "-f", "-"], {
+                input: crdManifest,
+                stdio: ["pipe", "pipe", "pipe"],
+              });
+            } catch (e: any) {
+              stepper.fail(`Failed to create target sandbox CRD: ${e.message}`);
+              await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+              process.exit(1);
+            }
+          }
+
+          // Wait for target pod to be ready (up to 120s)
+          stepper.step("Waiting for target pod on AKS...");
+          let targetReady = false;
+          for (let i = 0; i < 60; i++) {
+            try {
+              const { stdout } = await execa("kubectl", [
+                "get", "pods", "-n", targetNs,
+                "-l", `app.kubernetes.io/name=${targetName}`,
+                "-o", "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}",
+              ], { stdio: "pipe", reject: false });
+              if (stdout.trim() === "True") {
+                targetReady = true;
+                break;
+              }
+            } catch { /* not ready yet */ }
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          if (!targetReady) {
+            stepper.fail("Target pod not ready after 120s");
+            await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            process.exit(1);
+          }
+
+          // Port-forward to the target's router to send the restore payload
+          // The target agent's router listens on 8443 inside the pod
+          const targetPort = 18444; // temp local port for target
+          const pfProc = execa("kubectl", [
+            "port-forward", "-n", targetNs,
+            `svc/${targetName}`, `${targetPort}:8443`,
+          ], { stdio: "pipe", reject: false });
+
+          // Wait for port-forward to be ready
+          await new Promise(r => setTimeout(r, 3000));
+
+          try {
+            // Get the encrypted snapshot blob from the source
+            const blobResp = await routerExec("GET", "/agt/handoff/snapshot", undefined, handoffHeaders);
+            if (blobResp.status >= 400) {
+              stepper.fail(`Failed to retrieve snapshot: ${blobResp.body.error || `HTTP ${blobResp.status}`}`);
+              await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+              process.exit(1);
+            }
+
+            // Send restore to target via port-forward
+            const http = await import("node:http");
+            const restorePayload = JSON.stringify({
+              shared_secret: sharedSecret,
+              blob: blobResp.body.blob,
+            });
+
+            const restoreResult: any = await new Promise((resolve, reject) => {
+              const req = http.request(`http://127.0.0.1:${targetPort}/agt/handoff/restore`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Content-Length": Buffer.byteLength(restorePayload),
+                },
+                timeout: 30000,
+              }, (res) => {
+                let data = "";
+                res.on("data", (c: Buffer) => { data += c.toString(); });
+                res.on("end", () => {
+                  try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+                  catch { resolve({ status: res.statusCode, body: { raw: data } }); }
+                });
+              });
+              req.on("error", reject);
+              req.write(restorePayload);
+              req.end();
+            });
+
+            if (restoreResult.status >= 400) {
+              stepper.fail(`Restore failed on target: ${restoreResult.body.error || `HTTP ${restoreResult.status}`}`);
+              await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+              process.exit(1);
+            }
+
+            stepper.done(`State transferred to AKS (${(snapshotSize / 1024).toFixed(1)} KB restored)`);
+
+          } finally {
+            // Clean up port-forward
+            pfProc.kill();
+          }
+
         } else {
           // aks_to_local: the local agent would call /agt/handoff/restore
           stepper.done("State snapshot ready for transfer (local restore pending)");
@@ -278,12 +416,56 @@ export function handoffCommand(): Command {
 
         // Step 6: Succession (registry update)
         stepper.step("Registering identity succession...");
-        // In a full implementation:
-        // 1. Read predecessor AMID from source governance
-        // 2. Read successor AMID from target governance
-        // 3. Source signs succession notice
-        // 4. POST /v1/registry/succession to global registry
-        stepper.done("Identity succession ready (requires target agent AMID)");
+
+        // Read AMIDs from source and target
+        const sourceStatus = await routerExec("GET", "/agt/status", undefined, authHeaders);
+        const predecessorAmid = sourceStatus.body?.agent_did?.replace("did:agentmesh:", "") || "";
+
+        if (direction === "local_to_aks" && predecessorAmid) {
+          // Read successor AMID from the target's registry entry
+          try {
+            const http = await import("node:http");
+            const regSearchUrl = `http://127.0.0.1:8443/agt/registry/registry/search?capability=${encodeURIComponent(name)}`;
+            const regResult: any = await new Promise((resolve, reject) => {
+              const req = http.get(regSearchUrl, (res: any) => {
+                let data = "";
+                res.on("data", (c: Buffer) => { data += c.toString(); });
+                res.on("end", () => {
+                  try { resolve(JSON.parse(data)); } catch { resolve(null); }
+                });
+              });
+              req.on("error", reject);
+              req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+            });
+
+            // Find the AKS agent's AMID (different from our local AMID)
+            const candidates = regResult?.results?.filter(
+              (a: any) => a.amid !== predecessorAmid && (a.display_name === name || a.capabilities?.includes(name))
+            ) || [];
+
+            if (candidates.length > 0) {
+              const successorAmid = candidates[0].amid;
+              // POST succession to the global registry
+              const successionResp = await routerExec("POST", "/agt/registry/registry/succession", {
+                predecessor_amid: predecessorAmid,
+                successor_amid: successorAmid,
+                reason: "handoff:local_to_aks",
+              }, authHeaders);
+
+              if (successionResp.status < 400) {
+                stepper.done(`Identity succession: ${predecessorAmid.slice(0, 12)}... → ${successorAmid.slice(0, 12)}...`);
+              } else {
+                stepper.done(`Identity succession pending (${successionResp.body.error || "registry returned error"})`);
+              }
+            } else {
+              stepper.done("Identity succession pending (target AMID not yet registered)");
+            }
+          } catch {
+            stepper.done("Identity succession pending (registry unreachable)");
+          }
+        } else {
+          stepper.done("Identity succession ready (requires target agent AMID)");
+        }
 
         // Step 7: Summary
         stepper.step("Handoff summary...");
