@@ -561,131 +561,364 @@ graph TB
 
 ## 11. Cloud Handoff Flow (Dev → AKS)
 
-LLM-driven agent migration from local Docker to AKS cloud. The LLM requests the handoff but the plugin orchestrates the entire transfer — the handoff token never enters the model context.
+LLM-driven agent migration from local Docker to AKS cloud. The LLM requests the handoff, the user confirms with a code, and the plugin orchestrates the transfer asynchronously — reporting live progress via emoji status updates.
+
+### 11.1 End-to-End Sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant User as 👤 User
+    participant User as 👤 User (webchat)
     participant LLM as 🤖 LLM
-    participant Plugin as 🔌 Plugin
+    participant Plugin as 🔌 Plugin (source)
     participant Router as 🛡️ Source Router
     participant K8s as ☸️ K8s API
     participant Ctrl as 🎛️ Controller
-    participant Reg as 📋 Registry
-    participant Relay as 📡 Relay
-    participant Target as 🎯 Target (AKS)
+    participant Reg as 📋 Global Registry
+    participant Relay as 📡 Relay (E2E)
+    participant TPlugin as 🔌 Plugin (target)
+    participant TRouter as 🛡️ Target Router
 
-    Note over User,Target: Phase 1 — Two-Stage Confirmation Gate
+    Note over User,TRouter: ──── Phase 1: Two-Stage Confirmation Gate ────
 
     User->>LLM: "move to the cloud"
-    LLM->>Plugin: handoff_request
+    LLM->>Plugin: azureclaw_handoff_request(direction=cloud)
     Plugin->>Router: POST /agt/handoff/pending
-    Router-->>Plugin: confirmation code (5min TTL)
-    LLM-->>User: "confirm with code: f913b1f9"
+    Note right of Router: Rate limit: 1 req / 300s<br/>Token: random 8-hex, TTL 5min
+    Router-->>Plugin: {confirmation_token, expires_in}
+    Plugin-->>LLM: "confirm with code: f913b1f9"
+    LLM-->>User: "🔄 To confirm, reply: f913b1f9"
     User->>LLM: "f913b1f9"
-    LLM->>Plugin: handoff_confirm(code)
-
-    Note over User,Target: Phase 2 — Plugin Orchestration (LLM excluded)
-
+    LLM->>Plugin: azureclaw_handoff_confirm(code=f913b1f9)
     Plugin->>Router: POST /agt/handoff/confirm
-    Router-->>Plugin: handoff_token 🔒
+    Note right of Router: Min 3s delay enforced<br/>Constant-time comparison
+    Router-->>Plugin: {handoff_token 🔒, direction}
+
+    Note over User,TRouter: ──── Phase 2: Async Background Orchestration ────
+    Note over Plugin: Plugin returns immediately<br/>LLM polls handoff_status every 3-5s
+
+    Plugin-->>LLM: "started — poll handoff_status"
 
     rect rgb(40, 40, 60)
-        Note over Plugin,Router: Snapshot & Drain
+        Note over Plugin,Router: Step 1: Snapshot (timeout: 60s)
         Plugin->>Router: POST /agt/handoff/snapshot
-        Note right of Router: AES-256-GCM encrypted<br/>key = SHA256(admin + handoff token)
-        Router-->>Plugin: encrypted state blob
+        Note right of Router: AES-256-GCM encrypted<br/>key = HKDF(SHA256(admin‖handoff))
+        Router-->>Plugin: {blob, verification_hash, size_bytes}
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "📦 Snapshot ready (13.7 KB)"
+    LLM-->>User: 📦 Snapshot ready (13.7 KB)
+
+    rect rgb(40, 40, 60)
+        Note over Plugin,Router: Step 2: Drain (timeout: 30s)
         Plugin->>Router: POST /agt/handoff/drain
+        Note right of Router: Stop accepting new work<br/>⚠️ No undrain if aborted
     end
 
     rect rgb(40, 60, 40)
-        Note over Plugin,Target: Spawn Cloud Target
-        Plugin->>Router: POST /sandbox/spawn {handoff: restore}
+        Note over Plugin,Ctrl: Step 3: Spawn AKS Target
+        Plugin->>Router: POST /sandbox/spawn
+        Note right of Router: {handoff: {mode: restore}}<br/>Dev mode bypasses Docker → K8s CRD
         Router->>K8s: Create ClawSandbox CRD
-        Note right of K8s: governance.trustedPeers = source AMID<br/>governance.registryMode = global
-        Ctrl->>K8s: Reconcile → pod + NetworkPolicy
-        Note right of Ctrl: Injects AGT_TRUSTED_PEERS,<br/>AGT_REGISTRY_MODE=global
-        Target->>Reg: Register AMID (Ed25519)
+        Note right of K8s: labels: spawned-by=handoff<br/>governance.trustedPeers = source AMID<br/>governance.registryMode = global
+        Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
+        Note right of Ctrl: Both openclaw AND router get:<br/>AGT_TRUSTED_PEERS, AGT_REGISTRY_MODE
     end
 
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "🚀 CRD created, waiting for pod..."
+    LLM-->>User: 🚀 Cloud target spawning...
+
     rect rgb(50, 40, 40)
-        Note over Plugin,Reg: Mesh Discovery
-        loop Poll every 2s (90s max)
+        Note over Plugin,Reg: Step 4: Mesh Discovery (90s max)
+        TPlugin->>Reg: Register AMID (Ed25519)
+        loop Poll registry every 2s
             Plugin->>Reg: search for target AMID
         end
         Reg-->>Plugin: target AMID found ✓
     end
 
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "🌐 Cloud target online"
+    LLM-->>User: 🌐 Cloud target online
+
     rect rgb(60, 60, 40)
-        Note over Plugin,Target: E2E Encrypted State Transfer
-        Plugin->>Relay: mesh_send(handoff_transfer)
-        Note over Relay: 🔐 Signal Protocol<br/>relay is zero-knowledge
-        Relay->>Target: deliver encrypted message
-        Target->>Target: POST /agt/handoff/init
-        Target->>Target: POST /agt/handoff/restore
-        Target->>Target: POST /agt/handoff/verify
-        Target->>Relay: mesh_send(handoff_verify)
-        Relay->>Plugin: verification ✓
+        Note over Plugin,TPlugin: Step 5: E2E State Transfer (5 retries × 2s)
+        Plugin->>Relay: mesh_send(handoff_transfer, blob, secret, hash)
+        Note over Relay: 🔐 Signal Protocol (X3DH + Double Ratchet)<br/>Relay is zero-knowledge
+        Relay->>TPlugin: deliver encrypted message
+    end
+
+    rect rgb(60, 60, 40)
+        Note over TPlugin,TRouter: Step 5b: Target Restores State
+        TPlugin->>TRouter: POST /agt/handoff/init
+        TPlugin->>TRouter: POST /agt/handoff/restore {blob, secret}
+        Note right of TRouter: Decrypt, decompress,<br/>sanitize chat (anti-injection),<br/>trust scores capped at 750
+        TPlugin->>TRouter: POST /agt/handoff/verify {expected_hash}
+        Note right of TRouter: SHA-256 integrity match
+    end
+
+    rect rgb(60, 60, 40)
+        Note over TPlugin,Plugin: Step 5c: Verification via E2E Mesh
+        TPlugin->>Relay: mesh_send(handoff_verification)
+        Note right of TPlugin: {matches, successor_amid,<br/>trust_scores_count, audit_entries_count}
+        Relay->>Plugin: deliver verification ✓
+        Note over Plugin: Filter: from_amid AND<br/>from_agent must BOTH match
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "✅ State verified — hash match"
+    LLM-->>User: ✅ State verified
+
+    rect rgb(50, 40, 60)
+        Note over Plugin,Reg: Step 6: Identity Succession
+        Plugin->>Reg: POST /registry/succession
+        Note right of Reg: Ed25519 signed<br/>Copies reputation, marks predecessor Dormant
     end
 
     rect rgb(50, 40, 60)
-        Note over Plugin,Reg: Succession & Decommission
-        Plugin->>Reg: target inherits source identity
+        Note over Plugin,Router: Step 7: Decommission
         Plugin->>Router: POST /agt/handoff/decommission
+        Note right of Router: Dormant — keys preserved<br/>Ghost cleanup skips dormant agents
     end
 
-    Plugin-->>LLM: "Handoff complete"
-    LLM-->>User: "I'm now running on AKS ☁️"
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "🎉 Handoff complete!"
+    LLM-->>User: 🎉 I'm now running on AKS! Your keys are preserved for reverse handoff.
 ```
 
-### Handoff Security Model
+### 11.2 Handoff State Machine
+
+The router tracks handoff phases. **Note:** phase ordering is enforced by convention in the plugin, not by the router — endpoints are currently callable in any order (documented improvement area).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> PendingConfirmation: POST /pending
+    PendingConfirmation --> Confirmed: POST /confirm (code match, ≥3s delay)
+    PendingConfirmation --> Idle: timeout (5min) / cancel
+    Confirmed --> Snapshotting: POST /snapshot
+    Snapshotting --> Draining: POST /drain
+    Draining --> Transferring: mesh_send(handoff_transfer)
+    Transferring --> Restoring: POST /restore (on target)
+    Restoring --> Verifying: POST /verify (on target)
+    Verifying --> Succession: POST /registry/succession
+    Succession --> Decommissioning: POST /decommission
+    Decommissioning --> [*]
+
+    Confirmed --> Aborted: POST /abort
+    Snapshotting --> Aborted: POST /abort
+    Draining --> Aborted: POST /abort or error
+    Transferring --> Aborted: POST /abort
+    Verifying --> Aborted: timeout (60s)
+    Aborted --> [*]
+
+    note right of Draining
+        ⚠️ No undrain mechanism.
+        Abort after drain leaves agent
+        in drained state until restart.
+    end note
+
+    note right of Transferring
+        ⚠️ If mesh transfer fails after spawn,
+        orphaned CRD must be manually deleted:
+        kubectl delete clawsandbox <name>
+    end note
+```
+
+### 11.3 Security Model
 
 ```mermaid
 graph TB
-    subgraph human["Human-in-the-Loop"]
-        confirm["Two-stage confirmation<br/>User types code manually"]
+    subgraph gate["Layer 1: Human-in-the-Loop Gate"]
+        direction LR
+        pending["POST /pending<br/>Rate limit: 1 req / 300s"]
+        confirm["POST /confirm<br/>Min 3s delay, constant-time compare"]
+        pending --> confirm
     end
 
-    subgraph isolation["LLM Isolation"]
-        token["Handoff token stays in<br/>plugin memory — LLM never sees it"]
+    subgraph isolation["Layer 2: LLM Isolation"]
+        direction LR
+        token_iso["Handoff token stays in<br/>plugin memory — LLM never sees it"]
+        admin_iso["Admin token read from<br/>/run/secrets/ (K8s mount)"]
         execute["LLM can REQUEST<br/>but never EXECUTE"]
     end
 
-    subgraph encryption["Double Encryption"]
-        aes["AES-256-GCM snapshot<br/>key = SHA256(admin + handoff token)"]
-        signal["Signal Protocol transport<br/>X3DH + Double Ratchet"]
-        relay_zk["Relay is zero-knowledge<br/>cannot read payloads"]
+    subgraph auth["Layer 3: Three-Layer Endpoint Auth"]
+        direction LR
+        l1["Init: admin token<br/>(no localhost bypass)"]
+        l2["Mutations: admin + handoff token<br/>(no localhost bypass)"]
+        l3["Status: admin token<br/>(localhost bypass OK — read-only)"]
     end
 
-    subgraph identity["Identity & Trust"]
+    subgraph encryption["Layer 4: Double Encryption"]
+        direction LR
+        aes["Snapshot: AES-256-GCM<br/>key = HKDF-SHA256(admin‖handoff)"]
+        signal["Transport: Signal Protocol<br/>X3DH + Double Ratchet per session"]
+        relay_zk["Relay is zero-knowledge<br/>cannot decrypt payloads"]
+    end
+
+    subgraph injection["Layer 5: State Blob Hardening"]
+        direction LR
+        sanitize["Chat history sanitized<br/>(strip system prompts, JSON injection)"]
+        trust_cap["Trust scores capped at 750<br/>(prevent score inflation)"]
+        size_limit["50MB blob limit<br/>100 files max, 10MB/file"]
+    end
+
+    subgraph identity["Layer 6: Identity & Trust"]
+        direction LR
         ed25519["Ed25519 keypairs<br/>AMIDs = public keys"]
-        trusted["AGT_TRUSTED_PEERS<br/>K8s-injected, immutable"]
-        knock["KNOCK enforcement<br/>trust-score gating"]
+        trusted["AGT_TRUSTED_PEERS<br/>K8s-injected to BOTH containers"]
+        knock["KNOCK enforcement<br/>+500 bonus for trusted peers"]
+        verify_both["Verification filter:<br/>from_amid OR from_agent mismatch → reject"]
     end
 
-    subgraph infra["Infrastructure"]
-        netpol["NetworkPolicy: default-deny<br/>+ mesh egress only"]
+    subgraph infra["Layer 7: Infrastructure"]
+        direction LR
+        netpol["NetworkPolicy: default-deny<br/>mesh egress only"]
         readonly["Read-only rootfs<br/>seccomp + non-root"]
         kube["Kubeconfig: read-only mount<br/>dev mode only"]
+        validated["registry_mode validated: local|global<br/>trusted_peers: control chars rejected"]
     end
 
-    human --> isolation --> encryption --> identity --> infra
+    gate --> isolation --> auth --> encryption --> injection --> identity --> infra
 ```
 
-### Trust Flow — Current vs Future
+### 11.4 Env Var Propagation (Controller → Containers)
 
-Currently agents register anonymously (trust score = 0), so `AGT_TRUSTED_PEERS` provides the +500 KNOCK bonus. With Entra OAuth, agents get verified identities and real reputation scores.
+Both containers in the sandbox pod receive governance env vars. This is critical for handoff — the router needs `AGT_REGISTRY_MODE` to gate handoff endpoints, and `AGT_TRUSTED_PEERS` for KNOCK authentication.
+
+```mermaid
+graph LR
+    CRD["ClawSandbox CRD<br/>governance spec"] --> Ctrl["Controller<br/>reconciler.rs"]
+
+    Ctrl --> OC["OpenClaw Container"]
+    Ctrl --> IR["Inference Router"]
+
+    subgraph OC_env["OpenClaw Env Vars"]
+        direction TB
+        oc1["AGT_GOVERNANCE_ENABLED"]
+        oc2["AGT_POLICY_PROFILE"]
+        oc3["AGT_TRUST_THRESHOLD"]
+        oc4["AGT_TRUSTED_PEERS ✅"]
+        oc5["AGT_REGISTRY_MODE ✅"]
+    end
+
+    subgraph IR_env["Router Env Vars"]
+        direction TB
+        ir1["AGT_GOVERNANCE_ENABLED"]
+        ir2["AGT_POLICY_PROFILE"]
+        ir3["AGT_TRUST_THRESHOLD"]
+        ir4["AGT_TRUSTED_PEERS ✅"]
+        ir5["AGT_REGISTRY_MODE ✅"]
+        ir6["AGT_MESH_NAMESPACE"]
+        ir7["AGT_RELAY_URL"]
+        ir8["AGT_REGISTRY_URL"]
+    end
+
+    OC --> OC_env
+    IR --> IR_env
+
+    subgraph validation["CRD Validation"]
+        direction TB
+        v1["trusted_peers: reject \\n \\r \\0"]
+        v2["registry_mode: only local|global"]
+    end
+
+    CRD --> validation
+    validation --> Ctrl
+```
+
+### 11.5 Two Orchestration Paths
+
+There are two independent orchestration paths for handoff — both valid, serving different use cases:
+
+```mermaid
+graph TB
+    subgraph llm_path["LLM-Driven (plugin.ts — interactive webchat)"]
+        direction TB
+        L1["handoff_request tool<br/>→ POST /agt/handoff/pending"]
+        L2["handoff_confirm tool<br/>→ POST /agt/handoff/confirm"]
+        L3["_runHandoffOrchestration()<br/>runs async in background"]
+        L4["handoff_status tool<br/>polled every 3-5s by LLM"]
+        L1 --> L2 --> L3
+        L3 -.-> L4
+    end
+
+    subgraph cli_path["CLI-Driven (handoff.ts — operator terminal)"]
+        direction TB
+        C1["azureclaw handoff ‹name›<br/>→ POST /agt/handoff/init"]
+        C2["Direct snapshot + drain<br/>→ POST /snapshot, /drain"]
+        C3["kubectl apply CRD<br/>+ port-forward + restore"]
+        C4["Terminal progress bar<br/>(Stepper class)"]
+        C1 --> C2 --> C3
+        C3 -.-> C4
+    end
+
+    subgraph differences["Key Differences"]
+        direction TB
+        D1["LLM path: two-stage gate<br/>(pending → confirm with code)"]
+        D2["CLI path: direct init<br/>(operator trusted, no gate)"]
+        D3["LLM path: mesh transfer<br/>(E2E encrypted via relay)"]
+        D4["CLI path: port-forward restore<br/>(direct HTTP to target)"]
+    end
+
+    llm_path --- differences
+    cli_path --- differences
+```
+
+### 11.6 Trust Flow — Current vs Future
+
+Currently agents register anonymously (trust score = 0), so `AGT_TRUSTED_PEERS` provides the +500 KNOCK bonus. With Entra OAuth deployed, agents get verified identities and real reputation.
 
 ```mermaid
 graph LR
     subgraph current["Current — Unauthenticated"]
         S1["Source AMID<br/>registry score: 0"] -->|KNOCK| T1["Target<br/>threshold: 500"]
-        T1 -->|"+500 trusted_peers"| A1["✅ 500 ≥ 500"]
+        T1 -->|"+500 trusted_peers bonus"| A1["✅ 500 ≥ 500"]
     end
 
     subgraph future["Future — Entra OAuth"]
         S2["Source AMID<br/>Entra-verified"] -->|KNOCK| T2["Target<br/>threshold: 500"]
-        T2 -->|"registry score: 800"| A2["✅ 800 ≥ 500"]
+        T2 -->|"registry reputation: 800"| A2["✅ 800 ≥ 500"]
+        Note1["No trusted_peers needed<br/>Real identity = real trust"]
     end
+```
+
+### 11.7 Error Recovery & Known Limitations
+
+```mermaid
+graph TB
+    subgraph failure_modes["Failure Modes"]
+        F1["Mesh send fails<br/>(5 retries exhausted)"]
+        F2["Target doesn't register<br/>(90s timeout)"]
+        F3["Verification timeout<br/>(60s)"]
+        F4["Restore decrypt fails<br/>(wrong key / tampered blob)"]
+        F5["Abort after drain"]
+    end
+
+    subgraph recovery["Current Recovery"]
+        R1["Abort → token revoked,<br/>phase reset"]
+        R2["Abort → phase reset,<br/>target pod orphaned ⚠️"]
+        R3["Status = partial,<br/>target may still restore"]
+        R4["Target sends error<br/>via mesh → abort"]
+        R5["Agent stuck in drained<br/>state until restart ⚠️"]
+    end
+
+    subgraph improvements["Planned Improvements"]
+        I1["Auto-cleanup orphaned CRDs<br/>on abort"]
+        I2["POST /agt/handoff/resume<br/>to cancel drain"]
+        I3["Router enforces phase<br/>ordering (state machine)"]
+    end
+
+    F1 --> R1
+    F2 --> R2
+    F3 --> R3
+    F4 --> R4
+    F5 --> R5
+
+    R2 --> I1
+    R5 --> I2
+    recovery --> I3
 ```
