@@ -597,6 +597,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         openclaw_env
             .push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
         openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+        // Propagate trusted peers so the plugin auto-trusts parent/siblings at KNOCK time
+        if let Some(ref peers) = governance_config.trusted_peers {
+            openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+        }
+        // Registry mode: "global" enables handoff tools and cross-cluster mesh
+        let reg_mode = governance_config.registry_mode.as_deref().unwrap_or("global");
+        openclaw_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
         // Router needs these too for the AGT governance module
         router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
         router_agt_env

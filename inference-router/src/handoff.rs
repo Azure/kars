@@ -1654,6 +1654,7 @@ mod tests {
                     token_budget_daily: Some(50000),
                     token_budget_per_request: None,
                     trusted_peers: None,
+                    handoff: None,
                 },
                 task_context: "Searching quantum computing papers".to_string(),
                 status: "paused_at_checkpoint".to_string(),

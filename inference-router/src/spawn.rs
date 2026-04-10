@@ -186,11 +186,20 @@ pub async fn create_sandbox(
 
     // Add governance if enabled
     if req.governance {
-        spec["governance"] = serde_json::json!({
+        let mut gov = serde_json::json!({
             "enabled": true,
             "toolPolicy": "default",
             "trustThreshold": req.trust_threshold.unwrap_or(500),
         });
+        // Propagate trusted peers so the target auto-trusts the source at KNOCK time
+        if let Some(ref peers) = req.trusted_peers {
+            gov["trustedPeers"] = serde_json::json!(peers);
+        }
+        // Handoff targets need global registry mode for mesh communication
+        if req.handoff.is_some() {
+            gov["registryMode"] = serde_json::json!("global");
+        }
+        spec["governance"] = gov;
     }
 
     // Propagate Foundry agent tools from parent environment
@@ -206,16 +215,27 @@ pub async fn create_sandbox(
         spec["agent"] = serde_json::json!({ "tools": agent_tools });
     }
 
-    // Build labels
+    // Build labels — handoff targets use different labels than sub-agents
     let mut labels = BTreeMap::new();
-    labels.insert(
-        "azureclaw.azure.com/parent".to_string(),
-        parent_name.to_string(),
-    );
-    labels.insert(
-        "azureclaw.azure.com/spawned-by".to_string(),
-        "agent".to_string(),
-    );
+    if req.handoff.is_some() {
+        labels.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "handoff".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/predecessor".to_string(),
+            parent_name.to_string(),
+        );
+    } else {
+        labels.insert(
+            "azureclaw.azure.com/parent".to_string(),
+            parent_name.to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "agent".to_string(),
+        );
+    }
 
     let crd = serde_json::json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
