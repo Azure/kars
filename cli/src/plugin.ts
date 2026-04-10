@@ -1368,8 +1368,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           const authH = { Authorization: `Bearer ${adminToken}` };
 
           // 1. Initialize a handoff session on our own router
+          // Direction is always from the target's perspective: we're receiving state
           const initResp = await _routerCallStrict("POST", "/agt/handoff/init", {
-            direction: "local_to_aks", // we are the target (AKS side)
+            direction: message.direction || "local_to_aks",
             ttl_seconds: 300,
             predecessor_amid: fromAmid,
           }, 15000, authH);
@@ -1660,7 +1661,7 @@ async function _runHandoffOrchestration(
     .update(`${adminToken}:${handoffToken}`)
     .digest("base64");
 
-  const snapshotResp = await _routerCall("POST", "/agt/handoff/snapshot", {
+  const snapshotResp = await _routerCallStrict("POST", "/agt/handoff/snapshot", {
     shared_secret: sharedSecret,
   }, 60000, handoffH);
 
@@ -1799,6 +1800,7 @@ async function _runHandoffOrchestration(
         verification_hash: verificationHash,
         from_agent: myName,
         predecessor_amid: myAmid,
+        direction,
         timestamp: new Date().toISOString(),
       });
       sendSuccess = true;

@@ -618,6 +618,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         };
         openclaw_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
+        // Plugin also needs relay/registry URLs for direct AgentMesh SDK connections
+        openclaw_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
+        openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
         // Router needs governance vars too (handoff auth, policy enforcement)
         router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
         router_agt_env
