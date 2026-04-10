@@ -2989,10 +2989,13 @@ async fn handoff_snapshot(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    state
+    if let Err(e) = state
         .handoff_session
-        .set_phase(handoff::HandoffPhase::Snapshotting)
-        .await;
+        .try_transition(handoff::HandoffPhase::Snapshotting)
+        .await
+    {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+    }
 
     let predecessor_amid = body
         .get("predecessor_amid")
@@ -3204,10 +3207,13 @@ async fn handoff_restore(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    state
+    if let Err(e) = state
         .handoff_session
-        .set_phase(handoff::HandoffPhase::Restoring)
-        .await;
+        .try_transition(handoff::HandoffPhase::Restoring)
+        .await
+    {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+    }
 
     let shared_secret = body
         .get("shared_secret")
@@ -3457,10 +3463,13 @@ async fn handoff_verify(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    state
+    if let Err(e) = state
         .handoff_session
-        .set_phase(handoff::HandoffPhase::Verifying)
-        .await;
+        .try_transition(handoff::HandoffPhase::Verifying)
+        .await
+    {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+    }
 
     // Build snapshot of current state for verification
     let direction = state
@@ -3546,10 +3555,14 @@ async fn handoff_drain(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     state.drain_state.start_drain().await;
-    state
+    if let Err(e) = state
         .handoff_session
-        .set_phase(handoff::HandoffPhase::Draining)
-        .await;
+        .try_transition(handoff::HandoffPhase::Draining)
+        .await
+    {
+        state.drain_state.stop_drain().await;
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+    }
 
     state.governance.audit.log(
         &state.sandbox_name,
@@ -3571,10 +3584,13 @@ async fn handoff_drain(State(state): State<AppState>) -> impl IntoResponse {
 
 /// POST /agt/handoff/decommission — deregister from relay, enter dormant state.
 async fn handoff_decommission(State(state): State<AppState>) -> impl IntoResponse {
-    state
+    if let Err(e) = state
         .handoff_session
-        .set_phase(handoff::HandoffPhase::Decommissioning)
-        .await;
+        .try_transition(handoff::HandoffPhase::Decommissioning)
+        .await
+    {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+    }
 
     // Stop drain if still active
     state.drain_state.stop_drain().await;

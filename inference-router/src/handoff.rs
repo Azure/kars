@@ -642,7 +642,7 @@ impl HandoffSession {
             HandoffPhase::Transferring => matches!(inner.phase, HandoffPhase::Draining),
             HandoffPhase::Restoring => matches!(inner.phase, HandoffPhase::Initialized | HandoffPhase::Transferring),
             HandoffPhase::Verifying => matches!(inner.phase, HandoffPhase::Restoring),
-            HandoffPhase::Decommissioning => matches!(inner.phase, HandoffPhase::Verifying | HandoffPhase::Complete),
+            HandoffPhase::Decommissioning => matches!(inner.phase, HandoffPhase::Draining | HandoffPhase::Verifying | HandoffPhase::Complete),
             HandoffPhase::Complete => matches!(inner.phase, HandoffPhase::Verifying | HandoffPhase::Decommissioning),
             HandoffPhase::Aborted => !matches!(inner.phase, HandoffPhase::Idle | HandoffPhase::Complete),
             HandoffPhase::Failed => true,  // can fail from any phase
