@@ -74,6 +74,8 @@ export interface DeploymentContext {
   globalRegistryUrl?: string;
   /** External relay URL when registryMode is "global" */
   globalRelayUrl?: string;
+  /** How the registry was promoted: "port-forward" | "loadbalancer" */
+  promoteMode?: string;
 }
 
 const CONTEXT_FILE = join(CONFIG_DIR, "context.json");

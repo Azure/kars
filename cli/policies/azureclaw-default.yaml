@@ -100,16 +100,10 @@ policies:
     priority: 80
 
   # ── Tool calls ──────────────────────────────────────────────────────
-  # Handoff tool requires human approval (§9.9.9 — belt-and-suspenders
-  # protection against prompt injection triggering unauthorized handoff).
-  - name: handoff-tool-approval
-    type: approval
-    actions:
-      - "tool:azureclaw_handoff_request:*"
-      - "tool:azureclaw_handoff_confirm:*"
-    min_approvals: 1
-    priority: 75
-
+  # Handoff tools are allowed — the handoff flow itself has a two-step
+  # confirmation code mechanism (request → code → confirm) that prevents
+  # unauthorized handoff via prompt injection.  A separate approval gate
+  # can be re-enabled once the native approval UI is wired up.
   - name: tool-allow
     type: capability
     allowed_actions:

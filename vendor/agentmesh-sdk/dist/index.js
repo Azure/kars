@@ -2899,7 +2899,8 @@ var AgentMeshClient = class _AgentMeshClient {
     if (options.autoUploadPrekeys !== false) {
       await this.uploadPrekeys();
     }
-    await this.transport.connect();
+    // PATCH #9: Check transport.connect() result — don't set connected if transport failed
+    const transportConnected = await this.transport.connect();
     this.transport.onMessage("receive", async (data) => {
       const fromAmid = data.from;
       const rawPayload = data.encrypted_payload;
@@ -3055,6 +3056,11 @@ var AgentMeshClient = class _AgentMeshClient {
         }
       }
     });
+    // PATCH #9 continued: only mark connected if transport actually connected
+    if (transportConnected === false) {
+      await this.auditLogger.log("CONNECTION_FAILED", "WARN", "Transport connect returned false — relay unreachable");
+      return; // Don't set this.connected = true, so reconnect can retry
+    }
     this.connected = true;
     this.emitEvent("connected", { amid: this.amid });
     await this.auditLogger.log("CONNECTION_ESTABLISHED", "INFO", "Connected to AgentMesh");

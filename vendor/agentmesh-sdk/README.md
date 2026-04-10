@@ -75,6 +75,24 @@ Fix: Log the HTTP status + response body on non-200, and log the error
 message on exception. Returns `false` as before (no behavior change for
 callers) but now surfaces the actual failure reason in container logs.
 
+### 8. connect() — stale connected state blocks reconnect
+**Files:** `dist/index.js`, `dist/index.cjs`
+
+`AgentMeshClient.connect()` sets `this.connected = true` unconditionally after
+`transport.connect()` returns — even when the transport returned `false` (relay
+unreachable). This creates a deadlock:
+
+- `client.connected = true` (set unconditionally)
+- `transport.connected = false` (upstream failed)
+- `isConnected` → `false` (correct — checks both)
+- `connect()` → throws "Already connected" (checks only `client.connected`)
+- Result: client thinks it's connected, can't send, can't reconnect
+
+Fix: Check `transport.connect()` return value. If `false`, skip setting
+`this.connected = true` so subsequent `connect()` calls can retry. Also
+patched `plugin.ts` reconnect paths to call `disconnect()` first, resetting
+stale state before reattempting connection.
+
 ## Known Remaining Gap
 
 The SDK's relay transport `receive` events are not wired to

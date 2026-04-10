@@ -3088,21 +3088,37 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_handoff_status",
       label: "Handoff Status",
-      description: "Check handoff (live migration) progress. Returns the current phase, completed steps with emoji indicators, and any errors. Call this repeatedly during an active handoff to get real-time progress updates that you should relay to the user. Also shows registry mode and handoff availability when no handoff is active.",
+      description: "Check handoff (live migration) progress. Returns the current phase and NEW steps since your last poll. Pass since_step (the total_steps from your last call) to get only new updates. Relay each new step to the user immediately as a live update. Keep polling every 3-5 seconds until status is 'complete', 'error', or 'partial'.",
       parameters: {
         type: "object",
-        properties: {},
+        properties: {
+          since_step: {
+            type: "number",
+            description: "Number of steps you already received. Pass total_steps from your last handoff_status call. Omit or pass 0 on first call.",
+          },
+        },
       },
-      async execute() {
+      async execute(_id: string, params: Record<string, unknown>) {
         try {
           // If there's an active/recent handoff in progress, return that
           if (handoffProgress) {
+            const sinceStep = typeof params?.since_step === "number" ? params.since_step : 0;
+            const allSteps = handoffProgress.steps;
+            const newSteps = sinceStep > 0 ? allSteps.slice(sinceStep) : allSteps;
             return { content: [{ type: "text", text: safeJson({
-              ...handoffProgress,
+              phase: handoffProgress.phase,
+              status: handoffProgress.status,
+              direction: handoffProgress.direction,
               active: handoffProgress.status === "running",
+              total_steps: allSteps.length,
+              new_steps: newSteps,
+              error: handoffProgress.error,
+              result: handoffProgress.result,
               instruction: handoffProgress.status === "running"
-                ? "Relay each new step to the user as a live update. Call handoff_status again in 3-5 seconds for the next update."
-                : undefined,
+                ? `Relay ONLY these new_steps to the user right now (one message per step). Then call handoff_status again in 3-5 seconds with since_step=${allSteps.length}.`
+                : handoffProgress.status === "complete"
+                  ? "Relay the final new_steps to the user. The handoff is complete."
+                  : undefined,
             }) }] };
           }
           const result = await routerCall("GET", "/agt/handoff/status");
