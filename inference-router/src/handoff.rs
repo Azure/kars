@@ -557,6 +557,8 @@ pub struct HandoffSessionInner {
     pub snapshot_size_bytes: Option<usize>,
     pub snapshot_items: Option<SnapshotItemCounts>,
     pub error: Option<String>,
+    /// Verification hash of the restored compressed bytes (set during restore)
+    pub restored_verification_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +615,7 @@ impl HandoffSession {
                 snapshot_size_bytes: None,
                 snapshot_items: None,
                 error: None,
+                restored_verification_hash: None,
             })),
         }
     }
@@ -670,12 +673,21 @@ impl HandoffSession {
         inner.snapshot_size_bytes = None;
         inner.snapshot_items = None;
         inner.error = None;
+        inner.restored_verification_hash = None;
     }
 
     pub async fn record_snapshot(&self, size_bytes: usize, items: SnapshotItemCounts) {
         let mut inner = self.inner.write().await;
         inner.snapshot_size_bytes = Some(size_bytes);
         inner.snapshot_items = Some(items);
+    }
+
+    pub async fn set_restored_verification_hash(&self, hash: String) {
+        self.inner.write().await.restored_verification_hash = Some(hash);
+    }
+
+    pub async fn restored_verification_hash(&self) -> Option<String> {
+        self.inner.read().await.restored_verification_hash.clone()
     }
 
     pub async fn fail(&self, error: String) {

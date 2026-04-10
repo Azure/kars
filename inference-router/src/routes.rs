@@ -3303,6 +3303,10 @@ async fn handoff_restore(
         }
     };
 
+    // Compute verification hash of restored compressed bytes (matches source's hash)
+    let restored_hash = handoff::compute_verification_hash(&compressed);
+    state.handoff_session.set_restored_verification_hash(restored_hash).await;
+
     // Deserialize
     let mut restored_state = match handoff::deserialize_state(&compressed) {
         Ok(s) => s,
@@ -3471,50 +3475,45 @@ async fn handoff_verify(
         return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
     }
 
-    // Build snapshot of current state for verification
-    let direction = state
-        .handoff_session
-        .status()
-        .await
-        .direction
-        .unwrap_or(handoff::HandoffDirection::LocalToAks);
-
-    let predecessor = body
-        .get("predecessor_amid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let successor = body
-        .get("successor_amid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    let snapshot = match handoff::build_snapshot(&state, direction, predecessor, successor).await {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
+    // Use the hash computed during restore (same compressed bytes as the source)
+    // instead of building a new snapshot (which would have different timestamps,
+    // nonces, hostnames, etc. and never match).
+    let verification_hash = match state.handoff_session.restored_verification_hash().await {
+        Some(h) => h,
+        None => {
+            // Fallback for source-side verify (no restore happened here)
+            let direction = state
+                .handoff_session
+                .status()
+                .await
+                .direction
+                .unwrap_or(handoff::HandoffDirection::LocalToAks);
+            let predecessor = body
+                .get("predecessor_amid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let successor = body
+                .get("successor_amid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            match handoff::build_snapshot(&state, direction, predecessor, successor).await {
+                Ok(s) => match handoff::serialize_state(&s) {
+                    Ok(c) => handoff::compute_verification_hash(&c),
+                    Err(e) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+                    }
+                },
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+                }
+            }
         }
     };
 
-    let compressed = match handoff::serialize_state(&snapshot) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-    };
-
-    let verification_hash = handoff::compute_verification_hash(&compressed);
-
-    // Also compare with expected hash if provided
     let expected = body.get("expected_hash").and_then(|v| v.as_str());
     let matches = expected.map(|e| e == verification_hash);
+
+    let session_status = state.handoff_session.status().await;
 
     state.governance.audit.log(
         &state.sandbox_name,
@@ -3531,8 +3530,8 @@ async fn handoff_verify(
         Json(serde_json::json!({
             "verification_hash": verification_hash,
             "matches": matches,
-            "trust_scores_count": snapshot.trust_scores.as_array().map(|a| a.len()).unwrap_or(0),
-            "audit_entries_count": snapshot.audit_entries.len(),
+            "trust_scores_count": session_status.snapshot_items.as_ref().map(|i| i.trust_scores).unwrap_or(0),
+            "audit_entries_count": session_status.snapshot_items.as_ref().map(|i| i.audit_entries).unwrap_or(0),
             "phase": "verifying",
         })),
     )

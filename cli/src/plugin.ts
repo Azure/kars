@@ -3243,8 +3243,12 @@ const azureClawPlugin = definePluginEntry({
             return { content: [{ type: "text", text: safeJson(handoffProgress) }] };
           }
 
-          // Kick off orchestration in the background — LLM polls handoff_status
-          _runHandoffOrchestration(handoffToken, adminToken, direction, dirLabel).catch(err => {
+          // Run orchestration synchronously — return all progress when complete.
+          // LLMs don't autonomously poll tools, so we block here and return
+          // the full step-by-step result when the handoff finishes.
+          try {
+            await _runHandoffOrchestration(handoffToken, adminToken, direction, dirLabel);
+          } catch (err: any) {
             log.warn(`Handoff orchestration error: ${err.message}`);
             if (handoffProgress) {
               handoffProgress.status = "error";
@@ -3253,13 +3257,11 @@ const azureClawPlugin = definePluginEntry({
               handoffProgress.steps.push(`❌ ${err.message}`);
               handoffProgress.updated_at = new Date().toISOString();
             }
-          });
+          }
 
           return { content: [{ type: "text", text: safeJson({
-            status: "started",
-            direction,
-            message: `Handoff to ${dirLabel} initiated. Poll azureclaw_handoff_status for live progress.`,
-            instruction: "Call azureclaw_handoff_status every 3-5 seconds and relay each step to the user.",
+            ...handoffProgress,
+            instruction: "Relay each step to the user as a live update summary.",
           }) }] };
 
         } catch (e: any) {
