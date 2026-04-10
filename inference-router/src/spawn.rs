@@ -516,12 +516,15 @@ async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<Stri
         "/var/run/docker.sock".into(),
         "-s".into(),
         "-S".into(),
+        // Write HTTP status code after the response body
+        "-w".into(),
+        "\n__HTTP_STATUS__:%{http_code}".into(),
         "-X".into(),
         method.into(),
     ];
     if body.is_some() {
         args.extend(["-H".into(), "Content-Type: application/json".into()]);
-        args.extend(["-d".into(), body.expect("body presence checked at line 522").into()]);
+        args.extend(["-d".into(), body.expect("body presence checked").into()]);
     }
     // The hostname is ignored when using --unix-socket; "docker" is just a placeholder
     args.push(format!("http://docker/v1.44{}", path));
@@ -536,7 +539,31 @@ async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<Stri
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Docker API error: {}", stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Extract HTTP status code appended by -w flag
+    let (response_body, http_status) = if let Some(idx) = raw.rfind("\n__HTTP_STATUS__:") {
+        let status_str = &raw[idx + "\n__HTTP_STATUS__:".len()..];
+        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        (raw[..idx].to_string(), status)
+    } else {
+        (raw, 0)
+    };
+
+    // Treat 4xx/5xx as errors (2xx and 3xx are success)
+    if http_status >= 400 {
+        // Try to extract Docker's error message from JSON response
+        let msg = serde_json::from_str::<serde_json::Value>(&response_body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| response_body.clone());
+        return Err(format!(
+            "Docker API {method} {path} returned HTTP {http_status}: {msg}"
+        ));
+    }
+
+    Ok(response_body)
 }
 
 /// Spawn a sub-agent as a sibling Docker container (dev mode only).
