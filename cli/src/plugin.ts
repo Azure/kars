@@ -206,6 +206,11 @@ async function recordMeshSession(
 async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
   if (!agtMeshClient || agtConnected) return;
   try {
+    // Force disconnect first to reset stale "Already connected" state in the SDK.
+    // The SDK sets client.connected = true even when transport fails, which blocks
+    // subsequent connect() calls with "Already connected". Disconnecting first
+    // resets both client.connected and transport.ws so connect() can proceed.
+    try { await agtMeshClient.disconnect(); } catch { /* ignore */ }
     await agtMeshClient.connect({
       displayName: agtSandboxName,
       capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
@@ -1331,6 +1336,73 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
+
+      // ── Handle handoff_transfer messages — target receives state blob ──
+      // The source agent sends this after snapshot + drain. The target agent
+      // restores the state on its own router and sends verification back.
+      if (message?.type === "handoff_transfer" && fromAmid && agtMeshClient) {
+        log.info(`🔄 Handoff transfer received from '${fromName}' — restoring state...`);
+        try {
+          const adminToken = _readAdminToken();
+          if (!adminToken) throw new Error("No admin token available for handoff restore");
+
+          const authH = { Authorization: `Bearer ${adminToken}` };
+
+          // 1. Initialize a handoff session on our own router
+          const initResp = await _routerCallStrict("POST", "/agt/handoff/init", {
+            direction: "local_to_aks", // we are the target (AKS side)
+            ttl_seconds: 300,
+            predecessor_amid: fromAmid,
+          }, 15000, authH);
+
+          const handoffToken = initResp.handoff_token;
+          const hHeaders = { ...authH, "X-Handoff-Token": handoffToken };
+
+          // 2. Restore the state blob
+          const restoreResp = await _routerCallStrict("POST", "/agt/handoff/restore", {
+            shared_secret: message.shared_secret,
+            blob: message.blob,
+          }, 30000, hHeaders);
+
+          log.info(`✅ Handoff restore complete: trust_scores=${restoreResp.trust_scores_count || 0}, audit=${restoreResp.audit_entries_count || 0}`);
+
+          // 3. Compute verification digest
+          const verifyResp = await _routerCallStrict("POST", "/agt/handoff/verify", {
+            predecessor_amid: fromAmid,
+            expected_hash: message.verification_hash,
+          }, 15000, hHeaders);
+
+          // 4. Send verification back to source via E2E mesh
+          await agtMeshClient.send(fromAmid, {
+            type: "handoff_verification",
+            verification_hash: verifyResp.verification_hash,
+            matches: verifyResp.matches,
+            trust_scores_count: verifyResp.trust_scores_count,
+            audit_entries_count: verifyResp.audit_entries_count,
+            successor_amid: agtIdentity?.amid || "unknown",
+            from_agent: agtSandboxName,
+            timestamp: new Date().toISOString(),
+          });
+
+          log.info(`✅ Handoff verification sent back to '${fromName}' (hash_match=${verifyResp.matches})`);
+
+          // 5. Decommission our handoff session (we're done receiving)
+          await _routerCallStrict("POST", "/agt/handoff/decommission", {}, 15000, hHeaders).catch(() => {});
+
+        } catch (restoreErr: any) {
+          log.warn(`❌ Handoff restore failed: ${restoreErr.message}`);
+          // Notify source of failure
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff_verification",
+              error: restoreErr.message,
+              matches: false,
+              from_agent: agtSandboxName,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+      }
     });
 
     // ── Connect to the mesh (handlers are registered, safe to receive) ──
@@ -1473,7 +1545,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
 const ROUTER_BASE = "http://127.0.0.1:8443";
 
-async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000): Promise<any> {
+async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
   const url = new URL(path, ROUTER_BASE);
   return new Promise((resolve, reject) => {
@@ -1482,7 +1554,7 @@ async function _routerCall(method: string, path: string, body?: unknown, timeout
       port: url.port,
       path: url.pathname + url.search,
       method,
-      headers: { "x-azureclaw-sandbox": "self" } as Record<string, string>,
+      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
     };
     if (body) {
       opts.headers["content-type"] = "application/json";
@@ -1499,6 +1571,48 @@ async function _routerCall(method: string, path: string, body?: unknown, timeout
     if (body) req.write(JSON.stringify(body));
     req.end();
   });
+}
+
+// Strict variant that rejects on HTTP >= 400 — used by handoff orchestration
+async function _routerCallStrict(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
+  const http = await import("node:http");
+  const url = new URL(path, ROUTER_BASE);
+  return new Promise((resolve, reject) => {
+    const opts: any = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method,
+      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
+    };
+    if (body) {
+      opts.headers["content-type"] = "application/json";
+    }
+    const req = http.request(opts, (res: any) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
+          return;
+        }
+        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+// Read admin token from the filesystem (used by handoff orchestration)
+function _readAdminToken(): string {
+  const fs = require("node:fs");
+  for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
+    try { const t = fs.readFileSync(p, "utf-8").trim(); if (t) return t; } catch { /* skip */ }
+  }
+  return process.env.ADMIN_TOKEN || "";
 }
 
 // ---------------------------------------------------------------------------
@@ -2321,6 +2435,8 @@ const azureClawPlugin = definePluginEntry({
           if (!agtMeshClient.isConnected) {
             try {
               log.info("AGT relay: reconnecting before send...");
+              // Force disconnect first to clear stale "Already connected" state
+              try { await agtMeshClient.disconnect(); } catch { /* ignore */ }
               await agtMeshClient.connect({
                 displayName: agtSandboxName,
                 capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
@@ -2733,7 +2849,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_handoff_confirm",
       label: "Confirm Handoff",
-      description: "Confirm a pending handoff request using the confirmation code that the user provided. The code was generated by azureclaw_handoff_request and shown to the user. Only call this AFTER the user has explicitly replied with the confirmation code.",
+      description: "Confirm a pending handoff request using the confirmation code that the user provided. The code was generated by azureclaw_handoff_request and shown to the user. Only call this AFTER the user has explicitly replied with the confirmation code. This tool orchestrates the FULL handoff: snapshot → drain → spawn cloud target → transfer state via E2E mesh → verify → succession → decommission. The transfer happens automatically — no CLI command needed.",
       parameters: {
         type: "object",
         properties: {
@@ -2743,32 +2859,318 @@ const azureClawPlugin = definePluginEntry({
       },
       async execute(_id: string, params: Record<string, unknown>) {
         const token = params.confirmation_token as string;
+        const steps: string[] = [];
 
         try {
-          // Stage 2 (§9.9.9): Confirm the pending request.
+          // ── Stage 2 (§9.9.9): Confirm the pending request ──
           // Router enforces: min 3s delay (anti-LLM-self-confirm), token match, not expired.
-          // On success, the router creates the real handoff token and initializes the session.
+          // On success, creates the real handoff token and initializes the handoff session.
           const result = await routerCall("POST", "/agt/handoff/confirm", {
             confirmation_token: token,
           });
 
           const r = result as any;
-          if (r?.status === "confirmed") {
+          if (r?.status !== "confirmed") {
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          }
+
+          const handoffToken = r.handoff_token;
+          const direction = r.direction;
+          const dirLabel = direction === "local_to_aks" ? "cloud (AKS)" : "local";
+          steps.push(`✅ Handoff confirmed — transferring to ${dirLabel}`);
+          log.info(`Handoff confirmed (direction=${direction}) — starting LLM-driven orchestration`);
+
+          // Security: handoff token stays in plugin memory — LLM never sees it (§9.9.9 principle).
+          // All subsequent router calls use this token.
+          const adminToken = _readAdminToken();
+          if (!adminToken) {
             return { content: [{ type: "text", text: safeJson({
-              status: "confirmed",
-              direction: r.direction,
-              reason: r.reason,
-              phase: r.phase,
-              instruction: "Handoff confirmed. The operator can now run the CLI command to execute the transfer.",
-              command: `azureclaw handoff ${process.env.SANDBOX_NAME || "<name>"} --to ${r.direction === "local_to_aks" ? "cloud" : "local"}`,
-              display: `✅ Handoff confirmed! Transfer to ${r.direction === "local_to_aks" ? "cloud (AKS)" : "local"} is ready.\n` +
-                `Run: azureclaw handoff ${process.env.SANDBOX_NAME || "<name>"} --to ${r.direction === "local_to_aks" ? "cloud" : "local"}`,
+              status: "error",
+              error: "Admin token not found — cannot execute handoff",
+              steps,
             }) }] };
           }
 
-          return { content: [{ type: "text", text: safeJson(result) }] };
+          const authH: Record<string, string> = { Authorization: `Bearer ${adminToken}` };
+          const handoffH: Record<string, string> = { ...authH, "X-Handoff-Token": handoffToken };
+
+          // ── Step 1: Create encrypted state snapshot ──
+          const cryptoMod = await import("node:crypto");
+          const sharedSecret = cryptoMod
+            .createHash("sha256")
+            .update(`${adminToken}:${handoffToken}`)
+            .digest("base64");
+
+          const snapshotResp = await routerCall("POST", "/agt/handoff/snapshot", {
+            shared_secret: sharedSecret,
+          }, handoffH);
+
+          const snapshotSize = snapshotResp.size_bytes || 0;
+          const verificationHash = snapshotResp.verification_hash;
+          steps.push(`📦 State snapshot created (${(snapshotSize / 1024).toFixed(1)} KB, encrypted AES-256-GCM)`);
+          log.info(`Handoff snapshot: ${snapshotSize}B, hash=${verificationHash?.slice(0, 16)}`);
+
+          // ── Step 2: Drain — stop accepting new work ──
+          await routerCall("POST", "/agt/handoff/drain", {}, handoffH);
+          steps.push("⏳ Agent drained — no new work accepted");
+          log.info("Handoff: agent drained");
+
+          // ── Step 3: Spawn cloud target (or discover existing) ──
+          const myName = process.env.SANDBOX_NAME || "unknown";
+          const myAmid = agtMeshClient?.getAmid?.() || agtIdentity?.amid;
+          let targetName = myName; // same name on AKS
+          let targetAmid: string | undefined;
+
+          if (direction === "local_to_aks") {
+            // Spawn target agent on AKS via router (same as azureclaw_spawn)
+            steps.push("🚀 Spawning cloud target on AKS...");
+            log.info(`Handoff: spawning target '${targetName}' on AKS`);
+
+            const trustedPeers: string[] = [];
+            if (myAmid) trustedPeers.push(`${myName}:${myAmid}`);
+            for (const [amid, name] of amidToName.entries()) {
+              if (amid !== myAmid) trustedPeers.push(`${name}:${amid}`);
+            }
+
+            try {
+              await routerCall("POST", "/sandbox/spawn", {
+                name: targetName,
+                model: process.env.DEFAULT_MODEL || "gpt-4.1",
+                governance: true,
+                trust_threshold: 500,
+                trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
+                handoff: { mode: "restore", predecessor: myName },
+              });
+            } catch (spawnErr: any) {
+              // Target may already exist (e.g. from a previous attempt)
+              if (!spawnErr.message?.includes("already exists")) throw spawnErr;
+              log.info("Handoff: target already exists, proceeding");
+            }
+
+            // Wait for target to register in mesh (up to 90s)
+            const spawnStart = Date.now();
+            while (Date.now() - spawnStart < 90_000) {
+              await new Promise(r => setTimeout(r, 2000));
+              try {
+                const searchResult = await routerCall("GET",
+                  `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
+                const agents = searchResult?.results || [];
+                const match = agents.find((a: any) =>
+                  a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
+                );
+                if (match?.amid) {
+                  targetAmid = match.amid;
+                  nameToAmid.set(targetName, match.amid);
+                  amidToName.set(match.amid, targetName);
+                  break;
+                }
+              } catch { /* not registered yet */ }
+              const elapsed = Math.round((Date.now() - spawnStart) / 1000);
+              if (elapsed % 10 === 0) log.info(`Handoff: waiting for target mesh registration (${elapsed}s)`);
+            }
+
+            if (!targetAmid) {
+              steps.push("⚠️ Target spawned but not yet registered on mesh — transfer deferred");
+              await routerCall("POST", "/agt/handoff/abort", {}, handoffH).catch(() => {});
+              return { content: [{ type: "text", text: safeJson({
+                status: "partial",
+                error: "Cloud target did not register on mesh within 90s",
+                steps,
+                hint: `Target '${targetName}' is spawning. Retry in a minute or run: azureclaw handoff ${myName} --to cloud`,
+              }) }] };
+            }
+
+            steps.push(`🌐 Cloud target online (AMID: ${targetAmid.slice(0, 12)}...)`);
+            log.info(`Handoff: target registered as ${targetAmid.slice(0, 16)}`);
+
+          } else {
+            // aks_to_local: target is the local agent — find it in registry
+            // The local agent should already be running and registered
+            try {
+              const searchResult = await routerCall("GET",
+                `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
+              const agents = searchResult?.results || [];
+              const match = agents.find((a: any) =>
+                a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
+              );
+              if (match?.amid) {
+                targetAmid = match.amid;
+                nameToAmid.set(targetName, match.amid);
+                amidToName.set(match.amid, targetName);
+              }
+            } catch { /* registry error */ }
+
+            if (!targetAmid) {
+              await routerCall("POST", "/agt/handoff/abort", {}, handoffH).catch(() => {});
+              return { content: [{ type: "text", text: safeJson({
+                status: "error",
+                error: "Local target agent not found in mesh registry",
+                steps,
+              }) }] };
+            }
+            steps.push(`🏠 Local target found (AMID: ${targetAmid.slice(0, 12)}...)`);
+          }
+
+          // ── Step 4: Transfer state blob via E2E encrypted mesh ──
+          if (!agtMeshClient || !agtIdentity) {
+            await routerCall("POST", "/agt/handoff/abort", {}, handoffH).catch(() => {});
+            return { content: [{ type: "text", text: safeJson({
+              status: "error",
+              error: "Mesh client not connected — cannot transfer state",
+              steps,
+            }) }] };
+          }
+
+          steps.push("🔐 Sending encrypted state via E2E mesh (Signal Protocol)...");
+          log.info(`Handoff: sending state blob to ${targetAmid!.slice(0, 16)} via mesh`);
+
+          // Send state blob + shared secret to target agent
+          let sendSuccess = false;
+          for (let attempt = 0; attempt < 5; attempt++) {
+            try {
+              await agtMeshClient.send(targetAmid, {
+                type: "handoff_transfer",
+                blob: snapshotResp.blob,
+                shared_secret: sharedSecret,
+                verification_hash: verificationHash,
+                from_agent: myName,
+                predecessor_amid: myAmid,
+                timestamp: new Date().toISOString(),
+              });
+              sendSuccess = true;
+              break;
+            } catch (sendErr: any) {
+              log.warn(`Handoff mesh send attempt ${attempt + 1}/5 failed: ${sendErr.message}`);
+              if (attempt < 4) await new Promise(r => setTimeout(r, 2000));
+            }
+          }
+
+          if (!sendSuccess) {
+            steps.push("❌ Failed to send state blob — mesh send failed after 5 attempts");
+            await routerCall("POST", "/agt/handoff/abort", {}, handoffH).catch(() => {});
+            return { content: [{ type: "text", text: safeJson({
+              status: "error",
+              error: "Mesh send failed after retries",
+              steps,
+            }) }] };
+          }
+
+          steps.push("📤 State blob sent to cloud target");
+
+          // ── Step 5: Wait for verification from target ──
+          log.info("Handoff: waiting for verification from target...");
+          const verifyStart = Date.now();
+          const verifyTimeoutMs = 60_000;
+          let verifyResult: any = null;
+
+          while (Date.now() - verifyStart < verifyTimeoutMs) {
+            const idx = agtInbox.findIndex(m =>
+              (m.from_amid === targetAmid || m.from_agent === targetName) &&
+              m.message_type === "handoff_verification"
+            );
+            if (idx >= 0) {
+              const msg = agtInbox.splice(idx, 1)[0];
+              verifyResult = typeof msg.content === "string"
+                ? (() => { try { return JSON.parse(msg.content); } catch { return msg.content; } })()
+                : msg.content;
+              break;
+            }
+            // Also check for structured messages where type is in the content
+            const idx2 = agtInbox.findIndex(m => {
+              if (m.from_amid !== targetAmid && m.from_agent !== targetName) return false;
+              try {
+                const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                return c?.type === "handoff_verification";
+              } catch { return false; }
+            });
+            if (idx2 >= 0) {
+              const msg = agtInbox.splice(idx2, 1)[0];
+              verifyResult = typeof msg.content === "string"
+                ? (() => { try { return JSON.parse(msg.content); } catch { return msg.content; } })()
+                : msg.content;
+              break;
+            }
+            await new Promise(r => setTimeout(r, 500));
+          }
+
+          if (!verifyResult) {
+            steps.push("⚠️ Verification timeout — target may still be restoring. Check status with azureclaw_handoff_status.");
+            log.warn("Handoff: verification timeout after 60s");
+            return { content: [{ type: "text", text: safeJson({
+              status: "partial",
+              warning: "Transfer sent but verification not received within 60s",
+              steps,
+              hint: "The target agent may still be processing. The handoff session remains active.",
+            }) }] };
+          }
+
+          if (verifyResult.error || verifyResult.matches === false) {
+            steps.push(`❌ Verification failed: ${verifyResult.error || "hash mismatch"}`);
+            log.warn(`Handoff: verification failed: ${verifyResult.error || "hash mismatch"}`);
+            await routerCall("POST", "/agt/handoff/abort", {}, handoffH).catch(() => {});
+            return { content: [{ type: "text", text: safeJson({
+              status: "error",
+              error: `State verification failed: ${verifyResult.error || "integrity hash mismatch"}`,
+              steps,
+              note: "Handoff aborted — source agent remains active",
+            }) }] };
+          }
+
+          const successorAmid = verifyResult.successor_amid;
+          steps.push(`✅ State verified on cloud target (hash match confirmed)`);
+          log.info(`Handoff: verification passed, successor_amid=${successorAmid?.slice(0, 16)}`);
+
+          // ── Step 6: Identity succession in registry ──
+          if (myAmid && successorAmid) {
+            try {
+              await routerCall("POST", "/agt/registry/registry/succession", {
+                predecessor_amid: myAmid,
+                successor_amid: successorAmid,
+                reason: `handoff:${direction}`,
+              }, authH);
+              steps.push(`🔗 Identity succession: ${myAmid.slice(0, 12)}... → ${successorAmid.slice(0, 12)}...`);
+              log.info(`Handoff: succession registered ${myAmid.slice(0, 16)} → ${successorAmid.slice(0, 16)}`);
+            } catch (succErr: any) {
+              steps.push(`⚠️ Identity succession pending: ${succErr.message}`);
+              log.warn(`Handoff: succession failed: ${succErr.message}`);
+            }
+          }
+
+          // ── Step 7: Decommission local agent ──
+          try {
+            await routerCall("POST", "/agt/handoff/decommission", {}, handoffH);
+            steps.push("🏁 Local agent decommissioned (dormant — keys preserved)");
+            log.info("Handoff: local agent decommissioned");
+          } catch (decommErr: any) {
+            steps.push(`⚠️ Decommission pending: ${decommErr.message}`);
+            log.warn(`Handoff: decommission failed: ${decommErr.message}`);
+          }
+
+          // ── Done! ──
+          steps.push("");
+          steps.push(`🎉 Handoff complete! Agent is now running on ${dirLabel}.`);
+          if (direction === "local_to_aks") {
+            steps.push("The cloud agent has your full state — chat history, trust scores, audit trail.");
+            steps.push("Your local keys are preserved. You can reclaim with a reverse handoff anytime.");
+          }
+
+          return { content: [{ type: "text", text: safeJson({
+            status: "complete",
+            direction,
+            snapshot_size_kb: (snapshotSize / 1024).toFixed(1),
+            predecessor_amid: myAmid,
+            successor_amid: successorAmid,
+            verification: "passed",
+            steps,
+          }, 12000) }] };
+
         } catch (e: any) {
-          return { content: [{ type: "text", text: `Handoff confirm failed: ${e.message}` }] };
+          steps.push(`❌ ${e.message}`);
+          return { content: [{ type: "text", text: safeJson({
+            status: "error",
+            error: e.message,
+            steps,
+          }) }] };
         }
       },
     });
