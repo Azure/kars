@@ -32,14 +32,23 @@ function buildImageList(acrLoginServer: string): ImageDef[] {
       buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${now}`],
     },
     {
+      name: "sandbox-base",
+      tag: "azureclaw-sandbox-base:latest",
+      dockerfile: "sandbox-images/openclaw/Dockerfile.base",
+      buildArgs: [
+        "--build-arg",
+        `OPENCLAW_CACHE_BUST=${now}`,
+      ],
+    },
+    {
       name: "sandbox",
       tag: "openclaw-sandbox:latest",
       dockerfile: "sandbox-images/openclaw/Dockerfile",
       buildArgs: [
         "--build-arg",
-        `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
+        `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
         "--build-arg",
-        `OPENCLAW_CACHE_BUST=${now}`,
+        `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
       ],
     },
     {
@@ -115,18 +124,18 @@ describe("ACR login server resolution", () => {
 });
 
 describe("image list", () => {
-  it("defines 5 images", () => {
+  it("defines 6 images", () => {
     const images = buildImageList("test.azurecr.io");
-    expect(images).toHaveLength(5);
+    expect(images).toHaveLength(6);
   });
 
   it("includes all expected image names", () => {
     const images = buildImageList("test.azurecr.io");
     const names = images.map((i) => i.name);
-    expect(names).toEqual(["controller", "router", "sandbox", "relay", "registry"]);
+    expect(names).toEqual(["controller", "router", "sandbox-base", "sandbox", "relay", "registry"]);
   });
 
-  it("sandbox image references router image from ACR", () => {
+  it("sandbox image references base image and router image from ACR", () => {
     const images = buildImageList("myacr.azurecr.io");
     const sandbox = images.find((i) => i.name === "sandbox")!;
     expect(sandbox.buildArgs).toContain(
@@ -137,6 +146,12 @@ describe("image list", () => {
     );
     expect(routerArg).toBe(
       "INFERENCE_ROUTER_IMAGE=myacr.azurecr.io/azureclaw-inference-router:latest",
+    );
+    const baseArg = sandbox.buildArgs!.find((a) =>
+      a.includes("SANDBOX_BASE_IMAGE="),
+    );
+    expect(baseArg).toBe(
+      "SANDBOX_BASE_IMAGE=myacr.azurecr.io/azureclaw-sandbox-base:latest",
     );
   });
 
@@ -157,7 +172,7 @@ describe("--only flag filtering", () => {
   const images = buildImageList("test.azurecr.io");
 
   it("returns all images when --only is not set", () => {
-    expect(filterImages(images)).toHaveLength(5);
+    expect(filterImages(images)).toHaveLength(6);
   });
 
   it("filters to single image when --only is set", () => {

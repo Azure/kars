@@ -6,6 +6,8 @@ import { ensureCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from ".
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
+const SANDBOX_BASE_IMAGE =
+  "azureclaw-sandbox-base:dev";
 const AZURELINUX_BASE =
   "mcr.microsoft.com/azurelinux/base/core:3.0";
 
@@ -39,8 +41,9 @@ export function devCommand(): Command {
       false
     )
     .option(
-      "--no-agt",
-      "Skip AGT relay/registry stack (single-agent only)"
+      "--build-base",
+      "Rebuild the sandbox base image (heavy deps: OpenClaw, Python, Go tools). Only needed when upgrading these.",
+      false
     )
     .option(
       "--global-registry <url>",
@@ -67,7 +70,7 @@ export function devCommand(): Command {
     .action(async (options) => {
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
-      const stepper = new Stepper({ totalSteps: !options.agt ? 3 : 4 });
+      const stepper = new Stepper({ totalSteps: 4 });
 
       try {
         let image = options.image;
@@ -96,7 +99,7 @@ export function devCommand(): Command {
         if (options.build || !imageExists) {
           const baseImage = options.baseImage;
 
-          // Check if base image exists locally, pull if not
+          // Check if Azure Linux base image exists locally, pull if not
           try {
             await execa("docker", ["image", "inspect", baseImage], { stdio: "pipe" });
           } catch {
@@ -118,6 +121,7 @@ export function devCommand(): Command {
           }
 
           const dockerfilePath = path.join(repoRoot, "sandbox-images/openclaw/Dockerfile");
+          const baseDockerfilePath = path.join(repoRoot, "sandbox-images/openclaw/Dockerfile.base");
           const routerDockerfile = path.join(repoRoot, "inference-router/Dockerfile");
           if (!existsSync(dockerfilePath)) {
             stepper.fail("Dockerfile not found");
@@ -127,6 +131,32 @@ export function devCommand(): Command {
     ${chalk.cyan("azureclaw dev")}
 `));
             process.exit(1);
+          }
+
+          // Build sandbox base image (heavy deps) — only if --build-base or not cached
+          let sandboxBaseExists = false;
+          try {
+            await execa("docker", ["image", "inspect", SANDBOX_BASE_IMAGE], { stdio: "pipe" });
+            sandboxBaseExists = true;
+          } catch { /* not built yet */ }
+
+          if (options.buildBase || !sandboxBaseExists) {
+            stepper.update(sandboxBaseExists
+              ? "Rebuilding sandbox base image (--build-base)..."
+              : "Building sandbox base image (first run — includes OpenClaw, Python, Go tools)...");
+            stepper.stop();
+            console.log(chalk.dim("  Building sandbox base image (this is the slow one — only needed once)...\n"));
+            await execa("docker", [
+              "build",
+              "--build-arg", `AZURELINUX_BASE=${baseImage}`,
+              "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`,
+              "-t", SANDBOX_BASE_IMAGE,
+              "-f", baseDockerfilePath,
+              repoRoot,
+            ], { stdio: "inherit" });
+            console.log();
+          } else {
+            stepper.update("Sandbox base image cached ✓");
           }
 
           // Build inference router locally (sandbox Dockerfile needs it)
@@ -151,14 +181,13 @@ export function devCommand(): Command {
             console.log();
           }
 
-          stepper.update("Building sandbox image (Node.js + OpenClaw)...");
+          stepper.update("Building sandbox image (plugin + entrypoint overlay)...");
           stepper.stop();
           console.log(chalk.dim("  Building sandbox image...\n"));
           await execa("docker", [
             "build",
-            "--build-arg", `AZURELINUX_BASE=${baseImage}`,
+            "--build-arg", `SANDBOX_BASE_IMAGE=${SANDBOX_BASE_IMAGE}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
-            "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`,
             "-t", "azureclaw-sandbox:dev",
             "-f", dockerfilePath,
             repoRoot,
@@ -167,8 +196,8 @@ export function devCommand(): Command {
           image = "azureclaw-sandbox:dev";
           stepper.done("Sandbox image built");
 
-          // Build AGT relay + registry images if --build and AGT is enabled
-          if (options.agt) {
+          // Build AGT relay + registry images if --build
+          {
             stepper.update("Building AGT relay image (Rust)...");
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
@@ -228,11 +257,18 @@ export function devCommand(): Command {
           }
         } catch { /* Azure CLI might not be logged in or account not found */ }
 
-        // ── AGT infrastructure (relay, registry, postgres) ───────────
+        // ── Docker network (always needed for sub-agent spawning) ──
         let agtReady = false;
         const useGlobalRegistry = !!options.globalRegistry;
 
-        if (options.agt && !useGlobalRegistry) {
+        // Create shared Docker network — sub-agents need this even without AGT
+        try {
+          await execa("docker", ["network", "create", AGT_NETWORK], { stdio: "pipe" });
+        } catch {
+          // Already exists — fine
+        }
+
+        if (!useGlobalRegistry) {
           // Local registry mode — deploy relay/registry/postgres locally
           stepper.step("Starting AGT infrastructure (local registry)...");
 
@@ -244,13 +280,6 @@ export function devCommand(): Command {
               ], { stdio: "pipe" });
               return stdout.trim() === "true";
             } catch { return false; }
-          }
-
-          // Create shared Docker network
-          try {
-            await execa("docker", ["network", "create", AGT_NETWORK], { stdio: "pipe" });
-          } catch {
-            // Already exists — fine
           }
 
           // Start PostgreSQL (registry backend)
@@ -405,7 +434,7 @@ export function devCommand(): Command {
 
         // AGT network args: connect sandbox to the shared Docker network
         // so the router can reach relay/registry by container hostname
-        const networkArgs = (options.agt && !useGlobalRegistry) ? ["--network", AGT_NETWORK] : [];
+        const networkArgs = !useGlobalRegistry ? ["--network", AGT_NETWORK] : [];
         const agtEnvArgs: string[] = [];
         if (useGlobalRegistry) {
           // Global registry mode — router connects to external registry
@@ -424,7 +453,7 @@ export function devCommand(): Command {
             "-e", "AGT_REGISTRY_MODE=global",
             "-e", "AGT_GOVERNANCE_ENABLED=true",
           );
-        } else if (options.agt) {
+        } else {
           // Local registry mode — router connects to colocated containers
           agtEnvArgs.push(
             "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:8765`,
@@ -436,9 +465,9 @@ export function devCommand(): Command {
 
         // Dev mode: mount Docker socket so sub-agents can be spawned as sibling containers.
         // Not :ro — entrypoint chmod's it so the router (UID 1001) can use the Docker API.
-        const dockerSockArgs = (options.agt || useGlobalRegistry) ? [
+        const dockerSockArgs = [
           "-v", "/var/run/docker.sock:/var/run/docker.sock",
-        ] : [];
+        ];
 
         // Mount kubeconfig so the router can spawn AKS pods for handoff (K8s CRD path).
         // Respect $KUBECONFIG if set, fall back to default ~/.kube/config
@@ -455,6 +484,7 @@ export function devCommand(): Command {
           ...seccompArgs,
           ...networkArgs,
           "--read-only",
+          "--security-opt", "no-new-privileges",
           // Grant NET_ADMIN for iptables egress guard (same as AKS init container)
           "--cap-add", "NET_ADMIN",
           // Writable paths
@@ -576,7 +606,7 @@ export function devCommand(): Command {
         checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
         checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → transparent proxy)" : "(not available)"}`);
         checkLine(true, "API key mounted as read-only secret");
-        if (options.agt || useGlobalRegistry) {
+        {
           const registryLabel = useGlobalRegistry
             ? `(global registry — handoff enabled)`
             : `(relay + registry + E2E encryption)`;

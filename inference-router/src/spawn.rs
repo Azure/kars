@@ -185,8 +185,8 @@ pub async fn create_sandbox(
         spec["inference"]["tokenBudget"] = serde_json::Value::Object(budget);
     }
 
-    // Add governance if enabled
-    if req.governance {
+    // Governance is always enabled (native in router)
+    {
         let mut gov = serde_json::json!({
             "enabled": true,
             "toolPolicy": "default",
@@ -583,7 +583,8 @@ fn docker_create_body(
         env.push(format!("FOUNDRY_PROJECT_ENDPOINT={}", foundry_endpoint));
     }
 
-    if req.governance && !relay_url.is_empty() {
+    // Always propagate AGT relay/registry URLs to sub-agents (governance is native)
+    if !relay_url.is_empty() {
         env.push(format!("AGT_RELAY_URL={}", relay_url));
         env.push(format!("AGT_REGISTRY_URL={}", registry_url));
         env.push("AGT_GOVERNANCE_ENABLED=true".to_string());
@@ -717,6 +718,22 @@ async fn create_sandbox_docker(
             None,
         )
         .await;
+    }
+
+    // Ensure the Docker network exists (it may not if --agt was not used)
+    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
+    let net_check = docker_api("GET", &format!("/networks/{}", network), None).await;
+    if net_check.is_err()
+        || net_check
+            .as_ref()
+            .ok()
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+            .and_then(|v| v.get("message").map(|_| ()))
+            .is_some()
+    {
+        let net_body = serde_json::json!({ "Name": network, "CheckDuplicate": true });
+        let _ = docker_api("POST", "/networks/create", Some(&net_body.to_string())).await;
+        tracing::info!(network = %network, "Created Docker network for sub-agent");
     }
 
     // Create container

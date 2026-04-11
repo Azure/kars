@@ -947,10 +947,26 @@ export function upCommand(): Command {
 
           await buildPush("controller/Dockerfile", "azureclaw-controller:latest");
           await buildPush("inference-router/Dockerfile", "azureclaw-inference-router:latest");
+
+          // Build sandbox base if not already in ACR
+          let baseExists = false;
+          try {
+            await execa("docker", ["image", "inspect", `${acrLoginServer}/azureclaw-sandbox-base:latest`], { stdio: "pipe" });
+            baseExists = true;
+          } catch { /* not cached locally — need to build */ }
+          if (!baseExists) {
+            await buildPush(
+              "sandbox-images/openclaw/Dockerfile.base",
+              "azureclaw-sandbox-base:latest",
+              ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`]
+            );
+          }
+
           await buildPush(
             "sandbox-images/openclaw/Dockerfile",
             "openclaw-sandbox:latest",
-            ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
+            ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
+             "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
           );
 
           // AgentMesh components (relay + registry for E2E encrypted inter-agent comms)
@@ -1636,6 +1652,7 @@ export function upCommand(): Command {
             networkPolicy: {
               defaultDeny: true,
               approvalRequired: true,
+              learnEgress: true,
             },
             governance: {
               enabled: true,

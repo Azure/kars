@@ -98,8 +98,11 @@ jobs:
       - name: Build inference router image
         run: docker build --build-arg ROUTER_CACHE_BUST=$(date +%s) -t azureclaw-inference-router:test -f inference-router/Dockerfile .
 
+      - name: Build sandbox base image
+        run: docker build --build-arg OPENCLAW_CACHE_BUST=$(date +%s) -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
+
       - name: Build sandbox image
-        run: docker build --build-arg OPENCLAW_CACHE_BUST=$(date +%s) --build-arg INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:test -t azureclaw-sandbox:test -f sandbox-images/openclaw/Dockerfile .
+        run: docker build --build-arg SANDBOX_BASE_IMAGE=azureclaw-sandbox-base:test --build-arg INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:test -t azureclaw-sandbox:test -f sandbox-images/openclaw/Dockerfile .
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
@@ -130,6 +133,7 @@ jobs:
           IGNORE="--ignore DL3008 --ignore DL3013 --ignore DL3018 --ignore DL3006 --ignore DL4006 --ignore DL3003 --ignore DL3016 --ignore DL3059 --ignore SC2015 --ignore SC2028"
           hadolint $IGNORE controller/Dockerfile
           hadolint $IGNORE inference-router/Dockerfile
+          hadolint $IGNORE sandbox-images/openclaw/Dockerfile.base
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile
           hadolint $IGNORE vendor/agentmesh-relay/Dockerfile
           hadolint $IGNORE vendor/agentmesh-registry/Dockerfile

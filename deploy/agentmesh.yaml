@@ -38,6 +38,7 @@ spec:
       labels:
         app: postgres
     spec:
+      terminationGracePeriodSeconds: 60
       containers:
         - name: postgres
           image: azureclawacr.azurecr.io/postgres:16-alpine
@@ -62,6 +63,10 @@ spec:
             exec:
               command: [sh, -c, "pg_isready -U agentmesh"]
             periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: [sh, -c, "pg_ctl stop -D $PGDATA -m fast -w -t 45"]
           resources:
             requests:
               cpu: 100m

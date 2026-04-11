@@ -11,7 +11,8 @@ export function pushCommand(): Command {
   cmd
     .description("Build and push images to ACR (uses cached context from last deploy)")
     .option("--acr <name>", "ACR name (default: from last deploy)")
-    .option("--only <image>", "Build only one image: controller, router, sandbox, relay, registry")
+    .option("--only <image>", "Build only one image: controller, router, sandbox, sandbox-base, relay, registry")
+    .option("--include-base", "Include sandbox-base in a full push (skipped by default — rebuild only when upgrading OpenClaw/Python/Go)")
     .option("--apply", "Restart deployments after push so pods pick up new images")
     .action(async (options) => {
       const { execa } = await import("execa");
@@ -56,22 +57,41 @@ export function pushCommand(): Command {
         { name: "controller", tag: "azureclaw-controller:latest", dockerfile: "controller/Dockerfile" },
         { name: "router", tag: "azureclaw-inference-router:latest", dockerfile: "inference-router/Dockerfile",
           buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
+        { name: "sandbox-base", tag: "azureclaw-sandbox-base:latest", dockerfile: "sandbox-images/openclaw/Dockerfile.base",
+          buildArgs: ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
-          buildArgs: ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
-                      "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
+          buildArgs: ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
+                      "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`] },
         { name: "relay", tag: "agentmesh-relay:latest", dockerfile: "vendor/agentmesh-relay/Dockerfile", context: "vendor/agentmesh-relay",
           buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
         { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry",
           buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
       ];
 
-      // Filter if --only specified
-      const targets = options.only
+      // Filter if --only specified; skip sandbox-base unless explicitly requested
+      let targets = options.only
         ? images.filter(i => i.name === options.only)
-        : images;
+        : options.includeBase
+          ? images
+          : images.filter(i => i.name !== "sandbox-base");
+
+      // Auto-include sandbox-base if sandbox is in targets but base doesn't exist in ACR
+      const hasSandbox = targets.some(i => i.name === "sandbox");
+      const hasBase = targets.some(i => i.name === "sandbox-base");
+      if (hasSandbox && !hasBase) {
+        // Check if base image exists locally (would have been pushed previously)
+        try {
+          await execa("docker", ["image", "inspect", `${acrLoginServer}/azureclaw-sandbox-base:latest`], { stdio: "pipe" });
+        } catch {
+          // Base not found locally — include it so the build succeeds
+          console.log(chalk.yellow("  ℹ sandbox-base not found locally — building it first\n"));
+          const baseImg = images.find(i => i.name === "sandbox-base")!;
+          targets = [baseImg, ...targets];
+        }
+      }
 
       if (targets.length === 0) {
-        console.error(chalk.red(`\n  Unknown image: ${options.only}. Options: controller, router, sandbox, relay, registry\n`));
+        console.error(chalk.red(`\n  Unknown image: ${options.only}. Options: controller, router, sandbox-base, sandbox, relay, registry\n`));
         process.exit(1);
       }
 

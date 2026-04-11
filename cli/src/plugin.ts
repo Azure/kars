@@ -60,6 +60,8 @@ const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; tim
 let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let agtInboxNotifyTimer: ReturnType<typeof setInterval> | null = null;
 let agtConnected = false;
+let agtReconnectFailures = 0;
+const AGT_RECONNECT_MAX_BACKOFF = 300_000; // 5 min cap
 
 // ── Handoff progress tracker (module-level, survives across tool calls) ──
 interface HandoffProgress {
@@ -171,7 +173,8 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
       req.end();
     });
   } catch {
-    console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}`);
+    // Startup race: router may not be ready on first plugin load (double-load pattern).
+    // Trust will be seeded on the second load — no need to alarm the operator.
   }
 }
 
@@ -785,7 +788,10 @@ async function processTaskWithTools(
                 } else {
                   const memories = parsed.memories || [];
                   result = memories.length > 0
-                    ? memories.map((m: any) => `[${m.score?.toFixed(2) || "?"}] ${m.content || m.text || JSON.stringify(m)}`).join("\n")
+                    ? memories.map((m: any) => {
+                        const text = m.memory_item?.content || m.content || m.text || JSON.stringify(m);
+                        return `[${m.score?.toFixed(2) || "?"}] ${text}`;
+                      }).join("\n")
                     : "No relevant memories found.";
                 }
               }
@@ -1036,7 +1042,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   // that check AGT_LOCK_KEY can always await it (fixes race where pending was undefined).
   const initPromise = (async () => {
   try {
-    const sdk: any = await import("@agentmesh/sdk");
+    // ESM import preferred; fall back to CJS require if extension loader context rejects it
+    let sdk: any;
+    try {
+      sdk = await import("@agentmesh/sdk");
+    } catch {
+      // ESM import failed — load CJS entry via createRequire
+      const { createRequire } = await import("node:module");
+      const _require = createRequire(import.meta.url);
+      sdk = _require("@agentmesh/sdk");
+    }
 
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
@@ -1488,6 +1503,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               };
 
               // 1. Create a Foundry Conversation with the transferred chat history
+              let handoffConvId: string | undefined;
               if (chatMessages.length > 0) {
                 try {
                   const convResp = await _routerCall("POST", `/openai/conversations?${apiVer}`, {
@@ -1498,8 +1514,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                       direction: meta.direction || "local_to_aks",
                     },
                   });
-                  const convId = convResp?.id;
-                  if (convId) {
+                  handoffConvId = convResp?.id;
+                  if (handoffConvId) {
                     // Replay messages into the conversation (batch in chunks of 10)
                     const items = chatMessages.map((m: any) => ({
                       type: "message",
@@ -1508,16 +1524,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     }));
                     for (let i = 0; i < items.length; i += 10) {
                       const batch = items.slice(i, i + 10);
-                      await _routerCall("POST", `/openai/conversations/${convId}/items?${apiVer}`, { items: batch }).catch(() => {});
+                      await _routerCall("POST", `/openai/conversations/${handoffConvId}/items?${apiVer}`, { items: batch }).catch(() => {});
                     }
-                    log.info(`📝 Handoff: replayed ${items.length} messages into Foundry conversation ${convId}`);
+                    log.info(`📝 Handoff: replayed ${items.length} messages into Foundry conversation ${handoffConvId}`);
                   }
                 } catch (e: any) {
                   log.warn(`Handoff: Foundry conversation replay failed (non-fatal): ${e.message}`);
                 }
               }
 
-              // 2. Store handoff event in Foundry Memory
+              // 2. Store handoff event in Foundry Memory (includes conversation ID for startup recall)
               const store = `memory-${agentName}`;
               const recentSummary = chatMessages.slice(-5).map((m: any) =>
                 `${m.role}: ${String(m.content || "").slice(0, 200)}`
@@ -1528,6 +1544,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 `Direction: ${meta.direction || "local_to_aks"}.`,
                 `Trust scores transferred: ${meta.trust_scores_count || 0}.`,
                 `Audit entries transferred: ${meta.audit_entries_count || 0}.`,
+                handoffConvId ? `Foundry conversation: ${handoffConvId}.` : "",
                 chatMessages.length > 0 ? `\nRecent conversation context (last ${Math.min(5, chatMessages.length)} messages):\n${recentSummary}` : "",
               ].filter(Boolean).join(" ");
 
@@ -1542,46 +1559,112 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 log.warn(`Handoff: Foundry Memory update failed (non-fatal): ${e.message}`);
               }
 
-              // 3. Write HANDOFF_CONTEXT.md to workspace (fallback context for the agent)
-              const contextMd = [
-                "# Handoff Context",
-                "",
-                `> This agent was migrated from local dev to cloud (AKS) at ${meta.restored_at || "unknown"}.`,
-                `> Predecessor AMID: \`${meta.predecessor_amid || fromAmid}\``,
-                `> Direction: ${meta.direction || "local_to_aks"}`,
-                "",
-                "## Recent Conversation",
-                "",
-                ...chatMessages.slice(-20).map((m: any) =>
-                  `**${m.role}**: ${String(m.content || "").slice(0, 500)}`
-                ),
-                "",
-                "---",
-                "*This file was created automatically during handoff. The full conversation is also stored in Foundry Conversations and Memory.*",
-              ].join("\n");
+              // 3. Persist handoff context so the agent can see it
+              //    a) Write .handoff-state.json — picked up by MEMORY.md builder on every plugin load
+              //    b) Inject directly into MEMORY.md now (in case Foundry context hasn't written yet)
+              //    c) Keep HANDOFF_CONTEXT.md as a human-readable backup
+              //    d) Foundry Memory + Conversation are the durable stores (survive pod recreation)
+              const handoffState = {
+                restored_at: meta.restored_at || new Date().toISOString(),
+                predecessor_amid: meta.predecessor_amid || fromAmid,
+                direction: meta.direction || "local_to_aks",
+                trust_scores_count: meta.trust_scores_count || 0,
+                audit_entries_count: meta.audit_entries_count || 0,
+                chat_message_count: chatMessages.length,
+                conversation_id: handoffConvId,
+                recent_messages: chatMessages.slice(-10).map((m: any) => ({
+                  role: String(m.role).slice(0, 20),
+                  content: String(m.content || "").slice(0, 500),
+                })),
+              };
               try {
                 fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
+
+                // Flag file for MEMORY.md builder
+                fs.writeFileSync(
+                  "/sandbox/.openclaw/workspace/.handoff-state.json",
+                  JSON.stringify(handoffState),
+                  { mode: 0o600 },
+                );
+
+                // Inject into MEMORY.md directly (the agent reads this file)
+                const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
+                const handoffSection = [
+                  "\n## Handoff Context\n",
+                  `This agent was migrated from local dev to cloud (AKS) at ${handoffState.restored_at}.`,
+                  `Predecessor AMID: ${handoffState.predecessor_amid}. Direction: ${handoffState.direction}.`,
+                  `Trust scores: ${handoffState.trust_scores_count}, Audit trail: ${handoffState.audit_entries_count} entries.`,
+                  `Chat history: ${handoffState.chat_message_count} messages transferred.\n`,
+                  "### Recent Conversation Before Handoff\n",
+                  ...handoffState.recent_messages.map((m: { role: string; content: string }) =>
+                    `**${m.role}**: ${m.content}`
+                  ),
+                  "",
+                ].join("\n");
+                let existingMem = "";
+                try { existingMem = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
+                // Insert after the --- env marker if it exists, otherwise append
+                const endMarker = "\n---\n";
+                if (existingMem.includes(endMarker)) {
+                  const idx = existingMem.indexOf(endMarker) + endMarker.length;
+                  const before = existingMem.slice(0, idx);
+                  const after = existingMem.slice(idx);
+                  fs.writeFileSync(memoryFile, before + handoffSection + after);
+                } else {
+                  fs.writeFileSync(memoryFile, existingMem + handoffSection);
+                }
+
+                // Human-readable backup
+                const contextMd = [
+                  "# Handoff Context",
+                  "",
+                  `> This agent was migrated from local dev to cloud (AKS) at ${handoffState.restored_at}.`,
+                  `> Predecessor AMID: \`${handoffState.predecessor_amid}\``,
+                  `> Direction: ${handoffState.direction}`,
+                  "",
+                  "## Recent Conversation",
+                  "",
+                  ...chatMessages.slice(-20).map((m: any) =>
+                    `**${m.role}**: ${String(m.content || "").slice(0, 500)}`
+                  ),
+                  "",
+                  "---",
+                  "*This file was created automatically during handoff. The full conversation is also stored in Foundry Conversations and Memory.*",
+                ].join("\n");
                 fs.writeFileSync("/sandbox/.openclaw/workspace/HANDOFF_CONTEXT.md", contextMd);
-                log.info("📄 Handoff: wrote HANDOFF_CONTEXT.md to workspace");
+                log.info("📄 Handoff: wrote context to MEMORY.md + .handoff-state.json + HANDOFF_CONTEXT.md");
               } catch (e: any) {
-                log.warn(`Handoff: HANDOFF_CONTEXT.md write failed: ${e.message}`);
+                log.warn(`Handoff: context file write failed: ${e.message}`);
               }
 
               // 4. Send Telegram greeting if the channel is configured
               const tgToken = process.env.TELEGRAM_BOT_TOKEN;
               const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
               if (tgToken && tgAllowFrom) {
-                const greetingText = [
+                // Build a personalized greeting with conversation context
+                const lastUserMsg = [...chatMessages].reverse().find((m: any) => m.role === "user");
+                const lastAssistantMsg = [...chatMessages].reverse().find((m: any) => m.role === "assistant");
+                const escapeMd2 = (s: string) => s.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
+
+                const lines: string[] = [
                   "☁️ *AzureClaw — Cloud Handoff Complete*",
                   "",
-                  "I'm now running in the cloud (AKS)\\!",
-                  `Model: \`${process.env.DEFAULT_MODEL || "gpt-5.4"}\``,
-                  `Sandbox: \`${agentName}\``,
-                  "",
-                  chatMessages.length > 0
-                    ? `I have your conversation history (${chatMessages.length} messages)\\. Let's continue\\!`
-                    : "Ready to help\\!",
-                ].join("\n");
+                  `I've been migrated to the cloud \\(AKS\\) and I'm ready to continue\\.`,
+                  `Model: \`${escapeMd2(process.env.DEFAULT_MODEL || "gpt-5.4")}\` · Sandbox: \`${escapeMd2(agentName)}\``,
+                ];
+                if (chatMessages.length > 0) {
+                  lines.push("", `📜 _${chatMessages.length} messages transferred from our previous session\\._`);
+                }
+                if (lastUserMsg) {
+                  const preview = escapeMd2(String(lastUserMsg.content).slice(0, 200));
+                  lines.push("", `🔖 *Where we left off:*`, `Your last message: "${preview}${String(lastUserMsg.content).length > 200 ? "\\.\\.\\." : ""}"`);
+                }
+                if (lastAssistantMsg) {
+                  const preview = escapeMd2(String(lastAssistantMsg.content).slice(0, 200));
+                  lines.push(`My last reply: "${preview}${String(lastAssistantMsg.content).length > 200 ? "\\.\\.\\." : ""}"`);
+                }
+                lines.push("", "Want to pick up where we left off? Just send me a message\\!");
+                const greetingText = lines.join("\n");
 
                 // Send via router's egress proxy (respects allowlist + transparent proxy)
                 for (const chatId of tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean)) {
@@ -1710,39 +1793,53 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       });
     }
 
-    // Reconnect timer: every 30s, check if disconnected and try to reconnect.
-    // Also serves as a keep-alive — if the SDK exposes a ping, use it.
-    if (agtReconnectTimer) clearInterval(agtReconnectTimer);
-    agtReconnectTimer = setInterval(async () => {
-      if (!agtConnected && agtMeshClient) {
-        await agtReconnect(log);
-      }
-      // Heartbeat: ping the relay proxy to keep the connection warm
-      // and send a registry heartbeat to keep status as "online"
-      try {
-        const http = await import("node:http");
-        const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
-        req.on("error", () => {});
-        req.end();
-      } catch { /* best effort */ }
-      // Registry heartbeat: update last_seen so other agents see us as online
-      if (agtIdentity) {
-        try {
-          const http = await import("node:http");
-          const body = JSON.stringify({ amid: agtIdentity.amid });
-          const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-            timeout: 3000,
-          }, () => {});
-          req.on("error", () => {});
-          req.write(body);
-          req.end();
-        } catch { /* best effort */ }
-      }
-    }, 30_000);
-    // Don't let the timer prevent process exit
-    if (agtReconnectTimer.unref) agtReconnectTimer.unref();
+    // Reconnect timer with exponential backoff: starts at 30s, backs off on
+    // repeated failures to avoid CPU spin when registry/relay is unreachable.
+    if (agtReconnectTimer) clearTimeout(agtReconnectTimer);
+    const scheduleReconnect = () => {
+      const delay = Math.min(30_000 * Math.pow(2, agtReconnectFailures), AGT_RECONNECT_MAX_BACKOFF);
+      agtReconnectTimer = setTimeout(async () => {
+        if (!agtConnected && agtMeshClient) {
+          await agtReconnect(log);
+          if (!agtConnected) {
+            agtReconnectFailures++;
+            if (agtReconnectFailures <= 5) {
+              log.warn(`AGT reconnect backoff: next attempt in ${Math.min(30 * Math.pow(2, agtReconnectFailures), 300)}s`);
+            }
+          } else {
+            agtReconnectFailures = 0;
+          }
+        }
+        // Heartbeat: ping the relay proxy to keep the connection warm
+        // and send a registry heartbeat to keep status as "online"
+        if (agtConnected) {
+          try {
+            const http = await import("node:http");
+            const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
+            req.on("error", () => {});
+            req.end();
+          } catch { /* best effort */ }
+          // Registry heartbeat: update last_seen so other agents see us as online
+          if (agtIdentity) {
+            try {
+              const http = await import("node:http");
+              const body = JSON.stringify({ amid: agtIdentity.amid });
+              const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+                timeout: 3000,
+              }, () => {});
+              req.on("error", () => {});
+              req.write(body);
+              req.end();
+            } catch { /* best effort */ }
+          }
+        }
+        scheduleReconnect();
+      }, delay);
+      if (agtReconnectTimer.unref) agtReconnectTimer.unref();
+    };
+    scheduleReconnect();
 
     // ── Inbox notification timer ─────────────────────────────────────────
     // Every 10s, if there are unread messages, write a notification section
@@ -1902,12 +1999,12 @@ async function _runHandoffOrchestration(
     const apiVer = "api-version=2025-11-15-preview";
     const memResp = await _routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, {
       scope: agentName,
-      top: 20,
+      options: { max_memories: 20 },
     }).catch(() => null);
     if (memResp?.memories?.length) {
       const chatContext = memResp.memories.map((m: any) => ({
         role: "assistant",
-        content: m.content || m.text || JSON.stringify(m),
+        content: m.memory_item?.content || m.content || m.text || JSON.stringify(m),
         timestamp: m.created_at || new Date().toISOString(),
       }));
       snapshotPayload.chat_snapshot = Buffer.from(JSON.stringify(chatContext)).toString("base64");
@@ -1959,6 +2056,7 @@ async function _runHandoffOrchestration(
         model: process.env.DEFAULT_MODEL || "gpt-4.1",
         governance: true,
         trust_threshold: 500,
+        learn_egress: process.env.EGRESS_LEARN_MODE === "true",
         trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
         handoff: { mode: "restore", predecessor: myName },
       });
@@ -2166,9 +2264,20 @@ async function _runHandoffOrchestration(
   _hp("complete", "");
   _hp("complete", `🎉 Handoff complete! Agent is now running on ${dirLabel}.`);
   if (!handoffProgress) return;
+  const agentName = process.env.SANDBOX_NAME || "dev-agent";
   if (direction === "local_to_aks") {
     handoffProgress.steps.push("The cloud agent has your full state — chat history, trust scores, audit trail.");
     handoffProgress.steps.push("Your local keys are preserved. You can reclaim with a reverse handoff anytime.");
+    handoffProgress.steps.push("");
+    // Connection instructions — explicit --cloud since local container still exists
+    handoffProgress.steps.push(`📡 Connect to cloud agent: azureclaw connect ${agentName} --cloud`);
+    handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
+    // Telegram note
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the cloud agent. Chat continues automatically.`);
+    }
+    handoffProgress.steps.push(`💤 This local agent is now dormant. It will show as 'Dormant' in the operator TUI.`);
+    handoffProgress.steps.push(`🗑️  Clean up local: azureclaw destroy ${agentName} --local`);
   }
   handoffProgress.status = "complete";
   handoffProgress.result = {
@@ -2375,6 +2484,27 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       "",
     );
 
+    // Include handoff context if this agent was migrated (persists across plugin reloads)
+    try {
+      const handoffPath = "/sandbox/.openclaw/workspace/.handoff-state.json";
+      const raw = fs.readFileSync(handoffPath, "utf8");
+      const hs = JSON.parse(raw);
+      sections.push(
+        "## Handoff Context\n",
+        `This agent was migrated from local dev to cloud (AKS) at ${hs.restored_at}.`,
+        `Predecessor AMID: ${hs.predecessor_amid}. Direction: ${hs.direction}.`,
+        `Trust scores: ${hs.trust_scores_count}, Audit trail: ${hs.audit_entries_count} entries.`,
+        `Chat history: ${hs.chat_message_count} messages transferred.\n`,
+      );
+      if (Array.isArray(hs.recent_messages) && hs.recent_messages.length > 0) {
+        sections.push("### Recent Conversation Before Handoff\n");
+        for (const m of hs.recent_messages) {
+          sections.push(`**${m.role}**: ${String(m.content || "").slice(0, 500)}`);
+        }
+        sections.push("");
+      }
+    } catch { /* no handoff state — normal startup */ }
+
     // Write (or replace) the environment section at the top of MEMORY.md
     let existingMemory = "";
     try { existingMemory = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
@@ -2408,20 +2538,47 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       const store = `memory-${agentName}`;
       // Ensure store exists before searching (avoids 404 on first boot)
       await ensureMemoryStore(store);
-      const recallResult = await _routerCall(
+
+      // First: get static memories (user profile) — scope only, no items
+      const staticResult = await _routerCall(
         "POST",
         `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        { query: "key facts, user preferences, prior context, recent work", max_memories: 10 },
-      );
-      const memories = recallResult?.memories || recallResult?.value || [];
-      if (Array.isArray(memories) && memories.length > 0) {
+        { scope: agentName },
+      ).catch(() => null);
+
+      // Then: get contextual memories — scope + items
+      const contextResult = await _routerCall(
+        "POST",
+        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
+        {
+          scope: agentName,
+          items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "key facts, user preferences, prior context, recent work, handoff history" }] }],
+          options: { max_memories: 10 },
+        },
+      ).catch(() => null);
+
+      // Merge unique memories from both results
+      const seen = new Set<string>();
+      const memories: any[] = [];
+      for (const result of [staticResult, contextResult]) {
+        for (const m of (result?.memories || result?.value || [])) {
+          const mid = m?.memory_item?.memory_id || m?.memory_id || "";
+          const text = m?.memory_item?.content || m?.content || m?.text || "";
+          if (text && !seen.has(mid || text)) {
+            seen.add(mid || text);
+            memories.push(m);
+          }
+        }
+      }
+
+      if (memories.length > 0) {
         const recallSection = [
           "\n## Prior Context (Foundry Memory)\n",
           "_Recalled from persistent memory store on startup:_\n",
         ];
         for (const m of memories) {
-          const text = m?.content || m?.text || "";
-          const kind = m?.kind || m?.type || "memory";
+          const text = m?.memory_item?.content || m?.content || m?.text || "";
+          const kind = m?.memory_item?.kind || m?.kind || m?.type || "memory";
           if (text) recallSection.push(`- [${kind}] ${text}`);
         }
         recallSection.push("");
@@ -2444,6 +2601,58 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     } catch {
       // First boot or no memory store yet — silently skip
     }
+
+    // Recall handoff conversation history from Foundry Conversations
+    // (survives pod recreation — the conversation is stored in Foundry)
+    try {
+      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+      const apiVer = "api-version=2025-11-15-preview";
+        // List recent conversations, find the handoff one
+        const convList = await _routerCall("GET", `/openai/conversations?${apiVer}&limit=20&order=desc`).catch(() => null);
+        const conversations = convList?.data || convList?.conversations || [];
+        const handoffConv = conversations.find((c: any) =>
+          c.metadata?.source === "handoff" && c.metadata?.user === (process.env.SANDBOX_NAME || "")
+        );
+        if (handoffConv?.id) {
+          // Read conversation items
+          const itemsResp = await _routerCall("GET", `/openai/conversations/${handoffConv.id}/items?${apiVer}&limit=50`).catch(() => null);
+          const items = itemsResp?.data || itemsResp?.items || [];
+          if (items.length > 0) {
+            const historySection = [
+              "\n## Conversation History (from handoff)\n",
+              `_Restored from Foundry conversation ${handoffConv.id} (predecessor: ${handoffConv.metadata?.predecessor || "unknown"}):_\n`,
+            ];
+            for (const item of items.slice(-20)) {
+              const role = item.role || "unknown";
+              // Content can be string or array of content parts
+              let text = "";
+              if (typeof item.content === "string") {
+                text = item.content;
+              } else if (Array.isArray(item.content)) {
+                text = item.content.map((p: any) => p.text || p.input_text || "").filter(Boolean).join(" ");
+              }
+              if (text) historySection.push(`**${role}**: ${text.slice(0, 500)}`);
+            }
+            historySection.push("");
+
+            let current = "";
+            try { current = fs.readFileSync(memoryFile, "utf8"); } catch { /* */ }
+            const convMarker = "## Conversation History (from handoff)";
+            if (!current.includes(convMarker)) {
+              const sepIdx = current.indexOf("\n---\n");
+              if (sepIdx >= 0) {
+                const updated = current.slice(0, sepIdx) + historySection.join("\n") + current.slice(sepIdx);
+                const tmpFile3 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
+                fs.writeFileSync(tmpFile3, updated, { mode: 0o600 });
+                try { fs.renameSync(tmpFile3, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile3); } catch { /* */ } }
+              }
+            }
+            log.info(`Foundry conversation: recalled ${items.length} items from handoff conversation ${handoffConv.id}`);
+          }
+        }
+      } catch {
+        // Conversation recall is best-effort
+      }
   } catch (e: any) {
     log.warn(`Failed to write Foundry context to MEMORY.md: ${e.message}`);
   }

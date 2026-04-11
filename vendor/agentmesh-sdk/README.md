@@ -394,6 +394,18 @@ npm run build
 # Output: dist/ with ESM, CJS, and type definitions
 ```
 
+### 9. bytesToBase64 — stack overflow on large payloads
+**File:** `dist/index.js` (DoubleRatchet and SessionManager classes)
+
+`bytesToBase64()` used `String.fromCharCode(...bytes)` — the spread operator
+passes every byte as a separate function argument. For payloads >100 KB (e.g.
+handoff state transfer ~108 KB ciphertext after Signal Protocol encryption),
+this exceeds V8's maximum call stack size.
+
+**Fix:** Use `Buffer.from(bytes).toString('base64')` in Node.js environments,
+fall back to a loop-based approach in browsers. Applied to both instances
+(DoubleRatchet line 958 and SessionManager line 1365).
+
 ## License
 
 MIT

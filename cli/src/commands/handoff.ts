@@ -290,39 +290,72 @@ export function handoffCommand(): Command {
           const targetName = name; // same name on AKS
           const targetNs = `azureclaw-${targetName}`;
 
-          // Check if there's already a ClawSandbox for this agent
+          // Inherit the source agent's settings — cloud target should match parent
+          let sourceIsolation = "enhanced";
+          let sourceLearnEgress = true;
+          let sourceTrustThreshold = 500;
+          try {
+            const { stdout: envOut } = await execa("docker", [
+              "exec", containerName, "printenv",
+            ], { stdio: "pipe", reject: false });
+            for (const line of envOut.split("\n")) {
+              if (line.startsWith("EGRESS_LEARN_MODE=")) {
+                sourceLearnEgress = line.split("=")[1]?.trim().toLowerCase() === "true";
+              } else if (line.startsWith("SANDBOX_ISOLATION=")) {
+                sourceIsolation = line.split("=")[1]?.trim() || "enhanced";
+              } else if (line.startsWith("AGT_TRUST_THRESHOLD=")) {
+                const val = parseInt(line.split("=")[1]?.trim(), 10);
+                if (!isNaN(val)) sourceTrustThreshold = val;
+              }
+            }
+          } catch { /* use safe defaults */ }
+
+          // Always apply the CRD (create or update) with inherited config.
+          // Server-side apply is idempotent; the controller only restarts the
+          // pod if the deployment spec actually changed.
+          const crdManifest = JSON.stringify({
+            apiVersion: "azureclaw.io/v1alpha1",
+            kind: "ClawSandbox",
+            metadata: { name: targetName, namespace: "azureclaw-system" },
+            spec: {
+              model: process.env.DEFAULT_MODEL || "gpt-5.4",
+              handoff: { mode: "restore", predecessor: name },
+              networkPolicy: {
+                defaultDeny: true,
+                approvalRequired: true,
+                learnEgress: sourceLearnEgress,
+              },
+              sandbox: {
+                isolation: sourceIsolation,
+              },
+              governance: {
+                enabled: true,
+                toolPolicy: "default",
+                trustThreshold: sourceTrustThreshold,
+              },
+            },
+          });
+          try {
+            await execa("kubectl", ["apply", "-f", "-"], {
+              input: crdManifest,
+              stdio: ["pipe", "pipe", "pipe"],
+            });
+          } catch (e: any) {
+            stepper.fail(`Failed to create target sandbox CRD: ${e.message}`);
+            await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            process.exit(1);
+          }
+
+          // Check if the pod already existed (need to wait or it's already running)
           let targetExists = false;
           try {
             const { stdout } = await execa("kubectl", [
-              "get", "clawsandbox", targetName,
-              "-n", "azureclaw-system",
-              "-o", "jsonpath={.status.phase}",
+              "get", "pods", "-n", targetNs,
+              "-l", `app.kubernetes.io/name=${targetName}`,
+              "-o", "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}",
             ], { stdio: "pipe", reject: false });
-            targetExists = stdout.trim().length > 0;
-          } catch { /* doesn't exist yet */ }
-
-          if (!targetExists) {
-            // Create ClawSandbox CRD — the controller will reconcile it into a full sandbox
-            const crdManifest = JSON.stringify({
-              apiVersion: "azureclaw.io/v1alpha1",
-              kind: "ClawSandbox",
-              metadata: { name: targetName, namespace: "azureclaw-system" },
-              spec: {
-                model: process.env.DEFAULT_MODEL || "gpt-5.4",
-                handoff: { mode: "restore", predecessor: name },
-              },
-            });
-            try {
-              await execa("kubectl", ["apply", "-f", "-"], {
-                input: crdManifest,
-                stdio: ["pipe", "pipe", "pipe"],
-              });
-            } catch (e: any) {
-              stepper.fail(`Failed to create target sandbox CRD: ${e.message}`);
-              await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
-              process.exit(1);
-            }
-          }
+            targetExists = stdout.trim() === "True";
+          } catch { /* no pod yet */ }
 
           // Wait for target pod to be ready (up to 120s)
           stepper.step("Waiting for target pod on AKS...");
@@ -485,11 +518,14 @@ export function handoffCommand(): Command {
 
         if (direction === "local_to_aks") {
           console.log(chalk.dim("  Next steps:"));
-          console.log(chalk.dim(`    1. Target sandbox will be provisioned on AKS`));
-          console.log(chalk.dim(`    2. State will be restored on the target agent`));
-          console.log(chalk.dim(`    3. Identity succession will complete in the registry`));
-          console.log(chalk.dim(`    4. Peers will be notified of the new location`));
-          console.log(chalk.dim(`\n  Monitor: ${chalk.cyan(`azureclaw handoff ${name} --status`)}\n`));
+          console.log(chalk.cyan(`    📡 Connect to cloud agent: azureclaw connect ${name}`));
+          console.log(chalk.cyan(`    📊 Monitor agents:         azureclaw operator`));
+          console.log();
+          if (process.env.TELEGRAM_BOT_TOKEN) {
+            console.log(chalk.dim(`    📱 Telegram: Your bot is now handled by the cloud agent.`));
+          }
+          console.log(chalk.dim(`    💤 Local agent is dormant (keys preserved). Reclaim: azureclaw handoff ${name} --to local`));
+          console.log();
         } else {
           console.log(chalk.dim("  Next steps:"));
           console.log(chalk.dim(`    1. Local agent will restore the state snapshot`));
