@@ -163,11 +163,21 @@ export function connectCommand(): Command {
         console.log(chalk.dim(`  Port-forward active. Press Ctrl+C to disconnect.\n`));
 
         // Keep alive until Ctrl+C
+        const cleanup = () => {
+          pf.kill("SIGTERM");
+          console.log(chalk.dim("\n  Disconnected.\n"));
+          process.exit(0);
+        };
+        process.on("SIGINT", cleanup);
+        process.on("SIGTERM", cleanup);
         try {
           await pf;
         } catch {
-          // User pressed Ctrl+C
+          // port-forward exited
           console.log(chalk.dim("\n  Disconnected.\n"));
+        } finally {
+          process.removeListener("SIGINT", cleanup);
+          process.removeListener("SIGTERM", cleanup);
         }
       } else {
         // Shell mode
