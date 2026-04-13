@@ -57,7 +57,7 @@ interface SandboxInfo {
   restarts: number;
   role: "controller" | "sub-agent";
   parent: string;  // parent agent name (empty if controller)
-  handoffState?: "dormant" | "active-successor";
+  handoffState?: "dormant" | "active-successor" | "returning";
   runtime: "docker" | "aks";
 }
 
@@ -234,7 +234,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [4, 42, 16, 14, 14, 6, 8],
+    columnWidth: [3, 40, 14, 12, 12, 5, 6],
     interactive: true,
     style: {
       border: { fg: "cyan" },
@@ -620,6 +620,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             const hs = JSON.parse(hsOut);
             if (hs.phase === "complete" && hs.direction === "local_to_aks") {
               handoffState = "dormant";
+            } else if (hs.phase === "running" && hs.direction === "aks_to_local") {
+              handoffState = "returning";
             }
           } catch { /* no handoff state */ }
         }
@@ -1619,10 +1621,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     lines.push("");
 
     function statusIcon(health: string): string {
-      return health === "healthy" ? "{green-fg}●{/}" :
-             health === "dormant" ? "{blue-fg}💤{/}" :
-             health === "pending" ? "{yellow-fg}◌{/}" :
-             health === "degraded" ? "{yellow-fg}◐{/}" : "{red-fg}✗{/}";
+      return health === "healthy" ? "{green-fg}*{/}" :
+             health === "dormant" ? "{blue-fg}~{/}" :
+             health === "pending" ? "{yellow-fg}o{/}" :
+             health === "degraded" ? "{yellow-fg}!{/}" : "{red-fg}x{/}";
     }
 
     // Fixed column width for all boxes — keeps alignment clean at scale
@@ -1681,7 +1683,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
       const peerCount = sec?.agtTrustScores.filter((t) => t.agent !== p.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)).length || 0;
 
-      const rtLabel = p.runtime === "docker" ? "🐳" : "☁️";
+      const rtLabel = p.runtime === "docker" ? "D" : "C";
       const pBox = makeBox(p.name, icon, `${rtLabel} ${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
       for (const l of pBox) lines.push(`  ${l}`);
 
@@ -1933,36 +1935,42 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const agentData = sandboxes.map((s) => {
       let hIcon: string;
       if (s.handoffState === "dormant") {
-        hIcon = "💤";
+        hIcon = "~";
       } else if (s.handoffState === "active-successor") {
-        hIcon = "☁️";
+        hIcon = "^";
+      } else if (s.handoffState === "returning") {
+        hIcon = "<";
       } else {
-        hIcon = s.health === "healthy" ? "●" :
-                s.health === "degraded" ? "●" :
-                s.health === "down" ? "●" :
-                s.health === "pending" ? "◌" : "?";
+        hIcon = s.health === "healthy" ? "*" :
+                s.health === "degraded" ? "!" :
+                s.health === "down" ? "x" :
+                s.health === "pending" ? "o" : "?";
       }
       const restartStr = s.restarts > 0 ? ` R:${s.restarts}` : "";
-      // Runtime tag
-      const rtTag = s.runtime === "docker" ? "🐳 " : "☁  ";
+      // Runtime tag — ASCII only for reliable column alignment
+      const rtTag = s.runtime === "docker" ? "D " : "C ";
       // Tree prefix + handoff state annotations
       let displayName = s.name;
       if (s.handoffState === "dormant") {
-        displayName = `${rtTag} ${s.name} (offloaded)`;
+        displayName = `${rtTag}${s.name} (offloaded)`;
       } else if (s.handoffState === "active-successor") {
-        displayName = `${rtTag} ${s.name} (handoff)`;
+        displayName = `${rtTag}${s.name} (handoff)`;
+      } else if (s.handoffState === "returning") {
+        displayName = `${rtTag}${s.name} (returning)`;
       } else if (s.role === "sub-agent") {
         displayName = `${rtTag} └ ${s.name}`;
       } else {
-        displayName = `${rtTag} ${s.name}`;
+        displayName = `${rtTag}${s.name}`;
       }
       const statusStr = s.handoffState === "dormant"
-        ? "Offloaded → ☁️"
-        : `${s.status}${restartStr}`;
-      return [hIcon + " ", displayName, statusStr, s.model, s.isolation, s.channels, s.age];
+        ? "Offloaded"
+        : s.handoffState === "returning"
+          ? "Returning"
+          : `${s.status}${restartStr}`;
+      return [hIcon, displayName, statusStr, s.model, s.isolation, s.channels, s.age];
     });
     (agentTable as any).setData({
-      headers: [" ", "Name", "Status", "Model", "Isolation", "Ch", "Age"],
+      headers: [" ", " Name", " Status", " Model", " Isolation", " Ch", " Age"],
       data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
     });
 

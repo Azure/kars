@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
+import type { ChildProcess } from "node:child_process";
 
 /**
  * azureclaw handoff — live agent migration between local and cloud.
@@ -102,6 +103,207 @@ export function handoffCommand(): Command {
         }
       }
 
+      // ── Helper: port-forward to AKS pod and call its router ────
+      const targetNs = `azureclaw-${name}`;
+      let aksPfProc: ChildProcess | undefined;
+      let aksPfPort = 18445; // temp local port for source AKS pod
+
+      async function aksPortForwardStart(): Promise<void> {
+        if (aksPfProc) return; // already running
+        const { execa: ex } = await import("execa");
+        aksPfProc = ex("kubectl", [
+          "port-forward", "-n", targetNs,
+          `svc/${name}`, `${aksPfPort}:8443`,
+        ], { stdio: "pipe", reject: false }) as any;
+        // Wait for port-forward to be ready
+        const http = await import("node:http");
+        for (let i = 0; i < 15; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+          try {
+            const ok: boolean = await new Promise((resolve) => {
+              const req = http.get(`http://127.0.0.1:${aksPfPort}/readyz`, { timeout: 2000 }, (res) => {
+                let data = "";
+                res.on("data", (c: Buffer) => { data += c.toString(); });
+                res.on("end", () => resolve(res.statusCode === 200));
+              });
+              req.on("error", () => resolve(false));
+              req.on("timeout", () => { req.destroy(); resolve(false); });
+            });
+            if (ok) return;
+          } catch { /* retry */ }
+        }
+        throw new Error("AKS port-forward not ready after 15s");
+      }
+
+      function aksPortForwardStop(): void {
+        if (aksPfProc) {
+          try { (aksPfProc as any).kill(); } catch { /* ignore */ }
+          aksPfProc = undefined;
+        }
+      }
+
+      async function aksRouterExec(
+        method: string,
+        path: string,
+        body?: unknown,
+        extraHeaders?: Record<string, string>,
+      ): Promise<{ status: number; body: any }> {
+        const http = await import("node:http");
+        const payload = body ? JSON.stringify(body) : undefined;
+        return new Promise((resolve, reject) => {
+          const opts: any = {
+            hostname: "127.0.0.1",
+            port: aksPfPort,
+            path,
+            method,
+            headers: {
+              "Content-Type": "application/json",
+              ...(extraHeaders || {}),
+              ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+            },
+            timeout: 30000,
+          };
+          const req = http.request(opts, (res: any) => {
+            let data = "";
+            res.on("data", (c: Buffer) => { data += c.toString(); });
+            res.on("end", () => {
+              try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+              catch { resolve({ status: res.statusCode, body: { raw: data } }); }
+            });
+          });
+          req.on("error", reject);
+          req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+          if (payload) req.write(payload);
+          req.end();
+        });
+      }
+
+      // ── Helper: get admin token from AKS pod ───────────────────
+      async function getAksAdminToken(): Promise<string | undefined> {
+        try {
+          const { execa: ex } = await import("execa");
+          const { stdout } = await ex("kubectl", [
+            "exec", "-n", targetNs,
+            `deploy/${name}`, "-c", "openclaw", "--",
+            "printenv", "ADMIN_TOKEN",
+          ], { stdio: "pipe", reject: false });
+          if (stdout.trim()) return stdout.trim();
+        } catch { /* fallback */ }
+        try {
+          const { execa: ex } = await import("execa");
+          const { stdout } = await ex("kubectl", [
+            "exec", "-n", targetNs,
+            `deploy/${name}`, "-c", "openclaw", "--",
+            "cat", "/tmp/.agt-admin-token",
+          ], { stdio: "pipe", reject: false });
+          return stdout.trim() || undefined;
+        } catch {
+          return undefined;
+        }
+      }
+
+      // ── Helper: wake dormant local Docker container ─────────────
+      async function wakeDormantDocker(): Promise<{ ready: boolean; error?: string }> {
+        const { execa: ex } = await import("execa");
+        // Check if container exists
+        let containerState: string | undefined;
+        try {
+          const { stdout } = await ex("docker", [
+            "inspect", "-f", "{{.State.Status}}", containerName,
+          ], { stdio: "pipe" });
+          containerState = stdout.trim();
+        } catch {
+          return { ready: false, error: `Container '${containerName}' not found. Run 'azureclaw dev --name ${name}' first.` };
+        }
+
+        // Start if stopped/exited
+        if (containerState === "exited" || containerState === "created") {
+          try {
+            await ex("docker", ["start", containerName], { stdio: "pipe" });
+          } catch (e: any) {
+            return { ready: false, error: `Failed to start container: ${e.message}` };
+          }
+        } else if (containerState !== "running") {
+          return { ready: false, error: `Container in unexpected state: ${containerState}` };
+        }
+
+        // Wait for router to be healthy (up to 30s)
+        for (let i = 0; i < 30; i++) {
+          try {
+            await ex("docker", [
+              "exec", containerName, "sh", "-c",
+              "wget -qO- --timeout=2 http://127.0.0.1:8443/readyz 2>/dev/null || curl -sf --max-time 2 http://127.0.0.1:8443/readyz 2>/dev/null",
+            ], { stdio: "pipe" });
+            return { ready: true };
+          } catch { /* not ready yet */ }
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        return { ready: false, error: "Local router not healthy after 30s" };
+      }
+
+      // ── Helper: read AKS CRD spec to inherit settings ──────────
+      async function readAksCrdSpec(): Promise<{
+        model: string; learnEgress: boolean; isolation: string; trustThreshold: number;
+      }> {
+        const defaults = { model: "gpt-5.4", learnEgress: true, isolation: "enhanced", trustThreshold: 500 };
+        try {
+          const { execa: ex } = await import("execa");
+          const { stdout } = await ex("kubectl", [
+            "get", "clawsandbox", name, "-n", "azureclaw-system",
+            "-o", "jsonpath={.spec}",
+          ], { stdio: "pipe" });
+          const spec = JSON.parse(stdout);
+          return {
+            model: spec.inference?.model || spec.openclaw?.config?.agent?.model?.replace("azure/", "") || defaults.model,
+            learnEgress: spec.networkPolicy?.learnEgress ?? defaults.learnEgress,
+            isolation: spec.sandbox?.isolation || defaults.isolation,
+            trustThreshold: spec.governance?.trustThreshold || defaults.trustThreshold,
+          };
+        } catch {
+          return defaults;
+        }
+      }
+
+      // ── Helper: re-hydrate credentials from K8s secret to Docker ─
+      async function rehydrateCredentials(): Promise<string[]> {
+        const injected: string[] = [];
+        try {
+          const { execa: ex } = await import("execa");
+          const { stdout } = await ex("kubectl", [
+            "get", "secret", `${name}-credentials`, "-n", targetNs,
+            "-o", "json",
+          ], { stdio: "pipe" });
+          const secret = JSON.parse(stdout);
+          const data = secret.data || {};
+          for (const [key, b64] of Object.entries(data)) {
+            const val = Buffer.from(b64 as string, "base64").toString("utf8");
+            if (val) {
+              // Inject into running Docker container via a temp env file
+              // docker exec doesn't support -e, so write to a known location
+              // and have the entrypoint source it. Alternatively, we set it
+              // via the router's admin API if available.
+              // Simplest: use docker exec to export into the container's env
+              // by writing to /tmp/.handoff-credentials
+              injected.push(key);
+            }
+          }
+          if (injected.length > 0) {
+            // Write all credentials as env exports into a file the entrypoint sources
+            const envLines = Object.entries(data)
+              .map(([k, b64]) => `${k}=${Buffer.from(b64 as string, "base64").toString("utf8")}`)
+              .join("\n");
+            await ex("docker", [
+              "exec", containerName, "sh", "-c",
+              `cat > /tmp/.handoff-credentials << 'CRED_EOF'\n${envLines}\nCRED_EOF`,
+            ], { stdio: "pipe" });
+          }
+        } catch {
+          // K8s secret not available or no kubectl — fall back silently
+          // Local secrets.json will be used by the entrypoint
+        }
+        return injected;
+      }
+
       // ── STATUS ──────────────────────────────────────────────────
       if (options.status) {
         try {
@@ -180,12 +382,25 @@ export function handoffCommand(): Command {
 
       banner("AzureClaw · Agent Handoff", directionLabel);
 
-      const stepper = new Stepper({ totalSteps: 7 });
+      const stepper = new Stepper({ totalSteps: direction === "aks_to_local" ? 10 : 7 });
 
       try {
+        // Direction-aware source router: forward talks to Docker, reverse to AKS
+        const isReverse = direction === "aks_to_local";
+
+        // For reverse: establish port-forward to AKS before any source operations
+        if (isReverse) {
+          stepper.step("Connecting to cloud agent...");
+          await aksPortForwardStart();
+          stepper.done("Connected to AKS via port-forward");
+        }
+
+        // sourceExec talks to the SOURCE agent's router (Docker or AKS)
+        const sourceExec = isReverse ? aksRouterExec : routerExec;
+
         // Step 1: Verify source agent is running
         stepper.step("Verifying source agent...");
-        const adminToken = await getAdminToken();
+        const adminToken = isReverse ? await getAksAdminToken() : await getAdminToken();
         if (!adminToken) {
           stepper.fail("Admin token not found — cannot initiate handoff");
           process.exit(1);
@@ -194,7 +409,7 @@ export function handoffCommand(): Command {
         const authHeaders = { Authorization: `Bearer ${adminToken}` };
 
         // Check handoff status (also verifies connectivity + registry mode)
-        const statusResp = await routerExec("GET", "/agt/handoff/status", undefined, authHeaders);
+        const statusResp = await sourceExec("GET", "/agt/handoff/status", undefined, authHeaders);
         if (statusResp.status >= 400) {
           stepper.fail(`Router returned ${statusResp.status}`);
           process.exit(1);
@@ -220,7 +435,7 @@ export function handoffCommand(): Command {
 
         // Step 2: Initialize handoff — get one-time token
         stepper.step("Initializing handoff...");
-        const initResp = await routerExec("POST", "/agt/handoff/init", {
+        const initResp = await sourceExec("POST", "/agt/handoff/init", {
           direction,
           ttl_seconds: 300,
         }, authHeaders);
@@ -254,14 +469,14 @@ export function handoffCommand(): Command {
           .update(`${adminToken}:${handoffToken}`)
           .digest("base64");
 
-        const snapshotResp = await routerExec("POST", "/agt/handoff/snapshot", {
+        const snapshotResp = await sourceExec("POST", "/agt/handoff/snapshot", {
           shared_secret: sharedSecret,
         }, handoffHeaders);
 
         if (snapshotResp.status >= 400) {
           stepper.fail(`Snapshot failed: ${snapshotResp.body.error || `HTTP ${snapshotResp.status}`}`);
           // Try to abort
-          await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+          await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
           process.exit(1);
         }
 
@@ -271,11 +486,11 @@ export function handoffCommand(): Command {
 
         // Step 4: Drain — stop accepting new work
         stepper.step("Draining active work...");
-        const drainResp = await routerExec("POST", "/agt/handoff/drain", {}, handoffHeaders);
+        const drainResp = await sourceExec("POST", "/agt/handoff/drain", {}, handoffHeaders);
 
         if (drainResp.status >= 400) {
           stepper.fail(`Drain failed: ${drainResp.body.error || `HTTP ${drainResp.status}`}`);
-          await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+          await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
           process.exit(1);
         }
 
@@ -443,46 +658,83 @@ export function handoffCommand(): Command {
           }
 
         } else {
-          // aks_to_local: the local agent would call /agt/handoff/restore
-          stepper.done("State snapshot ready for transfer (local restore pending)");
+          // ── aks_to_local: Full reverse handoff orchestration ────────────
+
+          // Step 5a: Wake dormant local Docker container
+          stepper.step("Waking dormant local agent...");
+          const wakeResult = await wakeDormantDocker();
+          if (!wakeResult.ready) {
+            stepper.fail(wakeResult.error || "Failed to wake local container");
+            await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            aksPortForwardStop();
+            process.exit(1);
+          }
+          stepper.done("Local agent running");
+
+          // Step 5b: Re-hydrate credentials from K8s secret to Docker
+          stepper.step("Re-hydrating credentials...");
+          const injectedCreds = await rehydrateCredentials();
+          if (injectedCreds.length > 0) {
+            stepper.done(`Credentials injected: ${injectedCreds.join(", ")}`);
+          } else {
+            stepper.done("No cloud credentials to migrate (using local secrets)");
+          }
+
+          // Step 5c: Get encrypted snapshot blob from AKS source
+          stepper.step("Retrieving state from cloud agent...");
+          const blobResp = await sourceExec("GET", "/agt/handoff/snapshot", undefined, handoffHeaders);
+          if (blobResp.status >= 400) {
+            stepper.fail(`Failed to retrieve snapshot: ${blobResp.body.error || `HTTP ${blobResp.status}`}`);
+            await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            aksPortForwardStop();
+            process.exit(1);
+          }
+          stepper.done("State snapshot retrieved from cloud");
+
+          // Step 5d: Send restore to local Docker container
+          stepper.step("Restoring state to local agent...");
+          const localRestoreResp = await routerExec("POST", "/agt/handoff/restore", {
+            shared_secret: sharedSecret,
+            blob: blobResp.body.blob,
+          });
+
+          if (localRestoreResp.status >= 400) {
+            stepper.fail(`Local restore failed: ${localRestoreResp.body.error || `HTTP ${localRestoreResp.status}`}`);
+            await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            aksPortForwardStop();
+            process.exit(1);
+          }
+
+          stepper.done(`State restored to local (${(snapshotSize / 1024).toFixed(1)} KB)`);
         }
 
         // Step 6: Succession (registry update)
         stepper.step("Registering identity succession...");
 
         // Read AMIDs from source and target
-        const sourceStatus = await routerExec("GET", "/agt/status", undefined, authHeaders);
+        const sourceStatus = await sourceExec("GET", "/agt/status", undefined, authHeaders);
         const predecessorAmid = sourceStatus.body?.agent_did?.replace("did:agentmesh:", "") || "";
 
-        if (direction === "local_to_aks" && predecessorAmid) {
+        if (predecessorAmid) {
           // Read successor AMID from the target's registry entry
           try {
-            const http = await import("node:http");
-            const regSearchUrl = `http://127.0.0.1:8443/agt/registry/registry/search?capability=${encodeURIComponent(name)}`;
-            const regResult: any = await new Promise((resolve, reject) => {
-              const req = http.get(regSearchUrl, (res: any) => {
-                let data = "";
-                res.on("data", (c: Buffer) => { data += c.toString(); });
-                res.on("end", () => {
-                  try { resolve(JSON.parse(data)); } catch { resolve(null); }
-                });
-              });
-              req.on("error", reject);
-              req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-            });
+            const regSearchResp = await sourceExec("GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(name)}`,
+              undefined, authHeaders);
+            const regResult = regSearchResp.body;
 
-            // Find the AKS agent's AMID (different from our local AMID)
+            // Find the target agent's AMID (different from the source AMID)
             const candidates = regResult?.results?.filter(
               (a: any) => a.amid !== predecessorAmid && (a.display_name === name || a.capabilities?.includes(name))
             ) || [];
 
             if (candidates.length > 0) {
               const successorAmid = candidates[0].amid;
-              // POST succession to the global registry
-              const successionResp = await routerExec("POST", "/agt/registry/registry/succession", {
+              // POST succession to the global registry via the source's router
+              const successionResp = await sourceExec("POST", "/agt/registry/registry/succession", {
                 predecessor_amid: predecessorAmid,
                 successor_amid: successorAmid,
-                reason: "handoff:local_to_aks",
+                reason: `handoff:${direction}`,
               }, authHeaders);
 
               if (successionResp.status < 400) {
@@ -497,10 +749,34 @@ export function handoffCommand(): Command {
             stepper.done("Identity succession pending (registry unreachable)");
           }
         } else {
-          stepper.done("Identity succession ready (requires target agent AMID)");
+          stepper.done("Identity succession ready (requires source agent AMID)");
         }
 
-        // Step 7: Summary
+        // Step 7 (reverse only): Decommission cloud agent + delete CRD
+        if (isReverse) {
+          stepper.step("Decommissioning cloud agent...");
+          try {
+            await sourceExec("POST", "/agt/handoff/decommission", {}, handoffHeaders);
+            stepper.done("Cloud agent decommissioned");
+          } catch (decommErr: any) {
+            stepper.done(`Decommission pending: ${decommErr.message}`);
+          }
+
+          stepper.step("Removing cloud sandbox...");
+          try {
+            await execa("kubectl", [
+              "delete", "clawsandbox", name, "-n", "azureclaw-system",
+              "--ignore-not-found",
+            ], { stdio: "pipe" });
+            stepper.done("AKS ClawSandbox CRD removed");
+          } catch (delErr: any) {
+            stepper.done(`CRD removal pending: ${delErr.message}`);
+          }
+
+          aksPortForwardStop();
+        }
+
+        // Final step: Summary
         stepper.step("Handoff summary...");
 
         section("Handoff Result");
@@ -513,7 +789,7 @@ export function handoffCommand(): Command {
         kvLine("Token hash", tokenHash?.slice(0, 16) || "—");
 
         console.log();
-        console.log(chalk.green("  ✓ Handoff initiated successfully."));
+        console.log(chalk.green("  ✓ Handoff complete!"));
         console.log();
 
         if (direction === "local_to_aks") {
@@ -527,14 +803,21 @@ export function handoffCommand(): Command {
           console.log(chalk.dim(`    💤 Local agent is dormant (keys preserved). Reclaim: azureclaw handoff ${name} --to local`));
           console.log();
         } else {
+          console.log(chalk.dim("  Your agent is back on local Docker."));
+          console.log();
           console.log(chalk.dim("  Next steps:"));
-          console.log(chalk.dim(`    1. Local agent will restore the state snapshot`));
-          console.log(chalk.dim(`    2. Sub-agents will be re-spawned as Docker containers`));
-          console.log(chalk.dim(`    3. Co-signed reclamation will update the registry`));
-          console.log(chalk.dim(`    4. Cloud agent will decommission\n`));
+          console.log(chalk.cyan(`    📡 Connect: azureclaw connect ${name} --local`));
+          console.log(chalk.cyan(`    📊 Monitor: azureclaw operator`));
+          console.log();
+          if (process.env.TELEGRAM_BOT_TOKEN) {
+            console.log(chalk.dim(`    📱 Telegram: Your bot is now handled by the local agent.`));
+          }
+          console.log(chalk.dim(`    ☁️  Cloud sandbox has been decommissioned.`));
+          console.log();
         }
 
       } catch (e: any) {
+        aksPortForwardStop();
         console.log(chalk.red(`\n  Handoff failed: ${e.message}\n`));
         process.exit(1);
       }

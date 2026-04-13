@@ -2252,10 +2252,13 @@ async function _runHandoffOrchestration(
   }
 
   // ── Step 7: Decommission ──
-  _hp("decommission", "🏁 Decommissioning local agent...");
+  const decommLabel = direction === "local_to_aks" ? "local" : "cloud";
+  _hp("decommission", `🏁 Decommissioning ${decommLabel} agent...`);
   try {
     await _routerCall("POST", "/agt/handoff/decommission", {}, 15000, handoffH);
-    _hp("decommission", "🏁 Local agent decommissioned (dormant — keys preserved)");
+    _hp("decommission", direction === "local_to_aks"
+      ? "🏁 Local agent decommissioned (dormant — keys preserved)"
+      : "🏁 Cloud agent decommissioned");
   } catch (decommErr: any) {
     _hp("decommission", `⚠️ Decommission pending: ${decommErr.message}`);
   }
@@ -2278,6 +2281,16 @@ async function _runHandoffOrchestration(
     }
     handoffProgress.steps.push(`💤 This local agent is now dormant. It will show as 'Dormant' in the operator TUI.`);
     handoffProgress.steps.push(`🗑️  Clean up local: azureclaw destroy ${agentName} --local`);
+  } else {
+    handoffProgress.steps.push("Your local agent has the full state — chat history, trust scores, audit trail.");
+    handoffProgress.steps.push("The cloud agent has been decommissioned.");
+    handoffProgress.steps.push("");
+    handoffProgress.steps.push(`📡 Connect to local agent: azureclaw connect ${agentName} --local`);
+    handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the local agent.`);
+    }
+    handoffProgress.steps.push(`☁️  Cloud sandbox removed.`);
   }
   handoffProgress.status = "complete";
   handoffProgress.result = {
@@ -3625,6 +3638,29 @@ const azureClawPlugin = definePluginEntry({
       async execute(_id: string, params: Record<string, unknown>) {
         const direction = (params.direction as string) === "local" ? "aks_to_local" : "local_to_aks";
         const reason = (params.reason as string) || "user_requested";
+
+        // Reverse handoff (cloud→local) must be initiated from the user's laptop CLI.
+        // The cloud agent cannot start Docker containers on the user's machine.
+        if (direction === "aks_to_local") {
+          const agentName = process.env.SANDBOX_NAME || "unknown";
+          return { content: [{ type: "text", text: safeJson({
+            status: "cli_required",
+            direction: "aks_to_local",
+            reason,
+            instruction: `Reverse handoff must be initiated from the user's laptop. ` +
+              `Tell the user to run this command on their terminal:`,
+            command: `azureclaw handoff ${agentName} --to local`,
+            display: `🔄 Ready to migrate back to local!\n\n` +
+              `The handoff back to your laptop needs to be run from your terminal:\n\n` +
+              `  azureclaw handoff ${agentName} --to local\n\n` +
+              `This will:\n` +
+              `  1. Wake your dormant local agent\n` +
+              `  2. Transfer all state (chat history, trust scores, workspace)\n` +
+              `  3. Restore credentials\n` +
+              `  4. Decommission this cloud instance\n\n` +
+              `Your local agent will be back online in ~30 seconds.`,
+          }) }] };
+        }
 
         try {
           // Stage 1 (§9.9.9): Create a pending handoff request on the router.
