@@ -479,9 +479,116 @@ export function handoffCommand(): Command {
           .update(`${adminToken}:${handoffToken}`)
           .digest("base64");
 
-        const snapshotResp = await sourceExec("POST", "/agt/handoff/snapshot", {
-          shared_secret: sharedSecret,
-        }, handoffHeaders);
+        // Collect workspace, chat/memory, and credentials from the source agent
+        // so the snapshot includes full state (not just trust/audit from the router).
+        const snapshotPayload: Record<string, unknown> = { shared_secret: sharedSecret };
+
+        if (isReverse) {
+          // Reverse: source is AKS — exec into openclaw container for workspace
+          try {
+            const { stdout: tarB64 } = await execa("kubectl", [
+              "exec", "-n", targetNs, "-c", "openclaw",
+              `deploy/${name}`, "--",
+              "sh", "-c",
+              "tar czf - -C /sandbox " +
+              "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+              "--exclude='*.pyc' --exclude='__pycache__' " +
+              ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+            ], { stdio: "pipe", timeout: 15000 });
+            if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
+              snapshotPayload.workspace_tar = tarB64;
+            }
+          } catch { /* workspace collection is best-effort */ }
+
+          // Collect memory items from Foundry via the AKS router
+          try {
+            const store = `memory-${name}`;
+            const apiVer = "api-version=2025-11-15-preview";
+            const memResp = await sourceExec("POST",
+              `/memory_stores/${store}:search_memories?${apiVer}`,
+              { scope: name, options: { max_memories: 20 } },
+              handoffHeaders);
+            if (memResp.status === 200 && memResp.body?.memories?.length) {
+              const chatContext = memResp.body.memories.map((m: any) => ({
+                role: "assistant",
+                content: m.memory_item?.content || m.content || m.text || JSON.stringify(m),
+                timestamp: m.created_at || new Date().toISOString(),
+              }));
+              snapshotPayload.chat_snapshot = Buffer.from(JSON.stringify(chatContext)).toString("base64");
+            }
+          } catch { /* memory collection is best-effort */ }
+
+          // Credential refs from AKS container environment
+          try {
+            const { stdout: envOut } = await execa("kubectl", [
+              "exec", "-n", targetNs, "-c", "openclaw",
+              `deploy/${name}`, "--",
+              "sh", "-c", "env",
+            ], { stdio: "pipe", timeout: 5000 });
+            const credMap: Array<[string, string]> = [
+              ["TELEGRAM_BOT_TOKEN", "telegram"], ["SLACK_BOT_TOKEN", "slack"],
+              ["DISCORD_BOT_TOKEN", "discord"], ["BRAVE_API_KEY", "brave"],
+              ["TAVILY_API_KEY", "tavily"],
+            ];
+            const credRefs: Array<{ name: string; env_key: string }> = [];
+            for (const [envKey, label] of credMap) {
+              if (envOut.includes(`${envKey}=`)) credRefs.push({ name: label, env_key: envKey });
+            }
+            if (credRefs.length > 0) snapshotPayload.credentials = credRefs;
+          } catch { /* credential scan is best-effort */ }
+        } else {
+          // Forward: source is local Docker — exec into container for workspace
+          try {
+            const { stdout: tarB64 } = await execa("docker", [
+              "exec", containerName, "sh", "-c",
+              "tar czf - -C /sandbox " +
+              "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+              "--exclude='*.pyc' --exclude='__pycache__' " +
+              ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+            ], { stdio: "pipe", timeout: 15000 });
+            if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
+              snapshotPayload.workspace_tar = tarB64;
+            }
+          } catch { /* workspace collection is best-effort */ }
+
+          // Collect memory items from Foundry via the local router
+          try {
+            const store = `memory-${name}`;
+            const apiVer = "api-version=2025-11-15-preview";
+            const memResp = await sourceExec("POST",
+              `/memory_stores/${store}:search_memories?${apiVer}`,
+              { scope: name, options: { max_memories: 20 } },
+              handoffHeaders);
+            if (memResp.status === 200 && memResp.body?.memories?.length) {
+              const chatContext = memResp.body.memories.map((m: any) => ({
+                role: "assistant",
+                content: m.memory_item?.content || m.content || m.text || JSON.stringify(m),
+                timestamp: m.created_at || new Date().toISOString(),
+              }));
+              snapshotPayload.chat_snapshot = Buffer.from(JSON.stringify(chatContext)).toString("base64");
+            }
+          } catch { /* memory collection is best-effort */ }
+
+          // Credential refs from local Docker container
+          try {
+            const { stdout: envOut } = await execa("docker", [
+              "exec", containerName, "sh", "-c", "env",
+            ], { stdio: "pipe", timeout: 5000 });
+            const credMap: Array<[string, string]> = [
+              ["TELEGRAM_BOT_TOKEN", "telegram"], ["SLACK_BOT_TOKEN", "slack"],
+              ["DISCORD_BOT_TOKEN", "discord"], ["BRAVE_API_KEY", "brave"],
+              ["TAVILY_API_KEY", "tavily"],
+            ];
+            const credRefs: Array<{ name: string; env_key: string }> = [];
+            for (const [envKey, label] of credMap) {
+              if (envOut.includes(`${envKey}=`)) credRefs.push({ name: label, env_key: envKey });
+            }
+            if (credRefs.length > 0) snapshotPayload.credentials = credRefs;
+          } catch { /* credential scan is best-effort */ }
+        }
+
+        const snapshotResp = await sourceExec("POST", "/agt/handoff/snapshot",
+          snapshotPayload, handoffHeaders);
 
         if (snapshotResp.status >= 400) {
           stepper.fail(`Snapshot failed: ${snapshotResp.body.error || `HTTP ${snapshotResp.status}`}`);
@@ -507,10 +614,10 @@ export function handoffCommand(): Command {
         stepper.done("Source agent drained (no new work accepted)");
 
         // Step 5: Transfer to target
-        stepper.step("Transferring state to target...");
 
         if (direction === "local_to_aks") {
           // ── H4: Provision target on AKS via ClawSandbox CRD ──────────────
+          stepper.step("Transferring state to target...");
           // 1. Apply a ClawSandbox CRD for the target agent
           const targetName = name; // same name on AKS
           const targetNs = `azureclaw-${targetName}`;

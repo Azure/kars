@@ -3173,7 +3173,7 @@ async fn handoff_snapshot(
     };
     state
         .handoff_session
-        .record_snapshot(compressed.len(), items)
+        .record_snapshot(compressed.len(), items.clone())
         .await;
 
     // Audit log
@@ -3198,8 +3198,17 @@ async fn handoff_snapshot(
         Json(serde_json::json!({
             "blob": blob,
             "verification_hash": verification_hash,
+            "snapshot_size_bytes": compressed.len(),
             "size_bytes": compressed.len(),
             "phase": "snapshotting",
+            "items": {
+                "chat_messages": items.chat_messages,
+                "trust_scores": items.trust_scores,
+                "audit_entries": items.audit_entries,
+                "sub_agents": items.sub_agents,
+                "workspace_files": items.workspace_files,
+                "credentials": items.credentials,
+            },
         })),
     )
         .into_response()
