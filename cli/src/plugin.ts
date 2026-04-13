@@ -2023,6 +2023,14 @@ async function _runHandoffOrchestration(
   }
   if (credRefs.length > 0) snapshotPayload.credentials = credRefs;
 
+  // Collect sub-agent snapshots (best-effort)
+  try {
+    const subResp = await _routerCall("GET", "/agt/handoff/sub-agents", undefined, 10000, authH);
+    if (subResp?.count > 0) {
+      snapshotPayload.sub_agent_snapshots = subResp.sub_agent_snapshots;
+    }
+  } catch { /* sub-agent collection is best-effort */ }
+
   const snapshotResp = await _routerCallStrict("POST", "/agt/handoff/snapshot",
     snapshotPayload, 60000, handoffH);
 

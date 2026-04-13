@@ -587,6 +587,14 @@ export function handoffCommand(): Command {
           } catch { /* credential scan is best-effort */ }
         }
 
+        // Collect sub-agent snapshots (best-effort — works in both K8s and Docker)
+        try {
+          const subResp = await sourceExec("GET", "/agt/handoff/sub-agents", undefined, authHeaders);
+          if (subResp.status === 200 && subResp.body?.count > 0) {
+            snapshotPayload.sub_agent_snapshots = subResp.body.sub_agent_snapshots;
+          }
+        } catch { /* sub-agent collection is best-effort */ }
+
         const snapshotResp = await sourceExec("POST", "/agt/handoff/snapshot",
           snapshotPayload, handoffHeaders);
 

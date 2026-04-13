@@ -2896,6 +2896,7 @@ pub fn handoff_protected_routes() -> Router<AppState> {
 pub fn handoff_status_routes() -> Router<AppState> {
     Router::new()
         .route("/agt/handoff/status", get(handoff_status))
+        .route("/agt/handoff/sub-agents", get(handoff_sub_agents))
         // Two-stage confirmation gate (§9.9.9) — localhost allowed (agent tool calls these)
         .route("/agt/handoff/pending", post(handoff_pending))
         .route("/agt/handoff/confirm", post(handoff_confirm))
@@ -3439,6 +3440,58 @@ async fn handoff_restore(
         )
         .await;
 
+    // ── Re-spawn sub-agents from snapshot ──────────────────────────────────
+    let mut sub_agent_results: Vec<serde_json::Value> = Vec::new();
+    if !restored_state.sub_agent_snapshots.is_empty() {
+        tracing::info!(
+            count = restored_state.sub_agent_snapshots.len(),
+            "Re-spawning sub-agents from handoff snapshot"
+        );
+
+        for sub_snap in &restored_state.sub_agent_snapshots {
+            let mut spawn_req = sub_snap.spawn_config.clone();
+            // Clear handoff meta — this is a fresh spawn, not a handoff target
+            spawn_req.handoff = None;
+
+            match spawn::create_sandbox(&state.sandbox_name, &spawn_req).await {
+                Ok(resp) => {
+                    tracing::info!(
+                        sub_agent = %sub_snap.name,
+                        namespace = ?resp.namespace,
+                        "Re-spawned sub-agent from handoff snapshot"
+                    );
+                    state.governance.audit.log(
+                        &state.sandbox_name,
+                        "handoff:restore:sub-agent",
+                        &format!(
+                            "respawned={} original_amid={}",
+                            sub_snap.name, sub_snap.original_amid
+                        ),
+                    );
+                    sub_agent_results.push(serde_json::json!({
+                        "name": sub_snap.name,
+                        "original_amid": sub_snap.original_amid,
+                        "status": "spawned",
+                        "namespace": resp.namespace,
+                    }));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sub_agent = %sub_snap.name,
+                        error = %e,
+                        "Failed to re-spawn sub-agent — may already exist or quota exceeded"
+                    );
+                    sub_agent_results.push(serde_json::json!({
+                        "name": sub_snap.name,
+                        "original_amid": sub_snap.original_amid,
+                        "status": "failed",
+                        "error": e,
+                    }));
+                }
+            }
+        }
+    }
+
     // ── Return restored data to the plugin for hydration ─────────────────
     // In AKS, the router and openclaw are separate containers — they don't
     // share a filesystem. Return workspace tar and chat snapshot in the
@@ -3497,6 +3550,7 @@ async fn handoff_restore(
             "trust_scores_capped_at": 750,
             "audit_entries_count": restored_state.audit_entries.len(),
             "sub_agent_snapshots": restored_state.sub_agent_snapshots.len(),
+            "sub_agent_results": sub_agent_results,
             "credentials": restored_state.credentials.len(),
             "phase": "restoring",
             // Payload for plugin-side hydration (workspace + chat)
@@ -4181,6 +4235,42 @@ async fn handoff_confirm(
             }
 
             (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+/// GET /agt/handoff/sub-agents — collect sub-agent snapshots for handoff.
+///
+/// Lists active sub-agents spawned by this agent and reconstructs their
+/// SpawnRequest config from the CRD spec. Used by the CLI to include
+/// sub-agent state in the handoff snapshot.
+async fn handoff_sub_agents(State(state): State<AppState>) -> impl IntoResponse {
+    match spawn::collect_sub_agent_snapshots(&state.sandbox_name).await {
+        Ok(snapshots) => {
+            tracing::info!(
+                count = snapshots.len(),
+                "Collected sub-agent snapshots for handoff"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "sub_agent_snapshots": snapshots,
+                    "count": snapshots.len(),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("Failed to collect sub-agent snapshots: {}", e);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "sub_agent_snapshots": [],
+                    "count": 0,
+                    "warning": format!("Could not collect sub-agents: {}", e),
+                })),
+            )
+                .into_response()
         }
     }
 }

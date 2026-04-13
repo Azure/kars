@@ -122,7 +122,7 @@ pub struct TokenUsage {
 }
 
 /// Sub-agent state for re-spawn on the target host.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentSnapshot {
     pub name: String,
     pub original_amid: String,
