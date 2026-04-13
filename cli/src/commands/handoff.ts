@@ -1011,6 +1011,9 @@ export function handoffCommand(): Command {
           console.log();
         }
 
+        stepper.done("Done");
+        aksPortForwardStop();
+
       } catch (e: any) {
         aksPortForwardStop();
         console.log(chalk.red(`\n  Handoff failed: ${e.message}\n`));
