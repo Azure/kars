@@ -2190,11 +2190,15 @@ async function _runHandoffOrchestration(
   _hp("transfer", "📤 Encrypted state sent — waiting for target to verify...");
 
   // ── Step 5: Wait for verification ──
+  // The target may take time to fully initialize its plugin message handler
+  // after registering on the mesh. Re-send the blob every 30s in case the
+  // first send arrived before the handler was ready.
   _hp("verify", "🔍 Waiting for verification from cloud target...");
   const verifyStart = Date.now();
   let verifyResult: any = null;
+  let lastResendAt = Date.now();
 
-  while (Date.now() - verifyStart < 60_000) {
+  while (Date.now() - verifyStart < 180_000) {
     for (const checkType of ["handoff_verification"] as const) {
       const idx = agtInbox.findIndex(m => {
         if (m.from_amid !== targetAmid || m.from_agent !== targetName) return false;
@@ -2214,15 +2218,35 @@ async function _runHandoffOrchestration(
     }
     if (verifyResult) break;
     const elapsed = Math.round((Date.now() - verifyStart) / 1000);
-    if (elapsed % 15 === 0 && elapsed > 0) {
+
+    // Re-send the blob every 30s — the target's message handler may not
+    // have been wired up when we first sent it
+    if (Date.now() - lastResendAt >= 30_000) {
+      lastResendAt = Date.now();
+      _hp("verify", `🔁 Re-sending state to target... (${elapsed}s)`);
+      try {
+        await agtMeshClient.send(targetAmid, {
+          type: "handoff_transfer",
+          blob: snapshotResp.blob,
+          shared_secret: sharedSecret,
+          verification_hash: verificationHash,
+          from_agent: myName,
+          predecessor_amid: myAmid,
+          direction,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (resendErr: any) {
+        _log.warn(`Handoff re-send failed: ${resendErr.message}`);
+      }
+    } else if (elapsed % 15 === 0 && elapsed > 0) {
       _hp("verify", `🔍 Target restoring state... (${elapsed}s)`);
     }
     await new Promise(r => setTimeout(r, 500));
   }
 
   if (!verifyResult) {
-    _hp("verify", "⚠️ Verification timeout — target may still be restoring");
-    if (handoffProgress) { handoffProgress.status = "partial"; handoffProgress.error = "Verification timeout (60s)"; }
+    _hp("verify", "⚠️ Verification timeout (180s) — target may still be restoring");
+    if (handoffProgress) { handoffProgress.status = "partial"; handoffProgress.error = "Verification timeout (180s)"; }
     return;
   }
 
