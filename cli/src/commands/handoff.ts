@@ -691,11 +691,30 @@ export function handoffCommand(): Command {
           }
 
           // Step 5c: Send the snapshot (already captured at step 3) to local Docker
+          // Use stdin (@-) instead of -d arg to avoid shell argument length limits
           stepper.step("Restoring state to local agent...");
-          const localRestoreResp = await routerExec("POST", "/agt/handoff/restore", {
+          const restorePayload = JSON.stringify({
             shared_secret: sharedSecret,
             blob: snapshotResp.body.blob,
           });
+          const curlRestore = await execa("docker", [
+            "exec", "-i", containerName,
+            "curl", "-sf", "--max-time", "60",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", "@-",
+            "-w", "\n%{http_code}",
+            "http://127.0.0.1:8443/agt/handoff/restore",
+          ], { input: restorePayload, stdio: ["pipe", "pipe", "pipe"] });
+          const restoreLines = curlRestore.stdout.trimEnd().split("\n");
+          const restoreStatus = parseInt(restoreLines[restoreLines.length - 1], 10);
+          const restoreBodyRaw = restoreLines.slice(0, -1).join("\n");
+          let localRestoreResp: { status: number; body: any };
+          try {
+            localRestoreResp = { status: restoreStatus, body: JSON.parse(restoreBodyRaw) };
+          } catch {
+            localRestoreResp = { status: restoreStatus, body: { raw: restoreBodyRaw } };
+          }
 
           if (localRestoreResp.status >= 400) {
             stepper.fail(`Local restore failed: ${localRestoreResp.body.error || `HTTP ${localRestoreResp.status}`}`);
