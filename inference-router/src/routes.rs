@@ -2,6 +2,7 @@
 
 use axum::extract::Path;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::DefaultBodyLimit;
 use axum::{
     Json, Router,
     body::Body,
@@ -2878,6 +2879,7 @@ pub fn handoff_init_routes() -> Router<AppState> {
 
 /// Handoff mutation routes — require BOTH admin token AND handoff token.
 /// NO localhost bypass (critical for prompt injection protection).
+/// Body limit raised to 50 MB to accommodate encrypted state snapshots.
 pub fn handoff_protected_routes() -> Router<AppState> {
     Router::new()
         .route("/agt/handoff/snapshot", post(handoff_snapshot))
@@ -2886,6 +2888,7 @@ pub fn handoff_protected_routes() -> Router<AppState> {
         .route("/agt/handoff/drain", post(handoff_drain))
         .route("/agt/handoff/decommission", post(handoff_decommission))
         .route("/agt/handoff/abort", post(handoff_abort))
+        .layer(DefaultBodyLimit::max(super::handoff::MAX_BLOB_SIZE_BYTES))
 }
 
 /// Handoff status route — admin token required, localhost allowed (read-only).
