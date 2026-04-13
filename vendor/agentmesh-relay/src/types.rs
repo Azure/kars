@@ -210,7 +210,7 @@ pub struct RelayConfig {
 impl Default for RelayConfig {
     fn default() -> Self {
         Self {
-            max_message_size: 65536, // 64KB
+            max_message_size: 1_048_576, // 1MB — handoff snapshots can be large
             max_pending_messages: 100,
             message_ttl_hours: 72,
             rate_limit_messages_per_minute: 100,
