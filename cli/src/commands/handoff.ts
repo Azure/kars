@@ -690,22 +690,55 @@ export function handoffCommand(): Command {
             stepper.done("No cloud credentials to migrate (using local secrets)");
           }
 
-          // Step 5c: Send the snapshot (already captured at step 3) to local Docker
+          // Step 5c: Initialize handoff session on local router (needed for auth)
+          stepper.step("Preparing local agent for restore...");
+          const localAdminToken = await getAdminToken();
+          if (!localAdminToken) {
+            stepper.fail("Local admin token not found — cannot authenticate restore");
+            await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            aksPortForwardStop();
+            process.exit(1);
+          }
+          const localAuthHeaders = { Authorization: `Bearer ${localAdminToken}` };
+          const localInitResp = await routerExec("POST", "/agt/handoff/init", {
+            direction: "aks_to_local",
+            ttl_seconds: 300,
+          }, localAuthHeaders);
+          if (localInitResp.status >= 400) {
+            stepper.fail(`Local init failed: ${localInitResp.body.error || `HTTP ${localInitResp.status}`}`);
+            await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
+            aksPortForwardStop();
+            process.exit(1);
+          }
+          const localHandoffToken = localInitResp.body.handoff_token;
+          const localHandoffHeaders = {
+            ...localAuthHeaders,
+            "X-Handoff-Token": localHandoffToken,
+          };
+          stepper.done("Local agent ready for restore");
+
+          // Step 5d: Send the snapshot (already captured at step 3) to local Docker
           // Use stdin (@-) instead of -d arg to avoid shell argument length limits
           stepper.step("Restoring state to local agent...");
           const restorePayload = JSON.stringify({
             shared_secret: sharedSecret,
             blob: snapshotResp.body.blob,
           });
-          const curlRestore = await execa("docker", [
+          const curlRestoreArgs = [
             "exec", "-i", containerName,
             "curl", "-sf", "--max-time", "60",
             "-X", "POST",
             "-H", "Content-Type: application/json",
+            "-H", `Authorization: Bearer ${localAdminToken}`,
+            "-H", `X-Handoff-Token: ${localHandoffToken}`,
             "-d", "@-",
             "-w", "\n%{http_code}",
             "http://127.0.0.1:8443/agt/handoff/restore",
-          ], { input: restorePayload, stdio: ["pipe", "pipe", "pipe"] });
+          ];
+          const curlRestore = await execa("docker", curlRestoreArgs, {
+            input: restorePayload,
+            stdio: ["pipe", "pipe", "pipe"],
+          });
           const restoreLines = curlRestore.stdout.trimEnd().split("\n");
           const restoreStatus = parseInt(restoreLines[restoreLines.length - 1], 10);
           const restoreBodyRaw = restoreLines.slice(0, -1).join("\n");
