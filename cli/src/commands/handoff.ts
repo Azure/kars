@@ -619,7 +619,7 @@ export function handoffCommand(): Command {
 
           try {
             // Get the encrypted snapshot blob from the source
-            const blobResp = await routerExec("GET", "/agt/handoff/snapshot", undefined, handoffHeaders);
+            const blobResp = await routerExec("POST", "/agt/handoff/snapshot", {}, handoffHeaders);
             if (blobResp.status >= 400) {
               stepper.fail(`Failed to retrieve snapshot: ${blobResp.body.error || `HTTP ${blobResp.status}`}`);
               await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
@@ -692,7 +692,7 @@ export function handoffCommand(): Command {
 
           // Step 5c: Get encrypted snapshot blob from AKS source
           stepper.step("Retrieving state from cloud agent...");
-          const blobResp = await sourceExec("GET", "/agt/handoff/snapshot", undefined, handoffHeaders);
+          const blobResp = await sourceExec("POST", "/agt/handoff/snapshot", {}, handoffHeaders);
           if (blobResp.status >= 400) {
             stepper.fail(`Failed to retrieve snapshot: ${blobResp.body.error || `HTTP ${blobResp.status}`}`);
             await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
