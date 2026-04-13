@@ -180,26 +180,36 @@ export function handoffCommand(): Command {
 
       // ── Helper: get admin token from AKS pod ───────────────────
       async function getAksAdminToken(): Promise<string | undefined> {
+        const { execa: ex } = await import("execa");
+        // On AKS, the controller mounts the admin token at /etc/azureclaw/secrets/admin-token
         try {
-          const { execa: ex } = await import("execa");
           const { stdout } = await ex("kubectl", [
             "exec", "-n", targetNs,
-            `deploy/${name}`, "-c", "openclaw", "--",
-            "printenv", "ADMIN_TOKEN",
+            `deploy/${name}`, "-c", "inference-router", "--",
+            "cat", "/etc/azureclaw/secrets/admin-token",
           ], { stdio: "pipe", reject: false });
           if (stdout.trim()) return stdout.trim();
         } catch { /* fallback */ }
+        // Fallback: try the openclaw container (same volume mount)
         try {
-          const { execa: ex } = await import("execa");
           const { stdout } = await ex("kubectl", [
             "exec", "-n", targetNs,
             `deploy/${name}`, "-c", "openclaw", "--",
-            "cat", "/tmp/.agt-admin-token",
+            "cat", "/etc/azureclaw/secrets/admin-token",
           ], { stdio: "pipe", reject: false });
-          return stdout.trim() || undefined;
-        } catch {
-          return undefined;
-        }
+          if (stdout.trim()) return stdout.trim();
+        } catch { /* fallback */ }
+        // Fallback: read from K8s secret directly
+        try {
+          const { stdout } = await ex("kubectl", [
+            "get", "secret", "router-admin-token", "-n", targetNs,
+            "-o", "jsonpath={.data.token}",
+          ], { stdio: "pipe", reject: false });
+          if (stdout.trim()) {
+            return Buffer.from(stdout.trim(), "base64").toString("utf8").trim();
+          }
+        } catch { /* no secret */ }
+        return undefined;
       }
 
       // ── Helper: wake dormant local Docker container ─────────────
