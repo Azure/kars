@@ -3448,10 +3448,36 @@ async fn handoff_restore(
             "Re-spawning sub-agents from handoff snapshot"
         );
 
+        // Look up the new parent's AMID for trusted_peers remapping.
+        // Sub-agents had the old parent AMID in their trusted_peers; we need
+        // to replace it with the new parent's AMID so they trust us.
+        let new_parent_amid = if let Ok(reg_url) = std::env::var("AGT_REGISTRY_URL") {
+            lookup_parent_amid(&state.client, &reg_url, &state.sandbox_name).await
+        } else {
+            None
+        };
+        let old_parent_amid = &restored_state.predecessor_amid;
+
         for sub_snap in &restored_state.sub_agent_snapshots {
             let mut spawn_req = sub_snap.spawn_config.clone();
             // Clear handoff meta — this is a fresh spawn, not a handoff target
             spawn_req.handoff = None;
+
+            // Remap trusted_peers: replace old parent AMID with new one
+            if let Some(new_amid) = &new_parent_amid {
+                if let Some(peers) = &spawn_req.trusted_peers {
+                    if !old_parent_amid.is_empty() && peers.contains(old_parent_amid) {
+                        spawn_req.trusted_peers =
+                            Some(peers.replace(old_parent_amid, new_amid));
+                        tracing::info!(
+                            sub_agent = %sub_snap.name,
+                            old = %old_parent_amid,
+                            new = %new_amid,
+                            "Remapped parent AMID in sub-agent trusted_peers"
+                        );
+                    }
+                }
+            }
 
             match spawn::create_sandbox(&state.sandbox_name, &spawn_req).await {
                 Ok(resp) => {

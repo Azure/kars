@@ -1499,6 +1499,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 direction: restoreResp.direction || "local_to_aks",
                 trust_scores_count: restoreResp.trust_scores_count || 0,
                 audit_entries_count: restoreResp.audit_entries_count || 0,
+                sub_agents_respawned: (restoreResp.sub_agent_results || [])
+                  .filter((r: any) => r.status === "spawned").length,
                 restored_at: restoreResp.restored_at || new Date().toISOString(),
               };
 

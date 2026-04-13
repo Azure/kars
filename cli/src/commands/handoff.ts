@@ -591,7 +591,43 @@ export function handoffCommand(): Command {
         try {
           const subResp = await sourceExec("GET", "/agt/handoff/sub-agents", undefined, authHeaders);
           if (subResp.status === 200 && subResp.body?.count > 0) {
-            snapshotPayload.sub_agent_snapshots = subResp.body.sub_agent_snapshots;
+            const subSnaps = subResp.body.sub_agent_snapshots as Array<{
+              name: string; workspace_tar: string; [k: string]: unknown;
+            }>;
+
+            // Enrich each sub-agent snapshot with workspace tar from its container
+            for (const snap of subSnaps) {
+              try {
+                const subNs = `azureclaw-${snap.name}`;
+                const tarCmd = "tar czf - -C /sandbox " +
+                  "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+                  "--exclude='*.pyc' --exclude='__pycache__' " +
+                  ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0";
+
+                let tarB64 = "";
+                if (isReverse) {
+                  // Source is AKS — kubectl exec into sub-agent's openclaw container
+                  const { stdout } = await execa("kubectl", [
+                    "exec", "-n", subNs, "-c", "openclaw",
+                    `deploy/${snap.name}`, "--", "sh", "-c", tarCmd,
+                  ], { stdio: "pipe", timeout: 10000 });
+                  tarB64 = stdout;
+                } else {
+                  // Source is local Docker — docker exec into sub-agent container
+                  const containerName = `azureclaw-${snap.name}`;
+                  const { stdout } = await execa("docker", [
+                    "exec", containerName, "sh", "-c", tarCmd,
+                  ], { stdio: "pipe", timeout: 10000 });
+                  tarB64 = stdout;
+                }
+
+                if (tarB64.length > 0 && tarB64.length < 2 * 1024 * 1024) {
+                  snap.workspace_tar = tarB64;
+                }
+              } catch { /* sub-agent workspace collection is best-effort */ }
+            }
+
+            snapshotPayload.sub_agent_snapshots = subSnaps;
           }
         } catch { /* sub-agent collection is best-effort */ }
 
