@@ -757,6 +757,10 @@ export function handoffCommand(): Command {
           }
 
           stepper.done(`State restored to local (${(snapshotSize / 1024).toFixed(1)} KB)`);
+
+          // Mark local handoff session as complete so the router is ready for future handoffs
+          await routerExec("POST", "/agt/handoff/verify", {}, localHandoffHeaders).catch(() => {});
+          await routerExec("POST", "/agt/handoff/decommission", {}, localHandoffHeaders).catch(() => {});
         }
 
         // Step 6: Succession (registry update)

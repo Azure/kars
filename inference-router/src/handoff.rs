@@ -705,7 +705,9 @@ impl HandoffSession {
         self.inner.write().await.phase = HandoffPhase::Complete;
     }
 
-    /// Can a new handoff be started? Only from Idle, Complete, Failed, or Aborted.
+    /// Can a new handoff be started? From terminal or stale states.
+    /// Restoring/Verifying/Decommissioning are included because they indicate
+    /// a previous handoff that completed its data transfer but wasn't finalized.
     pub async fn can_start(&self) -> bool {
         matches!(
             self.inner.read().await.phase,
@@ -713,6 +715,9 @@ impl HandoffSession {
                 | HandoffPhase::Complete
                 | HandoffPhase::Failed
                 | HandoffPhase::Aborted
+                | HandoffPhase::Restoring
+                | HandoffPhase::Verifying
+                | HandoffPhase::Decommissioning
         )
     }
 
