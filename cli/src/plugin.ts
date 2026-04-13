@@ -2264,8 +2264,8 @@ async function _runHandoffOrchestration(
   if (myAmid && successorAmid) {
     _hp("succession", "🔗 Registering identity succession...");
     try {
-      await _routerCall("POST", "/agt/registry/registry/succession", {
-        predecessor_amid: myAmid,
+      // Router signs with its private key and submits to registry
+      await _routerCall("POST", "/agt/handoff/succession", {
         successor_amid: successorAmid,
         reason: `handoff:${direction}`,
       }, 15000, authH);

@@ -873,28 +873,25 @@ export function handoffCommand(): Command {
         // Step 6: Succession (registry update)
         stepper.step("Registering identity succession...");
 
-        // Read AMIDs from source and target
+        // The source router signs the succession message with its private key
+        // and submits directly to the registry. We just need the successor AMID.
         const sourceStatus = await sourceExec("GET", "/agt/status", undefined, authHeaders);
         const predecessorAmid = sourceStatus.body?.agent_did?.replace("did:agentmesh:", "") || "";
 
         if (predecessorAmid) {
-          // Read successor AMID from the target's registry entry
           try {
+            // Find successor AMID from registry (different from source)
             const regSearchResp = await sourceExec("GET",
               `/agt/registry/registry/search?capability=${encodeURIComponent(name)}`,
               undefined, authHeaders);
-            const regResult = regSearchResp.body;
-
-            // Find the target agent's AMID (different from the source AMID)
-            const candidates = regResult?.results?.filter(
+            const candidates = regSearchResp.body?.results?.filter(
               (a: any) => a.amid !== predecessorAmid && (a.display_name === name || a.capabilities?.includes(name))
             ) || [];
 
             if (candidates.length > 0) {
               const successorAmid = candidates[0].amid;
-              // POST succession to the global registry via the source's router
-              const successionResp = await sourceExec("POST", "/agt/registry/registry/succession", {
-                predecessor_amid: predecessorAmid,
+              // Let the source router sign and submit the succession
+              const successionResp = await sourceExec("POST", "/agt/handoff/succession", {
                 successor_amid: successorAmid,
                 reason: `handoff:${direction}`,
               }, authHeaders);
@@ -902,7 +899,7 @@ export function handoffCommand(): Command {
               if (successionResp.status < 400) {
                 stepper.done(`Identity succession: ${predecessorAmid.slice(0, 12)}... → ${successorAmid.slice(0, 12)}...`);
               } else {
-                stepper.done(`Identity succession pending (${successionResp.body.error || "registry returned error"})`);
+                stepper.done(`Identity succession pending (${successionResp.body?.error || "registry returned error"})`);
               }
             } else {
               stepper.done("Identity succession pending (target AMID not yet registered)");
