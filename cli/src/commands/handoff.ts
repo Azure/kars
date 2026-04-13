@@ -690,22 +690,11 @@ export function handoffCommand(): Command {
             stepper.done("No cloud credentials to migrate (using local secrets)");
           }
 
-          // Step 5c: Get encrypted snapshot blob from AKS source
-          stepper.step("Retrieving state from cloud agent...");
-          const blobResp = await sourceExec("POST", "/agt/handoff/snapshot", {}, handoffHeaders);
-          if (blobResp.status >= 400) {
-            stepper.fail(`Failed to retrieve snapshot: ${blobResp.body.error || `HTTP ${blobResp.status}`}`);
-            await sourceExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
-            aksPortForwardStop();
-            process.exit(1);
-          }
-          stepper.done("State snapshot retrieved from cloud");
-
-          // Step 5d: Send restore to local Docker container
+          // Step 5c: Send the snapshot (already captured at step 3) to local Docker
           stepper.step("Restoring state to local agent...");
           const localRestoreResp = await routerExec("POST", "/agt/handoff/restore", {
             shared_secret: sharedSecret,
-            blob: blobResp.body.blob,
+            blob: snapshotResp.body.blob,
           });
 
           if (localRestoreResp.status >= 400) {
