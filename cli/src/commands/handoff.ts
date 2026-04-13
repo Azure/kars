@@ -392,7 +392,7 @@ export function handoffCommand(): Command {
 
       banner("AzureClaw · Agent Handoff", directionLabel);
 
-      const stepper = new Stepper({ totalSteps: direction === "aks_to_local" ? 10 : 7 });
+      const stepper = new Stepper({ totalSteps: direction === "aks_to_local" ? 13 : 7 });
 
       try {
         // Direction-aware source router: forward talks to Docker, reverse to AKS
@@ -842,6 +842,39 @@ export function handoffCommand(): Command {
         console.log();
         console.log(chalk.green("  ✓ Handoff complete!"));
         console.log();
+
+        // Send Telegram notification (best-effort)
+        try {
+          let tgToken: string | undefined;
+          let tgChatId: string | undefined;
+          if (direction === "aks_to_local") {
+            // Credentials were just injected into the Docker container
+            const { stdout: t } = await execa("docker", [
+              "exec", containerName, "printenv", "TELEGRAM_BOT_TOKEN",
+            ], { stdio: "pipe", reject: false });
+            const { stdout: c } = await execa("docker", [
+              "exec", containerName, "printenv", "TELEGRAM_ALLOW_FROM",
+            ], { stdio: "pipe", reject: false });
+            tgToken = t.trim() || undefined;
+            tgChatId = c.trim() || undefined;
+          } else {
+            tgToken = process.env.TELEGRAM_BOT_TOKEN;
+            tgChatId = process.env.TELEGRAM_ALLOW_FROM;
+          }
+          if (tgToken && tgChatId) {
+            const label = direction === "local_to_aks"
+              ? "☁️ I've moved to the cloud. Same me, new home — Azure AKS."
+              : "🏠 I'm back on your local machine. Cloud instance decommissioned.";
+            await fetch(
+              `https://api.telegram.org/bot${tgToken}/sendMessage`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ chat_id: tgChatId, text: label }),
+              },
+            );
+          }
+        } catch { /* best-effort — don't fail handoff for notification */ }
 
         if (direction === "local_to_aks") {
           console.log(chalk.dim("  Next steps:"));
