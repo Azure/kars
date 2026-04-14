@@ -933,157 +933,208 @@ Full roundtrip handoff: local Docker ↔ AKS cloud, including sub-agent lifecycl
 
 ```mermaid
 graph LR
-    subgraph local["Local Docker (Home)"]
-        LP["Parent Agent<br/>(permanent)"]
-        LS1["Sub-Agent 1<br/>(ephemeral)"]
-        LS2["Sub-Agent 2<br/>(ephemeral)"]
+    subgraph local["Local Docker (Home Base)"]
+        LP["🏠 Parent Agent<br/>permanent — goes dormant,<br/>never deleted"]
+        LS1["Sub-Agent 1<br/>ephemeral"]
+        LS2["Sub-Agent 2<br/>ephemeral"]
     end
 
     subgraph cloud["AKS Cloud (Ephemeral)"]
-        CP["Parent Agent<br/>(created by handoff)"]
-        CS1["Sub-Agent 1<br/>(re-spawned)"]
-        CS2["Sub-Agent 2<br/>(re-spawned)"]
+        CP["☁️ Parent Agent<br/>created by forward handoff,<br/>CRD deleted on reverse"]
+        CS1["Sub-Agent 1<br/>re-spawned from snapshot"]
+        CS2["Sub-Agent 2<br/>re-spawned from snapshot"]
     end
 
-    LP -->|"forward handoff<br/>snapshot + spawn"| CP
+    LP -->|"forward: snapshot + spawn"| CP
     LS1 -.->|"destroyed"| CS1
     LS2 -.->|"destroyed"| CS2
-    CP -->|"reverse handoff<br/>snapshot + wake"| LP
+    CP -->|"reverse: snapshot + wake"| LP
     CS1 -.->|"CRD deleted"| LS1
     CS2 -.->|"CRD deleted"| LS2
-
-    style LP fill:#2d5a2d,stroke:#4a4
-    style CP fill:#2d2d5a,stroke:#44a
-    style LS1 fill:#5a5a2d,stroke:#aa4
-    style LS2 fill:#5a5a2d,stroke:#aa4
-    style CS1 fill:#5a2d5a,stroke:#a4a
-    style CS2 fill:#5a2d5a,stroke:#a4a
 ```
 
 **Key principle:** Sub-agents are never migrated — they are destroyed and re-spawned. Only the parent's snapshot (which includes sub-agent definitions and workspace tars) crosses the boundary.
 
 ### 12.2 Forward Handoff: Local → Cloud (with Sub-Agents)
 
+CLI-driven path (`azureclaw handoff <name> --to cloud`). 7 stepper steps.
+
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CLI as 🖥️ CLI / Plugin
-    participant Router as 🛡️ Source Router
-    participant Docker as 🐳 Docker Sub-Agents
+    participant CLI as 🖥️ CLI (handoff.ts)
+    participant SrcR as 🛡️ Source Router<br/>(Docker)
+    participant Sub as 🐳 Docker Sub-Agents
     participant K8s as ☸️ K8s API
     participant Ctrl as 🎛️ Controller
-    participant Relay as 📡 Relay
+    participant TgtR as 🛡️ Target Router<br/>(AKS)
+    participant Plugin as 🔌 Target Plugin<br/>(AKS)
     participant Reg as 📋 Registry
-    participant CP as ☁️ Cloud Parent
-    participant CS as ☁️ Cloud Sub-Agents
+    participant Relay as 📡 Relay
 
-    Note over CLI,CS: ──── Phase 1: Snapshot with Sub-Agent State ────
+    Note over CLI,Relay: Step 1: Verify source agent
 
-    CLI->>Router: GET /agt/handoff/sub-agents
-    Router-->>CLI: [{name, capabilities, amid}]
+    CLI->>SrcR: GET /agt/handoff/status
+    SrcR-->>CLI: handoff_available=true, registry_mode=global
 
-    par Interrupt all sub-agents
-        CLI->>Docker: write .handoff-interrupt to each workspace
+    Note over CLI,Relay: Step 2: Initialize handoff session
+
+    CLI->>SrcR: POST /agt/handoff/init {direction: local_to_aks}
+    SrcR-->>CLI: {handoff_token, token_hash}
+
+    Note over CLI,Relay: Step 3: Create state snapshot
+
+    CLI->>SrcR: GET /agt/handoff/sub-agents
+    SrcR-->>CLI: [{name, capabilities, amid}]
+    CLI->>Sub: write .handoff-interrupt to each workspace
+    Note right of Sub: 3s pause for agents<br/>to save checkpoints
+    CLI->>Sub: docker exec tar workspace (each sub-agent)
+    CLI->>SrcR: docker exec tar workspace (parent)
+    CLI->>SrcR: POST /memory_stores/{store}:search_memories
+    CLI->>SrcR: docker exec env (credential refs)
+    CLI->>SrcR: POST /agt/handoff/snapshot {workspace_tar, sub_agent_snapshots[], credentials}
+    SrcR-->>CLI: {blob, snapshot_size_bytes} (AES-256-GCM encrypted)
+
+    Note over CLI,Relay: Step 4: Drain active work
+
+    CLI->>SrcR: POST /agt/handoff/drain
+    SrcR-->>CLI: drained ✓
+
+    Note over CLI,Relay: Step 5: Provision target + restore
+
+    CLI->>K8s: kubectl apply ClawSandbox CRD<br/>(handoff.mode=restore, predecessor AMID)
+    Ctrl->>K8s: Reconcile → namespace, deployment, service, NetworkPolicy
+    CLI->>K8s: kubectl create secret (credentials)
+    CLI->>K8s: Wait for pod Ready (up to 120s)
+    CLI->>TgtR: kubectl port-forward → POST /agt/handoff/restore {blob, shared_secret}
+    Note right of TgtR: Decrypt blob → restore trust scores,<br/>audit entries, re-spawn sub-agents<br/>via POST /sandbox/spawn per snapshot
+
+    TgtR-->>CLI: {trust_scores_count, sub_agent_results[]}
+    TgtR->>K8s: Create sub-agent ClawSandbox CRDs
+    Ctrl->>K8s: Reconcile → sub-agent pods
+
+    Note over CLI,Relay: Plugin IIFE: async post-restore hydration
+
+    Plugin->>Plugin: Parse chat_snapshot → replay to Foundry Conversation
+    Plugin->>Plugin: Store handoff event in Foundry Memory
+    Plugin->>Plugin: Extract workspace tar to /sandbox/
+    Plugin->>Plugin: Write MEMORY.md + .handoff-state.json
+
+    Note over CLI,Relay: Plugin: Sub-agent trust + resume loop
+
+    Plugin->>Plugin: Collect original_amid from snapshots → staleAmids Set
+    Plugin->>Plugin: Clear stale entries from nameToAmid cache
+
+    loop For each sub-agent (reject stale AMIDs, 90s timeout)
+        Plugin->>Reg: GET /registry/search?capability={name}
+        Reg-->>Plugin: candidates (filter out staleAmids)
     end
-    Note right of Docker: 3s pause for agents<br/>to save checkpoints
+    Note right of Plugin: Cache NEW AMIDs in nameToAmid
 
-    par Collect sub-agent workspaces
-        CLI->>Docker: tar workspace from each container
+    loop Prekey gate (20 attempts × 3s)
+        Plugin->>Relay: ping sub-agent (verify E2E session)
     end
 
-    CLI->>Router: POST /agt/handoff/snapshot
-    Note right of Router: Snapshot includes:<br/>sub_agent_snapshots[],<br/>each with workspace_tar
-
-    Note over CLI,CS: ──── Phase 2: Spawn Cloud Parent + Restore ────
-
-    CLI->>K8s: Create parent ClawSandbox CRD
-    Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
-    CLI->>CP: POST /agt/handoff/restore {blob}
-    Note right of CP: Restore re-spawns sub-agents<br/>via POST /sandbox/spawn per snapshot
-
-    CP->>K8s: Create sub-agent ClawSandbox CRDs
-    Ctrl->>CS: Reconcile → Sub-agent pods
-
-    Note over CLI,CS: ──── Phase 3: Sub-Agent Trust + Workspace Inject ────
-
-    rect rgb(60, 60, 40)
-        Note over CP,CS: Stale AMID Filter
-        CP->>CP: Collect original_amid from snapshots
-        loop Search registry (reject stale AMIDs)
-            CP->>Reg: search by capability
-            Reg-->>CP: candidates
-            CP->>CP: Filter out original_amid matches
-        end
-        Note right of CP: Wait until NEW AMIDs appear<br/>(old entries age out)
+    loop Workspace inject (3 attempts × 20s ack wait)
+        Plugin->>Relay: mesh_send(workspace_inject, tar)
+        Relay->>Sub: deliver workspace tar (E2E encrypted)
+        Sub->>Sub: Extract tar + promote incoming/ + write HANDOFF_FILES.md
+        Sub->>Relay: mesh_send(workspace_inject_ack, {file_count})
+        Relay->>Plugin: deliver ack ✓
     end
 
-    rect rgb(40, 60, 40)
-        Note over CP,CS: Prekey Gate + Workspace Inject
-        loop Wait for E2E session (20 × 3s)
-            CP->>Relay: ping sub-agent
-        end
-        CP->>Relay: mesh_send(workspace_inject, tar)
-        Relay->>CS: deliver workspace tar
-        CS->>CS: Extract tar + promote incoming/<br/>+ write HANDOFF_FILES.md
-        CS->>Relay: mesh_send(workspace_inject_ack)
-        Relay->>CP: deliver ack ✓
-    end
+    Plugin->>Relay: mesh_send(handoff:resume, {task_context, checkpoint})
+    Relay->>Sub: deliver resume signal
+    Sub->>Sub: Resume interrupted task (processTaskWithTools)
 
-    CP->>Relay: mesh_send(handoff:resume, task_context)
-    Relay->>CS: deliver resume signal
-    CS->>CS: Resume interrupted task
+    Note over CLI,Relay: Step 6: Identity succession
 
-    Note over CLI,CS: ──── Phase 4: Local Cleanup ────
-    CLI->>Docker: Stop + remove sub-agent containers
-    CLI->>Router: POST /agt/handoff/decommission
-    Note right of Router: Parent goes dormant<br/>(Docker container preserved)
+    CLI->>Reg: POST /registry/succession (Ed25519 signed)
+    Note right of Reg: Copy reputation, mark predecessor dormant
+
+    Note over CLI,Relay: Step 7: Summary + local cleanup
+
+    CLI->>SrcR: POST /agt/handoff/decommission
+    Note right of SrcR: Parent goes dormant<br/>(Docker container preserved for reverse)
+    CLI->>Sub: docker stop + rm sub-agent containers
 ```
 
 ### 12.3 Reverse Handoff: Cloud → Local (with Sub-Agents)
 
+CLI-driven path (`azureclaw handoff <name> --to local`). 13 stepper steps.
+
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CLI as 🖥️ CLI
-    participant CP as ☁️ Cloud Parent
-    participant CS as ☁️ Cloud Sub-Agents
+    participant CLI as 🖥️ CLI (handoff.ts)
+    participant SrcR as 🛡️ Source Router<br/>(AKS)
+    participant Sub as ☁️ AKS Sub-Agents
     participant K8s as ☸️ K8s API
-    participant Relay as 📡 Relay
-    participant Reg as 📋 Registry
-    participant LP as 🏠 Local Parent
     participant Docker as 🐳 Docker
+    participant TgtR as 🛡️ Target Router<br/>(Docker)
+    participant Plugin as 🔌 Target Plugin<br/>(Docker)
+    participant Reg as 📋 Registry
+    participant Relay as 📡 Relay
 
-    Note over CLI,Docker: ──── Phase 1: Snapshot Cloud State ────
+    Note over CLI,Relay: Step 1: Connect to AKS
 
-    CLI->>CP: GET /agt/handoff/sub-agents
-    CP-->>CLI: [{name, capabilities, amid}]
+    CLI->>K8s: kubectl port-forward svc/{name} 18445:8443
+    CLI->>SrcR: GET /readyz (poll until healthy)
 
-    par Interrupt + collect sub-agent workspaces
-        CLI->>CS: kubectl exec: write .handoff-interrupt
-        CLI->>CS: kubectl exec: tar workspace
-    end
+    Note over CLI,Relay: Step 2: Verify source agent
 
-    CLI->>CP: POST /agt/handoff/snapshot
-    Note right of CP: Snapshot includes<br/>sub_agent_snapshots[]
+    CLI->>SrcR: GET /agt/handoff/status (via port-forward)
+    SrcR-->>CLI: handoff_available=true
 
-    Note over CLI,Docker: ──── Phase 2: Wake Local + Restore ────
+    Note over CLI,Relay: Step 3: Initialize handoff
+
+    CLI->>SrcR: POST /agt/handoff/init {direction: aks_to_local}
+    SrcR-->>CLI: {handoff_token, token_hash}
+
+    Note over CLI,Relay: Step 4: Create state snapshot
+
+    CLI->>SrcR: GET /agt/handoff/sub-agents
+    SrcR-->>CLI: [{name, capabilities, amid}]
+    CLI->>Sub: kubectl exec: write .handoff-interrupt
+    Note right of Sub: 3s pause
+    CLI->>Sub: kubectl exec: tar workspace (each sub-agent)
+    CLI->>SrcR: kubectl exec: tar workspace (parent)
+    CLI->>SrcR: POST /memory_stores/{store}:search_memories
+    CLI->>SrcR: POST /agt/handoff/snapshot {workspace_tar, sub_agent_snapshots[]}
+    SrcR-->>CLI: {blob, snapshot_size_bytes}
+
+    Note over CLI,Relay: Step 5: Drain
+
+    CLI->>SrcR: POST /agt/handoff/drain
+
+    Note over CLI,Relay: Steps 6-9: Wake local + restore
 
     CLI->>Docker: docker start (wake dormant parent)
-    CLI->>LP: POST /agt/handoff/restore {blob}
-    Note right of LP: Restore re-spawns sub-agents<br/>as local Docker containers
+    CLI->>K8s: kubectl get secret → decode credentials
+    CLI->>Docker: docker exec: write credentials to env file
+    CLI->>TgtR: POST /agt/handoff/init {direction: aks_to_local}
+    TgtR-->>CLI: {localHandoffToken}
+    CLI->>TgtR: docker exec curl POST /agt/handoff/restore {blob, shared_secret}
+    Note right of TgtR: Decrypt blob → restore state,<br/>re-spawn sub-agents as Docker containers
+    TgtR-->>CLI: {trust_scores_count, sub_agent_results[]}
 
-    LP->>Docker: docker run sub-agent containers
-    Note over LP,Docker: Trust + workspace inject + resume<br/>(same flow as forward §12.2 Phase 3)
+    Note over CLI,Relay: Plugin IIFE: async post-restore (same as §12.2)
 
-    Note over CLI,Docker: ──── Phase 3: Cloud Cleanup ────
+    Plugin->>Plugin: Chat replay + memory + workspace extraction
+    Plugin->>Plugin: Sub-agent trust+resume loop<br/>(stale AMID filter → prekey gate →<br/>workspace inject → resume)
 
-    CLI->>CP: POST /agt/handoff/decommission
-    par Delete all cloud CRDs
-        CLI->>K8s: kubectl delete clawsandbox parent
-        CLI->>K8s: kubectl delete clawsandbox sub-agent-1
-        CLI->>K8s: kubectl delete clawsandbox sub-agent-2
-    end
-    Note right of K8s: Controller cascades:<br/>namespace, deploy, svc,<br/>networkpolicy all deleted
+    Note over CLI,Relay: Step 10: Identity succession
+
+    CLI->>Reg: POST /registry/succession (Ed25519 signed)
+
+    Note over CLI,Relay: Steps 11-13: Cloud teardown
+
+    CLI->>SrcR: POST /agt/handoff/decommission
+    CLI->>K8s: kubectl delete clawsandbox {parent}
+    CLI->>K8s: kubectl delete clawsandbox {sub-agent-1}
+    CLI->>K8s: kubectl delete clawsandbox {sub-agent-2}
+    Note right of K8s: Controller cascades: delete<br/>namespace, deploy, svc, NetworkPolicy
+    CLI->>CLI: aksPortForwardStop()
 ```
 
 ### 12.4 Stale AMID Cache Poisoning — Problem & Fix
