@@ -597,12 +597,14 @@ export function handoffCommand(): Command {
         }
 
         // Collect sub-agent snapshots (best-effort — works in both K8s and Docker)
+        const subAgentNames: string[] = [];
         try {
           const subResp = await sourceExec("GET", "/agt/handoff/sub-agents", undefined, authHeaders);
           if (subResp.status === 200 && subResp.body?.count > 0) {
             const subSnaps = subResp.body.sub_agent_snapshots as Array<{
               name: string; workspace_tar: string; [k: string]: unknown;
             }>;
+            subAgentNames.push(...subSnaps.map(s => s.name));
 
             // Phase 1: Signal all sub-agents to save in-progress work
             for (const snap of subSnaps) {
@@ -1012,28 +1014,20 @@ export function handoffCommand(): Command {
             stepper.done(`Decommission pending: ${decommErr.message}`);
           }
 
-          // Scale the deployment to 0 instead of deleting the CRD.
-          // This preserves the sandbox definition for a future forward handoff
-          // while freeing all compute resources.
-          stepper.step("Scaling down cloud sandbox...");
-          try {
-            await execa("kubectl", [
-              "scale", "deploy", name, "-n", targetNs,
-              "--replicas=0",
-            ], { stdio: "pipe" });
-            stepper.done("AKS deployment scaled to 0 (CRD preserved for re-handoff)");
-          } catch {
-            // Fallback: delete CRD if scale fails (different controller version, etc.)
+          // Delete parent + sub-agent CRDs. The controller will tear down the
+          // namespaces, deployments, and services. A future forward handoff
+          // creates everything fresh via `azureclaw up`.
+          stepper.step("Destroying cloud sandboxes...");
+          const allCrds = [name, ...subAgentNames];
+          for (const crdName of allCrds) {
             try {
               await execa("kubectl", [
-                "delete", "clawsandbox", name, "-n", "azureclaw-system",
+                "delete", "clawsandbox", crdName, "-n", "azureclaw-system",
                 "--ignore-not-found",
-              ], { stdio: "pipe" });
-              stepper.done("AKS ClawSandbox CRD removed");
-            } catch (delErr: any) {
-              stepper.done(`CRD removal pending: ${delErr.message}`);
-            }
+              ], { stdio: "pipe", timeout: 10000 });
+            } catch { /* best effort */ }
           }
+          stepper.done(`Destroyed ${allCrds.length} cloud sandbox(es)`);
 
           aksPortForwardStop();
         }
