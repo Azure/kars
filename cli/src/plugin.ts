@@ -2611,6 +2611,7 @@ async function _runHandoffOrchestration(
       const subSnaps = subResp.sub_agent_snapshots as Array<{
         name: string; workspace_tar: string; [k: string]: unknown;
       }>;
+      _hp("snapshot", `🤖 Found ${subSnaps.length} sub-agent(s) — collecting state...`);
 
       // Request workspace from each sub-agent via E2E mesh
       // Protocol: interrupt → wait for ack/save → collect workspace
@@ -2664,10 +2665,11 @@ async function _runHandoffOrchestration(
               await new Promise(r => setTimeout(r, 500));
             }
           }
-          _log.info(`✅ ${acksReceived.size}/${subAmidMap.size} sub-agent(s) acknowledged interrupt`);
+          _hp("snapshot", `🛑 ${acksReceived.size}/${subAmidMap.size} sub-agent(s) interrupted and checkpointed`);
         }
 
         // Phase 2: Collect workspaces (sub-agents have now saved progress)
+        let collectedCount = 0;
         for (const snap of subSnaps) {
           const subAmid = subAmidMap.get(snap.name);
           if (!subAmid) continue;
@@ -2702,6 +2704,7 @@ async function _runHandoffOrchestration(
                 }
                 if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
                   snap.workspace_tar = parsed.workspace_tar;
+                  collectedCount++;
                   _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
                 } else if (parsed?.error) {
                   _log.warn(`Sub-agent '${snap.name}' workspace error: ${parsed.error}`);
@@ -2714,9 +2717,13 @@ async function _runHandoffOrchestration(
             _log.warn(`Workspace collection from sub-agent '${snap.name}' failed: ${subWsErr.message}`);
           }
         }
+        if (collectedCount > 0) {
+          _hp("snapshot", `📦 Collected ${collectedCount} sub-agent workspace(s)`);
+        }
       }
 
       snapshotPayload.sub_agent_snapshots = subSnaps;
+      _hp("snapshot", `🤖 ${subSnaps.length} sub-agent snapshot(s) included in handoff payload`);
     }
   } catch { /* sub-agent collection is best-effort */ }
 
@@ -2794,7 +2801,7 @@ async function _runHandoffOrchestration(
       // Clean up orphaned CRD to avoid stale pods on AKS
       if (direction === "local_to_aks") {
         _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
-        await _routerCall("DELETE", `/sandbox/spawn/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
+        await _routerCall("DELETE", `/sandbox/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
       }
       if (handoffProgress) {
         handoffProgress.status = "partial";
@@ -2897,7 +2904,7 @@ async function _runHandoffOrchestration(
     await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
     if (direction === "local_to_aks") {
       _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
-      await _routerCall("DELETE", `/sandbox/spawn/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
+      await _routerCall("DELETE", `/sandbox/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
     }
     if (handoffProgress) { handoffProgress.status = "error"; }
     return;
@@ -2984,17 +2991,18 @@ async function _runHandoffOrchestration(
 
   // Destroy source sub-agents — they've been re-spawned on the target
   try {
-    const listResp = await _routerCall("GET", "/sandbox/spawn", undefined, 10000, authH);
-    const subList = listResp?.sub_agents || [];
+    const listResp = await _routerCall("GET", "/sandbox/list", undefined, 10000, authH);
+    const subList = listResp?.sandboxes || [];
     if (subList.length > 0) {
-      _log.info(`🧹 Destroying ${subList.length} source sub-agent(s)...`);
+      _hp("decommission", `🧹 Destroying ${subList.length} source sub-agent(s)...`);
       for (const sub of subList) {
         const subName = sub.name || sub;
         try {
-          await _routerCall("DELETE", `/sandbox/spawn/${encodeURIComponent(subName)}`, {}, 10000, authH);
+          await _routerCall("DELETE", `/sandbox/${encodeURIComponent(subName)}`, {}, 10000, authH);
           _log.info(`🧹 Destroyed source sub-agent '${subName}'`);
         } catch { /* best-effort */ }
       }
+      _hp("decommission", `🧹 ${subList.length} source sub-agent(s) cleaned up`);
     }
   } catch { /* sub-agent cleanup is best-effort */ }
 
@@ -3037,12 +3045,14 @@ async function _runHandoffOrchestration(
     handoffProgress.steps.push(`☁️  Cloud sandbox scaled to 0 (CRD preserved — re-handoff to cloud is instant).`);
   }
   handoffProgress.status = "complete";
+  const subAgentCount = (snapshotPayload.sub_agent_snapshots as unknown[] | undefined)?.length || 0;
   handoffProgress.result = {
     direction,
     snapshot_size_kb: (snapshotSize / 1024).toFixed(1),
     predecessor_amid: myAmid,
     successor_amid: successorAmid,
     verification: "passed",
+    sub_agents_transferred: subAgentCount,
   };
   handoffProgress.updated_at = new Date().toISOString();
 
