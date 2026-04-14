@@ -1371,6 +1371,48 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
 
+      // ── Handle handoff:workspace_request — parent collects sub-agent workspace ──
+      // During handoff, the parent asks each sub-agent to serialize its workspace
+      // and send it back via mesh. This avoids needing cross-container exec.
+      if (message?.type === "handoff:workspace_request" && fromAmid && agtMeshClient) {
+        log.info(`📦 Workspace collection request from '${fromName}' — packaging workspace...`);
+        try {
+          const { execSync } = await import("node:child_process");
+          const tarB64 = execSync(
+            "tar czf - -C /sandbox " +
+            "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+            "--exclude='*.pyc' --exclude='__pycache__' " +
+            ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+            { timeout: 10000, maxBuffer: 3 * 1024 * 1024 },
+          ).toString().trim();
+
+          await agtMeshClient.send(fromAmid, {
+            type: "handoff:workspace_response",
+            name: process.env.SANDBOX_NAME || "unknown",
+            workspace_tar: tarB64.length < 2 * 1024 * 1024 ? tarB64 : "",
+            size_bytes: tarB64.length,
+            from_agent: process.env.SANDBOX_NAME || "unknown",
+            timestamp: new Date().toISOString(),
+          });
+          log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB)`);
+        } catch (wsErr: any) {
+          log.warn(`Workspace collection failed: ${wsErr.message}`);
+          // Send empty response so parent doesn't hang waiting
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:workspace_response",
+              name: process.env.SANDBOX_NAME || "unknown",
+              workspace_tar: "",
+              size_bytes: 0,
+              error: wsErr.message,
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+        return; // Don't process as a regular task
+      }
+
       // ── Handle handoff_transfer messages — target receives state blob ──
       // The source agent sends this after snapshot + drain. The target agent
       // restores the state on its own router and sends verification back.
@@ -2028,8 +2070,65 @@ async function _runHandoffOrchestration(
   // Collect sub-agent snapshots (best-effort)
   try {
     const subResp = await _routerCall("GET", "/agt/handoff/sub-agents", undefined, 10000, authH);
-    if (subResp?.count > 0) {
-      snapshotPayload.sub_agent_snapshots = subResp.sub_agent_snapshots;
+    if (subResp?.count > 0 && Array.isArray(subResp.sub_agent_snapshots)) {
+      const subSnaps = subResp.sub_agent_snapshots as Array<{
+        name: string; workspace_tar: string; [k: string]: unknown;
+      }>;
+
+      // Request workspace from each sub-agent via E2E mesh
+      if (agtMeshClient && agtIdentity) {
+        for (const snap of subSnaps) {
+          try {
+            // Look up sub-agent AMID from registry
+            const regResp = await _routerCall("GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(snap.name)}`,
+              undefined, 5000, authH);
+            const candidates = (regResp?.results || []).filter(
+              (a: any) => a.display_name === snap.name && a.status === "online"
+            );
+            if (candidates.length === 0) continue;
+
+            const subAmid = candidates[0].amid;
+            snap.original_amid = subAmid;
+
+            // Send workspace request via mesh
+            await agtMeshClient.send(subAmid, {
+              type: "handoff:workspace_request",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+
+            // Wait for workspace response (up to 15s)
+            const wsStart = Date.now();
+            while (Date.now() - wsStart < 15000) {
+              const idx = agtInbox.findIndex((m) =>
+                m.from_amid === subAmid &&
+                (m.message_type === "handoff:workspace_response" ||
+                 (typeof m.content === "string" && m.content.includes("handoff:workspace_response")))
+              );
+              if (idx >= 0) {
+                const reply = agtInbox.splice(idx, 1)[0];
+                let parsed: any;
+                if (typeof reply.content === "string") {
+                  try { parsed = JSON.parse(reply.content); } catch { parsed = reply.content; }
+                } else {
+                  parsed = reply.content;
+                }
+                if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
+                  snap.workspace_tar = parsed.workspace_tar;
+                  _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
+                }
+                break;
+              }
+              await new Promise(r => setTimeout(r, 500));
+            }
+          } catch (subWsErr: any) {
+            _log.warn(`Workspace collection from sub-agent '${snap.name}' failed: ${subWsErr.message}`);
+          }
+        }
+      }
+
+      snapshotPayload.sub_agent_snapshots = subSnaps;
     }
   } catch { /* sub-agent collection is best-effort */ }
 
