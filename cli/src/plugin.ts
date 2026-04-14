@@ -2978,9 +2978,26 @@ async function _runHandoffOrchestration(
     }
   }
 
-  // ── Step 7: Decommission ──
+  // ── Step 7: Destroy source sub-agents + Decommission ──
   const decommLabel = direction === "local_to_aks" ? "local" : "cloud";
-  _hp("decommission", `🏁 Decommissioning ${decommLabel} agent...`);
+  _hp("decommission", `🏁 Cleaning up ${decommLabel} sub-agents and decommissioning...`);
+
+  // Destroy source sub-agents — they've been re-spawned on the target
+  try {
+    const listResp = await _routerCall("GET", "/sandbox/spawn", undefined, 10000, authH);
+    const subList = listResp?.sub_agents || [];
+    if (subList.length > 0) {
+      _log.info(`🧹 Destroying ${subList.length} source sub-agent(s)...`);
+      for (const sub of subList) {
+        const subName = sub.name || sub;
+        try {
+          await _routerCall("DELETE", `/sandbox/spawn/${encodeURIComponent(subName)}`, {}, 10000, authH);
+          _log.info(`🧹 Destroyed source sub-agent '${subName}'`);
+        } catch { /* best-effort */ }
+      }
+    }
+  } catch { /* sub-agent cleanup is best-effort */ }
+
   try {
     await _routerCall("POST", "/agt/handoff/decommission", {}, 15000, handoffH);
     _hp("decommission", direction === "local_to_aks"

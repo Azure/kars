@@ -686,23 +686,25 @@ pub async fn collect_sub_agent_snapshots(
 async fn collect_sub_agent_snapshots_docker(
     parent_name: &str,
 ) -> Result<Vec<crate::handoff::SubAgentSnapshot>, String> {
-    // List containers with the parent label
-    let label = format!("azureclaw.parent={parent_name}");
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "--silent",
-            "--unix-socket",
-            "/var/run/docker.sock",
-            &format!(
-                "http://localhost/v1.43/containers/json?filters={{\"label\":[\"{label}\"],\"status\":[\"running\"]}}"
-            ),
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("Docker API error: {e}"))?;
+    // List containers with the parent label — URL-encode the filter
+    // (raw JSON braces/brackets cause curl globbing and Docker parse errors)
+    let filter = format!(
+        r#"{{"label":["azureclaw.parent={}"],"status":["running"]}}"#,
+        parent_name
+    );
+    let encoded = filter
+        .replace('{', "%7B")
+        .replace('}', "%7D")
+        .replace('[', "%5B")
+        .replace(']', "%5D")
+        .replace('"', "%22")
+        .replace('=', "%3D")
+        .replace(',', "%2C");
 
-    let containers: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .unwrap_or_default();
+    let resp =
+        docker_api("GET", &format!("/containers/json?filters={encoded}"), None).await?;
+    let containers: Vec<serde_json::Value> =
+        serde_json::from_str(&resp).unwrap_or_default();
 
     let mut snapshots = Vec::new();
 
@@ -718,10 +720,17 @@ async fn collect_sub_agent_snapshots_docker(
             })
             .unwrap_or_default();
 
-        let name = names.first().cloned().unwrap_or_default();
-        if name.is_empty() {
+        let container_name = names.first().cloned().unwrap_or_default();
+        if container_name.is_empty() {
             continue;
         }
+
+        // Strip the "azureclaw-" prefix that create_sandbox_docker adds,
+        // so respawn doesn't double-prefix to "azureclaw-azureclaw-{name}".
+        let name = container_name
+            .strip_prefix("azureclaw-")
+            .unwrap_or(&container_name)
+            .to_string();
 
         // Extract model from container labels
         let labels = container.get("Labels").and_then(|l| l.as_object());
