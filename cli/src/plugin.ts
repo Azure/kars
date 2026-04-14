@@ -431,7 +431,7 @@ async function delegateToNativeAgent(
 /**
  * Fallback: process a task_request with a limited tool-calling loop.
  * Used when native delegation fails (e.g., Gateway not running).
- * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_completion_tokens.
+ * Runs an LLM loop with 6 tools, max 25 rounds, 2048 max_completion_tokens.
  */
 async function processTaskWithTools(
   taskContent: any,
@@ -599,8 +599,8 @@ async function processTaskWithTools(
     },
   ];
 
-  // Tool-calling loop (max 10 rounds to prevent runaway)
-  for (let round = 0; round < 10; round++) {
+  // Tool-calling loop (max 25 rounds to prevent runaway)
+  for (let round = 0; round < 25; round++) {
     // Check for handoff interrupt — save progress and exit early
     // Two signals: (1) module-level flag from mesh handoff:interrupt message,
     // (2) file-based signal from CLI's docker/kubectl exec
@@ -615,7 +615,7 @@ async function processTaskWithTools(
       } catch { /* ignore */ }
     }
     if (handoffInterruptRequested) {
-      log.info(`🛑 Handoff interrupt: saving progress at round ${round}/${10}`);
+      log.info(`🛑 Handoff interrupt: saving progress at round ${round}/${25}`);
       try {
         const fs = await import("node:fs");
         const progressFile = "/sandbox/.openclaw/workspace/.task-in-progress.json";
@@ -624,7 +624,7 @@ async function processTaskWithTools(
           interrupted_at: new Date().toISOString(),
           reason: handoffInterruptReason,
           round,
-          total_rounds: 10,
+          total_rounds: 25,
           messages_so_far: messages.length,
           last_content: messages[messages.length - 1]?.content?.slice(0, 2000),
           task: typeof taskContent === "string" ? taskContent.slice(0, 2000) : JSON.stringify(taskContent).slice(0, 2000),
@@ -1079,7 +1079,7 @@ async function processTaskWithTools(
     return msg.content || "";
   }
 
-  return "Sub-agent reached maximum tool-calling rounds without a final response.";
+  return "Sub-agent reached maximum tool-calling rounds (25) without a final response.";
 }
 
 // ── meshSend: auto-chunking send wrapper ─────────────────────────────────────
