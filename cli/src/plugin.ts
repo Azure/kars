@@ -4402,14 +4402,36 @@ const azureClawPlugin = definePluginEntry({
             } catch { return true; } // If can't parse, keep it
           });
 
+          // Auto-decode file_transfer messages so LLM sees readable content
+          const decoded = userMessages.map((m: any) => {
+            try {
+              const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+              if (parsed?.type === "file_transfer" && parsed?.file_data && parsed?.file_name) {
+                const buf = Buffer.from(parsed.file_data, "base64");
+                const isText = !buf.some((b: number) => b === 0); // null bytes → binary
+                return {
+                  ...m,
+                  source: "agt_relay_e2e",
+                  message_type: "file_transfer",
+                  file_name: parsed.file_name,
+                  file_size_bytes: buf.length,
+                  content: isText
+                    ? buf.toString("utf-8")
+                    : `[binary file: ${parsed.file_name}, ${buf.length} bytes — saved to incoming/]`,
+                };
+              }
+            } catch { /* fall through */ }
+            return { ...m, source: "agt_relay_e2e" };
+          });
+
           const allMessages = [
-            ...userMessages.map((m: any) => ({ ...m, source: "agt_relay_e2e" })),
+            ...decoded,
             ...routerMessages.map((m: any) => ({ ...m, source: "router_http" })),
           ];
 
           return { content: [{ type: "text", text: JSON.stringify({
             count: allMessages.length,
-            agt_relay_count: userMessages.length,
+            agt_relay_count: decoded.length,
             router_count: routerMessages.length,
             filtered_protocol_messages: agtMessages.length - userMessages.length,
             messages: allMessages,
