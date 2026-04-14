@@ -4193,7 +4193,7 @@ const azureClawPlugin = definePluginEntry({
               // split into chunks and reassembled on the receiver side.
               // Retry loop: target may need time to upload prekeys after registering
               let sendErr: Error | null = null;
-              for (let sendAttempt = 0; sendAttempt < 8; sendAttempt++) {
+              for (let sendAttempt = 0; sendAttempt < 15; sendAttempt++) {
                 try {
                   await meshSend(agtMeshClient, targetAmid, {
                     type: "task_request",
@@ -4206,8 +4206,8 @@ const azureClawPlugin = definePluginEntry({
                 } catch (e: any) {
                   sendErr = e;
                   if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
-                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/8)...`);
-                    await new Promise(r => setTimeout(r, 2000));
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/15)...`);
+                    await new Promise(r => setTimeout(r, 3000));
                   } else if (e.message?.includes("not found") || e.message?.includes("closed") || e.message?.includes("AGENT_NOT_FOUND")) {
                     // Stale cached AMID — invalidate and re-discover
                     log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
@@ -4291,12 +4291,12 @@ const azureClawPlugin = definePluginEntry({
                 }
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
               }
-              log.warn(`AGT relay send failed after 8 retries: ${sendErr?.message}`);
+              log.warn(`AGT relay send failed after 15 retries: ${sendErr?.message}`);
               return { content: [{ type: "text", text: JSON.stringify({
                 error: "E2E encrypted send failed — message NOT delivered",
                 reason: sendErr?.message || "unknown",
                 agent: agentName,
-                hint: "The sub-agent may not have registered yet. Check azureclaw_spawn_status and retry.",
+                hint: "The sub-agent prekey registration takes up to 45s after pod is Running. Wait 30s and retry with azureclaw_mesh_send.",
               }, null, 2) }] };
             } else {
               log.warn(`AGT relay: target '${agentName}' not found in registry after polling`);
