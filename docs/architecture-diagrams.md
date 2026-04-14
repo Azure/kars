@@ -599,89 +599,71 @@ sequenceDiagram
 
     Plugin-->>LLM: "started — poll handoff_status"
 
-    rect rgb(40, 40, 60)
-        Note over Plugin,Router: Step 1: Snapshot (timeout: 60s)
-        Plugin->>Router: POST /agt/handoff/snapshot
-        Note right of Router: AES-256-GCM encrypted<br/>key = HKDF(SHA256(admin‖handoff))
-        Router-->>Plugin: {blob, verification_hash, size_bytes}
-    end
+    Note over Plugin,Router: Step 1: Snapshot (timeout: 60s)
+    Plugin->>Router: POST /agt/handoff/snapshot
+    Note right of Router: AES-256-GCM encrypted<br/>key = HKDF(SHA256(admin‖handoff))
+    Router-->>Plugin: {blob, verification_hash, size_bytes}
 
     LLM->>Plugin: azureclaw_handoff_status
     Plugin-->>LLM: "📦 Snapshot ready (13.7 KB)"
     LLM-->>User: 📦 Snapshot ready (13.7 KB)
 
-    rect rgb(40, 40, 60)
-        Note over Plugin,Router: Step 2: Drain (timeout: 30s)
-        Plugin->>Router: POST /agt/handoff/drain
-        Note right of Router: Stop accepting new work<br/>⚠️ No undrain if aborted
-    end
+    Note over Plugin,Router: Step 2: Drain (timeout: 30s)
+    Plugin->>Router: POST /agt/handoff/drain
+    Note right of Router: Stop accepting new work<br/>⚠️ No undrain if aborted
 
-    rect rgb(40, 60, 40)
-        Note over Plugin,Ctrl: Step 3: Spawn AKS Target
-        Plugin->>Router: POST /sandbox/spawn
-        Note right of Router: {handoff: {mode: restore}}<br/>Dev mode bypasses Docker → K8s CRD
-        Router->>K8s: Create ClawSandbox CRD
-        Note right of K8s: labels: spawned-by=handoff<br/>governance.trustedPeers = source AMID<br/>governance.registryMode = global
-        Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
-        Note right of Ctrl: Both openclaw AND router get:<br/>AGT_TRUSTED_PEERS, AGT_REGISTRY_MODE
-    end
+    Note over Plugin,Ctrl: Step 3: Spawn AKS Target
+    Plugin->>Router: POST /sandbox/spawn
+    Note right of Router: {handoff: {mode: restore}}<br/>Dev mode bypasses Docker → K8s CRD
+    Router->>K8s: Create ClawSandbox CRD
+    Note right of K8s: labels: spawned-by=handoff<br/>governance.trustedPeers = source AMID<br/>governance.registryMode = global
+    Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
+    Note right of Ctrl: Both openclaw AND router get:<br/>AGT_TRUSTED_PEERS, AGT_REGISTRY_MODE
 
     LLM->>Plugin: azureclaw_handoff_status
     Plugin-->>LLM: "🚀 CRD created, waiting for pod..."
     LLM-->>User: 🚀 Cloud target spawning...
 
-    rect rgb(50, 40, 40)
-        Note over Plugin,Reg: Step 4: Mesh Discovery (90s max)
-        TPlugin->>Reg: Register AMID (Ed25519)
-        loop Poll registry every 2s
-            Plugin->>Reg: search for target AMID
-        end
-        Reg-->>Plugin: target AMID found ✓
+    Note over Plugin,Reg: Step 4: Mesh Discovery (90s max)
+    TPlugin->>Reg: Register AMID (Ed25519)
+    loop Poll registry every 2s
+        Plugin->>Reg: search for target AMID
     end
+    Reg-->>Plugin: target AMID found ✓
 
     LLM->>Plugin: azureclaw_handoff_status
     Plugin-->>LLM: "🌐 Cloud target online"
     LLM-->>User: 🌐 Cloud target online
 
-    rect rgb(60, 60, 40)
-        Note over Plugin,TPlugin: Step 5: E2E State Transfer (5 retries × 2s)
-        Plugin->>Relay: mesh_send(handoff_transfer, blob, secret, hash)
-        Note over Relay: 🔐 Signal Protocol (X3DH + Double Ratchet)<br/>Relay is zero-knowledge
-        Relay->>TPlugin: deliver encrypted message
-    end
+    Note over Plugin,TPlugin: Step 5: E2E State Transfer (5 retries × 2s)
+    Plugin->>Relay: mesh_send(handoff_transfer, blob, secret, hash)
+    Note over Relay: 🔐 Signal Protocol (X3DH + Double Ratchet)<br/>Relay is zero-knowledge
+    Relay->>TPlugin: deliver encrypted message
 
-    rect rgb(60, 60, 40)
-        Note over TPlugin,TRouter: Step 5b: Target Restores State
-        TPlugin->>TRouter: POST /agt/handoff/init
-        TPlugin->>TRouter: POST /agt/handoff/restore {blob, secret}
-        Note right of TRouter: Decrypt, decompress,<br/>sanitize chat (anti-injection),<br/>trust scores capped at 750
-        TPlugin->>TRouter: POST /agt/handoff/verify {expected_hash}
-        Note right of TRouter: SHA-256 integrity match
-    end
+    Note over TPlugin,TRouter: Step 5b: Target Restores State
+    TPlugin->>TRouter: POST /agt/handoff/init
+    TPlugin->>TRouter: POST /agt/handoff/restore {blob, secret}
+    Note right of TRouter: Decrypt, decompress,<br/>sanitize chat (anti-injection),<br/>trust scores capped at 750
+    TPlugin->>TRouter: POST /agt/handoff/verify {expected_hash}
+    Note right of TRouter: SHA-256 integrity match
 
-    rect rgb(60, 60, 40)
-        Note over TPlugin,Plugin: Step 5c: Verification via E2E Mesh
-        TPlugin->>Relay: mesh_send(handoff_verification)
-        Note right of TPlugin: {matches, successor_amid,<br/>trust_scores_count, audit_entries_count}
-        Relay->>Plugin: deliver verification ✓
-        Note over Plugin: Filter: from_amid AND<br/>from_agent must BOTH match
-    end
+    Note over TPlugin,Plugin: Step 5c: Verification via E2E Mesh
+    TPlugin->>Relay: mesh_send(handoff_verification)
+    Note right of TPlugin: {matches, successor_amid,<br/>trust_scores_count, audit_entries_count}
+    Relay->>Plugin: deliver verification ✓
+    Note over Plugin: Filter: from_amid AND<br/>from_agent must BOTH match
 
     LLM->>Plugin: azureclaw_handoff_status
     Plugin-->>LLM: "✅ State verified — hash match"
     LLM-->>User: ✅ State verified
 
-    rect rgb(50, 40, 60)
-        Note over Plugin,Reg: Step 6: Identity Succession
-        Plugin->>Reg: POST /registry/succession
-        Note right of Reg: Ed25519 signed<br/>Copies reputation, marks predecessor Dormant
-    end
+    Note over Plugin,Reg: Step 6: Identity Succession
+    Plugin->>Reg: POST /registry/succession
+    Note right of Reg: Ed25519 signed<br/>Copies reputation, marks predecessor Dormant
 
-    rect rgb(50, 40, 60)
-        Note over Plugin,Router: Step 7: Decommission
-        Plugin->>Router: POST /agt/handoff/decommission
-        Note right of Router: Dormant — keys preserved<br/>Ghost cleanup skips dormant agents
-    end
+    Note over Plugin,Router: Step 7: Decommission
+    Plugin->>Router: POST /agt/handoff/decommission
+    Note right of Router: Dormant — keys preserved<br/>Ghost cleanup skips dormant agents
 
     LLM->>Plugin: azureclaw_handoff_status
     Plugin-->>LLM: "🎉 Handoff complete!"
@@ -730,6 +712,7 @@ stateDiagram-v2
 ### 11.3 Security Model
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph TB
     subgraph gate["Layer 1: Human-in-the-Loop Gate"]
         direction LR
@@ -790,6 +773,7 @@ graph TB
 Both containers in the sandbox pod receive governance env vars. This is critical for handoff — the router needs `AGT_REGISTRY_MODE` to gate handoff endpoints, and `AGT_TRUSTED_PEERS` for KNOCK authentication.
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph LR
     CRD["ClawSandbox CRD<br/>governance spec"] --> Ctrl["Controller<br/>reconciler.rs"]
 
@@ -835,6 +819,7 @@ graph LR
 There are two independent orchestration paths for handoff — both valid, serving different use cases:
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph TB
     subgraph llm_path["LLM-Driven (plugin.ts — interactive webchat)"]
         direction TB
@@ -873,6 +858,7 @@ graph TB
 Currently agents register anonymously (trust score = 0), so `AGT_TRUSTED_PEERS` provides the +500 KNOCK bonus. With Entra OAuth deployed, agents get verified identities and real reputation.
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph LR
     subgraph current["Current — Unauthenticated"]
         S1["Source AMID<br/>registry score: 0"] -->|KNOCK| T1["Target<br/>threshold: 500"]
@@ -889,6 +875,7 @@ graph LR
 ### 11.7 Error Recovery & Known Limitations
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph TB
     subgraph failure_modes["Failure Modes"]
         F1["Mesh send fails<br/>(5 retries exhausted)"]
