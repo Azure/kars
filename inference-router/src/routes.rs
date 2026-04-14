@@ -3578,6 +3578,32 @@ async fn handoff_restore(
         "Handoff state restored successfully"
     );
 
+    // Build sub-agent workspace payloads for plugin-side injection.
+    // The plugin will wait for each sub-agent to come online and push
+    // its workspace + task context via E2E mesh.
+    let sub_agent_workspaces: Vec<serde_json::Value> = restored_state
+        .sub_agent_snapshots
+        .iter()
+        .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "original_amid": s.original_amid,
+                "workspace_tar": if s.workspace_tar.is_empty() {
+                    None
+                } else {
+                    Some(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &s.workspace_tar,
+                    ))
+                },
+                "task_context": s.task_context,
+                "status": s.status,
+                "checkpoint": s.checkpoint,
+            })
+        })
+        .collect();
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -3593,6 +3619,7 @@ async fn handoff_restore(
             "audit_entries_count": restored_state.audit_entries.len(),
             "sub_agent_snapshots": restored_state.sub_agent_snapshots.len(),
             "sub_agent_results": sub_agent_results,
+            "sub_agent_workspaces": sub_agent_workspaces,
             "credentials": restored_state.credentials.len(),
             "phase": "restoring",
             // Payload for plugin-side hydration (workspace + chat)

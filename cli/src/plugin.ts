@@ -1769,6 +1769,118 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         return; // Don't process as a regular task
       }
 
+      // ── Handle handoff:workspace_inject — parent pushes workspace after re-spawn ──
+      // After handoff restore, the parent injects each sub-agent's workspace via mesh.
+      if (message?.type === "handoff:workspace_inject" && message?.workspace_tar) {
+        log.info(`📦 Workspace injection from '${fromName}' — extracting...`);
+        try {
+          const fs = await import("node:fs");
+          const { execSync } = await import("node:child_process");
+          const tarBuf = Buffer.from(message.workspace_tar as string, "base64");
+
+          const MAX_TAR_BYTES = 5 * 1024 * 1024;
+          if (tarBuf.length > MAX_TAR_BYTES) throw new Error(`workspace tar too large: ${tarBuf.length}`);
+
+          const tmpDir = `/tmp/handoff-inject-${Date.now()}`;
+          fs.mkdirSync(tmpDir, { recursive: true });
+          const tarPath = `${tmpDir}/workspace.tar.gz`;
+          fs.writeFileSync(tarPath, tarBuf, { mode: 0o600 });
+
+          // Validate entries
+          const listing = execSync(`tar tzf ${tarPath} 2>/dev/null`, { timeout: 5000 }).toString();
+          for (const entry of listing.split("\n").filter(Boolean)) {
+            if (entry.includes("..") || entry.startsWith("/")) {
+              throw new Error(`path traversal blocked: ${entry}`);
+            }
+          }
+
+          execSync(
+            `tar xzf ${tarPath} -C /sandbox/ --no-same-owner --no-overwrite-dir 2>/dev/null`,
+            { timeout: 10000 },
+          );
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+          log.info(`📦 Workspace injected (${(tarBuf.length / 1024).toFixed(1)} KB)`);
+        } catch (injectErr: any) {
+          log.warn(`Workspace injection failed: ${injectErr.message}`);
+        }
+        return;
+      }
+
+      // ── Handle handoff:resume — parent tells sub-agent to continue interrupted work ──
+      // After workspace injection, the parent sends the task context so the sub-agent
+      // can resume. The sub-agent reads .task-in-progress.json for checkpoint data,
+      // reports to parent, and optionally re-starts the interrupted task.
+      if (message?.type === "handoff:resume" && fromAmid && agtMeshClient) {
+        const agentName = process.env.SANDBOX_NAME || "unknown";
+        log.info(`▶️ Resume signal from '${fromName}' — checking for interrupted work...`);
+
+        let progressInfo: Record<string, unknown> | null = null;
+        try {
+          const fs = await import("node:fs");
+          const progressPath = "/sandbox/.openclaw/workspace/.task-in-progress.json";
+          if (fs.existsSync(progressPath)) {
+            progressInfo = JSON.parse(fs.readFileSync(progressPath, "utf8"));
+            log.info(`📋 Found interrupted task: round ${progressInfo?.round}/${progressInfo?.total_rounds}`);
+          }
+        } catch { /* no progress file */ }
+
+        // Report to parent: "I'm alive, here's my status"
+        try {
+          await agtMeshClient.send(fromAmid, {
+            type: "handoff:resume_ack",
+            from_agent: agentName,
+            previous_status: message.previous_status || "unknown",
+            has_interrupted_task: !!progressInfo,
+            interrupted_task: progressInfo ? {
+              task: (progressInfo.task as string)?.slice(0, 500),
+              round: progressInfo.round,
+              interrupted_at: progressInfo.interrupted_at,
+            } : null,
+            message: progressInfo
+              ? `Successfully restored in cloud. Resuming interrupted work from round ${progressInfo.round}: ${(progressInfo.task as string)?.slice(0, 200)}`
+              : `Successfully restored in cloud. No interrupted work — ready for new tasks.`,
+            timestamp: new Date().toISOString(),
+          });
+          log.info(`🤝 Sent resume_ack to parent '${fromName}'`);
+        } catch { /* best effort */ }
+
+        // If there's interrupted work, resume it
+        if (progressInfo?.task) {
+          log.info(`▶️ Resuming interrupted task...`);
+          const resumePrompt = `You were previously working on a task that was interrupted for a handoff migration. Here's what was happening:\n\n` +
+            `Original task: ${progressInfo.task}\n` +
+            `Progress: completed ${progressInfo.round} of ${progressInfo.total_rounds} tool-calling rounds\n` +
+            `Last output: ${(progressInfo.last_content as string)?.slice(0, 1000) || "(none)"}\n\n` +
+            `Please continue from where you left off. Complete the remaining work and report the results.`;
+          // Reset interrupt flag for this fresh start
+          handoffInterruptRequested = false;
+          handoffInterruptReason = "";
+          try {
+            const llmResponse = await processTaskWithTools(resumePrompt, log);
+            // Report results to parent
+            await agtMeshClient.send(fromAmid, {
+              type: "task_response",
+              content: `[Resumed after handoff] ${llmResponse}`,
+              from_agent: agentName,
+              in_reply_to: "handoff:resume",
+              timestamp: new Date().toISOString(),
+            });
+            log.info(`✅ Interrupted task completed after handoff resume`);
+          } catch (resumeErr: any) {
+            log.warn(`Task resumption failed: ${resumeErr.message}`);
+            try {
+              await agtMeshClient.send(fromAmid, {
+                type: "task_response",
+                content: `[Resume failed] ${resumeErr.message}`,
+                from_agent: agentName,
+                timestamp: new Date().toISOString(),
+              });
+            } catch { /* best effort */ }
+          }
+        }
+        return;
+      }
+
       // ── Handle handoff_transfer messages — target receives state blob ──
       // The source agent sends this after snapshot + drain. The target agent
       // restores the state on its own router and sends verification back.
@@ -2098,7 +2210,62 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 }
               }
 
-              // 5. Send "handoff_ready" mesh message back to predecessor
+              // 5. Inject workspaces into re-spawned sub-agents + resume interrupted tasks
+              const subWorkspaces = restoreResp.sub_agent_workspaces || [];
+              if (subWorkspaces.length > 0 && agtMeshClient) {
+                log.info(`📦 Handoff: injecting workspaces into ${subWorkspaces.length} sub-agent(s)...`);
+
+                for (const sub of subWorkspaces) {
+                  try {
+                    // Wait for sub-agent to register in mesh (up to 60s)
+                    let subAmid: string | undefined;
+                    const subStart = Date.now();
+                    while (Date.now() - subStart < 60_000) {
+                      try {
+                        const searchResult = await _routerCall("GET",
+                          `/agt/registry/registry/search?capability=${encodeURIComponent(sub.name)}`);
+                        const match = (searchResult?.results || []).find((a: any) =>
+                          a.display_name === sub.name && a.status === "online"
+                        );
+                        if (match?.amid) { subAmid = match.amid; break; }
+                      } catch { /* not registered yet */ }
+                      await new Promise(r => setTimeout(r, 2000));
+                    }
+
+                    if (!subAmid) {
+                      log.warn(`Sub-agent '${sub.name}' didn't register in mesh within 60s — skipping workspace injection`);
+                      continue;
+                    }
+
+                    // Send workspace tar via meshSend (auto-chunks if large)
+                    if (sub.workspace_tar) {
+                      await meshSend(agtMeshClient, subAmid, {
+                        type: "handoff:workspace_inject",
+                        workspace_tar: sub.workspace_tar,
+                        from_agent: agentName,
+                        timestamp: new Date().toISOString(),
+                      }, log);
+                      log.info(`📦 Sent workspace to sub-agent '${sub.name}'`);
+                    }
+
+                    // Send resume message with task context
+                    const resumePayload: Record<string, unknown> = {
+                      type: "handoff:resume",
+                      from_agent: agentName,
+                      task_context: sub.task_context || "",
+                      previous_status: sub.status || "unknown",
+                      checkpoint: sub.checkpoint || null,
+                      timestamp: new Date().toISOString(),
+                    };
+                    await agtMeshClient.send(subAmid, resumePayload);
+                    log.info(`▶️ Sent resume signal to sub-agent '${sub.name}' (status: ${sub.status})`);
+                  } catch (subErr: any) {
+                    log.warn(`Sub-agent '${sub.name}' workspace/resume failed: ${subErr.message}`);
+                  }
+                }
+              }
+
+              // 6. Send "handoff_ready" mesh message back to predecessor
               if (agtMeshClient && fromAmid) {
                 try {
                   await agtMeshClient.send(fromAmid, {
