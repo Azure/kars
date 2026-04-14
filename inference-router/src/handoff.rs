@@ -46,7 +46,7 @@ const AES_NONCE_BYTES: usize = 12;
 // ── Confirmation gate constants (§9.9.9) ────────────────────────────────────
 
 /// Minimum delay between pending request and confirm (prevents LLM self-confirm).
-pub const CONFIRMATION_MIN_DELAY_SECS: u64 = 3;
+pub const CONFIRMATION_MIN_DELAY_SECS: u64 = 8;
 /// TTL for pending handoff requests (seconds).
 pub const PENDING_HANDOFF_TTL_SECS: u64 = 300; // 5 minutes
 /// Rate limit: minimum interval between handoff requests (seconds).
@@ -1771,7 +1771,7 @@ mod tests {
             .unwrap();
 
         // Wait past minimum delay
-        tokio::time::sleep(Duration::from_millis(3100)).await;
+        tokio::time::sleep(Duration::from_millis(8100)).await;
 
         let result = store.confirm("wrong_token").await;
         assert!(matches!(result.unwrap_err(), PendingHandoffError::InvalidToken));
@@ -1786,7 +1786,7 @@ mod tests {
             .unwrap();
 
         // Wait past minimum delay
-        tokio::time::sleep(Duration::from_millis(3100)).await;
+        tokio::time::sleep(Duration::from_millis(8100)).await;
 
         // Now confirm should succeed
         let (direction, reason) = store.confirm(&token).await.unwrap();
@@ -2021,7 +2021,7 @@ mod tests {
     async fn test_pending_confirm_wrong_token() {
         let store = PendingHandoffStore::new();
         store.create_pending(HandoffDirection::LocalToAks, "test".to_string()).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        tokio::time::sleep(Duration::from_secs(9)).await;
         assert!(matches!(
             store.confirm("wrong-code").await,
             Err(PendingHandoffError::InvalidToken)

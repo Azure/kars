@@ -1257,4 +1257,27 @@ describe("post-handoff sub-agent restore logic", () => {
     expect(resumePayload.workspace_delivered).toBe(true);
     expect(resumePayload.type).toBe("handoff:resume");
   });
+
+  it("handoff request tool response does NOT expose confirmation token to LLM", () => {
+    // Simulates what the tool would return for a pending_confirmation.
+    // The confirmation_token must NOT be in the response — only sent via Telegram.
+    const toolResponse = {
+      status: "pending_confirmation",
+      direction: "local_to_aks",
+      reason: "user_requested",
+      expires_in_secs: 300,
+      instruction: "Handoff to cloud (AKS) requested. A confirmation code has been sent to the user's Telegram. Ask the user to type the code. Do NOT guess or fabricate the code.",
+      display: "🔄 Handoff requested to cloud (AKS)\nReason: user_requested\n\nA confirmation code has been sent to your Telegram.\nPlease type the code here to confirm.",
+    };
+
+    // The token field must NOT exist
+    expect(toolResponse).not.toHaveProperty("confirmation_token");
+    // The instruction must NOT contain an 8-char hex code pattern
+    expect(toolResponse.instruction).not.toMatch(/[a-f0-9]{8}/);
+    // The display must NOT contain a code
+    expect(toolResponse.display).not.toMatch(/[a-f0-9]{8}/);
+    // It should direct the user to Telegram
+    expect(toolResponse.instruction).toContain("Telegram");
+    expect(toolResponse.display).toContain("Telegram");
+  });
 });

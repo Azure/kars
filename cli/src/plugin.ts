@@ -1971,6 +1971,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // This runs async (best-effort) — handoff is already complete at this point.
           (async () => {
             try {
+              console.log(`[azureclaw-handoff] IIFE started — sub_agent_results=${JSON.stringify(restoreResp.sub_agent_results?.length ?? "missing")}, sub_agent_workspaces=${JSON.stringify(restoreResp.sub_agent_workspaces?.length ?? "missing")}, meshClient=${!!agtMeshClient}`);
               const fs = await import("node:fs");
               const agentName = process.env.SANDBOX_NAME || "dev-agent";
               const apiVer = "api-version=2025-11-15-preview";
@@ -2193,9 +2194,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 subWorkspaceMap.set(ws.name, ws);
               }
               const subAgentStatuses: Array<{ name: string; status: string; task?: string }> = [];
+              console.log(`[azureclaw-handoff] step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
               log.info(`📦 Handoff step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
 
               if (spawnedSubs.length > 0 && agtMeshClient) {
+                console.log(`[azureclaw-handoff] entering trust+resume loop for ${spawnedSubs.length} sub-agents`);
                 log.info(`🤖 Handoff: registering trust + resuming ${spawnedSubs.length} sub-agent(s)...`);
 
                 for (const spawned of spawnedSubs) {
@@ -2325,6 +2328,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     await new Promise(r => setTimeout(r, 500));
                   }
                 }
+              } else {
+                console.log(`[azureclaw-handoff] trust loop SKIPPED: spawned=${spawnedSubs.length}, meshClient=${!!agtMeshClient}`);
               }
 
               // 5. Send Telegram greeting (now includes sub-agent status)
@@ -2412,6 +2417,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 } catch { /* predecessor may already be decommissioned */ }
               }
             } catch (hydrateErr: any) {
+              console.log(`[azureclaw-handoff] IIFE error: ${hydrateErr.message}`);
               log.warn(`Handoff hydration failed (non-fatal): ${hydrateErr.message}`);
             }
           })();
@@ -4624,7 +4630,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_handoff_request",
       label: "Request Handoff",
-      description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that the user must echo back. This is a SECURITY-SENSITIVE operation — it will migrate the agent's full state including chat history, sub-agents, trust scores, and workspace. Direction: 'cloud' to migrate to AKS, 'local' to migrate back. IMPORTANT: Always call azureclaw_handoff_status first to check if handoff is available.",
+      description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that is sent DIRECTLY to the user's Telegram (you will NOT receive the code). The user must type the code back to you, and you pass it to azureclaw_handoff_confirm. Do NOT fabricate or guess the confirmation code. Direction: 'cloud' (local→AKS) or 'local' (AKS→local). IMPORTANT: Always call azureclaw_handoff_status first to check if handoff is available.",
       parameters: {
         type: "object",
         properties: {
@@ -4670,18 +4676,49 @@ const azureClawPlugin = definePluginEntry({
 
           const r = result as any;
           if (r?.status === "pending_confirmation") {
+            // Send confirmation code directly to Telegram (side-channel).
+            // The LLM must NOT see the code — it can only get it from user input.
+            const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+            const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
+            const dirLabel = direction === "local_to_aks" ? "cloud (AKS)" : "local";
+            if (tgToken && tgAllowFrom) {
+              const chatIds = tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean);
+              for (const chatId of chatIds) {
+                try {
+                  const tgResp = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      chat_id: chatId,
+                      text: `🔐 Handoff Confirmation Required\n\n` +
+                        `A handoff to ${dirLabel} has been requested.\n` +
+                        `Reason: ${reason}\n\n` +
+                        `Your confirmation code:\n\n    ${r.confirmation_token}\n\n` +
+                        `Reply with this code to proceed.\n` +
+                        `Expires in ${r.expires_in_secs || 300}s.`,
+                    }),
+                  });
+                  if (!tgResp.ok) log.warn(`Handoff: Telegram code delivery failed: ${tgResp.status}`);
+                } catch (tgErr: any) {
+                  log.warn(`Handoff: Telegram code delivery error: ${tgErr.message}`);
+                }
+              }
+            }
+            // Also print to console for TUI users (not visible to the LLM)
+            console.log(`\n🔐 Handoff confirmation code: ${r.confirmation_token}\n`);
+
             return { content: [{ type: "text", text: safeJson({
               status: "pending_confirmation",
-              confirmation_token: r.confirmation_token,
               direction: r.direction,
               reason: r.reason,
               expires_in_secs: r.expires_in_secs,
-              instruction: `Handoff to ${direction === "local_to_aks" ? "cloud" : "local"} requested. ` +
-                `To confirm, the user must reply with the code: ${r.confirmation_token}`,
-              display: `🔄 Handoff requested to ${direction === "local_to_aks" ? "cloud (AKS)" : "local"}\n` +
+              instruction: `Handoff to ${dirLabel} requested. ` +
+                `A confirmation code has been sent to the user's Telegram. ` +
+                `Ask the user to type the code. Do NOT guess or fabricate the code.`,
+              display: `🔄 Handoff requested to ${dirLabel}\n` +
                 `Reason: ${reason}\n\n` +
-                `To confirm, reply with: ${r.confirmation_token}\n` +
-                `(expires in ${r.expires_in_secs}s)`,
+                `A confirmation code has been sent to your Telegram.\n` +
+                `Please type the code here to confirm.`,
             }) }] };
           }
 
@@ -4696,7 +4733,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_handoff_confirm",
       label: "Confirm Handoff",
-      description: "Confirm a pending handoff request using the confirmation code that the user provided. This starts the handoff orchestration in the background and returns immediately. After calling this, poll azureclaw_handoff_status every 3-5 seconds and relay each new step to the user as a real-time progress update. Keep polling until status is 'complete', 'error', or 'partial'.",
+      description: "Confirm a pending handoff request using the confirmation code that the USER typed. You do NOT have the code — it was sent directly to the user's Telegram. You MUST wait for the user to type it. If the user hasn't provided a code, ask them to check their Telegram. After confirming, poll azureclaw_handoff_status every 3-5 seconds and relay each new step to the user as a real-time progress update.",
       parameters: {
         type: "object",
         properties: {
