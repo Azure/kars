@@ -2215,7 +2215,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 // Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
 // ---------------------------------------------------------------------------
 
-const ROUTER_BASE = "http://127.0.0.1:8443";
+const ROUTER_BASE = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
 
 async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
@@ -3463,7 +3463,7 @@ const azureClawPlugin = definePluginEntry({
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
-    const ROUTER = "http://127.0.0.1:8443";
+    const ROUTER = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
     async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
       const http = await import("node:http");
       const url = `${ROUTER}${path}`;

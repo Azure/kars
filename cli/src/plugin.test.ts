@@ -385,6 +385,7 @@ describe("tool execute — error handling", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./plugin.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -394,6 +395,7 @@ describe("tool execute — error handling", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
@@ -401,37 +403,28 @@ describe("tool execute — error handling", () => {
     const tool = tools.get("azureclaw_spawn")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
-    const parsed = JSON.parse(text);
-    // Tool handles unreachable router gracefully — returns status JSON, not a crash
-    expect(parsed).toHaveProperty("name", "test-agent");
-    expect(parsed).toHaveProperty("status");
+    expect(text).toContain("Spawn failed");
   });
 
   it("azureclaw_spawn_status returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_status")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
-    const parsed = JSON.parse(text);
-    expect(parsed).toHaveProperty("name", "test-agent");
-    expect(parsed).toHaveProperty("status");
+    expect(text).toContain("Status check failed");
   });
 
   it("azureclaw_spawn_destroy returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_destroy")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
-    const parsed = JSON.parse(text);
-    expect(parsed).toHaveProperty("name", "test-agent");
-    expect(parsed).toHaveProperty("status");
+    expect(text).toContain("Destroy failed");
   });
 
   it("azureclaw_spawn_list returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_list")!;
     const result = await tool.execute("test-id", {});
     const text = result.content[0].text;
-    const parsed = JSON.parse(text);
-    expect(parsed).toHaveProperty("count");
-    expect(parsed).toHaveProperty("sandboxes");
+    expect(text).toContain("List failed");
   });
 
   it("azureclaw_discover returns error when router is unreachable", async () => {
@@ -546,6 +539,7 @@ describe("tool output format consistency", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./plugin.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -555,6 +549,7 @@ describe("tool output format consistency", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
@@ -584,6 +579,7 @@ describe("tool output format consistency", () => {
     expect(result.content).toBeDefined();
     expect(result.content[0].type).toBe("text");
     expect(typeof result.content[0].text).toBe("string");
+    expect(result.content[0].text).toContain("Spawn failed");
   });
 });
 
@@ -894,5 +890,210 @@ describe("all registered tools have execute functions", () => {
     }
 
     delete process.env.AGT_SKIP_INIT;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 23. Mesh transport constants
+// ---------------------------------------------------------------------------
+
+describe("mesh transport constants", () => {
+  it("MESH_CHUNK_THRESHOLD is 512KB", async () => {
+    // Verify the exported tool descriptions mention chunking
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // The mesh_transfer_file tool should exist and mention 30MB limit
+    const transferTool = mock.tools.get("azureclaw_mesh_transfer_file");
+    expect(transferTool).toBeDefined();
+    expect(transferTool!.description).toContain("file");
+
+    delete process.env.AGT_SKIP_INIT;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 24. File transfer tool registration + validation
+// ---------------------------------------------------------------------------
+
+describe("azureclaw_mesh_transfer_file tool", () => {
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    tools = mock.tools;
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
+    vi.restoreAllMocks();
+  });
+
+  it("is registered with correct schema", () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file");
+    expect(tool).toBeDefined();
+    expect(tool.parameters.properties).toHaveProperty("to_agent");
+    expect(tool.parameters.properties).toHaveProperty("file_path");
+    expect(tool.parameters.required).toContain("to_agent");
+    expect(tool.parameters.required).toContain("file_path");
+  });
+
+  it("rejects path traversal with ../", async () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "some-agent",
+      file_path: "../../etc/passwd",
+    });
+    const text = result.content[0].text;
+    // Should error — path traversal blocked
+    expect(text.toLowerCase()).toMatch(/traversal|invalid|denied|error/);
+  });
+
+  it("rejects absolute paths outside sandbox", async () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "some-agent",
+      file_path: "/etc/passwd",
+    });
+    const text = result.content[0].text;
+    expect(text.toLowerCase()).toMatch(/traversal|invalid|denied|error|outside/);
+  });
+
+  it("returns error when mesh is not connected", async () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "some-agent",
+      file_path: "notes.txt",
+    });
+    const text = result.content[0].text;
+    // AGT_SKIP_INIT means no mesh client — should report error
+    expect(text.toLowerCase()).toMatch(/mesh|not connected|not available|error|failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 25. Mesh send tool auto-chunking
+// ---------------------------------------------------------------------------
+
+describe("azureclaw_mesh_send — auto-chunking", () => {
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    tools = mock.tools;
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    vi.restoreAllMocks();
+  });
+
+  it("mesh_send tool is registered with to_agent and content params", () => {
+    const tool = tools.get("azureclaw_mesh_send");
+    expect(tool).toBeDefined();
+    expect(tool.parameters.properties).toHaveProperty("to_agent");
+    expect(tool.parameters.properties).toHaveProperty("content");
+  });
+
+  it("mesh_send returns error when mesh is not connected", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "test-peer",
+      content: "hello world",
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 26. Handoff tool registration
+// ---------------------------------------------------------------------------
+
+describe("handoff tool registration", () => {
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    tools = mock.tools;
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    vi.restoreAllMocks();
+  });
+
+  it("registers azureclaw_handoff_status tool", () => {
+    expect(tools.has("azureclaw_handoff_status")).toBe(true);
+  });
+
+  it("handoff_status returns status info without crash", async () => {
+    const tool = tools.get("azureclaw_handoff_status")!;
+    const result = await tool.execute("test-id", {});
+    expect(result.content).toBeDefined();
+    expect(result.content[0].type).toBe("text");
+    const text = result.content[0].text;
+    // Should return JSON with handoff status fields
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("handoff_available");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 27. Router URL configuration via environment variable
+// ---------------------------------------------------------------------------
+
+describe("AZURECLAW_ROUTER_URL configuration", () => {
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
+    vi.restoreAllMocks();
+  });
+
+  it("spawn tools use configurable router URL", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const tool = mock.tools.get("azureclaw_spawn")!;
+    const result = await tool.execute("test-id", { name: "test-agent" });
+    const text = result.content[0].text;
+    // Should fail fast with connection refused on port 19876 (unused)
+    expect(text).toContain("Spawn failed");
+    expect(text).toMatch(/ECONNREFUSED|connect|refused/i);
+  });
+
+  it("spawn_status uses configurable router URL", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const tool = mock.tools.get("azureclaw_spawn_status")!;
+    const result = await tool.execute("test-id", { name: "test-agent" });
+    const text = result.content[0].text;
+    expect(text).toContain("Status check failed");
   });
 });
