@@ -932,15 +932,16 @@ Full roundtrip handoff: local Docker ↔ AKS cloud, including sub-agent lifecycl
 ### 12.1 Agent Lifecycle Across Handoff
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph LR
-    subgraph local["Local Docker (Home Base)"]
+    subgraph local["🐳 Local Docker — Home Base"]
         LP["🏠 Parent Agent<br/>permanent — goes dormant,<br/>never deleted"]
         LS1["Sub-Agent 1<br/>ephemeral"]
         LS2["Sub-Agent 2<br/>ephemeral"]
     end
 
-    subgraph cloud["AKS Cloud (Ephemeral)"]
-        CP["☁️ Parent Agent<br/>created by forward handoff,<br/>CRD deleted on reverse"]
+    subgraph cloud["☁️ AKS Cloud — Ephemeral"]
+        CP["Parent Agent<br/>created by forward handoff,<br/>CRD deleted on reverse"]
         CS1["Sub-Agent 1<br/>re-spawned from snapshot"]
         CS2["Sub-Agent 2<br/>re-spawned from snapshot"]
     end
@@ -1175,8 +1176,9 @@ sequenceDiagram
 ### 12.5 Workspace Injection Detail
 
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 graph TB
-    subgraph sender["Parent (sender)"]
+    subgraph sender["Parent — sender side"]
         S1["Collect workspace tar<br/>from snapshot"] --> S2["mesh_send(workspace_inject,<br/>base64 tar)"]
         S2 --> S3{"Ack received<br/>within 20s?"}
         S3 -->|No| S4["Retry (max 3)"]
@@ -1184,7 +1186,7 @@ graph TB
         S3 -->|Yes| S5["Send handoff:resume<br/>with task_context"]
     end
 
-    subgraph receiver["Sub-Agent (receiver)"]
+    subgraph receiver["Sub-Agent — receiver side"]
         R1["Receive workspace_inject"] --> R2["Validate tar entries<br/>(no path traversal)"]
         R2 --> R3["Extract to /sandbox/<br/>(--no-overwrite-dir)"]
         R3 --> R4["Promote incoming/ files<br/>to workspace root"]
