@@ -1670,6 +1670,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
       // ── Handle file_transfer messages — auto-save received files to workspace ──
       if (message?.type === "file_transfer" && message?.file_data && message?.file_name) {
+        let success = false;
+        let savedPath = "";
+        let errorMsg = "";
         try {
           const fs = await import("node:fs");
           const path = await import("node:path");
@@ -1680,6 +1683,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           const destPath = path.join(incomingDir, safeName);
           const buf = Buffer.from(message.file_data, "base64");
           fs.writeFileSync(destPath, buf, { mode: 0o600 });
+
+          // Verify the write
+          const stat = fs.statSync(destPath);
+          success = stat.size === buf.length;
+          savedPath = destPath;
 
           log.info(
             `📁 File received from '${fromName}': ${safeName} ` +
@@ -1699,7 +1707,23 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             });
           }
         } catch (ftErr: any) {
+          errorMsg = ftErr.message;
           log.warn(`File transfer save failed: ${ftErr.message}`);
+        }
+
+        // Send ack back to sender so they know the file landed (or didn't)
+        if (fromAmid && agtMeshClient) {
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "file_transfer_ack",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              file_name: String(message.file_name || ""),
+              success,
+              saved_to: savedPath,
+              error: errorMsg || undefined,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort ack */ }
         }
         return; // Don't process as a task
       }
@@ -4457,8 +4481,8 @@ const azureClawPlugin = definePluginEntry({
             }, null, 2) }] };
           }
 
-          // Send via meshSend (auto-chunks if needed)
-          const transferId = await meshSend(agtMeshClient, targetAmid, {
+          // Send + wait for ack with retry (up to 3 attempts)
+          const fileMsg = {
             type: "file_transfer",
             file_name: fileName,
             file_path: filePath,
@@ -4467,10 +4491,48 @@ const azureClawPlugin = definePluginEntry({
             description: desc,
             from_agent: process.env.SANDBOX_NAME || "unknown",
             timestamp: new Date().toISOString(),
-          }, log);
+          };
+
+          let ackReceived = false;
+          let ackSavedTo = "";
+          let ackError = "";
+          let transferId: string | undefined;
+          const maxAttempts = 3;
+
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            if (attempt > 0) {
+              log.info(`📁 File transfer retry ${attempt + 1}/${maxAttempts} for '${fileName}' → '${agentName}'`);
+              await new Promise(r => setTimeout(r, 3000));
+            }
+
+            transferId = await meshSend(agtMeshClient, targetAmid, fileMsg, log);
+
+            // Wait for file_transfer_ack (up to 15s)
+            const ackStart = Date.now();
+            while (Date.now() - ackStart < 15_000) {
+              const ackIdx = agtInbox.findIndex((m) =>
+                m.from_amid === targetAmid &&
+                (m.content?.includes?.("file_transfer_ack") || m.message_type === "file_transfer_ack")
+              );
+              if (ackIdx !== -1) {
+                try {
+                  const ackMsg = typeof agtInbox[ackIdx].content === "string"
+                    ? JSON.parse(agtInbox[ackIdx].content) : agtInbox[ackIdx].content;
+                  ackReceived = !!ackMsg?.success;
+                  ackSavedTo = ackMsg?.saved_to || "";
+                  ackError = ackMsg?.error || "";
+                } catch { ackReceived = true; }
+                agtInbox.splice(ackIdx, 1);
+                break;
+              }
+              await new Promise(r => setTimeout(r, 500));
+            }
+
+            if (ackReceived) break;
+          }
 
           return { content: [{ type: "text", text: JSON.stringify({
-            status: "sent",
+            status: ackReceived ? "delivered" : "sent_no_ack",
             to_agent: agentName,
             file_name: fileName,
             size_bytes: stat.size,
@@ -4478,8 +4540,12 @@ const azureClawPlugin = definePluginEntry({
               : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)}KB`
               : `${(stat.size / 1024 / 1024).toFixed(1)}MB`,
             chunked: !!transferId,
+            ...(ackReceived ? { saved_to: ackSavedTo } : {}),
+            ...(ackError ? { ack_error: ackError } : {}),
             protocol: "AGT E2E encrypted (Signal Protocol)",
-            note: `File sent to '${agentName}'. They will receive it as a file_transfer message in their inbox. Tell them to check azureclaw_mesh_inbox.`,
+            note: ackReceived
+              ? `File delivered and written to ${ackSavedTo} on '${agentName}'.`
+              : `File sent to '${agentName}' 3 times but no write confirmation received. The target agent may not be processing messages yet.`,
           }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: JSON.stringify({
