@@ -1374,8 +1374,13 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // ── Handle handoff:workspace_request — parent collects sub-agent workspace ──
       // During handoff, the parent asks each sub-agent to serialize its workspace
       // and send it back via mesh. This avoids needing cross-container exec.
+      // Supports chunked transfer: workspaces > 512KB are split into chunks to
+      // stay under the relay's ~1MB message limit (with Signal Protocol overhead).
       if (message?.type === "handoff:workspace_request" && fromAmid && agtMeshClient) {
         log.info(`📦 Workspace collection request from '${fromName}' — packaging workspace...`);
+        const CHUNK_SIZE = 512 * 1024; // 512KB per chunk — safe under relay's ~1MB with Signal overhead
+        const MAX_CHUNKS = 80;         // 80 × 512KB = ~40MB max; leaves headroom in 100-msg offline queue
+        const agentName = process.env.SANDBOX_NAME || "unknown";
         try {
           const { execSync } = await import("node:child_process");
           const tarB64 = execSync(
@@ -1385,31 +1390,80 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             "--exclude='*.pyc' --exclude='__pycache__' " +
             ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
             ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0",
-            { timeout: 10000, maxBuffer: 3 * 1024 * 1024 },
+            { timeout: 10000, maxBuffer: 50 * 1024 * 1024 },
           ).toString().trim();
 
-          await agtMeshClient.send(fromAmid, {
-            type: "handoff:workspace_response",
-            name: process.env.SANDBOX_NAME || "unknown",
-            // Cap at 768KB base64 — relay has ~1MB limit, plus Signal Protocol overhead
-            workspace_tar: tarB64.length < 768 * 1024 ? tarB64 : "",
-            size_bytes: tarB64.length,
-            truncated: tarB64.length >= 768 * 1024,
-            from_agent: process.env.SANDBOX_NAME || "unknown",
-            timestamp: new Date().toISOString(),
-          });
-          log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB)`);
+          if (tarB64.length <= CHUNK_SIZE) {
+            // Small workspace — send in a single message (fast path)
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:workspace_response",
+              name: agentName,
+              workspace_tar: tarB64,
+              size_bytes: tarB64.length,
+              chunked: false,
+              from_agent: agentName,
+              timestamp: new Date().toISOString(),
+            });
+            log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB, single message)`);
+          } else {
+            // Large workspace — split into chunks
+            const totalChunks = Math.ceil(tarB64.length / CHUNK_SIZE);
+            if (totalChunks > MAX_CHUNKS) {
+              log.warn(`Workspace too large for mesh transfer: ${(tarB64.length / 1024 / 1024).toFixed(1)} MB (${totalChunks} chunks > ${MAX_CHUNKS} max)`);
+              await agtMeshClient.send(fromAmid, {
+                type: "handoff:workspace_response",
+                name: agentName,
+                workspace_tar: "",
+                size_bytes: tarB64.length,
+                chunked: false,
+                truncated: true,
+                error: `Workspace too large: ${(tarB64.length / 1024 / 1024).toFixed(1)} MB exceeds mesh limit`,
+                from_agent: agentName,
+                timestamp: new Date().toISOString(),
+              });
+              return;
+            }
+
+            log.info(`📦 Large workspace (${(tarB64.length / 1024).toFixed(1)} KB) — sending ${totalChunks} chunks...`);
+
+            // Send chunks sequentially to avoid relay congestion
+            for (let i = 0; i < totalChunks; i++) {
+              const chunkData = tarB64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+              await agtMeshClient.send(fromAmid, {
+                type: "handoff:workspace_chunk",
+                name: agentName,
+                chunk_index: i,
+                total_chunks: totalChunks,
+                data: chunkData,
+                from_agent: agentName,
+                timestamp: new Date().toISOString(),
+              });
+              if (i % 10 === 9) log.info(`📦 Sent chunk ${i + 1}/${totalChunks}...`);
+            }
+
+            // Send completion marker so receiver knows all chunks are sent
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:workspace_response",
+              name: agentName,
+              workspace_tar: "",
+              size_bytes: tarB64.length,
+              chunked: true,
+              total_chunks: totalChunks,
+              from_agent: agentName,
+              timestamp: new Date().toISOString(),
+            });
+            log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB, ${totalChunks} chunks)`);
+          }
         } catch (wsErr: any) {
           log.warn(`Workspace collection failed: ${wsErr.message}`);
-          // Send empty response so parent doesn't hang waiting
           try {
             await agtMeshClient.send(fromAmid, {
               type: "handoff:workspace_response",
-              name: process.env.SANDBOX_NAME || "unknown",
+              name: agentName,
               workspace_tar: "",
               size_bytes: 0,
               error: wsErr.message,
-              from_agent: process.env.SANDBOX_NAME || "unknown",
+              from_agent: agentName,
               timestamp: new Date().toISOString(),
             });
           } catch { /* best effort */ }
@@ -2104,29 +2158,87 @@ async function _runHandoffOrchestration(
               timestamp: new Date().toISOString(),
             });
 
-            // Wait for workspace response (up to 15s)
+            // Wait for workspace response — supports both single-message and chunked transfer.
+            // Chunked: sub-agent sends N workspace_chunk messages followed by a workspace_response
+            // with chunked:true. We collect chunks and reassemble.
+            const chunkMap = new Map<number, string>();
+            let expectedChunks = -1;
+            let gotFinalResponse = false;
             const wsStart = Date.now();
-            while (Date.now() - wsStart < 15000) {
-              const idx = agtInbox.findIndex((m) =>
-                m.from_amid === subAmid &&
-                (m.message_type === "handoff:workspace_response" ||
-                 (typeof m.content === "string" && m.content.includes("handoff:workspace_response")))
-              );
-              if (idx >= 0) {
-                const reply = agtInbox.splice(idx, 1)[0];
+            const WS_TIMEOUT = 30000; // 30s for chunked (may have many chunks)
+
+            while (Date.now() - wsStart < WS_TIMEOUT) {
+              // Drain all relevant messages from inbox each iteration
+              for (let i = agtInbox.length - 1; i >= 0; i--) {
+                const m = agtInbox[i];
+                if (m.from_amid !== subAmid) continue;
+
                 let parsed: any;
-                if (typeof reply.content === "string") {
-                  try { parsed = JSON.parse(reply.content); } catch { parsed = reply.content; }
+                const raw = m.content;
+                if (typeof raw === "string") {
+                  try { parsed = JSON.parse(raw); } catch { parsed = raw; }
                 } else {
-                  parsed = reply.content;
+                  parsed = raw;
                 }
-                if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
-                  snap.workspace_tar = parsed.workspace_tar;
-                  _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
+                const msgType = m.message_type || parsed?.type;
+
+                if (msgType === "handoff:workspace_chunk" || parsed?.type === "handoff:workspace_chunk") {
+                  // Collect chunk
+                  agtInbox.splice(i, 1);
+                  if (typeof parsed?.chunk_index === "number" && typeof parsed?.data === "string") {
+                    chunkMap.set(parsed.chunk_index, parsed.data);
+                    if (typeof parsed.total_chunks === "number") expectedChunks = parsed.total_chunks;
+                  }
+                } else if (msgType === "handoff:workspace_response" ||
+                           (typeof raw === "string" && raw.includes("handoff:workspace_response"))) {
+                  agtInbox.splice(i, 1);
+
+                  if (parsed?.chunked && typeof parsed.total_chunks === "number") {
+                    // Chunked completion marker — set expected and flag
+                    expectedChunks = parsed.total_chunks;
+                    gotFinalResponse = true;
+                  } else if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
+                    // Single-message response (small workspace)
+                    snap.workspace_tar = parsed.workspace_tar;
+                    _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
+                    gotFinalResponse = true;
+                  } else {
+                    // Error or empty response
+                    if (parsed?.error) _log.warn(`Sub-agent '${snap.name}' workspace error: ${parsed.error}`);
+                    gotFinalResponse = true;
+                  }
                 }
+              }
+
+              // Check if we have a complete single-message response
+              if (gotFinalResponse && snap.workspace_tar) break;
+
+              // Check if all chunks received
+              if (expectedChunks > 0 && chunkMap.size >= expectedChunks) {
+                // Reassemble chunks in order
+                const parts: string[] = [];
+                for (let ci = 0; ci < expectedChunks; ci++) {
+                  parts.push(chunkMap.get(ci) || "");
+                }
+                snap.workspace_tar = parts.join("");
+                _log.info(`📦 Reassembled workspace from sub-agent '${snap.name}' (${(snap.workspace_tar.length / 1024).toFixed(1)} KB, ${expectedChunks} chunks)`);
                 break;
               }
-              await new Promise(r => setTimeout(r, 500));
+
+              // If got final response with no workspace and not chunked, stop waiting
+              if (gotFinalResponse && expectedChunks <= 0) break;
+
+              await new Promise(r => setTimeout(r, 300));
+            }
+
+            // Timeout with partial chunks — try to reassemble what we have
+            if (!snap.workspace_tar && chunkMap.size > 0 && expectedChunks > 0) {
+              _log.warn(`Timeout: got ${chunkMap.size}/${expectedChunks} chunks from '${snap.name}' — using partial`);
+              const parts: string[] = [];
+              for (let ci = 0; ci < expectedChunks; ci++) {
+                parts.push(chunkMap.get(ci) || "");
+              }
+              snap.workspace_tar = parts.join("");
             }
           } catch (subWsErr: any) {
             _log.warn(`Workspace collection from sub-agent '${snap.name}' failed: ${subWsErr.message}`);
