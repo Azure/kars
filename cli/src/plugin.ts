@@ -2225,19 +2225,47 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 console.log(`[azureclaw-handoff] entering trust+resume loop for ${spawnedSubs.length} sub-agents`);
                 log.info(`🤖 Handoff: registering trust + resuming ${spawnedSubs.length} sub-agent(s)...`);
 
+                // Collect OLD AMIDs from predecessor's snapshot so we can reject stale
+                // registry entries. After handoff, sub-agents get new key pairs → new AMIDs.
+                // The old Docker AMIDs may still be in the registry briefly.
+                const staleAmids = new Set<string>();
+                for (const spawned of spawnedSubs) {
+                  if (spawned.original_amid) {
+                    staleAmids.add(spawned.original_amid);
+                    // Clear stale cache entries
+                    nameToAmid.delete(spawned.name);
+                    amidToName.delete(spawned.original_amid);
+                    parentTrustedAmids.delete(spawned.original_amid);
+                  }
+                }
+                if (staleAmids.size > 0) {
+                  log.info(`🧹 Handoff: cleared ${staleAmids.size} stale AMID(s) from cache: ${[...staleAmids].map(a => a.slice(0, 12) + "...").join(", ")}`);
+                }
+
                 for (const spawned of spawnedSubs) {
                   try {
-                    // Wait for sub-agent to register in mesh (up to 90s — pods need boot time)
+                    // Wait for sub-agent to register in mesh with a NEW AMID
+                    // (up to 90s — pods need boot time + SDK init + relay connect)
+                    // IMPORTANT: reject old AMIDs from predecessor — they're dead connections
                     let subAmid: string | undefined;
                     const subStart = Date.now();
                     while (Date.now() - subStart < 90_000) {
                       try {
                         const searchResult = await _routerCall("GET",
                           `/agt/registry/registry/search?capability=${encodeURIComponent(spawned.name)}`);
-                        const match = (searchResult?.results || []).find((a: any) =>
+                        const candidates = (searchResult?.results || []).filter((a: any) =>
                           a.display_name === spawned.name && a.status === "online"
                         );
-                        if (match?.amid) { subAmid = match.amid; break; }
+                        // Pick the first candidate that is NOT a stale AMID
+                        const match = candidates.find((a: any) => !staleAmids.has(a.amid));
+                        if (match?.amid) {
+                          subAmid = match.amid;
+                          log.info(`🔍 Found NEW AMID for '${spawned.name}': ${match.amid.slice(0, 12)}...${spawned.original_amid ? ` (old was ${spawned.original_amid.slice(0, 12)}...)` : ""}`);
+                          break;
+                        }
+                        if (candidates.length > 0 && !match) {
+                          log.info(`⏳ Registry has '${spawned.name}' but AMID is stale (${candidates[0].amid.slice(0, 12)}...) — waiting for new registration`);
+                        }
                       } catch { /* not registered yet */ }
                       await new Promise(r => setTimeout(r, 3000));
                     }
@@ -2264,38 +2292,74 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     // Look up workspace data for this sub-agent (may be absent)
                     const wsData = subWorkspaceMap.get(spawned.name);
 
-                    // Send workspace tar via meshSend if available (auto-chunks if large)
-                    let workspaceDelivered = false;
-                    if (wsData?.workspace_tar) {
-                      await meshSend(agtMeshClient, subAmid, {
-                        type: "handoff:workspace_inject",
-                        workspace_tar: wsData.workspace_tar,
-                        from_agent: agentName,
-                        timestamp: new Date().toISOString(),
-                      }, log);
-                      log.info(`📦 Sent workspace to sub-agent '${spawned.name}' — waiting for ack...`);
-
-                      // Wait up to 15s for workspace_inject_ack
-                      const wsAckStart = Date.now();
-                      while (Date.now() - wsAckStart < 15_000) {
-                        const ackIdx = agtInbox.findIndex(m => {
-                          try {
-                            const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
-                            return c?.type === "handoff:workspace_inject_ack" && c?.from_agent === spawned.name;
-                          } catch { return false; }
-                        });
-                        if (ackIdx >= 0) {
-                          const ackMsg = agtInbox.splice(ackIdx, 1)[0];
-                          let parsed: any;
-                          try { parsed = typeof ackMsg.content === "string" ? JSON.parse(ackMsg.content) : ackMsg.content; } catch { parsed = {}; }
-                          workspaceDelivered = !!parsed.success;
-                          log.info(`📦 Workspace ack from '${spawned.name}': success=${parsed.success}, files=${parsed.file_count}${parsed.error ? `, error=${parsed.error}` : ""}`);
+                    // Wait for sub-agent's E2E session to be ready (prekey available on relay)
+                    // before sending workspace_inject. Without this, messages go to the void.
+                    let preKeyReady = false;
+                    const pkStart = Date.now();
+                    for (let pkAttempt = 0; pkAttempt < 20 && Date.now() - pkStart < 60_000; pkAttempt++) {
+                      try {
+                        await agtMeshClient.send(subAmid, { type: "ping", from_agent: agentName });
+                        preKeyReady = true;
+                        log.info(`🔗 E2E session ready for '${spawned.name}' (attempt ${pkAttempt + 1})`);
+                        break;
+                      } catch (pkErr: any) {
+                        if (pkErr.message?.includes("prekey") || pkErr.message?.includes("prekeys")) {
+                          log.info(`⏳ Waiting for prekeys from '${spawned.name}' (${pkAttempt + 1}/20)...`);
+                          await new Promise(r => setTimeout(r, 3000));
+                        } else {
+                          log.warn(`⚠️ E2E session check failed for '${spawned.name}': ${pkErr.message}`);
                           break;
                         }
-                        await new Promise(r => setTimeout(r, 500));
                       }
-                      if (!workspaceDelivered) {
-                        log.warn(`No workspace_inject_ack from '${spawned.name}' within 15s`);
+                    }
+                    if (!preKeyReady) {
+                      log.warn(`Sub-agent '${spawned.name}' E2E session not ready after 60s — sending anyway (best effort)`);
+                    }
+
+                    // Send workspace tar via meshSend if available (auto-chunks if large)
+                    // Retry up to 3 times with ack verification
+                    let workspaceDelivered = false;
+                    if (wsData?.workspace_tar) {
+                      for (let wsAttempt = 0; wsAttempt < 3 && !workspaceDelivered; wsAttempt++) {
+                        if (wsAttempt > 0) {
+                          log.info(`📦 Retrying workspace_inject for '${spawned.name}' (attempt ${wsAttempt + 1}/3)`);
+                          await new Promise(r => setTimeout(r, 3000));
+                        }
+                        try {
+                          await meshSend(agtMeshClient, subAmid, {
+                            type: "handoff:workspace_inject",
+                            workspace_tar: wsData.workspace_tar,
+                            from_agent: agentName,
+                            timestamp: new Date().toISOString(),
+                          }, log);
+                          log.info(`📦 Sent workspace to sub-agent '${spawned.name}' — waiting for ack (attempt ${wsAttempt + 1})...`);
+                        } catch (sendErr: any) {
+                          log.warn(`📦 workspace_inject send failed for '${spawned.name}': ${sendErr.message}`);
+                          continue;
+                        }
+
+                        // Wait up to 20s for workspace_inject_ack
+                        const wsAckStart = Date.now();
+                        while (Date.now() - wsAckStart < 20_000) {
+                          const ackIdx = agtInbox.findIndex(m => {
+                            try {
+                              const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                              return c?.type === "handoff:workspace_inject_ack" && c?.from_agent === spawned.name;
+                            } catch { return false; }
+                          });
+                          if (ackIdx >= 0) {
+                            const ackMsg = agtInbox.splice(ackIdx, 1)[0];
+                            let parsed: any;
+                            try { parsed = typeof ackMsg.content === "string" ? JSON.parse(ackMsg.content) : ackMsg.content; } catch { parsed = {}; }
+                            workspaceDelivered = !!parsed.success;
+                            log.info(`📦 Workspace ack from '${spawned.name}': success=${parsed.success}, files=${parsed.file_count}${parsed.error ? `, error=${parsed.error}` : ""}`);
+                            break;
+                          }
+                          await new Promise(r => setTimeout(r, 500));
+                        }
+                        if (!workspaceDelivered) {
+                          log.warn(`No workspace_inject_ack from '${spawned.name}' within 20s (attempt ${wsAttempt + 1}/3)`);
+                        }
                       }
                     }
 
