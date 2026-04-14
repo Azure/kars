@@ -2161,7 +2161,101 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 log.warn(`Handoff: context file write failed: ${e.message}`);
               }
 
-              // 4. Send Telegram greeting if the channel is configured
+              // 4. Inject workspaces into re-spawned sub-agents + resume interrupted tasks
+              // (Done before Telegram greeting so we can include sub-agent status)
+              const subWorkspaces = restoreResp.sub_agent_workspaces || [];
+              const subAgentStatuses: Array<{ name: string; status: string; task?: string }> = [];
+              if (subWorkspaces.length > 0 && agtMeshClient) {
+                log.info(`📦 Handoff: injecting workspaces into ${subWorkspaces.length} sub-agent(s)...`);
+
+                for (const sub of subWorkspaces) {
+                  try {
+                    // Wait for sub-agent to register in mesh (up to 60s)
+                    let subAmid: string | undefined;
+                    const subStart = Date.now();
+                    while (Date.now() - subStart < 60_000) {
+                      try {
+                        const searchResult = await _routerCall("GET",
+                          `/agt/registry/registry/search?capability=${encodeURIComponent(sub.name)}`);
+                        const match = (searchResult?.results || []).find((a: any) =>
+                          a.display_name === sub.name && a.status === "online"
+                        );
+                        if (match?.amid) { subAmid = match.amid; break; }
+                      } catch { /* not registered yet */ }
+                      await new Promise(r => setTimeout(r, 2000));
+                    }
+
+                    if (!subAmid) {
+                      log.warn(`Sub-agent '${sub.name}' didn't register in mesh within 60s — skipping workspace injection`);
+                      subAgentStatuses.push({ name: sub.name, status: "not_found" });
+                      continue;
+                    }
+
+                    // Send workspace tar via meshSend (auto-chunks if large)
+                    if (sub.workspace_tar) {
+                      await meshSend(agtMeshClient, subAmid, {
+                        type: "handoff:workspace_inject",
+                        workspace_tar: sub.workspace_tar,
+                        from_agent: agentName,
+                        timestamp: new Date().toISOString(),
+                      }, log);
+                      log.info(`📦 Sent workspace to sub-agent '${sub.name}'`);
+                    }
+
+                    // Send resume message with task context
+                    const resumePayload: Record<string, unknown> = {
+                      type: "handoff:resume",
+                      from_agent: agentName,
+                      task_context: sub.task_context || "",
+                      previous_status: sub.status || "unknown",
+                      checkpoint: sub.checkpoint || null,
+                      timestamp: new Date().toISOString(),
+                    };
+                    await agtMeshClient.send(subAmid, resumePayload);
+                    log.info(`▶️ Sent resume signal to sub-agent '${sub.name}' (status: ${sub.status})`);
+                    subAgentStatuses.push({
+                      name: sub.name,
+                      status: "resuming",
+                      task: (sub.task_context || "").slice(0, 200),
+                    });
+                  } catch (subErr: any) {
+                    log.warn(`Sub-agent '${sub.name}' workspace/resume failed: ${subErr.message}`);
+                    subAgentStatuses.push({ name: sub.name, status: "failed" });
+                  }
+                }
+
+                // Brief wait for resume_ack messages (best-effort, 8s)
+                if (subAgentStatuses.some(s => s.status === "resuming")) {
+                  const ackWaitStart = Date.now();
+                  while (Date.now() - ackWaitStart < 8_000) {
+                    for (const sa of subAgentStatuses) {
+                      if (sa.status !== "resuming") continue;
+                      const idx = agtInbox.findIndex(m =>
+                        (m.message_type === "handoff:resume_ack" ||
+                          (typeof m.content === "string" && m.content.includes("handoff:resume_ack"))) &&
+                        (() => {
+                          try {
+                            const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                            return c?.from_agent === sa.name;
+                          } catch { return false; }
+                        })()
+                      );
+                      if (idx >= 0) {
+                        const msg = agtInbox.splice(idx, 1)[0];
+                        let parsed: any;
+                        try { parsed = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content; } catch { parsed = {}; }
+                        sa.status = parsed?.has_interrupted_task ? "resumed" : "ready";
+                        sa.task = parsed?.interrupted_task?.task?.slice(0, 200) || sa.task;
+                        log.info(`🤝 Sub-agent '${sa.name}' checked in: ${sa.status}`);
+                      }
+                    }
+                    if (subAgentStatuses.every(s => s.status !== "resuming")) break;
+                    await new Promise(r => setTimeout(r, 500));
+                  }
+                }
+              }
+
+              // 5. Send Telegram greeting (now includes sub-agent status)
               const tgToken = process.env.TELEGRAM_BOT_TOKEN;
               const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
               if (tgToken && tgAllowFrom) {
@@ -2179,6 +2273,21 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 if (chatMessages.length > 0) {
                   lines.push("", `📜 _${chatMessages.length} messages transferred from our previous session\\._`);
                 }
+
+                // Sub-agent status section
+                if (subAgentStatuses.length > 0) {
+                  lines.push("", "🤖 *Sub\\-agents:*");
+                  for (const sa of subAgentStatuses) {
+                    const icon = sa.status === "resumed" ? "▶️" : sa.status === "ready" ? "✅" : sa.status === "resuming" ? "⏳" : "❌";
+                    const taskPreview = sa.task ? `: _${escapeMd2(sa.task.slice(0, 100))}${sa.task.length > 100 ? "\\.\\.\\." : ""}_` : "";
+                    const statusLabel = sa.status === "resumed" ? "resuming work"
+                      : sa.status === "ready" ? "ready"
+                      : sa.status === "resuming" ? "starting up"
+                      : "failed to restore";
+                    lines.push(`  ${icon} *${escapeMd2(sa.name)}* — ${statusLabel}${taskPreview}`);
+                  }
+                }
+
                 if (lastUserMsg) {
                   const preview = escapeMd2(String(lastUserMsg.content).slice(0, 200));
                   lines.push("", `🔖 *Where we left off:*`, `Your last message: "${preview}${String(lastUserMsg.content).length > 200 ? "\\.\\.\\." : ""}"`);
@@ -2210,61 +2319,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 }
               }
 
-              // 5. Inject workspaces into re-spawned sub-agents + resume interrupted tasks
-              const subWorkspaces = restoreResp.sub_agent_workspaces || [];
-              if (subWorkspaces.length > 0 && agtMeshClient) {
-                log.info(`📦 Handoff: injecting workspaces into ${subWorkspaces.length} sub-agent(s)...`);
-
-                for (const sub of subWorkspaces) {
-                  try {
-                    // Wait for sub-agent to register in mesh (up to 60s)
-                    let subAmid: string | undefined;
-                    const subStart = Date.now();
-                    while (Date.now() - subStart < 60_000) {
-                      try {
-                        const searchResult = await _routerCall("GET",
-                          `/agt/registry/registry/search?capability=${encodeURIComponent(sub.name)}`);
-                        const match = (searchResult?.results || []).find((a: any) =>
-                          a.display_name === sub.name && a.status === "online"
-                        );
-                        if (match?.amid) { subAmid = match.amid; break; }
-                      } catch { /* not registered yet */ }
-                      await new Promise(r => setTimeout(r, 2000));
-                    }
-
-                    if (!subAmid) {
-                      log.warn(`Sub-agent '${sub.name}' didn't register in mesh within 60s — skipping workspace injection`);
-                      continue;
-                    }
-
-                    // Send workspace tar via meshSend (auto-chunks if large)
-                    if (sub.workspace_tar) {
-                      await meshSend(agtMeshClient, subAmid, {
-                        type: "handoff:workspace_inject",
-                        workspace_tar: sub.workspace_tar,
-                        from_agent: agentName,
-                        timestamp: new Date().toISOString(),
-                      }, log);
-                      log.info(`📦 Sent workspace to sub-agent '${sub.name}'`);
-                    }
-
-                    // Send resume message with task context
-                    const resumePayload: Record<string, unknown> = {
-                      type: "handoff:resume",
-                      from_agent: agentName,
-                      task_context: sub.task_context || "",
-                      previous_status: sub.status || "unknown",
-                      checkpoint: sub.checkpoint || null,
-                      timestamp: new Date().toISOString(),
-                    };
-                    await agtMeshClient.send(subAmid, resumePayload);
-                    log.info(`▶️ Sent resume signal to sub-agent '${sub.name}' (status: ${sub.status})`);
-                  } catch (subErr: any) {
-                    log.warn(`Sub-agent '${sub.name}' workspace/resume failed: ${subErr.message}`);
-                  }
-                }
-              }
-
               // 6. Send "handoff_ready" mesh message back to predecessor
               if (agtMeshClient && fromAmid) {
                 try {
@@ -2275,6 +2329,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     chat_messages_loaded: chatMessages.length,
                     memory_stored: true,
                     telegram_greeted: !!(tgToken && tgAllowFrom),
+                    sub_agents_restored: subAgentStatuses.length,
+                    sub_agents_resumed: subAgentStatuses.filter(s => s.status === "resumed").length,
+                    sub_agent_details: subAgentStatuses,
                     timestamp: new Date().toISOString(),
                   });
                   log.info(`🤝 Handoff: sent 'handoff_ready' mesh message to predecessor`);
