@@ -1828,6 +1828,32 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             { timeout: 10000 },
           );
           fs.rmSync(tmpDir, { recursive: true, force: true });
+
+          // Write a manifest so the agent knows what files were restored and where.
+          // Filter to user-facing files (skip .openclaw internals, skills, etc.)
+          const userFiles = entries.filter((e: string) =>
+            !e.endsWith("/") &&
+            !e.includes("/skills/") &&
+            !e.includes("workspace-state.json") &&
+            !e.includes("SOUL.md") &&
+            !e.includes("USER.md"),
+          );
+          if (userFiles.length > 0) {
+            const manifestLines = [
+              "# Handoff — Restored Files",
+              "",
+              `Restored ${userFiles.length} workspace file(s) from the previous environment:`,
+              "",
+              ...userFiles.map((f: string) => `- /sandbox/${f}`),
+              "",
+              `Total files (including system): ${entries.length}`,
+            ];
+            fs.writeFileSync(
+              "/sandbox/.openclaw/workspace/HANDOFF_FILES.md",
+              manifestLines.join("\n") + "\n",
+            );
+          }
+
           success = true;
           log.info(`📦 Workspace injected (${(tarBuf.length / 1024).toFixed(1)} KB, ${fileCount} files)`);
         } catch (injectErr: any) {
