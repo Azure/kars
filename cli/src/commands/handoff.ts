@@ -604,7 +604,28 @@ export function handoffCommand(): Command {
               name: string; workspace_tar: string; [k: string]: unknown;
             }>;
 
-            // Enrich each sub-agent snapshot with workspace tar from its container
+            // Phase 1: Signal all sub-agents to save in-progress work
+            for (const snap of subSnaps) {
+              try {
+                const interruptCmd = `mkdir -p /sandbox/.openclaw/workspace && echo '{"reason":"parent_handoff","time":"${new Date().toISOString()}"}' > /sandbox/.openclaw/workspace/.handoff-interrupt`;
+                if (isReverse) {
+                  const subNs = `azureclaw-${snap.name}`;
+                  await execa("kubectl", [
+                    "exec", "-n", subNs, "-c", "openclaw",
+                    `deploy/${snap.name}`, "--", "sh", "-c", interruptCmd,
+                  ], { stdio: "pipe", timeout: 5000, reject: false });
+                } else {
+                  const containerName = `azureclaw-${snap.name}`;
+                  await execa("docker", [
+                    "exec", containerName, "sh", "-c", interruptCmd,
+                  ], { stdio: "pipe", timeout: 5000, reject: false });
+                }
+              } catch { /* interrupt signal is best-effort */ }
+            }
+            // Brief pause for sub-agents to notice the interrupt file
+            await new Promise(r => setTimeout(r, 3000));
+
+            // Phase 2: Collect workspaces (sub-agents may have saved progress)
             for (const snap of subSnaps) {
               try {
                 const subNs = `azureclaw-${snap.name}`;

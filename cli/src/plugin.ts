@@ -119,6 +119,10 @@ interface HandoffProgress {
 }
 let handoffProgress: HandoffProgress | null = null;
 
+// Handoff interrupt flag — set by handoff:interrupt message, checked by task loops
+let handoffInterruptRequested = false;
+let handoffInterruptReason = "";
+
 // Module-level logger — set once during register(), used by background orchestration
 let _log: { info: (m: string) => void; warn: (m: string) => void } = {
   info: (m: string) => console.log(`[azureclaw] ${m}`),
@@ -597,6 +601,41 @@ async function processTaskWithTools(
 
   // Tool-calling loop (max 10 rounds to prevent runaway)
   for (let round = 0; round < 10; round++) {
+    // Check for handoff interrupt — save progress and exit early
+    // Two signals: (1) module-level flag from mesh handoff:interrupt message,
+    // (2) file-based signal from CLI's docker/kubectl exec
+    if (!handoffInterruptRequested) {
+      try {
+        const fs = await import("node:fs");
+        if (fs.existsSync("/sandbox/.openclaw/workspace/.handoff-interrupt")) {
+          handoffInterruptRequested = true;
+          handoffInterruptReason = "cli_handoff";
+          fs.unlinkSync("/sandbox/.openclaw/workspace/.handoff-interrupt");
+        }
+      } catch { /* ignore */ }
+    }
+    if (handoffInterruptRequested) {
+      log.info(`🛑 Handoff interrupt: saving progress at round ${round}/${10}`);
+      try {
+        const fs = await import("node:fs");
+        const progressFile = "/sandbox/.openclaw/workspace/.task-in-progress.json";
+        fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
+        fs.writeFileSync(progressFile, JSON.stringify({
+          interrupted_at: new Date().toISOString(),
+          reason: handoffInterruptReason,
+          round,
+          total_rounds: 10,
+          messages_so_far: messages.length,
+          last_content: messages[messages.length - 1]?.content?.slice(0, 2000),
+          task: typeof taskContent === "string" ? taskContent.slice(0, 2000) : JSON.stringify(taskContent).slice(0, 2000),
+        }, null, 2));
+        log.info(`📝 Task progress saved to ${progressFile}`);
+      } catch { /* best-effort progress save */ }
+      handoffInterruptRequested = false;
+      handoffInterruptReason = "";
+      return `Task interrupted for handoff at round ${round}. Progress saved to .task-in-progress.json — will resume after handoff.`;
+    }
+
     const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
@@ -1665,6 +1704,26 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         return; // Don't process as a task
       }
 
+      // ── Handle handoff:interrupt — parent signals sub-agent to save progress ──
+      // Sent before workspace_request so the sub-agent can checkpoint its work.
+      // Sets the interrupt flag which processTaskWithTools checks between rounds.
+      if (message?.type === "handoff:interrupt" && fromAmid) {
+        log.info(`🛑 Handoff interrupt received from '${fromName}' — signaling task to save progress`);
+        handoffInterruptRequested = true;
+        handoffInterruptReason = message.reason || "parent_handoff";
+        // Acknowledge immediately — the task loop will save on next iteration
+        if (agtMeshClient) {
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:interrupt_ack",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+        return; // Don't process as a task
+      }
+
       // ── Handle handoff:workspace_request — parent collects sub-agent workspace ──
       // During handoff, the parent asks each sub-agent to serialize its workspace
       // and send it back via mesh. Uses meshSend for transparent auto-chunking.
@@ -2387,10 +2446,13 @@ async function _runHandoffOrchestration(
       }>;
 
       // Request workspace from each sub-agent via E2E mesh
+      // Protocol: interrupt → wait for ack/save → collect workspace
       if (agtMeshClient && agtIdentity) {
+        // Phase 1: Send handoff:interrupt to ALL sub-agents concurrently
+        // so they can save progress while we continue setup
+        const subAmidMap = new Map<string, string>(); // name → amid
         for (const snap of subSnaps) {
           try {
-            // Look up sub-agent AMID from registry
             const regResp = await _routerCall("GET",
               `/agt/registry/registry/search?capability=${encodeURIComponent(snap.name)}`,
               undefined, 5000, authH);
@@ -2401,7 +2463,49 @@ async function _runHandoffOrchestration(
 
             const subAmid = candidates[0].amid;
             snap.original_amid = subAmid;
+            subAmidMap.set(snap.name, subAmid);
 
+            // Signal sub-agent to save in-progress work
+            await agtMeshClient.send(subAmid, {
+              type: "handoff:interrupt",
+              reason: "parent_handoff",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+            _log.info(`🛑 Sent handoff:interrupt to sub-agent '${snap.name}'`);
+          } catch (lookupErr: any) {
+            _log.warn(`Sub-agent '${snap.name}' lookup/interrupt failed: ${lookupErr.message}`);
+          }
+        }
+
+        // Brief pause for sub-agents to checkpoint (they save between LLM rounds)
+        if (subAmidMap.size > 0) {
+          _log.info(`⏳ Waiting for ${subAmidMap.size} sub-agent(s) to save progress...`);
+          // Wait up to 10s for interrupt_ack from sub-agents (best-effort)
+          const ackStart = Date.now();
+          const acksReceived = new Set<string>();
+          while (Date.now() - ackStart < 10_000 && acksReceived.size < subAmidMap.size) {
+            for (let i = agtInbox.length - 1; i >= 0; i--) {
+              const m = agtInbox[i];
+              if (m.message_type === "handoff:interrupt_ack" ||
+                  (typeof m.content === "string" && m.content.includes("handoff:interrupt_ack"))) {
+                acksReceived.add(m.from_amid);
+                agtInbox.splice(i, 1);
+              }
+            }
+            if (acksReceived.size < subAmidMap.size) {
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
+          _log.info(`✅ ${acksReceived.size}/${subAmidMap.size} sub-agent(s) acknowledged interrupt`);
+        }
+
+        // Phase 2: Collect workspaces (sub-agents have now saved progress)
+        for (const snap of subSnaps) {
+          const subAmid = subAmidMap.get(snap.name);
+          if (!subAmid) continue;
+
+          try {
             // Send workspace request via mesh
             await agtMeshClient.send(subAmid, {
               type: "handoff:workspace_request",
