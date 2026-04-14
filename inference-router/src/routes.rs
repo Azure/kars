@@ -2949,6 +2949,22 @@ async fn handoff_init_handler(
         _ => handoff::HandoffDirection::LocalToAks,
     };
 
+    // Validate direction vs environment (warn-only, don't block)
+    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let expected = if is_dev {
+        handoff::HandoffDirection::AksToLocal
+    } else {
+        handoff::HandoffDirection::LocalToAks
+    };
+    if direction != expected {
+        tracing::warn!(
+            direction = %direction,
+            expected = %expected,
+            is_dev,
+            "Handoff direction does not match environment — proceeding with caution"
+        );
+    }
+
     let predecessor_amid = body
         .get("predecessor_amid")
         .and_then(|v| v.as_str())

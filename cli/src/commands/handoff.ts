@@ -493,6 +493,8 @@ export function handoffCommand(): Command {
         // Collect workspace, chat/memory, and credentials from the source agent
         // so the snapshot includes full state (not just trust/audit from the router).
         const snapshotPayload: Record<string, unknown> = { shared_secret: sharedSecret };
+        // Collected in forward path, used later to create K8s secret on AKS target
+        const credentialValues: Array<{ env_key: string; value: string }> = [];
 
         if (isReverse) {
           // Reverse: source is AKS — exec into openclaw container for workspace
@@ -572,7 +574,7 @@ export function handoffCommand(): Command {
             }
           } catch { /* memory collection is best-effort */ }
 
-          // Credential refs from local Docker container
+          // Credential refs + values from local Docker container
           try {
             const { stdout: envOut } = await execa("docker", [
               "exec", containerName, "sh", "-c", "env",
@@ -584,7 +586,11 @@ export function handoffCommand(): Command {
             ];
             const credRefs: Array<{ name: string; env_key: string }> = [];
             for (const [envKey, label] of credMap) {
-              if (envOut.includes(`${envKey}=`)) credRefs.push({ name: label, env_key: envKey });
+              const match = envOut.match(new RegExp(`^${envKey}=(.+)$`, "m"));
+              if (match) {
+                credRefs.push({ name: label, env_key: envKey });
+                credentialValues.push({ env_key: envKey, value: match[1] });
+              }
             }
             if (credRefs.length > 0) snapshotPayload.credentials = credRefs;
           } catch { /* credential scan is best-effort */ }
@@ -719,6 +725,27 @@ export function handoffCommand(): Command {
             stepper.fail(`Failed to create target sandbox CRD: ${e.message}`);
             await routerExec("POST", "/agt/handoff/abort", {}, handoffHeaders).catch(() => {});
             process.exit(1);
+          }
+
+          // Rehydrate credentials from Docker into K8s secret so the target
+          // pod's envFrom can mount them. Must happen before pod starts.
+          if (credentialValues.length > 0) {
+            stepper.step(`Migrating ${credentialValues.length} credential(s) to AKS...`);
+            try {
+              const secretName = `${targetName}-credentials`;
+              const secretArgs = [
+                "create", "secret", "generic", secretName,
+                "-n", targetNs, "--dry-run=client", "-o", "yaml",
+              ];
+              for (const cred of credentialValues) {
+                secretArgs.push(`--from-literal=${cred.env_key}=${cred.value}`);
+              }
+              const { stdout: yaml } = await execa("kubectl", secretArgs, { stdio: "pipe" });
+              await execa("kubectl", ["apply", "-f", "-"], { input: yaml, stdio: ["pipe", "pipe", "pipe"] });
+              stepper.done(`Credentials migrated (${credentialValues.map(c => c.env_key).join(", ")})`);
+            } catch (e: any) {
+              stepper.warn(`Credential migration failed (non-fatal): ${e.message}`);
+            }
           }
 
           // Check if the pod already existed (need to wait or it's already running)
@@ -954,7 +981,7 @@ export function handoffCommand(): Command {
           stepper.done("Identity succession ready (requires source agent AMID)");
         }
 
-        // Step 7 (reverse only): Decommission cloud agent + delete CRD
+        // Step 7 (reverse only): Decommission cloud agent + scale down
         if (isReverse) {
           stepper.step("Decommissioning cloud agent...");
           try {
@@ -964,15 +991,27 @@ export function handoffCommand(): Command {
             stepper.done(`Decommission pending: ${decommErr.message}`);
           }
 
-          stepper.step("Removing cloud sandbox...");
+          // Scale the deployment to 0 instead of deleting the CRD.
+          // This preserves the sandbox definition for a future forward handoff
+          // while freeing all compute resources.
+          stepper.step("Scaling down cloud sandbox...");
           try {
             await execa("kubectl", [
-              "delete", "clawsandbox", name, "-n", "azureclaw-system",
-              "--ignore-not-found",
+              "scale", "deploy", name, "-n", targetNs,
+              "--replicas=0",
             ], { stdio: "pipe" });
-            stepper.done("AKS ClawSandbox CRD removed");
-          } catch (delErr: any) {
-            stepper.done(`CRD removal pending: ${delErr.message}`);
+            stepper.done("AKS deployment scaled to 0 (CRD preserved for re-handoff)");
+          } catch {
+            // Fallback: delete CRD if scale fails (different controller version, etc.)
+            try {
+              await execa("kubectl", [
+                "delete", "clawsandbox", name, "-n", "azureclaw-system",
+                "--ignore-not-found",
+              ], { stdio: "pipe" });
+              stepper.done("AKS ClawSandbox CRD removed");
+            } catch (delErr: any) {
+              stepper.done(`CRD removal pending: ${delErr.message}`);
+            }
           }
 
           aksPortForwardStop();

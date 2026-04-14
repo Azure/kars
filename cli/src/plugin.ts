@@ -1719,12 +1719,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           const adminToken = await _readAdminToken();
           if (!adminToken) throw new Error("No admin token available for handoff restore");
 
+          // Validate direction matches our environment
+          const incomingDirection = message.direction || "local_to_aks";
+          const isDevMode = process.env.AZURECLAW_DEV_MODE === "true";
+          // If we're in dev mode (Docker), we should be receiving aks_to_local.
+          // If we're in AKS, we should be receiving local_to_aks.
+          const expectedDirection = isDevMode ? "aks_to_local" : "local_to_aks";
+          if (incomingDirection !== expectedDirection) {
+            log.warn(
+              `⚠️ Handoff direction mismatch: received '${incomingDirection}' but ` +
+              `expected '${expectedDirection}' (dev_mode=${isDevMode}). Proceeding with caution.`
+            );
+          }
+
           const authH = { Authorization: `Bearer ${adminToken}` };
 
           // 1. Initialize a handoff session on our own router
-          // Direction is always from the target's perspective: we're receiving state
           const initResp = await _routerCallStrict("POST", "/agt/handoff/init", {
-            direction: message.direction || "local_to_aks",
+            direction: incomingDirection,
             ttl_seconds: 300,
             predecessor_amid: fromAmid,
           }, 15000, authH);
@@ -2524,28 +2536,43 @@ async function _runHandoffOrchestration(
 
   } else {
     // aks_to_local: discover existing local target
+    // The CLI wakes the dormant Docker container before initiating the reverse
+    // handoff, so the local agent may still be starting. Retry with backoff.
     _hp("discover", "🏠 Discovering local target agent...");
-    try {
-      const searchResult = await _routerCall("GET",
-        `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
-      const agents = searchResult?.results || [];
-      const match = agents.find((a: any) =>
-        a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
-      );
-      if (match?.amid) {
-        targetAmid = match.amid;
-        nameToAmid.set(targetName, match.amid);
-        amidToName.set(match.amid, targetName);
+    const discoverStart = Date.now();
+    const DISCOVER_TIMEOUT = 60_000; // 60s — local agent may be waking up
+
+    while (Date.now() - discoverStart < DISCOVER_TIMEOUT) {
+      try {
+        const searchResult = await _routerCall("GET",
+          `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
+        const agents = searchResult?.results || [];
+        const match = agents.find((a: any) =>
+          a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
+        );
+        if (match?.amid) {
+          targetAmid = match.amid;
+          nameToAmid.set(targetName, match.amid);
+          amidToName.set(match.amid, targetName);
+          break;
+        }
+      } catch { /* registry error */ }
+
+      const elapsed = Math.round((Date.now() - discoverStart) / 1000);
+      if (elapsed % 10 === 0 && elapsed > 0) {
+        _hp("discover", `🏠 Waiting for local target to come online... (${elapsed}s)`);
       }
-    } catch { /* registry error */ }
+      await new Promise(r => setTimeout(r, 2000));
+    }
 
     if (!targetAmid) {
       await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
       if (handoffProgress) {
         handoffProgress.status = "error";
         handoffProgress.phase = "error";
-        handoffProgress.error = "Local target agent not found in mesh registry";
-        handoffProgress.steps.push("❌ Local target not found");
+        handoffProgress.error = "Local target agent not found in mesh registry after 60s. " +
+          "Ensure the local agent is running: azureclaw dev <name>";
+        handoffProgress.steps.push("❌ Local target not found — is the local agent running?");
       }
       return;
     }
@@ -2712,14 +2739,14 @@ async function _runHandoffOrchestration(
     handoffProgress.steps.push(`🗑️  Clean up local: azureclaw destroy ${agentName} --local`);
   } else {
     handoffProgress.steps.push("Your local agent has the full state — chat history, trust scores, audit trail.");
-    handoffProgress.steps.push("The cloud agent has been decommissioned.");
+    handoffProgress.steps.push("The cloud agent has been decommissioned and scaled to zero.");
     handoffProgress.steps.push("");
     handoffProgress.steps.push(`📡 Connect to local agent: azureclaw connect ${agentName} --local`);
     handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
     if (process.env.TELEGRAM_BOT_TOKEN) {
       handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the local agent.`);
     }
-    handoffProgress.steps.push(`☁️  Cloud sandbox removed.`);
+    handoffProgress.steps.push(`☁️  Cloud sandbox scaled to 0 (CRD preserved — re-handoff to cloud is instant).`);
   }
   handoffProgress.status = "complete";
   handoffProgress.result = {
