@@ -37,6 +37,17 @@ export function handoffCommand(): Command {
       const { execa } = await import("execa");
       const containerName = `azureclaw-${name}`;
 
+      // Shared tar command for workspace + config collection.
+      // Captures: workspace, gateway config, cron jobs, governance policies, agent state.
+      // Excludes: compiled extensions (regenerable), node_modules, git, python cache.
+      const WORKSPACE_TAR_CMD =
+        "tar czf - -C /sandbox " +
+        "--exclude='.openclaw/extensions/*/dist' --exclude='.openclaw/extensions/*/node_modules' " +
+        "--exclude='node_modules' --exclude='.git' " +
+        "--exclude='*.pyc' --exclude='__pycache__' " +
+        ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
+        ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0";
+
       // ── Helper: call the router inside the container ────────────
       async function routerExec(
         method: string,
@@ -489,11 +500,7 @@ export function handoffCommand(): Command {
             const { stdout: tarB64 } = await execa("kubectl", [
               "exec", "-n", targetNs, "-c", "openclaw",
               `deploy/${name}`, "--",
-              "sh", "-c",
-              "tar czf - -C /sandbox " +
-              "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
-              "--exclude='*.pyc' --exclude='__pycache__' " +
-              ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+              "sh", "-c", WORKSPACE_TAR_CMD,
             ], { stdio: "pipe", timeout: 15000 });
             if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
               snapshotPayload.workspace_tar = tarB64;
@@ -540,11 +547,7 @@ export function handoffCommand(): Command {
           // Forward: source is local Docker — exec into container for workspace
           try {
             const { stdout: tarB64 } = await execa("docker", [
-              "exec", containerName, "sh", "-c",
-              "tar czf - -C /sandbox " +
-              "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
-              "--exclude='*.pyc' --exclude='__pycache__' " +
-              ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+              "exec", containerName, "sh", "-c", WORKSPACE_TAR_CMD,
             ], { stdio: "pipe", timeout: 15000 });
             if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
               snapshotPayload.workspace_tar = tarB64;
@@ -599,24 +602,20 @@ export function handoffCommand(): Command {
             for (const snap of subSnaps) {
               try {
                 const subNs = `azureclaw-${snap.name}`;
-                const tarCmd = "tar czf - -C /sandbox " +
-                  "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
-                  "--exclude='*.pyc' --exclude='__pycache__' " +
-                  ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0";
 
                 let tarB64 = "";
                 if (isReverse) {
                   // Source is AKS — kubectl exec into sub-agent's openclaw container
                   const { stdout } = await execa("kubectl", [
                     "exec", "-n", subNs, "-c", "openclaw",
-                    `deploy/${snap.name}`, "--", "sh", "-c", tarCmd,
+                    `deploy/${snap.name}`, "--", "sh", "-c", WORKSPACE_TAR_CMD,
                   ], { stdio: "pipe", timeout: 10000 });
                   tarB64 = stdout;
                 } else {
                   // Source is local Docker — docker exec into sub-agent container
                   const containerName = `azureclaw-${snap.name}`;
                   const { stdout } = await execa("docker", [
-                    "exec", containerName, "sh", "-c", tarCmd,
+                    "exec", containerName, "sh", "-c", WORKSPACE_TAR_CMD,
                   ], { stdio: "pipe", timeout: 10000 });
                   tarB64 = stdout;
                 }

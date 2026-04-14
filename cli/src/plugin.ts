@@ -1380,17 +1380,21 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           const { execSync } = await import("node:child_process");
           const tarB64 = execSync(
             "tar czf - -C /sandbox " +
-            "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+            "--exclude='.openclaw/extensions/*/dist' --exclude='.openclaw/extensions/*/node_modules' " +
+            "--exclude='node_modules' --exclude='.git' " +
             "--exclude='*.pyc' --exclude='__pycache__' " +
-            ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+            ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
+            ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0",
             { timeout: 10000, maxBuffer: 3 * 1024 * 1024 },
           ).toString().trim();
 
           await agtMeshClient.send(fromAmid, {
             type: "handoff:workspace_response",
             name: process.env.SANDBOX_NAME || "unknown",
-            workspace_tar: tarB64.length < 2 * 1024 * 1024 ? tarB64 : "",
+            // Cap at 768KB base64 — relay has ~1MB limit, plus Signal Protocol overhead
+            workspace_tar: tarB64.length < 768 * 1024 ? tarB64 : "",
             size_bytes: tarB64.length,
+            truncated: tarB64.length >= 768 * 1024,
             from_agent: process.env.SANDBOX_NAME || "unknown",
             timestamp: new Date().toISOString(),
           });
@@ -2025,9 +2029,11 @@ async function _runHandoffOrchestration(
     // Tar key workspace files (skip large/transient dirs)
     const tarB64 = execSync(
       "tar czf - -C /sandbox " +
-      "--exclude='.openclaw/extensions' --exclude='node_modules' --exclude='.git' " +
+      "--exclude='.openclaw/extensions/*/dist' --exclude='.openclaw/extensions/*/node_modules' " +
+      "--exclude='node_modules' --exclude='.git' " +
       "--exclude='*.pyc' --exclude='__pycache__' " +
-      ".openclaw/workspace .openclaw/openclaw.json 2>/dev/null | base64 -w0",
+      ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
+      ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0",
       { maxBuffer: 10 * 1024 * 1024, timeout: 10000 },
     ).toString("utf-8").trim();
     if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
