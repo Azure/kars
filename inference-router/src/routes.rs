@@ -3479,17 +3479,38 @@ async fn handoff_restore(
             // Clear handoff meta — this is a fresh spawn, not a handoff target
             spawn_req.handoff = None;
 
-            // Remap trusted_peers: replace old parent AMID with new one
+            // Remap trusted_peers: ensure new parent is trusted.
+            // Docker snapshots have trusted_peers=None, so we MUST set it —
+            // otherwise sub-agents reject workspace_inject/resume messages.
             if let Some(new_amid) = &new_parent_amid {
-                if let Some(peers) = &spawn_req.trusted_peers {
-                    if !old_parent_amid.is_empty() && peers.contains(old_parent_amid) {
-                        spawn_req.trusted_peers =
-                            Some(peers.replace(old_parent_amid, new_amid));
+                let parent_name = &state.sandbox_name;
+                let new_entry = format!("{parent_name}:{new_amid}");
+
+                match &spawn_req.trusted_peers {
+                    Some(peers) if !peers.is_empty() => {
+                        // Remap old parent AMID → new parent AMID
+                        if !old_parent_amid.is_empty() && peers.contains(old_parent_amid) {
+                            spawn_req.trusted_peers =
+                                Some(peers.replace(old_parent_amid, new_amid));
+                            tracing::info!(
+                                sub_agent = %sub_snap.name,
+                                old = %old_parent_amid,
+                                new = %new_amid,
+                                "Remapped parent AMID in sub-agent trusted_peers"
+                            );
+                        } else {
+                            // Old parent not found — append new parent
+                            spawn_req.trusted_peers =
+                                Some(format!("{peers},{new_entry}"));
+                        }
+                    }
+                    _ => {
+                        // No trusted_peers at all — set new parent as trusted
+                        spawn_req.trusted_peers = Some(new_entry.clone());
                         tracing::info!(
                             sub_agent = %sub_snap.name,
-                            old = %old_parent_amid,
-                            new = %new_amid,
-                            "Remapped parent AMID in sub-agent trusted_peers"
+                            parent_amid = %new_amid,
+                            "Set trusted_peers for sub-agent (was empty)"
                         );
                     }
                 }
