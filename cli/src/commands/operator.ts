@@ -665,7 +665,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   async function fetchEgressDomains(sb: SandboxInfo): Promise<EgressDomain[]> {
     if (!sb.podName) return [];
-    const routerCurl = devMode
+    const isDockerAgent = sb.runtime === "docker";
+    const routerCurl = isDockerAgent
       ? (path: string) => execa("docker", [
           "exec", sb.podName!,
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
@@ -722,7 +723,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       sandbox: sb.name,
       isolation: sb.isolation,
       runtime: sb.isolation === "confidential" ? "kata-vm" : "runc",
-      seccomp: devMode ? "azureclaw-strict"
+      seccomp: sb.runtime === "docker" ? "azureclaw-strict"
                : sb.isolation === "enhanced" ? "azureclaw-strict" : "RuntimeDefault",
       networkPolicy: false,
       adminAuth: false,
@@ -769,7 +770,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     if (!sb.podName) return state;
 
-    const routerExec = devMode
+    // Use per-sandbox runtime to choose exec path (not global devMode) so the
+    // unified view can query Docker agents via docker-exec and AKS agents via
+    // kubectl-exec in the same operator session.
+    const isDockerAgent = sb.runtime === "docker";
+    const routerExec = isDockerAgent
       ? (path: string) => execa("docker", [
           "exec", sb.podName!,
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
@@ -780,10 +785,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
         ], kubeContext), { stdio: "pipe", timeout: 10000 });
 
-    // Run all checks in parallel
-    // In dev mode, skip K8s-only checks (NetworkPolicy, admin token)
-    const k8sCheck = (args: string[]) => devMode
-      ? Promise.reject("dev-mode")
+    // Docker agents don't have K8s resources (NetworkPolicy, admin token secret)
+    const k8sCheck = (args: string[]) => isDockerAgent
+      ? Promise.reject("docker-agent")
       : execa("kubectl", kctl(args, kubeContext), { stdio: "pipe", timeout: 10000 });
 
     const checks = await Promise.allSettled([
@@ -974,7 +978,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (!existing?.agtEnabled) return;
 
     try {
-      const { stdout } = devMode
+      const isDockerAgent = sb.runtime === "docker";
+      const { stdout } = isDockerAgent
         ? await execa("docker", [
             "exec", sb.podName,
             "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/status",
