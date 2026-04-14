@@ -1056,7 +1056,7 @@ var SessionManager = class {
   async initiateSession(peerAmid, peerBundle, peerSigningKey) {
     const existing = this.getSessionByPeer(peerAmid);
     if (existing && existing.state === "active" /* ACTIVE */) {
-      throw new Error(`Active session already exists with ${peerAmid}`);
+      return { sessionId: existing.sessionId, x3dhMessage: null, reused: true };
     }
     const x3dhResult = await X3DHKeyExchange.initiator(
       this.identity,
@@ -3190,13 +3190,17 @@ var AgentMeshClient = class _AgentMeshClient {
     const bundle = this.convertRegistryBundle(registryBundle);
     const signingKeyB64 = agentInfo.signingPublicKey;
     const signingKey = this.base64Decode(signingKeyB64);
-    const { sessionId, x3dhMessage } = await this.sessionManager.initiateSession(
+    const result = await this.sessionManager.initiateSession(
       toAmid,
       bundle,
       signingKey
     );
-    this.pendingX3DH.set(toAmid, x3dhMessage);
+    const { sessionId } = result;
     this.activeSessions.set(toAmid, sessionId);
+    if (result.reused) {
+      return sessionId;
+    }
+    this.pendingX3DH.set(toAmid, result.x3dhMessage);
     const request = {
       type: options.sessionType || "one-shot",
       ttl: options.ttl || 3600,

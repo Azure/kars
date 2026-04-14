@@ -406,6 +406,23 @@ this exceeds V8's maximum call stack size.
 fall back to a loop-based approach in browsers. Applied to both instances
 (DoubleRatchet line 958 and SessionManager line 1365).
 
+### 10. initiateSession — "Active session already exists" crash on reuse
+**File:** `dist/index.js` (SessionManager.initiateSession, AgentMeshClient.establishSession)
+
+When agent A sends a message to agent B, B's KNOCK response creates a session
+in A's SessionManager. But `client.activeSessions` (the high-level Map) isn't
+updated. A's next `send()` to B misses in `activeSessions` → calls
+`establishSession` → calls `initiateSession` → finds the active session in the
+crypto layer → throws `"Active session already exists with <amid>"`.
+
+This breaks `mesh_transfer_file` and any second message to the same peer when
+the session was established via incoming KNOCK rather than outgoing send.
+
+**Fix:** `initiateSession` returns `{ sessionId, x3dhMessage: null, reused: true }`
+for existing active sessions instead of throwing. `establishSession` detects
+`reused: true`, syncs `activeSessions`, and returns early (skips redundant
+KNOCK + activate).
+
 ## License
 
 MIT
