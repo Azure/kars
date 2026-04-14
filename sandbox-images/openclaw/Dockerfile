@@ -25,10 +25,10 @@ FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 FROM ${SANDBOX_BASE_IMAGE} AS cli-builder
 
 WORKDIR /build
-COPY cli/package.json cli/tsconfig.json ./cli/
+COPY cli/package.json cli/package-lock.json cli/tsconfig.json ./cli/
 COPY cli/src/ ./cli/src/
 COPY policy-engine/profiles/ ./policy-engine/profiles/
-RUN cd cli && npm install --ignore-scripts 2>/dev/null || true && npm run build
+RUN cd cli && npm ci --ignore-scripts && npm run build
 
 # ─── Runtime Stage (overlay on base) ─────────────────────────────────────────
 
@@ -42,19 +42,18 @@ COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/
 
 # Copy AzureClaw OpenClaw plugin (built from source in cli-builder stage)
 COPY --from=cli-builder /build/cli/dist/ /opt/azureclaw-plugin/
-COPY cli/package.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
+COPY cli/package.json cli/package-lock.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
 # Install plugin runtime dependencies
-RUN cd /opt/azureclaw-plugin && npm install --omit=dev --ignore-scripts 2>/dev/null || true
+RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
 
 # Install vendored SDK with its dependencies (libsodium-wrappers etc.)
-COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
+COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/package-lock.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
 COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
 COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
-RUN cd /opt/azureclaw-vendored-sdk && npm install --ignore-scripts 2>/dev/null || true && \
-    npm prune --omit=dev 2>/dev/null || true
+RUN cd /opt/azureclaw-vendored-sdk && npm ci --omit=dev --ignore-scripts
 
 # Overlay vendored SDK into plugin node_modules (patched dist + deps)
 RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \

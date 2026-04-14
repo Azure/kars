@@ -19,7 +19,7 @@ router: ## Build the Rust inference router
 	cargo build --release --package azureclaw-inference-router
 
 cli: ## Build the TypeScript CLI
-	cd cli && npm install && npm run build
+	cd cli && npm ci && npm run build
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
