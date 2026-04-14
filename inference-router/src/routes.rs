@@ -3617,6 +3617,13 @@ async fn handoff_restore(
     // Build sub-agent workspace payloads for plugin-side injection.
     // The plugin will wait for each sub-agent to come online and push
     // its workspace + task context via E2E mesh.
+    tracing::info!(
+        snapshot_count = restored_state.sub_agent_snapshots.len(),
+        names = %restored_state.sub_agent_snapshots.iter()
+            .map(|s| format!("{}(ws={}B,ctx={})", s.name, s.workspace_tar.len(), s.task_context.len()))
+            .collect::<Vec<_>>().join(", "),
+        "Building sub_agent_workspaces from restored snapshots"
+    );
     let sub_agent_workspaces: Vec<serde_json::Value> = restored_state
         .sub_agent_snapshots
         .iter()
@@ -3626,9 +3633,9 @@ async fn handoff_restore(
                 "name": s.name,
                 "original_amid": s.original_amid,
                 "workspace_tar": if s.workspace_tar.is_empty() {
-                    None
+                    serde_json::Value::Null
                 } else {
-                    Some(base64::Engine::encode(
+                    serde_json::Value::String(base64::Engine::encode(
                         &base64::engine::general_purpose::STANDARD,
                         &s.workspace_tar,
                     ))
@@ -3639,6 +3646,10 @@ async fn handoff_restore(
             })
         })
         .collect();
+    tracing::info!(
+        workspace_count = sub_agent_workspaces.len(),
+        "Sub-agent workspaces built for plugin response"
+    );
 
     (
         StatusCode::OK,

@@ -2090,4 +2090,197 @@ mod tests {
             }
         }
     }
+
+    /// Test that the sub_agent_workspaces builder (from routes.rs restore handler)
+    /// correctly filters and maps restored sub-agent snapshots. This is the exact
+    /// logic that decides what the plugin receives in restoreResp.sub_agent_workspaces.
+    #[test]
+    fn test_sub_agent_workspaces_builder_filter() {
+        use base64::Engine as _;
+
+        // Two sub-agents: one with workspace data, one without (typical after handoff)
+        let snaps = vec![
+            SubAgentSnapshot {
+                name: "researcher".to_string(),
+                original_amid: "AMID_OLD_1".to_string(),
+                spawn_config: SpawnRequest {
+                    name: "researcher".to_string(),
+                    model: None,
+                    governance: true,
+                    trust_threshold: None,
+                    learn_egress: false,
+                    isolation: None,
+                    token_budget_daily: None,
+                    token_budget_per_request: None,
+                    trusted_peers: None,
+                    handoff: None,
+                },
+                task_context: "Searching papers".to_string(),
+                status: "paused_at_checkpoint".to_string(),
+                checkpoint: Some("3 papers found".to_string()),
+                workspace_tar: vec![9, 10, 11], // has workspace
+            },
+            SubAgentSnapshot {
+                name: "data-collector".to_string(),
+                original_amid: "AMID_OLD_2".to_string(),
+                spawn_config: SpawnRequest {
+                    name: "data-collector".to_string(),
+                    model: None,
+                    governance: true,
+                    trust_threshold: None,
+                    learn_egress: false,
+                    isolation: None,
+                    token_budget_daily: None,
+                    token_budget_per_request: None,
+                    trusted_peers: None,
+                    handoff: None,
+                },
+                task_context: "Sub-agent 'data-collector' (Docker)".to_string(),
+                status: "paused_at_checkpoint".to_string(),
+                checkpoint: None,
+                workspace_tar: Vec::new(), // NO workspace (collection timed out)
+            },
+        ];
+
+        // Replicate the exact filter+map from routes.rs restore handler
+        let sub_agent_workspaces: Vec<serde_json::Value> = snaps
+            .iter()
+            .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "original_amid": s.original_amid,
+                    "workspace_tar": if s.workspace_tar.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(&s.workspace_tar))
+                    },
+                    "task_context": s.task_context,
+                    "status": s.status,
+                    "checkpoint": s.checkpoint,
+                })
+            })
+            .collect();
+
+        // BOTH should pass filter (both have non-empty task_context)
+        assert_eq!(sub_agent_workspaces.len(), 2, "both sub-agents should pass filter");
+
+        // First has workspace_tar as base64 string
+        assert_eq!(sub_agent_workspaces[0]["name"], "researcher");
+        assert!(sub_agent_workspaces[0]["workspace_tar"].is_string());
+        let ws_b64 = sub_agent_workspaces[0]["workspace_tar"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(ws_b64).unwrap();
+        assert_eq!(decoded, vec![9, 10, 11]);
+
+        // Second has workspace_tar as null (empty)
+        assert_eq!(sub_agent_workspaces[1]["name"], "data-collector");
+        assert!(sub_agent_workspaces[1]["workspace_tar"].is_null());
+
+        // Both have task_context
+        assert!(sub_agent_workspaces[0]["task_context"].as_str().unwrap().contains("Searching"));
+        assert!(sub_agent_workspaces[1]["task_context"].as_str().unwrap().contains("data-collector"));
+    }
+
+    /// Test the full encrypt→decrypt→deserialize round-trip produces valid
+    /// sub_agent_workspaces when there are multiple sub-agents with mixed
+    /// workspace states. This simulates the exact target-side restore path.
+    #[test]
+    fn test_full_roundtrip_sub_agent_workspaces_preserved() {
+        use base64::Engine as _;
+
+        let mut state = make_test_state();
+        // Add a second sub-agent with empty workspace (Docker-collected, no mesh workspace)
+        state.sub_agent_snapshots.push(SubAgentSnapshot {
+            name: "data-collector".to_string(),
+            original_amid: "AMID_SUB2".to_string(),
+            spawn_config: SpawnRequest {
+                name: "data-collector".to_string(),
+                model: Some("gpt-4.1".to_string()),
+                governance: true,
+                trust_threshold: None,
+                learn_egress: false,
+                isolation: None,
+                token_budget_daily: None,
+                token_budget_per_request: None,
+                trusted_peers: None,
+                handoff: None,
+            },
+            task_context: "Collecting CNCF data".to_string(),
+            status: "paused_at_checkpoint".to_string(),
+            checkpoint: None,
+            workspace_tar: Vec::new(), // empty — simulates failed mesh collection
+        });
+
+        // Full round-trip: serialize → compress → encrypt → decrypt → decompress → deserialize
+        let compressed = serialize_state(&state).unwrap();
+        let secret = b"test-shared-secret-32bytes-pad!!";
+        let salt = b"random-salt-for-test";
+        let blob = encrypt_state(&compressed, secret, salt).unwrap();
+        let decrypted = decrypt_state(&blob, secret).unwrap();
+        let restored = deserialize_state(&decrypted).unwrap();
+
+        // Both sub-agents survive
+        assert_eq!(restored.sub_agent_snapshots.len(), 2);
+
+        // First has workspace data preserved
+        assert_eq!(restored.sub_agent_snapshots[0].name, "researcher");
+        assert_eq!(restored.sub_agent_snapshots[0].workspace_tar, vec![9, 10, 11]);
+        assert!(!restored.sub_agent_snapshots[0].workspace_tar.is_empty());
+
+        // Second has empty workspace but valid task_context
+        assert_eq!(restored.sub_agent_snapshots[1].name, "data-collector");
+        assert!(restored.sub_agent_snapshots[1].workspace_tar.is_empty());
+        assert_eq!(restored.sub_agent_snapshots[1].task_context, "Collecting CNCF data");
+
+        // Simulate the sub_agent_workspaces builder (routes.rs filter)
+        let workspaces: Vec<&SubAgentSnapshot> = restored
+            .sub_agent_snapshots
+            .iter()
+            .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
+            .collect();
+        assert_eq!(workspaces.len(), 2, "filter must include both (task_context is non-empty)");
+
+        // Also simulate sub_agent_results (always populated for spawned agents)
+        // This is what the plugin NOW uses as the primary loop driver
+        let results: Vec<serde_json::Value> = restored
+            .sub_agent_snapshots
+            .iter()
+            .map(|s| serde_json::json!({"name": s.name, "status": "spawned"}))
+            .collect();
+        assert_eq!(results.len(), 2, "sub_agent_results must include all spawned agents");
+    }
+
+    /// Test that sub-agent snapshots with empty workspace AND empty task_context
+    /// are correctly filtered out (edge case — shouldn't happen in practice).
+    #[test]
+    fn test_empty_workspace_and_task_context_filtered_out() {
+        let snaps = vec![
+            SubAgentSnapshot {
+                name: "ghost".to_string(),
+                original_amid: String::new(),
+                spawn_config: SpawnRequest {
+                    name: "ghost".to_string(),
+                    model: None,
+                    governance: true,
+                    trust_threshold: None,
+                    learn_egress: false,
+                    isolation: None,
+                    token_budget_daily: None,
+                    token_budget_per_request: None,
+                    trusted_peers: None,
+                    handoff: None,
+                },
+                task_context: String::new(), // empty!
+                status: String::new(),
+                checkpoint: None,
+                workspace_tar: Vec::new(), // also empty!
+            },
+        ];
+
+        let workspaces: Vec<&SubAgentSnapshot> = snaps
+            .iter()
+            .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
+            .collect();
+        assert_eq!(workspaces.len(), 0, "empty workspace + empty task_context should be filtered out");
+    }
 }

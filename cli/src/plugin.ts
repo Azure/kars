@@ -1773,6 +1773,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // After handoff restore, the parent injects each sub-agent's workspace via mesh.
       if (message?.type === "handoff:workspace_inject" && message?.workspace_tar) {
         log.info(`📦 Workspace injection from '${fromName}' — extracting...`);
+        let success = false;
+        let fileCount = 0;
+        let errorMsg = "";
         try {
           const fs = await import("node:fs");
           const { execSync } = await import("node:child_process");
@@ -1788,20 +1791,38 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
           // Validate entries
           const listing = execSync(`tar tzf ${tarPath} 2>/dev/null`, { timeout: 5000 }).toString();
-          for (const entry of listing.split("\n").filter(Boolean)) {
+          const entries = listing.split("\n").filter(Boolean);
+          for (const entry of entries) {
             if (entry.includes("..") || entry.startsWith("/")) {
               throw new Error(`path traversal blocked: ${entry}`);
             }
           }
+          fileCount = entries.length;
 
           execSync(
             `tar xzf ${tarPath} -C /sandbox/ --no-same-owner --no-overwrite-dir 2>/dev/null`,
             { timeout: 10000 },
           );
           fs.rmSync(tmpDir, { recursive: true, force: true });
-          log.info(`📦 Workspace injected (${(tarBuf.length / 1024).toFixed(1)} KB)`);
+          success = true;
+          log.info(`📦 Workspace injected (${(tarBuf.length / 1024).toFixed(1)} KB, ${fileCount} files)`);
         } catch (injectErr: any) {
+          errorMsg = injectErr.message;
           log.warn(`Workspace injection failed: ${injectErr.message}`);
+        }
+
+        // Ack back to parent so they know data landed (or didn't)
+        if (fromAmid && agtMeshClient) {
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:workspace_inject_ack",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              success,
+              file_count: fileCount,
+              error: errorMsg || undefined,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
         }
         return;
       }
@@ -1921,7 +1942,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             blob: message.blob,
           }, 30000, hHeaders);
 
-          log.info(`✅ Handoff restore complete: trust_scores=${restoreResp.trust_scores_count || 0}, audit=${restoreResp.audit_entries_count || 0}`);
+          log.info(`✅ Handoff restore complete: trust_scores=${restoreResp.trust_scores_count || 0}, audit=${restoreResp.audit_entries_count || 0}, sub_agent_snapshots=${restoreResp.sub_agent_snapshots || 0}, sub_agent_workspaces=${Array.isArray(restoreResp.sub_agent_workspaces) ? restoreResp.sub_agent_workspaces.length : "missing"}, sub_agent_results=${Array.isArray(restoreResp.sub_agent_results) ? restoreResp.sub_agent_results.length : "missing"}`);
 
           // 3. Compute verification digest
           const verifyResp = await _routerCallStrict("POST", "/agt/handoff/verify", {
@@ -2161,79 +2182,117 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 log.warn(`Handoff: context file write failed: ${e.message}`);
               }
 
-              // 4. Inject workspaces into re-spawned sub-agents + resume interrupted tasks
-              // (Done before Telegram greeting so we can include sub-agent status)
-              const subWorkspaces = restoreResp.sub_agent_workspaces || [];
+              // 4. Register re-spawned sub-agents as trusted + inject workspaces + resume
+              // IMPORTANT: Use sub_agent_results (always populated for spawned agents)
+              // as the primary loop driver — NOT sub_agent_workspaces (which may be
+              // empty if workspace data was lost in the snapshot round-trip).
+              const spawnedSubs: Array<{ name: string; original_amid?: string; status?: string }> =
+                (restoreResp.sub_agent_results || []).filter((r: any) => r.status === "spawned");
+              const subWorkspaceMap = new Map<string, any>();
+              for (const ws of (restoreResp.sub_agent_workspaces || [])) {
+                subWorkspaceMap.set(ws.name, ws);
+              }
               const subAgentStatuses: Array<{ name: string; status: string; task?: string }> = [];
-              if (subWorkspaces.length > 0 && agtMeshClient) {
-                log.info(`📦 Handoff: injecting workspaces into ${subWorkspaces.length} sub-agent(s)...`);
+              log.info(`📦 Handoff step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
 
-                for (const sub of subWorkspaces) {
+              if (spawnedSubs.length > 0 && agtMeshClient) {
+                log.info(`🤖 Handoff: registering trust + resuming ${spawnedSubs.length} sub-agent(s)...`);
+
+                for (const spawned of spawnedSubs) {
                   try {
-                    // Wait for sub-agent to register in mesh (up to 60s)
+                    // Wait for sub-agent to register in mesh (up to 90s — pods need boot time)
                     let subAmid: string | undefined;
                     const subStart = Date.now();
-                    while (Date.now() - subStart < 60_000) {
+                    while (Date.now() - subStart < 90_000) {
                       try {
                         const searchResult = await _routerCall("GET",
-                          `/agt/registry/registry/search?capability=${encodeURIComponent(sub.name)}`);
+                          `/agt/registry/registry/search?capability=${encodeURIComponent(spawned.name)}`);
                         const match = (searchResult?.results || []).find((a: any) =>
-                          a.display_name === sub.name && a.status === "online"
+                          a.display_name === spawned.name && a.status === "online"
                         );
                         if (match?.amid) { subAmid = match.amid; break; }
                       } catch { /* not registered yet */ }
-                      await new Promise(r => setTimeout(r, 2000));
+                      await new Promise(r => setTimeout(r, 3000));
                     }
 
                     if (!subAmid) {
-                      log.warn(`Sub-agent '${sub.name}' didn't register in mesh within 60s — skipping workspace injection`);
-                      subAgentStatuses.push({ name: sub.name, status: "not_found" });
+                      log.warn(`Sub-agent '${spawned.name}' didn't register in mesh within 90s — skipping`);
+                      subAgentStatuses.push({ name: spawned.name, status: "not_found" });
                       continue;
                     }
 
                     // Register new sub-agent AMID in trust maps so parent accepts
                     // their messages (KNOCK handler checks parentTrustedAmids).
                     // After handoff, sub-agents have new key pairs → new AMIDs.
-                    amidToName.set(subAmid, sub.name);
-                    nameToAmid.set(sub.name, subAmid);
+                    amidToName.set(subAmid, spawned.name);
+                    nameToAmid.set(spawned.name, subAmid);
                     parentTrustedAmids.add(subAmid);
                     try {
-                      await pushTrustToRouter(sub.name, 0.0);
-                      log.info(`🔑 Registered re-spawned sub-agent '${sub.name}' as trusted peer (${subAmid.slice(0, 12)}...)`);
+                      await pushTrustToRouter(spawned.name, 0.0);
+                      log.info(`🔑 Registered re-spawned sub-agent '${spawned.name}' as trusted (${subAmid.slice(0, 12)}...)`);
                     } catch {
-                      log.warn(`Failed to push trust for re-spawned sub-agent '${sub.name}'`);
+                      log.warn(`Failed to push trust for re-spawned sub-agent '${spawned.name}'`);
                     }
 
-                    // Send workspace tar via meshSend (auto-chunks if large)
-                    if (sub.workspace_tar) {
+                    // Look up workspace data for this sub-agent (may be absent)
+                    const wsData = subWorkspaceMap.get(spawned.name);
+
+                    // Send workspace tar via meshSend if available (auto-chunks if large)
+                    let workspaceDelivered = false;
+                    if (wsData?.workspace_tar) {
                       await meshSend(agtMeshClient, subAmid, {
                         type: "handoff:workspace_inject",
-                        workspace_tar: sub.workspace_tar,
+                        workspace_tar: wsData.workspace_tar,
                         from_agent: agentName,
                         timestamp: new Date().toISOString(),
                       }, log);
-                      log.info(`📦 Sent workspace to sub-agent '${sub.name}'`);
+                      log.info(`📦 Sent workspace to sub-agent '${spawned.name}' — waiting for ack...`);
+
+                      // Wait up to 15s for workspace_inject_ack
+                      const wsAckStart = Date.now();
+                      while (Date.now() - wsAckStart < 15_000) {
+                        const ackIdx = agtInbox.findIndex(m => {
+                          try {
+                            const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                            return c?.type === "handoff:workspace_inject_ack" && c?.from_agent === spawned.name;
+                          } catch { return false; }
+                        });
+                        if (ackIdx >= 0) {
+                          const ackMsg = agtInbox.splice(ackIdx, 1)[0];
+                          let parsed: any;
+                          try { parsed = typeof ackMsg.content === "string" ? JSON.parse(ackMsg.content) : ackMsg.content; } catch { parsed = {}; }
+                          workspaceDelivered = !!parsed.success;
+                          log.info(`📦 Workspace ack from '${spawned.name}': success=${parsed.success}, files=${parsed.file_count}${parsed.error ? `, error=${parsed.error}` : ""}`);
+                          break;
+                        }
+                        await new Promise(r => setTimeout(r, 500));
+                      }
+                      if (!workspaceDelivered) {
+                        log.warn(`No workspace_inject_ack from '${spawned.name}' within 15s`);
+                      }
                     }
 
                     // Send resume message with task context
                     const resumePayload: Record<string, unknown> = {
                       type: "handoff:resume",
                       from_agent: agentName,
-                      task_context: sub.task_context || "",
-                      previous_status: sub.status || "unknown",
-                      checkpoint: sub.checkpoint || null,
+                      task_context: wsData?.task_context || "",
+                      previous_status: wsData?.status || "unknown",
+                      checkpoint: wsData?.checkpoint || null,
+                      workspace_delivered: workspaceDelivered,
                       timestamp: new Date().toISOString(),
                     };
                     await agtMeshClient.send(subAmid, resumePayload);
-                    log.info(`▶️ Sent resume signal to sub-agent '${sub.name}' (status: ${sub.status})`);
+                    log.info(`▶️ Sent resume to sub-agent '${spawned.name}' (status: ${wsData?.status || "?"})`);
                     subAgentStatuses.push({
-                      name: sub.name,
+                      name: spawned.name,
                       status: "resuming",
-                      task: (sub.task_context || "").slice(0, 200),
-                    });
+                      task: (wsData?.task_context || "").slice(0, 200),
+                      workspace_delivered: workspaceDelivered,
+                    } as any);
                   } catch (subErr: any) {
-                    log.warn(`Sub-agent '${sub.name}' workspace/resume failed: ${subErr.message}`);
-                    subAgentStatuses.push({ name: sub.name, status: "failed" });
+                    log.warn(`Sub-agent '${spawned.name}' trust/resume failed: ${subErr.message}`);
+                    subAgentStatuses.push({ name: spawned.name, status: "failed" });
                   }
                 }
 
@@ -2291,13 +2350,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 if (subAgentStatuses.length > 0) {
                   lines.push("", "🤖 *Sub\\-agents:*");
                   for (const sa of subAgentStatuses) {
+                    const wsFlag = (sa as any).workspace_delivered ? " 📦" : "";
                     const icon = sa.status === "resumed" ? "▶️" : sa.status === "ready" ? "✅" : sa.status === "resuming" ? "⏳" : "❌";
                     const taskPreview = sa.task ? `: _${escapeMd2(sa.task.slice(0, 100))}${sa.task.length > 100 ? "\\.\\.\\." : ""}_` : "";
                     const statusLabel = sa.status === "resumed" ? "resuming work"
                       : sa.status === "ready" ? "ready"
                       : sa.status === "resuming" ? "starting up"
                       : "failed to restore";
-                    lines.push(`  ${icon} *${escapeMd2(sa.name)}* — ${statusLabel}${taskPreview}`);
+                    lines.push(`  ${icon} *${escapeMd2(sa.name)}* — ${statusLabel}${wsFlag}${taskPreview}`);
                   }
                 }
 
@@ -2344,6 +2404,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     telegram_greeted: !!(tgToken && tgAllowFrom),
                     sub_agents_restored: subAgentStatuses.length,
                     sub_agents_resumed: subAgentStatuses.filter(s => s.status === "resumed").length,
+                    sub_agents_workspace_delivered: subAgentStatuses.filter(s => s.status === "resumed" || s.status === "ready").length,
                     sub_agent_details: subAgentStatuses,
                     timestamp: new Date().toISOString(),
                   });

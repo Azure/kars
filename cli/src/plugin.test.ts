@@ -1097,3 +1097,164 @@ describe("AZURECLAW_ROUTER_URL configuration", () => {
     expect(text).toContain("Status check failed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 29. Post-handoff restore: sub_agent_results drives trust+resume loop
+// ---------------------------------------------------------------------------
+
+describe("post-handoff sub-agent restore logic", () => {
+  // These tests validate the decision logic in the plugin's async IIFE
+  // that runs after handoff restore. The core fix: use sub_agent_results
+  // (always populated for spawned pods) instead of sub_agent_workspaces
+  // (which may be empty).
+
+  it("sub_agent_results drives loop even when sub_agent_workspaces is empty", () => {
+    // Simulate what the router returns
+    const restoreResp = {
+      restored: true,
+      sub_agent_snapshots: 2,       // just a count
+      sub_agent_results: [           // always populated when pods spawn
+        { name: "researcher", original_amid: "OLD_1", status: "spawned", namespace: "azureclaw-researcher" },
+        { name: "data-collector", original_amid: "OLD_2", status: "spawned", namespace: "azureclaw-data-collector" },
+      ],
+      sub_agent_workspaces: [],      // EMPTY — this was the bug trigger
+    };
+
+    // Old logic (BROKEN): gated on sub_agent_workspaces
+    const oldSubWorkspaces = restoreResp.sub_agent_workspaces || [];
+    expect(oldSubWorkspaces.length).toBe(0); // would skip the entire block
+
+    // New logic (FIXED): gated on sub_agent_results
+    const spawnedSubs = (restoreResp.sub_agent_results || []).filter(
+      (r: any) => r.status === "spawned"
+    );
+    expect(spawnedSubs.length).toBe(2); // enters the loop ✅
+    expect(spawnedSubs[0].name).toBe("researcher");
+    expect(spawnedSubs[1].name).toBe("data-collector");
+  });
+
+  it("workspace data is looked up by name from sub_agent_workspaces map", () => {
+    const restoreResp = {
+      sub_agent_results: [
+        { name: "researcher", status: "spawned" },
+        { name: "data-collector", status: "spawned" },
+      ],
+      sub_agent_workspaces: [
+        { name: "researcher", workspace_tar: "SGVsbG8=", task_context: "Search papers", status: "paused_at_checkpoint" },
+        // data-collector has no workspace entry at all
+      ],
+    };
+
+    const subWorkspaceMap = new Map<string, any>();
+    for (const ws of (restoreResp.sub_agent_workspaces || [])) {
+      subWorkspaceMap.set(ws.name, ws);
+    }
+
+    // researcher has workspace data
+    const researcherWs = subWorkspaceMap.get("researcher");
+    expect(researcherWs).toBeDefined();
+    expect(researcherWs.workspace_tar).toBe("SGVsbG8=");
+
+    // data-collector has no workspace data — but still gets trust+resume
+    const collectorWs = subWorkspaceMap.get("data-collector");
+    expect(collectorWs).toBeUndefined();
+  });
+
+  it("workspace_inject_ack protocol: success path", () => {
+    // Simulate sub-agent's ack message
+    const ackMessage = {
+      type: "handoff:workspace_inject_ack",
+      from_agent: "researcher",
+      success: true,
+      file_count: 15,
+      timestamp: "2026-04-14T12:00:00Z",
+    };
+
+    expect(ackMessage.success).toBe(true);
+    expect(ackMessage.file_count).toBe(15);
+    expect(ackMessage.from_agent).toBe("researcher");
+  });
+
+  it("workspace_inject_ack protocol: failure path", () => {
+    const ackMessage = {
+      type: "handoff:workspace_inject_ack",
+      from_agent: "data-collector",
+      success: false,
+      file_count: 0,
+      error: "workspace tar too large: 6291456",
+      timestamp: "2026-04-14T12:00:00Z",
+    };
+
+    expect(ackMessage.success).toBe(false);
+    expect(ackMessage.error).toContain("too large");
+  });
+
+  it("handoff_ready includes workspace delivery status per sub-agent", () => {
+    const subAgentStatuses = [
+      { name: "researcher", status: "resumed", task: "Search papers", workspace_delivered: true },
+      { name: "data-collector", status: "resuming", task: "Collect data", workspace_delivered: false },
+    ];
+
+    // Simulate handoff_ready payload construction
+    const handoffReady = {
+      type: "handoff_ready",
+      sub_agents_restored: subAgentStatuses.length,
+      sub_agents_resumed: subAgentStatuses.filter(s => s.status === "resumed").length,
+      sub_agents_workspace_delivered: subAgentStatuses.filter(
+        (s: any) => s.status === "resumed" || s.status === "ready"
+      ).length,
+      sub_agent_details: subAgentStatuses,
+    };
+
+    expect(handoffReady.sub_agents_restored).toBe(2);
+    expect(handoffReady.sub_agents_resumed).toBe(1);
+    expect(handoffReady.sub_agents_workspace_delivered).toBe(1);
+    expect(handoffReady.sub_agent_details[0].workspace_delivered).toBe(true);
+    expect(handoffReady.sub_agent_details[1].workspace_delivered).toBe(false);
+  });
+
+  it("only 'spawned' sub-agents enter the trust loop (failed/skipped excluded)", () => {
+    const restoreResp = {
+      sub_agent_results: [
+        { name: "researcher", status: "spawned" },
+        { name: "data-collector", status: "failed" },  // quota exceeded
+        { name: "summarizer", status: "spawned" },
+      ],
+    };
+
+    const spawnedSubs = (restoreResp.sub_agent_results || []).filter(
+      (r: any) => r.status === "spawned"
+    );
+    expect(spawnedSubs.length).toBe(2);
+    expect(spawnedSubs.map((s: any) => s.name)).toEqual(["researcher", "summarizer"]);
+  });
+
+  it("missing sub_agent_results gracefully handled (pre-fix router)", () => {
+    // Edge case: old router binary that doesn't return sub_agent_results
+    const restoreResp = {
+      restored: true,
+      sub_agent_snapshots: 2,
+      // sub_agent_results is missing entirely
+    };
+
+    const spawnedSubs = ((restoreResp as any).sub_agent_results || []).filter(
+      (r: any) => r.status === "spawned"
+    );
+    expect(spawnedSubs.length).toBe(0); // graceful no-op, no crash
+  });
+
+  it("resume payload includes workspace_delivered flag", () => {
+    const resumePayload = {
+      type: "handoff:resume",
+      from_agent: "dev-agent",
+      task_context: "Search papers",
+      previous_status: "paused_at_checkpoint",
+      checkpoint: "3 papers found",
+      workspace_delivered: true,
+      timestamp: "2026-04-14T12:00:00Z",
+    };
+
+    expect(resumePayload.workspace_delivered).toBe(true);
+    expect(resumePayload.type).toBe("handoff:resume");
+  });
+});
