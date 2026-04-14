@@ -14,21 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workspace Injection Pipeline** — tarball extraction with path traversal validation, `incoming/` file promotion to workspace root, `HANDOFF_FILES.md` manifest for agent discoverability
 - **Handoff Decommission Cleanup** — reverse handoff deletes all cloud CRDs (parent + sub-agents); forward handoff destroys local sub-agent containers
 - **Mesh Inbox Improvements** — protocol message filtering (hides handoff/ack messages), auto-decode of `file_transfer` base64 content
-- **AGT Governance Sidecar** — Python sidecar wrapping AGT SDK v3.0.0 with PolicyEvaluator, FileTrustStore (0–1000, ±200 clamp), SHA-256 Merkle audit chain, RateLimiter, and AgentBehaviorMonitor
+- **Native AGT Governance** — Rust-native governance module (replaces former Python sidecar) with PolicyEvaluator, FileTrustStore (0–1000, ±200 clamp), SHA-256 Merkle audit chain, RateLimiter, and AgentBehaviorMonitor
 - **E2E Encrypted Inter-Agent Messaging** — Signal Protocol (X3DH + Double Ratchet) via AgentMesh relay/registry with KNOCK trust handshake
 - **Content Safety Circuit Breaker** — fail-open with 60s auto-reset cooldown (prevents cascading failures when Content Safety endpoint is misconfigured)
 - **Foundry Agent Service Integration** — web search, code execute, file search, image generation, memory via Foundry project endpoint
-- **6-Image Architecture** — controller, inference-router, sandbox, agt-governance-sidecar, agentmesh-relay, agentmesh-registry
+- **5-Image Architecture** — controller, inference-router, sandbox, agentmesh-relay, agentmesh-registry (governance runs natively in the router)
 - **CLI `push --only <image> --apply`** — selective image builds with automatic pod restart
 - **10 AGT Policy Rules** — shell-safety, inference rate-limiting, content safety, mesh trust gates, spawn governance, sensitive file deny, recon tool deny, cloud metadata deny
-- **AGT Tool Execution Gate** — exec_command and http_fetch are forwarded to AGT sidecar for policy evaluation before execution; fail-open with 2s timeout
+- **AGT Tool Execution Gate** — exec_command and http_fetch are evaluated by the native governance module before execution; fail-open with 2s timeout
 - **Operator Dashboard** — real-time trust scores, audit chain, policy status, mesh connectivity
 - **GitHub CI/CD** — Rust + TypeScript + Python lint/test, Bicep validation, Helm lint, Trivy security scan, Dockerfile lint, tag-triggered releases
-- **318 Unit Tests** — Rust (130), TypeScript (148), Python (40) covering controller, router, CLI, and sidecar
+- **Unit Tests** — Rust (controller + router) and TypeScript (CLI + plugin) covering controller, router, CLI, and governance
 - **GitHub Templates** — issue templates (bug, feature, security), PR template, CODEOWNERS
 
 ### Fixed
-- Sidecar bind address (127.0.0.1 → 0.0.0.0) for K8s probe accessibility
+- Router bind address fix for K8s probe accessibility
 - K8s probe host field removal (kubelet defaults to pod IP)
 - Missing transitive Python dependencies (typing_inspection, cryptography) via PyPI fallback
 - 8 vendor patches for AgentMesh relay, registry, and SDK bugs
