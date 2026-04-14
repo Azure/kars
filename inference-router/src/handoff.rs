@@ -1505,6 +1505,13 @@ mod tests {
             state.token_budget_used.total_tokens
         );
         assert_eq!(restored.credentials.len(), state.credentials.len());
+        // Verify sub-agent workspace_tar survives the round-trip
+        assert_eq!(restored.sub_agent_snapshots.len(), 1);
+        assert_eq!(
+            restored.sub_agent_snapshots[0].workspace_tar,
+            state.sub_agent_snapshots[0].workspace_tar
+        );
+        assert!(!restored.sub_agent_snapshots[0].workspace_tar.is_empty());
     }
 
     #[test]
@@ -2019,5 +2026,68 @@ mod tests {
             store.confirm("wrong-code").await,
             Err(PendingHandoffError::InvalidToken)
         ));
+    }
+
+    /// Simulate the exact JSON round-trip the plugin does:
+    /// router → JSON → JS modify workspace_tar → JSON → serde_json::from_value
+    #[test]
+    fn test_sub_agent_snapshot_json_roundtrip_with_plugin() {
+        use crate::spawn::SpawnRequest;
+
+        // 1. Create snapshot like collect_sub_agent_snapshots_docker does
+        let snap = SubAgentSnapshot {
+            name: "researcher".to_string(),
+            original_amid: String::new(),
+            spawn_config: SpawnRequest {
+                name: "researcher".to_string(),
+                model: None,
+                governance: true,
+                trust_threshold: None,
+                learn_egress: false,
+                isolation: None,
+                token_budget_daily: None,
+                token_budget_per_request: None,
+                trusted_peers: None,
+                handoff: None,
+            },
+            task_context: "Sub-agent 'researcher' (Docker)".to_string(),
+            status: "paused_at_checkpoint".to_string(),
+            checkpoint: None,
+            workspace_tar: Vec::new(),
+        };
+
+        // 2. Serialize to JSON (router → plugin)
+        let json_val = serde_json::to_value(&snap).unwrap();
+        let json_str = serde_json::to_string(&json_val).unwrap();
+
+        // 3. Parse back (simulate JS parsing)
+        let mut parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // 4. Plugin modifies workspace_tar with base64 from sub-agent mesh response
+        let fake_tar = b"fake workspace tar data for testing";
+        let fake_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            fake_tar,
+        );
+        parsed["original_amid"] = serde_json::json!("test_amid_12345");
+        parsed["workspace_tar"] = serde_json::json!(fake_b64);
+
+        // 5. Plugin sends array back to router
+        let arr = serde_json::json!([parsed]);
+
+        // 6. Router deserializes (this is the critical step — line 3093 in routes.rs)
+        let result = serde_json::from_value::<Vec<SubAgentSnapshot>>(arr.clone());
+        match &result {
+            Ok(snaps) => {
+                assert_eq!(snaps.len(), 1);
+                assert_eq!(snaps[0].name, "researcher");
+                assert_eq!(snaps[0].original_amid, "test_amid_12345");
+                assert_eq!(snaps[0].workspace_tar, fake_tar);
+                assert!(!snaps[0].workspace_tar.is_empty());
+            }
+            Err(e) => {
+                panic!("from_value FAILED: {e}\nJSON was: {}", serde_json::to_string_pretty(&arr).unwrap());
+            }
+        }
     }
 }

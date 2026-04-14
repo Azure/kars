@@ -3088,10 +3088,25 @@ async fn handoff_snapshot(
         }
     }
 
-    // Inject sub-agent snapshots if provided
+    // Inject sub-agent snapshots if provided by the plugin (workspace data, AMIDs, etc.)
     if let Some(subs) = body.get("sub_agent_snapshots") {
-        if let Ok(sub_snaps) = serde_json::from_value::<Vec<handoff::SubAgentSnapshot>>(subs.clone()) {
-            snapshot.sub_agent_snapshots = sub_snaps;
+        match serde_json::from_value::<Vec<handoff::SubAgentSnapshot>>(subs.clone()) {
+            Ok(sub_snaps) => {
+                let ws_count = sub_snaps.iter().filter(|s| !s.workspace_tar.is_empty()).count();
+                tracing::info!(
+                    count = sub_snaps.len(),
+                    with_workspace = ws_count,
+                    "Injected sub-agent snapshots into handoff state"
+                );
+                snapshot.sub_agent_snapshots = sub_snaps;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    json_preview = %subs.to_string().chars().take(500).collect::<String>(),
+                    "Failed to deserialize sub_agent_snapshots — sub-agent workspaces will be lost"
+                );
+            }
         }
     }
 

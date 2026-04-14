@@ -2191,6 +2191,19 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                       continue;
                     }
 
+                    // Register new sub-agent AMID in trust maps so parent accepts
+                    // their messages (KNOCK handler checks parentTrustedAmids).
+                    // After handoff, sub-agents have new key pairs → new AMIDs.
+                    amidToName.set(subAmid, sub.name);
+                    nameToAmid.set(sub.name, subAmid);
+                    parentTrustedAmids.add(subAmid);
+                    try {
+                      await pushTrustToRouter(sub.name, 0.0);
+                      log.info(`🔑 Registered re-spawned sub-agent '${sub.name}' as trusted peer (${subAmid.slice(0, 12)}...)`);
+                    } catch {
+                      log.warn(`Failed to push trust for re-spawned sub-agent '${sub.name}'`);
+                    }
+
                     // Send workspace tar via meshSend (auto-chunks if large)
                     if (sub.workspace_tar) {
                       await meshSend(agtMeshClient, subAmid, {
