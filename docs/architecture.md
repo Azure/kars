@@ -295,6 +295,46 @@ Each container maintains **one AGT mesh connection**, created by the gateway pro
 
 **No plaintext fallback:** The HTTP mesh routes (`/agt/mesh/send`, `/agt/mesh/receive`) have been removed. All inter-agent communication is E2E encrypted via the Signal Protocol relay. If encryption fails, messages are rejected — never delivered in cleartext.
 
+### Global Registry Deployment
+
+For cross-environment handoff (local ↔ cloud), the AgentMesh relay and registry need public endpoints. Two deployment modes:
+
+| Mode | Flag | Registry Location | Handoff |
+|------|------|-------------------|---------|
+| **Local** (default) | — | In-cluster (`agentmesh` namespace) | ❌ |
+| **Global** | `--global-registry <url>` | External (public endpoint) | ✅ |
+
+**Exposing the registry:**
+
+```
+azureclaw up --expose-registry   # deploys AGIC Ingress + NetworkPolicy
+```
+
+This creates Application Gateway Ingress for `registry.<domain>` (HTTPS) and `relay.<domain>` (WSS) with Azure-managed TLS and WAF rate limiting.
+
+**4-layer authentication chain:**
+
+```
+Internet → [WAF rate limit] → [TLS termination] → [Ed25519 signature] → [Registry lookup] → Connected
+                                                         ↑                      ↑
+                                                    Proves AMID              Confirms agent
+                                                    ownership               is registered
+```
+
+| Layer | Component | What it stops |
+|-------|-----------|---------------|
+| 1. WAF | Application Gateway | DDoS, connection floods |
+| 2. Ed25519 | Relay `handle_auth()` | Impersonation, replay attacks |
+| 3. Registry check | Relay `RegistryVerifier` | Unregistered/anonymous/revoked agents |
+| 4. OAuth | Registry `oauth.rs` | Controls who can register (GitHub, Entra ID, Google) |
+
+**NetworkPolicy enforcement:**
+- PostgreSQL: inbound only from registry pods (port 5432)
+- Registry: inbound only from Application Gateway subnet + internal sandbox pods
+- Relay: inbound only from Application Gateway subnet + internal sandbox pods
+
+**Identity management:** `azureclaw mesh auth --registry <url> --provider github|entra` generates Ed25519 keypair, runs browser-based OAuth, stores encrypted identity in `~/.azureclaw/mesh-identity.json` (AES-256-GCM, machine-bound key).
+
 ### Sub-Agent Spawning
 
 | Method | Path | Purpose |

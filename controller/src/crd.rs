@@ -214,6 +214,13 @@ pub struct GovernanceConfig {
     /// Minimum trust score (0-1000) for inter-agent communication.
     #[serde(default = "default_trust_threshold")]
     pub trust_threshold: i32,
+    /// Pre-seeded trusted peer AMIDs (parent-verified, not self-reported).
+    /// Format: "name:AMID,name:AMID,..."
+    /// Set by the spawner to let the child auto-trust its parent and siblings.
+    pub trusted_peers: Option<String>,
+    /// Registry mode: "global" or "local" (default: "local").
+    /// Global mode enables cross-cluster mesh communication and handoff tools.
+    pub registry_mode: Option<String>,
 }
 
 fn default_policy() -> String {

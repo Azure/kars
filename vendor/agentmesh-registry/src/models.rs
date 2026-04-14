@@ -32,6 +32,10 @@ pub enum PresenceStatus {
     Away,
     Offline,
     Dnd,
+    /// Agent has been handed off — identity succeeded to a cloud counterpart.
+    /// Dormant agents are excluded from capability search and ghost cleanup
+    /// but remain in the registry for succession lookup redirects.
+    Dormant,
 }
 
 /// Agent record in the registry
@@ -119,6 +123,13 @@ pub struct AgentLookup {
     /// Reputation status: "rated" or "unrated"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reputation_status: Option<String>,
+    /// If this result was reached via succession redirect, contains the
+    /// predecessor AMID that was originally queried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub succeeded_from: Option<String>,
+    /// Active succession event hash (for reclamation reference).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub succession_hash: Option<String>,
 }
 
 /// Capability search request
@@ -262,4 +273,75 @@ pub struct PrekeyResponse {
     pub signed_prekey_id: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_time_prekey: Option<OneTimePrekey>,
+}
+
+// ── Identity succession models ──────────────────────────────────────────────
+
+/// Request to register identity succession (A→B).
+///
+/// The predecessor (A) signs the succession notice to prove it authorizes
+/// the handoff. The successor (B) must already be registered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuccessionRequest {
+    /// Predecessor agent identity
+    pub predecessor_amid: String,
+    pub predecessor_signing_key: String,
+    /// Successor agent identity
+    pub successor_amid: String,
+    pub successor_signing_key: String,
+    /// Reason for succession (e.g., "handoff")
+    #[serde(default = "default_succession_reason")]
+    pub reason: String,
+    /// ISO 8601 timestamp (replay protection)
+    pub timestamp: String,
+    /// Ed25519 signature from predecessor over the canonical succession message:
+    /// "succession:{predecessor_amid}:{successor_amid}:{timestamp}"
+    pub signature: String,
+}
+
+fn default_succession_reason() -> String {
+    "handoff".to_string()
+}
+
+/// Request to reclaim identity (B→A, co-signed).
+///
+/// Both the original agent (A) and the departing agent (B) must sign.
+/// The `original_succession_ref` must match the hash of the original succession.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclamationRequest {
+    /// Original agent (reclaiming identity)
+    pub original_amid: String,
+    pub original_signing_key: String,
+    /// Departing agent (handing back)
+    pub departing_amid: String,
+    pub departing_signing_key: String,
+    /// SHA-256 hash of the original succession event
+    pub original_succession_ref: String,
+    /// Reason for reclamation
+    #[serde(default = "default_reclamation_reason")]
+    pub reason: String,
+    /// ISO 8601 timestamp (replay protection)
+    pub timestamp: String,
+    /// Ed25519 signature from original agent over:
+    /// "reclamation:{original_amid}:{departing_amid}:{original_succession_ref}:{timestamp}"
+    pub signature_original: String,
+    /// Ed25519 co-signature from departing agent over the same message
+    pub signature_departing: String,
+}
+
+fn default_reclamation_reason() -> String {
+    "handoff_return_to_local".to_string()
+}
+
+/// Response for succession/reclamation operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuccessionResponse {
+    pub success: bool,
+    pub event_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predecessor_amid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successor_amid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

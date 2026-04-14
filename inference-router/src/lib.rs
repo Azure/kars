@@ -16,6 +16,7 @@ pub mod budget;
 pub mod config;
 pub mod forward_proxy;
 pub mod governance;
+pub mod handoff;
 pub mod mesh;
 pub mod metrics;
 pub mod proxy;

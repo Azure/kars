@@ -43,6 +43,8 @@ export function upCommand(): Command {
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
     .option("--dry-run", "Show what would be done without executing", false)
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
+    .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
+    .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
       const { default: inquirer } = await import("inquirer");
@@ -945,10 +947,26 @@ export function upCommand(): Command {
 
           await buildPush("controller/Dockerfile", "azureclaw-controller:latest");
           await buildPush("inference-router/Dockerfile", "azureclaw-inference-router:latest");
+
+          // Build sandbox base if not already in ACR
+          let baseExists = false;
+          try {
+            await execa("docker", ["image", "inspect", `${acrLoginServer}/azureclaw-sandbox-base:latest`], { stdio: "pipe" });
+            baseExists = true;
+          } catch { /* not cached locally — need to build */ }
+          if (!baseExists) {
+            await buildPush(
+              "sandbox-images/openclaw/Dockerfile.base",
+              "azureclaw-sandbox-base:latest",
+              ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`]
+            );
+          }
+
           await buildPush(
             "sandbox-images/openclaw/Dockerfile",
             "openclaw-sandbox:latest",
-            ["--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
+            ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
+             "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
           );
 
           // AgentMesh components (relay + registry for E2E encrypted inter-agent comms)
@@ -1217,7 +1235,25 @@ export function upCommand(): Command {
 
         // ── Step 6c: Deploy AgentMesh infrastructure (relay + registry) ──
         stepper.step("Deploying AgentMesh infrastructure...");
-        const agentmeshManifest = path.join(repoRoot, "deploy", "agentmesh.yaml");
+
+        // Track registry mode for context save at end
+        let registryMode = "local";
+        let globalRegistryUrl: string | undefined;
+        let globalRelayUrl: string | undefined;
+
+        if (options.globalRegistry) {
+          // External registry mode — skip local deployment, set env vars
+          stepper.update(`Using external registry: ${options.globalRegistry}`);
+          kvLine("Registry mode", "global");
+          kvLine("Registry URL", options.globalRegistry);
+
+          registryMode = "global";
+          globalRegistryUrl = options.globalRegistry;
+
+          stepper.done("AgentMesh: using external registry (skipped local deploy)");
+        } else {
+          // Local registry mode — deploy relay + registry in-cluster
+          const agentmeshManifest = path.join(repoRoot, "deploy", "agentmesh.yaml");
         if (existsSync(agentmeshManifest)) {
           // Import postgres image into ACR (Azure Policy blocks Docker Hub images)
           stepper.update("Importing postgres image into ACR...");
@@ -1283,6 +1319,39 @@ export function upCommand(): Command {
           }
         } else {
           stepper.warn("AgentMesh manifest not found — skipping");
+        }
+
+          // Deploy AGIC Ingress if --expose-registry is set
+          if (options.exposeRegistry) {
+            stepper.step("Deploying AgentMesh Ingress (public endpoints)...");
+            const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
+            if (existsSync(ingressManifest)) {
+              const ingressYaml = fs.readFileSync(ingressManifest, "utf-8");
+              const domain = `${baseName}.azureclaw.dev`;
+              const { stdout: currentSubId } = await execa("az", [
+                "account", "show", "--query", "id", "--output", "tsv",
+              ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
+              const patchedIngress = ingressYaml
+                .replace(/DOMAIN_PLACEHOLDER/g, domain)
+                .replace(/SUBSCRIPTION_ID/g, currentSubId.trim())
+                .replace(/RESOURCE_GROUP/g, rg)
+                .replace(/azureclawacr\.azurecr\.io/g, acrLoginServer);
+              const tmpIngress = path.join(repoRoot, ".tmp-agentmesh-ingress.yaml");
+              try {
+                fs.writeFileSync(tmpIngress, patchedIngress);
+                await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
+                stepper.done(`AgentMesh Ingress deployed (registry.${domain}, relay.${domain})`);
+
+                registryMode = "global";
+                globalRegistryUrl = `https://registry.${domain}`;
+                globalRelayUrl = `wss://relay.${domain}`;
+              } finally {
+                try { fs.unlinkSync(tmpIngress); } catch { /* noop */ }
+              }
+            } else {
+              stepper.warn("Ingress manifest not found — skipping");
+            }
+          }
         }
 
         // ── Step 7: Create ClawSandbox CR ────────────────────────────
@@ -1583,6 +1652,7 @@ export function upCommand(): Command {
             networkPolicy: {
               defaultDeny: true,
               approvalRequired: true,
+              learnEgress: true,
             },
             governance: {
               enabled: true,
@@ -1702,6 +1772,9 @@ export function upCommand(): Command {
             identityName: `${baseName}-aks-sandbox-wi`,
             identityResourceGroup: rg,
             oidcIssuerUrl: oidcIssuer?.trim() || undefined,
+            registryMode,
+            globalRegistryUrl,
+            globalRelayUrl,
           });
         } catch { /* non-critical */ }
 

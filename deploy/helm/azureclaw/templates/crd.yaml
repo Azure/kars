@@ -126,6 +126,14 @@ spec:
                       type: integer
                       default: 500
                       description: "Minimum trust score (0-1000) for inter-agent communication"
+                    trustedPeers:
+                      type: string
+                      description: "Pre-seeded trusted peer AMIDs (name:AMID,name:AMID,...). Set by spawner for parent/sibling trust."
+                    registryMode:
+                      type: string
+                      enum: ["local", "global"]
+                      default: "local"
+                      description: "Registry mode: global enables cross-cluster mesh communication and handoff."
                 azureServices:
                   type: array
                   description: "Azure services the sandbox can access via Managed Identity"

@@ -15,6 +15,8 @@ import { egressCommand } from "./commands/egress.js";
 import { destroyCommand } from "./commands/destroy.js";
 import { evalCommand } from "./commands/eval.js";
 import { operatorCommand } from "./commands/operator.js";
+import { handoffCommand } from "./commands/handoff.js";
+import { meshCommand } from "./commands/mesh.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -49,6 +51,10 @@ export function createCli(): Command {
   program.addCommand(traceCommand());
   program.addCommand(evalCommand());
   program.addCommand(operatorCommand());
+
+  // Agent mobility
+  program.addCommand(handoffCommand());
+  program.addCommand(meshCommand());
 
   return program;
 }

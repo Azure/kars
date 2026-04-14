@@ -4,9 +4,10 @@
 //! HTTP endpoints that the plugin's `/azureclaw-spawn` slash command calls to
 //! manage sub-agent sandboxes through the pod's ServiceAccount.
 
+use k8s_openapi::api::core::v1::{Namespace, Secret};
 use kube::{
     Api, Client, ResourceExt,
-    api::{DynamicObject, ListParams, PostParams},
+    api::{DynamicObject, ListParams, Patch, PatchParams, PostParams},
     discovery::ApiResource,
 };
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ fn claw_sandbox_api_resource() -> ApiResource {
 }
 
 /// Request body for `POST /sandbox/spawn`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnRequest {
     /// Name for the sub-agent sandbox (must be DNS-safe).
     pub name: String,
@@ -51,6 +52,17 @@ pub struct SpawnRequest {
     /// auto-trust (parent + siblings). Passed securely via env var at spawn time,
     /// not self-reported. Format: "name:AMID,name:AMID,..."
     pub trusted_peers: Option<String>,
+    /// Handoff metadata — when present, spawn targets AKS even in dev mode.
+    pub handoff: Option<HandoffMeta>,
+}
+
+/// Handoff metadata attached to a spawn request.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HandoffMeta {
+    /// "restore" = target will receive state from predecessor via mesh.
+    pub mode: String,
+    /// Name of the agent handing off.
+    pub predecessor: Option<String>,
 }
 
 /// Response from spawn/status endpoints.
@@ -96,9 +108,19 @@ pub async fn create_sandbox(
         return Err("name must not start or end with a hyphen".into());
     }
 
-    // Dev mode: spawn sibling Docker container instead of K8s CRD
-    if std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true" {
+    // Dev mode: spawn sibling Docker container instead of K8s CRD.
+    // Exception: handoff spawns always target AKS (the whole point is moving to cloud).
+    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let is_handoff = req.handoff.as_ref().is_some_and(|h| h.mode == "restore");
+    if is_dev && !is_handoff {
         return create_sandbox_docker(parent_name, req).await;
+    }
+    if is_dev && is_handoff {
+        tracing::info!(
+            parent = %parent_name,
+            child = %req.name,
+            "Handoff spawn — bypassing Docker dev mode, creating K8s CRD on AKS"
+        );
     }
 
     let client = Client::try_default()
@@ -163,13 +185,22 @@ pub async fn create_sandbox(
         spec["inference"]["tokenBudget"] = serde_json::Value::Object(budget);
     }
 
-    // Add governance if enabled
-    if req.governance {
-        spec["governance"] = serde_json::json!({
+    // Governance is always enabled (native in router)
+    {
+        let mut gov = serde_json::json!({
             "enabled": true,
             "toolPolicy": "default",
             "trustThreshold": req.trust_threshold.unwrap_or(500),
         });
+        // Propagate trusted peers so the target auto-trusts the source at KNOCK time
+        if let Some(ref peers) = req.trusted_peers {
+            gov["trustedPeers"] = serde_json::json!(peers);
+        }
+        // Handoff targets need global registry mode for mesh communication
+        if req.handoff.is_some() {
+            gov["registryMode"] = serde_json::json!("global");
+        }
+        spec["governance"] = gov;
     }
 
     // Propagate Foundry agent tools from parent environment
@@ -185,16 +216,27 @@ pub async fn create_sandbox(
         spec["agent"] = serde_json::json!({ "tools": agent_tools });
     }
 
-    // Build labels
+    // Build labels — handoff targets use different labels than sub-agents
     let mut labels = BTreeMap::new();
-    labels.insert(
-        "azureclaw.azure.com/parent".to_string(),
-        parent_name.to_string(),
-    );
-    labels.insert(
-        "azureclaw.azure.com/spawned-by".to_string(),
-        "agent".to_string(),
-    );
+    if req.handoff.is_some() {
+        labels.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "handoff".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/predecessor".to_string(),
+            parent_name.to_string(),
+        );
+    } else {
+        labels.insert(
+            "azureclaw.azure.com/parent".to_string(),
+            parent_name.to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "agent".to_string(),
+        );
+    }
 
     let crd = serde_json::json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
@@ -213,6 +255,26 @@ pub async fn create_sandbox(
     match api.create(&PostParams::default(), &obj).await {
         Ok(_created) => {
             tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent sandbox created");
+
+            // For handoff targets, propagate channel/plugin credentials to the
+            // target namespace so the cloud agent gets Telegram, Slack, etc.
+            if req.handoff.is_some() {
+                let child_name = req.name.clone();
+                let client_clone = Client::try_default().await.ok();
+                if let Some(kc) = client_clone {
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            propagate_credentials(&kc, &child_name).await
+                        {
+                            tracing::warn!(
+                                child = %child_name,
+                                "Credential propagation failed (non-fatal): {e}"
+                            );
+                        }
+                    });
+                }
+            }
+
             Ok(SpawnResponse {
                 status: "created".into(),
                 name: req.name.clone(),
@@ -243,6 +305,97 @@ pub async fn create_sandbox(
             Err(format!("Failed to create sandbox: {e}"))
         }
     }
+}
+
+// ── Credential propagation for handoff targets ──────────────────────────────
+//
+// The controller mounts `{name}-credentials` secret as envFrom (optional: true).
+// For handoff targets we propagate channel/plugin credentials from the source's
+// environment so the cloud agent inherits Telegram, Slack, etc.
+
+/// Env vars that carry channel and plugin credentials (safe to propagate).
+const CREDENTIAL_ENV_VARS: &[&str] = &[
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_ALLOW_FROM",
+    "SLACK_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "WHATSAPP_ENABLED",
+    "BRAVE_API_KEY",
+    "TAVILY_API_KEY",
+    "EXA_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "PERPLEXITY_API_KEY",
+];
+
+async fn propagate_credentials(client: &Client, child_name: &str) -> Result<(), String> {
+    // Collect credential env vars that are set in the current environment
+    let mut creds: BTreeMap<String, String> = BTreeMap::new();
+    for &var in CREDENTIAL_ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                creds.insert(var.to_string(), val);
+            }
+        }
+    }
+    if creds.is_empty() {
+        tracing::info!(child = %child_name, "No channel/plugin credentials to propagate");
+        return Ok(());
+    }
+
+    let target_ns = format!("azureclaw-{}", child_name);
+    let secret_name = format!("{}-credentials", child_name);
+
+    // Wait for the namespace to be created by the controller (up to 30s)
+    let ns_api: Api<Namespace> = Api::all(client.clone());
+    let mut ns_ready = false;
+    for i in 0..15 {
+        if ns_api.get_opt(&target_ns).await.ok().flatten().is_some() {
+            ns_ready = true;
+            break;
+        }
+        if i == 0 {
+            tracing::info!(child = %child_name, "Waiting for namespace '{target_ns}' before creating credentials secret");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if !ns_ready {
+        return Err(format!("Namespace '{target_ns}' not created within 30s"));
+    }
+
+    // Build and apply the credentials secret
+    let secret: Secret = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": secret_name,
+            "namespace": target_ns,
+            "labels": {
+                "azureclaw.azure.com/managed-by": "handoff",
+                "azureclaw.azure.com/predecessor": std::env::var("SANDBOX_NAME").unwrap_or_default(),
+            }
+        },
+        "type": "Opaque",
+        "stringData": creds,
+    }))
+    .map_err(|e| format!("Failed to build credentials secret: {e}"))?;
+
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), &target_ns);
+    secret_api
+        .patch(
+            &secret_name,
+            &PatchParams::apply("azureclaw-handoff"),
+            &Patch::Apply(secret),
+        )
+        .await
+        .map_err(|e| format!("Failed to create credentials secret: {e}"))?;
+
+    tracing::info!(
+        child = %child_name,
+        creds = creds.len(),
+        "Propagated {} credential(s) to {target_ns}/{secret_name}",
+        creds.len()
+    );
+    Ok(())
 }
 
 /// List sub-agents spawned by a parent sandbox.
@@ -394,6 +547,225 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
     })
 }
 
+/// Collect sub-agent snapshots for handoff.
+///
+/// Lists all running sub-agents and reconstructs a `SpawnRequest` from each
+/// CRD's spec so they can be re-spawned on the target host after restore.
+pub async fn collect_sub_agent_snapshots(
+    parent_name: &str,
+) -> Result<Vec<crate::handoff::SubAgentSnapshot>, String> {
+    // Dev mode (Docker): list sub-agent containers
+    if std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true" {
+        return collect_sub_agent_snapshots_docker(parent_name).await;
+    }
+
+    let client = Client::try_default()
+        .await
+        .map_err(|e| format!("K8s client error: {e}"))?;
+
+    let namespace =
+        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
+
+    let lp = ListParams::default().labels(&format!("azureclaw.azure.com/parent={parent_name}"));
+    let list = api
+        .list(&lp)
+        .await
+        .map_err(|e| format!("Failed to list sub-agents: {e}"))?;
+
+    let mut snapshots = Vec::new();
+
+    for obj in &list.items {
+        let name = obj.name_any();
+        let spec = match obj.data.get("spec") {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let phase = obj
+            .data
+            .get("status")
+            .and_then(|s| s.get("phase"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("Unknown");
+
+        // Only include Running or Pending sub-agents (skip Terminating)
+        if phase == "Terminating" {
+            continue;
+        }
+
+        // Reconstruct SpawnRequest from CRD spec
+        let model = spec
+            .get("inference")
+            .and_then(|i| i.get("model"))
+            .and_then(|m| m.as_str())
+            .map(String::from);
+
+        let governance = spec
+            .get("governance")
+            .and_then(|g| g.get("enabled"))
+            .and_then(|e| e.as_bool())
+            .unwrap_or(true);
+
+        let trust_threshold = spec
+            .get("governance")
+            .and_then(|g| g.get("trustThreshold"))
+            .and_then(|t| t.as_i64())
+            .map(|t| t as i32);
+
+        let learn_egress = spec
+            .get("networkPolicy")
+            .and_then(|n| n.get("learnEgress"))
+            .and_then(|l| l.as_bool())
+            .unwrap_or(false);
+
+        let isolation = spec
+            .get("sandbox")
+            .and_then(|s| s.get("isolation"))
+            .and_then(|i| i.as_str())
+            .map(String::from);
+
+        let token_budget_daily = spec
+            .get("inference")
+            .and_then(|i| i.get("tokenBudget"))
+            .and_then(|b| b.get("daily"))
+            .and_then(|d| d.as_i64());
+
+        let token_budget_per_request = spec
+            .get("inference")
+            .and_then(|i| i.get("tokenBudget"))
+            .and_then(|b| b.get("perRequest"))
+            .and_then(|p| p.as_i64());
+
+        let trusted_peers = spec
+            .get("governance")
+            .and_then(|g| g.get("trustedPeers"))
+            .and_then(|p| p.as_str())
+            .map(String::from);
+
+        let spawn_config = SpawnRequest {
+            name: name.clone(),
+            model,
+            governance,
+            trust_threshold,
+            learn_egress,
+            isolation,
+            token_budget_daily,
+            token_budget_per_request,
+            trusted_peers,
+            handoff: None, // Not a handoff spawn — regular sub-agent re-spawn
+        };
+
+        snapshots.push(crate::handoff::SubAgentSnapshot {
+            name: name.clone(),
+            original_amid: String::new(), // Set by caller if registry available
+            spawn_config,
+            task_context: format!("Sub-agent '{name}' (phase: {phase})"),
+            status: if phase == "Running" {
+                "paused_at_checkpoint".to_string()
+            } else {
+                "pending".to_string()
+            },
+            checkpoint: None,
+            workspace_tar: Vec::new(), // Workspace lives in the sub-agent's container
+        });
+
+        tracing::info!(
+            parent = %parent_name,
+            sub_agent = %name,
+            phase = %phase,
+            "Collected sub-agent snapshot for handoff"
+        );
+    }
+
+    Ok(snapshots)
+}
+
+/// Docker dev-mode: collect sub-agent snapshots from Docker containers.
+async fn collect_sub_agent_snapshots_docker(
+    parent_name: &str,
+) -> Result<Vec<crate::handoff::SubAgentSnapshot>, String> {
+    // List containers with the parent label — URL-encode the filter
+    // (raw JSON braces/brackets cause curl globbing and Docker parse errors)
+    let filter = format!(
+        r#"{{"label":["azureclaw.parent={}"],"status":["running"]}}"#,
+        parent_name
+    );
+    let encoded = filter
+        .replace('{', "%7B")
+        .replace('}', "%7D")
+        .replace('[', "%5B")
+        .replace(']', "%5D")
+        .replace('"', "%22")
+        .replace('=', "%3D")
+        .replace(',', "%2C");
+
+    let resp =
+        docker_api("GET", &format!("/containers/json?filters={encoded}"), None).await?;
+    let containers: Vec<serde_json::Value> =
+        serde_json::from_str(&resp).unwrap_or_default();
+
+    let mut snapshots = Vec::new();
+
+    for container in &containers {
+        let names = container
+            .get("Names")
+            .and_then(|n| n.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.as_str())
+                    .map(|n| n.trim_start_matches('/').to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let container_name = names.first().cloned().unwrap_or_default();
+        if container_name.is_empty() {
+            continue;
+        }
+
+        // Strip the "azureclaw-" prefix that create_sandbox_docker adds,
+        // so respawn doesn't double-prefix to "azureclaw-azureclaw-{name}".
+        let name = container_name
+            .strip_prefix("azureclaw-")
+            .unwrap_or(&container_name)
+            .to_string();
+
+        // Extract model from container labels
+        let labels = container.get("Labels").and_then(|l| l.as_object());
+        let model = labels
+            .and_then(|l| l.get("azureclaw.model"))
+            .and_then(|m| m.as_str())
+            .map(String::from);
+
+        let spawn_config = SpawnRequest {
+            name: name.clone(),
+            model,
+            governance: true,
+            trust_threshold: None,
+            learn_egress: false,
+            isolation: None,
+            token_budget_daily: None,
+            token_budget_per_request: None,
+            trusted_peers: None,
+            handoff: None,
+        };
+
+        snapshots.push(crate::handoff::SubAgentSnapshot {
+            name: name.clone(),
+            original_amid: String::new(),
+            spawn_config,
+            task_context: format!("Sub-agent '{name}' (Docker)"),
+            status: "paused_at_checkpoint".to_string(),
+            checkpoint: None,
+            workspace_tar: Vec::new(),
+        });
+    }
+
+    Ok(snapshots)
+}
+
 // ── Docker dev-mode spawning ────────────────────────────────────────────────
 //
 // In dev mode the router runs inside the sandbox container which has no docker
@@ -430,7 +802,8 @@ fn docker_create_body(
         env.push(format!("FOUNDRY_PROJECT_ENDPOINT={}", foundry_endpoint));
     }
 
-    if req.governance && !relay_url.is_empty() {
+    // Always propagate AGT relay/registry URLs to sub-agents (governance is native)
+    if !relay_url.is_empty() {
         env.push(format!("AGT_RELAY_URL={}", relay_url));
         env.push(format!("AGT_REGISTRY_URL={}", registry_url));
         env.push("AGT_GOVERNANCE_ENABLED=true".to_string());
@@ -475,12 +848,15 @@ async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<Stri
         "/var/run/docker.sock".into(),
         "-s".into(),
         "-S".into(),
+        // Write HTTP status code after the response body
+        "-w".into(),
+        "\n__HTTP_STATUS__:%{http_code}".into(),
         "-X".into(),
         method.into(),
     ];
     if body.is_some() {
         args.extend(["-H".into(), "Content-Type: application/json".into()]);
-        args.extend(["-d".into(), body.unwrap().into()]);
+        args.extend(["-d".into(), body.expect("body presence checked").into()]);
     }
     // The hostname is ignored when using --unix-socket; "docker" is just a placeholder
     args.push(format!("http://docker/v1.44{}", path));
@@ -495,7 +871,31 @@ async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<Stri
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Docker API error: {}", stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Extract HTTP status code appended by -w flag
+    let (response_body, http_status) = if let Some(idx) = raw.rfind("\n__HTTP_STATUS__:") {
+        let status_str = &raw[idx + "\n__HTTP_STATUS__:".len()..];
+        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        (raw[..idx].to_string(), status)
+    } else {
+        (raw, 0)
+    };
+
+    // Treat 4xx/5xx as errors (2xx and 3xx are success)
+    if http_status >= 400 {
+        // Try to extract Docker's error message from JSON response
+        let msg = serde_json::from_str::<serde_json::Value>(&response_body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| response_body.clone());
+        return Err(format!(
+            "Docker API {method} {path} returned HTTP {http_status}: {msg}"
+        ));
+    }
+
+    Ok(response_body)
 }
 
 /// Spawn a sub-agent as a sibling Docker container (dev mode only).
@@ -537,6 +937,22 @@ async fn create_sandbox_docker(
             None,
         )
         .await;
+    }
+
+    // Ensure the Docker network exists (it may not if --agt was not used)
+    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
+    let net_check = docker_api("GET", &format!("/networks/{}", network), None).await;
+    if net_check.is_err()
+        || net_check
+            .as_ref()
+            .ok()
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+            .and_then(|v| v.get("message").map(|_| ()))
+            .is_some()
+    {
+        let net_body = serde_json::json!({ "Name": network, "CheckDuplicate": true });
+        let _ = docker_api("POST", "/networks/create", Some(&net_body.to_string())).await;
+        tracing::info!(network = %network, "Created Docker network for sub-agent");
     }
 
     // Create container

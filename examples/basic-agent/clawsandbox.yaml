@@ -43,9 +43,8 @@ spec:
       - host: "api.github.com"
         port: 443
         methods: ["GET"]
-      - host: "clawhub.com"
-        port: 443
-        methods: ["GET", "POST"]
+    # clawhub.com intentionally excluded — 12% malware rate.
+    # Skills must be curated at build time, not downloaded at runtime.
 
   # Azure services accessible from inside the sandbox via Managed Identity
   azureServices:

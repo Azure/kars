@@ -957,7 +957,9 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
   }
   /**
@@ -1366,7 +1368,9 @@ var SessionManager = class {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
   }
   /**

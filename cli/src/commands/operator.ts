@@ -42,7 +42,7 @@ import { listSecretVariants } from "../config.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
-type HealthState = "healthy" | "degraded" | "down" | "pending" | "unknown";
+type HealthState = "healthy" | "degraded" | "down" | "pending" | "unknown" | "dormant";
 
 interface SandboxInfo {
   name: string;
@@ -57,6 +57,8 @@ interface SandboxInfo {
   restarts: number;
   role: "controller" | "sub-agent";
   parent: string;  // parent agent name (empty if controller)
+  handoffState?: "dormant" | "active-successor" | "returning";
+  runtime: "docker" | "aks";
 }
 
 interface EgressDomain {
@@ -118,6 +120,9 @@ interface SecurityState {
     avgFeedback: number;
     tags: { tag: string; count: number }[];
   } | null;
+  // AGT relay/registry URLs
+  agtRelayUrl: string;
+  agtRegistryUrl: string;
   // Prometheus metrics
   totalRequests: number;
   errorRequests: number;
@@ -192,6 +197,18 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       clusterName = stdout.trim();
     } catch { /* offline */ }
   }
+  // In dev mode, also check if kubectl is reachable for unified view
+  let hasKubectl = !devMode;
+  if (devMode) {
+    try {
+      await execa("kubectl", ["version", "--client", "--short"], { stdio: "pipe", timeout: 3000 });
+      try {
+        const { stdout } = await execa("kubectl", kctl(["config", "current-context"], kubeContext), { stdio: "pipe", timeout: 5000 });
+        clusterName = `docker + ${stdout.trim()}`;
+        hasKubectl = true;
+      } catch { /* no context */ }
+    } catch { /* no kubectl */ }
+  }
 
   const screen = blessed.screen({
     smartCSR: true,
@@ -217,7 +234,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [3, 38, 14, 14, 14, 6, 8],
+    columnWidth: [3, 40, 14, 12, 12, 5, 6],
     interactive: true,
     style: {
       border: { fg: "cyan" },
@@ -392,7 +409,20 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   // ── Data fetching ─────────────────────────────────────────────────
 
   async function fetchSandboxes(): Promise<SandboxInfo[]> {
-    if (devMode) return fetchSandboxesDocker();
+    // Always fetch both Docker and AKS — unified view
+    const [dockerResult, aksResult] = await Promise.allSettled([
+      fetchSandboxesDocker(),
+      fetchSandboxesAKS(),
+    ]);
+    const docker = dockerResult.status === "fulfilled" ? dockerResult.value : [];
+    const aks = aksResult.status === "fulfilled" ? aksResult.value : [];
+
+    // Deduplicate: if same name exists in both, mark relationships
+    // (e.g., dormant local + active-successor cloud after handoff)
+    return [...docker, ...aks];
+  }
+
+  async function fetchSandboxesAKS(): Promise<SandboxInfo[]> {
     try {
       const { stdout } = await execa("kubectl", kctl([
         "get", "clawsandbox", "-A", "-o", "json",
@@ -412,6 +442,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         const labels: Record<string, string> = item.metadata?.labels || {};
         const parentLabel = labels["azureclaw.azure.com/parent"] || "";
         const role: "controller" | "sub-agent" = parentLabel ? "sub-agent" : "controller";
+
+        // Detect handoff successor (CRD has spec.handoff.mode = "restore")
+        let handoffState: SandboxInfo["handoffState"] = undefined;
+        if (item.spec?.handoff?.mode === "restore") {
+          handoffState = "active-successor";
+        }
 
         const sandboxNs = `azureclaw-${name}`;
         let podStatus = phase;
@@ -495,7 +531,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           name, namespace: sandboxNs, status: podStatus,
           health, model, isolation,
           channels, age, podName, restarts,
-          role, parent: parentLabel,
+          role, parent: parentLabel, handoffState,
+          runtime: "aks",
         } as SandboxInfo;
       }));
 
@@ -552,31 +589,58 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           if (!isNaN(d.getTime())) age = timeSince(d);
         }
 
-        // Probe model from router
+        // Probe model + handoff state + channels from container env vars
         let model = "gpt-4.1";
+        let channels = "-";
+        let handoffState: SandboxInfo["handoffState"] = undefined;
         if (isUp) {
+          // Read model + channels from env vars (single exec call)
           try {
-            const { stdout: readyz } = await execa("docker", [
-              "exec", containerName, "curl", "-s", "--max-time", "2", "http://localhost:8443/readyz",
+            const { stdout: envOut } = await execa("docker", [
+              "exec", containerName, "printenv",
+            ], { stdio: "pipe", timeout: 5000 });
+            const chs: string[] = [];
+            for (const line of envOut.split("\n")) {
+              if (line.startsWith("TELEGRAM_BOT_TOKEN=")) chs.push("TG");
+              else if (line.startsWith("SLACK_BOT_TOKEN=")) chs.push("SL");
+              else if (line.startsWith("DISCORD_BOT_TOKEN=")) chs.push("DC");
+              else if (line.startsWith("DEFAULT_MODEL=")) {
+                const val = line.split("=")[1]?.trim();
+                if (val) model = val;
+              }
+            }
+            channels = chs.join(",") || "-";
+          } catch { /* env probe fail */ }
+
+          // Check if this agent has been handed off (dormant)
+          try {
+            const { stdout: hsOut } = await execa("docker", [
+              "exec", containerName, "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/handoff/status",
             ], { stdio: "pipe" });
-            const r = JSON.parse(readyz);
-            if (r.model) model = r.model;
-          } catch { /* probe fail */ }
+            const hs = JSON.parse(hsOut);
+            if (hs.phase === "complete" && hs.direction === "local_to_aks") {
+              handoffState = "dormant";
+            } else if (hs.phase === "running" && hs.direction === "aks_to_local") {
+              handoffState = "returning";
+            }
+          } catch { /* no handoff state */ }
         }
 
         results.push({
           name,
           namespace: containerName,
           status: podStatus,
-          health,
+          health: handoffState === "dormant" ? "dormant" : health,
           model,
           isolation: "standard",
-          channels: "-",
+          channels,
           age,
           podName: containerName,
           restarts: 0,
           role,
           parent: parent || "",
+          handoffState,
+          runtime: "docker",
         });
       }
 
@@ -601,7 +665,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   async function fetchEgressDomains(sb: SandboxInfo): Promise<EgressDomain[]> {
     if (!sb.podName) return [];
-    const routerCurl = devMode
+    const isDockerAgent = sb.runtime === "docker";
+    const routerCurl = isDockerAgent
       ? (path: string) => execa("docker", [
           "exec", sb.podName!,
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
@@ -658,8 +723,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       sandbox: sb.name,
       isolation: sb.isolation,
       runtime: sb.isolation === "confidential" ? "kata-vm" : "runc",
-      seccomp: sb.isolation === "enhanced" ? "azureclaw-strict" :
-               sb.isolation === "confidential" ? "RuntimeDefault" : "RuntimeDefault",
+      seccomp: sb.runtime === "docker" ? "azureclaw-strict"
+               : sb.isolation === "enhanced" ? "azureclaw-strict" : "RuntimeDefault",
       networkPolicy: false,
       adminAuth: false,
       readyz: false,
@@ -694,6 +759,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       agtContentFlags: 0,
       agtPolicyRules: 0,
       agtReputation: null,
+      agtRelayUrl: "",
+      agtRegistryUrl: "",
       totalRequests: 0,
       errorRequests: 0,
       inputTokens: 0,
@@ -703,7 +770,11 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
     if (!sb.podName) return state;
 
-    const routerExec = devMode
+    // Use per-sandbox runtime to choose exec path (not global devMode) so the
+    // unified view can query Docker agents via docker-exec and AKS agents via
+    // kubectl-exec in the same operator session.
+    const isDockerAgent = sb.runtime === "docker";
+    const routerExec = isDockerAgent
       ? (path: string) => execa("docker", [
           "exec", sb.podName!,
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
@@ -714,10 +785,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
         ], kubeContext), { stdio: "pipe", timeout: 10000 });
 
-    // Run all checks in parallel
-    // In dev mode, skip K8s-only checks (NetworkPolicy, admin token)
-    const k8sCheck = (args: string[]) => devMode
-      ? Promise.reject("dev-mode")
+    // Docker agents don't have K8s resources (NetworkPolicy, admin token secret)
+    const k8sCheck = (args: string[]) => isDockerAgent
+      ? Promise.reject("docker-agent")
       : execa("kubectl", kctl(args, kubeContext), { stdio: "pipe", timeout: 10000 });
 
     const checks = await Promise.allSettled([
@@ -799,6 +869,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         state.agtBehaviorDetail = agt.behavior_alerts_detail || [];
         state.agtContentFlags = agt.content_flags || 0;
         state.agtPolicyRules = agt.policy_rules || 0;
+        state.agtRelayUrl = agt.relay_url || "";
+        state.agtRegistryUrl = agt.registry_url || "";
         // If no trust states but governance is enabled, show self
         if (state.agtEnabled && ts.length === 0) {
           state.agtTrustScores = [{
@@ -906,7 +978,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (!existing?.agtEnabled) return;
 
     try {
-      const { stdout } = devMode
+      const isDockerAgent = sb.runtime === "docker";
+      const { stdout } = isDockerAgent
         ? await execa("docker", [
             "exec", sb.podName,
             "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/status",
@@ -1346,10 +1419,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       const denyRate = sec.agtPolicyEvaluations > 0
         ? `${((sec.agtPolicyDenials / sec.agtPolicyEvaluations) * 100).toFixed(1)}%`
         : "0%";
+      const registryMode = sec.agtRegistryUrl
+        ? (sec.agtRegistryUrl.includes("localhost") || sec.agtRegistryUrl.includes("agentmesh-registry")
+          ? "{yellow-fg}local{/}" : `{green-fg}global{/}`)
+        : "{gray-fg}none{/}";
       lines.push(
         "",
         `{bold}{underline}AGT Governance{/}`,
         ` Mode       ${modeLabel}  ${sec.agtPolicyRules} rules`,
+        ` Registry   ${registryMode}`,
         ` Evals      ${sec.agtPolicyEvaluations}  deny ${denyRate}  RL ${sec.agtPolicyRateLimits}`,
         ` Latency    ${sec.agtEvalLatencyUs > 0 ? `${sec.agtEvalLatencyUs}µs` : "<1µs"}`,
         sec.agtBehaviorAlerts > 0 && sec.agtBehaviorDetail.length > 0
@@ -1548,9 +1626,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     lines.push("");
 
     function statusIcon(health: string): string {
-      return health === "healthy" ? "{green-fg}●{/}" :
-             health === "pending" ? "{yellow-fg}◌{/}" :
-             health === "degraded" ? "{yellow-fg}◐{/}" : "{red-fg}✗{/}";
+      return health === "healthy" ? "{green-fg}*{/}" :
+             health === "dormant" ? "{blue-fg}~{/}" :
+             health === "pending" ? "{yellow-fg}o{/}" :
+             health === "degraded" ? "{yellow-fg}!{/}" : "{red-fg}x{/}";
     }
 
     // Fixed column width for all boxes — keeps alignment clean at scale
@@ -1609,7 +1688,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
       const peerCount = sec?.agtTrustScores.filter((t) => t.agent !== p.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)).length || 0;
 
-      const pBox = makeBox(p.name, icon, `${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
+      const rtLabel = p.runtime === "docker" ? "D" : "C";
+      const pBox = makeBox(p.name, icon, `${rtLabel} ${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
       for (const l of pBox) lines.push(`  ${l}`);
 
       const subs = children.filter((c) => c.parent === p.name);
@@ -1856,22 +1936,46 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       (agentTable as any).show();
     }
 
-    // Agent table — with tree hierarchy
+    // Agent table — with tree hierarchy, handoff state, and runtime source
     const agentData = sandboxes.map((s) => {
-      const hIcon = s.health === "healthy" ? "●" :
-                    s.health === "degraded" ? "●" :
-                    s.health === "down" ? "●" :
-                    s.health === "pending" ? "◌" : "?";
-      const restartStr = s.restarts > 0 ? ` R:${s.restarts}` : "";
-      // Tree prefix: sub-agents show parent relationship
-      let displayName = s.name;
-      if (s.role === "sub-agent") {
-        displayName = `└ ${s.name} (sub-agent)`;
+      let hIcon: string;
+      if (s.handoffState === "dormant") {
+        hIcon = "~";
+      } else if (s.handoffState === "active-successor") {
+        hIcon = "^";
+      } else if (s.handoffState === "returning") {
+        hIcon = "<";
+      } else {
+        hIcon = s.health === "healthy" ? "*" :
+                s.health === "degraded" ? "!" :
+                s.health === "down" ? "x" :
+                s.health === "pending" ? "o" : "?";
       }
-      return [hIcon, displayName, `${s.status}${restartStr}`, s.model, s.isolation, s.channels, s.age];
+      const restartStr = s.restarts > 0 ? ` R:${s.restarts}` : "";
+      // Runtime tag — ASCII only for reliable column alignment
+      const rtTag = s.runtime === "docker" ? "D " : "C ";
+      // Tree prefix + handoff state annotations
+      let displayName = s.name;
+      if (s.handoffState === "dormant") {
+        displayName = `${rtTag}${s.name} (offloaded)`;
+      } else if (s.handoffState === "active-successor") {
+        displayName = `${rtTag}${s.name} (handoff)`;
+      } else if (s.handoffState === "returning") {
+        displayName = `${rtTag}${s.name} (returning)`;
+      } else if (s.role === "sub-agent") {
+        displayName = `${rtTag} └ ${s.name}`;
+      } else {
+        displayName = `${rtTag}${s.name}`;
+      }
+      const statusStr = s.handoffState === "dormant"
+        ? "Offloaded"
+        : s.handoffState === "returning"
+          ? "Returning"
+          : `${s.status}${restartStr}`;
+      return [hIcon, displayName, statusStr, s.model, s.isolation, s.channels, s.age];
     });
     (agentTable as any).setData({
-      headers: [" ", "Name", "Status", "Model", "Isolation", "Ch", "Age"],
+      headers: [" ", " Name", " Status", " Model", " Isolation", " Ch", " Age"],
       data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
     });
 
@@ -2594,10 +2698,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
           activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold}...{/}`);
           screen.render();
           try {
-            if (devMode) {
+            if (sb.runtime === "docker") {
               await execa("docker", ["rm", "-f", sb.podName!], { stdio: "pipe" });
             } else {
-              await execa("azureclaw", ["destroy", sb.name, "--yes"], { stdio: "pipe" });
+              await execa("azureclaw", ["destroy", sb.name, "--cloud", "--yes"], { stdio: "pipe" });
             }
             activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
           } catch (e: any) {

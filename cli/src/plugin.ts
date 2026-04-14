@@ -60,6 +60,74 @@ const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; tim
 let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let agtInboxNotifyTimer: ReturnType<typeof setInterval> | null = null;
 let agtConnected = false;
+let agtReconnectFailures = 0;
+const AGT_RECONNECT_MAX_BACKOFF = 300_000; // 5 min cap
+
+// ── Chunked mesh transfer layer ──────────────────────────────────────────────
+// General-purpose transport for large payloads over the E2E encrypted mesh.
+// Any message exceeding MESH_CHUNK_THRESHOLD is auto-split into chunks by
+// meshSend(), and auto-reassembled by the onMessage handler before reaching
+// application logic. This is transparent — callers see a single send/receive.
+//
+// Protocol:
+//   1. Sender calls meshSend(amid, message)
+//   2. If serialized message ≤ threshold: sent as-is (fast path)
+//   3. If > threshold: sends mesh:transfer_manifest + N mesh:transfer_chunk
+//   4. Receiver accumulates chunks in pendingTransfers
+//   5. When all chunks arrive: verify SHA-256 hashes, reassemble, push to inbox
+//
+// Used by: mesh_send tool, mesh_transfer_file tool, handoff blob transfer,
+//          sub-agent workspace collection — any large mesh payload.
+
+const MESH_CHUNK_THRESHOLD = 512 * 1024;  // auto-chunk above 512KB
+const MESH_CHUNK_SIZE = 512 * 1024;       // 512KB per chunk
+const MESH_MAX_CHUNKS = 80;               // 80 × 512KB ≈ 40MB max payload
+const MESH_TRANSFER_TTL = 120_000;        // 2min TTL for incomplete transfers
+
+interface PendingMeshTransfer {
+  from_amid: string;
+  from_agent: string;
+  transfer_id: string;
+  total_chunks: number;
+  total_bytes: number;
+  chunk_hashes: string[];
+  manifest_hash: string;
+  metadata: Record<string, unknown>;  // all non-payload fields from the original message
+  chunks: Map<number, string>;
+  received_at: number;
+}
+const pendingTransfers = new Map<string, PendingMeshTransfer>();
+
+// Cleanup stale transfers every 30s
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, t] of pendingTransfers) {
+    if (now - t.received_at > MESH_TRANSFER_TTL) pendingTransfers.delete(key);
+  }
+}, 30_000).unref();
+
+// ── Handoff progress tracker (module-level, survives across tool calls) ──
+interface HandoffProgress {
+  phase: string;
+  status: "running" | "complete" | "error" | "partial";
+  steps: string[];
+  direction?: string;
+  started_at: string;
+  updated_at: string;
+  error?: string;
+  result?: Record<string, unknown>;
+}
+let handoffProgress: HandoffProgress | null = null;
+
+// Handoff interrupt flag — set by handoff:interrupt message, checked by task loops
+let handoffInterruptRequested = false;
+let handoffInterruptReason = "";
+
+// Module-level logger — set once during register(), used by background orchestration
+let _log: { info: (m: string) => void; warn: (m: string) => void } = {
+  info: (m: string) => console.log(`[azureclaw] ${m}`),
+  warn: (m: string) => console.warn(`[azureclaw] ${m}`),
+};
 
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
@@ -152,7 +220,8 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
       req.end();
     });
   } catch {
-    console.error(`[azureclaw] pushTrustToRouter failed for ${agentId}`);
+    // Startup race: router may not be ready on first plugin load (double-load pattern).
+    // Trust will be seeded on the second load — no need to alarm the operator.
   }
 }
 
@@ -206,6 +275,11 @@ async function recordMeshSession(
 async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
   if (!agtMeshClient || agtConnected) return;
   try {
+    // Force disconnect first to reset stale "Already connected" state in the SDK.
+    // The SDK sets client.connected = true even when transport fails, which blocks
+    // subsequent connect() calls with "Already connected". Disconnecting first
+    // resets both client.connected and transport.ws so connect() can proceed.
+    try { await agtMeshClient.disconnect(); } catch { /* ignore */ }
     await agtMeshClient.connect({
       displayName: agtSandboxName,
       capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
@@ -357,7 +431,7 @@ async function delegateToNativeAgent(
 /**
  * Fallback: process a task_request with a limited tool-calling loop.
  * Used when native delegation fails (e.g., Gateway not running).
- * Runs an LLM loop with 6 tools, max 10 rounds, 2048 max_completion_tokens.
+ * Runs an LLM loop with 6 tools, max 25 rounds, 2048 max_completion_tokens.
  */
 async function processTaskWithTools(
   taskContent: any,
@@ -525,8 +599,43 @@ async function processTaskWithTools(
     },
   ];
 
-  // Tool-calling loop (max 10 rounds to prevent runaway)
-  for (let round = 0; round < 10; round++) {
+  // Tool-calling loop (max 25 rounds to prevent runaway)
+  for (let round = 0; round < 25; round++) {
+    // Check for handoff interrupt — save progress and exit early
+    // Two signals: (1) module-level flag from mesh handoff:interrupt message,
+    // (2) file-based signal from CLI's docker/kubectl exec
+    if (!handoffInterruptRequested) {
+      try {
+        const fs = await import("node:fs");
+        if (fs.existsSync("/sandbox/.openclaw/workspace/.handoff-interrupt")) {
+          handoffInterruptRequested = true;
+          handoffInterruptReason = "cli_handoff";
+          fs.unlinkSync("/sandbox/.openclaw/workspace/.handoff-interrupt");
+        }
+      } catch { /* ignore */ }
+    }
+    if (handoffInterruptRequested) {
+      log.info(`🛑 Handoff interrupt: saving progress at round ${round}/${25}`);
+      try {
+        const fs = await import("node:fs");
+        const progressFile = "/sandbox/.openclaw/workspace/.task-in-progress.json";
+        fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
+        fs.writeFileSync(progressFile, JSON.stringify({
+          interrupted_at: new Date().toISOString(),
+          reason: handoffInterruptReason,
+          round,
+          total_rounds: 25,
+          messages_so_far: messages.length,
+          last_content: messages[messages.length - 1]?.content?.slice(0, 2000),
+          task: typeof taskContent === "string" ? taskContent.slice(0, 2000) : JSON.stringify(taskContent).slice(0, 2000),
+        }, null, 2));
+        log.info(`📝 Task progress saved to ${progressFile}`);
+      } catch { /* best-effort progress save */ }
+      handoffInterruptRequested = false;
+      handoffInterruptReason = "";
+      return `Task interrupted for handoff at round ${round}. Progress saved to .task-in-progress.json — will resume after handoff.`;
+    }
+
     const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
@@ -761,7 +870,10 @@ async function processTaskWithTools(
                 } else {
                   const memories = parsed.memories || [];
                   result = memories.length > 0
-                    ? memories.map((m: any) => `[${m.score?.toFixed(2) || "?"}] ${m.content || m.text || JSON.stringify(m)}`).join("\n")
+                    ? memories.map((m: any) => {
+                        const text = m.memory_item?.content || m.content || m.text || JSON.stringify(m);
+                        return `[${m.score?.toFixed(2) || "?"}] ${text}`;
+                      }).join("\n")
                     : "No relevant memories found.";
                 }
               }
@@ -967,7 +1079,207 @@ async function processTaskWithTools(
     return msg.content || "";
   }
 
-  return "Sub-agent reached maximum tool-calling rounds without a final response.";
+  return "Sub-agent reached maximum tool-calling rounds (25) without a final response.";
+}
+
+// ── meshSend: auto-chunking send wrapper ─────────────────────────────────────
+// Transparently chunks large messages. Small messages pass through directly.
+// Returns a transfer_id if chunked (for tracking), or undefined for direct send.
+async function meshSend(
+  client: { send: (amid: string, msg: unknown) => Promise<void> },
+  targetAmid: string,
+  message: Record<string, unknown>,
+  _log?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<string | undefined> {
+  const json = JSON.stringify(message);
+
+  if (json.length <= MESH_CHUNK_THRESHOLD) {
+    // Fast path — single message
+    await client.send(targetAmid, message);
+    return undefined;
+  }
+
+  // Large payload — chunked transfer
+  const totalChunks = Math.ceil(json.length / MESH_CHUNK_SIZE);
+  if (totalChunks > MESH_MAX_CHUNKS) {
+    throw new Error(
+      `Payload too large for mesh transfer: ${(json.length / 1024 / 1024).toFixed(1)} MB ` +
+      `(${totalChunks} chunks exceeds max ${MESH_MAX_CHUNKS})`
+    );
+  }
+
+  const { createHash } = await import("node:crypto");
+  const transferId = crypto.randomUUID();
+  const fromAgent = String(message.from_agent || process.env.SANDBOX_NAME || "unknown");
+
+  // Compute per-chunk SHA-256 for integrity verification
+  const chunkHashes: string[] = [];
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = json.slice(i * MESH_CHUNK_SIZE, (i + 1) * MESH_CHUNK_SIZE);
+    chunkHashes.push(createHash("sha256").update(chunk).digest("hex"));
+  }
+  const manifestHash = createHash("sha256").update(chunkHashes.join(":")).digest("hex");
+
+  _log?.info(
+    `Mesh chunked send: ${(json.length / 1024).toFixed(0)} KB → ${totalChunks} chunks ` +
+    `(transfer ${transferId.slice(0, 8)})`
+  );
+
+  // 1. Send manifest — receiver knows what to expect
+  await client.send(targetAmid, {
+    type: "mesh:transfer_manifest",
+    transfer_id: transferId,
+    original_type: message.type || "message",
+    total_chunks: totalChunks,
+    total_bytes: json.length,
+    chunk_hashes: chunkHashes,
+    manifest_hash: manifestHash,
+    from_agent: fromAgent,
+    timestamp: new Date().toISOString(),
+  });
+
+  // 2. Send chunks sequentially (relay preserves FIFO order per peer)
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkData = json.slice(i * MESH_CHUNK_SIZE, (i + 1) * MESH_CHUNK_SIZE);
+    await client.send(targetAmid, {
+      type: "mesh:transfer_chunk",
+      transfer_id: transferId,
+      chunk_index: i,
+      total_chunks: totalChunks,
+      data: chunkData,
+      hash: chunkHashes[i],
+      from_agent: fromAgent,
+    });
+  }
+
+  _log?.info(`Mesh chunked send complete: ${totalChunks} chunks (transfer ${transferId.slice(0, 8)})`);
+  return transferId;
+}
+
+// ── meshHandleTransportMessage: chunk accumulation + reassembly ───────────────
+// Called from onMessage handler. Returns the reassembled message if complete,
+// or null if the message was a transport chunk (absorbed, not for app layer).
+// Returns undefined if the message is NOT a transport message (pass through).
+async function meshHandleTransportMessage(
+  fromAmid: string,
+  fromAgent: string,
+  message: any,
+  _log?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<Record<string, unknown> | null | undefined> {
+  const msgType = message?.type;
+  if (msgType !== "mesh:transfer_manifest" && msgType !== "mesh:transfer_chunk") {
+    return undefined; // not a transport message — pass through to app layer
+  }
+
+  const transferId = message.transfer_id;
+  if (!transferId) return null; // malformed — absorb silently
+
+  const key = `${fromAmid}:${transferId}`;
+
+  if (msgType === "mesh:transfer_manifest") {
+    // Store manifest and prepare accumulator
+    pendingTransfers.set(key, {
+      from_amid: fromAmid,
+      from_agent: fromAgent,
+      transfer_id: transferId,
+      total_chunks: message.total_chunks,
+      total_bytes: message.total_bytes,
+      chunk_hashes: message.chunk_hashes || [],
+      manifest_hash: message.manifest_hash || "",
+      metadata: { original_type: message.original_type },
+      chunks: new Map(),
+      received_at: Date.now(),
+    });
+    _log?.info(
+      `Mesh transfer manifest: ${message.total_chunks} chunks, ` +
+      `${(message.total_bytes / 1024).toFixed(0)} KB (transfer ${transferId.slice(0, 8)})`
+    );
+    return null; // absorbed
+  }
+
+  // mesh:transfer_chunk
+  const transfer = pendingTransfers.get(key);
+  if (!transfer) {
+    // Chunk arrived before manifest or after TTL — try to find by transfer_id alone
+    for (const [k, t] of pendingTransfers) {
+      if (t.transfer_id === transferId && t.from_amid === fromAmid) {
+        t.chunks.set(message.chunk_index, message.data);
+        return null;
+      }
+    }
+    _log?.warn(`Mesh chunk for unknown transfer ${transferId.slice(0, 8)} — dropped`);
+    return null;
+  }
+
+  // Verify chunk hash before accepting
+  if (message.hash && transfer.chunk_hashes[message.chunk_index]) {
+    const { createHash } = await import("node:crypto");
+    const computed = createHash("sha256").update(message.data).digest("hex");
+    if (computed !== message.hash) {
+      _log?.warn(
+        `Mesh chunk ${message.chunk_index} hash mismatch (transfer ${transferId.slice(0, 8)}) — rejected`
+      );
+      return null; // reject corrupted chunk
+    }
+  }
+
+  transfer.chunks.set(message.chunk_index, message.data);
+
+  // Check if all chunks received
+  if (transfer.chunks.size < transfer.total_chunks) {
+    if (transfer.chunks.size % 10 === 0) {
+      _log?.info(
+        `Mesh transfer ${transferId.slice(0, 8)}: ${transfer.chunks.size}/${transfer.total_chunks} chunks`
+      );
+    }
+    return null; // still accumulating
+  }
+
+  // All chunks received — reassemble
+  _log?.info(
+    `Mesh transfer ${transferId.slice(0, 8)}: all ${transfer.total_chunks} chunks received — reassembling`
+  );
+
+  // Verify manifest hash (integrity of the complete chunk set)
+  const { createHash: mHash } = await import("node:crypto");
+  const actualHashes: string[] = [];
+  for (let i = 0; i < transfer.total_chunks; i++) {
+    actualHashes.push(
+      mHash("sha256").update(transfer.chunks.get(i) || "").digest("hex")
+    );
+  }
+  const actualManifestHash = mHash("sha256").update(actualHashes.join(":")).digest("hex");
+  if (transfer.manifest_hash && actualManifestHash !== transfer.manifest_hash) {
+    _log?.warn(
+      `Mesh transfer ${transferId.slice(0, 8)}: manifest hash mismatch — ` +
+      `data may be corrupted (expected ${transfer.manifest_hash.slice(0, 12)}, ` +
+      `got ${actualManifestHash.slice(0, 12)})`
+    );
+    // Continue anyway — let the application layer handle validation
+  }
+
+  // Reassemble JSON
+  const parts: string[] = [];
+  for (let i = 0; i < transfer.total_chunks; i++) {
+    parts.push(transfer.chunks.get(i) || "");
+  }
+  const reassembledJson = parts.join("");
+  pendingTransfers.delete(key);
+
+  let reassembled: Record<string, unknown>;
+  try {
+    reassembled = JSON.parse(reassembledJson);
+  } catch {
+    _log?.warn(`Mesh transfer ${transferId.slice(0, 8)}: reassembled JSON parse failed`);
+    return null;
+  }
+
+  _log?.info(
+    `Mesh transfer ${transferId.slice(0, 8)}: reassembled ${(reassembledJson.length / 1024).toFixed(0)} KB ` +
+    `(type: ${reassembled.type || transfer.metadata.original_type})`
+  );
+
+  return reassembled;
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
@@ -1012,7 +1324,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   // that check AGT_LOCK_KEY can always await it (fixes race where pending was undefined).
   const initPromise = (async () => {
   try {
-    const sdk: any = await import("@agentmesh/sdk");
+    // ESM import preferred; fall back to CJS require if extension loader context rejects it
+    let sdk: any;
+    try {
+      sdk = await import("@agentmesh/sdk");
+    } catch {
+      // ESM import failed — load CJS entry via createRequire
+      const { createRequire } = await import("node:module");
+      const _require = createRequire(import.meta.url);
+      sdk = _require("@agentmesh/sdk");
+    }
 
     // Policy engine — tool allow/deny evaluation
     agtPolicy = new sdk.Policy([
@@ -1165,6 +1486,21 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         fromName = await resolveAmidToName(fromAmid);
       }
       if (!fromName) fromName = fromAmid.slice(0, 12);
+
+      // ── Transport layer: intercept chunked transfer messages ──
+      // mesh:transfer_manifest and mesh:transfer_chunk are transport-level —
+      // they get accumulated and reassembled before reaching application logic.
+      const transportResult = await meshHandleTransportMessage(fromAmid, fromName, message, log);
+      if (transportResult === null) {
+        // Transport message absorbed (manifest or partial chunk) — don't process further
+        return;
+      }
+      if (transportResult !== undefined) {
+        // Reassembled message — replace the original message and continue to app layer
+        message = transportResult;
+        log.info(`Mesh transfer reassembled from '${fromName}' — processing as ${message.type || "message"}`);
+      }
+
       const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
       const entry = {
         from_amid: fromAmid,
@@ -1331,6 +1667,907 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         }
       }
+
+      // ── Handle file_transfer messages — auto-save received files to workspace ──
+      if (message?.type === "file_transfer" && message?.file_data && message?.file_name) {
+        let success = false;
+        let savedPath = "";
+        let errorMsg = "";
+        try {
+          const fs = await import("node:fs");
+          const path = await import("node:path");
+          const incomingDir = "/sandbox/.openclaw/workspace/incoming";
+          fs.mkdirSync(incomingDir, { recursive: true });
+
+          const safeName = String(message.file_name).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 255);
+          const destPath = path.join(incomingDir, safeName);
+          const buf = Buffer.from(message.file_data, "base64");
+          fs.writeFileSync(destPath, buf, { mode: 0o600 });
+
+          // Verify the write
+          const stat = fs.statSync(destPath);
+          success = stat.size === buf.length;
+          savedPath = destPath;
+
+          log.info(
+            `📁 File received from '${fromName}': ${safeName} ` +
+            `(${(buf.length / 1024).toFixed(1)} KB) → ${destPath}`
+          );
+
+          // Update the inbox entry with save path (already pushed above)
+          const lastEntry = agtInbox[agtInbox.length - 1];
+          if (lastEntry && lastEntry.from_amid === fromAmid) {
+            lastEntry.content = JSON.stringify({
+              type: "file_transfer",
+              file_name: safeName,
+              saved_to: destPath,
+              size_bytes: buf.length,
+              description: message.description || "",
+              from_agent: fromName,
+            });
+          }
+        } catch (ftErr: any) {
+          errorMsg = ftErr.message;
+          log.warn(`File transfer save failed: ${ftErr.message}`);
+        }
+
+        // Send ack back to sender so they know the file landed (or didn't)
+        if (fromAmid && agtMeshClient) {
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "file_transfer_ack",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              file_name: String(message.file_name || ""),
+              success,
+              saved_to: savedPath,
+              error: errorMsg || undefined,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort ack */ }
+        }
+        return; // Don't process as a task
+      }
+
+      // ── Handle handoff:interrupt — parent signals sub-agent to save progress ──
+      // Sent before workspace_request so the sub-agent can checkpoint its work.
+      // Sets the interrupt flag which processTaskWithTools checks between rounds.
+      if (message?.type === "handoff:interrupt" && fromAmid) {
+        log.info(`🛑 Handoff interrupt received from '${fromName}' — signaling task to save progress`);
+        handoffInterruptRequested = true;
+        handoffInterruptReason = message.reason || "parent_handoff";
+        // Acknowledge immediately — the task loop will save on next iteration
+        if (agtMeshClient) {
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:interrupt_ack",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+        return; // Don't process as a task
+      }
+
+      // ── Handle handoff:workspace_request — parent collects sub-agent workspace ──
+      // During handoff, the parent asks each sub-agent to serialize its workspace
+      // and send it back via mesh. Uses meshSend for transparent auto-chunking.
+      if (message?.type === "handoff:workspace_request" && fromAmid && agtMeshClient) {
+        log.info(`📦 Workspace collection request from '${fromName}' — packaging workspace...`);
+        const agentName = process.env.SANDBOX_NAME || "unknown";
+        try {
+          const { execSync } = await import("node:child_process");
+          const tarB64 = execSync(
+            "tar czf - -C /sandbox " +
+            "--exclude='.openclaw/extensions/*/dist' --exclude='.openclaw/extensions/*/node_modules' " +
+            "--exclude='node_modules' --exclude='.git' " +
+            "--exclude='*.pyc' --exclude='__pycache__' " +
+            ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
+            ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0",
+            { timeout: 10000, maxBuffer: 50 * 1024 * 1024 },
+          ).toString().trim();
+
+          // meshSend auto-chunks if > 512KB — transparent to the receiver
+          await meshSend(agtMeshClient, fromAmid, {
+            type: "handoff:workspace_response",
+            name: agentName,
+            workspace_tar: tarB64,
+            size_bytes: tarB64.length,
+            from_agent: agentName,
+            timestamp: new Date().toISOString(),
+          }, log);
+          log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB)`);
+        } catch (wsErr: any) {
+          log.warn(`Workspace collection failed: ${wsErr.message}`);
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:workspace_response",
+              name: agentName,
+              workspace_tar: "",
+              size_bytes: 0,
+              error: wsErr.message,
+              from_agent: agentName,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+        return; // Don't process as a regular task
+      }
+
+      // ── Handle handoff:workspace_inject — parent pushes workspace after re-spawn ──
+      // After handoff restore, the parent injects each sub-agent's workspace via mesh.
+      if (message?.type === "handoff:workspace_inject" && message?.workspace_tar) {
+        log.info(`📦 Workspace injection from '${fromName}' — extracting...`);
+        let success = false;
+        let fileCount = 0;
+        let errorMsg = "";
+        try {
+          const fs = await import("node:fs");
+          const { execSync } = await import("node:child_process");
+          const tarBuf = Buffer.from(message.workspace_tar as string, "base64");
+
+          const MAX_TAR_BYTES = 5 * 1024 * 1024;
+          if (tarBuf.length > MAX_TAR_BYTES) throw new Error(`workspace tar too large: ${tarBuf.length}`);
+
+          const tmpDir = `/tmp/handoff-inject-${Date.now()}`;
+          fs.mkdirSync(tmpDir, { recursive: true });
+          const tarPath = `${tmpDir}/workspace.tar.gz`;
+          fs.writeFileSync(tarPath, tarBuf, { mode: 0o600 });
+
+          // Validate entries
+          const listing = execSync(`tar tzf ${tarPath} 2>/dev/null`, { timeout: 5000 }).toString();
+          const entries = listing.split("\n").filter(Boolean);
+          for (const entry of entries) {
+            if (entry.includes("..") || entry.startsWith("/")) {
+              throw new Error(`path traversal blocked: ${entry}`);
+            }
+          }
+          fileCount = entries.length;
+
+          execSync(
+            `tar xzf ${tarPath} -C /sandbox/ --no-same-owner --no-overwrite-dir 2>/dev/null`,
+            { timeout: 10000 },
+          );
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+
+          // Write a manifest so the agent knows what files were restored and where.
+          // Filter to user-facing files (skip .openclaw internals, skills, etc.)
+          const userFiles = entries.filter((e: string) =>
+            !e.endsWith("/") &&
+            !e.includes("/skills/") &&
+            !e.includes("workspace-state.json") &&
+            !e.includes("SOUL.md") &&
+            !e.includes("USER.md"),
+          );
+          if (userFiles.length > 0) {
+            const manifestLines = [
+              "# Handoff — Restored Files",
+              "",
+              `Restored ${userFiles.length} workspace file(s) from the previous environment:`,
+              "",
+              ...userFiles.map((f: string) => `- /sandbox/${f}`),
+              "",
+              `Total files (including system): ${entries.length}`,
+            ];
+            fs.writeFileSync(
+              "/sandbox/.openclaw/workspace/HANDOFF_FILES.md",
+              manifestLines.join("\n") + "\n",
+            );
+          }
+
+          // Promote files from incoming/ to workspace root so they're immediately
+          // visible to the agent without needing to know about the incoming/ directory.
+          const incomingDir = "/sandbox/.openclaw/workspace/incoming";
+          const wsRoot = "/sandbox/.openclaw/workspace";
+          if (fs.existsSync(incomingDir)) {
+            try {
+              const incomingFiles = fs.readdirSync(incomingDir);
+              for (const file of incomingFiles) {
+                const src = `${incomingDir}/${file}`;
+                const dest = `${wsRoot}/${file}`;
+                if (!fs.existsSync(dest) && fs.statSync(src).isFile()) {
+                  fs.copyFileSync(src, dest);
+                  log.info(`📂 Promoted incoming/${file} → workspace root`);
+                }
+              }
+            } catch { /* best effort */ }
+          }
+
+          success = true;
+          log.info(`📦 Workspace injected (${(tarBuf.length / 1024).toFixed(1)} KB, ${fileCount} files)`);
+        } catch (injectErr: any) {
+          errorMsg = injectErr.message;
+          log.warn(`Workspace injection failed: ${injectErr.message}`);
+        }
+
+        // Ack back to parent so they know data landed (or didn't)
+        if (fromAmid && agtMeshClient) {
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff:workspace_inject_ack",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              success,
+              file_count: fileCount,
+              error: errorMsg || undefined,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+        return;
+      }
+
+      // ── Handle handoff:resume — parent tells sub-agent to continue interrupted work ──
+      // After workspace injection, the parent sends the task context so the sub-agent
+      // can resume. The sub-agent reads .task-in-progress.json for checkpoint data,
+      // reports to parent, and optionally re-starts the interrupted task.
+      if (message?.type === "handoff:resume" && fromAmid && agtMeshClient) {
+        const agentName = process.env.SANDBOX_NAME || "unknown";
+        log.info(`▶️ Resume signal from '${fromName}' — checking for interrupted work...`);
+
+        let progressInfo: Record<string, unknown> | null = null;
+        try {
+          const fs = await import("node:fs");
+          const progressPath = "/sandbox/.openclaw/workspace/.task-in-progress.json";
+          if (fs.existsSync(progressPath)) {
+            progressInfo = JSON.parse(fs.readFileSync(progressPath, "utf8"));
+            log.info(`📋 Found interrupted task: round ${progressInfo?.round}/${progressInfo?.total_rounds}`);
+          }
+        } catch { /* no progress file */ }
+
+        // Report to parent: "I'm alive, here's my status"
+        try {
+          await agtMeshClient.send(fromAmid, {
+            type: "handoff:resume_ack",
+            from_agent: agentName,
+            previous_status: message.previous_status || "unknown",
+            has_interrupted_task: !!progressInfo,
+            interrupted_task: progressInfo ? {
+              task: (progressInfo.task as string)?.slice(0, 500),
+              round: progressInfo.round,
+              interrupted_at: progressInfo.interrupted_at,
+            } : null,
+            message: progressInfo
+              ? `Successfully restored in cloud. Resuming interrupted work from round ${progressInfo.round}: ${(progressInfo.task as string)?.slice(0, 200)}`
+              : `Successfully restored in cloud. No interrupted work — ready for new tasks.`,
+            timestamp: new Date().toISOString(),
+          });
+          log.info(`🤝 Sent resume_ack to parent '${fromName}'`);
+        } catch { /* best effort */ }
+
+        // If there's interrupted work, resume it
+        if (progressInfo?.task) {
+          log.info(`▶️ Resuming interrupted task...`);
+          const resumePrompt = `You were previously working on a task that was interrupted for a handoff migration. Here's what was happening:\n\n` +
+            `Original task: ${progressInfo.task}\n` +
+            `Progress: completed ${progressInfo.round} of ${progressInfo.total_rounds} tool-calling rounds\n` +
+            `Last output: ${(progressInfo.last_content as string)?.slice(0, 1000) || "(none)"}\n\n` +
+            `Please continue from where you left off. Complete the remaining work and report the results.`;
+          // Reset interrupt flag for this fresh start
+          handoffInterruptRequested = false;
+          handoffInterruptReason = "";
+          try {
+            const llmResponse = await processTaskWithTools(resumePrompt, log);
+            // Report results to parent
+            await agtMeshClient.send(fromAmid, {
+              type: "task_response",
+              content: `[Resumed after handoff] ${llmResponse}`,
+              from_agent: agentName,
+              in_reply_to: "handoff:resume",
+              timestamp: new Date().toISOString(),
+            });
+            log.info(`✅ Interrupted task completed after handoff resume`);
+          } catch (resumeErr: any) {
+            log.warn(`Task resumption failed: ${resumeErr.message}`);
+            try {
+              await agtMeshClient.send(fromAmid, {
+                type: "task_response",
+                content: `[Resume failed] ${resumeErr.message}`,
+                from_agent: agentName,
+                timestamp: new Date().toISOString(),
+              });
+            } catch { /* best effort */ }
+          }
+        }
+        return;
+      }
+
+      // ── Handle handoff_transfer messages — target receives state blob ──
+      // The source agent sends this after snapshot + drain. The target agent
+      // restores the state on its own router and sends verification back.
+      if (message?.type === "handoff_transfer" && fromAmid && agtMeshClient) {
+        log.info(`🔄 Handoff transfer received from '${fromName}' — restoring state...`);
+        try {
+          const adminToken = await _readAdminToken();
+          if (!adminToken) throw new Error("No admin token available for handoff restore");
+
+          // Validate direction matches our environment
+          const incomingDirection = message.direction || "local_to_aks";
+          const isDevMode = process.env.AZURECLAW_DEV_MODE === "true";
+          // If we're in dev mode (Docker), we should be receiving aks_to_local.
+          // If we're in AKS, we should be receiving local_to_aks.
+          const expectedDirection = isDevMode ? "aks_to_local" : "local_to_aks";
+          if (incomingDirection !== expectedDirection) {
+            log.warn(
+              `⚠️ Handoff direction mismatch: received '${incomingDirection}' but ` +
+              `expected '${expectedDirection}' (dev_mode=${isDevMode}). Proceeding with caution.`
+            );
+          }
+
+          const authH = { Authorization: `Bearer ${adminToken}` };
+
+          // 1. Initialize a handoff session on our own router
+          const initResp = await _routerCallStrict("POST", "/agt/handoff/init", {
+            direction: incomingDirection,
+            ttl_seconds: 300,
+            predecessor_amid: fromAmid,
+          }, 15000, authH);
+
+          const handoffToken = initResp.handoff_token;
+          const hHeaders = { ...authH, "X-Handoff-Token": handoffToken };
+
+          // 2. Restore the state blob
+          const restoreResp = await _routerCallStrict("POST", "/agt/handoff/restore", {
+            shared_secret: message.shared_secret,
+            blob: message.blob,
+          }, 30000, hHeaders);
+
+          log.info(`✅ Handoff restore complete: trust_scores=${restoreResp.trust_scores_count || 0}, audit=${restoreResp.audit_entries_count || 0}, sub_agent_snapshots=${restoreResp.sub_agent_snapshots || 0}, sub_agent_workspaces=${Array.isArray(restoreResp.sub_agent_workspaces) ? restoreResp.sub_agent_workspaces.length : "missing"}, sub_agent_results=${Array.isArray(restoreResp.sub_agent_results) ? restoreResp.sub_agent_results.length : "missing"}`);
+
+          // 3. Compute verification digest
+          const verifyResp = await _routerCallStrict("POST", "/agt/handoff/verify", {
+            predecessor_amid: fromAmid,
+            expected_hash: message.verification_hash,
+          }, 15000, hHeaders);
+
+          // 4. Send verification back to source via E2E mesh
+          await agtMeshClient.send(fromAmid, {
+            type: "handoff_verification",
+            verification_hash: verifyResp.verification_hash,
+            matches: verifyResp.matches,
+            trust_scores_count: verifyResp.trust_scores_count,
+            audit_entries_count: verifyResp.audit_entries_count,
+            successor_amid: agtIdentity?.amid || "unknown",
+            from_agent: agtSandboxName,
+            timestamp: new Date().toISOString(),
+          });
+
+          log.info(`✅ Handoff verification sent back to '${fromName}' (hash_match=${verifyResp.matches})`);
+
+          // 5. Decommission our handoff session (we're done receiving)
+          await _routerCallStrict("POST", "/agt/handoff/decommission", {}, 15000, hHeaders).catch(() => {});
+
+          // ── Post-restore: hydrate the cloud agent with transferred state ──
+          // This runs async (best-effort) — handoff is already complete at this point.
+          (async () => {
+            try {
+              console.log(`[azureclaw-handoff] IIFE started — sub_agent_results=${JSON.stringify(restoreResp.sub_agent_results?.length ?? "missing")}, sub_agent_workspaces=${JSON.stringify(restoreResp.sub_agent_workspaces?.length ?? "missing")}, meshClient=${!!agtMeshClient}`);
+              const fs = await import("node:fs");
+              const agentName = process.env.SANDBOX_NAME || "dev-agent";
+              const apiVer = "api-version=2025-11-15-preview";
+
+              // Parse chat snapshot from restore response (returned by router)
+              let chatMessages: Array<{ role: string; content: string; timestamp?: string }> = [];
+              try {
+                if (restoreResp.chat_snapshot) {
+                  const raw = JSON.parse(restoreResp.chat_snapshot);
+                  if (!Array.isArray(raw)) throw new Error("chat_snapshot is not an array");
+                  // Schema validation: only accept {role, content} objects, cap at 100 messages
+                  for (const msg of raw.slice(0, 100)) {
+                    if (typeof msg?.role === "string" && typeof msg?.content === "string") {
+                      chatMessages.push({
+                        role: msg.role.slice(0, 20),
+                        content: msg.content.slice(0, 10000),
+                        ...(typeof msg.timestamp === "string" ? { timestamp: msg.timestamp.slice(0, 30) } : {}),
+                      });
+                    }
+                  }
+                  log.info(`📜 Handoff: loaded ${chatMessages.length} chat messages from snapshot`);
+                }
+              } catch { /* no valid chat snapshot — that's OK */ }
+
+              // Extract workspace tar to /sandbox/ (plugin runs in openclaw container)
+              if (restoreResp.workspace_tar) {
+                try {
+                  const { execSync } = await import("node:child_process");
+                  const tarBuf = Buffer.from(restoreResp.workspace_tar, "base64");
+
+                  // Size guard: reject decompression bombs (5MB compressed ≈ 50MB limit)
+                  const MAX_TAR_BYTES = 5 * 1024 * 1024;
+                  if (tarBuf.length > MAX_TAR_BYTES) {
+                    throw new Error(`workspace tar too large: ${tarBuf.length} bytes (max ${MAX_TAR_BYTES})`);
+                  }
+
+                  // Write to unique temp path to avoid /tmp race conditions
+                  const tmpDir = `/tmp/handoff-${Date.now()}`;
+                  fs.mkdirSync(tmpDir, { recursive: true });
+                  const tarPath = `${tmpDir}/workspace.tar.gz`;
+                  fs.writeFileSync(tarPath, tarBuf, { mode: 0o600 });
+
+                  // Validate: list entries and reject path traversal / symlinks
+                  const listing = execSync(`tar tzf ${tarPath} 2>/dev/null`, { timeout: 5000 }).toString();
+                  const entries = listing.split("\n").filter(Boolean);
+                  for (const entry of entries) {
+                    if (entry.includes("..") || entry.startsWith("/")) {
+                      throw new Error(`path traversal blocked in workspace tar: ${entry}`);
+                    }
+                  }
+
+                  // Extract safely: --no-same-owner (drop root ownership),
+                  // --no-overwrite-dir, no following symlinks outside target
+                  execSync(
+                    `tar xzf ${tarPath} -C /sandbox/ --no-same-owner --no-overwrite-dir 2>/dev/null`,
+                    { timeout: 10000 },
+                  );
+                  log.info(`📦 Handoff: extracted ${entries.length} workspace entries to /sandbox/`);
+
+                  // Cleanup temp
+                  fs.rmSync(tmpDir, { recursive: true, force: true });
+                } catch (tarErr: any) {
+                  log.warn(`Handoff: workspace tar extraction failed: ${tarErr.message}`);
+                }
+              }
+
+              const meta = {
+                predecessor_amid: restoreResp.predecessor_amid || fromAmid,
+                direction: restoreResp.direction || "local_to_aks",
+                trust_scores_count: restoreResp.trust_scores_count || 0,
+                audit_entries_count: restoreResp.audit_entries_count || 0,
+                sub_agents_respawned: (restoreResp.sub_agent_results || [])
+                  .filter((r: any) => r.status === "spawned").length,
+                restored_at: restoreResp.restored_at || new Date().toISOString(),
+              };
+
+              // 1. Create a Foundry Conversation with the transferred chat history
+              let handoffConvId: string | undefined;
+              if (chatMessages.length > 0) {
+                try {
+                  const convResp = await _routerCall("POST", `/openai/conversations?${apiVer}`, {
+                    metadata: {
+                      user: agentName,
+                      source: "handoff",
+                      predecessor: meta.predecessor_amid || fromAmid,
+                      direction: meta.direction || "local_to_aks",
+                    },
+                  });
+                  handoffConvId = convResp?.id;
+                  if (handoffConvId) {
+                    // Replay messages into the conversation (batch in chunks of 10)
+                    const items = chatMessages.map((m: any) => ({
+                      type: "message",
+                      role: m.role === "assistant" ? "assistant" : "user",
+                      content: [{ type: "input_text", text: String(m.content || "").slice(0, 10000) }],
+                    }));
+                    for (let i = 0; i < items.length; i += 10) {
+                      const batch = items.slice(i, i + 10);
+                      await _routerCall("POST", `/openai/conversations/${handoffConvId}/items?${apiVer}`, { items: batch }).catch(() => {});
+                    }
+                    log.info(`📝 Handoff: replayed ${items.length} messages into Foundry conversation ${handoffConvId}`);
+                  }
+                } catch (e: any) {
+                  log.warn(`Handoff: Foundry conversation replay failed (non-fatal): ${e.message}`);
+                }
+              }
+
+              // 2. Store handoff event in Foundry Memory (includes conversation ID for startup recall)
+              const store = `memory-${agentName}`;
+              const recentSummary = chatMessages.slice(-5).map((m: any) =>
+                `${m.role}: ${String(m.content || "").slice(0, 200)}`
+              ).join("\n");
+              const memoryText = [
+                `[Handoff event] I was migrated from local dev to cloud (AKS) at ${meta.restored_at || new Date().toISOString()}.`,
+                `Predecessor AMID: ${meta.predecessor_amid || fromAmid}.`,
+                `Direction: ${meta.direction || "local_to_aks"}.`,
+                `Trust scores transferred: ${meta.trust_scores_count || 0}.`,
+                `Audit entries transferred: ${meta.audit_entries_count || 0}.`,
+                handoffConvId ? `Foundry conversation: ${handoffConvId}.` : "",
+                chatMessages.length > 0 ? `\nRecent conversation context (last ${Math.min(5, chatMessages.length)} messages):\n${recentSummary}` : "",
+              ].filter(Boolean).join(" ");
+
+              try {
+                await _routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
+                  scope: agentName,
+                  items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: memoryText }] }],
+                  update_delay: 0,
+                });
+                log.info("🧠 Handoff: stored handoff event in Foundry Memory");
+              } catch (e: any) {
+                log.warn(`Handoff: Foundry Memory update failed (non-fatal): ${e.message}`);
+              }
+
+              // 3. Persist handoff context so the agent can see it
+              //    a) Write .handoff-state.json — picked up by MEMORY.md builder on every plugin load
+              //    b) Inject directly into MEMORY.md now (in case Foundry context hasn't written yet)
+              //    c) Keep HANDOFF_CONTEXT.md as a human-readable backup
+              //    d) Foundry Memory + Conversation are the durable stores (survive pod recreation)
+              const handoffState = {
+                restored_at: meta.restored_at || new Date().toISOString(),
+                predecessor_amid: meta.predecessor_amid || fromAmid,
+                direction: meta.direction || "local_to_aks",
+                trust_scores_count: meta.trust_scores_count || 0,
+                audit_entries_count: meta.audit_entries_count || 0,
+                chat_message_count: chatMessages.length,
+                conversation_id: handoffConvId,
+                recent_messages: chatMessages.slice(-10).map((m: any) => ({
+                  role: String(m.role).slice(0, 20),
+                  content: String(m.content || "").slice(0, 500),
+                })),
+              };
+              try {
+                fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
+
+                // Flag file for MEMORY.md builder
+                fs.writeFileSync(
+                  "/sandbox/.openclaw/workspace/.handoff-state.json",
+                  JSON.stringify(handoffState),
+                  { mode: 0o600 },
+                );
+
+                // Inject into MEMORY.md directly (the agent reads this file)
+                const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
+                const handoffSection = [
+                  "\n## Handoff Context\n",
+                  `This agent was migrated from local dev to cloud (AKS) at ${handoffState.restored_at}.`,
+                  `Predecessor AMID: ${handoffState.predecessor_amid}. Direction: ${handoffState.direction}.`,
+                  `Trust scores: ${handoffState.trust_scores_count}, Audit trail: ${handoffState.audit_entries_count} entries.`,
+                  `Chat history: ${handoffState.chat_message_count} messages transferred.\n`,
+                  "### Recent Conversation Before Handoff\n",
+                  ...handoffState.recent_messages.map((m: { role: string; content: string }) =>
+                    `**${m.role}**: ${m.content}`
+                  ),
+                  "",
+                ].join("\n");
+                let existingMem = "";
+                try { existingMem = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
+                // Insert after the --- env marker if it exists, otherwise append
+                const endMarker = "\n---\n";
+                if (existingMem.includes(endMarker)) {
+                  const idx = existingMem.indexOf(endMarker) + endMarker.length;
+                  const before = existingMem.slice(0, idx);
+                  const after = existingMem.slice(idx);
+                  fs.writeFileSync(memoryFile, before + handoffSection + after);
+                } else {
+                  fs.writeFileSync(memoryFile, existingMem + handoffSection);
+                }
+
+                // Human-readable backup
+                const contextMd = [
+                  "# Handoff Context",
+                  "",
+                  `> This agent was migrated from local dev to cloud (AKS) at ${handoffState.restored_at}.`,
+                  `> Predecessor AMID: \`${handoffState.predecessor_amid}\``,
+                  `> Direction: ${handoffState.direction}`,
+                  "",
+                  "## Recent Conversation",
+                  "",
+                  ...chatMessages.slice(-20).map((m: any) =>
+                    `**${m.role}**: ${String(m.content || "").slice(0, 500)}`
+                  ),
+                  "",
+                  "---",
+                  "*This file was created automatically during handoff. The full conversation is also stored in Foundry Conversations and Memory.*",
+                ].join("\n");
+                fs.writeFileSync("/sandbox/.openclaw/workspace/HANDOFF_CONTEXT.md", contextMd);
+                log.info("📄 Handoff: wrote context to MEMORY.md + .handoff-state.json + HANDOFF_CONTEXT.md");
+              } catch (e: any) {
+                log.warn(`Handoff: context file write failed: ${e.message}`);
+              }
+
+              // 4. Register re-spawned sub-agents as trusted + inject workspaces + resume
+              // IMPORTANT: Use sub_agent_results (always populated for spawned agents)
+              // as the primary loop driver — NOT sub_agent_workspaces (which may be
+              // empty if workspace data was lost in the snapshot round-trip).
+              const spawnedSubs: Array<{ name: string; original_amid?: string; status?: string }> =
+                (restoreResp.sub_agent_results || []).filter((r: any) => r.status === "spawned");
+              const subWorkspaceMap = new Map<string, any>();
+              for (const ws of (restoreResp.sub_agent_workspaces || [])) {
+                subWorkspaceMap.set(ws.name, ws);
+              }
+              const subAgentStatuses: Array<{ name: string; status: string; task?: string }> = [];
+              console.log(`[azureclaw-handoff] step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
+              log.info(`📦 Handoff step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
+
+              if (spawnedSubs.length > 0 && agtMeshClient) {
+                console.log(`[azureclaw-handoff] entering trust+resume loop for ${spawnedSubs.length} sub-agents`);
+                log.info(`🤖 Handoff: registering trust + resuming ${spawnedSubs.length} sub-agent(s)...`);
+
+                // Collect OLD AMIDs from predecessor's snapshot so we can reject stale
+                // registry entries. After handoff, sub-agents get new key pairs → new AMIDs.
+                // The old Docker AMIDs may still be in the registry briefly.
+                const staleAmids = new Set<string>();
+                for (const spawned of spawnedSubs) {
+                  if (spawned.original_amid) {
+                    staleAmids.add(spawned.original_amid);
+                    // Clear stale cache entries
+                    nameToAmid.delete(spawned.name);
+                    amidToName.delete(spawned.original_amid);
+                    parentTrustedAmids.delete(spawned.original_amid);
+                  }
+                }
+                if (staleAmids.size > 0) {
+                  log.info(`🧹 Handoff: cleared ${staleAmids.size} stale AMID(s) from cache: ${[...staleAmids].map(a => a.slice(0, 12) + "...").join(", ")}`);
+                }
+
+                for (const spawned of spawnedSubs) {
+                  try {
+                    // Wait for sub-agent to register in mesh with a NEW AMID
+                    // (up to 90s — pods need boot time + SDK init + relay connect)
+                    // IMPORTANT: reject old AMIDs from predecessor — they're dead connections
+                    let subAmid: string | undefined;
+                    const subStart = Date.now();
+                    while (Date.now() - subStart < 90_000) {
+                      try {
+                        const searchResult = await _routerCall("GET",
+                          `/agt/registry/registry/search?capability=${encodeURIComponent(spawned.name)}`);
+                        const candidates = (searchResult?.results || []).filter((a: any) =>
+                          a.display_name === spawned.name && a.status === "online"
+                        );
+                        // Pick the first candidate that is NOT a stale AMID
+                        const match = candidates.find((a: any) => !staleAmids.has(a.amid));
+                        if (match?.amid) {
+                          subAmid = match.amid;
+                          log.info(`🔍 Found NEW AMID for '${spawned.name}': ${match.amid.slice(0, 12)}...${spawned.original_amid ? ` (old was ${spawned.original_amid.slice(0, 12)}...)` : ""}`);
+                          break;
+                        }
+                        if (candidates.length > 0 && !match) {
+                          log.info(`⏳ Registry has '${spawned.name}' but AMID is stale (${candidates[0].amid.slice(0, 12)}...) — waiting for new registration`);
+                        }
+                      } catch { /* not registered yet */ }
+                      await new Promise(r => setTimeout(r, 3000));
+                    }
+
+                    if (!subAmid) {
+                      log.warn(`Sub-agent '${spawned.name}' didn't register in mesh within 90s — skipping`);
+                      subAgentStatuses.push({ name: spawned.name, status: "not_found" });
+                      continue;
+                    }
+
+                    // Register new sub-agent AMID in trust maps so parent accepts
+                    // their messages (KNOCK handler checks parentTrustedAmids).
+                    // After handoff, sub-agents have new key pairs → new AMIDs.
+                    amidToName.set(subAmid, spawned.name);
+                    nameToAmid.set(spawned.name, subAmid);
+                    parentTrustedAmids.add(subAmid);
+                    try {
+                      await pushTrustToRouter(spawned.name, 0.0);
+                      log.info(`🔑 Registered re-spawned sub-agent '${spawned.name}' as trusted (${subAmid.slice(0, 12)}...)`);
+                    } catch {
+                      log.warn(`Failed to push trust for re-spawned sub-agent '${spawned.name}'`);
+                    }
+
+                    // Look up workspace data for this sub-agent (may be absent)
+                    const wsData = subWorkspaceMap.get(spawned.name);
+
+                    // Wait for sub-agent's E2E session to be ready (prekey available on relay)
+                    // before sending workspace_inject. Without this, messages go to the void.
+                    let preKeyReady = false;
+                    const pkStart = Date.now();
+                    for (let pkAttempt = 0; pkAttempt < 20 && Date.now() - pkStart < 60_000; pkAttempt++) {
+                      try {
+                        await agtMeshClient.send(subAmid, { type: "ping", from_agent: agentName });
+                        preKeyReady = true;
+                        log.info(`🔗 E2E session ready for '${spawned.name}' (attempt ${pkAttempt + 1})`);
+                        break;
+                      } catch (pkErr: any) {
+                        if (pkErr.message?.includes("prekey") || pkErr.message?.includes("prekeys")) {
+                          log.info(`⏳ Waiting for prekeys from '${spawned.name}' (${pkAttempt + 1}/20)...`);
+                          await new Promise(r => setTimeout(r, 3000));
+                        } else {
+                          log.warn(`⚠️ E2E session check failed for '${spawned.name}': ${pkErr.message}`);
+                          break;
+                        }
+                      }
+                    }
+                    if (!preKeyReady) {
+                      log.warn(`Sub-agent '${spawned.name}' E2E session not ready after 60s — sending anyway (best effort)`);
+                    }
+
+                    // Send workspace tar via meshSend if available (auto-chunks if large)
+                    // Retry up to 3 times with ack verification
+                    let workspaceDelivered = false;
+                    if (wsData?.workspace_tar) {
+                      for (let wsAttempt = 0; wsAttempt < 3 && !workspaceDelivered; wsAttempt++) {
+                        if (wsAttempt > 0) {
+                          log.info(`📦 Retrying workspace_inject for '${spawned.name}' (attempt ${wsAttempt + 1}/3)`);
+                          await new Promise(r => setTimeout(r, 3000));
+                        }
+                        try {
+                          await meshSend(agtMeshClient, subAmid, {
+                            type: "handoff:workspace_inject",
+                            workspace_tar: wsData.workspace_tar,
+                            from_agent: agentName,
+                            timestamp: new Date().toISOString(),
+                          }, log);
+                          log.info(`📦 Sent workspace to sub-agent '${spawned.name}' — waiting for ack (attempt ${wsAttempt + 1})...`);
+                        } catch (sendErr: any) {
+                          log.warn(`📦 workspace_inject send failed for '${spawned.name}': ${sendErr.message}`);
+                          continue;
+                        }
+
+                        // Wait up to 20s for workspace_inject_ack
+                        const wsAckStart = Date.now();
+                        while (Date.now() - wsAckStart < 20_000) {
+                          const ackIdx = agtInbox.findIndex(m => {
+                            try {
+                              const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                              return c?.type === "handoff:workspace_inject_ack" && c?.from_agent === spawned.name;
+                            } catch { return false; }
+                          });
+                          if (ackIdx >= 0) {
+                            const ackMsg = agtInbox.splice(ackIdx, 1)[0];
+                            let parsed: any;
+                            try { parsed = typeof ackMsg.content === "string" ? JSON.parse(ackMsg.content) : ackMsg.content; } catch { parsed = {}; }
+                            workspaceDelivered = !!parsed.success;
+                            log.info(`📦 Workspace ack from '${spawned.name}': success=${parsed.success}, files=${parsed.file_count}${parsed.error ? `, error=${parsed.error}` : ""}`);
+                            break;
+                          }
+                          await new Promise(r => setTimeout(r, 500));
+                        }
+                        if (!workspaceDelivered) {
+                          log.warn(`No workspace_inject_ack from '${spawned.name}' within 20s (attempt ${wsAttempt + 1}/3)`);
+                        }
+                      }
+                    }
+
+                    // Send resume message with task context
+                    const resumePayload: Record<string, unknown> = {
+                      type: "handoff:resume",
+                      from_agent: agentName,
+                      task_context: wsData?.task_context || "",
+                      previous_status: wsData?.status || "unknown",
+                      checkpoint: wsData?.checkpoint || null,
+                      workspace_delivered: workspaceDelivered,
+                      timestamp: new Date().toISOString(),
+                    };
+                    await agtMeshClient.send(subAmid, resumePayload);
+                    log.info(`▶️ Sent resume to sub-agent '${spawned.name}' (status: ${wsData?.status || "?"})`);
+                    subAgentStatuses.push({
+                      name: spawned.name,
+                      status: "resuming",
+                      task: (wsData?.task_context || "").slice(0, 200),
+                      workspace_delivered: workspaceDelivered,
+                    } as any);
+                  } catch (subErr: any) {
+                    log.warn(`Sub-agent '${spawned.name}' trust/resume failed: ${subErr.message}`);
+                    subAgentStatuses.push({ name: spawned.name, status: "failed" });
+                  }
+                }
+
+                // Brief wait for resume_ack messages (best-effort, 8s)
+                if (subAgentStatuses.some(s => s.status === "resuming")) {
+                  const ackWaitStart = Date.now();
+                  while (Date.now() - ackWaitStart < 8_000) {
+                    for (const sa of subAgentStatuses) {
+                      if (sa.status !== "resuming") continue;
+                      const idx = agtInbox.findIndex(m =>
+                        (m.message_type === "handoff:resume_ack" ||
+                          (typeof m.content === "string" && m.content.includes("handoff:resume_ack"))) &&
+                        (() => {
+                          try {
+                            const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                            return c?.from_agent === sa.name;
+                          } catch { return false; }
+                        })()
+                      );
+                      if (idx >= 0) {
+                        const msg = agtInbox.splice(idx, 1)[0];
+                        let parsed: any;
+                        try { parsed = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content; } catch { parsed = {}; }
+                        sa.status = parsed?.has_interrupted_task ? "resumed" : "ready";
+                        sa.task = parsed?.interrupted_task?.task?.slice(0, 200) || sa.task;
+                        log.info(`🤝 Sub-agent '${sa.name}' checked in: ${sa.status}`);
+                      }
+                    }
+                    if (subAgentStatuses.every(s => s.status !== "resuming")) break;
+                    await new Promise(r => setTimeout(r, 500));
+                  }
+                }
+              } else {
+                console.log(`[azureclaw-handoff] trust loop SKIPPED: spawned=${spawnedSubs.length}, meshClient=${!!agtMeshClient}`);
+              }
+
+              // 5. Send Telegram greeting (now includes sub-agent status)
+              const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+              const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
+              if (tgToken && tgAllowFrom) {
+                // Build a personalized greeting with conversation context
+                const lastUserMsg = [...chatMessages].reverse().find((m: any) => m.role === "user");
+                const lastAssistantMsg = [...chatMessages].reverse().find((m: any) => m.role === "assistant");
+                const escapeMd2 = (s: string) => s.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
+
+                const lines: string[] = [
+                  "☁️ *AzureClaw — Cloud Handoff Complete*",
+                  "",
+                  `I've been migrated to the cloud \\(AKS\\) and I'm ready to continue\\.`,
+                  `Model: \`${escapeMd2(process.env.DEFAULT_MODEL || "gpt-5.4")}\` · Sandbox: \`${escapeMd2(agentName)}\``,
+                ];
+                if (chatMessages.length > 0) {
+                  lines.push("", `📜 _${chatMessages.length} messages transferred from our previous session\\._`);
+                }
+
+                // Sub-agent status section
+                if (subAgentStatuses.length > 0) {
+                  lines.push("", "🤖 *Sub\\-agents:*");
+                  for (const sa of subAgentStatuses) {
+                    const wsFlag = (sa as any).workspace_delivered ? " 📦" : "";
+                    const icon = sa.status === "resumed" ? "▶️" : sa.status === "ready" ? "✅" : sa.status === "resuming" ? "⏳" : "❌";
+                    const taskPreview = sa.task ? `: _${escapeMd2(sa.task.slice(0, 100))}${sa.task.length > 100 ? "\\.\\.\\." : ""}_` : "";
+                    const statusLabel = sa.status === "resumed" ? "resuming work"
+                      : sa.status === "ready" ? "ready"
+                      : sa.status === "resuming" ? "starting up"
+                      : "failed to restore";
+                    lines.push(`  ${icon} *${escapeMd2(sa.name)}* — ${statusLabel}${wsFlag}${taskPreview}`);
+                  }
+                }
+
+                if (lastUserMsg) {
+                  const preview = escapeMd2(String(lastUserMsg.content).slice(0, 200));
+                  lines.push("", `🔖 *Where we left off:*`, `Your last message: "${preview}${String(lastUserMsg.content).length > 200 ? "\\.\\.\\." : ""}"`);
+                }
+                if (lastAssistantMsg) {
+                  const preview = escapeMd2(String(lastAssistantMsg.content).slice(0, 200));
+                  lines.push(`My last reply: "${preview}${String(lastAssistantMsg.content).length > 200 ? "\\.\\.\\." : ""}"`);
+                }
+                lines.push("", "Want to pick up where we left off? Just send me a message\\!");
+                const greetingText = lines.join("\n");
+
+                // Send via router's egress proxy (respects allowlist + transparent proxy)
+                for (const chatId of tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean)) {
+                  try {
+                    await _routerCall("POST", "/egress/fetch", {
+                      url: `https://api.telegram.org/bot${tgToken}/sendMessage`,
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        chat_id: chatId,
+                        text: greetingText,
+                        parse_mode: "MarkdownV2",
+                      }),
+                    });
+                    log.info(`📱 Handoff: sent Telegram greeting to chat ${chatId}`);
+                  } catch (tgErr: any) {
+                    log.warn(`Handoff: Telegram greeting failed for ${chatId}: ${tgErr.message}`);
+                  }
+                }
+              }
+
+              // 6. Send "handoff_ready" mesh message back to predecessor
+              if (agtMeshClient && fromAmid) {
+                try {
+                  await agtMeshClient.send(fromAmid, {
+                    type: "handoff_ready",
+                    from_agent: agentName,
+                    successor_amid: agtIdentity?.amid || "unknown",
+                    chat_messages_loaded: chatMessages.length,
+                    memory_stored: true,
+                    telegram_greeted: !!(tgToken && tgAllowFrom),
+                    sub_agents_restored: subAgentStatuses.length,
+                    sub_agents_resumed: subAgentStatuses.filter(s => s.status === "resumed").length,
+                    sub_agents_workspace_delivered: subAgentStatuses.filter(s => s.status === "resumed" || s.status === "ready").length,
+                    sub_agent_details: subAgentStatuses,
+                    timestamp: new Date().toISOString(),
+                  });
+                  log.info(`🤝 Handoff: sent 'handoff_ready' mesh message to predecessor`);
+                } catch { /* predecessor may already be decommissioned */ }
+              }
+            } catch (hydrateErr: any) {
+              console.log(`[azureclaw-handoff] IIFE error: ${hydrateErr.message}`);
+              log.warn(`Handoff hydration failed (non-fatal): ${hydrateErr.message}`);
+            }
+          })();
+
+        } catch (restoreErr: any) {
+          log.warn(`❌ Handoff restore failed: ${restoreErr.message}`);
+          // Notify source of failure
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "handoff_verification",
+              error: restoreErr.message,
+              matches: false,
+              from_agent: agtSandboxName,
+              timestamp: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
+      }
     });
 
     // ── Connect to the mesh (handlers are registered, safe to receive) ──
@@ -1404,39 +2641,53 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       });
     }
 
-    // Reconnect timer: every 30s, check if disconnected and try to reconnect.
-    // Also serves as a keep-alive — if the SDK exposes a ping, use it.
-    if (agtReconnectTimer) clearInterval(agtReconnectTimer);
-    agtReconnectTimer = setInterval(async () => {
-      if (!agtConnected && agtMeshClient) {
-        await agtReconnect(log);
-      }
-      // Heartbeat: ping the relay proxy to keep the connection warm
-      // and send a registry heartbeat to keep status as "online"
-      try {
-        const http = await import("node:http");
-        const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
-        req.on("error", () => {});
-        req.end();
-      } catch { /* best effort */ }
-      // Registry heartbeat: update last_seen so other agents see us as online
-      if (agtIdentity) {
-        try {
-          const http = await import("node:http");
-          const body = JSON.stringify({ amid: agtIdentity.amid });
-          const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-            timeout: 3000,
-          }, () => {});
-          req.on("error", () => {});
-          req.write(body);
-          req.end();
-        } catch { /* best effort */ }
-      }
-    }, 30_000);
-    // Don't let the timer prevent process exit
-    if (agtReconnectTimer.unref) agtReconnectTimer.unref();
+    // Reconnect timer with exponential backoff: starts at 30s, backs off on
+    // repeated failures to avoid CPU spin when registry/relay is unreachable.
+    if (agtReconnectTimer) clearTimeout(agtReconnectTimer);
+    const scheduleReconnect = () => {
+      const delay = Math.min(30_000 * Math.pow(2, agtReconnectFailures), AGT_RECONNECT_MAX_BACKOFF);
+      agtReconnectTimer = setTimeout(async () => {
+        if (!agtConnected && agtMeshClient) {
+          await agtReconnect(log);
+          if (!agtConnected) {
+            agtReconnectFailures++;
+            if (agtReconnectFailures <= 5) {
+              log.warn(`AGT reconnect backoff: next attempt in ${Math.min(30 * Math.pow(2, agtReconnectFailures), 300)}s`);
+            }
+          } else {
+            agtReconnectFailures = 0;
+          }
+        }
+        // Heartbeat: ping the relay proxy to keep the connection warm
+        // and send a registry heartbeat to keep status as "online"
+        if (agtConnected) {
+          try {
+            const http = await import("node:http");
+            const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
+            req.on("error", () => {});
+            req.end();
+          } catch { /* best effort */ }
+          // Registry heartbeat: update last_seen so other agents see us as online
+          if (agtIdentity) {
+            try {
+              const http = await import("node:http");
+              const body = JSON.stringify({ amid: agtIdentity.amid });
+              const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+                timeout: 3000,
+              }, () => {});
+              req.on("error", () => {});
+              req.write(body);
+              req.end();
+            } catch { /* best effort */ }
+          }
+        }
+        scheduleReconnect();
+      }, delay);
+      if (agtReconnectTimer.unref) agtReconnectTimer.unref();
+    };
+    scheduleReconnect();
 
     // ── Inbox notification timer ─────────────────────────────────────────
     // Every 10s, if there are unread messages, write a notification section
@@ -1471,9 +2722,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 // Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
 // ---------------------------------------------------------------------------
 
-const ROUTER_BASE = "http://127.0.0.1:8443";
+const ROUTER_BASE = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
 
-async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000): Promise<any> {
+async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
   const url = new URL(path, ROUTER_BASE);
   return new Promise((resolve, reject) => {
@@ -1482,7 +2733,7 @@ async function _routerCall(method: string, path: string, body?: unknown, timeout
       port: url.port,
       path: url.pathname + url.search,
       method,
-      headers: { "x-azureclaw-sandbox": "self" } as Record<string, string>,
+      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
     };
     if (body) {
       opts.headers["content-type"] = "application/json";
@@ -1499,6 +2750,591 @@ async function _routerCall(method: string, path: string, body?: unknown, timeout
     if (body) req.write(JSON.stringify(body));
     req.end();
   });
+}
+
+// Strict variant that rejects on HTTP >= 400 — used by handoff orchestration
+async function _routerCallStrict(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
+  const http = await import("node:http");
+  const url = new URL(path, ROUTER_BASE);
+  return new Promise((resolve, reject) => {
+    const opts: any = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method,
+      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
+    };
+    if (body) {
+      opts.headers["content-type"] = "application/json";
+    }
+    const req = http.request(opts, (res: any) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
+          return;
+        }
+        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+// Read admin token from the filesystem (used by handoff orchestration)
+async function _readAdminToken(): Promise<string> {
+  const fs = await import("node:fs");
+  for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
+    try { const t = fs.readFileSync(p, "utf-8").trim(); if (t) return t; } catch { /* skip */ }
+  }
+  return process.env.ADMIN_TOKEN || "";
+}
+
+// Helper: update handoff progress tracker
+function _hp(phase: string, step: string) {
+  if (!handoffProgress) return;
+  handoffProgress.phase = phase;
+  handoffProgress.steps.push(step);
+  handoffProgress.updated_at = new Date().toISOString();
+  _log.info(`Handoff [${phase}]: ${step}`);
+}
+
+// Background handoff orchestration — runs async after handoff_confirm returns.
+// Progress is tracked in handoffProgress, polled by handoff_status tool.
+async function _runHandoffOrchestration(
+  handoffToken: string, adminToken: string, direction: string, dirLabel: string,
+) {
+ try {
+  const authH: Record<string, string> = { Authorization: `Bearer ${adminToken}` };
+  const handoffH: Record<string, string> = { ...authH, "X-Handoff-Token": handoffToken };
+
+  // ── Step 1: Create encrypted state snapshot ──
+  _hp("snapshot", "📦 Creating encrypted state snapshot...");
+  const cryptoMod = await import("node:crypto");
+  const sharedSecret = cryptoMod
+    .createHash("sha256")
+    .update(`${adminToken}:${handoffToken}`)
+    .digest("base64");
+
+  // Collect workspace files and recent conversation context for the snapshot
+  const snapshotPayload: Record<string, unknown> = { shared_secret: sharedSecret };
+
+  // Pack workspace files (/sandbox/) into a tar.gz for transfer
+  try {
+    const { execSync } = await import("node:child_process");
+    // Tar key workspace files (skip large/transient dirs)
+    const tarB64 = execSync(
+      "tar czf - -C /sandbox " +
+      "--exclude='.openclaw/extensions/*/dist' --exclude='.openclaw/extensions/*/node_modules' " +
+      "--exclude='node_modules' --exclude='.git' " +
+      "--exclude='*.pyc' --exclude='__pycache__' " +
+      ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
+      ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0",
+      { maxBuffer: 50 * 1024 * 1024, timeout: 10000 },
+    ).toString("utf-8").trim();
+    if (tarB64.length > 0 && tarB64.length < 50 * 1024 * 1024) {
+      snapshotPayload.workspace_tar = tarB64;
+      _log.info(`Handoff: packed workspace (${(tarB64.length / 1024).toFixed(1)} KB base64)`);
+    }
+  } catch { /* workspace tar is best-effort */ }
+
+  // Collect recent Foundry Memory as conversation context
+  try {
+    const agentName = process.env.SANDBOX_NAME || "dev-agent";
+    const store = `memory-${agentName}`;
+    const apiVer = "api-version=2025-11-15-preview";
+    const memResp = await _routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, {
+      scope: agentName,
+      options: { max_memories: 20 },
+    }).catch(() => null);
+    if (memResp?.memories?.length) {
+      const chatContext = memResp.memories.map((m: any) => ({
+        role: "assistant",
+        content: m.memory_item?.content || m.content || m.text || JSON.stringify(m),
+        timestamp: m.created_at || new Date().toISOString(),
+      }));
+      snapshotPayload.chat_snapshot = Buffer.from(JSON.stringify(chatContext)).toString("base64");
+      _log.info(`Handoff: included ${chatContext.length} memory items as chat context`);
+    }
+  } catch { /* memory search is best-effort */ }
+
+  // Include credential refs (what channels/plugins are configured, not the secrets)
+  const credRefs: Array<{ name: string; env_key: string }> = [];
+  for (const [envKey, label] of [
+    ["TELEGRAM_BOT_TOKEN", "telegram"], ["SLACK_BOT_TOKEN", "slack"],
+    ["DISCORD_BOT_TOKEN", "discord"], ["BRAVE_API_KEY", "brave"],
+    ["TAVILY_API_KEY", "tavily"],
+  ] as const) {
+    if (process.env[envKey]) credRefs.push({ name: label, env_key: envKey });
+  }
+  if (credRefs.length > 0) snapshotPayload.credentials = credRefs;
+
+  // Collect sub-agent snapshots (best-effort)
+  try {
+    const subResp = await _routerCall("GET", "/agt/handoff/sub-agents", undefined, 10000, authH);
+    if (subResp?.count > 0 && Array.isArray(subResp.sub_agent_snapshots)) {
+      const subSnaps = subResp.sub_agent_snapshots as Array<{
+        name: string; workspace_tar: string; [k: string]: unknown;
+      }>;
+      _hp("snapshot", `🤖 Found ${subSnaps.length} sub-agent(s) — collecting state...`);
+
+      // Request workspace from each sub-agent via E2E mesh
+      // Protocol: interrupt → wait for ack/save → collect workspace
+      if (agtMeshClient && agtIdentity) {
+        // Phase 1: Send handoff:interrupt to ALL sub-agents concurrently
+        // so they can save progress while we continue setup
+        const subAmidMap = new Map<string, string>(); // name → amid
+        for (const snap of subSnaps) {
+          try {
+            const regResp = await _routerCall("GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(snap.name)}`,
+              undefined, 5000, authH);
+            const candidates = (regResp?.results || []).filter(
+              (a: any) => a.display_name === snap.name && a.status === "online"
+            );
+            if (candidates.length === 0) continue;
+
+            const subAmid = candidates[0].amid;
+            snap.original_amid = subAmid;
+            subAmidMap.set(snap.name, subAmid);
+
+            // Signal sub-agent to save in-progress work
+            await agtMeshClient.send(subAmid, {
+              type: "handoff:interrupt",
+              reason: "parent_handoff",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+            _log.info(`🛑 Sent handoff:interrupt to sub-agent '${snap.name}'`);
+          } catch (lookupErr: any) {
+            _log.warn(`Sub-agent '${snap.name}' lookup/interrupt failed: ${lookupErr.message}`);
+          }
+        }
+
+        // Brief pause for sub-agents to checkpoint (they save between LLM rounds)
+        if (subAmidMap.size > 0) {
+          _log.info(`⏳ Waiting for ${subAmidMap.size} sub-agent(s) to save progress...`);
+          // Wait up to 10s for interrupt_ack from sub-agents (best-effort)
+          const ackStart = Date.now();
+          const acksReceived = new Set<string>();
+          while (Date.now() - ackStart < 10_000 && acksReceived.size < subAmidMap.size) {
+            for (let i = agtInbox.length - 1; i >= 0; i--) {
+              const m = agtInbox[i];
+              if (m.message_type === "handoff:interrupt_ack" ||
+                  (typeof m.content === "string" && m.content.includes("handoff:interrupt_ack"))) {
+                acksReceived.add(m.from_amid);
+                agtInbox.splice(i, 1);
+              }
+            }
+            if (acksReceived.size < subAmidMap.size) {
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
+          _hp("snapshot", `🛑 ${acksReceived.size}/${subAmidMap.size} sub-agent(s) interrupted and checkpointed`);
+        }
+
+        // Phase 2: Collect workspaces (sub-agents have now saved progress)
+        let collectedCount = 0;
+        for (const snap of subSnaps) {
+          const subAmid = subAmidMap.get(snap.name);
+          if (!subAmid) continue;
+
+          try {
+            // Send workspace request via mesh
+            await agtMeshClient.send(subAmid, {
+              type: "handoff:workspace_request",
+              from_agent: process.env.SANDBOX_NAME || "unknown",
+              timestamp: new Date().toISOString(),
+            });
+
+            // Wait for workspace response. The transport layer (meshSend + onMessage)
+            // handles chunking transparently — we just wait for a single
+            // handoff:workspace_response message in the inbox.
+            const wsStart = Date.now();
+            const WS_TIMEOUT = 60_000; // 60s — large workspaces may take time to chunk
+
+            while (Date.now() - wsStart < WS_TIMEOUT) {
+              const idx = agtInbox.findIndex((m) =>
+                m.from_amid === subAmid &&
+                (m.message_type === "handoff:workspace_response" ||
+                 (typeof m.content === "string" && m.content.includes("handoff:workspace_response")))
+              );
+              if (idx >= 0) {
+                const reply = agtInbox.splice(idx, 1)[0];
+                let parsed: any;
+                if (typeof reply.content === "string") {
+                  try { parsed = JSON.parse(reply.content); } catch { parsed = reply.content; }
+                } else {
+                  parsed = reply.content;
+                }
+                if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
+                  snap.workspace_tar = parsed.workspace_tar;
+                  collectedCount++;
+                  _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
+                } else if (parsed?.error) {
+                  _log.warn(`Sub-agent '${snap.name}' workspace error: ${parsed.error}`);
+                }
+                break;
+              }
+              await new Promise(r => setTimeout(r, 500));
+            }
+          } catch (subWsErr: any) {
+            _log.warn(`Workspace collection from sub-agent '${snap.name}' failed: ${subWsErr.message}`);
+          }
+        }
+        if (collectedCount > 0) {
+          _hp("snapshot", `📦 Collected ${collectedCount} sub-agent workspace(s)`);
+        }
+      }
+
+      snapshotPayload.sub_agent_snapshots = subSnaps;
+      _hp("snapshot", `🤖 ${subSnaps.length} sub-agent snapshot(s) included in handoff payload`);
+    }
+  } catch { /* sub-agent collection is best-effort */ }
+
+  const snapshotResp = await _routerCallStrict("POST", "/agt/handoff/snapshot",
+    snapshotPayload, 60000, handoffH);
+
+  const snapshotSize = snapshotResp.size_bytes || 0;
+  const verificationHash = snapshotResp.verification_hash;
+  _hp("snapshot", `📦 Snapshot ready (${(snapshotSize / 1024).toFixed(1)} KB, AES-256-GCM encrypted)`);
+
+  // ── Step 2: Drain ──
+  _hp("drain", "⏳ Draining agent — finishing in-flight work...");
+  await _routerCall("POST", "/agt/handoff/drain", {}, 30000, handoffH);
+  _hp("drain", "⏳ Agent drained — no new work accepted");
+
+  // ── Step 3: Spawn cloud target ──
+  const myName = process.env.SANDBOX_NAME || "unknown";
+  const myAmid = agtMeshClient?.getAmid?.() || agtIdentity?.amid;
+  let targetName = myName;
+  let targetAmid: string | undefined;
+
+  if (direction === "local_to_aks") {
+    _hp("spawn", "🚀 Spawning cloud target on AKS...");
+
+    const trustedPeers: string[] = [];
+    if (myAmid) trustedPeers.push(`${myName}:${myAmid}`);
+    for (const [amid, name] of amidToName.entries()) {
+      if (amid !== myAmid) trustedPeers.push(`${name}:${amid}`);
+    }
+
+    try {
+      await _routerCall("POST", "/sandbox/spawn", {
+        name: targetName,
+        model: process.env.DEFAULT_MODEL || "gpt-4.1",
+        governance: true,
+        trust_threshold: 500,
+        learn_egress: process.env.EGRESS_LEARN_MODE === "true",
+        trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
+        handoff: { mode: "restore", predecessor: myName },
+      });
+      _hp("spawn", "🚀 CRD created — waiting for pod to start...");
+    } catch (spawnErr: any) {
+      if (!spawnErr.message?.includes("already exists")) throw spawnErr;
+      _hp("spawn", "🚀 Target already exists — reusing");
+    }
+
+    // Wait for target to register in mesh (up to 90s)
+    _hp("mesh_wait", "🔍 Waiting for cloud target to join the mesh...");
+    const spawnStart = Date.now();
+    while (Date.now() - spawnStart < 90_000) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const searchResult = await _routerCall("GET",
+          `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
+        const agents = searchResult?.results || [];
+        const match = agents.find((a: any) =>
+          a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
+        );
+        if (match?.amid) {
+          targetAmid = match.amid;
+          nameToAmid.set(targetName, match.amid);
+          amidToName.set(match.amid, targetName);
+          break;
+        }
+      } catch { /* not registered yet */ }
+      const elapsed = Math.round((Date.now() - spawnStart) / 1000);
+      if (elapsed % 15 === 0) {
+        _hp("mesh_wait", `🔍 Target pod starting... (${elapsed}s)`);
+      }
+    }
+
+    if (!targetAmid) {
+      _hp("mesh_wait", "⚠️ Target spawned but not yet registered on mesh — transfer deferred");
+      await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+      // Clean up orphaned CRD to avoid stale pods on AKS
+      if (direction === "local_to_aks") {
+        _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
+        await _routerCall("DELETE", `/sandbox/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
+      }
+      if (handoffProgress) {
+        handoffProgress.status = "partial";
+        handoffProgress.error = "Cloud target did not register on mesh within 90s";
+      }
+      return;
+    }
+
+    _hp("mesh_wait", `🌐 Cloud target online (AMID: ${targetAmid.slice(0, 12)}...)`);
+
+  } else {
+    // aks_to_local: discover existing local target
+    // The CLI wakes the dormant Docker container before initiating the reverse
+    // handoff, so the local agent may still be starting. Retry with backoff.
+    _hp("discover", "🏠 Discovering local target agent...");
+    const discoverStart = Date.now();
+    const DISCOVER_TIMEOUT = 60_000; // 60s — local agent may be waking up
+
+    while (Date.now() - discoverStart < DISCOVER_TIMEOUT) {
+      try {
+        const searchResult = await _routerCall("GET",
+          `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
+        const agents = searchResult?.results || [];
+        const match = agents.find((a: any) =>
+          a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
+        );
+        if (match?.amid) {
+          targetAmid = match.amid;
+          nameToAmid.set(targetName, match.amid);
+          amidToName.set(match.amid, targetName);
+          break;
+        }
+      } catch { /* registry error */ }
+
+      const elapsed = Math.round((Date.now() - discoverStart) / 1000);
+      if (elapsed % 10 === 0 && elapsed > 0) {
+        _hp("discover", `🏠 Waiting for local target to come online... (${elapsed}s)`);
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    if (!targetAmid) {
+      await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+      if (handoffProgress) {
+        handoffProgress.status = "error";
+        handoffProgress.phase = "error";
+        handoffProgress.error = "Local target agent not found in mesh registry after 60s. " +
+          "Ensure the local agent is running: azureclaw dev <name>";
+        handoffProgress.steps.push("❌ Local target not found — is the local agent running?");
+      }
+      return;
+    }
+    _hp("discover", `🏠 Local target found (AMID: ${targetAmid.slice(0, 12)}...)`);
+  }
+
+  // ── Step 4: Transfer state via E2E mesh ──
+  if (!agtMeshClient || !agtIdentity) {
+    await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+    if (handoffProgress) {
+      handoffProgress.status = "error";
+      handoffProgress.phase = "error";
+      handoffProgress.error = "Mesh client not connected";
+      handoffProgress.steps.push("❌ Mesh client not connected — cannot transfer");
+    }
+    return;
+  }
+
+  _hp("transfer", "🔐 Sending encrypted state via E2E mesh (Signal Protocol)...");
+
+  // Use meshSend for auto-chunking — transparently handles blobs of any size
+  // up to ~40MB. The receiver's onMessage handler reassembles before processing.
+  const handoffMessage = {
+    type: "handoff_transfer",
+    blob: snapshotResp.blob,
+    shared_secret: sharedSecret,
+    verification_hash: verificationHash,
+    from_agent: myName,
+    predecessor_amid: myAmid,
+    direction,
+    timestamp: new Date().toISOString(),
+  };
+
+  let sendSuccess = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await meshSend(agtMeshClient, targetAmid, handoffMessage, _log);
+      sendSuccess = true;
+      break;
+    } catch (sendErr: any) {
+      _log.warn(`Handoff mesh send attempt ${attempt + 1}/5 failed: ${sendErr.message}`);
+      if (attempt < 4) {
+        _hp("transfer", `🔐 Retrying mesh send (${attempt + 2}/5)...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+
+  if (!sendSuccess) {
+    _hp("transfer", "❌ Mesh send failed after retries");
+    await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+    if (direction === "local_to_aks") {
+      _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
+      await _routerCall("DELETE", `/sandbox/${encodeURIComponent(targetName)}`, {}, 15000).catch(() => {});
+    }
+    if (handoffProgress) { handoffProgress.status = "error"; }
+    return;
+  }
+
+  _hp("transfer", "📤 Encrypted state sent — waiting for target to verify...");
+
+  // ── Step 5: Wait for verification ──
+  _hp("verify", "🔍 Waiting for verification from cloud target...");
+  const verifyStart = Date.now();
+  let verifyResult: any = null;
+  let lastResendAt = Date.now();
+
+  while (Date.now() - verifyStart < 180_000) {
+    for (const checkType of ["handoff_verification"] as const) {
+      const idx = agtInbox.findIndex(m => {
+        if (m.from_amid !== targetAmid || m.from_agent !== targetName) return false;
+        if (m.message_type === checkType) return true;
+        try {
+          const c = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+          return c?.type === checkType;
+        } catch { return false; }
+      });
+      if (idx >= 0) {
+        const msg = agtInbox.splice(idx, 1)[0];
+        verifyResult = typeof msg.content === "string"
+          ? (() => { try { return JSON.parse(msg.content); } catch { return msg.content; } })()
+          : msg.content;
+        break;
+      }
+    }
+    if (verifyResult) break;
+    const elapsed = Math.round((Date.now() - verifyStart) / 1000);
+
+    // Re-send every 30s — target's handler may not have been wired up yet
+    if (Date.now() - lastResendAt >= 30_000) {
+      lastResendAt = Date.now();
+      _hp("verify", `🔁 Re-sending state to target... (${elapsed}s)`);
+      try {
+        await meshSend(agtMeshClient, targetAmid, handoffMessage, _log);
+      } catch (resendErr: any) {
+        _log.warn(`Handoff re-send failed: ${resendErr.message}`);
+      }
+    } else if (elapsed % 15 === 0 && elapsed > 0) {
+      _hp("verify", `🔍 Target restoring state... (${elapsed}s)`);
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  if (!verifyResult) {
+    _hp("verify", "⚠️ Verification timeout (180s) — target may still be restoring");
+    if (handoffProgress) { handoffProgress.status = "partial"; handoffProgress.error = "Verification timeout (180s)"; }
+    return;
+  }
+
+  if (verifyResult.error || verifyResult.matches === false) {
+    _hp("verify", `❌ Verification failed: ${verifyResult.error || "hash mismatch"}`);
+    await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
+    if (handoffProgress) { handoffProgress.status = "error"; handoffProgress.error = "Verification failed"; }
+    return;
+  }
+
+  const successorAmid = verifyResult.successor_amid;
+  _hp("verify", "✅ State verified — integrity hash match confirmed");
+
+  // ── Step 6: Identity succession ──
+  if (myAmid && successorAmid) {
+    _hp("succession", "🔗 Registering identity succession...");
+    try {
+      // Router signs with its private key and submits to registry
+      await _routerCall("POST", "/agt/handoff/succession", {
+        successor_amid: successorAmid,
+        reason: `handoff:${direction}`,
+      }, 15000, authH);
+      _hp("succession", `🔗 Identity transferred: ${myAmid.slice(0, 12)}... → ${successorAmid.slice(0, 12)}...`);
+    } catch (succErr: any) {
+      _hp("succession", `⚠️ Identity succession pending: ${succErr.message}`);
+    }
+  }
+
+  // ── Step 7: Destroy source sub-agents + Decommission ──
+  const decommLabel = direction === "local_to_aks" ? "local" : "cloud";
+  _hp("decommission", `🏁 Cleaning up ${decommLabel} sub-agents and decommissioning...`);
+
+  // Destroy source sub-agents — they've been re-spawned on the target
+  try {
+    const listResp = await _routerCall("GET", "/sandbox/list", undefined, 10000, authH);
+    const subList = listResp?.sandboxes || [];
+    if (subList.length > 0) {
+      _hp("decommission", `🧹 Destroying ${subList.length} source sub-agent(s)...`);
+      for (const sub of subList) {
+        const subName = sub.name || sub;
+        try {
+          await _routerCall("DELETE", `/sandbox/${encodeURIComponent(subName)}`, {}, 10000, authH);
+          _log.info(`🧹 Destroyed source sub-agent '${subName}'`);
+        } catch { /* best-effort */ }
+      }
+      _hp("decommission", `🧹 ${subList.length} source sub-agent(s) cleaned up`);
+    }
+  } catch { /* sub-agent cleanup is best-effort */ }
+
+  try {
+    await _routerCall("POST", "/agt/handoff/decommission", {}, 15000, handoffH);
+    _hp("decommission", direction === "local_to_aks"
+      ? "🏁 Local agent decommissioned (dormant — keys preserved)"
+      : "🏁 Cloud agent decommissioned");
+  } catch (decommErr: any) {
+    _hp("decommission", `⚠️ Decommission pending: ${decommErr.message}`);
+  }
+
+  // ── Done! ──
+  _hp("complete", "");
+  _hp("complete", `🎉 Handoff complete! Agent is now running on ${dirLabel}.`);
+  if (!handoffProgress) return;
+  const agentName = process.env.SANDBOX_NAME || "dev-agent";
+  if (direction === "local_to_aks") {
+    handoffProgress.steps.push("The cloud agent has your full state — chat history, trust scores, audit trail.");
+    handoffProgress.steps.push("Your local keys are preserved. You can reclaim with a reverse handoff anytime.");
+    handoffProgress.steps.push("");
+    // Connection instructions — explicit --cloud since local container still exists
+    handoffProgress.steps.push(`📡 Connect to cloud agent: azureclaw connect ${agentName} --cloud`);
+    handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
+    // Telegram note
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the cloud agent. Chat continues automatically.`);
+    }
+    handoffProgress.steps.push(`💤 This local agent is now dormant. It will show as 'Dormant' in the operator TUI.`);
+    handoffProgress.steps.push(`🗑️  Clean up local: azureclaw destroy ${agentName} --local`);
+  } else {
+    handoffProgress.steps.push("Your local agent has the full state — chat history, trust scores, audit trail.");
+    handoffProgress.steps.push("The cloud agent has been decommissioned and scaled to zero.");
+    handoffProgress.steps.push("");
+    handoffProgress.steps.push(`📡 Connect to local agent: azureclaw connect ${agentName} --local`);
+    handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the local agent.`);
+    }
+    handoffProgress.steps.push(`☁️  Cloud sandbox scaled to 0 (CRD preserved — re-handoff to cloud is instant).`);
+  }
+  handoffProgress.status = "complete";
+  const subAgentCount = (snapshotPayload.sub_agent_snapshots as unknown[] | undefined)?.length || 0;
+  handoffProgress.result = {
+    direction,
+    snapshot_size_kb: (snapshotSize / 1024).toFixed(1),
+    predecessor_amid: myAmid,
+    successor_amid: successorAmid,
+    verification: "passed",
+    sub_agents_transferred: subAgentCount,
+  };
+  handoffProgress.updated_at = new Date().toISOString();
+
+ } catch (err: any) {
+    _log.warn(`Handoff orchestration failed: ${err.message}`);
+    if (handoffProgress) {
+      handoffProgress.status = "error";
+      handoffProgress.phase = "error";
+      handoffProgress.error = err.message;
+      handoffProgress.steps.push(`❌ ${err.message}`);
+      handoffProgress.updated_at = new Date().toISOString();
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1684,6 +3520,27 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       "",
     );
 
+    // Include handoff context if this agent was migrated (persists across plugin reloads)
+    try {
+      const handoffPath = "/sandbox/.openclaw/workspace/.handoff-state.json";
+      const raw = fs.readFileSync(handoffPath, "utf8");
+      const hs = JSON.parse(raw);
+      sections.push(
+        "## Handoff Context\n",
+        `This agent was migrated from local dev to cloud (AKS) at ${hs.restored_at}.`,
+        `Predecessor AMID: ${hs.predecessor_amid}. Direction: ${hs.direction}.`,
+        `Trust scores: ${hs.trust_scores_count}, Audit trail: ${hs.audit_entries_count} entries.`,
+        `Chat history: ${hs.chat_message_count} messages transferred.\n`,
+      );
+      if (Array.isArray(hs.recent_messages) && hs.recent_messages.length > 0) {
+        sections.push("### Recent Conversation Before Handoff\n");
+        for (const m of hs.recent_messages) {
+          sections.push(`**${m.role}**: ${String(m.content || "").slice(0, 500)}`);
+        }
+        sections.push("");
+      }
+    } catch { /* no handoff state — normal startup */ }
+
     // Write (or replace) the environment section at the top of MEMORY.md
     let existingMemory = "";
     try { existingMemory = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
@@ -1717,20 +3574,47 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
       const store = `memory-${agentName}`;
       // Ensure store exists before searching (avoids 404 on first boot)
       await ensureMemoryStore(store);
-      const recallResult = await _routerCall(
+
+      // First: get static memories (user profile) — scope only, no items
+      const staticResult = await _routerCall(
         "POST",
         `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        { query: "key facts, user preferences, prior context, recent work", max_memories: 10 },
-      );
-      const memories = recallResult?.memories || recallResult?.value || [];
-      if (Array.isArray(memories) && memories.length > 0) {
+        { scope: agentName },
+      ).catch(() => null);
+
+      // Then: get contextual memories — scope + items
+      const contextResult = await _routerCall(
+        "POST",
+        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
+        {
+          scope: agentName,
+          items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "key facts, user preferences, prior context, recent work, handoff history" }] }],
+          options: { max_memories: 10 },
+        },
+      ).catch(() => null);
+
+      // Merge unique memories from both results
+      const seen = new Set<string>();
+      const memories: any[] = [];
+      for (const result of [staticResult, contextResult]) {
+        for (const m of (result?.memories || result?.value || [])) {
+          const mid = m?.memory_item?.memory_id || m?.memory_id || "";
+          const text = m?.memory_item?.content || m?.content || m?.text || "";
+          if (text && !seen.has(mid || text)) {
+            seen.add(mid || text);
+            memories.push(m);
+          }
+        }
+      }
+
+      if (memories.length > 0) {
         const recallSection = [
           "\n## Prior Context (Foundry Memory)\n",
           "_Recalled from persistent memory store on startup:_\n",
         ];
         for (const m of memories) {
-          const text = m?.content || m?.text || "";
-          const kind = m?.kind || m?.type || "memory";
+          const text = m?.memory_item?.content || m?.content || m?.text || "";
+          const kind = m?.memory_item?.kind || m?.kind || m?.type || "memory";
           if (text) recallSection.push(`- [${kind}] ${text}`);
         }
         recallSection.push("");
@@ -1753,6 +3637,58 @@ async function initFoundry(log: { info: (m: string) => void; warn: (m: string) =
     } catch {
       // First boot or no memory store yet — silently skip
     }
+
+    // Recall handoff conversation history from Foundry Conversations
+    // (survives pod recreation — the conversation is stored in Foundry)
+    try {
+      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
+      const apiVer = "api-version=2025-11-15-preview";
+        // List recent conversations, find the handoff one
+        const convList = await _routerCall("GET", `/openai/conversations?${apiVer}&limit=20&order=desc`).catch(() => null);
+        const conversations = convList?.data || convList?.conversations || [];
+        const handoffConv = conversations.find((c: any) =>
+          c.metadata?.source === "handoff" && c.metadata?.user === (process.env.SANDBOX_NAME || "")
+        );
+        if (handoffConv?.id) {
+          // Read conversation items
+          const itemsResp = await _routerCall("GET", `/openai/conversations/${handoffConv.id}/items?${apiVer}&limit=50`).catch(() => null);
+          const items = itemsResp?.data || itemsResp?.items || [];
+          if (items.length > 0) {
+            const historySection = [
+              "\n## Conversation History (from handoff)\n",
+              `_Restored from Foundry conversation ${handoffConv.id} (predecessor: ${handoffConv.metadata?.predecessor || "unknown"}):_\n`,
+            ];
+            for (const item of items.slice(-20)) {
+              const role = item.role || "unknown";
+              // Content can be string or array of content parts
+              let text = "";
+              if (typeof item.content === "string") {
+                text = item.content;
+              } else if (Array.isArray(item.content)) {
+                text = item.content.map((p: any) => p.text || p.input_text || "").filter(Boolean).join(" ");
+              }
+              if (text) historySection.push(`**${role}**: ${text.slice(0, 500)}`);
+            }
+            historySection.push("");
+
+            let current = "";
+            try { current = fs.readFileSync(memoryFile, "utf8"); } catch { /* */ }
+            const convMarker = "## Conversation History (from handoff)";
+            if (!current.includes(convMarker)) {
+              const sepIdx = current.indexOf("\n---\n");
+              if (sepIdx >= 0) {
+                const updated = current.slice(0, sepIdx) + historySection.join("\n") + current.slice(sepIdx);
+                const tmpFile3 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
+                fs.writeFileSync(tmpFile3, updated, { mode: 0o600 });
+                try { fs.renameSync(tmpFile3, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile3); } catch { /* */ } }
+              }
+            }
+            log.info(`Foundry conversation: recalled ${items.length} items from handoff conversation ${handoffConv.id}`);
+          }
+        }
+      } catch {
+        // Conversation recall is best-effort
+      }
   } catch (e: any) {
     log.warn(`Failed to write Foundry context to MEMORY.md: ${e.message}`);
   }
@@ -1987,6 +3923,7 @@ const azureClawPlugin = definePluginEntry({
   register(api: OpenClawPluginApi): void {
     const config = getPluginConfig(api);
     const log = api.logger;
+    _log = log; // expose to module-level background tasks
 
     // ── Startup banner ─────────────────────────────────────────────────
     const foundryEndpoint = process.env.FOUNDRY_PROJECT_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || "";
@@ -2120,7 +4057,7 @@ const azureClawPlugin = definePluginEntry({
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
-    const ROUTER = "http://127.0.0.1:8443";
+    const ROUTER = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
     async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
       const http = await import("node:http");
       const url = `${ROUTER}${path}`;
@@ -2321,6 +4258,8 @@ const azureClawPlugin = definePluginEntry({
           if (!agtMeshClient.isConnected) {
             try {
               log.info("AGT relay: reconnecting before send...");
+              // Force disconnect first to clear stale "Already connected" state
+              try { await agtMeshClient.disconnect(); } catch { /* ignore */ }
               await agtMeshClient.connect({
                 displayName: agtSandboxName,
                 capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
@@ -2382,23 +4321,25 @@ const azureClawPlugin = definePluginEntry({
 
             if (targetAmid) {
               // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
+              // Uses meshSend for auto-chunking — large payloads are transparently
+              // split into chunks and reassembled on the receiver side.
               // Retry loop: target may need time to upload prekeys after registering
               let sendErr: Error | null = null;
-              for (let sendAttempt = 0; sendAttempt < 8; sendAttempt++) {
+              for (let sendAttempt = 0; sendAttempt < 15; sendAttempt++) {
                 try {
-                  await agtMeshClient.send(targetAmid, {
+                  await meshSend(agtMeshClient, targetAmid, {
                     type: "task_request",
                     content: msgContent,
                     from_agent: process.env.SANDBOX_NAME || "unknown",
                     timestamp: new Date().toISOString(),
-                  });
+                  }, log);
                   sendErr = null;
                   break;
                 } catch (e: any) {
                   sendErr = e;
                   if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
-                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/8)...`);
-                    await new Promise(r => setTimeout(r, 2000));
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/15)...`);
+                    await new Promise(r => setTimeout(r, 3000));
                   } else if (e.message?.includes("not found") || e.message?.includes("closed") || e.message?.includes("AGENT_NOT_FOUND")) {
                     // Stale cached AMID — invalidate and re-discover
                     log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
@@ -2482,12 +4423,12 @@ const azureClawPlugin = definePluginEntry({
                 }
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
               }
-              log.warn(`AGT relay send failed after 8 retries: ${sendErr?.message}`);
+              log.warn(`AGT relay send failed after 15 retries: ${sendErr?.message}`);
               return { content: [{ type: "text", text: JSON.stringify({
                 error: "E2E encrypted send failed — message NOT delivered",
                 reason: sendErr?.message || "unknown",
                 agent: agentName,
-                hint: "The sub-agent may not have registered yet. Check azureclaw_spawn_status and retry.",
+                hint: "The sub-agent prekey registration takes up to 45s after pod is Running. Wait 30s and retry with azureclaw_mesh_send.",
               }, null, 2) }] };
             } else {
               log.warn(`AGT relay: target '${agentName}' not found in registry after polling`);
@@ -2552,19 +4493,212 @@ const azureClawPlugin = definePluginEntry({
           }
 
           // Merge and deduplicate (prefer AGT source)
+          // Filter out internal protocol messages — only show human-readable content
+          const INTERNAL_TYPES = new Set([
+            "handoff_transfer", "handoff_verification", "handoff_ready",
+            "handoff:interrupt", "handoff:interrupt_ack",
+            "handoff:workspace_request", "handoff:workspace_response",
+            "handoff:workspace_inject", "handoff:workspace_inject_ack",
+            "handoff:resume", "handoff:resume_ack",
+            "file_transfer_ack",
+          ]);
+
+          const userMessages = agtMessages.filter((m: any) => {
+            try {
+              const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+              return !INTERNAL_TYPES.has(parsed?.type);
+            } catch { return true; } // If can't parse, keep it
+          });
+
+          // Auto-decode file_transfer messages so LLM sees readable content
+          const decoded = userMessages.map((m: any) => {
+            try {
+              const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+              if (parsed?.type === "file_transfer" && parsed?.file_data && parsed?.file_name) {
+                const buf = Buffer.from(parsed.file_data, "base64");
+                const isText = !buf.some((b: number) => b === 0); // null bytes → binary
+                return {
+                  ...m,
+                  source: "agt_relay_e2e",
+                  message_type: "file_transfer",
+                  file_name: parsed.file_name,
+                  file_size_bytes: buf.length,
+                  content: isText
+                    ? buf.toString("utf-8")
+                    : `[binary file: ${parsed.file_name}, ${buf.length} bytes — saved to incoming/]`,
+                };
+              }
+            } catch { /* fall through */ }
+            return { ...m, source: "agt_relay_e2e" };
+          });
+
           const allMessages = [
-            ...agtMessages.map((m: any) => ({ ...m, source: "agt_relay_e2e" })),
+            ...decoded,
             ...routerMessages.map((m: any) => ({ ...m, source: "router_http" })),
           ];
 
           return { content: [{ type: "text", text: JSON.stringify({
             count: allMessages.length,
-            agt_relay_count: agtMessages.length,
+            agt_relay_count: decoded.length,
             router_count: routerMessages.length,
+            filtered_protocol_messages: agtMessages.length - userMessages.length,
             messages: allMessages,
           }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Inbox check failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "azureclaw_mesh_transfer_file",
+      label: "Transfer File via Mesh",
+      description: "Send a file to another agent via E2E encrypted mesh. The file is read from your local workspace, base64-encoded, and sent via the chunked transfer protocol — files up to ~30MB are supported. The receiving agent gets a file_transfer message in their inbox with the file content. Great for sharing datasets, configs, code, or any file between agents.",
+      parameters: {
+        type: "object",
+        properties: {
+          to_agent: { type: "string", description: "Name of the target agent" },
+          file_path: { type: "string", description: "Path to the file to send (relative to workspace or absolute)" },
+          description: { type: "string", description: "Optional description of the file for the receiving agent" },
+        },
+        required: ["to_agent", "file_path"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        const agentName = params.to_agent as string;
+        const filePath = params.file_path as string;
+        const desc = (params.description as string) || "";
+
+        if (!agtMeshClient || !agtIdentity) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: "AGT mesh not initialized — cannot transfer files",
+          }, null, 2) }] };
+        }
+
+        try {
+          const fs = await import("node:fs");
+          const path = await import("node:path");
+
+          // Resolve path relative to workspace
+          const workspaceRoot = "/sandbox/.openclaw/workspace";
+          const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(workspaceRoot, filePath);
+
+          // Security: block path traversal outside /sandbox
+          if (!resolvedPath.startsWith("/sandbox")) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: "File path must be within /sandbox — path traversal blocked",
+            }, null, 2) }] };
+          }
+
+          const stat = fs.statSync(resolvedPath);
+          if (!stat.isFile()) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `Not a regular file: ${filePath}`,
+            }, null, 2) }] };
+          }
+
+          const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30MB
+          if (stat.size > MAX_FILE_SIZE) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`,
+            }, null, 2) }] };
+          }
+
+          const fileData = fs.readFileSync(resolvedPath);
+          const b64Data = fileData.toString("base64");
+          const fileName = path.basename(resolvedPath);
+
+          // Look up target AMID
+          let targetAmid = nameToAmid.get(agentName);
+          if (!targetAmid) {
+            const regResult = await routerCall("GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
+            const match = (regResult?.results || []).find(
+              (a: any) => a.display_name === agentName || a.capabilities?.includes(agentName)
+            );
+            if (match?.amid) {
+              targetAmid = match.amid;
+              nameToAmid.set(agentName, match.amid);
+              amidToName.set(match.amid, agentName);
+            }
+          }
+
+          if (!targetAmid) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `Agent '${agentName}' not found in mesh registry`,
+              hint: "Ensure the agent is running and registered. Use azureclaw_discover to search.",
+            }, null, 2) }] };
+          }
+
+          // Send + wait for ack with retry (up to 3 attempts)
+          const fileMsg = {
+            type: "file_transfer",
+            file_name: fileName,
+            file_path: filePath,
+            file_data: b64Data,
+            size_bytes: stat.size,
+            description: desc,
+            from_agent: process.env.SANDBOX_NAME || "unknown",
+            timestamp: new Date().toISOString(),
+          };
+
+          let ackReceived = false;
+          let ackSavedTo = "";
+          let ackError = "";
+          let transferId: string | undefined;
+          const maxAttempts = 3;
+
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            if (attempt > 0) {
+              log.info(`📁 File transfer retry ${attempt + 1}/${maxAttempts} for '${fileName}' → '${agentName}'`);
+              await new Promise(r => setTimeout(r, 3000));
+            }
+
+            transferId = await meshSend(agtMeshClient, targetAmid, fileMsg, log);
+
+            // Wait for file_transfer_ack (up to 15s)
+            const ackStart = Date.now();
+            while (Date.now() - ackStart < 15_000) {
+              const ackIdx = agtInbox.findIndex((m) =>
+                m.from_amid === targetAmid &&
+                (m.content?.includes?.("file_transfer_ack") || m.message_type === "file_transfer_ack")
+              );
+              if (ackIdx !== -1) {
+                try {
+                  const ackMsg = typeof agtInbox[ackIdx].content === "string"
+                    ? JSON.parse(agtInbox[ackIdx].content) : agtInbox[ackIdx].content;
+                  ackReceived = !!ackMsg?.success;
+                  ackSavedTo = ackMsg?.saved_to || "";
+                  ackError = ackMsg?.error || "";
+                } catch { ackReceived = true; }
+                agtInbox.splice(ackIdx, 1);
+                break;
+              }
+              await new Promise(r => setTimeout(r, 500));
+            }
+
+            if (ackReceived) break;
+          }
+
+          return { content: [{ type: "text", text: JSON.stringify({
+            status: ackReceived ? "delivered" : "sent_no_ack",
+            to_agent: agentName,
+            file_name: fileName,
+            size_bytes: stat.size,
+            size_human: stat.size < 1024 ? `${stat.size}B`
+              : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)}KB`
+              : `${(stat.size / 1024 / 1024).toFixed(1)}MB`,
+            chunked: !!transferId,
+            ...(ackReceived ? { saved_to: ackSavedTo } : {}),
+            ...(ackError ? { ack_error: ackError } : {}),
+            protocol: "AGT E2E encrypted (Signal Protocol)",
+            note: ackReceived
+              ? `File delivered and written to ${ackSavedTo} on '${agentName}'.`
+              : `File sent to '${agentName}' 3 times but no write confirmation received. The target agent may not be processing messages yet.`,
+          }, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: `File transfer failed: ${e.message}`,
+          }, null, 2) }] };
         }
       },
     });
@@ -2653,7 +4787,257 @@ const azureClawPlugin = definePluginEntry({
       },
     });
 
-    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, http_fetch");
+    // ── Handoff tools (agent migration) ──────────────────────────────────
+    // These allow the LLM to check handoff readiness and trigger migration
+    // when the user asks to "continue from the cloud" or similar.
+
+    api.registerTool({
+      name: "azureclaw_handoff_status",
+      label: "Handoff Status",
+      description: "Check handoff (live migration) progress. Returns the current phase and NEW steps since your last poll. Pass since_step (the total_steps from your last call) to get only new updates. Relay each new step to the user immediately as a live update. Keep polling every 3-5 seconds until status is 'complete', 'error', or 'partial'.",
+      parameters: {
+        type: "object",
+        properties: {
+          since_step: {
+            type: "number",
+            description: "Number of steps you already received. Pass total_steps from your last handoff_status call. Omit or pass 0 on first call.",
+          },
+        },
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        try {
+          // If there's an active/recent handoff in progress, return that
+          if (handoffProgress) {
+            const sinceStep = typeof params?.since_step === "number" ? params.since_step : 0;
+            const allSteps = handoffProgress.steps;
+            const newSteps = sinceStep > 0 ? allSteps.slice(sinceStep) : allSteps;
+            return { content: [{ type: "text", text: safeJson({
+              phase: handoffProgress.phase,
+              status: handoffProgress.status,
+              direction: handoffProgress.direction,
+              active: handoffProgress.status === "running",
+              total_steps: allSteps.length,
+              new_steps: newSteps,
+              error: handoffProgress.error,
+              result: handoffProgress.result,
+              instruction: handoffProgress.status === "running"
+                ? `Relay ONLY these new_steps to the user right now (one message per step). Then call handoff_status again in 3-5 seconds with since_step=${allSteps.length}.`
+                : handoffProgress.status === "complete"
+                  ? "Relay the final new_steps to the user. The handoff is complete."
+                  : undefined,
+            }) }] };
+          }
+          const result = await routerCall("GET", "/agt/handoff/status");
+          return { content: [{ type: "text", text: safeJson(result) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Handoff status check failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    // Only register mutation handoff tools when global registry is active.
+    // In local mode the LLM only sees azureclaw_handoff_status which reports
+    // handoff_available: false — no point exposing tools that would 409.
+    const registryMode = process.env.AGT_REGISTRY_MODE || "local";
+    if (registryMode === "global") {
+
+    api.registerTool({
+      name: "azureclaw_handoff_request",
+      label: "Request Handoff",
+      description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that is sent DIRECTLY to the user's Telegram (you will NOT receive the code). The user must type the code back to you, and you pass it to azureclaw_handoff_confirm. Do NOT fabricate or guess the confirmation code. Direction: 'cloud' (local→AKS) or 'local' (AKS→local). IMPORTANT: Always call azureclaw_handoff_status first to check if handoff is available.",
+      parameters: {
+        type: "object",
+        properties: {
+          direction: { type: "string", description: "Migration direction: 'cloud' (local→AKS) or 'local' (AKS→local)" },
+          reason: { type: "string", description: "Why the handoff is requested (shown in audit log and displayed to user)" },
+        },
+        required: ["direction"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        const direction = (params.direction as string) === "local" ? "aks_to_local" : "local_to_aks";
+        const reason = (params.reason as string) || "user_requested";
+
+        // Reverse handoff (cloud→local) must be initiated from the user's laptop CLI.
+        // The cloud agent cannot start Docker containers on the user's machine.
+        if (direction === "aks_to_local") {
+          const agentName = process.env.SANDBOX_NAME || "unknown";
+          return { content: [{ type: "text", text: safeJson({
+            status: "cli_required",
+            direction: "aks_to_local",
+            reason,
+            instruction: `Reverse handoff must be initiated from the user's laptop. ` +
+              `Tell the user to run this command on their terminal:`,
+            command: `azureclaw handoff ${agentName} --to local`,
+            display: `🔄 Ready to migrate back to local!\n\n` +
+              `The handoff back to your laptop needs to be run from your terminal:\n\n` +
+              `  azureclaw handoff ${agentName} --to local\n\n` +
+              `This will:\n` +
+              `  1. Wake your dormant local agent\n` +
+              `  2. Transfer all state (chat history, trust scores, workspace)\n` +
+              `  3. Restore credentials\n` +
+              `  4. Decommission this cloud instance\n\n` +
+              `Your local agent will be back online in ~30 seconds.`,
+          }) }] };
+        }
+
+        try {
+          // Stage 1 (§9.9.9): Create a pending handoff request on the router.
+          // The router generates a confirmation token — the user must echo it back.
+          const result = await routerCall("POST", "/agt/handoff/pending", {
+            direction,
+            reason,
+          });
+
+          const r = result as any;
+          if (r?.status === "pending_confirmation") {
+            // Send confirmation code directly to Telegram (side-channel).
+            // The LLM must NOT see the code — it can only get it from user input.
+            const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+            const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
+            const dirLabel = direction === "local_to_aks" ? "cloud (AKS)" : "local";
+            if (tgToken && tgAllowFrom) {
+              const chatIds = tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean);
+              for (const chatId of chatIds) {
+                try {
+                  const tgResp = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      chat_id: chatId,
+                      text: `🔐 Handoff Confirmation Required\n\n` +
+                        `A handoff to ${dirLabel} has been requested.\n` +
+                        `Reason: ${reason}\n\n` +
+                        `Your confirmation code:\n\n    ${r.confirmation_token}\n\n` +
+                        `Reply with this code to proceed.\n` +
+                        `Expires in ${r.expires_in_secs || 300}s.`,
+                    }),
+                  });
+                  if (!tgResp.ok) log.warn(`Handoff: Telegram code delivery failed: ${tgResp.status}`);
+                } catch (tgErr: any) {
+                  log.warn(`Handoff: Telegram code delivery error: ${tgErr.message}`);
+                }
+              }
+            }
+            // Also print to console for TUI users (not visible to the LLM)
+            console.log(`\n🔐 Handoff confirmation code: ${r.confirmation_token}\n`);
+
+            return { content: [{ type: "text", text: safeJson({
+              status: "pending_confirmation",
+              direction: r.direction,
+              reason: r.reason,
+              expires_in_secs: r.expires_in_secs,
+              instruction: `Handoff to ${dirLabel} requested. ` +
+                `A confirmation code has been sent to the user's Telegram. ` +
+                `Ask the user to type the code. Do NOT guess or fabricate the code.`,
+              display: `🔄 Handoff requested to ${dirLabel}\n` +
+                `Reason: ${reason}\n\n` +
+                `A confirmation code has been sent to your Telegram.\n` +
+                `Please type the code here to confirm.`,
+            }) }] };
+          }
+
+          // Non-pending response (e.g., error)
+          return { content: [{ type: "text", text: safeJson(result) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Handoff request failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "azureclaw_handoff_confirm",
+      label: "Confirm Handoff",
+      description: "Confirm a pending handoff request using the confirmation code that the USER typed. You do NOT have the code — it was sent directly to the user's Telegram. You MUST wait for the user to type it. If the user hasn't provided a code, ask them to check their Telegram. After confirming, poll azureclaw_handoff_status every 3-5 seconds and relay each new step to the user as a real-time progress update.",
+      parameters: {
+        type: "object",
+        properties: {
+          confirmation_token: { type: "string", description: "The confirmation code the user replied with" },
+        },
+        required: ["confirmation_token"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        const token = params.confirmation_token as string;
+
+        try {
+          // ── Stage 2 (§9.9.9): Confirm the pending request ──
+          const result = await routerCall("POST", "/agt/handoff/confirm", {
+            confirmation_token: token,
+          });
+
+          const r = result as any;
+          if (r?.status !== "confirmed") {
+            return { content: [{ type: "text", text: safeJson(result) }] };
+          }
+
+          const handoffToken = r.handoff_token;
+          const direction = r.direction;
+          const dirLabel = direction === "local_to_aks" ? "cloud (AKS)" : "local";
+
+          // Guard against concurrent handoff — don't overwrite in-progress tracker
+          if (handoffProgress?.status === "running") {
+            return { content: [{ type: "text", text: safeJson({
+              status: "error",
+              error: "A handoff is already in progress. Use azureclaw_handoff_status to check.",
+            }) }] };
+          }
+
+          // Initialize progress tracker
+          handoffProgress = {
+            phase: "confirmed",
+            status: "running",
+            steps: [`✅ Handoff confirmed — transferring to ${dirLabel}`],
+            direction,
+            started_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+
+          const adminToken = await _readAdminToken();
+          if (!adminToken) {
+            handoffProgress.status = "error";
+            handoffProgress.phase = "error";
+            handoffProgress.error = "Admin token not found";
+            handoffProgress.steps.push("❌ Admin token not found — cannot execute handoff");
+            handoffProgress.updated_at = new Date().toISOString();
+            return { content: [{ type: "text", text: safeJson(handoffProgress) }] };
+          }
+
+          // Run orchestration synchronously — return all progress when complete.
+          // LLMs don't autonomously poll tools, so we block here and return
+          // the full step-by-step result when the handoff finishes.
+          try {
+            await _runHandoffOrchestration(handoffToken, adminToken, direction, dirLabel);
+          } catch (err: any) {
+            log.warn(`Handoff orchestration error: ${err.message}`);
+            if (handoffProgress) {
+              handoffProgress.status = "error";
+              handoffProgress.phase = "error";
+              handoffProgress.error = err.message;
+              handoffProgress.steps.push(`❌ ${err.message}`);
+              handoffProgress.updated_at = new Date().toISOString();
+            }
+          }
+
+          return { content: [{ type: "text", text: safeJson({
+            ...handoffProgress,
+            instruction: "Relay each step to the user as a live update summary.",
+          }) }] };
+
+        } catch (e: any) {
+          return { content: [{ type: "text", text: safeJson({
+            status: "error",
+            error: e.message,
+          }) }] };
+        }
+      },
+    });
+
+    log.info(`AzureClaw handoff tools registered (registry_mode=${registryMode}): azureclaw_handoff_request, azureclaw_handoff_confirm`);
+
+    } else {
+      log.info(`AzureClaw handoff mutation tools skipped (registry_mode=${registryMode}) — only azureclaw_handoff_status available`);
+    }
+
+    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_mesh_transfer_file, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, azureclaw_handoff_status, http_fetch");
 
     // ── http_fetch: routed through the inference router's egress proxy ──
     // The sandbox (UID 1000) cannot reach the internet directly (iptables).

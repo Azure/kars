@@ -9,42 +9,88 @@ export function connectCommand(): Command {
     .argument("<name>", "Sandbox name")
     .option("--shell", "Drop to bash shell instead of OpenClaw", false)
     .option("--web", "Open WebUI via port-forward (default for AKS)", false)
+    .option("--local", "Connect to local Docker sandbox (skip AKS)", false)
+    .option("--cloud", "Connect to AKS cloud sandbox (skip Docker)", false)
     .option("--port <port>", "Local port for WebUI", "18789")
-    .action(async (name: string, options: { shell: boolean; web: boolean; port: string }) => {
+    .action(async (name: string, options: { shell: boolean; web: boolean; local: boolean; cloud: boolean; port: string }) => {
       const { execa } = await import("execa");
       const containerName = `azureclaw-${name}`;
       const namespace = `azureclaw-${name}`;
       const localPort = options.port;
 
-      // Try local Docker first (azureclaw dev mode)
-      if (!options.web) {
+      // Detect where the agent exists
+      let localRunning = false;
+      let localExists = false;
+      let aksExists = false;
+
+      if (!options.cloud) {
         try {
           const { stdout } = await execa("docker", [
             "inspect", "--format", "{{.State.Running}}", containerName,
           ], { stdio: "pipe" });
+          localExists = true;
+          localRunning = stdout.trim() === "true";
+        } catch { /* no local container */ }
+      }
 
-          if (stdout.trim() === "true") {
-            console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)}. OpenClaw is ready.\n`));
-            console.log(chalk.dim(`  Chat:    openclaw tui`));
-            console.log(chalk.dim(`  Message: openclaw agent --agent main --local -m "hello" --session-id test`));
-            console.log(chalk.dim(`  Exit:    type "exit"\n`));
-            await execa("docker", [
-              "exec", "-it", containerName, "/bin/bash", "--login",
-            ], { stdio: "inherit" });
-            return;
-          }
-        } catch {
-          // Not a local container — try AKS
+      if (!options.local) {
+        try {
+          await execa("kubectl", [
+            "get", "deploy", name, "-n", namespace, "--no-headers",
+          ], { stdio: "pipe" });
+          aksExists = true;
+        } catch { /* no AKS deployment */ }
+      }
+
+      // Ambiguity: both exist, no explicit flag
+      if (localExists && aksExists && !options.local && !options.cloud) {
+        console.log(chalk.yellow(`\n  ⚠️  '${name}' exists in both Docker and AKS:`));
+        console.log(chalk.dim(`     Docker: ${localRunning ? "running" : "dormant (stopped)"}`));
+        console.log(chalk.dim(`     AKS:    running`));
+        console.log();
+        console.log(`  ${chalk.cyan(`azureclaw connect ${name} --local`)}   → Docker`);
+        console.log(`  ${chalk.cyan(`azureclaw connect ${name} --cloud`)}   → AKS`);
+        console.log();
+        // Auto-resolve: prefer cloud if local is dormant (handoff scenario)
+        if (!localRunning) {
+          console.log(chalk.dim(`  Auto-connecting to cloud (local is dormant)...\n`));
+          options.cloud = true;
+        } else {
+          console.log(chalk.dim(`  Auto-connecting to local (running)...\n`));
+          options.local = true;
         }
       }
 
-      // AKS mode: check if pod exists
-      try {
-        await execa("kubectl", [
-          "get", "deploy", name, "-n", namespace, "--no-headers",
-        ], { stdio: "pipe" });
-      } catch {
+      // Neither exists
+      if (!localExists && !aksExists) {
         console.log(chalk.red(`\n  Sandbox '${name}' not found.`));
+        console.log(chalk.dim(`  Run: azureclaw dev --name ${name}  (local) or  azureclaw up --name ${name}  (AKS)\n`));
+        return;
+      }
+
+      // ── Local Docker mode ──
+      const useLocal = options.local || (localExists && !aksExists);
+      if (useLocal && localExists) {
+        if (!localRunning) {
+          console.log(chalk.yellow(`\n  Container '${name}' is stopped (dormant).`));
+          console.log(chalk.dim(`  Start it with: docker start ${containerName}\n`));
+          return;
+        }
+        if (!options.web) {
+          console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)} (local). OpenClaw is ready.\n`));
+          console.log(chalk.dim(`  Chat:    openclaw tui`));
+          console.log(chalk.dim(`  Message: openclaw agent --agent main --local -m "hello" --session-id test`));
+          console.log(chalk.dim(`  Exit:    type "exit"\n`));
+          await execa("docker", [
+            "exec", "-it", containerName, "/bin/bash", "--login",
+          ], { stdio: "inherit" });
+          return;
+        }
+      }
+
+      // ── AKS mode ──
+      if (!aksExists) {
+        console.log(chalk.red(`\n  Sandbox '${name}' not found on AKS.`));
         console.log(chalk.dim(`  Run: azureclaw up --name ${name}\n`));
         return;
       }
@@ -117,11 +163,21 @@ export function connectCommand(): Command {
         console.log(chalk.dim(`  Port-forward active. Press Ctrl+C to disconnect.\n`));
 
         // Keep alive until Ctrl+C
+        const cleanup = () => {
+          pf.kill("SIGTERM");
+          console.log(chalk.dim("\n  Disconnected.\n"));
+          process.exit(0);
+        };
+        process.on("SIGINT", cleanup);
+        process.on("SIGTERM", cleanup);
         try {
           await pf;
         } catch {
-          // User pressed Ctrl+C
+          // port-forward exited
           console.log(chalk.dim("\n  Disconnected.\n"));
+        } finally {
+          process.removeListener("SIGINT", cleanup);
+          process.removeListener("SIGTERM", cleanup);
         }
       } else {
         // Shell mode

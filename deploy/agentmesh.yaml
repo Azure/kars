@@ -38,6 +38,7 @@ spec:
       labels:
         app: postgres
     spec:
+      terminationGracePeriodSeconds: 60
       containers:
         - name: postgres
           image: azureclawacr.azurecr.io/postgres:16-alpine
@@ -62,6 +63,10 @@ spec:
             exec:
               command: [sh, -c, "pg_isready -U agentmesh"]
             periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: [sh, -c, "pg_ctl stop -D $PGDATA -m fast -w -t 45"]
           resources:
             requests:
               cpu: 100m
@@ -121,6 +126,40 @@ spec:
               value: "8080"
             - name: RUST_LOG
               value: agentmesh_registry=info,actix_web=info
+            # OAuth credentials (optional — from agentmesh-oauth-credentials secret)
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: agentmesh-oauth-credentials
+                  key: GITHUB_CLIENT_ID
+                  optional: true
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agentmesh-oauth-credentials
+                  key: GITHUB_CLIENT_SECRET
+                  optional: true
+            - name: ENTRA_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: agentmesh-oauth-credentials
+                  key: ENTRA_CLIENT_ID
+                  optional: true
+            - name: ENTRA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agentmesh-oauth-credentials
+                  key: ENTRA_CLIENT_SECRET
+                  optional: true
+            - name: ENTRA_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: agentmesh-oauth-credentials
+                  key: ENTRA_TENANT_ID
+                  optional: true
+            # Set by azureclaw up --expose-registry (public domain for OAuth callbacks)
+            # - name: OAUTH_CALLBACK_BASE_URL
+            #   value: "https://registry.<domain>"
           readinessProbe:
             httpGet:
               path: /v1/health
@@ -172,6 +211,12 @@ spec:
               value: agentmesh_relay=info
             - name: RELAY_ADDR
               value: "0.0.0.0:8765"
+            # Registry URL for agent registration verification
+            - name: REGISTRY_URL
+              value: "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"
+            # When true, relay verifies connecting agents are registered
+            - name: REQUIRE_REGISTRATION
+              value: "true"
           readinessProbe:
             tcpSocket:
               port: 8765

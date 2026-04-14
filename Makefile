@@ -66,12 +66,19 @@ image-router: ## Build inference router Docker image
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f inference-router/Dockerfile .
 
-image-sandbox: image-router ## Build sandbox Docker image
+image-sandbox-base: ## Build sandbox base image (heavy deps — rebuild when upgrading OpenClaw/Python/Go tools)
 	docker build --platform linux/amd64 \
-		--build-arg AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0 \
+		--build-arg OPENCLAW_CACHE_BUST=$$(date +%s) \
+		-t $(REGISTRY)/azureclaw-sandbox-base:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-sandbox-base:latest \
+		-f sandbox-images/openclaw/Dockerfile.base .
+
+image-sandbox: image-router ## Build sandbox Docker image (slim overlay — fast per-commit rebuild)
+	docker build --platform linux/amd64 \
+		--build-arg SANDBOX_BASE_IMAGE=$(REGISTRY)/azureclaw-sandbox-base:latest \
 		--build-arg INFERENCE_ROUTER_IMAGE=$(REGISTRY)/azureclaw-inference-router:latest \
-		-t $(REGISTRY)/azureclaw-sandbox:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-sandbox:latest \
+		-t $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG) \
+		-t $(REGISTRY)/openclaw-sandbox:latest \
 		-f sandbox-images/openclaw/Dockerfile .
 
 image-relay: ## Build AgentMesh relay image
@@ -91,8 +98,10 @@ push: ## Push all images to ACR
 	docker push $(REGISTRY)/azureclaw-controller:latest
 	docker push $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG)
 	docker push $(REGISTRY)/azureclaw-inference-router:latest
-	docker push $(REGISTRY)/azureclaw-sandbox:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-sandbox:latest
+	docker push $(REGISTRY)/azureclaw-sandbox-base:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-sandbox-base:latest
+	docker push $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG)
+	docker push $(REGISTRY)/openclaw-sandbox:latest
 	docker push $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG)
 	docker push $(REGISTRY)/agentmesh-relay:latest
 	docker push $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG)

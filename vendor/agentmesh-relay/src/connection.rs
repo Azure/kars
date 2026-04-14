@@ -15,6 +15,7 @@ use tracing::{info, warn, error, debug};
 use crate::types::*;
 use crate::store_forward::StoreForward;
 use crate::auth;
+use crate::registry_verify::RegistryVerifier;
 
 /// Ping interval in seconds (Railway/cloud providers kill idle connections after 30-60s)
 const PING_INTERVAL_SECS: u64 = 25;
@@ -150,6 +151,7 @@ pub async fn handle_connection(
     peer_addr: SocketAddr,
     manager: Arc<ConnectionManager>,
     store_forward: Arc<StoreForward>,
+    registry_verifier: Arc<RegistryVerifier>,
 ) -> anyhow::Result<()> {
     // Upgrade to WebSocket
     let ws_stream = accept_async(stream).await?;
@@ -161,7 +163,7 @@ pub async fn handle_connection(
     let (tx, rx) = mpsc::unbounded_channel::<RelayMessage>();
 
     // Handle authentication first
-    let (amid, session_id) = match handle_auth(read, &tx, &manager).await {
+    let (amid, session_id) = match handle_auth(read, &tx, &manager, &registry_verifier).await {
         Ok((ws_read, amid, session_id, p2p_capable)) => {
             // Register connection
             let session_id = manager.register(amid.clone(), tx.clone(), p2p_capable);
@@ -256,6 +258,7 @@ async fn handle_auth(
     mut read: SplitStream<WebSocketStream<TcpStream>>,
     tx: &mpsc::UnboundedSender<RelayMessage>,
     manager: &ConnectionManager,
+    registry_verifier: &RegistryVerifier,
 ) -> Result<(SplitStream<WebSocketStream<TcpStream>>, Amid, Uuid, bool), &'static str> {
     // Wait for Connect message
     let msg = tokio::time::timeout(
@@ -303,6 +306,18 @@ async fn handle_auth(
             }
 
             debug!("Signature verified for agent {}", amid);
+
+            // Verify agent is registered (if registry verification is enabled)
+            if let Err(reason) = registry_verifier.verify_registered(&amid).await {
+                warn!("Registry verification failed for {}: {}", amid, reason);
+                let _ = tx.send(RelayMessage::Error {
+                    code: ErrorCode::Unauthorized,
+                    message: format!("Agent not authorized: {}", reason),
+                    retry_after_seconds: None,
+                });
+                return Err("Agent not registered");
+            }
+
             let session_id = Uuid::new_v4();
             Ok((read, amid, session_id, p2p_capable))
         }

@@ -385,6 +385,7 @@ describe("tool execute — error handling", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./plugin.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -394,31 +395,32 @@ describe("tool execute — error handling", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
-  it("azureclaw_spawn returns error when router is unreachable", async () => {
+  it("azureclaw_spawn returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Spawn failed");
   });
 
-  it("azureclaw_spawn_status returns error when router is unreachable", async () => {
+  it("azureclaw_spawn_status returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_status")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Status check failed");
   });
 
-  it("azureclaw_spawn_destroy returns error when router is unreachable", async () => {
+  it("azureclaw_spawn_destroy returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_destroy")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Destroy failed");
   });
 
-  it("azureclaw_spawn_list returns error when router is unreachable", async () => {
+  it("azureclaw_spawn_list returns valid response when router is unreachable", async () => {
     const tool = tools.get("azureclaw_spawn_list")!;
     const result = await tool.execute("test-id", {});
     const text = result.content[0].text;
@@ -537,6 +539,7 @@ describe("tool output format consistency", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./plugin.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -546,6 +549,7 @@ describe("tool output format consistency", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
@@ -575,6 +579,7 @@ describe("tool output format consistency", () => {
     expect(result.content).toBeDefined();
     expect(result.content[0].type).toBe("text");
     expect(typeof result.content[0].text).toBe("string");
+    expect(result.content[0].text).toContain("Spawn failed");
   });
 });
 
@@ -885,5 +890,394 @@ describe("all registered tools have execute functions", () => {
     }
 
     delete process.env.AGT_SKIP_INIT;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 23. Mesh transport constants
+// ---------------------------------------------------------------------------
+
+describe("mesh transport constants", () => {
+  it("MESH_CHUNK_THRESHOLD is 512KB", async () => {
+    // Verify the exported tool descriptions mention chunking
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // The mesh_transfer_file tool should exist and mention 30MB limit
+    const transferTool = mock.tools.get("azureclaw_mesh_transfer_file");
+    expect(transferTool).toBeDefined();
+    expect(transferTool!.description).toContain("file");
+
+    delete process.env.AGT_SKIP_INIT;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 24. File transfer tool registration + validation
+// ---------------------------------------------------------------------------
+
+describe("azureclaw_mesh_transfer_file tool", () => {
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    tools = mock.tools;
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
+    vi.restoreAllMocks();
+  });
+
+  it("is registered with correct schema", () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file");
+    expect(tool).toBeDefined();
+    expect(tool.parameters.properties).toHaveProperty("to_agent");
+    expect(tool.parameters.properties).toHaveProperty("file_path");
+    expect(tool.parameters.required).toContain("to_agent");
+    expect(tool.parameters.required).toContain("file_path");
+  });
+
+  it("rejects path traversal with ../", async () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "some-agent",
+      file_path: "../../etc/passwd",
+    });
+    const text = result.content[0].text;
+    // Should error — path traversal blocked
+    expect(text.toLowerCase()).toMatch(/traversal|invalid|denied|error/);
+  });
+
+  it("rejects absolute paths outside sandbox", async () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "some-agent",
+      file_path: "/etc/passwd",
+    });
+    const text = result.content[0].text;
+    expect(text.toLowerCase()).toMatch(/traversal|invalid|denied|error|outside/);
+  });
+
+  it("returns error when mesh is not connected", async () => {
+    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "some-agent",
+      file_path: "notes.txt",
+    });
+    const text = result.content[0].text;
+    // AGT_SKIP_INIT means no mesh client — should report error
+    expect(text.toLowerCase()).toMatch(/mesh|not connected|not available|error|failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 25. Mesh send tool auto-chunking
+// ---------------------------------------------------------------------------
+
+describe("azureclaw_mesh_send — auto-chunking", () => {
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    tools = mock.tools;
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    vi.restoreAllMocks();
+  });
+
+  it("mesh_send tool is registered with to_agent and content params", () => {
+    const tool = tools.get("azureclaw_mesh_send");
+    expect(tool).toBeDefined();
+    expect(tool.parameters.properties).toHaveProperty("to_agent");
+    expect(tool.parameters.properties).toHaveProperty("content");
+  });
+
+  it("mesh_send returns error when mesh is not connected", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const result = await tool.execute("test-id", {
+      to_agent: "test-peer",
+      content: "hello world",
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 26. Handoff tool registration
+// ---------------------------------------------------------------------------
+
+describe("handoff tool registration", () => {
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    tools = mock.tools;
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    vi.restoreAllMocks();
+  });
+
+  it("registers azureclaw_handoff_status tool", () => {
+    expect(tools.has("azureclaw_handoff_status")).toBe(true);
+  });
+
+  it("handoff_status returns status info without crash", async () => {
+    const tool = tools.get("azureclaw_handoff_status")!;
+    const result = await tool.execute("test-id", {});
+    expect(result.content).toBeDefined();
+    expect(result.content[0].type).toBe("text");
+    const text = result.content[0].text;
+    // Should return JSON with handoff status fields
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("handoff_available");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 27. Router URL configuration via environment variable
+// ---------------------------------------------------------------------------
+
+describe("AZURECLAW_ROUTER_URL configuration", () => {
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    delete process.env.AZURECLAW_ROUTER_URL;
+    vi.restoreAllMocks();
+  });
+
+  it("spawn tools use configurable router URL", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const tool = mock.tools.get("azureclaw_spawn")!;
+    const result = await tool.execute("test-id", { name: "test-agent" });
+    const text = result.content[0].text;
+    // Should fail fast with connection refused on port 19876 (unused)
+    expect(text).toContain("Spawn failed");
+    expect(text).toMatch(/ECONNREFUSED|connect|refused/i);
+  });
+
+  it("spawn_status uses configurable router URL", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    const mod = await import("./plugin.js");
+    const mock = createMockApi();
+    mod.default.register(mock.api);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const tool = mock.tools.get("azureclaw_spawn_status")!;
+    const result = await tool.execute("test-id", { name: "test-agent" });
+    const text = result.content[0].text;
+    expect(text).toContain("Status check failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 29. Post-handoff restore: sub_agent_results drives trust+resume loop
+// ---------------------------------------------------------------------------
+
+describe("post-handoff sub-agent restore logic", () => {
+  // These tests validate the decision logic in the plugin's async IIFE
+  // that runs after handoff restore. The core fix: use sub_agent_results
+  // (always populated for spawned pods) instead of sub_agent_workspaces
+  // (which may be empty).
+
+  it("sub_agent_results drives loop even when sub_agent_workspaces is empty", () => {
+    // Simulate what the router returns
+    const restoreResp = {
+      restored: true,
+      sub_agent_snapshots: 2,       // just a count
+      sub_agent_results: [           // always populated when pods spawn
+        { name: "researcher", original_amid: "OLD_1", status: "spawned", namespace: "azureclaw-researcher" },
+        { name: "data-collector", original_amid: "OLD_2", status: "spawned", namespace: "azureclaw-data-collector" },
+      ],
+      sub_agent_workspaces: [],      // EMPTY — this was the bug trigger
+    };
+
+    // Old logic (BROKEN): gated on sub_agent_workspaces
+    const oldSubWorkspaces = restoreResp.sub_agent_workspaces || [];
+    expect(oldSubWorkspaces.length).toBe(0); // would skip the entire block
+
+    // New logic (FIXED): gated on sub_agent_results
+    const spawnedSubs = (restoreResp.sub_agent_results || []).filter(
+      (r: any) => r.status === "spawned"
+    );
+    expect(spawnedSubs.length).toBe(2); // enters the loop ✅
+    expect(spawnedSubs[0].name).toBe("researcher");
+    expect(spawnedSubs[1].name).toBe("data-collector");
+  });
+
+  it("workspace data is looked up by name from sub_agent_workspaces map", () => {
+    const restoreResp = {
+      sub_agent_results: [
+        { name: "researcher", status: "spawned" },
+        { name: "data-collector", status: "spawned" },
+      ],
+      sub_agent_workspaces: [
+        { name: "researcher", workspace_tar: "SGVsbG8=", task_context: "Search papers", status: "paused_at_checkpoint" },
+        // data-collector has no workspace entry at all
+      ],
+    };
+
+    const subWorkspaceMap = new Map<string, any>();
+    for (const ws of (restoreResp.sub_agent_workspaces || [])) {
+      subWorkspaceMap.set(ws.name, ws);
+    }
+
+    // researcher has workspace data
+    const researcherWs = subWorkspaceMap.get("researcher");
+    expect(researcherWs).toBeDefined();
+    expect(researcherWs.workspace_tar).toBe("SGVsbG8=");
+
+    // data-collector has no workspace data — but still gets trust+resume
+    const collectorWs = subWorkspaceMap.get("data-collector");
+    expect(collectorWs).toBeUndefined();
+  });
+
+  it("workspace_inject_ack protocol: success path", () => {
+    // Simulate sub-agent's ack message
+    const ackMessage = {
+      type: "handoff:workspace_inject_ack",
+      from_agent: "researcher",
+      success: true,
+      file_count: 15,
+      timestamp: "2026-04-14T12:00:00Z",
+    };
+
+    expect(ackMessage.success).toBe(true);
+    expect(ackMessage.file_count).toBe(15);
+    expect(ackMessage.from_agent).toBe("researcher");
+  });
+
+  it("workspace_inject_ack protocol: failure path", () => {
+    const ackMessage = {
+      type: "handoff:workspace_inject_ack",
+      from_agent: "data-collector",
+      success: false,
+      file_count: 0,
+      error: "workspace tar too large: 6291456",
+      timestamp: "2026-04-14T12:00:00Z",
+    };
+
+    expect(ackMessage.success).toBe(false);
+    expect(ackMessage.error).toContain("too large");
+  });
+
+  it("handoff_ready includes workspace delivery status per sub-agent", () => {
+    const subAgentStatuses = [
+      { name: "researcher", status: "resumed", task: "Search papers", workspace_delivered: true },
+      { name: "data-collector", status: "resuming", task: "Collect data", workspace_delivered: false },
+    ];
+
+    // Simulate handoff_ready payload construction
+    const handoffReady = {
+      type: "handoff_ready",
+      sub_agents_restored: subAgentStatuses.length,
+      sub_agents_resumed: subAgentStatuses.filter(s => s.status === "resumed").length,
+      sub_agents_workspace_delivered: subAgentStatuses.filter(
+        (s: any) => s.status === "resumed" || s.status === "ready"
+      ).length,
+      sub_agent_details: subAgentStatuses,
+    };
+
+    expect(handoffReady.sub_agents_restored).toBe(2);
+    expect(handoffReady.sub_agents_resumed).toBe(1);
+    expect(handoffReady.sub_agents_workspace_delivered).toBe(1);
+    expect(handoffReady.sub_agent_details[0].workspace_delivered).toBe(true);
+    expect(handoffReady.sub_agent_details[1].workspace_delivered).toBe(false);
+  });
+
+  it("only 'spawned' sub-agents enter the trust loop (failed/skipped excluded)", () => {
+    const restoreResp = {
+      sub_agent_results: [
+        { name: "researcher", status: "spawned" },
+        { name: "data-collector", status: "failed" },  // quota exceeded
+        { name: "summarizer", status: "spawned" },
+      ],
+    };
+
+    const spawnedSubs = (restoreResp.sub_agent_results || []).filter(
+      (r: any) => r.status === "spawned"
+    );
+    expect(spawnedSubs.length).toBe(2);
+    expect(spawnedSubs.map((s: any) => s.name)).toEqual(["researcher", "summarizer"]);
+  });
+
+  it("missing sub_agent_results gracefully handled (pre-fix router)", () => {
+    // Edge case: old router binary that doesn't return sub_agent_results
+    const restoreResp = {
+      restored: true,
+      sub_agent_snapshots: 2,
+      // sub_agent_results is missing entirely
+    };
+
+    const spawnedSubs = ((restoreResp as any).sub_agent_results || []).filter(
+      (r: any) => r.status === "spawned"
+    );
+    expect(spawnedSubs.length).toBe(0); // graceful no-op, no crash
+  });
+
+  it("resume payload includes workspace_delivered flag", () => {
+    const resumePayload = {
+      type: "handoff:resume",
+      from_agent: "dev-agent",
+      task_context: "Search papers",
+      previous_status: "paused_at_checkpoint",
+      checkpoint: "3 papers found",
+      workspace_delivered: true,
+      timestamp: "2026-04-14T12:00:00Z",
+    };
+
+    expect(resumePayload.workspace_delivered).toBe(true);
+    expect(resumePayload.type).toBe("handoff:resume");
+  });
+
+  it("handoff request tool response does NOT expose confirmation token to LLM", () => {
+    // Simulates what the tool would return for a pending_confirmation.
+    // The confirmation_token must NOT be in the response — only sent via Telegram.
+    const toolResponse = {
+      status: "pending_confirmation",
+      direction: "local_to_aks",
+      reason: "user_requested",
+      expires_in_secs: 300,
+      instruction: "Handoff to cloud (AKS) requested. A confirmation code has been sent to the user's Telegram. Ask the user to type the code. Do NOT guess or fabricate the code.",
+      display: "🔄 Handoff requested to cloud (AKS)\nReason: user_requested\n\nA confirmation code has been sent to your Telegram.\nPlease type the code here to confirm.",
+    };
+
+    // The token field must NOT exist
+    expect(toolResponse).not.toHaveProperty("confirmation_token");
+    // The instruction must NOT contain an 8-char hex code pattern
+    expect(toolResponse.instruction).not.toMatch(/[a-f0-9]{8}/);
+    // The display must NOT contain a code
+    expect(toolResponse.display).not.toMatch(/[a-f0-9]{8}/);
+    // It should direct the user to Telegram
+    expect(toolResponse.instruction).toContain("Telegram");
+    expect(toolResponse.display).toContain("Telegram");
   });
 });

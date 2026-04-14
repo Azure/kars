@@ -51,3 +51,11 @@ tokio-tungstenite = "0.26"
 kube.workspace = true
 k8s-openapi.workspace = true
 tokio-stream = "0.1.18"
+
+# Handoff encryption (AES-256-GCM + HKDF key derivation + SHA-256 verification)
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.9"
+base64 = "0.22"
+flate2 = "1"

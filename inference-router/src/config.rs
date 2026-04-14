@@ -2,6 +2,29 @@
 
 use anyhow::{Context, Result};
 
+/// Registry topology mode.
+///
+/// - `Local` (default): registry + relay + postgres are deployed alongside the agent
+///   (Docker containers in dev, in-cluster services on AKS). Handoff is unavailable.
+/// - `Global`: a shared registry is deployed externally. Both local and cloud agents
+///   register there, enabling identity succession and cross-host handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryMode {
+    /// Self-contained — registry/relay/postgres colocated with agent.
+    Local,
+    /// Shared external registry — enables handoff between hosts.
+    Global,
+}
+
+impl std::fmt::Display for RegistryMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => write!(f, "local"),
+            Self::Global => write!(f, "global"),
+        }
+    }
+}
+
 pub struct Config {
     /// Port to listen on (default: 8443)
     pub port: u16,
@@ -40,6 +63,13 @@ pub struct Config {
 
     /// Per-request token limit (0 = unlimited)
     pub token_budget_per_request: u64,
+
+    /// Registry topology mode (local or global).
+    pub registry_mode: RegistryMode,
+
+    /// Registry URL (used in both modes — local points to colocated service,
+    /// global points to the shared external registry).
+    pub registry_url: Option<String>,
 }
 
 impl Config {
@@ -86,6 +116,19 @@ impl Config {
                 .unwrap_or_else(|_| "0".into())
                 .parse()
                 .unwrap_or(0),
+
+            registry_mode: match std::env::var("AGT_REGISTRY_MODE")
+                .unwrap_or_else(|_| "local".into())
+                .to_lowercase()
+                .as_str()
+            {
+                "global" => RegistryMode::Global,
+                _ => RegistryMode::Local,
+            },
+
+            registry_url: std::env::var("AGT_REGISTRY_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 }

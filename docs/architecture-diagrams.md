@@ -556,3 +556,591 @@ graph TB
     style L8 fill:#55efc4,stroke:#00b894
     style L9 fill:#81ecec,stroke:#00cec9
 ```
+
+---
+
+## 11. Cloud Handoff Flow (Dev → AKS)
+
+LLM-driven agent migration from local Docker to AKS cloud. The LLM requests the handoff, the user confirms with a code, and the plugin orchestrates the transfer asynchronously — reporting live progress via emoji status updates.
+
+### 11.1 End-to-End Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 👤 User (webchat)
+    participant LLM as 🤖 LLM
+    participant Plugin as 🔌 Plugin (source)
+    participant Router as 🛡️ Source Router
+    participant K8s as ☸️ K8s API
+    participant Ctrl as 🎛️ Controller
+    participant Reg as 📋 Global Registry
+    participant Relay as 📡 Relay (E2E)
+    participant TPlugin as 🔌 Plugin (target)
+    participant TRouter as 🛡️ Target Router
+
+    Note over User,TRouter: ──── Phase 1: Two-Stage Confirmation Gate ────
+
+    User->>LLM: "move to the cloud"
+    LLM->>Plugin: azureclaw_handoff_request(direction=cloud)
+    Plugin->>Router: POST /agt/handoff/pending
+    Note right of Router: Rate limit: 1 req / 300s<br/>Token: random 8-hex, TTL 5min
+    Router-->>Plugin: {confirmation_token, expires_in}
+    Plugin-->>LLM: "confirm with code: f913b1f9"
+    LLM-->>User: "🔄 To confirm, reply: f913b1f9"
+    User->>LLM: "f913b1f9"
+    LLM->>Plugin: azureclaw_handoff_confirm(code=f913b1f9)
+    Plugin->>Router: POST /agt/handoff/confirm
+    Note right of Router: Min 3s delay enforced<br/>Constant-time comparison
+    Router-->>Plugin: {handoff_token 🔒, direction}
+
+    Note over User,TRouter: ──── Phase 2: Async Background Orchestration ────
+    Note over Plugin: Plugin returns immediately<br/>LLM polls handoff_status every 3-5s
+
+    Plugin-->>LLM: "started — poll handoff_status"
+
+    rect rgb(40, 40, 60)
+        Note over Plugin,Router: Step 1: Snapshot (timeout: 60s)
+        Plugin->>Router: POST /agt/handoff/snapshot
+        Note right of Router: AES-256-GCM encrypted<br/>key = HKDF(SHA256(admin‖handoff))
+        Router-->>Plugin: {blob, verification_hash, size_bytes}
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "📦 Snapshot ready (13.7 KB)"
+    LLM-->>User: 📦 Snapshot ready (13.7 KB)
+
+    rect rgb(40, 40, 60)
+        Note over Plugin,Router: Step 2: Drain (timeout: 30s)
+        Plugin->>Router: POST /agt/handoff/drain
+        Note right of Router: Stop accepting new work<br/>⚠️ No undrain if aborted
+    end
+
+    rect rgb(40, 60, 40)
+        Note over Plugin,Ctrl: Step 3: Spawn AKS Target
+        Plugin->>Router: POST /sandbox/spawn
+        Note right of Router: {handoff: {mode: restore}}<br/>Dev mode bypasses Docker → K8s CRD
+        Router->>K8s: Create ClawSandbox CRD
+        Note right of K8s: labels: spawned-by=handoff<br/>governance.trustedPeers = source AMID<br/>governance.registryMode = global
+        Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
+        Note right of Ctrl: Both openclaw AND router get:<br/>AGT_TRUSTED_PEERS, AGT_REGISTRY_MODE
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "🚀 CRD created, waiting for pod..."
+    LLM-->>User: 🚀 Cloud target spawning...
+
+    rect rgb(50, 40, 40)
+        Note over Plugin,Reg: Step 4: Mesh Discovery (90s max)
+        TPlugin->>Reg: Register AMID (Ed25519)
+        loop Poll registry every 2s
+            Plugin->>Reg: search for target AMID
+        end
+        Reg-->>Plugin: target AMID found ✓
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "🌐 Cloud target online"
+    LLM-->>User: 🌐 Cloud target online
+
+    rect rgb(60, 60, 40)
+        Note over Plugin,TPlugin: Step 5: E2E State Transfer (5 retries × 2s)
+        Plugin->>Relay: mesh_send(handoff_transfer, blob, secret, hash)
+        Note over Relay: 🔐 Signal Protocol (X3DH + Double Ratchet)<br/>Relay is zero-knowledge
+        Relay->>TPlugin: deliver encrypted message
+    end
+
+    rect rgb(60, 60, 40)
+        Note over TPlugin,TRouter: Step 5b: Target Restores State
+        TPlugin->>TRouter: POST /agt/handoff/init
+        TPlugin->>TRouter: POST /agt/handoff/restore {blob, secret}
+        Note right of TRouter: Decrypt, decompress,<br/>sanitize chat (anti-injection),<br/>trust scores capped at 750
+        TPlugin->>TRouter: POST /agt/handoff/verify {expected_hash}
+        Note right of TRouter: SHA-256 integrity match
+    end
+
+    rect rgb(60, 60, 40)
+        Note over TPlugin,Plugin: Step 5c: Verification via E2E Mesh
+        TPlugin->>Relay: mesh_send(handoff_verification)
+        Note right of TPlugin: {matches, successor_amid,<br/>trust_scores_count, audit_entries_count}
+        Relay->>Plugin: deliver verification ✓
+        Note over Plugin: Filter: from_amid AND<br/>from_agent must BOTH match
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "✅ State verified — hash match"
+    LLM-->>User: ✅ State verified
+
+    rect rgb(50, 40, 60)
+        Note over Plugin,Reg: Step 6: Identity Succession
+        Plugin->>Reg: POST /registry/succession
+        Note right of Reg: Ed25519 signed<br/>Copies reputation, marks predecessor Dormant
+    end
+
+    rect rgb(50, 40, 60)
+        Note over Plugin,Router: Step 7: Decommission
+        Plugin->>Router: POST /agt/handoff/decommission
+        Note right of Router: Dormant — keys preserved<br/>Ghost cleanup skips dormant agents
+    end
+
+    LLM->>Plugin: azureclaw_handoff_status
+    Plugin-->>LLM: "🎉 Handoff complete!"
+    LLM-->>User: 🎉 I'm now running on AKS! Your keys are preserved for reverse handoff.
+```
+
+### 11.2 Handoff State Machine
+
+The router tracks handoff phases. **Note:** phase ordering is enforced by convention in the plugin, not by the router — endpoints are currently callable in any order (documented improvement area).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> PendingConfirmation: POST /pending
+    PendingConfirmation --> Confirmed: POST /confirm (code match, ≥3s delay)
+    PendingConfirmation --> Idle: timeout (5min) / cancel
+    Confirmed --> Snapshotting: POST /snapshot
+    Snapshotting --> Draining: POST /drain
+    Draining --> Transferring: mesh_send(handoff_transfer)
+    Transferring --> Restoring: POST /restore (on target)
+    Restoring --> Verifying: POST /verify (on target)
+    Verifying --> Succession: POST /registry/succession
+    Succession --> Decommissioning: POST /decommission
+    Decommissioning --> [*]
+
+    Confirmed --> Aborted: POST /abort
+    Snapshotting --> Aborted: POST /abort
+    Draining --> Aborted: POST /abort or error
+    Transferring --> Aborted: POST /abort
+    Verifying --> Aborted: timeout (60s)
+    Aborted --> [*]
+
+    note right of Draining
+        ⚠️ No undrain mechanism.
+        Abort after drain leaves agent
+        in drained state until restart.
+    end note
+
+    note right of Transferring
+        ⚠️ If mesh transfer fails after spawn,
+        orphaned CRD must be manually deleted:
+        kubectl delete clawsandbox <name>
+    end note
+```
+
+### 11.3 Security Model
+
+```mermaid
+graph TB
+    subgraph gate["Layer 1: Human-in-the-Loop Gate"]
+        direction LR
+        pending["POST /pending<br/>Rate limit: 1 req / 300s"]
+        confirm["POST /confirm<br/>Min 3s delay, constant-time compare"]
+        pending --> confirm
+    end
+
+    subgraph isolation["Layer 2: LLM Isolation"]
+        direction LR
+        token_iso["Handoff token stays in<br/>plugin memory — LLM never sees it"]
+        admin_iso["Admin token read from<br/>/run/secrets/ (K8s mount)"]
+        execute["LLM can REQUEST<br/>but never EXECUTE"]
+    end
+
+    subgraph auth["Layer 3: Three-Layer Endpoint Auth"]
+        direction LR
+        l1["Init: admin token<br/>(no localhost bypass)"]
+        l2["Mutations: admin + handoff token<br/>(no localhost bypass)"]
+        l3["Status: admin token<br/>(localhost bypass OK — read-only)"]
+    end
+
+    subgraph encryption["Layer 4: Double Encryption"]
+        direction LR
+        aes["Snapshot: AES-256-GCM<br/>key = HKDF-SHA256(admin‖handoff)"]
+        signal["Transport: Signal Protocol<br/>X3DH + Double Ratchet per session"]
+        relay_zk["Relay is zero-knowledge<br/>cannot decrypt payloads"]
+    end
+
+    subgraph injection["Layer 5: State Blob Hardening"]
+        direction LR
+        sanitize["Chat history sanitized<br/>(strip system prompts, JSON injection)"]
+        trust_cap["Trust scores capped at 750<br/>(prevent score inflation)"]
+        size_limit["50MB blob limit<br/>100 files max, 10MB/file"]
+    end
+
+    subgraph identity["Layer 6: Identity & Trust"]
+        direction LR
+        ed25519["Ed25519 keypairs<br/>AMIDs = public keys"]
+        trusted["AGT_TRUSTED_PEERS<br/>K8s-injected to BOTH containers"]
+        knock["KNOCK enforcement<br/>+500 bonus for trusted peers"]
+        verify_both["Verification filter:<br/>from_amid OR from_agent mismatch → reject"]
+    end
+
+    subgraph infra["Layer 7: Infrastructure"]
+        direction LR
+        netpol["NetworkPolicy: default-deny<br/>mesh egress only"]
+        readonly["Read-only rootfs<br/>seccomp + non-root"]
+        kube["Kubeconfig: read-only mount<br/>dev mode only"]
+        validated["registry_mode validated: local|global<br/>trusted_peers: control chars rejected"]
+    end
+
+    gate --> isolation --> auth --> encryption --> injection --> identity --> infra
+```
+
+### 11.4 Env Var Propagation (Controller → Containers)
+
+Both containers in the sandbox pod receive governance env vars. This is critical for handoff — the router needs `AGT_REGISTRY_MODE` to gate handoff endpoints, and `AGT_TRUSTED_PEERS` for KNOCK authentication.
+
+```mermaid
+graph LR
+    CRD["ClawSandbox CRD<br/>governance spec"] --> Ctrl["Controller<br/>reconciler.rs"]
+
+    Ctrl --> OC["OpenClaw Container"]
+    Ctrl --> IR["Inference Router"]
+
+    subgraph OC_env["OpenClaw Env Vars"]
+        direction TB
+        oc1["AGT_GOVERNANCE_ENABLED"]
+        oc2["AGT_POLICY_PROFILE"]
+        oc3["AGT_TRUST_THRESHOLD"]
+        oc4["AGT_TRUSTED_PEERS ✅"]
+        oc5["AGT_REGISTRY_MODE ✅"]
+    end
+
+    subgraph IR_env["Router Env Vars"]
+        direction TB
+        ir1["AGT_GOVERNANCE_ENABLED"]
+        ir2["AGT_POLICY_PROFILE"]
+        ir3["AGT_TRUST_THRESHOLD"]
+        ir4["AGT_TRUSTED_PEERS ✅"]
+        ir5["AGT_REGISTRY_MODE ✅"]
+        ir6["AGT_MESH_NAMESPACE"]
+        ir7["AGT_RELAY_URL"]
+        ir8["AGT_REGISTRY_URL"]
+    end
+
+    OC --> OC_env
+    IR --> IR_env
+
+    subgraph validation["CRD Validation"]
+        direction TB
+        v1["trusted_peers: reject \\n \\r \\0"]
+        v2["registry_mode: only local|global"]
+    end
+
+    CRD --> validation
+    validation --> Ctrl
+```
+
+### 11.5 Two Orchestration Paths
+
+There are two independent orchestration paths for handoff — both valid, serving different use cases:
+
+```mermaid
+graph TB
+    subgraph llm_path["LLM-Driven (plugin.ts — interactive webchat)"]
+        direction TB
+        L1["handoff_request tool<br/>→ POST /agt/handoff/pending"]
+        L2["handoff_confirm tool<br/>→ POST /agt/handoff/confirm"]
+        L3["_runHandoffOrchestration()<br/>runs async in background"]
+        L4["handoff_status tool<br/>polled every 3-5s by LLM"]
+        L1 --> L2 --> L3
+        L3 -.-> L4
+    end
+
+    subgraph cli_path["CLI-Driven (handoff.ts — operator terminal)"]
+        direction TB
+        C1["azureclaw handoff ‹name›<br/>→ POST /agt/handoff/init"]
+        C2["Direct snapshot + drain<br/>→ POST /snapshot, /drain"]
+        C3["kubectl apply CRD<br/>+ port-forward + restore"]
+        C4["Terminal progress bar<br/>(Stepper class)"]
+        C1 --> C2 --> C3
+        C3 -.-> C4
+    end
+
+    subgraph differences["Key Differences"]
+        direction TB
+        D1["LLM path: two-stage gate<br/>(pending → confirm with code)"]
+        D2["CLI path: direct init<br/>(operator trusted, no gate)"]
+        D3["LLM path: mesh transfer<br/>(E2E encrypted via relay)"]
+        D4["CLI path: port-forward restore<br/>(direct HTTP to target)"]
+    end
+
+    llm_path --- differences
+    cli_path --- differences
+```
+
+### 11.6 Trust Flow — Current vs Future
+
+Currently agents register anonymously (trust score = 0), so `AGT_TRUSTED_PEERS` provides the +500 KNOCK bonus. With Entra OAuth deployed, agents get verified identities and real reputation.
+
+```mermaid
+graph LR
+    subgraph current["Current — Unauthenticated"]
+        S1["Source AMID<br/>registry score: 0"] -->|KNOCK| T1["Target<br/>threshold: 500"]
+        T1 -->|"+500 trusted_peers bonus"| A1["✅ 500 ≥ 500"]
+    end
+
+    subgraph future["Future — Entra OAuth"]
+        S2["Source AMID<br/>Entra-verified"] -->|KNOCK| T2["Target<br/>threshold: 500"]
+        T2 -->|"registry reputation: 800"| A2["✅ 800 ≥ 500"]
+        Note1["No trusted_peers needed<br/>Real identity = real trust"]
+    end
+```
+
+### 11.7 Error Recovery & Known Limitations
+
+```mermaid
+graph TB
+    subgraph failure_modes["Failure Modes"]
+        F1["Mesh send fails<br/>(5 retries exhausted)"]
+        F2["Target doesn't register<br/>(90s timeout)"]
+        F3["Verification timeout<br/>(60s)"]
+        F4["Restore decrypt fails<br/>(wrong key / tampered blob)"]
+        F5["Abort after drain"]
+    end
+
+    subgraph recovery["Current Recovery"]
+        R1["Abort → token revoked,<br/>phase reset"]
+        R2["Abort → phase reset,<br/>target pod orphaned ⚠️"]
+        R3["Status = partial,<br/>target may still restore"]
+        R4["Target sends error<br/>via mesh → abort"]
+        R5["Agent stuck in drained<br/>state until restart ⚠️"]
+    end
+
+    subgraph improvements["Planned Improvements"]
+        I1["Auto-cleanup orphaned CRDs<br/>on abort"]
+        I2["POST /agt/handoff/resume<br/>to cancel drain"]
+        I3["Router enforces phase<br/>ordering (state machine)"]
+    end
+
+    F1 --> R1
+    F2 --> R2
+    F3 --> R3
+    F4 --> R4
+    F5 --> R5
+
+    R2 --> I1
+    R5 --> I2
+    recovery --> I3
+```
+
+---
+
+## 12. Bidirectional Handoff with Sub-Agents
+
+Full roundtrip handoff: local Docker ↔ AKS cloud, including sub-agent lifecycle (snapshot, destroy, re-spawn, workspace inject, task resume). The local Docker parent is the permanent "home base" — everything else is ephemeral.
+
+### 12.1 Agent Lifecycle Across Handoff
+
+```mermaid
+graph LR
+    subgraph local["Local Docker (Home)"]
+        LP["Parent Agent<br/>(permanent)"]
+        LS1["Sub-Agent 1<br/>(ephemeral)"]
+        LS2["Sub-Agent 2<br/>(ephemeral)"]
+    end
+
+    subgraph cloud["AKS Cloud (Ephemeral)"]
+        CP["Parent Agent<br/>(created by handoff)"]
+        CS1["Sub-Agent 1<br/>(re-spawned)"]
+        CS2["Sub-Agent 2<br/>(re-spawned)"]
+    end
+
+    LP -->|"forward handoff<br/>snapshot + spawn"| CP
+    LS1 -.->|"destroyed"| CS1
+    LS2 -.->|"destroyed"| CS2
+    CP -->|"reverse handoff<br/>snapshot + wake"| LP
+    CS1 -.->|"CRD deleted"| LS1
+    CS2 -.->|"CRD deleted"| LS2
+
+    style LP fill:#2d5a2d,stroke:#4a4
+    style CP fill:#2d2d5a,stroke:#44a
+    style LS1 fill:#5a5a2d,stroke:#aa4
+    style LS2 fill:#5a5a2d,stroke:#aa4
+    style CS1 fill:#5a2d5a,stroke:#a4a
+    style CS2 fill:#5a2d5a,stroke:#a4a
+```
+
+**Key principle:** Sub-agents are never migrated — they are destroyed and re-spawned. Only the parent's snapshot (which includes sub-agent definitions and workspace tars) crosses the boundary.
+
+### 12.2 Forward Handoff: Local → Cloud (with Sub-Agents)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as 🖥️ CLI / Plugin
+    participant Router as 🛡️ Source Router
+    participant Docker as 🐳 Docker Sub-Agents
+    participant K8s as ☸️ K8s API
+    participant Ctrl as 🎛️ Controller
+    participant Relay as 📡 Relay
+    participant Reg as 📋 Registry
+    participant CP as ☁️ Cloud Parent
+    participant CS as ☁️ Cloud Sub-Agents
+
+    Note over CLI,CS: ──── Phase 1: Snapshot with Sub-Agent State ────
+
+    CLI->>Router: GET /agt/handoff/sub-agents
+    Router-->>CLI: [{name, capabilities, amid}]
+
+    par Interrupt all sub-agents
+        CLI->>Docker: write .handoff-interrupt to each workspace
+    end
+    Note right of Docker: 3s pause for agents<br/>to save checkpoints
+
+    par Collect sub-agent workspaces
+        CLI->>Docker: tar workspace from each container
+    end
+
+    CLI->>Router: POST /agt/handoff/snapshot
+    Note right of Router: Snapshot includes:<br/>sub_agent_snapshots[],<br/>each with workspace_tar
+
+    Note over CLI,CS: ──── Phase 2: Spawn Cloud Parent + Restore ────
+
+    CLI->>K8s: Create parent ClawSandbox CRD
+    Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
+    CLI->>CP: POST /agt/handoff/restore {blob}
+    Note right of CP: Restore re-spawns sub-agents<br/>via POST /sandbox/spawn per snapshot
+
+    CP->>K8s: Create sub-agent ClawSandbox CRDs
+    Ctrl->>CS: Reconcile → Sub-agent pods
+
+    Note over CLI,CS: ──── Phase 3: Sub-Agent Trust + Workspace Inject ────
+
+    rect rgb(60, 60, 40)
+        Note over CP,CS: Stale AMID Filter
+        CP->>CP: Collect original_amid from snapshots
+        loop Search registry (reject stale AMIDs)
+            CP->>Reg: search by capability
+            Reg-->>CP: candidates
+            CP->>CP: Filter out original_amid matches
+        end
+        Note right of CP: Wait until NEW AMIDs appear<br/>(old entries age out)
+    end
+
+    rect rgb(40, 60, 40)
+        Note over CP,CS: Prekey Gate + Workspace Inject
+        loop Wait for E2E session (20 × 3s)
+            CP->>Relay: ping sub-agent
+        end
+        CP->>Relay: mesh_send(workspace_inject, tar)
+        Relay->>CS: deliver workspace tar
+        CS->>CS: Extract tar + promote incoming/<br/>+ write HANDOFF_FILES.md
+        CS->>Relay: mesh_send(workspace_inject_ack)
+        Relay->>CP: deliver ack ✓
+    end
+
+    CP->>Relay: mesh_send(handoff:resume, task_context)
+    Relay->>CS: deliver resume signal
+    CS->>CS: Resume interrupted task
+
+    Note over CLI,CS: ──── Phase 4: Local Cleanup ────
+    CLI->>Docker: Stop + remove sub-agent containers
+    CLI->>Router: POST /agt/handoff/decommission
+    Note right of Router: Parent goes dormant<br/>(Docker container preserved)
+```
+
+### 12.3 Reverse Handoff: Cloud → Local (with Sub-Agents)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as 🖥️ CLI
+    participant CP as ☁️ Cloud Parent
+    participant CS as ☁️ Cloud Sub-Agents
+    participant K8s as ☸️ K8s API
+    participant Relay as 📡 Relay
+    participant Reg as 📋 Registry
+    participant LP as 🏠 Local Parent
+    participant Docker as 🐳 Docker
+
+    Note over CLI,Docker: ──── Phase 1: Snapshot Cloud State ────
+
+    CLI->>CP: GET /agt/handoff/sub-agents
+    CP-->>CLI: [{name, capabilities, amid}]
+
+    par Interrupt + collect sub-agent workspaces
+        CLI->>CS: kubectl exec: write .handoff-interrupt
+        CLI->>CS: kubectl exec: tar workspace
+    end
+
+    CLI->>CP: POST /agt/handoff/snapshot
+    Note right of CP: Snapshot includes<br/>sub_agent_snapshots[]
+
+    Note over CLI,Docker: ──── Phase 2: Wake Local + Restore ────
+
+    CLI->>Docker: docker start (wake dormant parent)
+    CLI->>LP: POST /agt/handoff/restore {blob}
+    Note right of LP: Restore re-spawns sub-agents<br/>as local Docker containers
+
+    LP->>Docker: docker run sub-agent containers
+    Note over LP,Docker: Trust + workspace inject + resume<br/>(same flow as forward §12.2 Phase 3)
+
+    Note over CLI,Docker: ──── Phase 3: Cloud Cleanup ────
+
+    CLI->>CP: POST /agt/handoff/decommission
+    par Delete all cloud CRDs
+        CLI->>K8s: kubectl delete clawsandbox parent
+        CLI->>K8s: kubectl delete clawsandbox sub-agent-1
+        CLI->>K8s: kubectl delete clawsandbox sub-agent-2
+    end
+    Note right of K8s: Controller cascades:<br/>namespace, deploy, svc,<br/>networkpolicy all deleted
+```
+
+### 12.4 Stale AMID Cache Poisoning — Problem & Fix
+
+After handoff, the predecessor's sub-agents leave stale AMIDs in the registry (5-minute heartbeat timeout). The successor's trust+resume loop could cache these dead AMIDs, causing all mesh messages to silently drop.
+
+```mermaid
+sequenceDiagram
+    participant Old as Old Sub-Agent<br/>(AMID: 3FFu...)
+    participant Reg as 📋 Registry
+    participant New as New Sub-Agent<br/>(AMID: 4SKY...)
+    participant Parent as Successor Parent
+
+    Note over Old,Parent: T+0: Docker containers destroyed
+
+    Old->>Reg: Last heartbeat at T-30s
+    Note right of Reg: AMID 3FFu... still "online"<br/>(heartbeat timeout = 5 min)
+
+    Parent->>Reg: search("researcher")
+    Reg-->>Parent: 3FFu... (STALE ❌)
+    Note right of Parent: original_amid filter rejects!<br/>Keeps searching...
+
+    Note over Old,Parent: T+27s: New AKS sub-agent registers
+
+    New->>Reg: Register AMID 4SKY...
+    Note right of Reg: Ghost cleanup deletes 3FFu...<br/>4SKY... is now "online"
+
+    Parent->>Reg: search("researcher")
+    Reg-->>Parent: 4SKY... (NEW ✅)
+    Parent->>Parent: Cache 4SKY... in nameToAmid
+```
+
+**Three-layer fix:**
+1. **Stale AMID rejection** — `original_amid` from snapshots used to filter registry results by identity, not time
+2. **Prekey readiness gate** — 20 attempts × 3s to verify E2E session before workspace_inject
+3. **Workspace inject retry** — 3 attempts with 20s ack wait, catches send errors
+
+### 12.5 Workspace Injection Detail
+
+```mermaid
+graph TB
+    subgraph sender["Parent (sender)"]
+        S1["Collect workspace tar<br/>from snapshot"] --> S2["mesh_send(workspace_inject,<br/>base64 tar)"]
+        S2 --> S3{"Ack received<br/>within 20s?"}
+        S3 -->|No| S4["Retry (max 3)"]
+        S4 --> S2
+        S3 -->|Yes| S5["Send handoff:resume<br/>with task_context"]
+    end
+
+    subgraph receiver["Sub-Agent (receiver)"]
+        R1["Receive workspace_inject"] --> R2["Validate tar entries<br/>(no path traversal)"]
+        R2 --> R3["Extract to /sandbox/<br/>(--no-overwrite-dir)"]
+        R3 --> R4["Promote incoming/ files<br/>to workspace root"]
+        R4 --> R5["Write HANDOFF_FILES.md<br/>(file manifest)"]
+        R5 --> R6["Send workspace_inject_ack<br/>{success, file_count}"]
+    end
+
+    S2 -.->|E2E encrypted<br/>via relay| R1
+    R6 -.->|E2E encrypted<br/>via relay| S3
+```

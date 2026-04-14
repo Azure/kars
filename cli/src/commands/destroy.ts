@@ -9,6 +9,8 @@ export function destroyCommand(): Command {
     .description("Teardown sandbox(es) or the entire AzureClaw deployment")
     .argument("[name]", "Sandbox name (omit to destroy all sandboxes)")
     .option("-y, --yes", "Skip confirmation prompt", false)
+    .option("--local", "Destroy local Docker sandbox only (skip AKS)", false)
+    .option("--cloud", "Destroy AKS cloud sandbox only (skip Docker)", false)
     .option("--all", "Destroy ALL resources (AKS, ACR, KV, AOAI — deletes the resource group)", false)
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--region <region>", "Azure region (used to derive resource group)", "eastus2")
@@ -68,16 +70,39 @@ export function destroyCommand(): Command {
         const { execa } = await import("execa");
         const containerName = `azureclaw-${name}`;
 
-        // Check if this is a local Docker container
-        let isLocal = false;
-        try {
-          await execa("docker", ["inspect", containerName], { stdio: "pipe" });
-          isLocal = true;
-        } catch {
-          // Not a local container — fall through to kubectl
+        // Detect where the agent exists
+        let localExists = false;
+        let aksExists = false;
+
+        if (!options.cloud) {
+          try {
+            await execa("docker", ["inspect", containerName], { stdio: "pipe" });
+            localExists = true;
+          } catch { /* no local container */ }
         }
 
-        if (isLocal) {
+        if (!options.local) {
+          try {
+            await execa("kubectl", [
+              "get", "clawsandbox", name, "-n", "azureclaw-system", "--no-headers",
+            ], { stdio: "pipe" });
+            aksExists = true;
+          } catch { /* no AKS sandbox */ }
+        }
+
+        // Ambiguity: both exist, no explicit flag
+        if (localExists && aksExists && !options.local && !options.cloud) {
+          console.log(chalk.yellow(`\n  ⚠️  '${name}' exists in both Docker and AKS.`));
+          console.log();
+          console.log(`  ${chalk.cyan(`azureclaw destroy ${name} --local`)}   → destroy Docker container`);
+          console.log(`  ${chalk.cyan(`azureclaw destroy ${name} --cloud`)}   → destroy AKS sandbox`);
+          console.log(`  ${chalk.cyan(`azureclaw destroy ${name} --local --cloud`)}   → destroy both`);
+          console.log();
+          return;
+        }
+
+        // Destroy local if requested or if it's the only one
+        if (localExists && (options.local || !aksExists)) {
           const spinner = ora(`Destroying local sandbox '${name}'...`).start();
           try {
             await execa("docker", ["rm", "-f", containerName], { stdio: "pipe" });
@@ -118,13 +143,20 @@ export function destroyCommand(): Command {
                 }).catch(() => {});
             }
 
-            spinner.succeed(`Sandbox '${name}' destroyed`);
+            spinner.succeed(`Local sandbox '${name}' destroyed`);
           } catch (error) {
             spinner.fail("Destroy failed");
             const message = error instanceof Error ? error.message : String(error);
             console.error(chalk.red(`\nError: ${message}\n`));
             process.exit(1);
           }
+          // If also destroying cloud, continue; otherwise done
+          if (!aksExists || (!options.cloud && !options.local)) return;
+        }
+
+        // Nothing found locally and no AKS either
+        if (!localExists && !aksExists) {
+          console.log(chalk.red(`\n  Sandbox '${name}' not found.\n`));
           return;
         }
       }

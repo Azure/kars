@@ -1,0 +1,202 @@
+# AgentMesh Global Ingress — AGIC (Application Gateway Ingress Controller)
+#
+# Exposes relay (WebSocket) and registry (HTTP) publicly with:
+#   - Azure-managed TLS (Key Vault or AppGW certificates)
+#   - WAF v2 rate limiting
+#   - WebSocket support for relay
+#
+# Prerequisites:
+#   - AKS cluster with AGIC add-on enabled
+#   - DNS records: relay.<domain> and registry.<domain> → AppGW public IP
+#   - WAF policy created (see waf-policy section below)
+#
+# Deploy:
+#   kubectl apply -f deploy/agentmesh-ingress.yaml
+#   azureclaw up --expose-registry  (automated)
+---
+# NetworkPolicy: PostgreSQL — only reachable from registry pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-restrict
+  namespace: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: agentmesh-registry
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# NetworkPolicy: Registry — only from Application Gateway subnet + internal pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: registry-restrict
+  namespace: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+spec:
+  podSelector:
+    matchLabels:
+      app: agentmesh-registry
+  policyTypes:
+    - Ingress
+  ingress:
+    # From Application Gateway subnet (AGIC)
+    - from:
+        - ipBlock:
+            # Placeholder — replaced by azureclaw up with actual AppGW subnet CIDR
+            cidr: 10.225.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8080
+    # From internal sandbox pods (via K8s service)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: azureclaw
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# NetworkPolicy: Relay — only from Application Gateway subnet + internal pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-restrict
+  namespace: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+spec:
+  podSelector:
+    matchLabels:
+      app: agentmesh-relay
+  policyTypes:
+    - Ingress
+  ingress:
+    # From Application Gateway subnet (AGIC)
+    - from:
+        - ipBlock:
+            # Placeholder — replaced by azureclaw up with actual AppGW subnet CIDR
+            cidr: 10.225.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8765
+    # From internal sandbox pods
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: azureclaw
+      ports:
+        - protocol: TCP
+          port: 8765
+---
+# Ingress: Registry API (HTTPS)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentmesh-registry-ingress
+  namespace: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+  annotations:
+    kubernetes.io/ingress.class: azure/application-gateway
+    # TLS: redirect HTTP → HTTPS
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    # Health probe on registry health endpoint
+    appgw.ingress.kubernetes.io/health-probe-path: /v1/health
+    appgw.ingress.kubernetes.io/health-probe-status-codes: "200"
+    # Request timeout (seconds)
+    appgw.ingress.kubernetes.io/request-timeout: "30"
+    # WAF policy (created by azureclaw up --expose-registry)
+    appgw.ingress.kubernetes.io/waf-policy-for-path: /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/agentmesh-waf
+    # Backend protocol
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    # Connection draining for graceful updates
+    appgw.ingress.kubernetes.io/connection-draining: "true"
+    appgw.ingress.kubernetes.io/connection-draining-timeout: "30"
+spec:
+  tls:
+    - hosts:
+        # Placeholder — replaced by azureclaw up with actual domain
+        - registry.DOMAIN_PLACEHOLDER
+      secretName: agentmesh-tls
+  rules:
+    - host: registry.DOMAIN_PLACEHOLDER
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agentmesh-registry
+                port:
+                  number: 8080
+---
+# Ingress: Relay WebSocket (WSS)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentmesh-relay-ingress
+  namespace: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+  annotations:
+    kubernetes.io/ingress.class: azure/application-gateway
+    # TLS: redirect HTTP → HTTPS
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    # Health probe — relay uses TCP socket, not HTTP
+    appgw.ingress.kubernetes.io/health-probe-port: "8765"
+    appgw.ingress.kubernetes.io/health-probe-status-codes: "200-499"
+    # Long timeout for WebSocket connections (1 hour)
+    appgw.ingress.kubernetes.io/request-timeout: "3600"
+    # WAF policy
+    appgw.ingress.kubernetes.io/waf-policy-for-path: /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/agentmesh-waf
+    # Backend protocol — HTTP for WS upgrade
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    # Connection draining
+    appgw.ingress.kubernetes.io/connection-draining: "true"
+    appgw.ingress.kubernetes.io/connection-draining-timeout: "60"
+spec:
+  tls:
+    - hosts:
+        - relay.DOMAIN_PLACEHOLDER
+      secretName: agentmesh-tls
+  rules:
+    - host: relay.DOMAIN_PLACEHOLDER
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agentmesh-relay
+                port:
+                  number: 8765
+---
+# OAuth credentials secret (created by azureclaw up --expose-registry)
+# This is a template — actual values are provisioned at deploy time.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentmesh-oauth-credentials
+  namespace: agentmesh
+  labels:
+    app.kubernetes.io/managed-by: azureclaw
+type: Opaque
+stringData:
+  GITHUB_CLIENT_ID: ""
+  GITHUB_CLIENT_SECRET: ""
+  ENTRA_CLIENT_ID: ""
+  ENTRA_CLIENT_SECRET: ""
+  ENTRA_TENANT_ID: ""

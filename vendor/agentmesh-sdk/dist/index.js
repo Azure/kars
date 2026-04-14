@@ -956,7 +956,9 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
   }
   /**
@@ -1054,7 +1056,7 @@ var SessionManager = class {
   async initiateSession(peerAmid, peerBundle, peerSigningKey) {
     const existing = this.getSessionByPeer(peerAmid);
     if (existing && existing.state === "active" /* ACTIVE */) {
-      throw new Error(`Active session already exists with ${peerAmid}`);
+      return { sessionId: existing.sessionId, x3dhMessage: null, reused: true };
     }
     const x3dhResult = await X3DHKeyExchange.initiator(
       this.identity,
@@ -1365,7 +1367,9 @@ var SessionManager = class {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
   }
   /**
@@ -2899,7 +2903,8 @@ var AgentMeshClient = class _AgentMeshClient {
     if (options.autoUploadPrekeys !== false) {
       await this.uploadPrekeys();
     }
-    await this.transport.connect();
+    // PATCH #9: Check transport.connect() result — don't set connected if transport failed
+    const transportConnected = await this.transport.connect();
     this.transport.onMessage("receive", async (data) => {
       const fromAmid = data.from;
       const rawPayload = data.encrypted_payload;
@@ -3055,6 +3060,11 @@ var AgentMeshClient = class _AgentMeshClient {
         }
       }
     });
+    // PATCH #9 continued: only mark connected if transport actually connected
+    if (transportConnected === false) {
+      await this.auditLogger.log("CONNECTION_FAILED", "WARN", "Transport connect returned false — relay unreachable");
+      return; // Don't set this.connected = true, so reconnect can retry
+    }
     this.connected = true;
     this.emitEvent("connected", { amid: this.amid });
     await this.auditLogger.log("CONNECTION_ESTABLISHED", "INFO", "Connected to AgentMesh");
@@ -3180,13 +3190,17 @@ var AgentMeshClient = class _AgentMeshClient {
     const bundle = this.convertRegistryBundle(registryBundle);
     const signingKeyB64 = agentInfo.signingPublicKey;
     const signingKey = this.base64Decode(signingKeyB64);
-    const { sessionId, x3dhMessage } = await this.sessionManager.initiateSession(
+    const result = await this.sessionManager.initiateSession(
       toAmid,
       bundle,
       signingKey
     );
-    this.pendingX3DH.set(toAmid, x3dhMessage);
+    const { sessionId } = result;
     this.activeSessions.set(toAmid, sessionId);
+    if (result.reused) {
+      return sessionId;
+    }
+    this.pendingX3DH.set(toAmid, result.x3dhMessage);
     const request = {
       type: options.sessionType || "one-shot",
       ttl: options.ttl || 3600,

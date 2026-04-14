@@ -182,6 +182,61 @@ pub fn verify_update_signature(
     Ok(())
 }
 
+/// Verify a signature over arbitrary message bytes (for succession/reclamation).
+///
+/// Unlike `verify_registration_signature`, this does NOT verify AMID derivation
+/// (caller must verify the signing key matches the registered agent separately).
+/// Timestamp validation uses the provided `timestamp_str` for replay protection.
+pub fn verify_succession_signature(
+    public_key_b64: &str,
+    message: &[u8],
+    signature_b64: &str,
+    timestamp_str: &str,
+) -> Result<(), AuthError> {
+    // Validate timestamp for replay protection
+    let timestamp = DateTime::parse_from_rfc3339(timestamp_str)
+        .or_else(|_| DateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|_| AuthError::InvalidTimestamp)?;
+
+    let now = Utc::now();
+    let age = now.signed_duration_since(timestamp);
+
+    if age > Duration::minutes(5) {
+        return Err(AuthError::TimestampTooOld);
+    }
+    if age < Duration::minutes(-1) {
+        return Err(AuthError::TimestampInFuture);
+    }
+
+    let key_b64 = strip_key_prefix(public_key_b64);
+
+    let public_key_bytes = BASE64.decode(key_b64)
+        .map_err(|_| AuthError::InvalidPublicKeyFormat)?;
+
+    let public_key_array: [u8; 32] = public_key_bytes
+        .try_into()
+        .map_err(|_| AuthError::InvalidPublicKeyFormat)?;
+
+    let verifying_key = VerifyingKey::from_bytes(&public_key_array)
+        .map_err(|_| AuthError::InvalidPublicKeyFormat)?;
+
+    let signature_bytes = BASE64.decode(signature_b64)
+        .map_err(|_| AuthError::InvalidSignatureFormat)?;
+
+    let signature_array: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| AuthError::InvalidSignatureFormat)?;
+
+    let signature = Signature::from_bytes(&signature_array);
+
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|_| AuthError::SignatureVerificationFailed)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
