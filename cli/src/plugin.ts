@@ -63,6 +63,49 @@ let agtConnected = false;
 let agtReconnectFailures = 0;
 const AGT_RECONNECT_MAX_BACKOFF = 300_000; // 5 min cap
 
+// ── Chunked mesh transfer layer ──────────────────────────────────────────────
+// General-purpose transport for large payloads over the E2E encrypted mesh.
+// Any message exceeding MESH_CHUNK_THRESHOLD is auto-split into chunks by
+// meshSend(), and auto-reassembled by the onMessage handler before reaching
+// application logic. This is transparent — callers see a single send/receive.
+//
+// Protocol:
+//   1. Sender calls meshSend(amid, message)
+//   2. If serialized message ≤ threshold: sent as-is (fast path)
+//   3. If > threshold: sends mesh:transfer_manifest + N mesh:transfer_chunk
+//   4. Receiver accumulates chunks in pendingTransfers
+//   5. When all chunks arrive: verify SHA-256 hashes, reassemble, push to inbox
+//
+// Used by: mesh_send tool, mesh_transfer_file tool, handoff blob transfer,
+//          sub-agent workspace collection — any large mesh payload.
+
+const MESH_CHUNK_THRESHOLD = 512 * 1024;  // auto-chunk above 512KB
+const MESH_CHUNK_SIZE = 512 * 1024;       // 512KB per chunk
+const MESH_MAX_CHUNKS = 80;               // 80 × 512KB ≈ 40MB max payload
+const MESH_TRANSFER_TTL = 120_000;        // 2min TTL for incomplete transfers
+
+interface PendingMeshTransfer {
+  from_amid: string;
+  from_agent: string;
+  transfer_id: string;
+  total_chunks: number;
+  total_bytes: number;
+  chunk_hashes: string[];
+  manifest_hash: string;
+  metadata: Record<string, unknown>;  // all non-payload fields from the original message
+  chunks: Map<number, string>;
+  received_at: number;
+}
+const pendingTransfers = new Map<string, PendingMeshTransfer>();
+
+// Cleanup stale transfers every 30s
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, t] of pendingTransfers) {
+    if (now - t.received_at > MESH_TRANSFER_TTL) pendingTransfers.delete(key);
+  }
+}, 30_000).unref();
+
 // ── Handoff progress tracker (module-level, survives across tool calls) ──
 interface HandoffProgress {
   phase: string;
@@ -1000,6 +1043,206 @@ async function processTaskWithTools(
   return "Sub-agent reached maximum tool-calling rounds without a final response.";
 }
 
+// ── meshSend: auto-chunking send wrapper ─────────────────────────────────────
+// Transparently chunks large messages. Small messages pass through directly.
+// Returns a transfer_id if chunked (for tracking), or undefined for direct send.
+async function meshSend(
+  client: { send: (amid: string, msg: unknown) => Promise<void> },
+  targetAmid: string,
+  message: Record<string, unknown>,
+  _log?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<string | undefined> {
+  const json = JSON.stringify(message);
+
+  if (json.length <= MESH_CHUNK_THRESHOLD) {
+    // Fast path — single message
+    await client.send(targetAmid, message);
+    return undefined;
+  }
+
+  // Large payload — chunked transfer
+  const totalChunks = Math.ceil(json.length / MESH_CHUNK_SIZE);
+  if (totalChunks > MESH_MAX_CHUNKS) {
+    throw new Error(
+      `Payload too large for mesh transfer: ${(json.length / 1024 / 1024).toFixed(1)} MB ` +
+      `(${totalChunks} chunks exceeds max ${MESH_MAX_CHUNKS})`
+    );
+  }
+
+  const { createHash } = await import("node:crypto");
+  const transferId = crypto.randomUUID();
+  const fromAgent = String(message.from_agent || process.env.SANDBOX_NAME || "unknown");
+
+  // Compute per-chunk SHA-256 for integrity verification
+  const chunkHashes: string[] = [];
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = json.slice(i * MESH_CHUNK_SIZE, (i + 1) * MESH_CHUNK_SIZE);
+    chunkHashes.push(createHash("sha256").update(chunk).digest("hex"));
+  }
+  const manifestHash = createHash("sha256").update(chunkHashes.join(":")).digest("hex");
+
+  _log?.info(
+    `Mesh chunked send: ${(json.length / 1024).toFixed(0)} KB → ${totalChunks} chunks ` +
+    `(transfer ${transferId.slice(0, 8)})`
+  );
+
+  // 1. Send manifest — receiver knows what to expect
+  await client.send(targetAmid, {
+    type: "mesh:transfer_manifest",
+    transfer_id: transferId,
+    original_type: message.type || "message",
+    total_chunks: totalChunks,
+    total_bytes: json.length,
+    chunk_hashes: chunkHashes,
+    manifest_hash: manifestHash,
+    from_agent: fromAgent,
+    timestamp: new Date().toISOString(),
+  });
+
+  // 2. Send chunks sequentially (relay preserves FIFO order per peer)
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkData = json.slice(i * MESH_CHUNK_SIZE, (i + 1) * MESH_CHUNK_SIZE);
+    await client.send(targetAmid, {
+      type: "mesh:transfer_chunk",
+      transfer_id: transferId,
+      chunk_index: i,
+      total_chunks: totalChunks,
+      data: chunkData,
+      hash: chunkHashes[i],
+      from_agent: fromAgent,
+    });
+  }
+
+  _log?.info(`Mesh chunked send complete: ${totalChunks} chunks (transfer ${transferId.slice(0, 8)})`);
+  return transferId;
+}
+
+// ── meshHandleTransportMessage: chunk accumulation + reassembly ───────────────
+// Called from onMessage handler. Returns the reassembled message if complete,
+// or null if the message was a transport chunk (absorbed, not for app layer).
+// Returns undefined if the message is NOT a transport message (pass through).
+async function meshHandleTransportMessage(
+  fromAmid: string,
+  fromAgent: string,
+  message: any,
+  _log?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<Record<string, unknown> | null | undefined> {
+  const msgType = message?.type;
+  if (msgType !== "mesh:transfer_manifest" && msgType !== "mesh:transfer_chunk") {
+    return undefined; // not a transport message — pass through to app layer
+  }
+
+  const transferId = message.transfer_id;
+  if (!transferId) return null; // malformed — absorb silently
+
+  const key = `${fromAmid}:${transferId}`;
+
+  if (msgType === "mesh:transfer_manifest") {
+    // Store manifest and prepare accumulator
+    pendingTransfers.set(key, {
+      from_amid: fromAmid,
+      from_agent: fromAgent,
+      transfer_id: transferId,
+      total_chunks: message.total_chunks,
+      total_bytes: message.total_bytes,
+      chunk_hashes: message.chunk_hashes || [],
+      manifest_hash: message.manifest_hash || "",
+      metadata: { original_type: message.original_type },
+      chunks: new Map(),
+      received_at: Date.now(),
+    });
+    _log?.info(
+      `Mesh transfer manifest: ${message.total_chunks} chunks, ` +
+      `${(message.total_bytes / 1024).toFixed(0)} KB (transfer ${transferId.slice(0, 8)})`
+    );
+    return null; // absorbed
+  }
+
+  // mesh:transfer_chunk
+  const transfer = pendingTransfers.get(key);
+  if (!transfer) {
+    // Chunk arrived before manifest or after TTL — try to find by transfer_id alone
+    for (const [k, t] of pendingTransfers) {
+      if (t.transfer_id === transferId && t.from_amid === fromAmid) {
+        t.chunks.set(message.chunk_index, message.data);
+        return null;
+      }
+    }
+    _log?.warn(`Mesh chunk for unknown transfer ${transferId.slice(0, 8)} — dropped`);
+    return null;
+  }
+
+  // Verify chunk hash before accepting
+  if (message.hash && transfer.chunk_hashes[message.chunk_index]) {
+    const { createHash } = await import("node:crypto");
+    const computed = createHash("sha256").update(message.data).digest("hex");
+    if (computed !== message.hash) {
+      _log?.warn(
+        `Mesh chunk ${message.chunk_index} hash mismatch (transfer ${transferId.slice(0, 8)}) — rejected`
+      );
+      return null; // reject corrupted chunk
+    }
+  }
+
+  transfer.chunks.set(message.chunk_index, message.data);
+
+  // Check if all chunks received
+  if (transfer.chunks.size < transfer.total_chunks) {
+    if (transfer.chunks.size % 10 === 0) {
+      _log?.info(
+        `Mesh transfer ${transferId.slice(0, 8)}: ${transfer.chunks.size}/${transfer.total_chunks} chunks`
+      );
+    }
+    return null; // still accumulating
+  }
+
+  // All chunks received — reassemble
+  _log?.info(
+    `Mesh transfer ${transferId.slice(0, 8)}: all ${transfer.total_chunks} chunks received — reassembling`
+  );
+
+  // Verify manifest hash (integrity of the complete chunk set)
+  const { createHash: mHash } = await import("node:crypto");
+  const actualHashes: string[] = [];
+  for (let i = 0; i < transfer.total_chunks; i++) {
+    actualHashes.push(
+      mHash("sha256").update(transfer.chunks.get(i) || "").digest("hex")
+    );
+  }
+  const actualManifestHash = mHash("sha256").update(actualHashes.join(":")).digest("hex");
+  if (transfer.manifest_hash && actualManifestHash !== transfer.manifest_hash) {
+    _log?.warn(
+      `Mesh transfer ${transferId.slice(0, 8)}: manifest hash mismatch — ` +
+      `data may be corrupted (expected ${transfer.manifest_hash.slice(0, 12)}, ` +
+      `got ${actualManifestHash.slice(0, 12)})`
+    );
+    // Continue anyway — let the application layer handle validation
+  }
+
+  // Reassemble JSON
+  const parts: string[] = [];
+  for (let i = 0; i < transfer.total_chunks; i++) {
+    parts.push(transfer.chunks.get(i) || "");
+  }
+  const reassembledJson = parts.join("");
+  pendingTransfers.delete(key);
+
+  let reassembled: Record<string, unknown>;
+  try {
+    reassembled = JSON.parse(reassembledJson);
+  } catch {
+    _log?.warn(`Mesh transfer ${transferId.slice(0, 8)}: reassembled JSON parse failed`);
+    return null;
+  }
+
+  _log?.info(
+    `Mesh transfer ${transferId.slice(0, 8)}: reassembled ${(reassembledJson.length / 1024).toFixed(0)} KB ` +
+    `(type: ${reassembled.type || transfer.metadata.original_type})`
+  );
+
+  return reassembled;
+}
+
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
   // Node hosts don't participate in the mesh — skip entirely.
   if (process.env.AGT_SKIP_INIT === "1") return;
@@ -1204,6 +1447,21 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         fromName = await resolveAmidToName(fromAmid);
       }
       if (!fromName) fromName = fromAmid.slice(0, 12);
+
+      // ── Transport layer: intercept chunked transfer messages ──
+      // mesh:transfer_manifest and mesh:transfer_chunk are transport-level —
+      // they get accumulated and reassembled before reaching application logic.
+      const transportResult = await meshHandleTransportMessage(fromAmid, fromName, message, log);
+      if (transportResult === null) {
+        // Transport message absorbed (manifest or partial chunk) — don't process further
+        return;
+      }
+      if (transportResult !== undefined) {
+        // Reassembled message — replace the original message and continue to app layer
+        message = transportResult;
+        log.info(`Mesh transfer reassembled from '${fromName}' — processing as ${message.type || "message"}`);
+      }
+
       const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
       const entry = {
         from_amid: fromAmid,
@@ -1371,15 +1629,47 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
 
+      // ── Handle file_transfer messages — auto-save received files to workspace ──
+      if (message?.type === "file_transfer" && message?.file_data && message?.file_name) {
+        try {
+          const fs = await import("node:fs");
+          const path = await import("node:path");
+          const incomingDir = "/sandbox/.openclaw/workspace/incoming";
+          fs.mkdirSync(incomingDir, { recursive: true });
+
+          const safeName = String(message.file_name).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 255);
+          const destPath = path.join(incomingDir, safeName);
+          const buf = Buffer.from(message.file_data, "base64");
+          fs.writeFileSync(destPath, buf, { mode: 0o600 });
+
+          log.info(
+            `📁 File received from '${fromName}': ${safeName} ` +
+            `(${(buf.length / 1024).toFixed(1)} KB) → ${destPath}`
+          );
+
+          // Update the inbox entry with save path (already pushed above)
+          const lastEntry = agtInbox[agtInbox.length - 1];
+          if (lastEntry && lastEntry.from_amid === fromAmid) {
+            lastEntry.content = JSON.stringify({
+              type: "file_transfer",
+              file_name: safeName,
+              saved_to: destPath,
+              size_bytes: buf.length,
+              description: message.description || "",
+              from_agent: fromName,
+            });
+          }
+        } catch (ftErr: any) {
+          log.warn(`File transfer save failed: ${ftErr.message}`);
+        }
+        return; // Don't process as a task
+      }
+
       // ── Handle handoff:workspace_request — parent collects sub-agent workspace ──
       // During handoff, the parent asks each sub-agent to serialize its workspace
-      // and send it back via mesh. This avoids needing cross-container exec.
-      // Supports chunked transfer: workspaces > 512KB are split into chunks to
-      // stay under the relay's ~1MB message limit (with Signal Protocol overhead).
+      // and send it back via mesh. Uses meshSend for transparent auto-chunking.
       if (message?.type === "handoff:workspace_request" && fromAmid && agtMeshClient) {
         log.info(`📦 Workspace collection request from '${fromName}' — packaging workspace...`);
-        const CHUNK_SIZE = 512 * 1024; // 512KB per chunk — safe under relay's ~1MB with Signal overhead
-        const MAX_CHUNKS = 80;         // 80 × 512KB = ~40MB max; leaves headroom in 100-msg offline queue
         const agentName = process.env.SANDBOX_NAME || "unknown";
         try {
           const { execSync } = await import("node:child_process");
@@ -1393,67 +1683,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             { timeout: 10000, maxBuffer: 50 * 1024 * 1024 },
           ).toString().trim();
 
-          if (tarB64.length <= CHUNK_SIZE) {
-            // Small workspace — send in a single message (fast path)
-            await agtMeshClient.send(fromAmid, {
-              type: "handoff:workspace_response",
-              name: agentName,
-              workspace_tar: tarB64,
-              size_bytes: tarB64.length,
-              chunked: false,
-              from_agent: agentName,
-              timestamp: new Date().toISOString(),
-            });
-            log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB, single message)`);
-          } else {
-            // Large workspace — split into chunks
-            const totalChunks = Math.ceil(tarB64.length / CHUNK_SIZE);
-            if (totalChunks > MAX_CHUNKS) {
-              log.warn(`Workspace too large for mesh transfer: ${(tarB64.length / 1024 / 1024).toFixed(1)} MB (${totalChunks} chunks > ${MAX_CHUNKS} max)`);
-              await agtMeshClient.send(fromAmid, {
-                type: "handoff:workspace_response",
-                name: agentName,
-                workspace_tar: "",
-                size_bytes: tarB64.length,
-                chunked: false,
-                truncated: true,
-                error: `Workspace too large: ${(tarB64.length / 1024 / 1024).toFixed(1)} MB exceeds mesh limit`,
-                from_agent: agentName,
-                timestamp: new Date().toISOString(),
-              });
-              return;
-            }
-
-            log.info(`📦 Large workspace (${(tarB64.length / 1024).toFixed(1)} KB) — sending ${totalChunks} chunks...`);
-
-            // Send chunks sequentially to avoid relay congestion
-            for (let i = 0; i < totalChunks; i++) {
-              const chunkData = tarB64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-              await agtMeshClient.send(fromAmid, {
-                type: "handoff:workspace_chunk",
-                name: agentName,
-                chunk_index: i,
-                total_chunks: totalChunks,
-                data: chunkData,
-                from_agent: agentName,
-                timestamp: new Date().toISOString(),
-              });
-              if (i % 10 === 9) log.info(`📦 Sent chunk ${i + 1}/${totalChunks}...`);
-            }
-
-            // Send completion marker so receiver knows all chunks are sent
-            await agtMeshClient.send(fromAmid, {
-              type: "handoff:workspace_response",
-              name: agentName,
-              workspace_tar: "",
-              size_bytes: tarB64.length,
-              chunked: true,
-              total_chunks: totalChunks,
-              from_agent: agentName,
-              timestamp: new Date().toISOString(),
-            });
-            log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB, ${totalChunks} chunks)`);
-          }
+          // meshSend auto-chunks if > 512KB — transparent to the receiver
+          await meshSend(agtMeshClient, fromAmid, {
+            type: "handoff:workspace_response",
+            name: agentName,
+            workspace_tar: tarB64,
+            size_bytes: tarB64.length,
+            from_agent: agentName,
+            timestamp: new Date().toISOString(),
+          }, log);
+          log.info(`📦 Workspace sent to '${fromName}' (${(tarB64.length / 1024).toFixed(1)} KB)`);
         } catch (wsErr: any) {
           log.warn(`Workspace collection failed: ${wsErr.message}`);
           try {
@@ -2088,9 +2327,9 @@ async function _runHandoffOrchestration(
       "--exclude='*.pyc' --exclude='__pycache__' " +
       ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
       ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0",
-      { maxBuffer: 10 * 1024 * 1024, timeout: 10000 },
+      { maxBuffer: 50 * 1024 * 1024, timeout: 10000 },
     ).toString("utf-8").trim();
-    if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
+    if (tarB64.length > 0 && tarB64.length < 50 * 1024 * 1024) {
       snapshotPayload.workspace_tar = tarB64;
       _log.info(`Handoff: packed workspace (${(tarB64.length / 1024).toFixed(1)} KB base64)`);
     }
@@ -2158,87 +2397,35 @@ async function _runHandoffOrchestration(
               timestamp: new Date().toISOString(),
             });
 
-            // Wait for workspace response — supports both single-message and chunked transfer.
-            // Chunked: sub-agent sends N workspace_chunk messages followed by a workspace_response
-            // with chunked:true. We collect chunks and reassemble.
-            const chunkMap = new Map<number, string>();
-            let expectedChunks = -1;
-            let gotFinalResponse = false;
+            // Wait for workspace response. The transport layer (meshSend + onMessage)
+            // handles chunking transparently — we just wait for a single
+            // handoff:workspace_response message in the inbox.
             const wsStart = Date.now();
-            const WS_TIMEOUT = 30000; // 30s for chunked (may have many chunks)
+            const WS_TIMEOUT = 60_000; // 60s — large workspaces may take time to chunk
 
             while (Date.now() - wsStart < WS_TIMEOUT) {
-              // Drain all relevant messages from inbox each iteration
-              for (let i = agtInbox.length - 1; i >= 0; i--) {
-                const m = agtInbox[i];
-                if (m.from_amid !== subAmid) continue;
-
+              const idx = agtInbox.findIndex((m) =>
+                m.from_amid === subAmid &&
+                (m.message_type === "handoff:workspace_response" ||
+                 (typeof m.content === "string" && m.content.includes("handoff:workspace_response")))
+              );
+              if (idx >= 0) {
+                const reply = agtInbox.splice(idx, 1)[0];
                 let parsed: any;
-                const raw = m.content;
-                if (typeof raw === "string") {
-                  try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+                if (typeof reply.content === "string") {
+                  try { parsed = JSON.parse(reply.content); } catch { parsed = reply.content; }
                 } else {
-                  parsed = raw;
+                  parsed = reply.content;
                 }
-                const msgType = m.message_type || parsed?.type;
-
-                if (msgType === "handoff:workspace_chunk" || parsed?.type === "handoff:workspace_chunk") {
-                  // Collect chunk
-                  agtInbox.splice(i, 1);
-                  if (typeof parsed?.chunk_index === "number" && typeof parsed?.data === "string") {
-                    chunkMap.set(parsed.chunk_index, parsed.data);
-                    if (typeof parsed.total_chunks === "number") expectedChunks = parsed.total_chunks;
-                  }
-                } else if (msgType === "handoff:workspace_response" ||
-                           (typeof raw === "string" && raw.includes("handoff:workspace_response"))) {
-                  agtInbox.splice(i, 1);
-
-                  if (parsed?.chunked && typeof parsed.total_chunks === "number") {
-                    // Chunked completion marker — set expected and flag
-                    expectedChunks = parsed.total_chunks;
-                    gotFinalResponse = true;
-                  } else if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
-                    // Single-message response (small workspace)
-                    snap.workspace_tar = parsed.workspace_tar;
-                    _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
-                    gotFinalResponse = true;
-                  } else {
-                    // Error or empty response
-                    if (parsed?.error) _log.warn(`Sub-agent '${snap.name}' workspace error: ${parsed.error}`);
-                    gotFinalResponse = true;
-                  }
+                if (parsed?.workspace_tar && parsed.workspace_tar.length > 0) {
+                  snap.workspace_tar = parsed.workspace_tar;
+                  _log.info(`📦 Got workspace from sub-agent '${snap.name}' (${(parsed.size_bytes / 1024).toFixed(1)} KB)`);
+                } else if (parsed?.error) {
+                  _log.warn(`Sub-agent '${snap.name}' workspace error: ${parsed.error}`);
                 }
-              }
-
-              // Check if we have a complete single-message response
-              if (gotFinalResponse && snap.workspace_tar) break;
-
-              // Check if all chunks received
-              if (expectedChunks > 0 && chunkMap.size >= expectedChunks) {
-                // Reassemble chunks in order
-                const parts: string[] = [];
-                for (let ci = 0; ci < expectedChunks; ci++) {
-                  parts.push(chunkMap.get(ci) || "");
-                }
-                snap.workspace_tar = parts.join("");
-                _log.info(`📦 Reassembled workspace from sub-agent '${snap.name}' (${(snap.workspace_tar.length / 1024).toFixed(1)} KB, ${expectedChunks} chunks)`);
                 break;
               }
-
-              // If got final response with no workspace and not chunked, stop waiting
-              if (gotFinalResponse && expectedChunks <= 0) break;
-
-              await new Promise(r => setTimeout(r, 300));
-            }
-
-            // Timeout with partial chunks — try to reassemble what we have
-            if (!snap.workspace_tar && chunkMap.size > 0 && expectedChunks > 0) {
-              _log.warn(`Timeout: got ${chunkMap.size}/${expectedChunks} chunks from '${snap.name}' — using partial`);
-              const parts: string[] = [];
-              for (let ci = 0; ci < expectedChunks; ci++) {
-                parts.push(chunkMap.get(ci) || "");
-              }
-              snap.workspace_tar = parts.join("");
+              await new Promise(r => setTimeout(r, 500));
             }
           } catch (subWsErr: any) {
             _log.warn(`Workspace collection from sub-agent '${snap.name}' failed: ${subWsErr.message}`);
@@ -2379,19 +2566,23 @@ async function _runHandoffOrchestration(
 
   _hp("transfer", "🔐 Sending encrypted state via E2E mesh (Signal Protocol)...");
 
+  // Use meshSend for auto-chunking — transparently handles blobs of any size
+  // up to ~40MB. The receiver's onMessage handler reassembles before processing.
+  const handoffMessage = {
+    type: "handoff_transfer",
+    blob: snapshotResp.blob,
+    shared_secret: sharedSecret,
+    verification_hash: verificationHash,
+    from_agent: myName,
+    predecessor_amid: myAmid,
+    direction,
+    timestamp: new Date().toISOString(),
+  };
+
   let sendSuccess = false;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      await agtMeshClient.send(targetAmid, {
-        type: "handoff_transfer",
-        blob: snapshotResp.blob,
-        shared_secret: sharedSecret,
-        verification_hash: verificationHash,
-        from_agent: myName,
-        predecessor_amid: myAmid,
-        direction,
-        timestamp: new Date().toISOString(),
-      });
+      await meshSend(agtMeshClient, targetAmid, handoffMessage, _log);
       sendSuccess = true;
       break;
     } catch (sendErr: any) {
@@ -2404,7 +2595,7 @@ async function _runHandoffOrchestration(
   }
 
   if (!sendSuccess) {
-    _hp("transfer", "❌ Mesh send failed after 5 attempts");
+    _hp("transfer", "❌ Mesh send failed after retries");
     await _routerCall("POST", "/agt/handoff/abort", {}, 15000, handoffH).catch(() => {});
     if (direction === "local_to_aks") {
       _hp("cleanup", "🧹 Cleaning up orphaned cloud target...");
@@ -2417,9 +2608,6 @@ async function _runHandoffOrchestration(
   _hp("transfer", "📤 Encrypted state sent — waiting for target to verify...");
 
   // ── Step 5: Wait for verification ──
-  // The target may take time to fully initialize its plugin message handler
-  // after registering on the mesh. Re-send the blob every 30s in case the
-  // first send arrived before the handler was ready.
   _hp("verify", "🔍 Waiting for verification from cloud target...");
   const verifyStart = Date.now();
   let verifyResult: any = null;
@@ -2446,22 +2634,12 @@ async function _runHandoffOrchestration(
     if (verifyResult) break;
     const elapsed = Math.round((Date.now() - verifyStart) / 1000);
 
-    // Re-send the blob every 30s — the target's message handler may not
-    // have been wired up when we first sent it
+    // Re-send every 30s — target's handler may not have been wired up yet
     if (Date.now() - lastResendAt >= 30_000) {
       lastResendAt = Date.now();
       _hp("verify", `🔁 Re-sending state to target... (${elapsed}s)`);
       try {
-        await agtMeshClient.send(targetAmid, {
-          type: "handoff_transfer",
-          blob: snapshotResp.blob,
-          shared_secret: sharedSecret,
-          verification_hash: verificationHash,
-          from_agent: myName,
-          predecessor_amid: myAmid,
-          direction,
-          timestamp: new Date().toISOString(),
-        });
+        await meshSend(agtMeshClient, targetAmid, handoffMessage, _log);
       } catch (resendErr: any) {
         _log.warn(`Handoff re-send failed: ${resendErr.message}`);
       }
@@ -3549,16 +3727,18 @@ const azureClawPlugin = definePluginEntry({
 
             if (targetAmid) {
               // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
+              // Uses meshSend for auto-chunking — large payloads are transparently
+              // split into chunks and reassembled on the receiver side.
               // Retry loop: target may need time to upload prekeys after registering
               let sendErr: Error | null = null;
               for (let sendAttempt = 0; sendAttempt < 8; sendAttempt++) {
                 try {
-                  await agtMeshClient.send(targetAmid, {
+                  await meshSend(agtMeshClient, targetAmid, {
                     type: "task_request",
                     content: msgContent,
                     from_agent: process.env.SANDBOX_NAME || "unknown",
                     timestamp: new Date().toISOString(),
-                  });
+                  }, log);
                   sendErr = null;
                   break;
                 } catch (e: any) {
@@ -3732,6 +3912,117 @@ const azureClawPlugin = definePluginEntry({
           }, null, 2) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Inbox check failed: ${e.message}` }] };
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "azureclaw_mesh_transfer_file",
+      label: "Transfer File via Mesh",
+      description: "Send a file to another agent via E2E encrypted mesh. The file is read from your local workspace, base64-encoded, and sent via the chunked transfer protocol — files up to ~30MB are supported. The receiving agent gets a file_transfer message in their inbox with the file content. Great for sharing datasets, configs, code, or any file between agents.",
+      parameters: {
+        type: "object",
+        properties: {
+          to_agent: { type: "string", description: "Name of the target agent" },
+          file_path: { type: "string", description: "Path to the file to send (relative to workspace or absolute)" },
+          description: { type: "string", description: "Optional description of the file for the receiving agent" },
+        },
+        required: ["to_agent", "file_path"],
+      },
+      async execute(_id: string, params: Record<string, unknown>) {
+        const agentName = params.to_agent as string;
+        const filePath = params.file_path as string;
+        const desc = (params.description as string) || "";
+
+        if (!agtMeshClient || !agtIdentity) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: "AGT mesh not initialized — cannot transfer files",
+          }, null, 2) }] };
+        }
+
+        try {
+          const fs = await import("node:fs");
+          const path = await import("node:path");
+
+          // Resolve path relative to workspace
+          const workspaceRoot = "/sandbox/.openclaw/workspace";
+          const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(workspaceRoot, filePath);
+
+          // Security: block path traversal outside /sandbox
+          if (!resolvedPath.startsWith("/sandbox")) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: "File path must be within /sandbox — path traversal blocked",
+            }, null, 2) }] };
+          }
+
+          const stat = fs.statSync(resolvedPath);
+          if (!stat.isFile()) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `Not a regular file: ${filePath}`,
+            }, null, 2) }] };
+          }
+
+          const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30MB
+          if (stat.size > MAX_FILE_SIZE) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`,
+            }, null, 2) }] };
+          }
+
+          const fileData = fs.readFileSync(resolvedPath);
+          const b64Data = fileData.toString("base64");
+          const fileName = path.basename(resolvedPath);
+
+          // Look up target AMID
+          let targetAmid = nameToAmid.get(agentName);
+          if (!targetAmid) {
+            const regResult = await routerCall("GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
+            const match = (regResult?.results || []).find(
+              (a: any) => a.display_name === agentName || a.capabilities?.includes(agentName)
+            );
+            if (match?.amid) {
+              targetAmid = match.amid;
+              nameToAmid.set(agentName, match.amid);
+              amidToName.set(match.amid, agentName);
+            }
+          }
+
+          if (!targetAmid) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `Agent '${agentName}' not found in mesh registry`,
+              hint: "Ensure the agent is running and registered. Use azureclaw_discover to search.",
+            }, null, 2) }] };
+          }
+
+          // Send via meshSend (auto-chunks if needed)
+          const transferId = await meshSend(agtMeshClient, targetAmid, {
+            type: "file_transfer",
+            file_name: fileName,
+            file_path: filePath,
+            file_data: b64Data,
+            size_bytes: stat.size,
+            description: desc,
+            from_agent: process.env.SANDBOX_NAME || "unknown",
+            timestamp: new Date().toISOString(),
+          }, log);
+
+          return { content: [{ type: "text", text: JSON.stringify({
+            status: "sent",
+            to_agent: agentName,
+            file_name: fileName,
+            size_bytes: stat.size,
+            size_human: stat.size < 1024 ? `${stat.size}B`
+              : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)}KB`
+              : `${(stat.size / 1024 / 1024).toFixed(1)}MB`,
+            chunked: !!transferId,
+            protocol: "AGT E2E encrypted (Signal Protocol)",
+            note: `File sent to '${agentName}'. They will receive it as a file_transfer message in their inbox. Tell them to check azureclaw_mesh_inbox.`,
+          }, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: `File transfer failed: ${e.message}`,
+          }, null, 2) }] };
         }
       },
     });
@@ -4039,7 +4330,7 @@ const azureClawPlugin = definePluginEntry({
       log.info(`AzureClaw handoff mutation tools skipped (registry_mode=${registryMode}) — only azureclaw_handoff_status available`);
     }
 
-    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, azureclaw_handoff_status, http_fetch");
+    log.info("AzureClaw agent tools registered: azureclaw_spawn, azureclaw_spawn_status, azureclaw_mesh_send, azureclaw_mesh_inbox, azureclaw_mesh_transfer_file, azureclaw_spawn_destroy, azureclaw_spawn_list, azureclaw_discover, azureclaw_handoff_status, http_fetch");
 
     // ── http_fetch: routed through the inference router's egress proxy ──
     // The sandbox (UID 1000) cannot reach the internet directly (iptables).

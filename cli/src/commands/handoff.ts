@@ -502,7 +502,7 @@ export function handoffCommand(): Command {
               `deploy/${name}`, "--",
               "sh", "-c", WORKSPACE_TAR_CMD,
             ], { stdio: "pipe", timeout: 15000 });
-            if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
+            if (tarB64.length > 0 && tarB64.length < 50 * 1024 * 1024) {
               snapshotPayload.workspace_tar = tarB64;
             }
           } catch { /* workspace collection is best-effort */ }
@@ -549,7 +549,7 @@ export function handoffCommand(): Command {
             const { stdout: tarB64 } = await execa("docker", [
               "exec", containerName, "sh", "-c", WORKSPACE_TAR_CMD,
             ], { stdio: "pipe", timeout: 15000 });
-            if (tarB64.length > 0 && tarB64.length < 5 * 1024 * 1024) {
+            if (tarB64.length > 0 && tarB64.length < 50 * 1024 * 1024) {
               snapshotPayload.workspace_tar = tarB64;
             }
           } catch { /* workspace collection is best-effort */ }

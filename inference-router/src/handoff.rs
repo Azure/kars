@@ -56,8 +56,10 @@ const CONFIRMATION_TOKEN_HEX_LEN: usize = 4; // bytes, displayed as 8 hex chars
 
 // ── State blob limits (§9.9.4) ──────────────────────────────────────────────
 
-/// Maximum blob size in bytes (50 MB).
-pub const MAX_BLOB_SIZE_BYTES: usize = 50 * 1024 * 1024;
+/// Maximum blob size in bytes (200 MB).
+/// Raised from 50MB to accommodate sub-agent workspace collection — the snapshot
+/// contains the main agent workspace + all sub-agent workspaces + chat/trust/audit.
+pub const MAX_BLOB_SIZE_BYTES: usize = 200 * 1024 * 1024;
 /// Maximum files in workspace tar.
 pub const MAX_WORKSPACE_FILES: usize = 100;
 /// Maximum size per workspace file (10 MB).
@@ -1886,7 +1888,7 @@ mod tests {
 
     #[test]
     fn test_blob_size_constants() {
-        assert_eq!(MAX_BLOB_SIZE_BYTES, 50 * 1024 * 1024);
+        assert_eq!(MAX_BLOB_SIZE_BYTES, 200 * 1024 * 1024);
         assert_eq!(MAX_WORKSPACE_FILES, 100);
         assert_eq!(MAX_WORKSPACE_FILE_SIZE, 10 * 1024 * 1024);
     }
