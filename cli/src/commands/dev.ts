@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { ensureCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from "../config.js";
+import { loadConfig, promptAndSaveCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -21,10 +21,12 @@ export function devCommand(): Command {
 
   cmd
     .description(
-      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop."
+      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop.\n" +
+      "Requires an existing Azure OpenAI resource with at least one model deployment (e.g. gpt-4.1).\n" +
+      "On first run, you will be prompted for your endpoint, model deployment name, and resource-level API key."
     )
     .option("--name <name>", "Sandbox name", "dev-agent")
-    .option("--model <model>", "AI model", "gpt-4.1")
+    .option("--model <model>", "Existing model deployment name in your Azure OpenAI resource", "gpt-4.1")
     .option(
       "--policy <preset>",
       "Policy preset: minimal, developer, web, azure",
@@ -82,6 +84,21 @@ export function devCommand(): Command {
         while (repoRoot !== "/" && !existsSync(path.join(repoRoot, "Cargo.toml"))) {
           repoRoot = path.dirname(repoRoot);
         }
+
+        // ── Credentials (first — prompt before potentially long build) ──
+        stepper.step("Checking credentials...");
+        let creds = loadConfig();
+        if (!creds) {
+          // Stop spinner so inquirer interactive prompts display correctly
+          stepper.stop();
+          console.log(chalk.yellow("\n  No Azure OpenAI credentials found. Let's set them up."));
+          console.log(chalk.yellow("  You need an existing Azure OpenAI resource with a deployed model (e.g. gpt-4.1).\n"));
+          creds = await promptAndSaveCredentials();
+          stepper.done("Credentials configured");
+        } else {
+          stepper.done("Credentials loaded");
+        }
+        const model = options.model !== "gpt-4.1" ? options.model : creds.model;
 
         // ── Image resolution ─────────────────────────────────────────
         stepper.step("Resolving sandbox image...");
@@ -221,12 +238,6 @@ export function devCommand(): Command {
         } else {
           stepper.done("Sandbox image found");
         }
-
-        // ── Load or prompt for credentials ──────────────────────────
-        stepper.step("Loading credentials...");
-        const creds = await ensureCredentials();
-        stepper.done("Credentials ready");
-        const model = options.model !== "gpt-4.1" ? options.model : creds.model;
 
         // ── Discover deployed models from Azure endpoint ─────────────
         let discoveredDeployments = "";

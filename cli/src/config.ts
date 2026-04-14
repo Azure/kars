@@ -153,13 +153,13 @@ export async function promptAndSaveCredentials(options?: {
     {
       type: "input",
       name: "model",
-      message: "Model deployment name:",
+      message: "Model deployment name (must already exist in your Azure OpenAI resource):",
       default: existing?.model || "gpt-4.1",
     },
     {
       type: "password",
       name: "apiKey",
-      message: "API key:",
+      message: "Azure OpenAI resource API key (resource-level key, not a per-model key):",
       mask: "•",
       validate: (input: string) => {
         if (!input || input.length < 10) return "API key is required";
