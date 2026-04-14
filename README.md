@@ -68,7 +68,7 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
    └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-> 📐 **[Architecture & Flow Diagrams](docs/architecture-diagrams.md)** — Mermaid diagrams for all core flows: pod architecture, agent creation, sub-agent spawning, E2E encrypted communication, inference routing, egress control, and defense-in-depth layers.
+> 📐 **[Architecture & Flow Diagrams](docs/architecture-diagrams.md)** — Mermaid diagrams for all core flows: pod architecture, agent creation, sub-agent spawning, E2E encrypted communication, inference routing, egress control, bidirectional handoff with sub-agents, and defense-in-depth layers.
 
 ### Docker Images
 
@@ -138,6 +138,7 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 ### ⚙️ Operations
 
 - **One-command deploy** — `azureclaw up` provisions AKS + ACR + Foundry + sandbox end-to-end
+- **Live handoff** — `azureclaw handoff <name> --to cloud|local` migrates agents between local Docker and AKS with sub-agent state, E2E encrypted workspace transfer, and task resumption
 - **Operator dashboard** — `azureclaw operator` launches a live TUI for managing all agents
 - **Credential management** — `azureclaw credentials update` rotates tokens for running sandboxes
 - **Image pipeline** — `azureclaw push` builds and pushes images to ACR with optional rollout
@@ -308,6 +309,9 @@ azureclaw credentials update my-agent \
 | **Operations** | |
 | `azureclaw operator` | Live TUI dashboard — agents, egress, security, cluster health |
 | `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) |
+| `azureclaw handoff <name> --to cloud` | Live-migrate agent + sub-agents from local Docker to AKS |
+| `azureclaw handoff <name> --to local` | Live-migrate agent + sub-agents from AKS back to local Docker |
+| `azureclaw handoff <name> --status` | Show current handoff progress |
 | `azureclaw status <name>` | Health, model, tokens used |
 | `azureclaw list` | All sandboxes across Docker and AKS |
 | `azureclaw logs <name>` | Stream logs (`-f`, `--service router\|gateway\|openclaw`) |

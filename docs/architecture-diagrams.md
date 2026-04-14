@@ -922,3 +922,225 @@ graph TB
     R5 --> I2
     recovery --> I3
 ```
+
+---
+
+## 12. Bidirectional Handoff with Sub-Agents
+
+Full roundtrip handoff: local Docker ↔ AKS cloud, including sub-agent lifecycle (snapshot, destroy, re-spawn, workspace inject, task resume). The local Docker parent is the permanent "home base" — everything else is ephemeral.
+
+### 12.1 Agent Lifecycle Across Handoff
+
+```mermaid
+graph LR
+    subgraph local["Local Docker (Home)"]
+        LP["Parent Agent<br/>(permanent)"]
+        LS1["Sub-Agent 1<br/>(ephemeral)"]
+        LS2["Sub-Agent 2<br/>(ephemeral)"]
+    end
+
+    subgraph cloud["AKS Cloud (Ephemeral)"]
+        CP["Parent Agent<br/>(created by handoff)"]
+        CS1["Sub-Agent 1<br/>(re-spawned)"]
+        CS2["Sub-Agent 2<br/>(re-spawned)"]
+    end
+
+    LP -->|"forward handoff<br/>snapshot + spawn"| CP
+    LS1 -.->|"destroyed"| CS1
+    LS2 -.->|"destroyed"| CS2
+    CP -->|"reverse handoff<br/>snapshot + wake"| LP
+    CS1 -.->|"CRD deleted"| LS1
+    CS2 -.->|"CRD deleted"| LS2
+
+    style LP fill:#2d5a2d,stroke:#4a4
+    style CP fill:#2d2d5a,stroke:#44a
+    style LS1 fill:#5a5a2d,stroke:#aa4
+    style LS2 fill:#5a5a2d,stroke:#aa4
+    style CS1 fill:#5a2d5a,stroke:#a4a
+    style CS2 fill:#5a2d5a,stroke:#a4a
+```
+
+**Key principle:** Sub-agents are never migrated — they are destroyed and re-spawned. Only the parent's snapshot (which includes sub-agent definitions and workspace tars) crosses the boundary.
+
+### 12.2 Forward Handoff: Local → Cloud (with Sub-Agents)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as 🖥️ CLI / Plugin
+    participant Router as 🛡️ Source Router
+    participant Docker as 🐳 Docker Sub-Agents
+    participant K8s as ☸️ K8s API
+    participant Ctrl as 🎛️ Controller
+    participant Relay as 📡 Relay
+    participant Reg as 📋 Registry
+    participant CP as ☁️ Cloud Parent
+    participant CS as ☁️ Cloud Sub-Agents
+
+    Note over CLI,CS: ──── Phase 1: Snapshot with Sub-Agent State ────
+
+    CLI->>Router: GET /agt/handoff/sub-agents
+    Router-->>CLI: [{name, capabilities, amid}]
+
+    par Interrupt all sub-agents
+        CLI->>Docker: write .handoff-interrupt to each workspace
+    end
+    Note right of Docker: 3s pause for agents<br/>to save checkpoints
+
+    par Collect sub-agent workspaces
+        CLI->>Docker: tar workspace from each container
+    end
+
+    CLI->>Router: POST /agt/handoff/snapshot
+    Note right of Router: Snapshot includes:<br/>sub_agent_snapshots[],<br/>each with workspace_tar
+
+    Note over CLI,CS: ──── Phase 2: Spawn Cloud Parent + Restore ────
+
+    CLI->>K8s: Create parent ClawSandbox CRD
+    Ctrl->>K8s: Reconcile → Pod + NetworkPolicy
+    CLI->>CP: POST /agt/handoff/restore {blob}
+    Note right of CP: Restore re-spawns sub-agents<br/>via POST /sandbox/spawn per snapshot
+
+    CP->>K8s: Create sub-agent ClawSandbox CRDs
+    Ctrl->>CS: Reconcile → Sub-agent pods
+
+    Note over CLI,CS: ──── Phase 3: Sub-Agent Trust + Workspace Inject ────
+
+    rect rgb(60, 60, 40)
+        Note over CP,CS: Stale AMID Filter
+        CP->>CP: Collect original_amid from snapshots
+        loop Search registry (reject stale AMIDs)
+            CP->>Reg: search by capability
+            Reg-->>CP: candidates
+            CP->>CP: Filter out original_amid matches
+        end
+        Note right of CP: Wait until NEW AMIDs appear<br/>(old entries age out)
+    end
+
+    rect rgb(40, 60, 40)
+        Note over CP,CS: Prekey Gate + Workspace Inject
+        loop Wait for E2E session (20 × 3s)
+            CP->>Relay: ping sub-agent
+        end
+        CP->>Relay: mesh_send(workspace_inject, tar)
+        Relay->>CS: deliver workspace tar
+        CS->>CS: Extract tar + promote incoming/<br/>+ write HANDOFF_FILES.md
+        CS->>Relay: mesh_send(workspace_inject_ack)
+        Relay->>CP: deliver ack ✓
+    end
+
+    CP->>Relay: mesh_send(handoff:resume, task_context)
+    Relay->>CS: deliver resume signal
+    CS->>CS: Resume interrupted task
+
+    Note over CLI,CS: ──── Phase 4: Local Cleanup ────
+    CLI->>Docker: Stop + remove sub-agent containers
+    CLI->>Router: POST /agt/handoff/decommission
+    Note right of Router: Parent goes dormant<br/>(Docker container preserved)
+```
+
+### 12.3 Reverse Handoff: Cloud → Local (with Sub-Agents)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as 🖥️ CLI
+    participant CP as ☁️ Cloud Parent
+    participant CS as ☁️ Cloud Sub-Agents
+    participant K8s as ☸️ K8s API
+    participant Relay as 📡 Relay
+    participant Reg as 📋 Registry
+    participant LP as 🏠 Local Parent
+    participant Docker as 🐳 Docker
+
+    Note over CLI,Docker: ──── Phase 1: Snapshot Cloud State ────
+
+    CLI->>CP: GET /agt/handoff/sub-agents
+    CP-->>CLI: [{name, capabilities, amid}]
+
+    par Interrupt + collect sub-agent workspaces
+        CLI->>CS: kubectl exec: write .handoff-interrupt
+        CLI->>CS: kubectl exec: tar workspace
+    end
+
+    CLI->>CP: POST /agt/handoff/snapshot
+    Note right of CP: Snapshot includes<br/>sub_agent_snapshots[]
+
+    Note over CLI,Docker: ──── Phase 2: Wake Local + Restore ────
+
+    CLI->>Docker: docker start (wake dormant parent)
+    CLI->>LP: POST /agt/handoff/restore {blob}
+    Note right of LP: Restore re-spawns sub-agents<br/>as local Docker containers
+
+    LP->>Docker: docker run sub-agent containers
+    Note over LP,Docker: Trust + workspace inject + resume<br/>(same flow as forward §12.2 Phase 3)
+
+    Note over CLI,Docker: ──── Phase 3: Cloud Cleanup ────
+
+    CLI->>CP: POST /agt/handoff/decommission
+    par Delete all cloud CRDs
+        CLI->>K8s: kubectl delete clawsandbox parent
+        CLI->>K8s: kubectl delete clawsandbox sub-agent-1
+        CLI->>K8s: kubectl delete clawsandbox sub-agent-2
+    end
+    Note right of K8s: Controller cascades:<br/>namespace, deploy, svc,<br/>networkpolicy all deleted
+```
+
+### 12.4 Stale AMID Cache Poisoning — Problem & Fix
+
+After handoff, the predecessor's sub-agents leave stale AMIDs in the registry (5-minute heartbeat timeout). The successor's trust+resume loop could cache these dead AMIDs, causing all mesh messages to silently drop.
+
+```mermaid
+sequenceDiagram
+    participant Old as Old Sub-Agent<br/>(AMID: 3FFu...)
+    participant Reg as 📋 Registry
+    participant New as New Sub-Agent<br/>(AMID: 4SKY...)
+    participant Parent as Successor Parent
+
+    Note over Old,Parent: T+0: Docker containers destroyed
+
+    Old->>Reg: Last heartbeat at T-30s
+    Note right of Reg: AMID 3FFu... still "online"<br/>(heartbeat timeout = 5 min)
+
+    Parent->>Reg: search("researcher")
+    Reg-->>Parent: 3FFu... (STALE ❌)
+    Note right of Parent: original_amid filter rejects!<br/>Keeps searching...
+
+    Note over Old,Parent: T+27s: New AKS sub-agent registers
+
+    New->>Reg: Register AMID 4SKY...
+    Note right of Reg: Ghost cleanup deletes 3FFu...<br/>4SKY... is now "online"
+
+    Parent->>Reg: search("researcher")
+    Reg-->>Parent: 4SKY... (NEW ✅)
+    Parent->>Parent: Cache 4SKY... in nameToAmid
+```
+
+**Three-layer fix:**
+1. **Stale AMID rejection** — `original_amid` from snapshots used to filter registry results by identity, not time
+2. **Prekey readiness gate** — 20 attempts × 3s to verify E2E session before workspace_inject
+3. **Workspace inject retry** — 3 attempts with 20s ack wait, catches send errors
+
+### 12.5 Workspace Injection Detail
+
+```mermaid
+graph TB
+    subgraph sender["Parent (sender)"]
+        S1["Collect workspace tar<br/>from snapshot"] --> S2["mesh_send(workspace_inject,<br/>base64 tar)"]
+        S2 --> S3{"Ack received<br/>within 20s?"}
+        S3 -->|No| S4["Retry (max 3)"]
+        S4 --> S2
+        S3 -->|Yes| S5["Send handoff:resume<br/>with task_context"]
+    end
+
+    subgraph receiver["Sub-Agent (receiver)"]
+        R1["Receive workspace_inject"] --> R2["Validate tar entries<br/>(no path traversal)"]
+        R2 --> R3["Extract to /sandbox/<br/>(--no-overwrite-dir)"]
+        R3 --> R4["Promote incoming/ files<br/>to workspace root"]
+        R4 --> R5["Write HANDOFF_FILES.md<br/>(file manifest)"]
+        R5 --> R6["Send workspace_inject_ack<br/>{success, file_count}"]
+    end
+
+    S2 -.->|E2E encrypted<br/>via relay| R1
+    R6 -.->|E2E encrypted<br/>via relay| S3
+```
