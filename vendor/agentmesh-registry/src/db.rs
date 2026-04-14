@@ -63,7 +63,7 @@ pub async fn search_by_capability(
     pool: &PgPool,
     req: &CapabilitySearchRequest,
 ) -> Result<(Vec<Agent>, u64)> {
-    // Count total (only recently-seen agents)
+    // Count total (only recently-seen agents, exclude dormant)
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM agents
@@ -76,6 +76,7 @@ pub async fn search_by_capability(
              END <= $2)
         AND ($3 IS NULL OR reputation_score >= $3)
         AND ($4 IS NULL OR status = $4)
+        AND status != 'dormant'
         AND last_seen > NOW() - INTERVAL '5 minutes'
         "#
     )
@@ -86,7 +87,7 @@ pub async fn search_by_capability(
     .fetch_one(pool)
     .await?;
 
-    // Fetch page — prefer recently-seen agents, exclude stale (>5min)
+    // Fetch page — prefer recently-seen agents, exclude stale (>5min) and dormant
     let agents = sqlx::query_as::<_, Agent>(
         r#"
         SELECT id, amid, signing_public_key, exchange_public_key, tier,
@@ -103,6 +104,7 @@ pub async fn search_by_capability(
              END <= $2)
         AND ($3 IS NULL OR reputation_score >= $3)
         AND ($4 IS NULL OR status = $4)
+        AND status != 'dormant'
         AND last_seen > NOW() - INTERVAL '5 minutes'
         ORDER BY last_seen DESC, reputation_score DESC
         LIMIT $5 OFFSET $6
@@ -149,10 +151,12 @@ pub async fn delete_stale_by_display_name(
     display_name: &str,
     current_amid: &str,
 ) -> Result<u64> {
+    // Skip dormant agents — they are handed-off predecessors with active
+    // succession redirects. Deleting them would break lookup chains.
     let result = sqlx::query(
         r#"
         DELETE FROM agents
-        WHERE display_name = $1 AND amid != $2
+        WHERE display_name = $1 AND amid != $2 AND status != 'dormant'
         "#
     )
     .bind(display_name)
@@ -557,3 +561,246 @@ pub const RATING_TAGS: &[&str] = &[
     "unhelpful",
     "unreliable",
 ];
+
+// ── Succession DB operations ────────────────────────────────────────────────
+
+/// Check if a succession/reclamation event happened too recently for a given AMID.
+///
+/// §9.9.8: Rate limit — max 1 succession per AMID per `min_interval_secs`.
+/// §9.9.3: Rate limit — max 1 reclamation per AMID per `min_interval_secs`.
+pub async fn check_succession_rate_limit(
+    pool: &PgPool,
+    amid: &str,
+    event_type: &str,
+    min_interval_secs: i64,
+) -> Result<Option<i64>> {
+    // Find the most recent event of this type involving this AMID
+    let row: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
+        r#"
+        SELECT created_at FROM succession_log
+        WHERE (predecessor_amid = $1 OR successor_amid = $1)
+          AND event_type = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(amid)
+    .bind(event_type)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((last_at,)) = row {
+        let elapsed = (Utc::now() - last_at).num_seconds();
+        if elapsed < min_interval_secs {
+            return Ok(Some(min_interval_secs - elapsed)); // seconds until allowed
+        }
+    }
+
+    Ok(None) // No rate limit hit
+}
+
+/// Record an identity succession event (A→B).
+pub async fn create_succession(
+    pool: &PgPool,
+    predecessor_amid: &str,
+    predecessor_signing_key: &str,
+    successor_amid: &str,
+    successor_signing_key: &str,
+    predecessor_signature: &str,
+    reason: &str,
+    event_hash: &str,
+    reputation_at_event: f32,
+) -> Result<uuid::Uuid> {
+    let id: uuid::Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO succession_log (
+            predecessor_amid, predecessor_signing_key,
+            successor_amid, successor_signing_key,
+            event_type, predecessor_signature,
+            reason, event_hash, reputation_at_event, active
+        ) VALUES ($1, $2, $3, $4, 'succession', $5, $6, $7, $8, TRUE)
+        RETURNING id
+        "#
+    )
+    .bind(predecessor_amid)
+    .bind(predecessor_signing_key)
+    .bind(successor_amid)
+    .bind(successor_signing_key)
+    .bind(predecessor_signature)
+    .bind(reason)
+    .bind(event_hash)
+    .bind(reputation_at_event)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(id)
+}
+
+/// Record a reclamation event (B→A, co-signed).
+pub async fn create_reclamation(
+    pool: &PgPool,
+    predecessor_amid: &str,
+    predecessor_signing_key: &str,
+    successor_amid: &str,
+    successor_signing_key: &str,
+    predecessor_signature: &str,
+    successor_signature: &str,
+    reason: &str,
+    event_hash: &str,
+    original_succession_ref: &str,
+    reputation_at_event: f32,
+) -> Result<uuid::Uuid> {
+    let id: uuid::Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO succession_log (
+            predecessor_amid, predecessor_signing_key,
+            successor_amid, successor_signing_key,
+            event_type, predecessor_signature, successor_signature,
+            reason, event_hash, original_succession_ref,
+            reputation_at_event, active
+        ) VALUES ($1, $2, $3, $4, 'reclamation', $5, $6, $7, $8, $9, $10, TRUE)
+        RETURNING id
+        "#
+    )
+    .bind(predecessor_amid)
+    .bind(predecessor_signing_key)
+    .bind(successor_amid)
+    .bind(successor_signing_key)
+    .bind(predecessor_signature)
+    .bind(successor_signature)
+    .bind(reason)
+    .bind(event_hash)
+    .bind(original_succession_ref)
+    .bind(reputation_at_event)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(id)
+}
+
+/// Get active succession for a predecessor AMID (returns successor's AMID).
+pub async fn get_active_succession(
+    pool: &PgPool,
+    predecessor_amid: &str,
+) -> Result<Option<SuccessionRecord>> {
+    let record = sqlx::query_as::<_, SuccessionRecord>(
+        r#"
+        SELECT id, predecessor_amid, predecessor_signing_key,
+               successor_amid, successor_signing_key,
+               event_type, event_hash, reputation_at_event, created_at
+        FROM succession_log
+        WHERE predecessor_amid = $1
+          AND event_type = 'succession'
+          AND active = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#
+    )
+    .bind(predecessor_amid)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(record)
+}
+
+/// Check if an AMID has an active succession as successor (is someone's cloud counterpart).
+pub async fn get_active_succession_as_successor(
+    pool: &PgPool,
+    successor_amid: &str,
+) -> Result<Option<SuccessionRecord>> {
+    let record = sqlx::query_as::<_, SuccessionRecord>(
+        r#"
+        SELECT id, predecessor_amid, predecessor_signing_key,
+               successor_amid, successor_signing_key,
+               event_type, event_hash, reputation_at_event, created_at
+        FROM succession_log
+        WHERE successor_amid = $1
+          AND event_type = 'succession'
+          AND active = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#
+    )
+    .bind(successor_amid)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(record)
+}
+
+/// Deactivate all active successions for a predecessor (used during reclamation).
+pub async fn deactivate_successions(
+    pool: &PgPool,
+    predecessor_amid: &str,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE succession_log
+        SET active = FALSE
+        WHERE predecessor_amid = $1 AND active = TRUE
+        "#
+    )
+    .bind(predecessor_amid)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Set agent status to dormant (for handed-off predecessors).
+pub async fn set_agent_dormant(
+    pool: &PgPool,
+    amid: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE agents
+        SET status = 'dormant', updated_at = $2
+        WHERE amid = $1
+        "#
+    )
+    .bind(amid)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Copy reputation score from one agent to another.
+pub async fn copy_reputation(
+    pool: &PgPool,
+    from_amid: &str,
+    to_amid: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE agents
+        SET reputation_score = (
+            SELECT reputation_score FROM agents WHERE amid = $1
+        ), updated_at = $3
+        WHERE amid = $2
+        "#
+    )
+    .bind(from_amid)
+    .bind(to_amid)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Succession record returned from DB queries.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct SuccessionRecord {
+    pub id: uuid::Uuid,
+    pub predecessor_amid: String,
+    pub predecessor_signing_key: String,
+    pub successor_amid: String,
+    pub successor_signing_key: String,
+    pub event_type: String,
+    pub event_hash: String,
+    pub reputation_at_event: Option<f32>,
+    pub created_at: chrono::DateTime<Utc>,
+}

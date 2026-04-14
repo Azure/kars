@@ -278,3 +278,46 @@ the relay sees only encrypted payloads while endpoints see plaintext.
 | Node compliance | azure-osconfig for CIS AKS benchmarks (deferred) |
 | Azure Monitor alerting | Token spike and egress anomaly alerts (planned) |
 | Behavioral anomaly detection | Kill switch + SLO circuit breakers (planned for AGT v2) |
+
+## Layer 9: Global Registry & Handoff Security
+
+Cross-environment agent handoff (local ↔ cloud) introduces new attack surface. Mitigations:
+
+### Relay Authentication (4 layers)
+
+| Layer | Control | Purpose |
+|-------|---------|---------|
+| WAF (AppGW) | Rate limiting, DDoS protection | Network-level flood prevention |
+| Ed25519 signature | `verify_connection_signature()` | Proves AMID ownership (replay-protected via timestamp) |
+| Registry lookup | `RegistryVerifier.verify_registered()` | Confirms agent is registered + not revoked |
+| OAuth | GitHub / Entra ID / Google | Controls who can register in the first place |
+
+Relay fails open on registry 5xx (avoids cascading failures) but rejects on 404 (unregistered).
+
+### Handoff Protocol Security
+
+| Threat | Mitigation |
+|--------|------------|
+| LLM-initiated handoff | Two-stage confirmation gate: router token + 3s human delay + rate limit (1/5min) |
+| Prompt injection in state blob | `sanitize_chat_snapshot()` strips 17 injection patterns |
+| Trust score inflation | Scores capped at 750 on restore (cannot import max trust) |
+| State blob DoS | 50MB blob cap, 100 file limit, 10MB/file |
+| Succession flooding | DB-backed rate limits: succession 1/5min, reclamation 1/hour per AMID |
+| Identity impersonation | Ed25519 succession signatures with canonical messages |
+| Downgrade attack | One-shot succession (unique index), co-signature reclamation |
+| AGT policy bypass | `handoff-tool-approval` rule at priority 75 (above tool-allow at 70) |
+
+### NetworkPolicy (public mode)
+
+```
+PostgreSQL ← only registry pods (port 5432)
+Registry   ← only AppGW subnet + internal sandbox pods (port 8080)
+Relay      ← only AppGW subnet + internal sandbox pods (port 8765)
+```
+
+### Identity at Rest
+
+Mesh identity stored in `~/.azureclaw/mesh-identity.json`:
+- Private key encrypted with AES-256-GCM
+- Encryption key derived from machine-specific seed (hostname + homedir)
+- File permissions restricted to owner (0600), directory (0700)

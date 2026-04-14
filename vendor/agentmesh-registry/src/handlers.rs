@@ -1,5 +1,6 @@
 use actix_web::{web, HttpResponse, Responder};
 use chrono::Utc;
+use sha2::{Sha256, Digest};
 use std::sync::Arc;
 use uuid::Uuid;
 use tracing::{info, warn, error};
@@ -279,6 +280,9 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route("/registry/reputation/leaderboard", web::get().to(reputation::leaderboard))
             // DID resolution endpoint
             .route("/registry/did/{amid}", web::get().to(resolve_did))
+            // Identity succession endpoints
+            .route("/registry/succession", web::post().to(succession_handler))
+            .route("/registry/reclamation", web::post().to(reclamation_handler))
     );
 }
 
@@ -526,7 +530,29 @@ async fn lookup_agent(
         Err(_) => return service_unavailable(),
     };
 
-    match db::get_agent_by_amid(pool, &query.amid).await {
+    // Track succession redirect for response metadata
+    let mut succeeded_from: Option<String> = None;
+    let mut succession_hash: Option<String> = None;
+    let lookup_amid;
+
+    // Check for active succession redirect (dormant agent → successor)
+    match db::get_active_succession(pool, &query.amid).await {
+        Ok(Some(succession)) => {
+            info!(
+                predecessor = %query.amid,
+                successor = %succession.successor_amid,
+                "Following succession redirect"
+            );
+            succeeded_from = Some(query.amid.clone());
+            succession_hash = Some(succession.event_hash);
+            lookup_amid = succession.successor_amid;
+        }
+        _ => {
+            lookup_amid = query.amid.clone();
+        }
+    }
+
+    match db::get_agent_by_amid(pool, &lookup_amid).await {
         Ok(Some(agent)) => {
             // Get organization name if applicable
             let organization = if let Some(org_id) = agent.organization_id {
@@ -570,6 +596,8 @@ async fn lookup_agent(
                 flags: if flags.is_empty() { None } else { Some(flags) },
                 ratings_count: Some(ratings_count),
                 reputation_status,
+                succeeded_from,
+                succession_hash,
             })
         }
         Ok(None) => HttpResponse::NotFound().json(serde_json::json!({
@@ -619,6 +647,8 @@ async fn search_capabilities(
                 flags: None,
                 ratings_count: None,
                 reputation_status: None,
+                succeeded_from: None,
+                succession_hash: None,
             }).collect();
 
             HttpResponse::Ok().json(CapabilitySearchResponse {
@@ -1018,4 +1048,541 @@ async fn upload_prekeys(
         "signed_prekey_id": req.signed_prekey_id,
         "one_time_prekeys_stored": req.one_time_prekeys.len()
     }))
+}
+
+// ── Identity Succession ────────────────────────────────────────────────────
+
+/// POST /v1/registry/succession — register identity succession (A→B).
+///
+/// The predecessor (A) signs a canonical message to authorize the handoff.
+/// The registry validates the signature, records the succession, copies
+/// reputation A→B, and marks A as dormant.
+///
+/// Security:
+/// - Ed25519 signature from predecessor over canonical message
+/// - Timestamp replay protection (5-minute window)
+/// - Predecessor must be registered with matching signing key
+/// - Successor must be registered
+/// - Only one active succession per predecessor (one-shot rule)
+async fn succession_handler(
+    state: web::Data<Arc<AppState>>,
+    req: web::Json<SuccessionRequest>,
+) -> impl Responder {
+    let pool = match state.require_ready() {
+        Ok(p) => p,
+        Err(_) => return service_unavailable(),
+    };
+
+    info!(
+        predecessor = %req.predecessor_amid,
+        successor = %req.successor_amid,
+        reason = %req.reason,
+        "Succession request received"
+    );
+
+    // §9.9.8: Rate limit — max 1 succession per AMID per 5 minutes
+    match db::check_succession_rate_limit(pool, &req.predecessor_amid, "succession", 300).await {
+        Ok(Some(retry_after)) => {
+            warn!(
+                predecessor = %req.predecessor_amid,
+                retry_after_secs = retry_after,
+                "Succession rate limited"
+            );
+            return HttpResponse::TooManyRequests().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: None,
+                error: Some(format!("Rate limited — retry after {retry_after}s")),
+            });
+        }
+        Ok(None) => {} // Not rate limited
+        Err(e) => {
+            error!("Rate limit check failed: {}", e);
+            // Fail open on DB error (don't block legitimate succession)
+        }
+    }
+
+    // 1. Verify predecessor is registered and signing key matches
+    let predecessor = match db::get_agent_by_amid(pool, &req.predecessor_amid).await {
+        Ok(Some(agent)) => agent,
+        Ok(None) => {
+            warn!("Succession failed: predecessor {} not found", req.predecessor_amid);
+            return HttpResponse::NotFound().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: None,
+                error: Some("Predecessor agent not found".into()),
+            });
+        }
+        Err(e) => {
+            error!("DB error looking up predecessor: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: None,
+                error: Some("Internal error".into()),
+            });
+        }
+    };
+
+    // Verify signing key matches registered key
+    if predecessor.signing_public_key != req.predecessor_signing_key {
+        warn!(
+            "Succession failed: signing key mismatch for {}",
+            req.predecessor_amid
+        );
+        return HttpResponse::Unauthorized().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.predecessor_amid.clone()),
+            successor_amid: None,
+            error: Some("Predecessor signing key does not match registered key".into()),
+        });
+    }
+
+    // 2. Verify successor is registered
+    match db::get_agent_by_amid(pool, &req.successor_amid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            warn!(
+                "Succession failed: successor {} not found",
+                req.successor_amid
+            );
+            return HttpResponse::NotFound().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: Some(req.successor_amid.clone()),
+                error: Some("Successor agent not found — must register before succession".into()),
+            });
+        }
+        Err(e) => {
+            error!("DB error looking up successor: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: None,
+                successor_amid: None,
+                error: Some("Internal error".into()),
+            });
+        }
+    }
+
+    // 3. Check one-shot rule: no active succession for this predecessor
+    match db::get_active_succession(pool, &req.predecessor_amid).await {
+        Ok(Some(existing)) => {
+            warn!(
+                "Succession failed: active succession already exists for {} → {}",
+                req.predecessor_amid, existing.successor_amid
+            );
+            return HttpResponse::Conflict().json(SuccessionResponse {
+                success: false,
+                event_hash: existing.event_hash,
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: Some(existing.successor_amid),
+                error: Some("Active succession already exists — reclaim first".into()),
+            });
+        }
+        Ok(None) => {} // Good — no active succession
+        Err(e) => {
+            error!("DB error checking active succession: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: None,
+                successor_amid: None,
+                error: Some("Internal error".into()),
+            });
+        }
+    }
+
+    // 4. Build canonical message and verify Ed25519 signature
+    let canonical_message = format!(
+        "succession:{}:{}:{}",
+        req.predecessor_amid, req.successor_amid, req.timestamp
+    );
+
+    if let Err(auth_err) = auth::verify_succession_signature(
+        &req.predecessor_signing_key,
+        canonical_message.as_bytes(),
+        &req.signature,
+        &req.timestamp,
+    ) {
+        warn!(
+            "Succession signature verification failed for {}: {:?}",
+            req.predecessor_amid, auth_err
+        );
+        return HttpResponse::Unauthorized().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.predecessor_amid.clone()),
+            successor_amid: Some(req.successor_amid.clone()),
+            error: Some(format!("Signature verification failed: {}", auth_err)),
+        });
+    }
+
+    // 5. Compute event hash for chain integrity
+    let event_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_message.as_bytes());
+        hasher.update(req.signature.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    // 6. Record succession in DB
+    let reputation = predecessor.reputation_score;
+    match db::create_succession(
+        pool,
+        &req.predecessor_amid,
+        &req.predecessor_signing_key,
+        &req.successor_amid,
+        &req.successor_signing_key,
+        &req.signature,
+        &req.reason,
+        &event_hash,
+        reputation,
+    )
+    .await
+    {
+        Ok(id) => {
+            info!(id = %id, hash = %event_hash, "Succession recorded");
+        }
+        Err(e) => {
+            error!("Failed to record succession: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.predecessor_amid.clone()),
+                successor_amid: Some(req.successor_amid.clone()),
+                error: Some("Failed to record succession".into()),
+            });
+        }
+    }
+
+    // 7. Copy reputation A→B
+    if let Err(e) = db::copy_reputation(pool, &req.predecessor_amid, &req.successor_amid).await {
+        warn!("Failed to copy reputation: {} (non-fatal)", e);
+    }
+
+    // 8. Mark predecessor as dormant
+    if let Err(e) = db::set_agent_dormant(pool, &req.predecessor_amid).await {
+        warn!("Failed to set predecessor dormant: {} (non-fatal)", e);
+    }
+
+    info!(
+        predecessor = %req.predecessor_amid,
+        successor = %req.successor_amid,
+        hash = %event_hash,
+        "Identity succession completed"
+    );
+
+    HttpResponse::Created().json(SuccessionResponse {
+        success: true,
+        event_hash,
+        predecessor_amid: Some(req.predecessor_amid.clone()),
+        successor_amid: Some(req.successor_amid.clone()),
+        error: None,
+    })
+}
+
+/// POST /v1/registry/reclamation — reclaim identity (B→A, co-signed).
+///
+/// Both agents must sign the reclamation notice. The original succession
+/// reference must match an active succession record.
+///
+/// Security:
+/// - Ed25519 signatures from BOTH original and departing agents
+/// - original_succession_ref must match active succession event_hash
+/// - Signing keys must match registered keys
+/// - Timestamp replay protection (5-minute window)
+async fn reclamation_handler(
+    state: web::Data<Arc<AppState>>,
+    req: web::Json<ReclamationRequest>,
+) -> impl Responder {
+    let pool = match state.require_ready() {
+        Ok(p) => p,
+        Err(_) => return service_unavailable(),
+    };
+
+    info!(
+        original = %req.original_amid,
+        departing = %req.departing_amid,
+        reason = %req.reason,
+        "Reclamation request received"
+    );
+
+    // §9.9.3: Rate limit — max 1 reclamation per AMID per hour
+    match db::check_succession_rate_limit(pool, &req.original_amid, "reclamation", 3600).await {
+        Ok(Some(retry_after)) => {
+            warn!(
+                original = %req.original_amid,
+                retry_after_secs = retry_after,
+                "Reclamation rate limited"
+            );
+            return HttpResponse::TooManyRequests().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.original_amid.clone()),
+                successor_amid: Some(req.departing_amid.clone()),
+                error: Some(format!("Rate limited — retry after {retry_after}s")),
+            });
+        }
+        Ok(None) => {} // Not rate limited
+        Err(e) => {
+            error!("Reclamation rate limit check failed: {}", e);
+        }
+    }
+
+    // 1. Find the active succession referenced by original_succession_ref
+    let succession = match db::get_active_succession(pool, &req.original_amid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            warn!(
+                "Reclamation failed: no active succession for {}",
+                req.original_amid
+            );
+            return HttpResponse::NotFound().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.original_amid.clone()),
+                successor_amid: Some(req.departing_amid.clone()),
+                error: Some("No active succession found for this agent".into()),
+            });
+        }
+        Err(e) => {
+            error!("DB error looking up succession: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: None,
+                successor_amid: None,
+                error: Some("Internal error".into()),
+            });
+        }
+    };
+
+    // 2. Verify the succession reference matches
+    if succession.event_hash != req.original_succession_ref {
+        warn!(
+            "Reclamation failed: succession ref mismatch (expected {}, got {})",
+            succession.event_hash, req.original_succession_ref
+        );
+        return HttpResponse::BadRequest().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.original_amid.clone()),
+            successor_amid: Some(req.departing_amid.clone()),
+            error: Some("Succession reference does not match active succession".into()),
+        });
+    }
+
+    // 3. Verify the departing agent matches the succession's successor
+    if succession.successor_amid != req.departing_amid {
+        warn!(
+            "Reclamation failed: departing {} doesn't match succession successor {}",
+            req.departing_amid, succession.successor_amid
+        );
+        return HttpResponse::BadRequest().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.original_amid.clone()),
+            successor_amid: Some(req.departing_amid.clone()),
+            error: Some("Departing agent does not match succession successor".into()),
+        });
+    }
+
+    // 4. Verify signing keys match registered agents
+    let original = match db::get_agent_by_amid(pool, &req.original_amid).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.original_amid.clone()),
+                successor_amid: None,
+                error: Some("Original agent not found".into()),
+            });
+        }
+        Err(e) => {
+            error!("DB error: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: None,
+                successor_amid: None,
+                error: Some("Internal error".into()),
+            });
+        }
+    };
+
+    if original.signing_public_key != req.original_signing_key {
+        warn!("Reclamation failed: original signing key mismatch");
+        return HttpResponse::Unauthorized().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.original_amid.clone()),
+            successor_amid: Some(req.departing_amid.clone()),
+            error: Some("Original signing key does not match registered key".into()),
+        });
+    }
+
+    let departing = match db::get_agent_by_amid(pool, &req.departing_amid).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.original_amid.clone()),
+                successor_amid: Some(req.departing_amid.clone()),
+                error: Some("Departing agent not found".into()),
+            });
+        }
+        Err(e) => {
+            error!("DB error: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: None,
+                successor_amid: None,
+                error: Some("Internal error".into()),
+            });
+        }
+    };
+
+    if departing.signing_public_key != req.departing_signing_key {
+        warn!("Reclamation failed: departing signing key mismatch");
+        return HttpResponse::Unauthorized().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.original_amid.clone()),
+            successor_amid: Some(req.departing_amid.clone()),
+            error: Some("Departing signing key does not match registered key".into()),
+        });
+    }
+
+    // 5. Build canonical message and verify BOTH signatures
+    let canonical_message = format!(
+        "reclamation:{}:{}:{}:{}",
+        req.original_amid, req.departing_amid, req.original_succession_ref, req.timestamp
+    );
+
+    // Verify original agent's signature
+    if let Err(auth_err) = auth::verify_succession_signature(
+        &req.original_signing_key,
+        canonical_message.as_bytes(),
+        &req.signature_original,
+        &req.timestamp,
+    ) {
+        warn!("Reclamation: original signature failed: {:?}", auth_err);
+        return HttpResponse::Unauthorized().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.original_amid.clone()),
+            successor_amid: Some(req.departing_amid.clone()),
+            error: Some(format!(
+                "Original agent signature verification failed: {}",
+                auth_err
+            )),
+        });
+    }
+
+    // Verify departing agent's co-signature
+    if let Err(auth_err) = auth::verify_succession_signature(
+        &req.departing_signing_key,
+        canonical_message.as_bytes(),
+        &req.signature_departing,
+        &req.timestamp,
+    ) {
+        warn!("Reclamation: departing co-signature failed: {:?}", auth_err);
+        return HttpResponse::Unauthorized().json(SuccessionResponse {
+            success: false,
+            event_hash: String::new(),
+            predecessor_amid: Some(req.original_amid.clone()),
+            successor_amid: Some(req.departing_amid.clone()),
+            error: Some(format!(
+                "Departing agent co-signature verification failed: {}",
+                auth_err
+            )),
+        });
+    }
+
+    // 6. Compute reclamation event hash
+    let event_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_message.as_bytes());
+        hasher.update(req.signature_original.as_bytes());
+        hasher.update(req.signature_departing.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    // 7. Record reclamation in DB
+    let reputation = departing.reputation_score;
+    match db::create_reclamation(
+        pool,
+        &req.original_amid,
+        &req.original_signing_key,
+        &req.departing_amid,
+        &req.departing_signing_key,
+        &req.signature_original,
+        &req.signature_departing,
+        &req.reason,
+        &event_hash,
+        &req.original_succession_ref,
+        reputation,
+    )
+    .await
+    {
+        Ok(id) => {
+            info!(id = %id, hash = %event_hash, "Reclamation recorded");
+        }
+        Err(e) => {
+            error!("Failed to record reclamation: {}", e);
+            return HttpResponse::InternalServerError().json(SuccessionResponse {
+                success: false,
+                event_hash: String::new(),
+                predecessor_amid: Some(req.original_amid.clone()),
+                successor_amid: Some(req.departing_amid.clone()),
+                error: Some("Failed to record reclamation".into()),
+            });
+        }
+    }
+
+    // 8. Deactivate the original succession redirect
+    if let Err(e) = db::deactivate_successions(pool, &req.original_amid).await {
+        warn!("Failed to deactivate successions: {} (non-fatal)", e);
+    }
+
+    // 9. Copy reputation B→A (departing → original)
+    if let Err(e) = db::copy_reputation(pool, &req.departing_amid, &req.original_amid).await {
+        warn!("Failed to copy reputation back: {} (non-fatal)", e);
+    }
+
+    // 10. Set original agent back to online, departing to offline
+    if let Err(e) = db::update_agent_status(pool, &req.original_amid, PresenceStatus::Online).await
+    {
+        warn!("Failed to set original agent online: {} (non-fatal)", e);
+    }
+    if let Err(e) =
+        db::update_agent_status(pool, &req.departing_amid, PresenceStatus::Offline).await
+    {
+        warn!("Failed to set departing agent offline: {} (non-fatal)", e);
+    }
+
+    info!(
+        original = %req.original_amid,
+        departing = %req.departing_amid,
+        hash = %event_hash,
+        "Identity reclamation completed"
+    );
+
+    HttpResponse::Created().json(SuccessionResponse {
+        success: true,
+        event_hash,
+        predecessor_amid: Some(req.original_amid.clone()),
+        successor_amid: Some(req.departing_amid.clone()),
+        error: None,
+    })
 }

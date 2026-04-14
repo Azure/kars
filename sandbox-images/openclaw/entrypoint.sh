@@ -595,10 +595,39 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 # Ensure all sandbox files are owned by sandbox user
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /sandbox
 
-# Harden AGT policy files AFTER the blanket chown — sandbox must not modify its own rules
-if [ "$IS_ROOT" = "true" ] && [ -d "$OPENCLAW_DIR/policies" ]; then
-  chown root:root "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-  chmod 444 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+# ── Code integrity hardening ──────────────────────────────────────────────
+# After the blanket chown, lock down all executable code so the agent (UID 1000)
+# cannot modify its own plugin, SDK, or governance policies at runtime.
+# This prevents prompt-injection attacks that instruct the agent to patch its
+# own safety checks, exfiltrate data through modified code, or disable E2E
+# encryption / governance enforcement.
+#
+# Pattern: root owns the code, sandbox user gets read + execute only.
+# Same approach already used for policy YAML files.
+if [ "$IS_ROOT" = "true" ]; then
+  # Plugin code (JS, type defs, source maps, manifests)
+  PLUGIN_DIR="$OPENCLAW_DIR/extensions/azureclaw"
+  if [ -d "$PLUGIN_DIR" ]; then
+    chown -R root:sandbox "$PLUGIN_DIR"
+    # Directories: read + execute (traverse) for sandbox group
+    find "$PLUGIN_DIR" -type d -exec chmod 750 {} +
+    # Files: read-only for sandbox group
+    find "$PLUGIN_DIR" -type f -exec chmod 640 {} +
+    echo "[azureclaw] Plugin code hardened (root-owned, read-only for sandbox)"
+  fi
+
+  # AGT policy files
+  if [ -d "$OPENCLAW_DIR/policies" ]; then
+    chown root:root "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+    chmod 444 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+  fi
+
+  # Curated skills installed into workspace (SKILL.md files)
+  if [ -d "$WORKSPACE_DIR/skills" ]; then
+    chown -R root:sandbox "$WORKSPACE_DIR/skills"
+    find "$WORKSPACE_DIR/skills" -type d -exec chmod 750 {} +
+    find "$WORKSPACE_DIR/skills" -type f -exec chmod 640 {} +
+  fi
 fi
 
 # Start AzureClaw inference router as UID 1001 (router user) — only in dev mode.

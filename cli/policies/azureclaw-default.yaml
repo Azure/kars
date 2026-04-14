@@ -100,6 +100,10 @@ policies:
     priority: 80
 
   # ── Tool calls ──────────────────────────────────────────────────────
+  # Handoff tools are allowed — the handoff flow itself has a two-step
+  # confirmation code mechanism (request → code → confirm) that prevents
+  # unauthorized handoff via prompt injection.  A separate approval gate
+  # can be re-enabled once the native approval UI is wired up.
   - name: tool-allow
     type: capability
     allowed_actions:
@@ -127,7 +131,7 @@ policies:
     type: rate_limit
     actions:
       - "inference:*"
-    max_calls: 120
+    max_calls: 500
     window: "60s"
     priority: 40
 

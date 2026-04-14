@@ -22,7 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{config, forward_proxy, governance, routes};
+use azureclaw_inference_router::{config, forward_proxy, governance, handoff, routes};
 
 use anyhow::Result;
 use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};
@@ -43,6 +43,49 @@ async fn main() -> Result<()> {
     tracing::info!("AzureClaw Inference Router starting");
 
     let config = config::Config::from_env()?;
+
+    // Log registry mode — informs whether handoff is available.
+    tracing::info!(
+        registry_mode = %config.registry_mode,
+        registry_url = config.registry_url.as_deref().unwrap_or("<unset>"),
+        "Registry topology"
+    );
+
+    // In global mode, verify registry connectivity at startup.
+    if config.registry_mode == config::RegistryMode::Global {
+        let url = config.registry_url.as_deref().unwrap_or_default();
+        if url.is_empty() {
+            anyhow::bail!(
+                "AGT_REGISTRY_MODE=global requires AGT_REGISTRY_URL to be set"
+            );
+        }
+        let health_url = format!("{}/v1/health", url.trim_end_matches('/'));
+        tracing::info!(url = %health_url, "Checking global registry connectivity...");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        match client.get(&health_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Global registry is reachable");
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    status = %resp.status(),
+                    url = %health_url,
+                    "Global registry health check returned non-200 — registry may not be ready"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    url = %health_url,
+                    "Global registry health check failed — registry may not be reachable. \
+                     The router will start anyway and retry on first use."
+                );
+            }
+        }
+    }
+
     let state = routes::AppState::new(&config).await?;
 
     // Start policy hot-reload watcher (polls AGT_POLICY_DIR for mtime changes).
@@ -112,8 +155,37 @@ async fn main() -> Result<()> {
             protected
         };
 
+        // Handoff routes — three auth tiers, all stricter than admin_auth_middleware:
+        //
+        // 1. handoff/init: admin token only, NO localhost bypass
+        // 2. handoff/* mutations: admin token + handoff token, NO localhost bypass
+        // 3. handoff/status: admin token, localhost allowed (read-only)
+        let handoff_init = routes::handoff_init_routes().layer(
+            axum::middleware::from_fn_with_state(
+                state.clone(),
+                handoff::handoff_init_auth_middleware,
+            ),
+        );
+
+        let handoff_mutations = routes::handoff_protected_routes().layer(
+            axum::middleware::from_fn_with_state(
+                state.clone(),
+                handoff::handoff_auth_middleware,
+            ),
+        );
+
+        let handoff_status = routes::handoff_status_routes().layer(
+            axum::middleware::from_fn_with_state(
+                state.clone(),
+                handoff::handoff_status_auth_middleware,
+            ),
+        );
+
         public
             .merge(protected)
+            .merge(handoff_init)
+            .merge(handoff_mutations)
+            .merge(handoff_status)
             .with_state(state)
             .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(

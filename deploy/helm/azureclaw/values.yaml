@@ -82,14 +82,10 @@ networkPolicy:
       host: "api.github.com"
       port: 443
       methods: ["GET"]
-    - name: clawhub
-      host: "clawhub.com"
-      port: 443
-      methods: ["GET", "POST"]
-    - name: openclaw-api
-      host: "openclaw.ai"
-      port: 443
-      methods: ["GET", "POST"]
+    # clawhub.com intentionally excluded — 12% malware rate (Atomic Stealer).
+    # Skills must be curated at build time, not downloaded at runtime.
+    # See: https://cybersecuritynews.com/openclaws-top-skill-malware/
+    # openclaw.ai also excluded — prevents `curl | bash` install vectors.
     - name: npm-registry
       host: "registry.npmjs.org"
       port: 443

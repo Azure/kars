@@ -17,8 +17,9 @@ use tower::ServiceExt; // for oneshot()
 use azureclaw_inference_router::auth::WorkloadIdentityAuth;
 use azureclaw_inference_router::blocklist::Blocklist;
 use azureclaw_inference_router::budget::TokenBudgetTracker;
-use azureclaw_inference_router::config::Config;
+use azureclaw_inference_router::config::{Config, RegistryMode};
 use azureclaw_inference_router::governance::Governance;
+use azureclaw_inference_router::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
 use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
 
@@ -42,6 +43,8 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
             content_safety_endpoint: None,
             token_budget_daily: 1_000_000,
             token_budget_per_request: 100_000,
+            registry_mode: RegistryMode::Local,
+            registry_url: None,
         }),
         budget: TokenBudgetTracker::new(1_000_000, 100_000),
         governance: Arc::new(Governance::new(sandbox)),
@@ -52,6 +55,10 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         model_override: Arc::new(std::sync::RwLock::new(None)),
         admin_token: admin_token.map(|t| Arc::new(t.to_string())),
         responses_only_models: Arc::new(std::sync::RwLock::new(Default::default())),
+        handoff_tokens: HandoffTokenStore::new(),
+        handoff_session: HandoffSession::new(),
+        drain_state: DrainState::new(),
+        pending_handoff: PendingHandoffStore::new(),
     }
 }
 

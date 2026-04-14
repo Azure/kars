@@ -75,6 +75,24 @@ Fix: Log the HTTP status + response body on non-200, and log the error
 message on exception. Returns `false` as before (no behavior change for
 callers) but now surfaces the actual failure reason in container logs.
 
+### 8. connect() — stale connected state blocks reconnect
+**Files:** `dist/index.js`, `dist/index.cjs`
+
+`AgentMeshClient.connect()` sets `this.connected = true` unconditionally after
+`transport.connect()` returns — even when the transport returned `false` (relay
+unreachable). This creates a deadlock:
+
+- `client.connected = true` (set unconditionally)
+- `transport.connected = false` (upstream failed)
+- `isConnected` → `false` (correct — checks both)
+- `connect()` → throws "Already connected" (checks only `client.connected`)
+- Result: client thinks it's connected, can't send, can't reconnect
+
+Fix: Check `transport.connect()` return value. If `false`, skip setting
+`this.connected = true` so subsequent `connect()` calls can retry. Also
+patched `plugin.ts` reconnect paths to call `disconnect()` first, resetting
+stale state before reattempting connection.
+
 ## Known Remaining Gap
 
 The SDK's relay transport `receive` events are not wired to
@@ -375,6 +393,35 @@ npm run build
 
 # Output: dist/ with ESM, CJS, and type definitions
 ```
+
+### 9. bytesToBase64 — stack overflow on large payloads
+**File:** `dist/index.js` (DoubleRatchet and SessionManager classes)
+
+`bytesToBase64()` used `String.fromCharCode(...bytes)` — the spread operator
+passes every byte as a separate function argument. For payloads >100 KB (e.g.
+handoff state transfer ~108 KB ciphertext after Signal Protocol encryption),
+this exceeds V8's maximum call stack size.
+
+**Fix:** Use `Buffer.from(bytes).toString('base64')` in Node.js environments,
+fall back to a loop-based approach in browsers. Applied to both instances
+(DoubleRatchet line 958 and SessionManager line 1365).
+
+### 10. initiateSession — "Active session already exists" crash on reuse
+**File:** `dist/index.js` (SessionManager.initiateSession, AgentMeshClient.establishSession)
+
+When agent A sends a message to agent B, B's KNOCK response creates a session
+in A's SessionManager. But `client.activeSessions` (the high-level Map) isn't
+updated. A's next `send()` to B misses in `activeSessions` → calls
+`establishSession` → calls `initiateSession` → finds the active session in the
+crypto layer → throws `"Active session already exists with <amid>"`.
+
+This breaks `mesh_transfer_file` and any second message to the same peer when
+the session was established via incoming KNOCK rather than outgoing send.
+
+**Fix:** `initiateSession` returns `{ sessionId, x3dhMessage: null, reused: true }`
+for existing active sessions instead of throwing. `establishSession` detects
+`reused: true`, syncs `activeSessions`, and returns early (skips redundant
+KNOCK + activate).
 
 ## License
 

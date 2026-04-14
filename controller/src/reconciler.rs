@@ -597,11 +597,39 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         openclaw_env
             .push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
         openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
-        // Router needs these too for the AGT governance module
+        // Validate and propagate trusted peers (format: "name:AMID,name:AMID,...")
+        let valid_peers = governance_config.trusted_peers.as_deref().filter(|p| {
+            let ok = !p.contains('\n') && !p.contains('\r') && !p.contains('\0');
+            if !ok {
+                tracing::warn!("Ignoring trusted_peers: contains control characters");
+            }
+            ok
+        });
+        if let Some(peers) = valid_peers {
+            openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+        }
+        // Validate registry mode: must be "local" or "global"
+        let reg_mode = match governance_config.registry_mode.as_deref() {
+            Some("local") => "local",
+            Some("global") | None => "global",
+            Some(other) => {
+                tracing::warn!(mode = other, "Invalid registry_mode, defaulting to global");
+                "global"
+            }
+        };
+        openclaw_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
+        // Plugin also needs relay/registry URLs for direct AgentMesh SDK connections
+        openclaw_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
+        openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
+        // Router needs governance vars too (handoff auth, policy enforcement)
         router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
         router_agt_env
             .push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
         router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+        if let Some(peers) = valid_peers {
+            router_agt_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+        }
+        router_agt_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
         // Mesh namespace for K8s DNS routing between agents
         router_agt_env.push(json!({"name": "AGT_MESH_NAMESPACE", "value": &sandbox_ns}));
         // Self-hosted AGT relay + registry (for E2E encrypted inter-agent comms)

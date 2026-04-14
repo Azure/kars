@@ -365,7 +365,7 @@ impl Governance {
             policy,
             trust: TrustManager::new(trust_config),
             audit: AuditLogger::new(),
-            rate_limiter: RateLimiter::new(100.0, 200.0, 10.0, 20.0),
+            rate_limiter: RateLimiter::new(500.0, 1000.0, 50.0, 100.0),
             behavior: BehaviorMonitor::new(100, 20, 10),
             metrics: GovernanceMetrics::new(),
             sandbox_name: sandbox_name.to_string(),
@@ -755,6 +755,8 @@ impl Governance {
         let trust_states = self.all_trust_scores();
         let audit_count = self.audit.entries().len();
         let integrity_ok = self.audit.verify();
+        let relay_url = std::env::var("AGT_RELAY_URL").unwrap_or_default();
+        let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
 
         serde_json::json!({
             "enabled": true,
@@ -783,6 +785,8 @@ impl Governance {
             "behavior_alerts_detail": self.behavior.alerts_detail(),
             "content_flags": self.metrics.content_flags.load(Ordering::Relaxed),
             "uptime_secs": self.start_time.elapsed().as_secs(),
+            "relay_url": relay_url,
+            "registry_url": registry_url,
             "rate_limit": {
                 "global_rate": self.rate_limiter.global_rate(),
                 "global_capacity": self.rate_limiter.global_capacity(),
