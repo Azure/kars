@@ -1854,6 +1854,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             );
           }
 
+          // Promote files from incoming/ to workspace root so they're immediately
+          // visible to the agent without needing to know about the incoming/ directory.
+          const incomingDir = "/sandbox/.openclaw/workspace/incoming";
+          const wsRoot = "/sandbox/.openclaw/workspace";
+          if (fs.existsSync(incomingDir)) {
+            try {
+              const incomingFiles = fs.readdirSync(incomingDir);
+              for (const file of incomingFiles) {
+                const src = `${incomingDir}/${file}`;
+                const dest = `${wsRoot}/${file}`;
+                if (!fs.existsSync(dest) && fs.statSync(src).isFile()) {
+                  fs.copyFileSync(src, dest);
+                  log.info(`📂 Promoted incoming/${file} → workspace root`);
+                }
+              }
+            } catch { /* best effort */ }
+          }
+
           success = true;
           log.info(`📦 Workspace injected (${(tarBuf.length / 1024).toFixed(1)} KB, ${fileCount} files)`);
         } catch (injectErr: any) {
