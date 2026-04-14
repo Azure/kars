@@ -4385,15 +4385,33 @@ const azureClawPlugin = definePluginEntry({
           }
 
           // Merge and deduplicate (prefer AGT source)
+          // Filter out internal protocol messages — only show human-readable content
+          const INTERNAL_TYPES = new Set([
+            "handoff_transfer", "handoff_verification", "handoff_ready",
+            "handoff:interrupt", "handoff:interrupt_ack",
+            "handoff:workspace_request", "handoff:workspace_response",
+            "handoff:workspace_inject", "handoff:workspace_inject_ack",
+            "handoff:resume", "handoff:resume_ack",
+            "file_transfer_ack",
+          ]);
+
+          const userMessages = agtMessages.filter((m: any) => {
+            try {
+              const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+              return !INTERNAL_TYPES.has(parsed?.type);
+            } catch { return true; } // If can't parse, keep it
+          });
+
           const allMessages = [
-            ...agtMessages.map((m: any) => ({ ...m, source: "agt_relay_e2e" })),
+            ...userMessages.map((m: any) => ({ ...m, source: "agt_relay_e2e" })),
             ...routerMessages.map((m: any) => ({ ...m, source: "router_http" })),
           ];
 
           return { content: [{ type: "text", text: JSON.stringify({
             count: allMessages.length,
-            agt_relay_count: agtMessages.length,
+            agt_relay_count: userMessages.length,
             router_count: routerMessages.length,
+            filtered_protocol_messages: agtMessages.length - userMessages.length,
             messages: allMessages,
           }, null, 2) }] };
         } catch (e: any) {
