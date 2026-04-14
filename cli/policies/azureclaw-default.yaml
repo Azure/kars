@@ -131,7 +131,7 @@ policies:
     type: rate_limit
     actions:
       - "inference:*"
-    max_calls: 120
+    max_calls: 500
     window: "60s"
     priority: 40
 

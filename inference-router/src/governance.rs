@@ -365,7 +365,7 @@ impl Governance {
             policy,
             trust: TrustManager::new(trust_config),
             audit: AuditLogger::new(),
-            rate_limiter: RateLimiter::new(100.0, 200.0, 10.0, 20.0),
+            rate_limiter: RateLimiter::new(500.0, 1000.0, 50.0, 100.0),
             behavior: BehaviorMonitor::new(100, 20, 10),
             metrics: GovernanceMetrics::new(),
             sandbox_name: sandbox_name.to_string(),
