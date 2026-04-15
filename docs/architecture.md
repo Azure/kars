@@ -91,9 +91,9 @@ Per-sandbox router on port 8443. Runs as UID 1001 (unrestricted network). The ag
 **Request pipeline (inference):**
 
 ```
-Agent → Token budget check (429) → Content Safety (fail-open)
-      → Prompt Shields (fail-open) → IMDS/WI token (cached per scope)
-      → Forward to Azure OpenAI / Foundry → Extract usage → Prometheus metrics → Agent
+Agent → Token budget check (429) → IMDS/WI token (cached per scope)
+      → Forward to Azure OpenAI / Foundry → Foundry guardrails (Content Safety + Prompt Shields, server-side)
+      → Parse content filter annotations → Report flags to AGT → Extract usage → Prometheus metrics → Agent
 ```
 
 **Embedding model routing:** The `/v1/embeddings` endpoint extracts the `model` field from the request body (e.g., `text-embedding-3-small`) and routes to that specific deployment. This prevents embedding requests from being sent to the default chat model, which would fail. Both AKS (Workload Identity) and dev (API key) code paths handle this.

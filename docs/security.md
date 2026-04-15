@@ -89,12 +89,12 @@ The seccomp profile is installed on every node via a DaemonSet that writes `azur
 
 | Control | Service | Default |
 |---------|---------|---------|
-| Content filtering | Azure AI Content Safety (`text:analyze`) | On (fail-open) |
-| Jailbreak detection | Prompt Shields | On (fail-open) |
+| Content filtering | Foundry Guardrails (`Microsoft.DefaultV2`) | Always on (server-side) |
+| Jailbreak detection | Prompt Shields (Foundry-side) | Always on (server-side) |
 | Token budgets | In-process enforcement | Per-sandbox daily + per-request limits, HTTP 429 |
 | Audit | Prometheus metrics | Always on (requests, latency, tokens per sandbox) |
 
-"Fail-open" means: if Content Safety is unreachable, inference proceeds. This prevents the safety service from becoming a denial-of-service vector.
+"Foundry-side" means: Content Safety and Prompt Shields are applied by the Azure AI Foundry model deployment (`Microsoft.DefaultV2` guardrails). The router does not make separate Content Safety API calls — it parses `prompt_filter_results` annotations from model responses and reports detected flags to AGT governance for trust scoring and audit logging.
 
 ---
 

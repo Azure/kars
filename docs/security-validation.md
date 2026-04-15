@@ -168,9 +168,11 @@ inference:
 | Token budgets | ✅ Enforced | Per-sandbox daily + per-request limits |
 | Metrics | ✅ Active | Prometheus endpoint on router |
 
-Content Safety operates in **fail-open** mode: if the safety service is unreachable,
-inference proceeds to prevent the safety service from becoming a denial-of-service
-vector.
+Content Safety operates via **Foundry-side guardrails** (`Microsoft.DefaultV2`): content filter
+annotations are applied server-side by Azure AI Foundry on every model inference call. The router
+parses `prompt_filter_results` from the response and reports detected flags to AGT governance.
+There is no separate Content Safety API call — if the model response lacks filter annotations,
+inference proceeds normally.
 
 ---
 
