@@ -20,10 +20,11 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@agentmesh/sdk": "^0.1.2"
+    "ws": "^8.18"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@types/ws": "^8",
     "typescript": "^5.7",
     "vitest": "^3.2"
   }

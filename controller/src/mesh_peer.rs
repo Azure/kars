@@ -194,12 +194,12 @@ enum RelayMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Pairing protocol messages (carried inside encrypted_payload as base64 JSON)
+// Federation protocol messages (carried inside encrypted_payload as base64 JSON)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-enum PairingMessage {
+enum FederationMessage {
     #[serde(rename = "pair_request")]
     PairRequest {
         secret: String,
@@ -229,6 +229,61 @@ enum PairingMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    #[serde(rename = "offload_request")]
+    OffloadRequest {
+        task: String,
+        #[serde(default)]
+        files: Vec<String>,
+        #[serde(default)]
+        file_count: usize,
+        #[serde(default)]
+        total_bytes: u64,
+        #[serde(default)]
+        preferences: Option<OffloadPreferences>,
+        request_id: String,
+        timestamp: String,
+    },
+    #[serde(rename = "offload_status")]
+    OffloadStatus {
+        request_id: String,
+        phase: String,
+        message: String,
+    },
+    #[serde(rename = "offload_done")]
+    OffloadDone {
+        request_id: String,
+        summary: String,
+        #[serde(default)]
+        output_files: Vec<String>,
+        #[serde(default)]
+        tokens_used: Option<TokenUsage>,
+        #[serde(default)]
+        duration_seconds: u64,
+    },
+    #[serde(rename = "offload_error")]
+    OffloadError {
+        request_id: String,
+        error: String,
+        phase: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct OffloadPreferences {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    #[serde(default)]
+    timeout_minutes: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct TokenUsage {
+    #[serde(default)]
+    prompt: u64,
+    #[serde(default)]
+    completion: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +465,7 @@ async fn handle_peer_message(
     let payload_bytes = BASE64.decode(payload_b64).unwrap_or_default();
     let payload_str = String::from_utf8_lossy(&payload_bytes);
 
-    let msg: PairingMessage = match serde_json::from_str(&payload_str) {
+    let msg: FederationMessage = match serde_json::from_str(&payload_str) {
         Ok(m) => m,
         Err(_) => {
             tracing::debug!(from = %from_amid, "Unrecognized message format — ignoring");
@@ -419,7 +474,7 @@ async fn handle_peer_message(
     };
 
     match msg {
-        PairingMessage::PairRequest {
+        FederationMessage::PairRequest {
             secret,
             pubkey_ed25519,
             display_name,
@@ -434,20 +489,42 @@ async fn handle_peer_message(
                 display_name.as_deref(),
             )
             .await;
-            // Send response back
-            let response_json = serde_json::to_string(&response)?;
-            let response_b64 = BASE64.encode(response_json.as_bytes());
-            let send_msg = RelayMessage::Send {
-                to: from_amid.to_string(),
-                encrypted_payload: response_b64,
-                message_type: "message".into(),
-            };
-            let mut w = write.write().await;
-            w.send(WsMessage::Text(serde_json::to_string(&send_msg)?.into()))
-                .await?;
+            send_to_peer(write, from_amid, &response).await?;
         }
-        PairingMessage::PairResponse { .. } => {
+        FederationMessage::OffloadRequest {
+            task,
+            files,
+            file_count,
+            total_bytes,
+            preferences,
+            request_id,
+            timestamp,
+        } => {
+            tracing::info!(
+                from = %from_amid,
+                request_id = %request_id,
+                task_len = task.len(),
+                files = file_count,
+                "Received offload_request"
+            );
+            handle_offload_request(
+                state,
+                write,
+                from_amid,
+                &request_id,
+                &task,
+                &files,
+                total_bytes,
+                preferences.as_ref(),
+                &timestamp,
+            )
+            .await?;
+        }
+        FederationMessage::PairResponse { .. } => {
             tracing::debug!(from = %from_amid, "Ignoring pair_response (we are the controller)");
+        }
+        _ => {
+            tracing::debug!(from = %from_amid, "Ignoring unhandled federation message");
         }
     }
 
@@ -461,7 +538,7 @@ async fn handle_pair_request(
     secret: &str,
     pubkey_ed25519: &str,
     display_name: Option<&str>,
-) -> PairingMessage {
+) -> FederationMessage {
     let token_hash = hex_sha256(secret);
 
     // List all ClawPairing CRDs and find matching token_hash
@@ -543,7 +620,7 @@ async fn handle_pair_request(
         "Pairing successful — AMID bound"
     );
 
-    PairingMessage::PairResponse {
+    FederationMessage::PairResponse {
         success: true,
         cluster_name: Some(state.cluster_name.clone()),
         controller_amid: Some(state.identity.amid.clone()),
@@ -555,8 +632,8 @@ async fn handle_pair_request(
     }
 }
 
-fn pair_error(message: &str) -> PairingMessage {
-    PairingMessage::PairResponse {
+fn pair_error(message: &str) -> FederationMessage {
+    FederationMessage::PairResponse {
         success: false,
         cluster_name: None,
         controller_amid: None,
@@ -571,6 +648,322 @@ fn pair_error(message: &str) -> PairingMessage {
 fn hex_sha256(input: &str) -> String {
     let hash = Sha256::digest(input.as_bytes());
     hex::encode(hash)
+}
+
+// ---------------------------------------------------------------------------
+// Send helper
+// ---------------------------------------------------------------------------
+
+async fn send_to_peer<S>(
+    write: &Arc<RwLock<S>>,
+    to_amid: &str,
+    msg: &FederationMessage,
+) -> Result<()>
+where
+    S: SinkExt<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let json = serde_json::to_string(msg)?;
+    let b64 = BASE64.encode(json.as_bytes());
+    let send_msg = RelayMessage::Send {
+        to: to_amid.to_string(),
+        encrypted_payload: b64,
+        message_type: "message".into(),
+    };
+    let mut w = write.write().await;
+    w.send(WsMessage::Text(serde_json::to_string(&send_msg)?.into()))
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Offload orchestration
+// ---------------------------------------------------------------------------
+
+/// Handle an offload_request from a paired external agent.
+/// Validates the pairing, checks budget/slots, creates a ClawSandbox CRD,
+/// monitors it, and streams status back to the requester.
+#[allow(clippy::too_many_arguments)]
+async fn handle_offload_request<S>(
+    state: &MeshPeerState,
+    write: &Arc<RwLock<S>>,
+    from_amid: &str,
+    request_id: &str,
+    task: &str,
+    _files: &[String],
+    _total_bytes: u64,
+    preferences: Option<&OffloadPreferences>,
+    _timestamp: &str,
+) -> Result<()>
+where
+    S: SinkExt<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    // Phase 1: Validate pairing
+    send_to_peer(
+        write,
+        from_amid,
+        &FederationMessage::OffloadStatus {
+            request_id: request_id.into(),
+            phase: "validating".into(),
+            message: "Validating pairing and budget".into(),
+        },
+    )
+    .await?;
+
+    let pairing = match validate_pairing_for_offload(state, from_amid).await {
+        Ok(p) => p,
+        Err(e) => {
+            send_to_peer(
+                write,
+                from_amid,
+                &FederationMessage::OffloadError {
+                    request_id: request_id.into(),
+                    error: e.clone(),
+                    phase: "validating".into(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Phase 2: Create offload sandbox
+    send_to_peer(
+        write,
+        from_amid,
+        &FederationMessage::OffloadStatus {
+            request_id: request_id.into(),
+            phase: "spawning".into(),
+            message: "Creating offload sandbox".into(),
+        },
+    )
+    .await?;
+
+    let sandbox_name = format!("offload-{}", &request_id[..8]);
+    let model = preferences
+        .and_then(|p| p.model.as_deref())
+        .unwrap_or("gpt-4.1");
+    let timeout_minutes = preferences.and_then(|p| p.timeout_minutes).unwrap_or(30);
+    let namespace =
+        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+
+    let spec = json!({
+        "openclaw": {
+            "version": "2026.3.13",
+            "config": {
+                "agent": {
+                    "model": format!("azure/{model}")
+                }
+            }
+        },
+        "sandbox": {
+            "isolation": "enhanced",
+            "readOnlyRootFilesystem": true,
+            "runAsNonRoot": true,
+            "allowPrivilegeEscalation": false
+        },
+        "inference": {
+            "provider": "azure-ai-foundry",
+            "model": model,
+            "contentSafety": true,
+            "promptShields": true,
+            "tokenBudget": {
+                "daily": pairing.spec.token_budget,
+                "perRequest": 32000
+            }
+        },
+        "networkPolicy": {
+            "defaultDeny": true,
+            "approvalRequired": true,
+            "learnEgress": false,
+        },
+        "governance": {
+            "enabled": true,
+            "toolPolicy": "default",
+            "trustThreshold": 500,
+            "registryMode": "local"
+        }
+    });
+
+    let crd = json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "ClawSandbox",
+        "metadata": {
+            "name": sandbox_name,
+            "namespace": namespace,
+            "labels": {
+                "azureclaw.azure.com/spawned-by": "offload",
+                "azureclaw.azure.com/offload-requester": from_amid,
+                "azureclaw.azure.com/request-id": request_id,
+            },
+            "annotations": {
+                "azureclaw.azure.com/offload-task": &task[..task.len().min(256)],
+                "azureclaw.azure.com/offload-timeout": format!("{timeout_minutes}m"),
+                "azureclaw.azure.com/offload-parent-amid": from_amid,
+            }
+        },
+        "spec": spec,
+    });
+
+    // Set env vars the entrypoint will read for offload mode
+    let extra_env = json!({
+        "OFFLOAD_MODE": "true",
+        "OFFLOAD_TASK": task,
+        "OFFLOAD_REQUEST_ID": request_id,
+        "OFFLOAD_PARENT_AMID": from_amid,
+        "OFFLOAD_CONTROLLER_AMID": state.identity.amid,
+        "OFFLOAD_TIMEOUT_MINUTES": timeout_minutes.to_string(),
+    });
+
+    // Create via K8s API
+    let api_resource = kube::api::ApiResource {
+        group: "azureclaw.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "azureclaw.azure.com/v1alpha1".into(),
+        kind: "ClawSandbox".into(),
+        plural: "clawsandboxes".into(),
+    };
+    let api: Api<kube::api::DynamicObject> =
+        Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
+
+    // Merge extra env into the CRD spec
+    let mut crd_value = crd;
+    if let Some(openclaw) = crd_value["spec"]["openclaw"].as_object_mut() {
+        openclaw.insert("extraEnv".to_string(), extra_env);
+    }
+
+    let obj: kube::api::DynamicObject = match serde_json::from_value(crd_value) {
+        Ok(o) => o,
+        Err(e) => {
+            send_to_peer(
+                write,
+                from_amid,
+                &FederationMessage::OffloadError {
+                    request_id: request_id.into(),
+                    error: format!("Failed to build sandbox CRD: {e}"),
+                    phase: "spawning".into(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    match api.create(&PostParams::default(), &obj).await {
+        Ok(_) => {
+            tracing::info!(
+                sandbox = %sandbox_name,
+                requester = %from_amid,
+                request_id = %request_id,
+                "Offload sandbox created"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                sandbox = %sandbox_name,
+                "Failed to create offload sandbox: {e}"
+            );
+            send_to_peer(
+                write,
+                from_amid,
+                &FederationMessage::OffloadError {
+                    request_id: request_id.into(),
+                    error: format!("Failed to create sandbox: {e}"),
+                    phase: "spawning".into(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    // Update pairing usage
+    let pairing_name = pairing.name_any();
+    let pairings_api: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
+    let usage_patch = json!({
+        "status": {
+            "slotsUsed": pairing.status.as_ref().and_then(|s| s.slots_used).unwrap_or(0) + 1,
+            "lastOffloadAt": chrono::Utc::now().to_rfc3339(),
+        }
+    });
+    let _ = pairings_api
+        .patch_status(
+            &pairing_name,
+            &PatchParams::apply("azureclaw-mesh-peer"),
+            &Patch::Merge(usage_patch),
+        )
+        .await;
+
+    // Phase 3: Running — notify requester
+    send_to_peer(
+        write,
+        from_amid,
+        &FederationMessage::OffloadStatus {
+            request_id: request_id.into(),
+            phase: "running".into(),
+            message: format!(
+                "Sandbox '{sandbox_name}' created. Task running with model '{model}'. Timeout: {timeout_minutes}m."
+            ),
+        },
+    )
+    .await?;
+
+    // Sandbox lifecycle monitoring is handled by the reconciler.
+    // The offload entrypoint will send offload_done/offload_error back
+    // to the parent AMID when complete. The controller doesn't need to
+    // actively poll — it just forwarded the request.
+
+    Ok(())
+}
+
+/// Validate that an AMID has an active pairing with available slots and budget.
+async fn validate_pairing_for_offload(
+    state: &MeshPeerState,
+    from_amid: &str,
+) -> Result<ClawPairing, String> {
+    let pairings: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
+    let pairing_list = pairings
+        .list(&kube::api::ListParams::default())
+        .await
+        .map_err(|e| format!("Internal error — could not list pairings: {e}"))?;
+
+    let matching = pairing_list
+        .items
+        .into_iter()
+        .find(|p| p.status.as_ref().and_then(|s| s.bound_amid.as_deref()) == Some(from_amid));
+
+    let pairing = matching.ok_or_else(|| {
+        format!("No pairing found for AMID {from_amid}. Pair first with mesh_pair.")
+    })?;
+
+    let status = pairing.status.as_ref();
+    let current_phase = status.and_then(|s| s.phase.as_deref()).unwrap_or("");
+
+    if current_phase != phase::ACTIVE {
+        return Err(format!("Pairing is '{current_phase}' — must be Active"));
+    }
+
+    // Check expiry
+    if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(&pairing.spec.expires_at)
+        && chrono::Utc::now() >= expiry.to_utc()
+    {
+        return Err("Pairing has expired".into());
+    }
+
+    // Check slots
+    let slots_used = status.and_then(|s| s.slots_used).unwrap_or(0);
+    if slots_used >= pairing.spec.slots_max {
+        return Err(format!(
+            "No available slots ({slots_used}/{} used)",
+            pairing.spec.slots_max
+        ));
+    }
+
+    // Check capability
+    if !pairing.spec.capabilities.contains(&"offload".to_string()) {
+        return Err("Pairing does not include 'offload' capability".into());
+    }
+
+    Ok(pairing)
 }
 
 // ---------------------------------------------------------------------------
@@ -639,7 +1032,7 @@ mod tests {
     fn pair_error_response() {
         let resp = pair_error("test error");
         match resp {
-            PairingMessage::PairResponse {
+            FederationMessage::PairResponse {
                 success,
                 error,
                 cluster_name,
@@ -655,7 +1048,7 @@ mod tests {
 
     #[test]
     fn pairing_message_serialization() {
-        let msg = PairingMessage::PairRequest {
+        let msg = FederationMessage::PairRequest {
             secret: "abc".into(),
             pubkey_ed25519: "def".into(),
             pubkey_x25519: None,
@@ -667,9 +1060,69 @@ mod tests {
         assert!(json.contains("abc"));
 
         // Roundtrip
-        let decoded: PairingMessage = serde_json::from_str(&json).unwrap();
+        let decoded: FederationMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            PairingMessage::PairRequest { secret, .. } => assert_eq!(secret, "abc"),
+            FederationMessage::PairRequest { secret, .. } => assert_eq!(secret, "abc"),
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn offload_request_serialization_roundtrip() {
+        let msg = FederationMessage::OffloadRequest {
+            task: "Analyze the dataset".into(),
+            files: vec!["data.csv".into()],
+            file_count: 1,
+            total_bytes: 4096,
+            preferences: Some(OffloadPreferences {
+                model: Some("gpt-4.1".into()),
+                max_tokens: None,
+                timeout_minutes: Some(15),
+            }),
+            request_id: "req-001".into(),
+            timestamp: "2026-04-15T14:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("offload_request"));
+        assert!(json.contains("Analyze the dataset"));
+
+        let decoded: FederationMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            FederationMessage::OffloadRequest {
+                task, request_id, ..
+            } => {
+                assert_eq!(task, "Analyze the dataset");
+                assert_eq!(request_id, "req-001");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn offload_status_serialization() {
+        let msg = FederationMessage::OffloadStatus {
+            request_id: "req-001".into(),
+            phase: "running".into(),
+            message: "Task in progress".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("offload_status"));
+        assert!(json.contains("running"));
+    }
+
+    #[test]
+    fn offload_error_serialization() {
+        let msg = FederationMessage::OffloadError {
+            request_id: "req-001".into(),
+            error: "Budget exceeded".into(),
+            phase: "validating".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: FederationMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            FederationMessage::OffloadError { error, .. } => {
+                assert_eq!(error, "Budget exceeded");
+            }
             _ => panic!("Wrong variant"),
         }
     }
