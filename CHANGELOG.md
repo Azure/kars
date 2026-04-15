@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workspace Injection Pipeline** — tarball extraction with path traversal validation, `incoming/` file promotion to workspace root, `HANDOFF_FILES.md` manifest for agent discoverability
 - **Handoff Decommission Cleanup** — reverse handoff deletes all cloud CRDs (parent + sub-agents); forward handoff destroys local sub-agent containers
 - **Mesh Inbox Improvements** — protocol message filtering (hides handoff/ack messages), auto-decode of `file_transfer` base64 content
-- **Native AGT Governance** — Rust-native governance module (replaces former Python sidecar) with PolicyEvaluator, FileTrustStore (0–1000, ±200 clamp), SHA-256 Merkle audit chain, RateLimiter, and AgentBehaviorMonitor
+- **Native AGT Governance** — Rust-native governance module (replaces former Python sidecar) with PolicyEngine, TrustManager (0–1000, ±200 clamp, Ed25519 signed), SHA-256 Merkle audit chain, RateLimiter, and BehaviorMonitor
 - **E2E Encrypted Inter-Agent Messaging** — Signal Protocol (X3DH + Double Ratchet) via AgentMesh relay/registry with KNOCK trust handshake
 - **Content Safety Circuit Breaker** — fail-open with 60s auto-reset cooldown (prevents cascading failures when Content Safety endpoint is misconfigured)
 - **Foundry Agent Service Integration** — web search, code execute, file search, image generation, memory via Foundry project endpoint
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Circuit breaker fails open instead of closed (prevents total service lockout)
 - iptables UID-based egress — agent process restricted to localhost
-- Zero Azure credentials in agent container — sidecar authenticates via Workload Identity
+- Zero Azure credentials in agent container — router authenticates via Workload Identity
 - Kata Confidential VM support — per-pod dedicated kernel
-- Custom seccomp profile (~150 allowed syscalls)
-- Domain blocklist (53k+ malicious domains)
+- Custom seccomp profile (219 allowed syscalls, 28 explicitly blocked)
+- Domain blocklist (51k+ malicious domains)

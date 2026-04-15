@@ -39,14 +39,10 @@ Each sandbox stores channel tokens and plugin API keys in its own namespace as K
 
 ```
 azureclaw-tenant-a/
-  ├─ channel-telegram-token    # Tenant A's Telegram bot
-  ├─ plugin-brave-api-key      # Tenant A's Brave key
-  └─ ...
+  └─ tenant-a-credentials      # All of Tenant A's channel/plugin keys
 
 azureclaw-tenant-b/
-  ├─ channel-slack-token       # Tenant B's Slack bot
-  ├─ plugin-tavily-api-key     # Tenant B's Tavily key
-  └─ ...
+  └─ tenant-b-credentials      # All of Tenant B's channel/plugin keys
 ```
 
 Use `azureclaw credentials update <name>` to rotate credentials for a specific sandbox without affecting others. See [channels-plugins.md](channels-plugins.md#rotating-credentials) for details.

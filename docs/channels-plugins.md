@@ -156,7 +156,7 @@ When deploying to AKS with `azureclaw add`, channel tokens and plugin API keys a
 CLI (azureclaw add --telegram-token "...")
     │
     ▼
-K8s Secret (azureclaw-<name>/channel-telegram-token)
+K8s Secret (azureclaw-<name>/<name>-credentials)
     │
     ▼
 Controller mounts via envFrom in pod spec
@@ -168,24 +168,26 @@ entrypoint.sh reads env vars → configures channels/plugins
 Agent process (pre-configured, never sees raw tokens)
 ```
 
-Secret naming convention:
+Secret naming convention: All credentials are stored in a **single secret** named `<name>-credentials` in the `azureclaw-<name>` namespace. The secret contains keys mapped to environment variables:
 
-| Credential Type | Secret Name |
-|----------------|-------------|
-| Telegram token | `channel-telegram-token` |
-| Slack token | `channel-slack-token` |
-| Discord token | `channel-discord-token` |
-| Brave API key | `plugin-brave-api-key` |
-| Tavily API key | `plugin-tavily-api-key` |
-| Exa API key | `plugin-exa-api-key` |
-| Firecrawl API key | `plugin-firecrawl-api-key` |
-| Perplexity API key | `plugin-perplexity-api-key` |
-| OpenAI API key | `plugin-openai-api-key` |
+| Credential Type | Secret Key | Environment Variable |
+|----------------|------------|---------------------|
+| Telegram token | `TELEGRAM_BOT_TOKEN` | `TELEGRAM_BOT_TOKEN` |
+| Telegram allowlist | `TELEGRAM_ALLOW_FROM` | `TELEGRAM_ALLOW_FROM` |
+| Slack token | `SLACK_BOT_TOKEN` | `SLACK_BOT_TOKEN` |
+| Discord token | `DISCORD_BOT_TOKEN` | `DISCORD_BOT_TOKEN` |
+| WhatsApp | `WHATSAPP_ENABLED` | `WHATSAPP_ENABLED` |
+| Brave API key | `BRAVE_API_KEY` | `BRAVE_API_KEY` |
+| Tavily API key | `TAVILY_API_KEY` | `TAVILY_API_KEY` |
+| Exa API key | `EXA_API_KEY` | `EXA_API_KEY` |
+| Firecrawl API key | `FIRECRAWL_API_KEY` | `FIRECRAWL_API_KEY` |
+| Perplexity API key | `PERPLEXITY_API_KEY` | `PERPLEXITY_API_KEY` |
+| OpenAI API key | `OPENAI_API_KEY` | `OPENAI_API_KEY` |
 
 These secrets are:
-- **Created automatically** by the CLI during `azureclaw add`
-- **Mounted as environment variables** into the sandbox pod by the controller
-- **Never exposed** to the agent process — the entrypoint reads them and configures channels/plugins before handing off to the agent
+- **Created automatically** by the CLI during `azureclaw add` or `azureclaw credentials update`
+- **Mounted as environment variables** into the sandbox pod by the controller (via `envFrom` with `optional: true` — pods start even without credentials)
+- **Read by the entrypoint** — which auto-configures channels/plugins before handing off to the agent
 - **Scoped to the agent namespace** — other agents cannot access them
 
 ### Rotating Credentials
@@ -209,7 +211,7 @@ The command updates the K8s secret and triggers a rolling restart of the sandbox
 
 ## Entrypoint Auto-Configuration
 
-The sandbox entrypoint (`sandbox-images/entrypoint.sh`) handles channel and plugin setup:
+The sandbox entrypoint (`sandbox-images/openclaw/entrypoint.sh`) handles channel and plugin setup:
 
 1. **Reads environment variables** injected from K8s secrets (AKS) or CLI flags (local dev)
 2. **Enables channels** — starts the appropriate adapter (Telegram polling, Slack WebSocket, etc.)

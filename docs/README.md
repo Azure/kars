@@ -7,7 +7,7 @@
 
 ## Security
 
-- [Security Model](security.md) — 10-layer defense-in-depth (8 infra + 2 behavioral)
+- [Security Model](security.md) — 9-layer defense-in-depth (7 infra + AGT governance + E2E mesh)
 - [Network Egress & Proxy](egress-proxy.md) — Blocklist, allowlist, approval flow, learn mode
 - [E2E Encryption Proof](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging with traffic capture evidence
 - [Security Validation](security-validation.md) — Live cluster evidence for every security layer
@@ -20,6 +20,7 @@
 ## Operations
 
 - [Egress Management](egress-proxy.md#operator-workflow) — Learn → review → approve → lock down
+- [Agent Handoff](architecture.md#cloud-handoff) — Live migration between local Docker and AKS
 - [Multi-Tenant Isolation](multi-tenant.md) — Per-namespace security boundaries
 
 ## Demos & Examples

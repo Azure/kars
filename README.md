@@ -124,7 +124,7 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 - **Trust scoring** — per-agent scores 0–1000, threshold 500, clamped ±200/update, Ed25519 signed
 - **Policy engine** — YAML-driven rules (hot-reloaded) covering shell safety, inference rate-limiting, content safety, mesh trust gates
 - **Audit trail** — SHA-256 Merkle tree append-only chain with tamper detection and integrity verification
-- **Components** — PolicyEngine, TrustManager, AuditLogger, RateLimiter, BehaviorMonitor (via `agentmesh` crate v3.0.2)
+- **Components** — PolicyEngine, TrustManager, AuditLogger, RateLimiter, BehaviorMonitor (native Rust, compiled into the inference router)
 - **Prometheus metrics** — `azureclaw_agt_policy_evaluations_total`, `azureclaw_agt_eval_latency_seconds`, `azureclaw_agt_behavior_alerts_total`, and more
 
 ### 🔐 E2E Encryption (Signal Protocol)
@@ -166,7 +166,7 @@ git clone https://github.com/Azure/azureclaw.git
 cd azureclaw
 
 # Build the CLI
-cd cli && npm install && npm run build && npm link
+cd cli && npm ci && npm run build && npm link
 cd ..
 
 # Verify
@@ -305,7 +305,7 @@ azureclaw credentials update my-agent \
 | `azureclaw dev` | Local Docker sandbox with same security controls |
 | `azureclaw add <name>` | Add sandbox to existing cluster |
 | `azureclaw destroy [name]` | Tear down sandbox or entire resource group (`--all`) |
-| `azureclaw push` | Build and push all 6 images to ACR (`--apply` restarts deployments, `--only <image>` for single image) |
+| `azureclaw push` | Build and push all 5 images to ACR (`--apply` restarts deployments, `--only <image>` for single image) |
 | **Operations** | |
 | `azureclaw operator` | Live TUI dashboard — agents, egress, security, cluster health |
 | `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) |
@@ -328,6 +328,10 @@ azureclaw credentials update my-agent \
 | **Observability** | |
 | `azureclaw trace <name>` | eBPF tracing (`--network`, `--dns`, `--files`, `--exec`) |
 | `azureclaw eval <name>` | Run Foundry evaluations against agent |
+| **Multi-Agent** | |
+| `azureclaw mesh auth` | Authenticate with global AgentMesh registry (OAuth) |
+| `azureclaw mesh status` | Show mesh connectivity and registered agents |
+| `azureclaw mesh send <amid>` | Send E2E encrypted message to another agent |
 
 ### Common Flags
 
@@ -473,7 +477,7 @@ azureclaw/
 └── vendor/               # AgentMesh SDK, relay, registry (patched forks)
 ```
 
-> **📦 Why `vendor/`?** AgentMesh is pre-release — we found and fixed 8 bugs in the relay, registry, and SDK (see `vendor/*/README.md` for each patch). These are carried as patched forks until fixes land upstream. The AGT governance wheels are also vendored here since the SDK isn't published to PyPI yet. Once AgentMesh and AGT ship stable releases, `vendor/` goes away entirely.
+> **📦 Why `vendor/`?** AgentMesh is pre-release — we found and fixed 8 bugs in the relay, registry, and SDK (see `vendor/*/README.md` for each patch). These are carried as patched forks until fixes land upstream. Once AgentMesh ships a stable release, `vendor/` goes away entirely.
 
 ---
 

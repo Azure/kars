@@ -12,7 +12,7 @@ Four components, two languages:
 |-----------|----------|-------------|------|
 | **Controller** | Rust (kube-rs) | `azureclaw-controller` | K8s operator — reconciles `ClawSandbox` CRDs into isolated sandboxes (namespace, deployment, service, NetworkPolicy, ConfigMap) |
 | **Inference Router** | Rust (axum) | `azureclaw-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, 18 Foundry API groups, AGT governance, sub-agent spawn |
-| **CLI** | TypeScript | `@azure/azureclaw` | 13 CLI commands (`azureclaw up/add/dev/connect/...`) + OpenClaw plugin + 9 Foundry skills |
+| **CLI** | TypeScript | `@azure/azureclaw` | 18 CLI commands (`azureclaw up/add/dev/connect/handoff/mesh/...`) + OpenClaw plugin + 10 Foundry skills |
 | **Policy Engine** | YAML profiles | — | AGT governance policy profiles (allow/deny/approval/rate-limit) |
 
 **External dependencies:** [OpenClaw](https://openclaw.ai) (agent framework), [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) (managed AI services), [AGT](https://github.com/microsoft/agent-governance-toolkit) (governance layer).
@@ -40,7 +40,7 @@ Agents never see API keys. The router authenticates via IMDS/Workload Identity.
 ```bash
 make build                # builds controller + router + CLI
 cargo build --release     # Rust only (both crates)
-cargo test --all          # all Rust tests (9 controller + 5 budget)
+cargo test --all          # all Rust tests (74 controller + 105 router + 26 integration)
 
 # Single crate:
 cargo build --release --package azureclaw-controller
@@ -59,7 +59,7 @@ cargo fmt --all           # format
 
 ```bash
 cd cli
-npm install && npm run build    # compile + copy policy profiles to dist/
+npm ci && npm run build    # compile + copy policy profiles to dist/
 npm test                        # vitest
 npm run lint                    # oxlint
 npm run typecheck               # tsc --noEmit

@@ -520,7 +520,7 @@ graph TB
     end
 
     subgraph L4["Layer 4: Kernel Confinement"]
-        SECC["Seccomp: 175 allowed syscalls<br/>Blocks: ptrace, mount, bpf,<br/>unshare, kexec, chroot"]
+        SECC["Seccomp: 219 allowed, 28 blocked<br/>Blocks: ptrace, mount, bpf,<br/>unshare, kexec, chroot"]
     end
 
     subgraph L5["Layer 5: Network Segmentation"]

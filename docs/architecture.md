@@ -77,7 +77,7 @@ Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `contr
 | Level | RuntimeClass | seccomp | Node Pool |
 |-------|-------------|---------|-----------|
 | standard | (default runc) | RuntimeDefault | `sandbox` |
-| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (175 syscalls) | `sandbox` |
+| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (219 allowed syscalls) | `sandbox` |
 | confidential | `kata-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
 
 **Isolation inheritance:** The controller exports `SANDBOX_ISOLATION` as an environment variable into every pod. When a sub-agent is spawned via `/sandbox/spawn`, the inference router reads the parent's isolation level from this env var and applies it as the default for the child. Downgrading from `confidential` to a lower isolation level is blocked — the spawn request returns an error.
@@ -406,7 +406,7 @@ The sandbox entrypoint (`sandbox-images/openclaw/entrypoint.sh`) auto-discovers 
 | `perplexity` | `PERPLEXITY_API_KEY` | `--perplexity-api-key` |
 | `openai` | `OPENAI_API_KEY` | `--openai-api-key` |
 
-Source: `sandbox-images/openclaw/entrypoint.sh` (plugin loop at lines 200–233)
+Source: `sandbox-images/openclaw/entrypoint.sh` (plugin loop at lines 286–301)
 
 ---
 
@@ -432,7 +432,7 @@ Channel tokens and plugin API keys follow a consistent pattern from CLI to runni
 CLI flag (--telegram-token)
     │
     ▼
-K8s Secret (azureclaw-<name>/channel-telegram-token)
+K8s Secret (azureclaw-<name>/<name>-credentials)
     │
     ▼
 envFrom in pod spec (controller injects all secrets)

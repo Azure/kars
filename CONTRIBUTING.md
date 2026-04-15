@@ -8,8 +8,8 @@ This project welcomes contributions and suggestions.
 git clone https://github.com/<your-user>/azureclaw.git
 cd azureclaw
 make build    # Rust (controller + router) + TypeScript CLI
-make test     # 21 unit tests (Rust)
-make lint     # clippy + oxlint + ruff
+make test     # 205 unit tests (Rust) + 207 CLI tests (vitest)
+make lint     # clippy + oxlint
 ```
 
 ## Project Structure
@@ -18,7 +18,7 @@ make lint     # clippy + oxlint + ruff
 |-----------|----------|------------|
 | `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs into sandboxes |
 | `inference-router/` | Rust (axum) | Per-sandbox router — auth, safety, budgets, 18 Foundry APIs, native AGT governance |
-| `cli/` | TypeScript | 15+ CLI commands + OpenClaw plugin + 9 Foundry skills |
+| `cli/` | TypeScript | 18 CLI commands + OpenClaw plugin + 10 Foundry skills |
 | `cli/skills/` | Markdown | 10 SKILL.md files teaching the agent to use Foundry services |
 | `cli/policies/` | YAML | AGT policy profiles (shell-safety, approval, rate-limit) |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
@@ -34,7 +34,7 @@ make lint     # clippy + oxlint + ruff
 
 ```bash
 cd cli
-npm install && npm run build && npm link   # compile + link global `azureclaw` command
+npm ci && npm run build && npm link   # compile + link global `azureclaw` command
 npm test                                    # vitest
 npm run lint                                # oxlint
 npm run typecheck                           # tsc --noEmit
@@ -44,7 +44,7 @@ npm run typecheck                           # tsc --noEmit
 
 ```bash
 cargo build --release     # builds controller + inference-router
-cargo test --all          # 21 unit tests (16 controller + 5 budget)
+cargo test --all          # 205 unit tests (74 controller + 105 router + 26 integration)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all           # format
 ```

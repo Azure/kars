@@ -5,7 +5,7 @@
 **Agent:** `demo-agent` (gpt-4.1, confidential isolation)  
 **Pod:** `demo-agent-689b5cc899-ktll9`
 
-All 8+2 security layers validated on a live AKS cluster with evidence captured below.
+All 9 security layers validated on a live AKS cluster with evidence captured below.
 
 ---
 
@@ -106,7 +106,7 @@ Container escape attacks are trapped inside the VM boundary. The CRD specifies
 ```
 
 The CRD specifies `seccompProfile: azureclaw-strict` (custom Localhost profile with
-~150 syscall allowlist). On Kata VM pods, the runtime defaults to `RuntimeDefault`
+219 allowed syscalls, 28 explicitly blocked). On Kata VM pods, the runtime defaults to `RuntimeDefault`
 because the VM boundary provides the primary isolation. The custom strict profile is
 used on `enhanced` isolation level (standard container runtime).
 
