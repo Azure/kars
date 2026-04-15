@@ -39,7 +39,21 @@ let connection: MeshConnection | null = null;
 let meshIdentity: MeshIdentity | null = null;
 let activePairing: StoredPairing | null = null;
 let initialized = false;
-let activeOffload: { requestId: string; startedAt: number } | null = null;
+let activeOffload: {
+  requestId: string;
+  startedAt: number;
+  sandboxName?: string;
+  sandboxAmid?: string;
+  filesSent?: number;
+  phase: string;
+} | null = null;
+
+// Directory to save incoming files from sandboxes
+const INCOMING_DIR = path.join(
+  process.env.HOME || process.env.USERPROFILE || "/tmp",
+  ".azureclaw-mesh",
+  "incoming",
+);
 
 // ---------------------------------------------------------------------------
 // Plugin entry point
@@ -79,8 +93,9 @@ export function definePluginEntry() {
         name: "cloud_offload",
         description:
           "Delegate a task to a governed AzureClaw cloud sandbox. " +
-          "The task runs with full GPU/inference capabilities and AGT governance. " +
-          "Results are returned via E2E encrypted mesh. Requires prior pairing.",
+          "Optionally send workspace files — they are transferred directly to the sandbox via E2E encrypted mesh (up to 30MB each). " +
+          "The sandbox runs with full GPU/inference capabilities and AGT governance. " +
+          "Results and output files are returned directly via mesh. Requires prior pairing.",
         parameters: {
           type: "object",
           properties: {
@@ -91,7 +106,7 @@ export function definePluginEntry() {
             files: {
               type: "array",
               items: { type: "string" },
-              description: "[Not yet implemented] Workspace files to send to the sandbox",
+              description: "Workspace files to send to the sandbox (paths, up to 30MB each)",
             },
             model: {
               type: "string",
@@ -318,23 +333,28 @@ async function cloudOffloadHandler(params: {
 
   const requestId = crypto.randomUUID();
 
-  // Collect file metadata
+  // Validate files upfront (before sending request to controller)
   const filePaths = params.files || [];
   let totalBytes = 0;
+  const validFiles: string[] = [];
   for (const f of filePaths) {
     try {
       const stat = fs.statSync(f);
+      if (stat.size > 30 * 1024 * 1024) {
+        return `❌ File too large: ${f} (${(stat.size / 1024 / 1024).toFixed(1)} MB, max 30MB)`;
+      }
       totalBytes += stat.size;
+      validFiles.push(f);
     } catch {
-      // file doesn't exist or unreadable — skip
+      return `❌ Cannot read file: ${f}`;
     }
   }
 
   const request: OffloadRequestMessage = {
     type: "offload_request",
     task: params.task,
-    files: filePaths,
-    file_count: filePaths.length,
+    files: validFiles.map((f) => path.basename(f)),
+    file_count: validFiles.length,
     total_bytes: totalBytes,
     preferences: {
       model: params.model,
@@ -344,53 +364,133 @@ async function cloudOffloadHandler(params: {
     timestamp: new Date().toISOString(),
   };
 
+  // Phase 1: Send offload request to controller (matchmaker)
   try {
     await connection.send(activePairing.controllerAmid, request);
-  } catch (err: any) {
-    return `❌ Failed to send offload request: ${err.message}`;
+  } catch (sendErr: any) {
+    return `❌ Failed to send offload request: ${sendErr.message}`;
   }
 
-  activeOffload = { requestId, startedAt: Date.now() };
+  activeOffload = { requestId, startedAt: Date.now(), phase: "submitted" };
 
-  // Wait for initial status (validating/spawning)
-  let initialStatus: OffloadStatusMessage | OffloadErrorMessage | null = null;
+  // Phase 2: Wait for controller to spawn sandbox and report "ready" with sandbox_name.
+  // Controller flow: validate pairing → create CRD → wait for pod Running → send sandbox_name.
+  // This can take up to ~5 minutes (image pull, scheduling).
+  const readyTimeoutMs = 5 * 60 * 1000;
+  let sandboxName: string | null = null;
+
   try {
-    initialStatus = await connection.waitForMessage(
+    const readyStatus = await connection.waitForMessage<OffloadStatusMessage>(
       (content) => {
         const msg = content as Record<string, unknown>;
-        if (
-          (msg?.type === "offload_status" || msg?.type === "offload_error") &&
-          msg?.request_id === requestId
-        ) {
-          return msg as unknown as OffloadStatusMessage | OffloadErrorMessage;
+        if (msg?.request_id !== requestId) return null;
+
+        // Handle errors at any phase
+        if (msg?.type === "offload_error") {
+          throw new Error(`${msg.error} (phase: ${msg.phase})`);
+        }
+
+        // Absorb intermediate statuses (validating, spawning, scheduled)
+        if (msg?.type === "offload_status") {
+          activeOffload!.phase = String(msg.phase);
+          if (msg.phase === "ready" && msg.sandbox_name) {
+            return msg as unknown as OffloadStatusMessage;
+          }
         }
         return null;
       },
-      30_000
+      readyTimeoutMs,
     );
-  } catch {
-    // Timeout waiting for initial status — keep going
-  }
-
-  if (initialStatus?.type === "offload_error") {
+    sandboxName = readyStatus.sandbox_name || null;
+  } catch (waitErr: any) {
     activeOffload = null;
-    const errMsg = initialStatus as OffloadErrorMessage;
-    return `❌ Offload rejected: ${errMsg.error} (phase: ${errMsg.phase})`;
+    return `❌ Offload failed: ${waitErr.message}`;
   }
 
-  const statusPhase = (initialStatus as OffloadStatusMessage)?.phase || "submitted";
-  const statusMsg = (initialStatus as OffloadStatusMessage)?.message || "Request sent to cluster";
+  if (!sandboxName) {
+    activeOffload = null;
+    return "❌ Controller reported ready but no sandbox name — cannot proceed.";
+  }
+
+  activeOffload.sandboxName = sandboxName;
+  activeOffload.phase = "connecting";
+
+  // Phase 3: Discover sandbox AMID via registry
+  let sandboxAmid: string | null = null;
+  const discoveryRetries = 10;
+  for (let i = 0; i < discoveryRetries; i++) {
+    sandboxAmid = await connection.resolveAmid(sandboxName);
+    if (sandboxAmid) break;
+    await new Promise((r) => setTimeout(r, 3000)); // sandbox may still be registering
+  }
+
+  if (!sandboxAmid) {
+    activeOffload = null;
+    return `❌ Could not find sandbox '${sandboxName}' on the mesh after ${discoveryRetries} attempts. It may have failed to start.`;
+  }
+
+  activeOffload.sandboxAmid = sandboxAmid;
+
+  // Phase 4: Send files directly to sandbox (if any)
+  if (validFiles.length > 0) {
+    activeOffload.phase = "uploading";
+    activeOffload.filesSent = 0;
+
+    for (const filePath of validFiles) {
+      const fileName = path.basename(filePath);
+      try {
+        const ack = await connection.sendFile(sandboxAmid, filePath, {
+          description: `Offload file for request ${requestId}`,
+          timeoutMs: 30_000,
+          retries: 3,
+        });
+
+        if (!ack.success) {
+          activeOffload = null;
+          return `❌ File transfer failed for '${fileName}': ${ack.error || "no ACK"}`;
+        }
+
+        activeOffload.filesSent = (activeOffload.filesSent || 0) + 1;
+      } catch (ftErr: any) {
+        activeOffload = null;
+        return `❌ File transfer error for '${fileName}': ${ftErr.message}`;
+      }
+    }
+  }
+
+  // Phase 5: Send the task to sandbox directly via mesh
+  activeOffload.phase = "running";
+  try {
+    await connection.send(sandboxAmid, {
+      type: "offload_task",
+      request_id: requestId,
+      task: params.task,
+      files: validFiles.map((f) => path.basename(f)),
+      from_agent: connection.amid,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (taskErr: any) {
+    activeOffload = null;
+    return `❌ Failed to send task to sandbox: ${taskErr.message}`;
+  }
+
+  // Return immediately — sandbox works asynchronously.
+  // Results arrive via mesh (offload_done, file_transfer) and are picked up by offload_status.
+  const filesInfo = validFiles.length > 0
+    ? `${validFiles.length} file(s) (${(totalBytes / 1024).toFixed(1)} KB) uploaded`
+    : "no files";
 
   return [
-    `☁️ Offload request accepted`,
+    `☁️ Offload running`,
     "",
     `  Request ID:  ${requestId}`,
-    `  Phase:       ${statusPhase}`,
+    `  Sandbox:     ${sandboxName}`,
     `  Task:        ${params.task.slice(0, 100)}${params.task.length > 100 ? "..." : ""}`,
-    `  Files:       ${filePaths.length} (${(totalBytes / 1024).toFixed(1)} KB)`,
-    `  Status:      ${statusMsg}`,
+    `  Files:       ${filesInfo}`,
+    `  Timeout:     ${params.timeout_minutes || 30}m`,
     "",
-    "Use offload_status to monitor progress. Results will arrive via mesh.",
+    "The sandbox is working on your task. Use offload_status to check progress.",
+    "Results and output files will arrive automatically via mesh.",
   ].join("\n");
 }
 
@@ -402,22 +502,26 @@ async function offloadStatusHandler(_params: Record<string, unknown>): Promise<s
 
   const inbox = connection.getInbox();
   const requestId = activeOffload.requestId;
+  const sandboxAmid = activeOffload.sandboxAmid;
   const elapsed = Math.round((Date.now() - activeOffload.startedAt) / 1000);
 
-  // Find latest status for this request
-  let latestStatus: OffloadStatusMessage | null = null;
+  // Scan inbox for messages from the sandbox or controller about this offload
   let latestProgress: OffloadProgressMessage | null = null;
   let doneMsg: OffloadDoneMessage | null = null;
   let errorMsg: OffloadErrorMessage | null = null;
+  const receivedFiles: string[] = [];
 
   for (const msg of inbox) {
     const content = msg.content as Record<string, unknown>;
-    if (content?.request_id !== requestId) continue;
+    if (!content) continue;
 
-    switch (content?.type) {
-      case "offload_status":
-        latestStatus = content as unknown as OffloadStatusMessage;
-        break;
+    // Match by request_id or by sender (sandbox AMID)
+    const matchesRequest = content.request_id === requestId;
+    const matchesSandbox = sandboxAmid && msg.from === sandboxAmid;
+
+    if (!matchesRequest && !matchesSandbox) continue;
+
+    switch (content.type) {
       case "offload_progress":
         latestProgress = content as unknown as OffloadProgressMessage;
         break;
@@ -426,6 +530,21 @@ async function offloadStatusHandler(_params: Record<string, unknown>): Promise<s
         break;
       case "offload_error":
         errorMsg = content as unknown as OffloadErrorMessage;
+        break;
+      case "file_transfer":
+        // Auto-save incoming file from sandbox
+        if (matchesSandbox && content.file_name) {
+          try {
+            const result = await connection!.handleFileTransfer(
+              msg.from,
+              content as Record<string, unknown>,
+              INCOMING_DIR,
+            );
+            if (result) {
+              receivedFiles.push(`${result.fileName} (${(result.sizeBytes / 1024).toFixed(1)} KB) → ${result.savedPath}`);
+            }
+          } catch { /* best effort */ }
+        }
         break;
     }
   }
@@ -438,26 +557,44 @@ async function offloadStatusHandler(_params: Record<string, unknown>): Promise<s
   if (doneMsg) {
     activeOffload = null;
     const totalTokens = (doneMsg.tokens_used?.prompt || 0) + (doneMsg.tokens_used?.completion || 0);
-    return [
+    const lines = [
       `✅ Offload complete`,
       "",
       `  Duration:     ${doneMsg.duration_seconds}s`,
       `  Tokens used:  ${totalTokens.toLocaleString()}`,
-      `  Output files: ${doneMsg.output_files.length > 0 ? doneMsg.output_files.join(", ") : "none"}`,
-      "",
-      doneMsg.summary,
-    ].join("\n");
+    ];
+    if (doneMsg.output_files.length > 0) {
+      lines.push(`  Output files: ${doneMsg.output_files.join(", ")}`);
+    }
+    if (receivedFiles.length > 0) {
+      lines.push(`  Saved files:  ${receivedFiles.length}`);
+      for (const f of receivedFiles) {
+        lines.push(`    • ${f}`);
+      }
+    }
+    lines.push("", doneMsg.summary);
+    return lines.join("\n");
   }
 
   if (latestProgress) {
     return `☁️ Running (${latestProgress.pct}%) — ${latestProgress.stage}: ${latestProgress.message} [${elapsed}s]`;
   }
 
-  if (latestStatus) {
-    return `☁️ ${latestStatus.phase}: ${latestStatus.message} [${elapsed}s]`;
-  }
+  // Show current phase from the offload tracker
+  const phase = activeOffload.phase || "running";
+  const sandbox = activeOffload.sandboxName || "pending";
+  const filesInfo = activeOffload.filesSent
+    ? `${activeOffload.filesSent} file(s) sent`
+    : "";
 
-  return `☁️ Offload in progress... (${elapsed}s elapsed, waiting for status update)`;
+  return [
+    `☁️ Offload in progress [${elapsed}s]`,
+    `  Phase:   ${phase}`,
+    `  Sandbox: ${sandbox}`,
+    filesInfo ? `  Files:   ${filesInfo}` : "",
+    "",
+    "Waiting for results from sandbox...",
+  ].filter(Boolean).join("\n");
 }
 
 async function meshSendHandler(params: {

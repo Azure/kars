@@ -28,6 +28,16 @@ export interface PairResponseMessage {
 }
 
 // ---------------------------------------------------------------------------
+// File content (inline transfer)
+// ---------------------------------------------------------------------------
+
+export interface FileContent {
+  path: string;
+  data_b64: string;
+  size: number;
+}
+
+// ---------------------------------------------------------------------------
 // Task Offload
 // ---------------------------------------------------------------------------
 
@@ -37,6 +47,7 @@ export interface OffloadRequestMessage {
   files: string[];
   file_count: number;
   total_bytes: number;
+  file_contents?: FileContent[];
   preferences?: {
     model?: string;
     max_tokens?: number;
@@ -49,8 +60,10 @@ export interface OffloadRequestMessage {
 export interface OffloadStatusMessage {
   type: "offload_status";
   request_id: string;
-  phase: "validating" | "spawning" | "uploading" | "running" | "returning" | "done" | "error";
+  phase: "validating" | "spawning" | "scheduled" | "ready" | "running" | "returning" | "done" | "error";
   message: string;
+  /** Set when phase === "ready" — the sandbox name to discover on the mesh */
+  sandbox_name?: string;
 }
 
 export interface OffloadProgressMessage {
@@ -66,6 +79,7 @@ export interface OffloadDoneMessage {
   request_id: string;
   summary: string;
   output_files: string[];
+  output_file_contents?: FileContent[];
   tokens_used: { prompt: number; completion: number };
   duration_seconds: number;
 }

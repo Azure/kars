@@ -43,7 +43,7 @@ Pairing is one-time. After pairing, your identity is stored at `~/.azureclaw/ide
 ### Example
 
 ```
-cloud_offload(task: "Analyze this codebase for OWASP Top 10 vulnerabilities. Focus on SQL injection and XSS. Return a markdown report.", model: "gpt-4.1", timeout_minutes: 15)
+cloud_offload(task: "Analyze this codebase for OWASP Top 10 vulnerabilities. Focus on SQL injection and XSS. Return a markdown report.", files: ["src/auth.ts", "src/db.ts"], model: "gpt-4.1", timeout_minutes: 15)
 ```
 
 Then poll:
@@ -65,7 +65,7 @@ mesh_inbox(limit: 5)
 - **Pairing required first**: All tools except `mesh_pair` require an active pairing
 - **Token budget**: Your pairing has a token budget (e.g., 500K tokens). `offload_status` shows remaining budget.
 - **One offload at a time**: You can only have one active cloud offload. Wait for it to finish or time out.
-- **Task prompt only**: `cloud_offload` sends a text task description. File transfer is not yet supported — describe what you need in the prompt.
+- **File transfer supported**: `cloud_offload` can send workspace files (up to 30MB each) directly to the sandbox via E2E encrypted chunked transfer with SHA-256 integrity verification.
 - **Timeout**: Default 30 minutes. The sandbox auto-terminates after timeout.
 - **No secrets in tasks**: Never include API keys, passwords, or tokens in task descriptions — the sandbox has its own managed identity.
 
