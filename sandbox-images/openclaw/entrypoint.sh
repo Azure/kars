@@ -719,115 +719,21 @@ else
   echo "[azureclaw] Inference router provided by AKS container (workload-identity mode)"
 fi
 
-# ── Offload mode: run task and exit ─────────────────────────────────────────
-# When OFFLOAD_MODE=true, this sandbox was created by the mesh federation
-# controller to execute a single offloaded task. Skip the normal gateway/TUI
-# flow: start a minimal gateway, run the task as agent prompt, collect output,
-# send results back to the parent AMID via the controller, then exit.
-if [ "$OFFLOAD_MODE" = "true" ]; then
-  echo "[azureclaw] ═══ OFFLOAD MODE ═══"
+# ── Offload timeout enforcement ─────────────────────────────────────────────
+# When OFFLOAD_TIMEOUT_MINUTES is set (by the controller for offload sandboxes),
+# start a background kill timer. The sandbox runs as a full agent (normal mode)
+# and communicates directly with the external agent via mesh. After timeout,
+# the container exits to release resources.
+if [ -n "${OFFLOAD_TIMEOUT_MINUTES:-}" ] && [ "$OFFLOAD_TIMEOUT_MINUTES" != "0" ]; then
+  OFFLOAD_TIMEOUT_SECONDS=$(( OFFLOAD_TIMEOUT_MINUTES * 60 ))
+  echo "[azureclaw] Offload sandbox — auto-terminate in ${OFFLOAD_TIMEOUT_MINUTES}m (${OFFLOAD_TIMEOUT_SECONDS}s)"
   echo "[azureclaw] Request ID:  ${OFFLOAD_REQUEST_ID:-unknown}"
   echo "[azureclaw] Parent AMID: ${OFFLOAD_PARENT_AMID:-unknown}"
-  echo "[azureclaw] Task length:  ${#OFFLOAD_TASK} chars"
-  echo "[azureclaw] Timeout:      ${OFFLOAD_TIMEOUT_MINUTES:-30}m"
-
-  # Start gateway (still needed for agent execution)
-  HTTPS_PROXY="http://127.0.0.1:8444" HTTP_PROXY="http://127.0.0.1:8444" \
-    NO_PROXY="127.0.0.1,localhost" \
-    NODE_OPTIONS="--require /usr/local/lib/proxy-bootstrap.js" \
-    NODE_COMPILE_CACHE="/var/tmp/openclaw-compile-cache" \
-    OPENCLAW_NO_RESPAWN=1 \
-    OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
-  OFFLOAD_GATEWAY_PID=$!
-
-  for i in $(seq 1 15); do
-    if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
-      echo "[azureclaw] Gateway ready (PID: $OFFLOAD_GATEWAY_PID)"
-      break
-    fi
-    sleep 0.5
-  done
-
-  # Start node host (for shell/exec/filesystem tools)
-  mkdir -p /tmp/node-host-home/.openclaw
-  [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /tmp/node-host-home
-  cat > /tmp/node-host-home/.openclaw/openclaw.json << 'NODECONF'
-{
-  "gateway": { "port": 18789 },
-  "plugins": { "allow": [] }
-}
-NODECONF
-  [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home/.openclaw/openclaw.json
-  NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "offload")
-  HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
-    AGT_SKIP_INIT=1 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
-    --host 127.0.0.1 --port 18789 \
-    --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
-  OFFLOAD_NODE_PID=$!
-  sleep 1
-
-  # Run the offloaded task with timeout enforcement
-  OFFLOAD_TIMEOUT_SECONDS=$(( ${OFFLOAD_TIMEOUT_MINUTES:-30} * 60 ))
-  echo "[azureclaw] Running offload task (timeout: ${OFFLOAD_TIMEOUT_SECONDS}s)..."
-
-  OFFLOAD_OUTPUT_FILE="/tmp/offload-output.txt"
-  OFFLOAD_START=$(date +%s)
-
-  # Use openclaw agent --message to execute the task
-  timeout "${OFFLOAD_TIMEOUT_SECONDS}" \
-    HTTPS_PROXY="http://127.0.0.1:8444" HTTP_PROXY="http://127.0.0.1:8444" \
-    NO_PROXY="127.0.0.1,localhost" \
-    NODE_OPTIONS="--require /usr/local/lib/proxy-bootstrap.js" \
-    OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
-    $AS_SANDBOX openclaw agent --message "$OFFLOAD_TASK" --no-stream \
-    > "$OFFLOAD_OUTPUT_FILE" 2>&1
-  OFFLOAD_EXIT=$?
-
-  OFFLOAD_END=$(date +%s)
-  OFFLOAD_DURATION=$(( OFFLOAD_END - OFFLOAD_START ))
-
-  if [ "$OFFLOAD_EXIT" -eq 124 ]; then
-    echo "[azureclaw] ❌ Offload timed out after ${OFFLOAD_TIMEOUT_SECONDS}s"
-    OFFLOAD_SUMMARY="Task timed out after ${OFFLOAD_DURATION}s"
-    OFFLOAD_PHASE="error"
-  elif [ "$OFFLOAD_EXIT" -ne 0 ]; then
-    echo "[azureclaw] ❌ Offload failed with exit code ${OFFLOAD_EXIT}"
-    OFFLOAD_SUMMARY="Task failed (exit code: ${OFFLOAD_EXIT})"
-    OFFLOAD_PHASE="error"
-  else
-    echo "[azureclaw] ✅ Offload task completed in ${OFFLOAD_DURATION}s"
-    OFFLOAD_SUMMARY=$(head -c 4000 "$OFFLOAD_OUTPUT_FILE")
-    OFFLOAD_PHASE="done"
-  fi
-
-  # Collect output files from /sandbox workspace (if any were created)
-  OFFLOAD_OUTPUT_FILES=""
-  if [ -d "/sandbox" ]; then
-    OFFLOAD_OUTPUT_FILES=$(find /sandbox -type f -newer "$OFFLOAD_OUTPUT_FILE" -printf '%P\n' 2>/dev/null | head -50 | tr '\n' ',' | sed 's/,$//')
-  fi
-
-  # Write result marker file for the controller/reconciler to pick up
-  cat > /tmp/offload-result.json << RESULTEOF
-{
-  "request_id": "${OFFLOAD_REQUEST_ID}",
-  "phase": "${OFFLOAD_PHASE}",
-  "summary": $(echo "$OFFLOAD_SUMMARY" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '"(output encoding error)"'),
-  "duration_seconds": ${OFFLOAD_DURATION},
-  "exit_code": ${OFFLOAD_EXIT},
-  "output_files": "${OFFLOAD_OUTPUT_FILES}",
-  "parent_amid": "${OFFLOAD_PARENT_AMID}",
-  "controller_amid": "${OFFLOAD_CONTROLLER_AMID}"
-}
-RESULTEOF
-
-  echo "[azureclaw] Result written to /tmp/offload-result.json"
-  cat /tmp/offload-result.json
-
-  # Cleanup: kill background processes
-  kill "$OFFLOAD_GATEWAY_PID" "$OFFLOAD_NODE_PID" 2>/dev/null || true
-
-  echo "[azureclaw] ═══ OFFLOAD COMPLETE ═══"
-  exit "$OFFLOAD_EXIT"
+  (
+    sleep "$OFFLOAD_TIMEOUT_SECONDS"
+    echo "[azureclaw] ⏰ Offload timeout reached (${OFFLOAD_TIMEOUT_MINUTES}m) — shutting down"
+    kill 1 2>/dev/null || true
+  ) &
 fi
 
 # ── Normal mode: start gateway + node host + TUI ───────────────────────────

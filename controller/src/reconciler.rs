@@ -169,6 +169,50 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             tracing::warn!(sandbox = %name, "Federated credential cleanup failed (non-fatal): {e}");
         }
 
+        // Offload sandbox slot cleanup: decrement slotsUsed on the parent ClawPairing
+        if let Some(requester) = sandbox
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("azureclaw.azure.com/offload-requester"))
+        {
+            let pairings_api: Api<crate::pairing::ClawPairing> =
+                Api::namespaced(client.clone(), crate::mesh_peer::IDENTITY_NAMESPACE);
+            if let Ok(list) = pairings_api.list(&ListParams::default()).await
+                && let Some(pairing) = list.items.iter().find(|p| {
+                    p.status
+                        .as_ref()
+                        .and_then(|s| s.bound_amid.as_deref())
+                        == Some(requester)
+                })
+            {
+                let pairing_name = pairing.name_any();
+                let current_slots = pairing
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.slots_used)
+                    .unwrap_or(1);
+                let patch = json!({
+                    "status": {
+                        "slotsUsed": (current_slots - 1).max(0),
+                        "activeSandbox": serde_json::Value::Null,
+                    }
+                });
+                let _ = pairings_api
+                    .patch_status(
+                        &pairing_name,
+                        &PatchParams::apply("azureclaw-controller"),
+                        &Patch::Merge(patch),
+                    )
+                    .await;
+                tracing::info!(
+                    sandbox = %name,
+                    pairing = %pairing_name,
+                    "Offload slot released"
+                );
+            }
+        }
+
         // Remove the finalizer so K8s can complete CRD deletion
         let sandbox_api: Api<ClawSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());

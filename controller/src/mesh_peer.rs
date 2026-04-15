@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use k8s_openapi::api::core::v1::{Pod, Secret};
 use kube::{
     Client, ResourceExt,
-    api::{Api, ListParams, LogParams, Patch, PatchParams, PostParams},
+    api::{Api, ListParams, Patch, PatchParams, PostParams},
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ fn derive_amid(verifying_key: &VerifyingKey) -> String {
 // ---------------------------------------------------------------------------
 
 const IDENTITY_SECRET_NAME: &str = "controller-mesh-identity";
-const IDENTITY_NAMESPACE: &str = "azureclaw-system";
+pub(crate) const IDENTITY_NAMESPACE: &str = "azureclaw-system";
 
 /// Load or create the controller's mesh identity from a K8s Secret.
 pub async fn load_or_create_identity(client: &Client) -> Result<MeshIdentity> {
@@ -239,6 +239,8 @@ enum FederationMessage {
         #[serde(default)]
         total_bytes: u64,
         #[serde(default)]
+        file_contents: Vec<FileContent>,
+        #[serde(default)]
         preferences: Option<OffloadPreferences>,
         request_id: String,
         timestamp: String,
@@ -248,6 +250,10 @@ enum FederationMessage {
         request_id: String,
         phase: String,
         message: String,
+        /// Sandbox name (set when phase == "ready") — the external agent uses
+        /// this to discover the sandbox on the mesh and talk to it directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox_name: Option<String>,
     },
     #[serde(rename = "offload_done")]
     OffloadDone {
@@ -255,6 +261,8 @@ enum FederationMessage {
         summary: String,
         #[serde(default)]
         output_files: Vec<String>,
+        #[serde(default)]
+        output_file_contents: Vec<FileContent>,
         #[serde(default)]
         tokens_used: Option<TokenUsage>,
         #[serde(default)]
@@ -284,6 +292,13 @@ struct TokenUsage {
     prompt: u64,
     #[serde(default)]
     completion: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct FileContent {
+    path: String,
+    data_b64: String,
+    size: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +511,7 @@ async fn handle_peer_message(
             files,
             file_count,
             total_bytes,
+            file_contents,
             preferences,
             request_id,
             timestamp,
@@ -505,6 +521,7 @@ async fn handle_peer_message(
                 request_id = %request_id,
                 task_len = task.len(),
                 files = file_count,
+                inline_files = file_contents.len(),
                 "Received offload_request"
             );
             handle_offload_request(
@@ -515,6 +532,7 @@ async fn handle_peer_message(
                 &task,
                 &files,
                 total_bytes,
+                &file_contents,
                 preferences.as_ref(),
                 &timestamp,
             )
@@ -731,8 +749,8 @@ async fn send_via_relay(
 // ---------------------------------------------------------------------------
 
 /// Handle an offload_request from a paired external agent.
-/// Validates the pairing, checks budget/slots, creates a ClawSandbox CRD,
-/// monitors it, and streams status back to the requester.
+/// Validates the pairing, checks budget/slots, creates file ConfigMap if needed,
+/// creates a ClawSandbox CRD, watches pod completion, and relays results back.
 #[allow(clippy::too_many_arguments)]
 async fn handle_offload_request<S>(
     state: &Arc<MeshPeerState>,
@@ -742,6 +760,7 @@ async fn handle_offload_request<S>(
     task: &str,
     _files: &[String],
     _total_bytes: u64,
+    _file_contents: &[FileContent],
     preferences: Option<&OffloadPreferences>,
     _timestamp: &str,
 ) -> Result<()>
@@ -756,6 +775,7 @@ where
             request_id: request_id.into(),
             phase: "validating".into(),
             message: "Validating pairing and budget".into(),
+            sandbox_name: None,
         },
     )
     .await?;
@@ -785,6 +805,7 @@ where
             request_id: request_id.into(),
             phase: "spawning".into(),
             message: "Creating offload sandbox".into(),
+            sandbox_name: None,
         },
     )
     .await?;
@@ -830,8 +851,9 @@ where
         "governance": {
             "enabled": true,
             "toolPolicy": "default",
-            "trustThreshold": 500,
-            "registryMode": "local"
+            "trustThreshold": 900,
+            "trustedPeers": format!("offload-parent:{from_amid}"),
+            "registryMode": "global"
         }
     });
 
@@ -855,13 +877,13 @@ where
         "spec": spec,
     });
 
-    // Set env vars the entrypoint will read for offload mode
+    // No OFFLOAD_MODE — sandbox starts as a full AzureClaw agent.
+    // The external agent talks to it directly via existing mesh protocol
+    // (mesh_send, mesh_transfer_file). AGT_TRUSTED_PEERS locks the sandbox
+    // so only the paired external agent can communicate with it.
     let extra_env = json!({
-        "OFFLOAD_MODE": "true",
-        "OFFLOAD_TASK": task,
         "OFFLOAD_REQUEST_ID": request_id,
         "OFFLOAD_PARENT_AMID": from_amid,
-        "OFFLOAD_CONTROLLER_AMID": state.identity.amid,
         "OFFLOAD_TIMEOUT_MINUTES": timeout_minutes.to_string(),
     });
 
@@ -944,23 +966,23 @@ where
         )
         .await;
 
-    // Phase 3: Running — notify requester
+    // Phase 3: CRD created — notify requester sandbox is being scheduled
     send_to_peer(
         write,
         from_amid,
         &FederationMessage::OffloadStatus {
             request_id: request_id.into(),
-            phase: "running".into(),
+            phase: "scheduled".into(),
             message: format!(
-                "Sandbox '{sandbox_name}' created. Task running with model '{model}'. Timeout: {timeout_minutes}m."
+                "Sandbox '{sandbox_name}' created, waiting for it to start..."
             ),
+            sandbox_name: None,
         },
     )
     .await?;
 
-    // Phase 4: Watch pod completion and relay result back to requester.
-    // Spawned as a background task so we don't block the relay message loop.
-    // Uses its own relay connection since the pod may finish minutes/hours later.
+    // Phase 4: Watch for sandbox to become Running, then send sandbox name
+    // back to the requester so they can talk to it directly via mesh.
     let watcher_state = Arc::clone(state);
     let watcher_amid = from_amid.to_string();
     let watcher_request_id = request_id.to_string();
@@ -968,19 +990,18 @@ where
     let watcher_ns = namespace.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = watch_offload_pod(
+        if let Err(e) = watch_sandbox_ready(
             &watcher_state,
             &watcher_amid,
             &watcher_request_id,
             &watcher_sandbox,
             &watcher_ns,
-            timeout_minutes,
         )
         .await
         {
             tracing::error!(
                 request_id = %watcher_request_id,
-                "Offload pod watcher failed: {e:#}"
+                "Sandbox ready watcher failed: {e:#}"
             );
         }
     });
@@ -989,53 +1010,37 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Pod completion watcher + result relay
+// Sandbox ready watcher
 // ---------------------------------------------------------------------------
 
-/// Offload result parsed from pod logs (written by entrypoint.sh).
-#[derive(Debug, Deserialize)]
-struct OffloadResult {
-    request_id: String,
-    phase: String,
-    summary: String,
-    duration_seconds: u64,
-    #[allow(dead_code)]
-    exit_code: i32,
-    #[serde(default)]
-    output_files: String,
-}
-
-/// Watch an offload sandbox pod until it completes, read the result from
-/// pod logs, and relay `OffloadDone` or `OffloadError` back to the requester
-/// via a dedicated relay connection.
-async fn watch_offload_pod(
+/// Watch for an offload sandbox pod to become Running, then send its name back
+/// to the requester so they can talk to it directly via the mesh.
+///
+/// The controller's job ends here — the external agent and sandbox communicate
+/// directly via the existing mesh protocol (mesh_send, mesh_transfer_file).
+/// AGT_TRUSTED_PEERS on the sandbox ensures only the paired agent can talk to it.
+async fn watch_sandbox_ready(
     state: &Arc<MeshPeerState>,
     requester_amid: &str,
     request_id: &str,
     sandbox_name: &str,
     namespace: &str,
-    timeout_minutes: u32,
 ) -> Result<()> {
     let pods: Api<Pod> = Api::namespaced(state.client.clone(), namespace);
-
-    // Wait for the pod to appear (reconciler creates it from the CRD)
-    let pod_name = format!("{sandbox_name}-0");
     let label_selector = format!("azureclaw.azure.com/request-id={request_id}");
-    let timeout = Duration::from_secs(u64::from(timeout_minutes) * 60 + 120); // task timeout + 2min buffer
+    // 5 minutes should be enough for pod scheduling + container pull + startup
+    let timeout = Duration::from_secs(300);
 
     tracing::info!(
         request_id = %request_id,
-        pod = %pod_name,
+        sandbox = %sandbox_name,
         namespace = %namespace,
-        "Watching offload pod for completion"
+        "Watching for offload sandbox to become ready"
     );
 
-    // Poll for pod to exist and reach a terminal state.
-    // The reconciler creates a Deployment which creates the pod, so the name
-    // may differ. Use label selector to find it.
-    let terminal_pod = tokio::time::timeout(timeout, async {
+    let ready_pod = tokio::time::timeout(timeout, async {
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
             let list = pods
                 .list(&ListParams::default().labels(&label_selector))
                 .await;
@@ -1051,8 +1056,9 @@ async fn watch_offload_pod(
                 if let Some(status) = &pod.status {
                     let phase = status.phase.as_deref().unwrap_or("");
                     match phase {
-                        "Succeeded" | "Failed" => {
-                            return Ok::<Pod, anyhow::Error>(pod.clone());
+                        "Running" => return Ok::<Pod, anyhow::Error>(pod.clone()),
+                        "Failed" => {
+                            anyhow::bail!("Sandbox pod failed before becoming ready");
                         }
                         _ => {}
                     }
@@ -1062,180 +1068,57 @@ async fn watch_offload_pod(
     })
     .await;
 
-    let pod = match terminal_pod {
-        Ok(Ok(pod)) => pod,
+    match ready_pod {
+        Ok(Ok(_pod)) => {
+            tracing::info!(
+                request_id = %request_id,
+                sandbox = %sandbox_name,
+                "Offload sandbox is running — sending name to requester"
+            );
+
+            // Send sandbox name so the external agent can discover it on the mesh
+            // and talk to it directly via mesh_send / mesh_transfer_file
+            send_via_relay(
+                state,
+                requester_amid,
+                &FederationMessage::OffloadStatus {
+                    request_id: request_id.into(),
+                    phase: "ready".into(),
+                    message: format!("Sandbox '{sandbox_name}' is running — send files and task directly via mesh"),
+                    sandbox_name: Some(sandbox_name.into()),
+                },
+            )
+            .await?;
+        }
         Ok(Err(e)) => {
-            tracing::error!(request_id = %request_id, "Pod watch error: {e}");
+            tracing::error!(request_id = %request_id, "Sandbox failed: {e}");
             send_via_relay(
                 state,
                 requester_amid,
                 &FederationMessage::OffloadError {
                     request_id: request_id.into(),
-                    error: format!("Pod watch error: {e}"),
-                    phase: "watching".into(),
+                    error: format!("Sandbox failed to start: {e}"),
+                    phase: "spawning".into(),
                 },
             )
             .await?;
-            return Ok(());
         }
         Err(_) => {
-            tracing::warn!(request_id = %request_id, "Offload pod timed out");
+            tracing::warn!(request_id = %request_id, "Sandbox did not become ready within 5 minutes");
             send_via_relay(
                 state,
                 requester_amid,
                 &FederationMessage::OffloadError {
                     request_id: request_id.into(),
-                    error: format!("Offload timed out after {timeout_minutes}m"),
-                    phase: "timeout".into(),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-
-    let pod_name_actual = pod.name_any();
-    let pod_phase = pod
-        .status
-        .as_ref()
-        .and_then(|s| s.phase.as_deref())
-        .unwrap_or("Unknown");
-
-    tracing::info!(
-        request_id = %request_id,
-        pod = %pod_name_actual,
-        phase = %pod_phase,
-        "Offload pod reached terminal state"
-    );
-
-    // Read pod logs to extract the JSON result (entrypoint prints it to stdout)
-    let log_params = LogParams {
-        container: Some("openclaw".into()),
-        tail_lines: Some(50),
-        ..Default::default()
-    };
-
-    let logs = pods
-        .logs(&pod_name_actual, &log_params)
-        .await
-        .unwrap_or_default();
-
-    // Parse the offload result JSON from logs.
-    // The entrypoint writes it between the result marker and "OFFLOAD COMPLETE".
-    let result = parse_offload_result_from_logs(&logs);
-
-    match result {
-        Some(offload_result) if offload_result.phase == "done" => {
-            let output_files: Vec<String> = offload_result
-                .output_files
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect();
-
-            send_via_relay(
-                state,
-                requester_amid,
-                &FederationMessage::OffloadDone {
-                    request_id: offload_result.request_id,
-                    summary: offload_result.summary,
-                    output_files,
-                    tokens_used: None,
-                    duration_seconds: offload_result.duration_seconds,
-                },
-            )
-            .await?;
-
-            tracing::info!(
-                request_id = %request_id,
-                duration_s = offload_result.duration_seconds,
-                "Relayed offload_done to requester"
-            );
-        }
-        Some(offload_result) => {
-            send_via_relay(
-                state,
-                requester_amid,
-                &FederationMessage::OffloadError {
-                    request_id: offload_result.request_id,
-                    error: offload_result.summary,
-                    phase: offload_result.phase,
-                },
-            )
-            .await?;
-
-            tracing::info!(
-                request_id = %request_id,
-                "Relayed offload_error to requester"
-            );
-        }
-        None => {
-            let error_msg = if pod_phase == "Failed" {
-                "Offload sandbox failed (no result in logs)"
-            } else {
-                "Offload completed but result could not be parsed from logs"
-            };
-
-            send_via_relay(
-                state,
-                requester_amid,
-                &FederationMessage::OffloadError {
-                    request_id: request_id.into(),
-                    error: error_msg.into(),
-                    phase: pod_phase.to_lowercase(),
+                    error: "Sandbox timed out waiting to become ready".into(),
+                    phase: "spawning".into(),
                 },
             )
             .await?;
         }
-    }
-
-    // Decrement slots_used on the pairing
-    let pairings_api: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
-    let pairing_list = pairings_api.list(&ListParams::default()).await.ok();
-    if let Some(list) = pairing_list
-        && let Some(pairing) = list.items.iter().find(|p| {
-            p.status.as_ref().and_then(|s| s.bound_amid.as_deref()) == Some(requester_amid)
-        })
-    {
-        let name = pairing.name_any();
-        let current_slots = pairing
-            .status
-            .as_ref()
-            .and_then(|s| s.slots_used)
-            .unwrap_or(1);
-        let patch = json!({
-            "status": {
-                "slotsUsed": (current_slots - 1).max(0),
-                "activeSandbox": serde_json::Value::Null,
-            }
-        });
-        let _ = pairings_api
-            .patch_status(
-                &name,
-                &PatchParams::apply("azureclaw-mesh-peer"),
-                &Patch::Merge(patch),
-            )
-            .await;
     }
 
     Ok(())
-}
-
-/// Parse the offload result JSON from pod log output.
-/// The entrypoint writes it after "Result written to /tmp/offload-result.json"
-/// and then immediately `cat`s it, so it appears in stdout logs.
-fn parse_offload_result_from_logs(logs: &str) -> Option<OffloadResult> {
-    // Look for JSON object containing "request_id" — the result marker
-    for line in logs.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('{')
-            && trimmed.contains("request_id")
-            && let Ok(result) = serde_json::from_str::<OffloadResult>(trimmed)
-        {
-            return Some(result);
-        }
-    }
-    None
 }
 
 /// Validate that an AMID has an active pairing with available slots and budget.
@@ -1397,6 +1280,7 @@ mod tests {
             files: vec!["data.csv".into()],
             file_count: 1,
             total_bytes: 4096,
+            file_contents: vec![],
             preferences: Some(OffloadPreferences {
                 model: Some("gpt-4.1".into()),
                 max_tokens: None,
@@ -1427,10 +1311,23 @@ mod tests {
             request_id: "req-001".into(),
             phase: "running".into(),
             message: "Task in progress".into(),
+            sandbox_name: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("offload_status"));
         assert!(json.contains("running"));
+        // sandbox_name omitted when None
+        assert!(!json.contains("sandbox_name"));
+
+        // With sandbox_name
+        let msg2 = FederationMessage::OffloadStatus {
+            request_id: "req-002".into(),
+            phase: "ready".into(),
+            message: "Sandbox ready".into(),
+            sandbox_name: Some("offload-abc123".into()),
+        };
+        let json2 = serde_json::to_string(&msg2).unwrap();
+        assert!(json2.contains("offload-abc123"));
     }
 
     #[test]
@@ -1451,46 +1348,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_offload_result_from_logs_success() {
-        let logs = r#"[azureclaw] Starting offload mode
-[azureclaw] Running task...
-[azureclaw] ✅ Offload task completed in 45s
-[azureclaw] Result written to /tmp/offload-result.json
-{"request_id":"abc-123","phase":"done","summary":"Analysis complete. Found 3 issues.","duration_seconds":45,"exit_code":0,"output_files":"report.md,findings.json","parent_amid":"peer1","controller_amid":"ctrl1"}
-[azureclaw] ═══ OFFLOAD COMPLETE ═══"#;
-
-        let result = parse_offload_result_from_logs(logs).unwrap();
-        assert_eq!(result.request_id, "abc-123");
-        assert_eq!(result.phase, "done");
-        assert_eq!(result.duration_seconds, 45);
-        assert!(result.summary.contains("3 issues"));
-        assert!(result.output_files.contains("report.md"));
-    }
-
-    #[test]
-    fn parse_offload_result_from_logs_error() {
-        let logs = r#"[azureclaw] ❌ Offload failed with exit code 1
-{"request_id":"def-456","phase":"error","summary":"Task failed (exit code: 1)","duration_seconds":12,"exit_code":1,"output_files":"","parent_amid":"peer1","controller_amid":"ctrl1"}
-[azureclaw] ═══ OFFLOAD COMPLETE ═══"#;
-
-        let result = parse_offload_result_from_logs(logs).unwrap();
-        assert_eq!(result.request_id, "def-456");
-        assert_eq!(result.phase, "error");
-        assert_eq!(result.exit_code, 1);
-    }
-
-    #[test]
-    fn parse_offload_result_from_logs_missing() {
-        let logs = "[azureclaw] Starting offload\nsome random output\n";
-        assert!(parse_offload_result_from_logs(logs).is_none());
-    }
-
-    #[test]
     fn offload_done_serialization_roundtrip() {
         let msg = FederationMessage::OffloadDone {
             request_id: "req-done".into(),
             summary: "Task completed successfully".into(),
             output_files: vec!["report.md".into(), "data.json".into()],
+            output_file_contents: vec![],
             tokens_used: Some(TokenUsage {
                 prompt: 1500,
                 completion: 800,
