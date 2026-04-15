@@ -17,6 +17,7 @@ import { evalCommand } from "./commands/eval.js";
 import { operatorCommand } from "./commands/operator.js";
 import { handoffCommand } from "./commands/handoff.js";
 import { meshCommand } from "./commands/mesh.js";
+import { pairCommand } from "./commands/pair.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -55,6 +56,7 @@ export function createCli(): Command {
   // Agent mobility
   program.addCommand(handoffCommand());
   program.addCommand(meshCommand());
+  program.addCommand(pairCommand());
 
   return program;
 }
