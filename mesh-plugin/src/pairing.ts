@@ -36,8 +36,16 @@ export function decodeToken(token: string): PairingTokenPayload | null {
   const cleaned = token.replace(/\s+/g, "").trim();
   if (!cleaned.startsWith(TOKEN_PREFIX)) return null;
   try {
-    const b64 = cleaned.slice(TOKEN_PREFIX.length);
-    const json = Buffer.from(b64, "base64url").toString("utf-8");
+    let b64 = cleaned.slice(TOKEN_PREFIX.length);
+    // Add padding if missing (base64url may omit it)
+    while (b64.length % 4 !== 0) b64 += "=";
+    // Try base64url first, then standard base64
+    let json: string;
+    try {
+      json = Buffer.from(b64, "base64url").toString("utf-8");
+    } catch {
+      json = Buffer.from(b64, "base64").toString("utf-8");
+    }
     const payload = JSON.parse(json);
     if (!payload.controller_amid || !payload.secret) return null;
     return payload as PairingTokenPayload;
