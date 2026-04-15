@@ -32,9 +32,11 @@ export interface StoredPairing {
 
 /** Decode an azcp_1_ pairing token. Returns null if invalid. */
 export function decodeToken(token: string): PairingTokenPayload | null {
-  if (!token.startsWith(TOKEN_PREFIX)) return null;
+  // Strip any whitespace/newlines that chat UIs may inject
+  const cleaned = token.replace(/\s+/g, "").trim();
+  if (!cleaned.startsWith(TOKEN_PREFIX)) return null;
   try {
-    const b64 = token.slice(TOKEN_PREFIX.length);
+    const b64 = cleaned.slice(TOKEN_PREFIX.length);
     const json = Buffer.from(b64, "base64url").toString("utf-8");
     const payload = JSON.parse(json);
     if (!payload.controller_amid || !payload.secret) return null;
