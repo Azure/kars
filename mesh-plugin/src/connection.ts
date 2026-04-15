@@ -57,10 +57,12 @@ interface InboxMessage {
 
 export class MeshConnection {
   private ws: import("node:net").Socket | null = null;
-  private wsObj: any = null; // WebSocket instance
+  private wsObj: any = null;
   private config: ConnectionConfig;
   private inbox: InboxMessage[] = [];
   private connected = false;
+  private intentionalClose = false;
+  private reconnectAttempts = 0;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private maxInboxSize = 500;
@@ -80,6 +82,7 @@ export class MeshConnection {
   // ── Connect ──────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
+    this.intentionalClose = false;
     const { WebSocket } = await import("ws").catch(() => {
       throw new Error(
         "ws package required for relay connection. Install with: npm install ws"
@@ -116,6 +119,7 @@ export class MeshConnection {
         this.connected = false;
         this.stopKeepalive();
         this.config.onDisconnect?.();
+        this.scheduleReconnect();
       });
 
       ws.on("error", (err: Error) => {
@@ -128,6 +132,7 @@ export class MeshConnection {
   }
 
   async disconnect(): Promise<void> {
+    this.intentionalClose = true;
     this.stopKeepalive();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -138,6 +143,24 @@ export class MeshConnection {
       this.wsObj = null;
     }
     this.connected = false;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.intentionalClose) return;
+    if (this.reconnectTimer) return;
+    const delay = Math.min(5000 * Math.pow(2, this.reconnectAttempts), 60_000);
+    this.reconnectAttempts++;
+    console.log(`[mesh] Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})...`);
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      try {
+        await this.connect();
+        this.reconnectAttempts = 0;
+        console.log("[mesh] Reconnected to relay");
+      } catch {
+        this.scheduleReconnect();
+      }
+    }, delay);
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────
