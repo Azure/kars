@@ -62,8 +62,8 @@ export function pairCommand(): Command {
     .option("--token-budget <tokens>", "Maximum tokens for offloads", "500000")
     .option("--slots <n>", "Maximum concurrent offload sandboxes", "1")
     .option("--capabilities <list>", "Comma-separated: offload,handoff", "offload,handoff")
-    .option("--relay-url <url>", "AgentMesh relay URL", "ws://localhost:18765")
-    .option("--registry-url <url>", "AgentMesh registry URL", "http://localhost:18080")
+    .option("--relay-url <url>", "AgentMesh relay URL", "ws://host.docker.internal:18765")
+    .option("--registry-url <url>", "AgentMesh registry URL", "http://host.docker.internal:18080")
     .action(async (options) => {
       banner("AzureClaw · Pair", "Federation Pairing Token");
 
