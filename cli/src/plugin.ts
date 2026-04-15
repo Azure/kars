@@ -135,6 +135,8 @@ const nameToAmid: Map<string, string> = new Map();
 // Parent-verified trusted peer AMIDs — pre-seeded at spawn via AGT_TRUSTED_PEERS env var.
 // Separate from amidToName to prevent trust escalation via arbitrary registry lookups.
 const parentTrustedAmids: Set<string> = new Set();
+// AMID → Ed25519 signing public key (base64) — cached from registry lookups
+const peerSigningKeys: Map<string, string> = new Map();
 
 // Sanitize user-influenced strings before logging — strip ANSI escapes and collapse newlines
 function sanitizeLog(s: string, maxLen = 500): string {
@@ -170,7 +172,34 @@ async function resolveAmidToName(amid: string): Promise<string> {
   return "";
 }
 
-// Stored sandbox name for reconnect attempts
+// Resolve AMID → Ed25519 signing public key via registry lookup (cached).
+// Returns the base64-encoded public key, or empty string if unavailable.
+async function resolveSigningKey(amid: string): Promise<string> {
+  const cached = peerSigningKeys.get(amid);
+  if (cached) return cached;
+  try {
+    const http = await import("node:http");
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.get(
+        `http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${amid}`,
+        (res) => {
+          let d = "";
+          res.on("data", (c: Buffer) => { d += c.toString(); });
+          res.on("end", () => resolve(d));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
+    });
+    const parsed = JSON.parse(body);
+    const key = parsed.signing_public_key || parsed.public_info?.signing_public_key || "";
+    if (key) {
+      peerSigningKeys.set(amid, key);
+      return key;
+    }
+  } catch { /* best effort */ }
+  return "";
+}
 let agtSandboxName: string = "unknown";
 
 // Push trust updates to the router's local TrustStore (POST /agt/trust).
@@ -223,6 +252,25 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
     // Startup race: router may not be ready on first plugin load (double-load pattern).
     // Trust will be seeded on the second load — no need to alarm the operator.
   }
+}
+
+// Push Ed25519 signing counter to router for /agt/status metrics.
+async function pushSigningCounter(action: "signed" | "verified" | "rejected") {
+  try {
+    const http = await import("node:http");
+    const body = JSON.stringify({ action });
+    await new Promise<void>((resolve) => {
+      const req = http.request(
+        { hostname: "127.0.0.1", port: 8443, path: "/agt/signing-counter", method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        () => resolve(),
+      );
+      req.on("error", () => resolve());
+      req.setTimeout(1000, () => { req.destroy(); resolve(); });
+      req.write(body);
+      req.end();
+    });
+  } catch { /* best effort */ }
 }
 
 // Record a completed mesh session in the AGT registry so reputation/session counters update.
@@ -1091,6 +1139,22 @@ async function meshSend(
   message: Record<string, unknown>,
   _log?: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<string | undefined> {
+  // Ed25519 per-message signing — attach signature and sender AMID
+  if (agtIdentity && !message.__signed) {
+    const payload = JSON.stringify(message);
+    try {
+      const encoder = new TextEncoder();
+      const signature = await agtIdentity.signB64(encoder.encode(payload));
+      (message as any).__signature = signature;
+      (message as any).__sender_amid = agtIdentity.amid;
+      (message as any).__signed_at = Math.floor(Date.now() / 1000);
+      // Push counter to router
+      pushSigningCounter("signed");
+    } catch {
+      // Sign failed — send unsigned (fail-open for availability)
+    }
+  }
+
   const json = JSON.stringify(message);
 
   if (json.length <= MESH_CHUNK_THRESHOLD) {
@@ -1499,6 +1563,55 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         // Reassembled message — replace the original message and continue to app layer
         message = transportResult;
         log.info(`Mesh transfer reassembled from '${fromName}' — processing as ${message.type || "message"}`);
+      }
+
+      // ── Ed25519 signature verification (AGT Identity) ──
+      // Verify per-message signatures using the sender's public key from registry.
+      // Fail-open: unsigned or unverifiable messages are still delivered but logged.
+      if (message && typeof message === "object" && message.__signature) {
+        const sigB64: string = message.__signature;
+        const senderAmid: string = message.__sender_amid || fromAmid;
+        const signedAt: number = message.__signed_at || 0;
+        // Strip signing metadata before verification (verify the original payload)
+        const { __signature: _s, __sender_amid: _a, __signed_at: _t, __signed: _sg, ...originalPayload } = message;
+        const payloadStr = JSON.stringify(originalPayload);
+
+        // Timestamp window check (60s) — replay protection beyond Signal layer
+        const now = Math.floor(Date.now() / 1000);
+        if (signedAt > 0 && Math.abs(now - signedAt) > 60) {
+          log.warn(`Ed25519 signature expired from '${fromName}' (${Math.abs(now - signedAt)}s drift) — message accepted but flagged`);
+          pushSigningCounter("rejected");
+          pushTrustToRouter(fromName, -0.3);
+        } else {
+          const sdk = await import("@agentmesh/sdk");
+          const pubKey = await resolveSigningKey(senderAmid);
+          if (pubKey) {
+            try {
+              const encoder = new TextEncoder();
+              const valid = await sdk.Identity.verifySignature(pubKey, encoder.encode(payloadStr), sigB64);
+              if (valid) {
+                pushSigningCounter("verified");
+              } else {
+                log.warn(`Ed25519 signature INVALID from '${fromName}' — message accepted but trust penalized`);
+                pushSigningCounter("rejected");
+                pushTrustToRouter(fromName, -0.5);
+                agtInbox.push({
+                  from_amid: fromAmid,
+                  from_agent: fromName,
+                  content: `⚠️ SIGNATURE INVALID: Message from '${fromName}' has invalid Ed25519 signature. Possible tampering.`,
+                  message_type: "security_event",
+                  timestamp: new Date().toISOString(),
+                  id: `agt-sig-${Date.now().toString(36)}`,
+                });
+              }
+            } catch {
+              // Verification error — log but don't block
+              log.warn(`Ed25519 verify error for '${fromName}' — message accepted`);
+            }
+          }
+        }
+        // Use original payload (without signing metadata) for application processing
+        message = originalPayload;
       }
 
       const content = typeof message === "string" ? message : (message?.content || message?.text || JSON.stringify(message));
