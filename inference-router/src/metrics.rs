@@ -109,3 +109,51 @@ pub static AGT_POLICY_RULES: LazyLock<IntGauge> = LazyLock::new(|| {
     ))
     .unwrap()
 });
+
+/// Total credential redactions by kind (AGT CredentialRedactor).
+pub static AGT_REDACTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_agt_redactions_total",
+            "Credentials redacted from output"
+        ),
+        &["kind"]
+    )
+    .unwrap()
+});
+
+/// Response threats detected by type (AGT McpResponseScanner).
+pub static AGT_RESPONSE_THREATS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_agt_response_threats_total",
+            "Response threats detected (prompt injection, exfil, etc.)"
+        ),
+        &["type"]
+    )
+    .unwrap()
+});
+
+/// Per-tool rate limit denials (AGT McpSlidingRateLimiter).
+pub static AGT_TOOL_RATE_LIMITS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_agt_tool_rate_limits_total",
+            "Per-tool sliding window rate limit denials"
+        ),
+        &["tool"]
+    )
+    .unwrap()
+});
+
+/// Ed25519 message signature operations by action.
+pub static AGT_MESSAGE_SIGNATURES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_agt_message_signatures_total",
+            "Ed25519 message signing and verification"
+        ),
+        &["action"]
+    )
+    .unwrap()
+});
