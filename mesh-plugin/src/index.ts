@@ -251,7 +251,7 @@ async function meshPairHandler(params: any): Promise<string> {
 
   const payload = decodeToken(token);
   if (!payload) {
-    return "❌ Invalid pairing token. Must start with azcp_1_ and contain valid data.";
+    return `❌ Invalid pairing token. Must start with azcp_1_ and contain valid data. (token length: ${token.length}, starts: ${token.slice(0, 20)}...)`;
   }
 
   meshIdentity = loadOrCreateIdentity();
