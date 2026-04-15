@@ -237,8 +237,17 @@ async function ensureInitialized(): Promise<string | null> {
 // Tool handlers
 // ---------------------------------------------------------------------------
 
-async function meshPairHandler(params: { token: string }): Promise<string> {
-  const { token } = params;
+async function meshPairHandler(params: any): Promise<string> {
+  // OpenClaw may pass args in various shapes — extract token defensively
+  const token: string | undefined =
+    params?.token ??
+    params?.arguments?.token ??
+    params?.params?.token ??
+    (typeof params === "string" ? params : undefined);
+
+  if (!token) {
+    return `❌ No token provided. Pass a pairing token starting with azcp_1_. (received keys: ${JSON.stringify(Object.keys(params ?? {}))})`;
+  }
 
   const payload = decodeToken(token);
   if (!payload) {
