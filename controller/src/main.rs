@@ -1,17 +1,20 @@
 //! AzureClaw Controller — Kubernetes operator for sandboxed OpenClaw agents.
 //!
-//! Watches `ClawSandbox` custom resources and reconciles:
+//! Watches `ClawSandbox` and `ClawPairing` custom resources and reconciles:
 //! - Isolated namespace per sandbox
 //! - OpenClaw agent pod with security constraints (seccomp, SELinux, read-only rootfs)
 //! - NetworkPolicy (default-deny + allowlist from CRD spec)
 //! - iptables egress-guard for per-container network isolation
 //! - Workload Identity bindings for Azure service access
 //! - Inference router configuration
+//! - Federation pairings for external agent cloud offload/handoff
 //!
 //! Built with kube-rs (CNCF Sandbox).
 
 mod crd;
 mod fedcred;
+mod pairing;
+mod pairing_reconciler;
 mod reconciler;
 
 use anyhow::Result;
@@ -31,7 +34,26 @@ async fn main() -> Result<()> {
     tracing::info!("AzureClaw Controller starting");
 
     let client = Client::try_default().await?;
-    reconciler::run(client).await?;
+
+    // Run sandbox and pairing controllers concurrently.
+    // Pairing controller is non-fatal — if CRD is missing, it exits gracefully.
+    let sandbox_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { reconciler::run(client).await })
+    };
+    let pairing_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { pairing_reconciler::run(client).await })
+    };
+
+    tokio::select! {
+        res = sandbox_handle => {
+            res??;
+        }
+        res = pairing_handle => {
+            res??;
+        }
+    }
 
     Ok(())
 }
