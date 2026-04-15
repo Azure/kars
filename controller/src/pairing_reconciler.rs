@@ -39,7 +39,9 @@ async fn reconcile_pairing(
     ctx: Arc<PairingContext>,
 ) -> Result<Action, PairingReconcileError> {
     let name = pairing.name_any();
-    let ns = pairing.namespace().unwrap_or_else(|| "azureclaw-system".into());
+    let ns = pairing
+        .namespace()
+        .unwrap_or_else(|| "azureclaw-system".into());
 
     tracing::info!(pairing = %name, "Reconciling ClawPairing");
 
@@ -137,9 +139,7 @@ pub async fn run(client: Client) -> Result<()> {
             tracing::info!("ClawPairing CRD found — starting pairing controller");
         }
         Err(e) => {
-            tracing::warn!(
-                "ClawPairing CRD not installed — pairing/federation disabled: {e}"
-            );
+            tracing::warn!("ClawPairing CRD not installed — pairing/federation disabled: {e}");
             return Ok(());
         }
     }
