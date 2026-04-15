@@ -86,6 +86,7 @@ export function definePluginEntry() {
           required: ["token"],
         },
         handler: meshPairHandler,
+        execute: meshPairHandler,
       });
 
       // ── cloud_offload ──
@@ -120,6 +121,7 @@ export function definePluginEntry() {
           required: ["task"],
         },
         handler: cloudOffloadHandler,
+        execute: cloudOffloadHandler,
       });
 
       // ── offload_status ──
@@ -133,6 +135,7 @@ export function definePluginEntry() {
           properties: {},
         },
         handler: offloadStatusHandler,
+        execute: offloadStatusHandler,
       });
 
       // ── mesh_send ──
@@ -156,6 +159,7 @@ export function definePluginEntry() {
           required: ["to", "message"],
         },
         handler: meshSendHandler,
+        execute: meshSendHandler,
       });
 
       // ── mesh_inbox ──
@@ -173,6 +177,7 @@ export function definePluginEntry() {
           },
         },
         handler: meshInboxHandler,
+        execute: meshInboxHandler,
       });
 
       // ── discover ──
@@ -194,6 +199,7 @@ export function definePluginEntry() {
           },
         },
         handler: discoverHandler,
+        execute: discoverHandler,
       });
     },
   };
