@@ -187,6 +187,49 @@ pub async fn heartbeat_agent(
     Ok(result.rows_affected() > 0)
 }
 
+/// Update agent tier (used by revocation downgrade and re-verification upgrade)
+pub async fn update_agent_tier(
+    pool: &PgPool,
+    amid: &str,
+    tier: crate::models::TrustTier,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE agents
+        SET tier = $2, updated_at = $3
+        WHERE amid = $1
+        "#
+    )
+    .bind(amid)
+    .bind(tier)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Demote agents with expired certificates back to anonymous tier.
+/// Returns the number of agents demoted.
+pub async fn demote_expired_certs(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE agents SET tier = 'anonymous', updated_at = NOW()
+        WHERE amid IN (
+            SELECT c.amid FROM agent_certificates c
+            JOIN agents a ON a.amid = c.amid
+            WHERE a.tier != 'anonymous'
+            AND c.certificate IS NOT NULL
+            AND c.created_at < NOW() - INTERVAL '365 days'
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Update agent capabilities
 pub async fn update_agent_capabilities(
     pool: &PgPool,
