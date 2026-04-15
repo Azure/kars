@@ -91,6 +91,12 @@ networkPolicy:
       port: 443
       methods: ["GET"]
 
+# Mesh federation — enables external agents to pair and offload tasks
+meshPeer:
+  enabled: false            # Set to true to enable federation
+  relayUrl: ""              # AgentMesh relay URL (default: wss://relay.agentmesh.online/v1/connect)
+  clusterName: ""           # Display name shown to external agents during pairing
+
 # Foundry configuration (set by azureclaw up --foundry-endpoint)
 foundry:
   endpoint: ""            # e.g. https://my-resource.services.ai.azure.com — AI Services base

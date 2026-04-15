@@ -5,20 +5,36 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "skills",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
     "lint": "oxlint src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "openclaw",
     "azureclaw",
     "agentmesh",
     "cloud-offload",
-    "e2e-encryption"
+    "e2e-encryption",
+    "federation"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AzureClaw/azureclaw.git",
+    "directory": "mesh-plugin"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "ws": "^8.18"
   },

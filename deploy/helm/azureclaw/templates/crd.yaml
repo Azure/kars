@@ -256,3 +256,105 @@ spec:
     shortNames:
       - cs
       - claw
+---
+# ClawPairing CRD — federation trust relationships
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clawpairings.azureclaw.azure.com
+  labels:
+    app.kubernetes.io/name: azureclaw
+spec:
+  group: azureclaw.azure.com
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["tokenHash", "expiresAt"]
+              properties:
+                tokenHash:
+                  type: string
+                  description: "SHA-256 hash of the pairing token secret (hex-encoded)"
+                expiresAt:
+                  type: string
+                  description: "ISO 8601 timestamp when this pairing expires"
+                slotsMax:
+                  type: integer
+                  default: 1
+                  description: "Maximum concurrent offload sandboxes"
+                tokenBudget:
+                  type: integer
+                  default: 500000
+                  description: "Maximum total tokens the paired agent can consume"
+                capabilities:
+                  type: array
+                  items:
+                    type: string
+                  default: ["offload", "handoff"]
+                  description: "Granted capabilities"
+                displayName:
+                  type: string
+                  description: "Admin-friendly display name"
+                model:
+                  type: string
+                  description: "Inference model for offload sandboxes"
+                isolation:
+                  type: string
+                  enum: ["standard", "enhanced", "confidential"]
+                  description: "Isolation level for offload sandboxes"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["PendingPairing", "Active", "Expired", "Revoked"]
+                boundAmid:
+                  type: string
+                  description: "External agent AMID (set on pairing)"
+                boundPubkeyEd25519:
+                  type: string
+                  description: "External agent Ed25519 public key (base64)"
+                pairedAt:
+                  type: string
+                  format: date-time
+                slotsUsed:
+                  type: integer
+                tokensUsed:
+                  type: integer
+                lastOffloadAt:
+                  type: string
+                  format: date-time
+                offloadsCompleted:
+                  type: integer
+                offloadsFailed:
+                  type: integer
+                activeSandbox:
+                  type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: AMID
+          type: string
+          jsonPath: .status.boundAmid
+        - name: Budget
+          type: integer
+          jsonPath: .spec.tokenBudget
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: clawpairings
+    singular: clawpairing
+    kind: ClawPairing
+    shortNames:
+      - cp
