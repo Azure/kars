@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mesh Inbox Improvements** — protocol message filtering (hides handoff/ack messages), auto-decode of `file_transfer` base64 content
 - **Native AGT Governance** — Rust-native governance module (replaces former Python sidecar) with PolicyEngine, TrustManager (0–1000, ±200 clamp, Ed25519 signed), SHA-256 Merkle audit chain, RateLimiter, and BehaviorMonitor
 - **E2E Encrypted Inter-Agent Messaging** — Signal Protocol (X3DH + Double Ratchet) via AgentMesh relay/registry with KNOCK trust handshake
-- **Content Safety Circuit Breaker** — fail-open with 60s auto-reset cooldown (prevents cascading failures when Content Safety endpoint is misconfigured)
+- **Content Safety via Foundry Guardrails** — Content Safety + Prompt Shields enforced server-side by Foundry (`Microsoft.DefaultV2`); the router parses `prompt_filter_results` annotations from model responses and reports flags to AGT governance for trust scoring and audit
 - **Foundry Agent Service Integration** — web search, code execute, file search, image generation, memory via Foundry project endpoint
 - **5-Image Architecture** — controller, inference-router, sandbox, agentmesh-relay, agentmesh-registry (governance runs natively in the router)
 - **CLI `push --only <image> --apply`** — selective image builds with automatic pod restart
