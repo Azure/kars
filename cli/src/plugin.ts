@@ -4997,7 +4997,10 @@ const azureClawPlugin = definePluginEntry({
           const result = await routerCall("GET", "/agt/handoff/status");
           return { content: [{ type: "text", text: safeJson(result) }] };
         } catch (e: any) {
-          return { content: [{ type: "text", text: `Handoff status check failed: ${e.message}` }] };
+          return { content: [{ type: "text", text: safeJson({
+            handoff_available: false,
+            error: e.message,
+          }) }] };
         }
       },
     });

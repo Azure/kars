@@ -94,15 +94,43 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 2
 
       - name: Build inference router image
-        run: docker build --build-arg ROUTER_CACHE_BUST=$(date +%s) -t azureclaw-inference-router:test -f inference-router/Dockerfile .
+        run: docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
 
-      - name: Build sandbox base image
-        run: docker build --build-arg OPENCLAW_CACHE_BUST=$(date +%s) -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
+      - name: Check if base image needs rebuild
+        id: base-check
+        run: |
+          if git diff --name-only HEAD~1 HEAD -- sandbox-images/openclaw/Dockerfile.base | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sandbox base image (only when Dockerfile.base changed)
+        if: steps.base-check.outputs.changed == 'true'
+        run: docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
+
+      - name: Pull cached base image (when Dockerfile.base unchanged)
+        if: steps.base-check.outputs.changed != 'true'
+        run: |
+          # Use the ACR base image if available, otherwise build locally
+          if docker pull azureclawacr.azurecr.io/azureclaw-sandbox-base:latest 2>/dev/null; then
+            docker tag azureclawacr.azurecr.io/azureclaw-sandbox-base:latest azureclaw-sandbox-base:test
+          else
+            echo "::warning::ACR base image unavailable — building locally (slow)"
+            docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
+          fi
 
       - name: Build sandbox image
         run: docker build --build-arg SANDBOX_BASE_IMAGE=azureclaw-sandbox-base:test --build-arg INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:test -t azureclaw-sandbox:test -f sandbox-images/openclaw/Dockerfile .
+
+      - name: Free disk space before scan
+        run: |
+          docker image rm azureclaw-sandbox-base:test azureclaw-inference-router:test 2>/dev/null || true
+          docker builder prune -f 2>/dev/null || true
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
@@ -114,7 +142,7 @@ jobs:
 
       - name: Upload scan results
         uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4
-        if: always()
+        if: always() && hashFiles('container-results.sarif') != ''
         with:
           sarif_file: "container-results.sarif"
 
