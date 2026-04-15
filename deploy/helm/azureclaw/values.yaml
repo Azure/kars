@@ -94,7 +94,7 @@ networkPolicy:
 # Mesh federation — enables external agents to pair and offload tasks
 meshPeer:
   enabled: false            # Set to true to enable federation
-  relayUrl: ""              # AgentMesh relay URL (default: wss://relay.agentmesh.online/v1/connect)
+  relayUrl: ""              # Override relay URL (default: ws://agentmesh-relay.agentmesh.svc.cluster.local:8765)
   clusterName: ""           # Display name shown to external agents during pairing
 
 # Foundry configuration (set by azureclaw up --foundry-endpoint)

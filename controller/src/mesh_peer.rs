@@ -319,8 +319,10 @@ struct MeshPeerState {
 /// Run the controller mesh peer. Connects to the relay, listens for messages,
 /// and handles pairing/offload requests. Reconnects automatically on disconnect.
 pub async fn run(client: Client) -> Result<()> {
+    // Default to in-cluster relay service. External agents use the public ingress
+    // URL (embedded in pairing tokens via `azureclaw pair generate --relay-url`).
     let relay_url = std::env::var("MESH_RELAY_URL")
-        .unwrap_or_else(|_| "wss://relay.agentmesh.online/v1/connect".into());
+        .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
     let cluster_name = std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "azureclaw-cluster".into());
 
     let identity = load_or_create_identity(&client).await?;
