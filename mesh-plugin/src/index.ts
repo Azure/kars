@@ -91,7 +91,7 @@ export function definePluginEntry() {
             files: {
               type: "array",
               items: { type: "string" },
-              description: "Workspace files to send to the sandbox (relative paths)",
+              description: "[Not yet implemented] Workspace files to send to the sandbox",
             },
             model: {
               type: "string",
