@@ -4,20 +4,20 @@
  * Enables any OpenClaw agent to:
  * 1. Pair with a trusted AzureClaw cluster (one-time)
  * 2. Offload tasks to governed cloud sandboxes
- * 3. Handoff full agent state to the cloud and recall it
- * 4. Communicate with other mesh agents (send/inbox/discover)
+ * 3. Communicate with other mesh agents (send/inbox/discover)
  *
- * Dependencies: @agentmesh/sdk (+ libsodium-wrappers)
+ * Dependencies: ws (WebSocket client)
  * No Docker, no Rust, no AzureClaw CLI required.
  */
 
-import { loadOrCreateIdentity, getIdentityPath } from "./identity.js";
+import { loadOrCreateIdentity, getIdentityPath, type MeshIdentity } from "./identity.js";
 import {
   decodeToken,
   savePairing,
   getDefaultPairing,
   type StoredPairing,
 } from "./pairing.js";
+import { MeshConnection } from "./connection.js";
 import type {
   PairRequestMessage,
   PairResponseMessage,
@@ -25,16 +25,21 @@ import type {
   OffloadStatusMessage,
   OffloadProgressMessage,
   OffloadDoneMessage,
+  OffloadErrorMessage,
 } from "./types.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as crypto from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
-let meshClient: any = null;
-let meshIdentity: ReturnType<typeof loadOrCreateIdentity> | null = null;
+let connection: MeshConnection | null = null;
+let meshIdentity: MeshIdentity | null = null;
 let activePairing: StoredPairing | null = null;
 let initialized = false;
+let activeOffload: { requestId: string; startedAt: number } | null = null;
 
 // ---------------------------------------------------------------------------
 // Plugin entry point
@@ -191,15 +196,12 @@ async function ensureInitialized(): Promise<string | null> {
 
   if (activePairing) {
     try {
-      const sdk = await import("@agentmesh/sdk");
-      meshClient = await sdk.AgentMeshClient.create({
-        registryUrl: activePairing.registryUrl,
+      connection = new MeshConnection({
         relayUrl: activePairing.relayUrl,
-      } as any);
-      await meshClient.connect(meshIdentity!.amid, {
-        displayName: `external-${meshIdentity!.amid.slice(0, 8)}`,
-        capabilities: ["external", "offload"],
+        registryUrl: activePairing.registryUrl,
+        identity: meshIdentity,
       });
+      await connection.connect();
       initialized = true;
     } catch (err: any) {
       return `Failed to connect to mesh: ${err.message}`;
@@ -217,38 +219,27 @@ async function ensureInitialized(): Promise<string | null> {
 async function meshPairHandler(params: { token: string }): Promise<string> {
   const { token } = params;
 
-  // Decode token
   const payload = decodeToken(token);
   if (!payload) {
     return "❌ Invalid pairing token. Must start with azcp_1_ and contain valid data.";
   }
 
-  // Generate/load identity
   meshIdentity = loadOrCreateIdentity();
   const identityPath = getIdentityPath();
 
-  // Connect to mesh
-  let sdk: any;
+  // Connect to relay
   try {
-    sdk = await import("@agentmesh/sdk");
-  } catch {
-    return "❌ @agentmesh/sdk not found. Install with: npm install @agentmesh/sdk";
-  }
-
-  try {
-    meshClient = await sdk.AgentMeshClient.create({
-      registryUrl: payload.registry_url,
+    connection = new MeshConnection({
       relayUrl: payload.relay_url,
-    } as any);
-    await meshClient.connect(meshIdentity.amid, {
-      displayName: `external-${meshIdentity.amid.slice(0, 8)}`,
-      capabilities: ["external", "offload"],
+      registryUrl: payload.registry_url,
+      identity: meshIdentity,
     });
+    await connection.connect();
   } catch (err: any) {
-    return `❌ Failed to connect to mesh: ${err.message}`;
+    return `❌ Failed to connect to mesh relay: ${err.message}`;
   }
 
-  // Send pair_request to controller
+  // Send pair_request
   const pairRequest: PairRequestMessage = {
     type: "pair_request",
     secret: payload.secret,
@@ -258,27 +249,23 @@ async function meshPairHandler(params: { token: string }): Promise<string> {
   };
 
   try {
-    await meshClient.send(payload.controller_amid, pairRequest);
+    await connection.send(payload.controller_amid, pairRequest);
   } catch (err: any) {
     return `❌ Failed to send pair request: ${err.message}`;
   }
 
   // Wait for pair_response (up to 15s)
   let response: PairResponseMessage | null = null;
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    const messages = await meshClient.getInbox?.() || [];
-    for (const msg of messages) {
-      const content = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
-      if (content?.type === "pair_response") {
-        response = content as PairResponseMessage;
-        break;
-      }
-    }
-    if (response) break;
-  }
-
-  if (!response) {
+  try {
+    response = await connection.waitForMessage<PairResponseMessage>(
+      (content) => {
+        const msg = content as Record<string, unknown>;
+        if (msg?.type === "pair_response") return msg as unknown as PairResponseMessage;
+        return null;
+      },
+      15_000
+    );
+  } catch {
     return "❌ Pairing timed out — no response from controller after 15s. Is the cluster online?";
   }
 
@@ -286,7 +273,7 @@ async function meshPairHandler(params: { token: string }): Promise<string> {
     return `❌ Pairing rejected: ${response.error || "Unknown error"}`;
   }
 
-  // Save pairing
+  // Persist pairing
   const clusterName = response.cluster_name || "unknown";
   savePairing(clusterName, {
     controllerAmid: response.controller_amid || payload.controller_amid,
@@ -326,15 +313,29 @@ async function cloudOffloadHandler(params: {
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!activePairing) return "❌ Not paired with any AzureClaw cluster. Use mesh_pair first.";
-  if (!meshClient) return "❌ Mesh client not connected.";
+  if (!connection?.isConnected) return "❌ Mesh connection lost. Reconnecting...";
+  if (activeOffload) return `❌ Offload already in progress (${activeOffload.requestId}). Use offload_status to check.`;
 
   const requestId = crypto.randomUUID();
+
+  // Collect file metadata
+  const filePaths = params.files || [];
+  let totalBytes = 0;
+  for (const f of filePaths) {
+    try {
+      const stat = fs.statSync(f);
+      totalBytes += stat.size;
+    } catch {
+      // file doesn't exist or unreadable — skip
+    }
+  }
+
   const request: OffloadRequestMessage = {
     type: "offload_request",
     task: params.task,
-    files: params.files || [],
-    file_count: (params.files || []).length,
-    total_bytes: 0, // Will be calculated when sending files
+    files: filePaths,
+    file_count: filePaths.length,
+    total_bytes: totalBytes,
     preferences: {
       model: params.model,
       timeout_minutes: params.timeout_minutes || 30,
@@ -344,74 +345,119 @@ async function cloudOffloadHandler(params: {
   };
 
   try {
-    await meshClient.send(activePairing.controllerAmid, request);
+    await connection.send(activePairing.controllerAmid, request);
   } catch (err: any) {
     return `❌ Failed to send offload request: ${err.message}`;
   }
 
-  // TODO: Phase 5 — upload workspace files via file_transfer protocol
-  // TODO: Phase 5 — monitor progress and receive results
+  activeOffload = { requestId, startedAt: Date.now() };
+
+  // Wait for initial status (validating/spawning)
+  let initialStatus: OffloadStatusMessage | OffloadErrorMessage | null = null;
+  try {
+    initialStatus = await connection.waitForMessage(
+      (content) => {
+        const msg = content as Record<string, unknown>;
+        if (
+          (msg?.type === "offload_status" || msg?.type === "offload_error") &&
+          msg?.request_id === requestId
+        ) {
+          return msg as unknown as OffloadStatusMessage | OffloadErrorMessage;
+        }
+        return null;
+      },
+      30_000
+    );
+  } catch {
+    // Timeout waiting for initial status — keep going
+  }
+
+  if (initialStatus?.type === "offload_error") {
+    activeOffload = null;
+    const errMsg = initialStatus as OffloadErrorMessage;
+    return `❌ Offload rejected: ${errMsg.error} (phase: ${errMsg.phase})`;
+  }
+
+  const statusPhase = (initialStatus as OffloadStatusMessage)?.phase || "submitted";
+  const statusMsg = (initialStatus as OffloadStatusMessage)?.message || "Request sent to cluster";
 
   return [
-    `☁️ Offload request sent to ${activePairing.clusterName}`,
+    `☁️ Offload request accepted`,
     "",
     `  Request ID:  ${requestId}`,
+    `  Phase:       ${statusPhase}`,
     `  Task:        ${params.task.slice(0, 100)}${params.task.length > 100 ? "..." : ""}`,
-    `  Files:       ${(params.files || []).length}`,
+    `  Files:       ${filePaths.length} (${(totalBytes / 1024).toFixed(1)} KB)`,
+    `  Status:      ${statusMsg}`,
     "",
-    "Use offload_status to check progress.",
+    "Use offload_status to monitor progress. Results will arrive via mesh.",
   ].join("\n");
 }
 
 async function offloadStatusHandler(_params: Record<string, unknown>): Promise<string> {
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
-  if (!meshClient) return "❌ Mesh client not connected.";
+  if (!connection) return "❌ Mesh client not connected.";
+  if (!activeOffload) return "No active offload. Use cloud_offload to start one.";
 
-  // Check inbox for status/progress/done messages
-  const messages = await meshClient.getInbox?.() || [];
-  const statusMsgs: (OffloadStatusMessage | OffloadProgressMessage | OffloadDoneMessage)[] = [];
+  const inbox = connection.getInbox();
+  const requestId = activeOffload.requestId;
+  const elapsed = Math.round((Date.now() - activeOffload.startedAt) / 1000);
 
-  for (const msg of messages) {
-    try {
-      const content = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
-      if (
-        content?.type === "offload_status" ||
-        content?.type === "offload_progress" ||
-        content?.type === "offload_done"
-      ) {
-        statusMsgs.push(content);
-      }
-    } catch {
-      // skip unparseable
+  // Find latest status for this request
+  let latestStatus: OffloadStatusMessage | null = null;
+  let latestProgress: OffloadProgressMessage | null = null;
+  let doneMsg: OffloadDoneMessage | null = null;
+  let errorMsg: OffloadErrorMessage | null = null;
+
+  for (const msg of inbox) {
+    const content = msg.content as Record<string, unknown>;
+    if (content?.request_id !== requestId) continue;
+
+    switch (content?.type) {
+      case "offload_status":
+        latestStatus = content as unknown as OffloadStatusMessage;
+        break;
+      case "offload_progress":
+        latestProgress = content as unknown as OffloadProgressMessage;
+        break;
+      case "offload_done":
+        doneMsg = content as unknown as OffloadDoneMessage;
+        break;
+      case "offload_error":
+        errorMsg = content as unknown as OffloadErrorMessage;
+        break;
     }
   }
 
-  if (statusMsgs.length === 0) {
-    return "No active offloads or status updates.";
+  if (errorMsg) {
+    activeOffload = null;
+    return `❌ Offload failed (phase: ${errorMsg.phase}): ${errorMsg.error}`;
   }
 
-  const latest = statusMsgs[statusMsgs.length - 1];
-  if (latest.type === "offload_done") {
-    const done = latest as OffloadDoneMessage;
+  if (doneMsg) {
+    activeOffload = null;
+    const totalTokens = (doneMsg.tokens_used?.prompt || 0) + (doneMsg.tokens_used?.completion || 0);
     return [
       `✅ Offload complete`,
       "",
-      `  Duration:     ${done.duration_seconds}s`,
-      `  Tokens used:  ${done.tokens_used.prompt + done.tokens_used.completion}`,
-      `  Output files: ${done.output_files.join(", ")}`,
+      `  Duration:     ${doneMsg.duration_seconds}s`,
+      `  Tokens used:  ${totalTokens.toLocaleString()}`,
+      `  Output files: ${doneMsg.output_files.length > 0 ? doneMsg.output_files.join(", ") : "none"}`,
       "",
-      done.summary,
+      doneMsg.summary,
     ].join("\n");
   }
 
-  if (latest.type === "offload_progress") {
-    const prog = latest as OffloadProgressMessage;
-    return `☁️ Running (${prog.pct}%) — ${prog.stage}: ${prog.message}`;
+  if (latestProgress) {
+    return `☁️ Running (${latestProgress.pct}%) — ${latestProgress.stage}: ${latestProgress.message} [${elapsed}s]`;
   }
 
-  const status = latest as OffloadStatusMessage;
-  return `☁️ ${status.phase}: ${status.message}`;
+  if (latestStatus) {
+    return `☁️ ${latestStatus.phase}: ${latestStatus.message} [${elapsed}s]`;
+  }
+
+  return `☁️ Offload in progress... (${elapsed}s elapsed, waiting for status update)`;
 }
 
 async function meshSendHandler(params: {
@@ -420,10 +466,10 @@ async function meshSendHandler(params: {
 }): Promise<string> {
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
-  if (!meshClient) return "❌ Mesh client not connected. Pair first with mesh_pair.";
+  if (!connection?.isConnected) return "❌ Mesh client not connected. Pair first with mesh_pair.";
 
   try {
-    await meshClient.send(params.to, { type: "message", content: params.message });
+    await connection.send(params.to, { type: "message", content: params.message });
     return `✓ Message sent to ${params.to} (E2E encrypted)`;
   } catch (err: any) {
     return `❌ Send failed: ${err.message}`;
@@ -433,20 +479,19 @@ async function meshSendHandler(params: {
 async function meshInboxHandler(params: { limit?: number }): Promise<string> {
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
-  if (!meshClient) return "❌ Mesh client not connected.";
+  if (!connection) return "❌ Mesh client not connected.";
 
   const limit = params.limit || 10;
-  const messages = (await meshClient.getInbox?.() || []).slice(-limit);
+  const messages = connection.getInbox(limit);
 
   if (messages.length === 0) return "📭 Inbox empty.";
 
-  const lines = messages.map((m: any, i: number) => {
-    const from = m.from || m.sender || "unknown";
+  const lines = messages.map((m, i) => {
     const content =
       typeof m.content === "string"
         ? m.content.slice(0, 200)
         : JSON.stringify(m.content).slice(0, 200);
-    return `  ${i + 1}. [${from}] ${content}`;
+    return `  ${i + 1}. [${m.from}] ${content}`;
   });
 
   return `📬 ${messages.length} message(s):\n${lines.join("\n")}`;
@@ -458,17 +503,17 @@ async function discoverHandler(params: {
 }): Promise<string> {
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
-  if (!meshClient) return "❌ Mesh client not connected.";
+  if (!connection) return "❌ Mesh client not connected.";
 
   try {
-    const results = await meshClient.discover?.({
+    const results = await connection.discover({
       capability: params.capability,
       limit: params.limit || 20,
-    }) || [];
+    });
 
     if (results.length === 0) return "No agents found on the mesh.";
 
-    const lines = results.map((a: any) =>
+    const lines = results.map((a) =>
       `  ${a.amid?.slice(0, 16)}...  ${a.displayName || "—"}  [${(a.capabilities || []).join(", ")}]`
     );
     return `🌐 ${results.length} agent(s):\n${lines.join("\n")}`;
