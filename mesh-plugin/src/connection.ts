@@ -204,6 +204,7 @@ export class MeshConnection {
     const timestamp = new Date().toISOString();
     const signature = this.signTimestamp(timestamp);
     const authMsg = {
+      type: "connect",
       protocol: "agentmesh/0.2",
       amid: this.config.identity.amid,
       public_key: this.config.identity.signingPublicKey.toString("base64"),
@@ -408,6 +409,7 @@ export class MeshConnection {
     if (json.length <= CHUNK_THRESHOLD) {
       const payloadB64 = Buffer.from(json).toString("base64");
       this.wsSend({
+        type: "send",
         to: toAmid,
         encrypted_payload: payloadB64,
         message_type: "message",
@@ -470,6 +472,7 @@ export class MeshConnection {
     const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload);
     const payloadB64 = Buffer.from(payloadStr).toString("base64");
     this.wsSend({
+      type: "send",
       to: toAmid,
       encrypted_payload: payloadB64,
       message_type: "message",
