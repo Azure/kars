@@ -7,9 +7,9 @@
 
 use agentmesh::AuditLogger;
 use agentmesh::identity::AgentIdentity;
+use agentmesh::mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
 use agentmesh::mcp::redactor::{CredentialKind, CredentialRedactor};
 use agentmesh::mcp::response::{McpResponseScanner, McpResponseThreatType};
-use agentmesh::mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
 use agentmesh::mcp::{InMemoryAuditSink, McpMetricsCollector, SystemClock};
 use agentmesh::policy::PolicyEngine;
 use agentmesh::trust::{TrustConfig, TrustManager};
@@ -376,12 +376,10 @@ impl Governance {
             tracing::warn!("CredentialRedactor init failed ({e}), using fallback");
             CredentialRedactor::new().expect("redactor must initialize")
         });
-        let mcp_clock: std::sync::Arc<dyn agentmesh::mcp::Clock> =
-            std::sync::Arc::new(SystemClock);
-        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> =
-            std::sync::Arc::new(InMemoryAuditSink::new(
-                CredentialRedactor::new().expect("redactor for audit sink"),
-            ));
+        let mcp_clock: std::sync::Arc<dyn agentmesh::mcp::Clock> = std::sync::Arc::new(SystemClock);
+        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> = std::sync::Arc::new(
+            InMemoryAuditSink::new(CredentialRedactor::new().expect("redactor for audit sink")),
+        );
         let mcp_metrics = McpMetricsCollector::default();
         let response_scanner = McpResponseScanner::new(
             CredentialRedactor::new().expect("redactor for scanner"),
@@ -655,7 +653,11 @@ impl Governance {
         let result = self.redactor.redact(text);
         if !result.detected.is_empty() {
             self.metrics.redactions.fetch_add(1, Ordering::Relaxed);
-            let kinds: Vec<&str> = result.detected.iter().map(|k: &CredentialKind| k.as_str()).collect();
+            let kinds: Vec<&str> = result
+                .detected
+                .iter()
+                .map(|k: &CredentialKind| k.as_str())
+                .collect();
             for kind in &kinds {
                 metrics::AGT_REDACTIONS.with_label_values(&[kind]).inc();
             }
@@ -664,7 +666,11 @@ impl Governance {
                 kinds = ?kinds,
                 "Credential redacted from output"
             );
-            self.audit.log(&self.sandbox_name, &format!("credential_redacted:{}", kinds.join(",")), "sanitized");
+            self.audit.log(
+                &self.sandbox_name,
+                &format!("credential_redacted:{}", kinds.join(",")),
+                "sanitized",
+            );
         }
         result.sanitized
     }
@@ -677,7 +683,9 @@ impl Governance {
         match self.response_scanner.scan_text(text) {
             Ok(result) => {
                 if !result.findings.is_empty() {
-                    self.metrics.response_threats.fetch_add(result.findings.len() as u64, Ordering::Relaxed);
+                    self.metrics
+                        .response_threats
+                        .fetch_add(result.findings.len() as u64, Ordering::Relaxed);
                     for finding in &result.findings {
                         let label = match finding.threat_type {
                             McpResponseThreatType::PromptInjectionTag => "prompt_injection",
@@ -685,20 +693,30 @@ impl Governance {
                             McpResponseThreatType::CredentialLeakage => "credential_leakage",
                             McpResponseThreatType::ExfiltrationUrl => "exfiltration_url",
                         };
-                        metrics::AGT_RESPONSE_THREATS.with_label_values(&[label]).inc();
+                        metrics::AGT_RESPONSE_THREATS
+                            .with_label_values(&[label])
+                            .inc();
                     }
-                    let types: Vec<&str> = result.findings.iter().map(|f| match f.threat_type {
-                        McpResponseThreatType::PromptInjectionTag => "prompt_injection",
-                        McpResponseThreatType::ImperativePhrasing => "imperative_phrasing",
-                        McpResponseThreatType::CredentialLeakage => "credential_leakage",
-                        McpResponseThreatType::ExfiltrationUrl => "exfiltration_url",
-                    }).collect();
+                    let types: Vec<&str> = result
+                        .findings
+                        .iter()
+                        .map(|f| match f.threat_type {
+                            McpResponseThreatType::PromptInjectionTag => "prompt_injection",
+                            McpResponseThreatType::ImperativePhrasing => "imperative_phrasing",
+                            McpResponseThreatType::CredentialLeakage => "credential_leakage",
+                            McpResponseThreatType::ExfiltrationUrl => "exfiltration_url",
+                        })
+                        .collect();
                     tracing::warn!(
                         sandbox = %self.sandbox_name,
                         threats = ?types,
                         "Response threats detected"
                     );
-                    self.audit.log(&self.sandbox_name, &format!("response_threat:{}", types.join(",")), "flagged");
+                    self.audit.log(
+                        &self.sandbox_name,
+                        &format!("response_threat:{}", types.join(",")),
+                        "flagged",
+                    );
                 }
                 (result.sanitized, !result.findings.is_empty())
             }
@@ -716,15 +734,23 @@ impl Governance {
         match self.tool_rate_limiter.check(tool) {
             Ok(decision) => {
                 if !decision.allowed {
-                    self.metrics.tool_rate_limits.fetch_add(1, Ordering::Relaxed);
-                    metrics::AGT_TOOL_RATE_LIMITS.with_label_values(&[tool]).inc();
+                    self.metrics
+                        .tool_rate_limits
+                        .fetch_add(1, Ordering::Relaxed);
+                    metrics::AGT_TOOL_RATE_LIMITS
+                        .with_label_values(&[tool])
+                        .inc();
                     tracing::warn!(
                         sandbox = %self.sandbox_name,
                         tool,
                         retry_after = decision.retry_after_secs,
                         "Per-tool rate limit exceeded"
                     );
-                    self.audit.log(&self.sandbox_name, &format!("tool_rate_limited:{tool}"), "denied");
+                    self.audit.log(
+                        &self.sandbox_name,
+                        &format!("tool_rate_limited:{tool}"),
+                        "denied",
+                    );
                 }
                 (decision.allowed, decision.retry_after_secs)
             }

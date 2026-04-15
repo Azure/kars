@@ -1,8 +1,8 @@
 //! Axum route handlers for the inference router.
 
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Path;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::DefaultBodyLimit;
 use axum::{
     Json, Router,
     body::Body,
@@ -905,13 +905,12 @@ async fn chat_completions(
                             let redacted = state.governance.redact_text(&response_text);
 
                             // 2. Scan for threats (AGT McpResponseScanner)
-                            let (sanitized, _threats_found) = state.governance.scan_response(&redacted);
+                            let (sanitized, _threats_found) =
+                                state.governance.scan_response(&redacted);
 
                             // 3. Policy check — blocking (was fire-and-forget)
-                            let action = format!(
-                                "output:{}",
-                                &sanitized[..sanitized.len().min(200)]
-                            );
+                            let action =
+                                format!("output:{}", &sanitized[..sanitized.len().min(200)]);
                             let result = state.governance.evaluate(sandbox_name, &action, None);
                             let allowed = result
                                 .get("allowed")
@@ -926,19 +925,25 @@ async fn chat_completions(
                                     "AGT: model response blocked by output policy");
                                 return (
                                     axum::http::StatusCode::FORBIDDEN,
-                                    Body::from(serde_json::json!({
-                                        "error": {
-                                            "message": "Response blocked by output policy",
-                                            "type": "content_policy_violation",
-                                            "code": "content_filter"
-                                        }
-                                    }).to_string()),
-                                ).into_response();
+                                    Body::from(
+                                        serde_json::json!({
+                                            "error": {
+                                                "message": "Response blocked by output policy",
+                                                "type": "content_policy_violation",
+                                                "code": "content_filter"
+                                            }
+                                        })
+                                        .to_string(),
+                                    ),
+                                )
+                                    .into_response();
                             }
 
                             // 4. Rewrite body if redaction/scanning modified the text
                             if sanitized != response_text {
-                                if let Ok(mut body_mut) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                                if let Ok(mut body_mut) =
+                                    serde_json::from_slice::<serde_json::Value>(&resp_body)
+                                {
                                     if let Some(content) = body_mut
                                         .get_mut("choices")
                                         .and_then(|c| c.get_mut(0))
@@ -1889,16 +1894,34 @@ async fn agt_signing_counter(
         .unwrap_or("unknown");
     match action {
         "signed" => {
-            state.governance.metrics.messages_signed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::metrics::AGT_MESSAGE_SIGNATURES.with_label_values(&["signed"]).inc();
+            state
+                .governance
+                .metrics
+                .messages_signed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::AGT_MESSAGE_SIGNATURES
+                .with_label_values(&["signed"])
+                .inc();
         }
         "verified" => {
-            state.governance.metrics.messages_verified.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::metrics::AGT_MESSAGE_SIGNATURES.with_label_values(&["verified"]).inc();
+            state
+                .governance
+                .metrics
+                .messages_verified
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::AGT_MESSAGE_SIGNATURES
+                .with_label_values(&["verified"])
+                .inc();
         }
         "rejected" => {
-            state.governance.metrics.signatures_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::metrics::AGT_MESSAGE_SIGNATURES.with_label_values(&["rejected"]).inc();
+            state
+                .governance
+                .metrics
+                .signatures_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::AGT_MESSAGE_SIGNATURES
+                .with_label_values(&["rejected"])
+                .inc();
         }
         _ => {}
     }
@@ -3126,39 +3149,30 @@ async fn handoff_snapshot(
         .unwrap_or(handoff::HandoffDirection::LocalToAks);
 
     // Build snapshot from current state
-    let mut snapshot = match handoff::build_snapshot(
-        &state,
-        direction,
-        predecessor_amid,
-        successor_amid,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            state.handoff_session.fail(e.clone()).await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-    };
+    let mut snapshot =
+        match handoff::build_snapshot(&state, direction, predecessor_amid, successor_amid).await {
+            Ok(s) => s,
+            Err(e) => {
+                state.handoff_session.fail(e.clone()).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        };
 
     // Inject workspace/chat if provided in request body
     if let Some(workspace) = body.get("workspace_tar").and_then(|v| v.as_str()) {
-        if let Ok(bytes) = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            workspace,
-        ) {
+        if let Ok(bytes) =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, workspace)
+        {
             snapshot.workspace_tar = bytes;
         }
     }
     if let Some(chat) = body.get("chat_snapshot").and_then(|v| v.as_str()) {
-        if let Ok(bytes) = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            chat,
-        ) {
+        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, chat)
+        {
             snapshot.chat_snapshot = Some(bytes);
         }
     }
@@ -3167,7 +3181,10 @@ async fn handoff_snapshot(
     if let Some(subs) = body.get("sub_agent_snapshots") {
         match serde_json::from_value::<Vec<handoff::SubAgentSnapshot>>(subs.clone()) {
             Ok(sub_snaps) => {
-                let ws_count = sub_snaps.iter().filter(|s| !s.workspace_tar.is_empty()).count();
+                let ws_count = sub_snaps
+                    .iter()
+                    .filter(|s| !s.workspace_tar.is_empty())
+                    .count();
                 tracing::info!(
                     count = sub_snaps.len(),
                     with_workspace = ws_count,
@@ -3187,7 +3204,8 @@ async fn handoff_snapshot(
 
     // Inject credential refs if provided
     if let Some(creds) = body.get("credentials") {
-        if let Ok(cred_refs) = serde_json::from_value::<Vec<handoff::CredentialRef>>(creds.clone()) {
+        if let Ok(cred_refs) = serde_json::from_value::<Vec<handoff::CredentialRef>>(creds.clone())
+        {
             snapshot.credentials = cred_refs;
         }
     }
@@ -3231,23 +3249,23 @@ async fn handoff_snapshot(
     };
 
     // Decrypt the shared secret from base64
-    let secret_bytes = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        shared_secret,
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            state
-                .handoff_session
-                .fail(format!("Invalid shared_secret: {e}"))
-                .await;
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid shared_secret base64: {e}")})),
-            )
-                .into_response();
-        }
-    };
+    let secret_bytes =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, shared_secret) {
+            Ok(b) => b,
+            Err(e) => {
+                state
+                    .handoff_session
+                    .fail(format!("Invalid shared_secret: {e}"))
+                    .await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": format!("Invalid shared_secret base64: {e}")}),
+                    ),
+                )
+                    .into_response();
+            }
+        };
 
     // Encrypt with AES-256-GCM
     let blob = match handoff::encrypt_state(&compressed, &secret_bytes, &salt) {
@@ -3369,10 +3387,7 @@ async fn handoff_restore(
             }
         },
         None => {
-            state
-                .handoff_session
-                .fail("Missing blob".into())
-                .await;
+            state.handoff_session.fail("Missing blob".into()).await;
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "blob is required"})),
@@ -3381,23 +3396,21 @@ async fn handoff_restore(
         }
     };
 
-    let secret_bytes = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        shared_secret,
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            state
-                .handoff_session
-                .fail(format!("Invalid shared_secret: {e}"))
-                .await;
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid shared_secret: {e}")})),
-            )
-                .into_response();
-        }
-    };
+    let secret_bytes =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, shared_secret) {
+            Ok(b) => b,
+            Err(e) => {
+                state
+                    .handoff_session
+                    .fail(format!("Invalid shared_secret: {e}"))
+                    .await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Invalid shared_secret: {e}")})),
+                )
+                    .into_response();
+            }
+        };
 
     // Decrypt and verify
     let compressed = match handoff::decrypt_state(&blob, &secret_bytes) {
@@ -3425,7 +3438,10 @@ async fn handoff_restore(
 
     // Compute verification hash of restored compressed bytes (matches source's hash)
     let restored_hash = handoff::compute_verification_hash(&compressed);
-    state.handoff_session.set_restored_verification_hash(restored_hash).await;
+    state
+        .handoff_session
+        .set_restored_verification_hash(restored_hash)
+        .await;
 
     // Deserialize
     let mut restored_state = match handoff::deserialize_state(&compressed) {
@@ -3522,10 +3538,7 @@ async fn handoff_restore(
             ) {
                 // Set transferred trust — capped at 750 (cannot import max trust)
                 let capped_score = (score as u32).min(750);
-                state
-                    .governance
-                    .trust
-                    .set_trust(agent_id, capped_score);
+                state.governance.trust.set_trust(agent_id, capped_score);
                 trust_count += 1;
             }
         }
@@ -3590,8 +3603,7 @@ async fn handoff_restore(
                             );
                         } else {
                             // Old parent not found — append new parent
-                            spawn_req.trusted_peers =
-                                Some(format!("{peers},{new_entry}"));
+                            spawn_req.trusted_peers = Some(format!("{peers},{new_entry}"));
                         }
                     }
                     _ => {
@@ -3790,11 +3802,19 @@ async fn handoff_verify(
                 Ok(s) => match handoff::serialize_state(&s) {
                     Ok(c) => handoff::compute_verification_hash(&c),
                     Err(e) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e})),
+                        )
+                            .into_response();
                     }
                 },
                 Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e})),
+                    )
+                        .into_response();
                 }
             }
         }
@@ -3853,11 +3873,10 @@ async fn handoff_drain(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
     }
 
-    state.governance.audit.log(
-        &state.sandbox_name,
-        "handoff:drain",
-        "drain_started",
-    );
+    state
+        .governance
+        .audit
+        .log(&state.sandbox_name, "handoff:drain", "drain_started");
 
     tracing::info!("Handoff: entering drain mode");
 
@@ -3887,11 +3906,10 @@ async fn handoff_decommission(State(state): State<AppState>) -> impl IntoRespons
     // Revoke the handoff token
     state.handoff_tokens.revoke().await;
 
-    state.governance.audit.log(
-        &state.sandbox_name,
-        "handoff:decommission",
-        "agent_dormant",
-    );
+    state
+        .governance
+        .audit
+        .log(&state.sandbox_name, "handoff:decommission", "agent_dormant");
 
     // Mark session complete
     state.handoff_session.complete().await;
@@ -4035,40 +4053,35 @@ async fn handoff_succession(
     // Look up successor's signing key from registry
     let successor_signing_key = match state
         .client
-        .get(&format!(
-            "{}/v1/registry/lookup/{}",
-            base, successor_amid
-        ))
+        .get(&format!("{}/v1/registry/lookup/{}", base, successor_amid))
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(v) => match v.get("signing_public_key").and_then(|k| k.as_str()) {
-                    Some(key) => key.to_string(),
-                    None => {
-                        return (
-                            StatusCode::BAD_GATEWAY,
-                            Json(serde_json::json!({
-                                "error": "Successor agent has no signing_public_key in registry",
-                                "successor_amid": successor_amid,
-                            })),
-                        )
-                            .into_response();
-                    }
-                },
-                Err(e) => {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(v) => match v.get("signing_public_key").and_then(|k| k.as_str()) {
+                Some(key) => key.to_string(),
+                None => {
                     return (
                         StatusCode::BAD_GATEWAY,
                         Json(serde_json::json!({
-                            "error": format!("Failed to parse registry lookup response: {}", e),
+                            "error": "Successor agent has no signing_public_key in registry",
+                            "successor_amid": successor_amid,
                         })),
                     )
                         .into_response();
                 }
+            },
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to parse registry lookup response: {}", e),
+                    })),
+                )
+                    .into_response();
             }
-        }
+        },
         Ok(resp) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -4127,10 +4140,8 @@ async fn handoff_succession(
         predecessor_amid, successor_amid, timestamp
     );
     let signature_bytes = state.governance.identity.sign(canonical_message.as_bytes());
-    let signature_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &signature_bytes,
-    );
+    let signature_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signature_bytes);
 
     // Submit to registry
     let succession_request = serde_json::json!({
@@ -4160,10 +4171,9 @@ async fn handoff_succession(
     {
         Ok(resp) => {
             let status = resp.status();
-            let body = resp
-                .json::<serde_json::Value>()
-                .await
-                .unwrap_or_else(|_| serde_json::json!({"error": "Failed to parse registry response"}));
+            let body = resp.json::<serde_json::Value>().await.unwrap_or_else(
+                |_| serde_json::json!({"error": "Failed to parse registry response"}),
+            );
 
             state.governance.audit.log(
                 &state.sandbox_name,
@@ -4175,8 +4185,8 @@ async fn handoff_succession(
             );
 
             // Forward the registry's status code
-            let axum_status = StatusCode::from_u16(status.as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let axum_status =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
             (axum_status, Json(body)).into_response()
         }
@@ -4197,11 +4207,10 @@ async fn handoff_succession(
 async fn handoff_resume(State(state): State<AppState>) -> impl IntoResponse {
     match state.handoff_session.resume().await {
         Ok(()) => {
-            state.governance.audit.log(
-                &state.sandbox_name,
-                "handoff:resume",
-                "resumed_to_idle",
-            );
+            state
+                .governance
+                .audit
+                .log(&state.sandbox_name, "handoff:resume", "resumed_to_idle");
 
             tracing::info!("Handoff resumed to idle");
 
@@ -4272,7 +4281,11 @@ async fn handoff_pending(
         .unwrap_or("user_requested")
         .to_string();
 
-    match state.pending_handoff.create_pending(direction, reason.clone()).await {
+    match state
+        .pending_handoff
+        .create_pending(direction, reason.clone())
+        .await
+    {
         Ok(token) => {
             state.governance.audit.log(
                 &state.sandbox_name,

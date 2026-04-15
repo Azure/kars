@@ -9,10 +9,7 @@
 //!
 //! All handoff endpoints are audit-logged with caller IP, timestamp, and outcome.
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::Aead,
-};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use axum::{
     extract::State,
     http::{HeaderMap, Request, StatusCode},
@@ -268,9 +265,7 @@ impl HandoffTokenStore {
     pub async fn validate(&self, provided: &str) -> Result<String, HandoffTokenError> {
         let mut guard = self.inner.write().await;
 
-        let active = guard
-            .as_mut()
-            .ok_or(HandoffTokenError::NoActiveToken)?;
+        let active = guard.as_mut().ok_or(HandoffTokenError::NoActiveToken)?;
 
         // Check expiry
         if active.created_at.elapsed() > active.ttl {
@@ -473,7 +468,10 @@ impl PendingHandoffStore {
     ) -> Result<(HandoffDirection, String), PendingHandoffError> {
         let mut guard = self.inner.write().await;
 
-        let pending = guard.pending.as_ref().ok_or(PendingHandoffError::NoPending)?;
+        let pending = guard
+            .pending
+            .as_ref()
+            .ok_or(PendingHandoffError::NoPending)?;
 
         // Check expiry
         if pending.created_at.elapsed() > pending.ttl {
@@ -641,17 +639,34 @@ impl HandoffSession {
     pub async fn try_transition(&self, target: HandoffPhase) -> Result<(), String> {
         let mut inner = self.inner.write().await;
         let allowed = match target {
-            HandoffPhase::Initialized => matches!(inner.phase, HandoffPhase::Idle | HandoffPhase::Complete | HandoffPhase::Failed | HandoffPhase::Aborted),
+            HandoffPhase::Initialized => matches!(
+                inner.phase,
+                HandoffPhase::Idle
+                    | HandoffPhase::Complete
+                    | HandoffPhase::Failed
+                    | HandoffPhase::Aborted
+            ),
             HandoffPhase::Snapshotting => matches!(inner.phase, HandoffPhase::Initialized),
             HandoffPhase::Draining => matches!(inner.phase, HandoffPhase::Snapshotting),
             HandoffPhase::Transferring => matches!(inner.phase, HandoffPhase::Draining),
-            HandoffPhase::Restoring => matches!(inner.phase, HandoffPhase::Initialized | HandoffPhase::Transferring),
+            HandoffPhase::Restoring => matches!(
+                inner.phase,
+                HandoffPhase::Initialized | HandoffPhase::Transferring
+            ),
             HandoffPhase::Verifying => matches!(inner.phase, HandoffPhase::Restoring),
-            HandoffPhase::Decommissioning => matches!(inner.phase, HandoffPhase::Draining | HandoffPhase::Verifying | HandoffPhase::Complete),
-            HandoffPhase::Complete => matches!(inner.phase, HandoffPhase::Verifying | HandoffPhase::Decommissioning),
-            HandoffPhase::Aborted => !matches!(inner.phase, HandoffPhase::Idle | HandoffPhase::Complete),
-            HandoffPhase::Failed => true,  // can fail from any phase
-            HandoffPhase::Idle => true,    // reset always allowed
+            HandoffPhase::Decommissioning => matches!(
+                inner.phase,
+                HandoffPhase::Draining | HandoffPhase::Verifying | HandoffPhase::Complete
+            ),
+            HandoffPhase::Complete => matches!(
+                inner.phase,
+                HandoffPhase::Verifying | HandoffPhase::Decommissioning
+            ),
+            HandoffPhase::Aborted => {
+                !matches!(inner.phase, HandoffPhase::Idle | HandoffPhase::Complete)
+            }
+            HandoffPhase::Failed => true, // can fail from any phase
+            HandoffPhase::Idle => true,   // reset always allowed
         };
         if allowed {
             inner.phase = target;
@@ -661,11 +676,7 @@ impl HandoffSession {
         }
     }
 
-    pub async fn initialize(
-        &self,
-        direction: HandoffDirection,
-        predecessor_amid: Option<String>,
-    ) {
+    pub async fn initialize(&self, direction: HandoffDirection, predecessor_amid: Option<String>) {
         let mut inner = self.inner.write().await;
         inner.phase = HandoffPhase::Initialized;
         inner.direction = Some(direction);
@@ -775,8 +786,7 @@ pub fn encrypt_state(
     hk.expand(HKDF_INFO, &mut key_bytes)
         .map_err(|e| format!("HKDF expand: {e}"))?;
 
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| format!("AES key init: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("AES key init: {e}"))?;
 
     // Random 96-bit nonce
     let mut nonce_bytes = [0u8; AES_NONCE_BYTES];
@@ -799,10 +809,7 @@ pub fn encrypt_state(
 }
 
 /// Decrypt an encrypted handoff blob.
-pub fn decrypt_state(
-    blob: &EncryptedHandoffBlob,
-    shared_secret: &[u8],
-) -> Result<Vec<u8>, String> {
+pub fn decrypt_state(blob: &EncryptedHandoffBlob, shared_secret: &[u8]) -> Result<Vec<u8>, String> {
     let salt = BASE64
         .decode(&blob.hkdf_salt)
         .map_err(|e| format!("decode salt: {e}"))?;
@@ -826,8 +833,7 @@ pub fn decrypt_state(
     hk.expand(HKDF_INFO, &mut key_bytes)
         .map_err(|e| format!("HKDF expand: {e}"))?;
 
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| format!("AES key init: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("AES key init: {e}"))?;
 
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -909,31 +915,26 @@ pub async fn handoff_auth_middleware(
     }
 
     // Extract and verify handoff token from X-Handoff-Token header
-    let handoff_token = headers
-        .get("x-handoff-token")
-        .and_then(|v| v.to_str().ok());
+    let handoff_token = headers.get("x-handoff-token").and_then(|v| v.to_str().ok());
 
     match handoff_token {
-        Some(token) => {
-            match state.handoff_tokens.validate(token).await {
-                Ok(token_hash) => {
-                    tracing::info!(
-                        path = %request.uri().path(),
-                        token_hash = &token_hash[..16],
-                        "handoff auth: validated"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %request.uri().path(),
-                        error = %e,
-                        "handoff auth: token validation failed"
-                    );
-                    return (StatusCode::UNAUTHORIZED, format!("Handoff token: {e}"))
-                        .into_response();
-                }
+        Some(token) => match state.handoff_tokens.validate(token).await {
+            Ok(token_hash) => {
+                tracing::info!(
+                    path = %request.uri().path(),
+                    token_hash = &token_hash[..16],
+                    "handoff auth: validated"
+                );
             }
-        }
+            Err(e) => {
+                tracing::warn!(
+                    path = %request.uri().path(),
+                    error = %e,
+                    "handoff auth: token validation failed"
+                );
+                return (StatusCode::UNAUTHORIZED, format!("Handoff token: {e}")).into_response();
+            }
+        },
         None => {
             tracing::warn!(
                 path = %request.uri().path(),
@@ -1175,11 +1176,7 @@ impl DrainState {
     }
 
     pub async fn drain_duration(&self) -> Option<Duration> {
-        self.inner
-            .read()
-            .await
-            .drain_started
-            .map(|s| s.elapsed())
+        self.inner.read().await.drain_started.map(|s| s.elapsed())
     }
 }
 
@@ -1246,10 +1243,7 @@ pub fn sanitize_chat_snapshot(chat_bytes: &[u8]) -> Vec<u8> {
         }
 
         // For system/assistant/tool messages, check content for injection patterns
-        let content = msg
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
         let lower = content.to_lowercase();
 
         !SUSPICIOUS_PATTERNS
@@ -1441,7 +1435,10 @@ mod tests {
     async fn test_handoff_token_no_active() {
         let store = HandoffTokenStore::new();
         let result = store.validate("anything").await;
-        assert!(matches!(result.unwrap_err(), HandoffTokenError::NoActiveToken));
+        assert!(matches!(
+            result.unwrap_err(),
+            HandoffTokenError::NoActiveToken
+        ));
     }
 
     #[tokio::test]
@@ -1627,9 +1624,7 @@ mod tests {
     #[tokio::test]
     async fn test_handoff_session_abort() {
         let session = HandoffSession::new();
-        session
-            .initialize(HandoffDirection::AksToLocal, None)
-            .await;
+        session.initialize(HandoffDirection::AksToLocal, None).await;
         session.abort().await;
         assert_eq!(session.phase().await, HandoffPhase::Aborted);
         assert!(session.can_start().await);
@@ -1638,9 +1633,7 @@ mod tests {
     #[tokio::test]
     async fn test_handoff_session_fail() {
         let session = HandoffSession::new();
-        session
-            .initialize(HandoffDirection::LocalToAks, None)
-            .await;
+        session.initialize(HandoffDirection::LocalToAks, None).await;
         session.fail("integrity check failed".into()).await;
 
         let status = session.status().await;
@@ -1759,7 +1752,10 @@ mod tests {
 
         // Confirm too fast — should fail (min 3s delay)
         let result = store.confirm(&token).await;
-        assert!(matches!(result.unwrap_err(), PendingHandoffError::TooFast { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            PendingHandoffError::TooFast { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1774,7 +1770,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(8100)).await;
 
         let result = store.confirm("wrong_token").await;
-        assert!(matches!(result.unwrap_err(), PendingHandoffError::InvalidToken));
+        assert!(matches!(
+            result.unwrap_err(),
+            PendingHandoffError::InvalidToken
+        ));
     }
 
     #[tokio::test]
@@ -1811,7 +1810,10 @@ mod tests {
         let result = store
             .create_pending(HandoffDirection::LocalToAks, "second".into())
             .await;
-        assert!(matches!(result.unwrap_err(), PendingHandoffError::RateLimited { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            PendingHandoffError::RateLimited { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1828,14 +1830,20 @@ mod tests {
 
         // Confirm should fail with NoPending
         let result = store.confirm("anything").await;
-        assert!(matches!(result.unwrap_err(), PendingHandoffError::NoPending));
+        assert!(matches!(
+            result.unwrap_err(),
+            PendingHandoffError::NoPending
+        ));
     }
 
     #[tokio::test]
     async fn test_pending_handoff_no_pending() {
         let store = PendingHandoffStore::new();
         let result = store.confirm("anything").await;
-        assert!(matches!(result.unwrap_err(), PendingHandoffError::NoPending));
+        assert!(matches!(
+            result.unwrap_err(),
+            PendingHandoffError::NoPending
+        ));
     }
 
     // ── Chat sanitization tests (§9.9.1) ───────────────────────────────
@@ -1905,13 +1913,43 @@ mod tests {
     #[tokio::test]
     async fn test_session_try_transition_valid_sequence() {
         let session = HandoffSession::new();
-        assert!(session.try_transition(HandoffPhase::Initialized).await.is_ok());
-        assert!(session.try_transition(HandoffPhase::Snapshotting).await.is_ok());
+        assert!(
+            session
+                .try_transition(HandoffPhase::Initialized)
+                .await
+                .is_ok()
+        );
+        assert!(
+            session
+                .try_transition(HandoffPhase::Snapshotting)
+                .await
+                .is_ok()
+        );
         assert!(session.try_transition(HandoffPhase::Draining).await.is_ok());
-        assert!(session.try_transition(HandoffPhase::Transferring).await.is_ok());
-        assert!(session.try_transition(HandoffPhase::Restoring).await.is_ok());
-        assert!(session.try_transition(HandoffPhase::Verifying).await.is_ok());
-        assert!(session.try_transition(HandoffPhase::Decommissioning).await.is_ok());
+        assert!(
+            session
+                .try_transition(HandoffPhase::Transferring)
+                .await
+                .is_ok()
+        );
+        assert!(
+            session
+                .try_transition(HandoffPhase::Restoring)
+                .await
+                .is_ok()
+        );
+        assert!(
+            session
+                .try_transition(HandoffPhase::Verifying)
+                .await
+                .is_ok()
+        );
+        assert!(
+            session
+                .try_transition(HandoffPhase::Decommissioning)
+                .await
+                .is_ok()
+        );
         assert!(session.try_transition(HandoffPhase::Complete).await.is_ok());
     }
 
@@ -1919,16 +1957,32 @@ mod tests {
     async fn test_session_try_transition_invalid_skip() {
         let session = HandoffSession::new();
         // Can't skip from Idle to Draining
-        assert!(session.try_transition(HandoffPhase::Draining).await.is_err());
+        assert!(
+            session
+                .try_transition(HandoffPhase::Draining)
+                .await
+                .is_err()
+        );
         // Can't skip from Idle to Verifying
-        assert!(session.try_transition(HandoffPhase::Verifying).await.is_err());
+        assert!(
+            session
+                .try_transition(HandoffPhase::Verifying)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_session_try_transition_abort_from_any_active() {
         let session = HandoffSession::new();
-        session.try_transition(HandoffPhase::Initialized).await.unwrap();
-        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Snapshotting)
+            .await
+            .unwrap();
         assert!(session.try_transition(HandoffPhase::Aborted).await.is_ok());
     }
 
@@ -1941,16 +1995,28 @@ mod tests {
     #[tokio::test]
     async fn test_session_try_transition_fail_from_any() {
         let session = HandoffSession::new();
-        session.try_transition(HandoffPhase::Initialized).await.unwrap();
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
         assert!(session.try_transition(HandoffPhase::Failed).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_session_resume_from_aborted() {
         let session = HandoffSession::new();
-        session.try_transition(HandoffPhase::Initialized).await.unwrap();
-        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
-        session.try_transition(HandoffPhase::Draining).await.unwrap();
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Snapshotting)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Draining)
+            .await
+            .unwrap();
         session.try_transition(HandoffPhase::Aborted).await.unwrap();
         assert!(session.resume().await.is_ok());
         assert_eq!(session.phase().await, HandoffPhase::Idle);
@@ -1959,9 +2025,18 @@ mod tests {
     #[tokio::test]
     async fn test_session_resume_from_draining() {
         let session = HandoffSession::new();
-        session.try_transition(HandoffPhase::Initialized).await.unwrap();
-        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
-        session.try_transition(HandoffPhase::Draining).await.unwrap();
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Snapshotting)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Draining)
+            .await
+            .unwrap();
         assert!(session.resume().await.is_ok());
     }
 
@@ -1974,15 +2049,41 @@ mod tests {
     #[tokio::test]
     async fn test_session_restart_after_complete() {
         let session = HandoffSession::new();
-        session.try_transition(HandoffPhase::Initialized).await.unwrap();
-        session.try_transition(HandoffPhase::Snapshotting).await.unwrap();
-        session.try_transition(HandoffPhase::Draining).await.unwrap();
-        session.try_transition(HandoffPhase::Transferring).await.unwrap();
-        session.try_transition(HandoffPhase::Restoring).await.unwrap();
-        session.try_transition(HandoffPhase::Verifying).await.unwrap();
-        session.try_transition(HandoffPhase::Complete).await.unwrap();
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Snapshotting)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Draining)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Transferring)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Restoring)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Verifying)
+            .await
+            .unwrap();
+        session
+            .try_transition(HandoffPhase::Complete)
+            .await
+            .unwrap();
         // Can start again from Complete
-        assert!(session.try_transition(HandoffPhase::Initialized).await.is_ok());
+        assert!(
+            session
+                .try_transition(HandoffPhase::Initialized)
+                .await
+                .is_ok()
+        );
     }
 
     // ── Auth middleware tests (Fix 6) ───────────────────────────────────
@@ -2020,7 +2121,10 @@ mod tests {
     #[tokio::test]
     async fn test_pending_confirm_wrong_token() {
         let store = PendingHandoffStore::new();
-        store.create_pending(HandoffDirection::LocalToAks, "test".to_string()).await.unwrap();
+        store
+            .create_pending(HandoffDirection::LocalToAks, "test".to_string())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(9)).await;
         assert!(matches!(
             store.confirm("wrong-code").await,
@@ -2065,10 +2169,7 @@ mod tests {
 
         // 4. Plugin modifies workspace_tar with base64 from sub-agent mesh response
         let fake_tar = b"fake workspace tar data for testing";
-        let fake_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            fake_tar,
-        );
+        let fake_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, fake_tar);
         parsed["original_amid"] = serde_json::json!("test_amid_12345");
         parsed["workspace_tar"] = serde_json::json!(fake_b64);
 
@@ -2086,7 +2187,10 @@ mod tests {
                 assert!(!snaps[0].workspace_tar.is_empty());
             }
             Err(e) => {
-                panic!("from_value FAILED: {e}\nJSON was: {}", serde_json::to_string_pretty(&arr).unwrap());
+                panic!(
+                    "from_value FAILED: {e}\nJSON was: {}",
+                    serde_json::to_string_pretty(&arr).unwrap()
+                );
             }
         }
     }
@@ -2163,13 +2267,19 @@ mod tests {
             .collect();
 
         // BOTH should pass filter (both have non-empty task_context)
-        assert_eq!(sub_agent_workspaces.len(), 2, "both sub-agents should pass filter");
+        assert_eq!(
+            sub_agent_workspaces.len(),
+            2,
+            "both sub-agents should pass filter"
+        );
 
         // First has workspace_tar as base64 string
         assert_eq!(sub_agent_workspaces[0]["name"], "researcher");
         assert!(sub_agent_workspaces[0]["workspace_tar"].is_string());
         let ws_b64 = sub_agent_workspaces[0]["workspace_tar"].as_str().unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD.decode(ws_b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(ws_b64)
+            .unwrap();
         assert_eq!(decoded, vec![9, 10, 11]);
 
         // Second has workspace_tar as null (empty)
@@ -2177,8 +2287,18 @@ mod tests {
         assert!(sub_agent_workspaces[1]["workspace_tar"].is_null());
 
         // Both have task_context
-        assert!(sub_agent_workspaces[0]["task_context"].as_str().unwrap().contains("Searching"));
-        assert!(sub_agent_workspaces[1]["task_context"].as_str().unwrap().contains("data-collector"));
+        assert!(
+            sub_agent_workspaces[0]["task_context"]
+                .as_str()
+                .unwrap()
+                .contains("Searching")
+        );
+        assert!(
+            sub_agent_workspaces[1]["task_context"]
+                .as_str()
+                .unwrap()
+                .contains("data-collector")
+        );
     }
 
     /// Test the full encrypt→decrypt→deserialize round-trip produces valid
@@ -2224,13 +2344,19 @@ mod tests {
 
         // First has workspace data preserved
         assert_eq!(restored.sub_agent_snapshots[0].name, "researcher");
-        assert_eq!(restored.sub_agent_snapshots[0].workspace_tar, vec![9, 10, 11]);
+        assert_eq!(
+            restored.sub_agent_snapshots[0].workspace_tar,
+            vec![9, 10, 11]
+        );
         assert!(!restored.sub_agent_snapshots[0].workspace_tar.is_empty());
 
         // Second has empty workspace but valid task_context
         assert_eq!(restored.sub_agent_snapshots[1].name, "data-collector");
         assert!(restored.sub_agent_snapshots[1].workspace_tar.is_empty());
-        assert_eq!(restored.sub_agent_snapshots[1].task_context, "Collecting CNCF data");
+        assert_eq!(
+            restored.sub_agent_snapshots[1].task_context,
+            "Collecting CNCF data"
+        );
 
         // Simulate the sub_agent_workspaces builder (routes.rs filter)
         let workspaces: Vec<&SubAgentSnapshot> = restored
@@ -2238,7 +2364,11 @@ mod tests {
             .iter()
             .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
             .collect();
-        assert_eq!(workspaces.len(), 2, "filter must include both (task_context is non-empty)");
+        assert_eq!(
+            workspaces.len(),
+            2,
+            "filter must include both (task_context is non-empty)"
+        );
 
         // Also simulate sub_agent_results (always populated for spawned agents)
         // This is what the plugin NOW uses as the primary loop driver
@@ -2247,40 +2377,46 @@ mod tests {
             .iter()
             .map(|s| serde_json::json!({"name": s.name, "status": "spawned"}))
             .collect();
-        assert_eq!(results.len(), 2, "sub_agent_results must include all spawned agents");
+        assert_eq!(
+            results.len(),
+            2,
+            "sub_agent_results must include all spawned agents"
+        );
     }
 
     /// Test that sub-agent snapshots with empty workspace AND empty task_context
     /// are correctly filtered out (edge case — shouldn't happen in practice).
     #[test]
     fn test_empty_workspace_and_task_context_filtered_out() {
-        let snaps = vec![
-            SubAgentSnapshot {
+        let snaps = vec![SubAgentSnapshot {
+            name: "ghost".to_string(),
+            original_amid: String::new(),
+            spawn_config: SpawnRequest {
                 name: "ghost".to_string(),
-                original_amid: String::new(),
-                spawn_config: SpawnRequest {
-                    name: "ghost".to_string(),
-                    model: None,
-                    governance: true,
-                    trust_threshold: None,
-                    learn_egress: false,
-                    isolation: None,
-                    token_budget_daily: None,
-                    token_budget_per_request: None,
-                    trusted_peers: None,
-                    handoff: None,
-                },
-                task_context: String::new(), // empty!
-                status: String::new(),
-                checkpoint: None,
-                workspace_tar: Vec::new(), // also empty!
+                model: None,
+                governance: true,
+                trust_threshold: None,
+                learn_egress: false,
+                isolation: None,
+                token_budget_daily: None,
+                token_budget_per_request: None,
+                trusted_peers: None,
+                handoff: None,
             },
-        ];
+            task_context: String::new(), // empty!
+            status: String::new(),
+            checkpoint: None,
+            workspace_tar: Vec::new(), // also empty!
+        }];
 
         let workspaces: Vec<&SubAgentSnapshot> = snaps
             .iter()
             .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
             .collect();
-        assert_eq!(workspaces.len(), 0, "empty workspace + empty task_context should be filtered out");
+        assert_eq!(
+            workspaces.len(),
+            0,
+            "empty workspace + empty task_context should be filtered out"
+        );
     }
 }

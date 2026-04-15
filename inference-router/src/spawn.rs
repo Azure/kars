@@ -263,9 +263,7 @@ pub async fn create_sandbox(
                 let client_clone = Client::try_default().await.ok();
                 if let Some(kc) = client_clone {
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            propagate_credentials(&kc, &child_name).await
-                        {
+                        if let Err(e) = propagate_credentials(&kc, &child_name).await {
                             tracing::warn!(
                                 child = %child_name,
                                 "Credential propagation failed (non-fatal): {e}"
@@ -701,10 +699,8 @@ async fn collect_sub_agent_snapshots_docker(
         .replace('=', "%3D")
         .replace(',', "%2C");
 
-    let resp =
-        docker_api("GET", &format!("/containers/json?filters={encoded}"), None).await?;
-    let containers: Vec<serde_json::Value> =
-        serde_json::from_str(&resp).unwrap_or_default();
+    let resp = docker_api("GET", &format!("/containers/json?filters={encoded}"), None).await?;
+    let containers: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
 
     let mut snapshots = Vec::new();
 

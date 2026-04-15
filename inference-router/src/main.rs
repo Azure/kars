@@ -55,9 +55,7 @@ async fn main() -> Result<()> {
     if config.registry_mode == config::RegistryMode::Global {
         let url = config.registry_url.as_deref().unwrap_or_default();
         if url.is_empty() {
-            anyhow::bail!(
-                "AGT_REGISTRY_MODE=global requires AGT_REGISTRY_URL to be set"
-            );
+            anyhow::bail!("AGT_REGISTRY_MODE=global requires AGT_REGISTRY_URL to be set");
         }
         let health_url = format!("{}/v1/health", url.trim_end_matches('/'));
         tracing::info!(url = %health_url, "Checking global registry connectivity...");
@@ -160,26 +158,21 @@ async fn main() -> Result<()> {
         // 1. handoff/init: admin token only, NO localhost bypass
         // 2. handoff/* mutations: admin token + handoff token, NO localhost bypass
         // 3. handoff/status: admin token, localhost allowed (read-only)
-        let handoff_init = routes::handoff_init_routes().layer(
-            axum::middleware::from_fn_with_state(
+        let handoff_init =
+            routes::handoff_init_routes().layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 handoff::handoff_init_auth_middleware,
-            ),
-        );
+            ));
 
         let handoff_mutations = routes::handoff_protected_routes().layer(
-            axum::middleware::from_fn_with_state(
-                state.clone(),
-                handoff::handoff_auth_middleware,
-            ),
+            axum::middleware::from_fn_with_state(state.clone(), handoff::handoff_auth_middleware),
         );
 
-        let handoff_status = routes::handoff_status_routes().layer(
-            axum::middleware::from_fn_with_state(
+        let handoff_status =
+            routes::handoff_status_routes().layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 handoff::handoff_status_auth_middleware,
-            ),
-        );
+            ));
 
         public
             .merge(protected)
