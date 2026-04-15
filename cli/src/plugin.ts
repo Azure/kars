@@ -1865,6 +1865,125 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         return; // Don't process as a task
       }
 
+      // ── Handle offload_task — external agent sends task directly to sandbox ──
+      // This is the direct agent-to-agent offload flow. The external agent paired
+      // with the cluster, got this sandbox spawned by the controller, then sends
+      // the task directly via mesh. We execute it and send offload_done back.
+      if (message?.type === "offload_task" && fromAmid && agtMeshClient) {
+        const offloadRequestId = message.request_id || crypto.randomUUID();
+        const taskContent = message.task || message.content || "";
+        const offloadFiles = message.files || [];
+        const offloadStartTime = Date.now();
+
+        log.info(
+          `☁️ Offload task received from '${fromName}' (${fromAmid.slice(0, 12)}...) — ` +
+          `request: ${offloadRequestId.slice(0, 8)}, task: ${String(taskContent).slice(0, 100)}, ` +
+          `files: ${offloadFiles.length}`
+        );
+
+        // Send progress: task started
+        try {
+          await meshSend(agtMeshClient, fromAmid, {
+            type: "offload_progress",
+            request_id: offloadRequestId,
+            stage: "executing",
+            message: "Task execution started",
+            pct: 10,
+            from_agent: agtSandboxName,
+            timestamp: new Date().toISOString(),
+          }, log);
+        } catch { /* best effort progress */ }
+
+        // Execute the task — same pattern as task_request but with offload framing
+        let taskResult: string;
+        let taskSuccess = true;
+        try {
+          try {
+            taskResult = await delegateToNativeAgent(taskContent, fromName, log);
+          } catch (nativeErr: any) {
+            log.warn(`Native agent failed for offload task (${nativeErr.message}), falling back to processTaskWithTools`);
+            taskResult = await processTaskWithTools(taskContent, log);
+          }
+        } catch (taskErr: any) {
+          taskResult = `Task execution failed: ${taskErr.message}`;
+          taskSuccess = false;
+        }
+
+        const offloadDuration = Math.round((Date.now() - offloadStartTime) / 1000);
+
+        // Collect output files — anything new in workspace since task started
+        const outputFiles: string[] = [];
+        try {
+          const { execSync } = await import("node:child_process");
+          const workspaceRoot = "/sandbox/.openclaw/workspace";
+          const newFiles = execSync(
+            `find ${workspaceRoot} -type f -newer /proc/1/cmdline -name '*.md' -o -name '*.json' -o -name '*.csv' -o -name '*.txt' -o -name '*.html' -o -name '*.png' -o -name '*.pdf' 2>/dev/null | head -20`,
+            { encoding: "utf-8", timeout: 5000 }
+          ).trim();
+          if (newFiles) {
+            for (const f of newFiles.split("\n")) {
+              if (f) outputFiles.push(f.replace(`${workspaceRoot}/`, ""));
+            }
+          }
+        } catch { /* no output files — that's fine */ }
+
+        // Send output files back to requester via file_transfer (before offload_done)
+        for (const relPath of outputFiles.slice(0, 10)) { // cap at 10 files
+          try {
+            const fPath = `/sandbox/.openclaw/workspace/${relPath}`;
+            const fs = await import("node:fs");
+            const fStat = fs.statSync(fPath);
+            if (fStat.size > 30 * 1024 * 1024) continue; // skip files >30MB
+            const fData = fs.readFileSync(fPath);
+            const fName = relPath.split("/").pop() || relPath;
+            await meshSend(agtMeshClient, fromAmid, {
+              type: "file_transfer",
+              file_name: fName,
+              file_path: relPath,
+              file_data: fData.toString("base64"),
+              size_bytes: fStat.size,
+              description: `Output file from offload ${offloadRequestId.slice(0, 8)}`,
+              from_agent: agtSandboxName,
+              timestamp: new Date().toISOString(),
+            }, log);
+            log.info(`📁 Sent output file '${fName}' (${(fStat.size / 1024).toFixed(1)} KB) to '${fromName}'`);
+          } catch (ftErr: any) {
+            log.warn(`Failed to send output file '${relPath}': ${ftErr.message}`);
+          }
+        }
+
+        // Send offload_done or offload_error back to requester
+        if (taskSuccess) {
+          await meshSend(agtMeshClient, fromAmid, {
+            type: "offload_done",
+            request_id: offloadRequestId,
+            summary: taskResult.slice(0, 8000),
+            output_files: outputFiles,
+            output_file_contents: [],
+            tokens_used: { prompt: 0, completion: 0 }, // TODO: track from router
+            duration_seconds: offloadDuration,
+            from_agent: agtSandboxName,
+            timestamp: new Date().toISOString(),
+          }, log);
+          log.info(
+            `✅ Offload complete: ${offloadRequestId.slice(0, 8)} — ` +
+            `${offloadDuration}s, ${outputFiles.length} output file(s)`
+          );
+        } else {
+          await meshSend(agtMeshClient, fromAmid, {
+            type: "offload_error",
+            request_id: offloadRequestId,
+            error: taskResult.slice(0, 4000),
+            phase: "execution",
+            from_agent: agtSandboxName,
+            timestamp: new Date().toISOString(),
+          }, log);
+          log.info(`❌ Offload failed: ${offloadRequestId.slice(0, 8)} — ${offloadDuration}s`);
+        }
+
+        return; // Don't process as a regular task
+      }
+
       // ── Handle handoff:interrupt — parent signals sub-agent to save progress ──
       // Sent before workspace_request so the sub-agent can checkpoint its work.
       // Sets the interrupt flag which processTaskWithTools checks between rounds.
