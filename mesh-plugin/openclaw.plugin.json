@@ -1,0 +1,23 @@
+{
+  "id": "azureclaw-mesh",
+  "name": "AzureClaw Mesh",
+  "version": "0.1.0",
+  "description": "Connect to AzureClaw for secure cloud offload, handoff, and inter-agent communication via E2E encrypted AgentMesh.",
+  "author": "AzureClaw",
+  "skills": [],
+  "configSchema": {
+    "relay_url": {
+      "type": "string",
+      "description": "AgentMesh relay URL (auto-set on pairing)"
+    },
+    "registry_url": {
+      "type": "string",
+      "description": "AgentMesh registry URL (auto-set on pairing)"
+    },
+    "identity_path": {
+      "type": "string",
+      "default": "~/.azureclaw/identity.json",
+      "description": "Path to mesh identity file"
+    }
+  }
+}
