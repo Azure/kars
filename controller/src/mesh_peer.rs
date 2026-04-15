@@ -251,8 +251,7 @@ struct MeshPeerState {
 pub async fn run(client: Client) -> Result<()> {
     let relay_url = std::env::var("MESH_RELAY_URL")
         .unwrap_or_else(|_| "wss://relay.agentmesh.online/v1/connect".into());
-    let cluster_name =
-        std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "azureclaw-cluster".into());
+    let cluster_name = std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "azureclaw-cluster".into());
 
     let identity = load_or_create_identity(&client).await?;
     tracing::info!(
@@ -319,9 +318,11 @@ async fn connect_and_listen(state: Arc<MeshPeerState>) -> Result<()> {
                 timestamp: chrono::Utc::now().to_rfc3339(),
             };
             let mut w = write_ping.write().await;
-            if w.send(WsMessage::Text(serde_json::to_string(&ping).unwrap_or_default().into()))
-                .await
-                .is_err()
+            if w.send(WsMessage::Text(
+                serde_json::to_string(&ping).unwrap_or_default().into(),
+            ))
+            .await
+            .is_err()
             {
                 break;
             }
@@ -357,7 +358,9 @@ async fn connect_and_listen(state: Arc<MeshPeerState>) -> Result<()> {
 /// Handle a single relay message.
 async fn handle_message(
     state: &MeshPeerState,
-    write: &Arc<RwLock<impl SinkExt<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin>>,
+    write: &Arc<
+        RwLock<impl SinkExt<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin>,
+    >,
     text: &str,
 ) -> Result<()> {
     let msg: RelayMessage = serde_json::from_str(text)?;
@@ -397,7 +400,9 @@ async fn handle_message(
 /// Handle a message from a peer. Decode and dispatch by type.
 async fn handle_peer_message(
     state: &MeshPeerState,
-    write: &Arc<RwLock<impl SinkExt<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin>>,
+    write: &Arc<
+        RwLock<impl SinkExt<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin>,
+    >,
     from_amid: &str,
     payload_b64: &str,
 ) -> Result<()> {
@@ -421,9 +426,14 @@ async fn handle_peer_message(
             ..
         } => {
             tracing::info!(from = %from_amid, "Received pair_request");
-            let response =
-                handle_pair_request(state, from_amid, &secret, &pubkey_ed25519, display_name.as_deref())
-                    .await;
+            let response = handle_pair_request(
+                state,
+                from_amid,
+                &secret,
+                &pubkey_ed25519,
+                display_name.as_deref(),
+            )
+            .await;
             // Send response back
             let response_json = serde_json::to_string(&response)?;
             let response_b64 = BASE64.encode(response_json.as_bytes());
@@ -455,12 +465,8 @@ async fn handle_pair_request(
     let token_hash = hex_sha256(secret);
 
     // List all ClawPairing CRDs and find matching token_hash
-    let pairings: Api<ClawPairing> =
-        Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
-    let pairing_list = match pairings
-        .list(&kube::api::ListParams::default())
-        .await
-    {
+    let pairings: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
+    let pairing_list = match pairings.list(&kube::api::ListParams::default()).await {
         Ok(list) => list,
         Err(e) => {
             tracing::error!("Failed to list ClawPairings: {e}");
@@ -469,7 +475,10 @@ async fn handle_pair_request(
     };
 
     // Find matching pairing
-    let matching = pairing_list.items.iter().find(|p| p.spec.token_hash == token_hash);
+    let matching = pairing_list
+        .items
+        .iter()
+        .find(|p| p.spec.token_hash == token_hash);
     let pairing = match matching {
         Some(p) => p,
         None => {
@@ -492,7 +501,9 @@ async fn handle_pair_request(
             phase = %current_phase,
             "Pair request for non-pending pairing"
         );
-        return pair_error(&format!("Pairing is {current_phase} — token already consumed or expired"));
+        return pair_error(&format!(
+            "Pairing is {current_phase} — token already consumed or expired"
+        ));
     }
 
     // Verify not expired

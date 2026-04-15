@@ -54,7 +54,9 @@ async fn main() -> Result<()> {
                 tracing::info!("Mesh peer enabled — starting relay connection");
                 mesh_peer::run(client).await
             } else {
-                tracing::info!("Mesh peer disabled (set MESH_PEER_ENABLED=true to enable federation)");
+                tracing::info!(
+                    "Mesh peer disabled (set MESH_PEER_ENABLED=true to enable federation)"
+                );
                 // Park forever — don't exit so select! doesn't trigger
                 std::future::pending::<Result<()>>().await
             }

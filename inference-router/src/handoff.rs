@@ -2200,10 +2200,8 @@ mod tests {
     /// logic that decides what the plugin receives in restoreResp.sub_agent_workspaces.
     #[test]
     fn test_sub_agent_workspaces_builder_filter() {
-        use base64::Engine as _;
-
         // Two sub-agents: one with workspace data, one without (typical after handoff)
-        let snaps = vec![
+        let snaps = [
             SubAgentSnapshot {
                 name: "researcher".to_string(),
                 original_amid: "AMID_OLD_1".to_string(),
@@ -2306,8 +2304,6 @@ mod tests {
     /// workspace states. This simulates the exact target-side restore path.
     #[test]
     fn test_full_roundtrip_sub_agent_workspaces_preserved() {
-        use base64::Engine as _;
-
         let mut state = make_test_state();
         // Add a second sub-agent with empty workspace (Docker-collected, no mesh workspace)
         state.sub_agent_snapshots.push(SubAgentSnapshot {
@@ -2388,7 +2384,7 @@ mod tests {
     /// are correctly filtered out (edge case — shouldn't happen in practice).
     #[test]
     fn test_empty_workspace_and_task_context_filtered_out() {
-        let snaps = vec![SubAgentSnapshot {
+        let snaps = [SubAgentSnapshot {
             name: "ghost".to_string(),
             original_amid: String::new(),
             spawn_config: SpawnRequest {
