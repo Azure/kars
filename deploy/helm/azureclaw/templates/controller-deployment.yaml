@@ -62,6 +62,17 @@ spec:
             - name: OIDC_ISSUER_URL
               value: {{ .Values.fedcred.oidcIssuerUrl | default "" | quote }}
             {{- end }}
+            # Mesh federation
+            - name: MESH_PEER_ENABLED
+              value: {{ .Values.meshPeer.enabled | quote }}
+            {{- if .Values.meshPeer.relayUrl }}
+            - name: MESH_RELAY_URL
+              value: {{ .Values.meshPeer.relayUrl | quote }}
+            {{- end }}
+            {{- if .Values.meshPeer.clusterName }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.meshPeer.clusterName | quote }}
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

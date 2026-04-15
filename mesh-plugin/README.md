@@ -1,0 +1,208 @@
+# @azureclaw/mesh — OpenClaw Federation Plugin
+
+Connect any OpenClaw agent to an AzureClaw cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
+
+**No Docker, no Rust, no AzureClaw CLI required on the client side.**
+
+## What it does
+
+| Capability | Description |
+|-----------|-------------|
+| **Cloud offload** | Delegate compute-heavy tasks to governed AKS sandboxes with GPU/inference |
+| **Task results** | Automatic result relay — the cloud sandbox runs your task and pushes results back to you |
+| **Inter-agent messaging** | Send/receive E2E encrypted messages to any agent on the mesh |
+| **Agent discovery** | Find specialist agents by capability (security-auditor, code-reviewer, etc.) |
+
+## Prerequisites
+
+- **Node.js 20+** (22 recommended)
+- **OpenClaw** installed and working locally
+- An AzureClaw cluster admin who can generate a pairing token for you
+
+## Install
+
+```bash
+# From npm (when published)
+npm install -g @azureclaw/mesh
+
+# From source
+git clone https://github.com/AzureClaw/azureclaw.git
+cd azureclaw/mesh-plugin
+npm install && npm run build
+```
+
+### Register with OpenClaw
+
+Add to your OpenClaw config (`~/.openclaw/openclaw.json`):
+
+```json
+{
+  "plugins": {
+    "allow": ["azureclaw-mesh"],
+    "entries": [
+      {
+        "name": "azureclaw-mesh",
+        "enabled": true,
+        "path": "/path/to/mesh-plugin/dist/index.js"
+      }
+    ]
+  }
+}
+```
+
+Or if installed globally via npm:
+
+```json
+{
+  "plugins": {
+    "allow": ["azureclaw-mesh"],
+    "entries": [
+      {
+        "name": "azureclaw-mesh",
+        "enabled": true,
+        "module": "@azureclaw/mesh"
+      }
+    ]
+  }
+}
+```
+
+## Quick start
+
+### 1. Get a pairing token
+
+Ask your AzureClaw cluster admin to generate one:
+
+```bash
+# On the AzureClaw cluster (admin runs this)
+azureclaw pair generate --name alice-laptop --budget 500000 --expires 30d
+```
+
+They'll give you a token like: `azcp_1_eyJjb250cm9sbGVyX2FtaWQiOi...`
+
+### 2. Pair your agent
+
+In your OpenClaw agent session, say:
+
+> "Pair with AzureClaw using this token: azcp_1_eyJ..."
+
+Or directly invoke the tool:
+
+```
+mesh_pair(token: "azcp_1_eyJ...")
+```
+
+Pairing is **one-time**. Your identity is saved at `~/.azureclaw/identity.json`.
+
+### 3. Offload a task
+
+> "Offload this task to the cloud: Analyze this codebase for OWASP Top 10 vulnerabilities and generate a markdown report"
+
+Or:
+
+```
+cloud_offload(task: "Analyze codebase for OWASP Top 10 vulnerabilities", model: "gpt-4.1", timeout_minutes: 15)
+```
+
+### 4. Check status
+
+> "What's the status of my offload?"
+
+The plugin automatically receives status updates and the final result via the mesh.
+
+## Available tools
+
+| Tool | Description |
+|------|-------------|
+| `mesh_pair` | One-time pairing with an AzureClaw cluster |
+| `cloud_offload` | Delegate a task to a governed cloud sandbox |
+| `offload_status` | Check progress of an active offload |
+| `mesh_send` | Send an E2E encrypted message to another agent |
+| `mesh_inbox` | Read incoming messages from the mesh |
+| `discover` | Find agents by capability or name |
+
+## How it works
+
+```
+┌─────────────────┐     WebSocket      ┌──────────────┐     K8s API     ┌──────────────────┐
+│  Your OpenClaw   │◄──── AgentMesh ───►│  AzureClaw   │───────────────►│  Offload Sandbox │
+│  + mesh plugin   │     Relay (E2E)    │  Controller  │                │  (AKS pod)       │
+└─────────────────┘                     └──────────────┘                └──────────────────┘
+   ~/.azureclaw/                          K8s Secret                     OFFLOAD_MODE=true
+   identity.json                          mesh identity                  runs task → result
+   pairings.json                          ClawPairing CRD                relayed back via mesh
+```
+
+1. **Pairing**: Your plugin connects to the relay, sends a `pair_request` with the token. The controller validates it, binds your AMID (Agent Mesh ID), and responds.
+
+2. **Offload**: You send an `offload_request`. The controller validates your pairing/budget, creates a ClawSandbox CRD → pod runs your task → controller watches pod completion → reads result from pod logs → sends `offload_done` back to you via the relay.
+
+3. **Security**: All relay messages are opaque base64 payloads. The pairing token is never stored (only its SHA-256 hash). Your Ed25519 identity provides authentication. The sandbox runs with full AzureClaw security (seccomp, NetworkPolicy, read-only rootfs, Content Safety).
+
+## Files created
+
+| Path | Purpose |
+|------|---------|
+| `~/.azureclaw/identity.json` | Ed25519 keypair (AES-256-GCM encrypted) + AMID |
+| `~/.azureclaw/pairings.json` | Stored pairing metadata (relay URL, cluster name, budget) |
+
+## Testing with NemoClaw (or any OpenClaw)
+
+1. Install NemoClaw / OpenClaw on your machine
+2. Install this plugin (see [Install](#install))
+3. Register the plugin in your OpenClaw config
+4. Start your agent: `openclaw agent --local`
+5. Pair with your AzureClaw cluster (get token from admin)
+6. Try: "Offload a task to analyze a simple math problem"
+
+## Cluster admin setup
+
+To enable federation on your AzureClaw cluster:
+
+```yaml
+# In your Helm values (deploy/helm/azureclaw/values.yaml)
+meshPeer:
+  enabled: true
+  relayUrl: "wss://relay.agentmesh.online/v1/connect"  # or your own relay
+  clusterName: "my-azureclaw-cluster"
+```
+
+Then upgrade:
+
+```bash
+helm upgrade azureclaw deploy/helm/azureclaw -n azureclaw-system
+```
+
+Generate pairing tokens:
+
+```bash
+azureclaw pair generate --name alice-laptop --budget 500000 --expires 30d
+azureclaw pair list
+azureclaw pair revoke alice-laptop
+```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| "Not paired" | Run `mesh_pair` with a token from your cluster admin |
+| "Pairing expired" | Ask admin for a new token (`azureclaw pair generate`) |
+| "Connection lost" | Plugin auto-reconnects. If persistent, check relay URL |
+| "No available slots" | Wait for current offload to finish, or ask admin to increase slots |
+| "Budget exceeded" | Ask admin to create a new pairing with higher budget |
+| Tools not showing | Verify plugin is in `plugins.allow` AND `plugins.entries` in OpenClaw config |
+
+## Development
+
+```bash
+cd mesh-plugin
+npm install
+npm run build       # TypeScript → dist/
+npm test            # vitest
+npm run typecheck   # tsc --noEmit
+npm run lint        # oxlint
+```
+
+## License
+
+MIT

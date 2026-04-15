@@ -23,6 +23,10 @@ rules:
   - apiGroups: ["azureclaw.azure.com"]
     resources: ["clawsandboxes", "clawsandboxes/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage ClawPairing CRDs (federation)
+  - apiGroups: ["azureclaw.azure.com"]
+    resources: ["clawpairings", "clawpairings/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -31,6 +35,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read pod logs (for offload result relay)
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   # Manage deployments
   - apiGroups: ["apps"]
     resources: ["deployments"]
