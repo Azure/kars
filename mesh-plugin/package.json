@@ -1,0 +1,30 @@
+{
+  "name": "@azureclaw/mesh",
+  "version": "0.1.0",
+  "description": "Connect any OpenClaw agent to AzureClaw for secure cloud offload and inter-agent communication",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "oxlint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "openclaw",
+    "azureclaw",
+    "agentmesh",
+    "cloud-offload",
+    "e2e-encryption"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@agentmesh/sdk": "^0.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.7",
+    "vitest": "^3.2"
+  }
+}
