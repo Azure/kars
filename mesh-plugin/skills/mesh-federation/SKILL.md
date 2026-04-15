@@ -65,7 +65,7 @@ mesh_inbox(limit: 5)
 - **Pairing required first**: All tools except `mesh_pair` require an active pairing
 - **Token budget**: Your pairing has a token budget (e.g., 500K tokens). `offload_status` shows remaining budget.
 - **One offload at a time**: You can only have one active cloud offload. Wait for it to finish or time out.
-- **Files are optional**: `cloud_offload` works with just a task prompt. Files are uploaded to the sandbox if specified.
+- **Task prompt only**: `cloud_offload` sends a text task description. File transfer is not yet supported — describe what you need in the prompt.
 - **Timeout**: Default 30 minutes. The sandbox auto-terminates after timeout.
 - **No secrets in tasks**: Never include API keys, passwords, or tokens in task descriptions — the sandbox has its own managed identity.
 
