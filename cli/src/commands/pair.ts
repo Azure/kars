@@ -163,6 +163,24 @@ export function pairCommand(): Command {
       console.log(chalk.green("  │") + chalk.yellow("  ⚠  One-time use. Share securely (Signal, encrypted email).") + chalk.green(" │"));
       console.log(chalk.green("  ╰──────────────────────────────────────────────────────────────╯"));
       console.log();
+      // Print raw token for easy copying
+      console.log(chalk.dim("  Token (single line):"));
+      console.log(`  ${token}`);
+      console.log();
+      // Try to copy to clipboard
+      try {
+        const { execSync } = await import("child_process");
+        if (process.platform === "darwin") {
+          execSync("pbcopy", { input: token });
+          console.log(chalk.green("  ✓ Copied to clipboard"));
+        } else if (process.platform === "linux") {
+          execSync("xclip -selection clipboard", { input: token });
+          console.log(chalk.green("  ✓ Copied to clipboard"));
+        }
+      } catch {
+        // clipboard not available — no problem
+      }
+      console.log();
     });
 
   // ── azureclaw pair list ──
