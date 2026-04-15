@@ -237,16 +237,46 @@ async function ensureInitialized(): Promise<string | null> {
 // Tool handlers
 // ---------------------------------------------------------------------------
 
+/** Recursively scan an object for a string value starting with azcp_1_ */
+function findTokenInObject(obj: any, depth = 0): string | undefined {
+  if (depth > 5) return undefined;
+  if (typeof obj === "string") {
+    // Check if the string contains a token (LLM may embed it in prose)
+    const match = obj.match(/azcp_1_[A-Za-z0-9_\-+=\/]+/);
+    if (match) return match[0];
+    return undefined;
+  }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = findTokenInObject(item, depth + 1);
+      if (found) return found;
+    }
+  } else if (obj && typeof obj === "object") {
+    for (const val of Object.values(obj)) {
+      const found = findTokenInObject(val, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 async function meshPairHandler(params: any): Promise<string> {
-  // OpenClaw may pass args in various shapes — extract token defensively
-  const token: string | undefined =
+  // OpenClaw may pass args in various shapes — extract token defensively.
+  // Some LLMs/runtimes put tool-call IDs or other junk in `params.token`,
+  // so we also deep-scan all string values for the azcp_1_ prefix.
+  let token: string | undefined =
     params?.token ??
     params?.arguments?.token ??
     params?.params?.token ??
     (typeof params === "string" ? params : undefined);
 
+  // If the extracted value doesn't look like a real token, scan all values
+  if (!token || !token.startsWith("azcp_1_")) {
+    token = findTokenInObject(params);
+  }
+
   if (!token) {
-    return `❌ No token provided. Pass a pairing token starting with azcp_1_. (received keys: ${JSON.stringify(Object.keys(params ?? {}))})`;
+    return `❌ No token provided. Pass a pairing token starting with azcp_1_. (received: ${JSON.stringify(params).slice(0, 200)})`;
   }
 
   const payload = decodeToken(token);
