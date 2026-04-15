@@ -355,6 +355,8 @@ pub fn sensitive_agt_routes() -> Router<AppState> {
         .route("/agt/status", get(agt_status))
         // Trust update (plugin pushes reputation changes to the router's trust store)
         .route("/agt/trust", post(agt_trust_update))
+        // Ed25519 signing counter (plugin pushes signed/verified/rejected counts)
+        .route("/agt/signing-counter", post(agt_signing_counter))
         // Dynamic rate-limit update (admin only)
         .route(
             "/agt/rate-limit",
@@ -1873,6 +1875,34 @@ async fn agt_status(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     Json(result).into_response()
+}
+
+/// POST /agt/signing-counter — plugin pushes Ed25519 signing metrics.
+/// Body: { "action": "signed"|"verified"|"rejected" }
+async fn agt_signing_counter(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let action = body
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    match action {
+        "signed" => {
+            state.governance.metrics.messages_signed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::AGT_MESSAGE_SIGNATURES.with_label_values(&["signed"]).inc();
+        }
+        "verified" => {
+            state.governance.metrics.messages_verified.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::AGT_MESSAGE_SIGNATURES.with_label_values(&["verified"]).inc();
+        }
+        "rejected" => {
+            state.governance.metrics.signatures_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::AGT_MESSAGE_SIGNATURES.with_label_values(&["rejected"]).inc();
+        }
+        _ => {}
+    }
+    Json(serde_json::json!({"ok": true}))
 }
 
 /// POST /agt/trust — plugin pushes trust updates after mesh interactions.
