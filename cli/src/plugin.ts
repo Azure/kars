@@ -1641,6 +1641,30 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             senderTrustScore = trustResult?.score ?? 0;
           } catch { /* trust lookup failed — use 0 */ }
 
+          // Tier verification gate — when REQUIRE_VERIFIED_TIER=true, reject
+          // messages from anonymous-tier agents (not verified via OAuth/Entra).
+          if (process.env.REQUIRE_VERIFIED_TIER === "true") {
+            try {
+              const lookupResult = await _routerCall("GET",
+                `/agt/registry/v1/registry/lookup?amid=${encodeURIComponent(fromAmid)}`);
+              const senderTier = lookupResult?.tier || "anonymous";
+              if (senderTier === "anonymous") {
+                log.warn(`AGT tier gate DENIED: '${fromName}' is anonymous (require_verified_tier=true)`);
+                if (agtMeshClient) {
+                  try {
+                    await agtMeshClient.send(fromAmid, {
+                      type: "task_response",
+                      content: "Request denied: this agent requires verified identity tier (OAuth/Entra). Register with a verification token.",
+                      from_agent: agtSandboxName,
+                      timestamp: new Date().toISOString(),
+                    });
+                  } catch { /* best effort */ }
+                }
+                return;
+              }
+            } catch { /* tier lookup failed — fail-open */ }
+          }
+
           // Evaluate mesh:receive action with sender trust context
           const evalPayload = JSON.stringify({
             action: "mesh:receive",
@@ -2743,6 +2767,36 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (peers.length > 0) {
         log.info(`AGT pre-seeded ${peers.length} trusted peer(s) from parent`);
       }
+    }
+
+    // ── OAuth/Entra identity verification (opt-in) ────────────────────────
+    // If AGT_OAUTH_TOKEN is set (from Workload Identity token exchange or
+    // manual config), POST to /registry/verify to upgrade tier from anonymous
+    // to verified. Also sets up 12-hour periodic re-verification.
+    const oauthToken = process.env.AGT_OAUTH_TOKEN || "";
+    if (oauthToken && connected) {
+      try {
+        await _routerCall("POST", "/agt/registry/v1/registry/verify", {
+          amid: agtIdentity.amid,
+          verification_token: oauthToken,
+        });
+        log.info("AGT identity verified via OAuth — tier upgraded to 'verified'");
+      } catch (verifyErr: any) {
+        log.warn(`AGT OAuth verification failed: ${verifyErr.message} — running as anonymous tier`);
+      }
+
+      // Periodic re-verification every 12 hours (refreshes certificate expiry)
+      setInterval(async () => {
+        const token = process.env.AGT_OAUTH_TOKEN || "";
+        if (!token || !agtIdentity) return;
+        try {
+          await _routerCall("POST", "/agt/registry/v1/registry/verify", {
+            amid: agtIdentity.amid,
+            verification_token: token,
+          });
+          log.info("AGT identity re-verified (12hr cycle)");
+        } catch { /* fail-open — stays at current tier */ }
+      }, 12 * 60 * 60 * 1000);
     }
 
     // ── Disconnect handler + auto-reconnect ──────────────────────────────

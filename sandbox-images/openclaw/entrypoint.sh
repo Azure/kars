@@ -102,6 +102,33 @@ elif [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
   chmod 400 /tmp/azure-openai-key 2>/dev/null || true
 fi
 
+# ── Workload Identity → Entra token exchange (opt-in) ────────────────────
+# If Azure Workload Identity is mounted (AZURE_FEDERATED_TOKEN_FILE set by
+# AKS WI webhook), exchange the Kubernetes service account token for an
+# Entra ID access token and set AGT_OAUTH_TOKEN for registry verification.
+# This upgrades the agent from anonymous to verified tier.
+if [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
+   [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
+   [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+  echo "[entrypoint] Exchanging Workload Identity token for Entra ID access token..."
+  _FED_TOKEN=$(cat "$AZURE_FEDERATED_TOKEN_FILE")
+  _TOKEN_RESP=$(curl -s --max-time 10 \
+    "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
+    -d "client_id=${AZURE_CLIENT_ID}" \
+    -d "scope=api://agentmesh/.default" \
+    -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+    -d "client_assertion=${_FED_TOKEN}" \
+    -d "grant_type=client_credentials" 2>/dev/null || echo "")
+  _ACCESS_TOKEN=$(echo "$_TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+  if [ -n "$_ACCESS_TOKEN" ]; then
+    export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
+    echo "[entrypoint] Entra ID token acquired — agent will register as verified tier"
+  else
+    echo "[entrypoint] Entra token exchange failed — agent will register as anonymous tier"
+  fi
+  unset _FED_TOKEN _TOKEN_RESP _ACCESS_TOKEN
+fi
+
 # Get config from env vars (set by azureclaw dev/up)
 ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 MODEL="${OPENCLAW_MODEL:-gpt-4.1}"

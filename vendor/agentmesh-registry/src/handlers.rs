@@ -283,6 +283,8 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             // Identity succession endpoints
             .route("/registry/succession", web::post().to(succession_handler))
             .route("/registry/reclamation", web::post().to(reclamation_handler))
+            // Re-verification endpoint (verify OAuth token post-registration)
+            .route("/registry/verify", web::post().to(verify_agent))
     );
 }
 
@@ -515,6 +517,70 @@ async fn register_agent(
                 certificate: None,
                 error: Some("Registration failed".to_string()),
             })
+        }
+    }
+}
+
+/// POST /registry/verify — re-verify an existing agent's OAuth token.
+/// Upgrades tier from anonymous to verified, issues new certificate,
+/// and removes any existing revocation for the agent.
+async fn verify_agent(
+    state: web::Data<Arc<AppState>>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let pool = match state.require_ready() {
+        Ok(p) => p,
+        Err(_) => return service_unavailable(),
+    };
+
+    let amid = match body.get("amid").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "missing amid"})),
+    };
+    let token = match body.get("verification_token").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "missing verification_token"})),
+    };
+
+    // Validate OAuth token
+    match oauth::validate_oauth_token(token).await {
+        Ok(validated_user) => {
+            info!("Re-verification OAuth validated for {} (user: {:?})", amid, validated_user);
+
+            // Upgrade tier
+            let _ = db::update_agent_tier(pool, amid, TrustTier::Verified).await;
+
+            // Look up agent to get signing public key for certificate issuance
+            let agent = db::get_agent_by_amid(pool, amid).await.ok().flatten();
+            let certificate = if let Some(ref a) = agent {
+                let cert = issue_agent_certificate(amid, &a.signing_public_key, TrustTier::Verified);
+                if let Ok(ref c) = cert {
+                    let _ = db::store_agent_certificate(pool, amid, c).await;
+                }
+                cert.ok()
+            } else {
+                None
+            };
+
+            // Remove any existing revocation (re-verify lifts revocation)
+            let _ = sqlx::query("DELETE FROM revocations WHERE amid = $1")
+                .bind(amid)
+                .execute(pool)
+                .await;
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "amid": amid,
+                "tier": "verified",
+                "certificate": certificate,
+            }))
+        }
+        Err(e) => {
+            warn!("Re-verification failed for {}: {}", amid, e);
+            HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "error": format!("OAuth validation failed: {}", e),
+            }))
         }
     }
 }

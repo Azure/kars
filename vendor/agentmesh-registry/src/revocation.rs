@@ -444,6 +444,11 @@ async fn create_revocation(
     )
     .execute(pool)
     .await?;
+
+    // Downgrade revoked agent to anonymous tier — peers with
+    // require_verified_tier policy will stop accepting their messages.
+    let _ = crate::db::update_agent_tier(pool, amid, crate::models::TrustTier::Anonymous).await;
+
     Ok(())
 }
 

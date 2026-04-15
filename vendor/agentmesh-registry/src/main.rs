@@ -113,6 +113,27 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Background cert expiry sweep — demotes agents with expired certificates
+    // to anonymous tier. Runs every hour.
+    let sweep_pool = pool.clone();
+    let sweep_state = app_state.clone();
+    tokio::spawn(async move {
+        // Wait for DB to be ready before first sweep
+        loop {
+            if sweep_state.is_ready() { break; }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        info!("Certificate expiry sweep task started (1hr interval)");
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            match db::demote_expired_certs(&sweep_pool).await {
+                Ok(0) => {}
+                Ok(n) => info!("Cert expiry sweep: demoted {} agents to anonymous", n),
+                Err(e) => warn!("Cert expiry sweep error: {}", e),
+            }
+        }
+    });
+
     // Server config
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = std::env::var("PORT")
