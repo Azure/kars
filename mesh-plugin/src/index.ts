@@ -659,6 +659,17 @@ async function discoverHandler(params: {
   }
 }
 
+// Gateway-compatible named export: OpenClaw's runtime plugin loader
+// looks for a top-level `register` or `activate` export on non-bundled
+// extensions discovered from ~/.openclaw-data/extensions/.
+export function register(api: any) {
+  const entry = definePluginEntry();
+  entry.register(api);
+}
+
+// Also expose as `activate` (alternate name accepted by the gateway).
+export const activate = register;
+
 // Re-export for consumers
 export { decodeToken } from "./pairing.js";
 export type * from "./types.js";
