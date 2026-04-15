@@ -848,7 +848,7 @@ async fn chat_completions(
                     }
                 }
             }
-            Ok((status, resp_headers, resp_body)) => {
+            Ok((status, resp_headers, mut resp_body)) => {
                 // Record token usage from response for budget tracking
                 if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
                     && let Some(total) = body_json
@@ -889,7 +889,7 @@ async fn chat_completions(
                             });
                         }
 
-                        // AGT output validation — fire-and-forget
+                        // AGT output pipeline: redact → scan → policy check (blocking)
                         let response_text = body_json
                             .get("choices")
                             .and_then(|c| c.get(0))
@@ -899,27 +899,57 @@ async fn chat_completions(
                             .unwrap_or("")
                             .to_string();
                         if !response_text.is_empty() {
-                            let gov = state.governance.clone();
-                            let sandbox = sandbox_name.to_string();
-                            tokio::spawn(async move {
-                                let action = format!(
-                                    "output:{}",
-                                    &response_text[..response_text.len().min(200)]
-                                );
-                                let result = gov.evaluate(&sandbox, &action, None);
-                                let allowed = result
-                                    .get("allowed")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
-                                if !allowed {
-                                    let reason = result
-                                        .get("reason")
-                                        .and_then(|r| r.as_str())
-                                        .unwrap_or("output policy");
-                                    tracing::warn!(sandbox = %sandbox, %reason,
-                                        "AGT: model response flagged by output policy");
+                            // 1. Redact credentials (AGT CredentialRedactor)
+                            let redacted = state.governance.redact_text(&response_text);
+
+                            // 2. Scan for threats (AGT McpResponseScanner)
+                            let (sanitized, _threats_found) = state.governance.scan_response(&redacted);
+
+                            // 3. Policy check — blocking (was fire-and-forget)
+                            let action = format!(
+                                "output:{}",
+                                &sanitized[..sanitized.len().min(200)]
+                            );
+                            let result = state.governance.evaluate(sandbox_name, &action, None);
+                            let allowed = result
+                                .get("allowed")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            if !allowed {
+                                let reason = result
+                                    .get("reason")
+                                    .and_then(|r| r.as_str())
+                                    .unwrap_or("output policy");
+                                tracing::warn!(sandbox = %sandbox_name, %reason,
+                                    "AGT: model response blocked by output policy");
+                                return (
+                                    axum::http::StatusCode::FORBIDDEN,
+                                    Body::from(serde_json::json!({
+                                        "error": {
+                                            "message": "Response blocked by output policy",
+                                            "type": "content_policy_violation",
+                                            "code": "content_filter"
+                                        }
+                                    }).to_string()),
+                                ).into_response();
+                            }
+
+                            // 4. Rewrite body if redaction/scanning modified the text
+                            if sanitized != response_text {
+                                if let Ok(mut body_mut) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                                    if let Some(content) = body_mut
+                                        .get_mut("choices")
+                                        .and_then(|c| c.get_mut(0))
+                                        .and_then(|c| c.get_mut("message"))
+                                        .and_then(|m| m.get_mut("content"))
+                                    {
+                                        *content = serde_json::Value::String(sanitized);
+                                        if let Ok(new_body) = serde_json::to_vec(&body_mut) {
+                                            resp_body = new_body.into();
+                                        }
+                                    }
                                 }
-                            });
+                            }
                         }
                     }
                 }

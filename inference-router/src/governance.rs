@@ -1,12 +1,16 @@
 //! Native AGT governance — in-process policy evaluation, trust management,
 //! audit logging, and agent identity.
 //!
-//! Uses the `agentmesh` crate (v3.0.2) for core primitives.  The `/agt/*`
-//! route handlers call these functions directly instead of forwarding HTTP
-//! to a separate service.
+//! Uses the `agentmesh` crate (v3.1.0) for core primitives + MCP modules.
+//! The `/agt/*` route handlers call these functions directly instead of
+//! forwarding HTTP to a separate service.
 
 use agentmesh::AuditLogger;
 use agentmesh::identity::AgentIdentity;
+use agentmesh::mcp::redactor::{CredentialKind, CredentialRedactor};
+use agentmesh::mcp::response::{McpResponseScanner, McpResponseThreatType};
+use agentmesh::mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
+use agentmesh::mcp::{InMemoryAuditSink, McpMetricsCollector, SystemClock};
 use agentmesh::policy::PolicyEngine;
 use agentmesh::trust::{TrustConfig, TrustManager};
 use agentmesh::types::PolicyDecision;
@@ -31,6 +35,12 @@ pub struct GovernanceMetrics {
     pub content_flags: AtomicU64,
     pub eval_latency_sum_us: AtomicU64,
     pub behavior_alerts: AtomicU64,
+    pub redactions: AtomicU64,
+    pub response_threats: AtomicU64,
+    pub tool_rate_limits: AtomicU64,
+    pub messages_signed: AtomicU64,
+    pub messages_verified: AtomicU64,
+    pub signatures_rejected: AtomicU64,
 }
 
 impl Default for GovernanceMetrics {
@@ -49,6 +59,12 @@ impl GovernanceMetrics {
             content_flags: AtomicU64::new(0),
             eval_latency_sum_us: AtomicU64::new(0),
             behavior_alerts: AtomicU64::new(0),
+            redactions: AtomicU64::new(0),
+            response_threats: AtomicU64::new(0),
+            tool_rate_limits: AtomicU64::new(0),
+            messages_signed: AtomicU64::new(0),
+            messages_verified: AtomicU64::new(0),
+            signatures_rejected: AtomicU64::new(0),
         }
     }
 
@@ -309,6 +325,9 @@ pub struct Governance {
     pub policy: PolicyEngine,
     pub trust: TrustManager,
     pub audit: AuditLogger,
+    pub redactor: CredentialRedactor,
+    pub response_scanner: McpResponseScanner,
+    pub tool_rate_limiter: McpSlidingRateLimiter,
     pub rate_limiter: RateLimiter,
     pub behavior: BehaviorMonitor,
     pub metrics: GovernanceMetrics,
@@ -352,6 +371,43 @@ impl Governance {
         let policy = PolicyEngine::new();
         let policy_rule_count = AtomicU64::new(0);
 
+        // AGT MCP modules (from agentmesh 3.1.0)
+        let redactor = CredentialRedactor::new().unwrap_or_else(|e| {
+            tracing::warn!("CredentialRedactor init failed ({e}), using fallback");
+            CredentialRedactor::new().expect("redactor must initialize")
+        });
+        let mcp_clock: std::sync::Arc<dyn agentmesh::mcp::Clock> =
+            std::sync::Arc::new(SystemClock);
+        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> =
+            std::sync::Arc::new(InMemoryAuditSink::new(
+                CredentialRedactor::new().expect("redactor for audit sink"),
+            ));
+        let mcp_metrics = McpMetricsCollector::default();
+        let response_scanner = McpResponseScanner::new(
+            CredentialRedactor::new().expect("redactor for scanner"),
+            mcp_audit,
+            mcp_metrics,
+            mcp_clock.clone(),
+        )
+        .expect("McpResponseScanner must initialize");
+
+        // Per-tool sliding window: configurable via env vars
+        let tool_max = std::env::var("TOOL_RATE_LIMIT_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100usize);
+        let tool_window_secs = std::env::var("TOOL_RATE_LIMIT_WINDOW_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60u64);
+        let tool_rate_limiter = McpSlidingRateLimiter::new(
+            tool_max,
+            Duration::from_secs(tool_window_secs),
+            mcp_clock,
+            std::sync::Arc::new(InMemoryRateLimitStore::default()),
+        )
+        .expect("McpSlidingRateLimiter must initialize");
+
         tracing::info!(
             sandbox = sandbox_name,
             did = %identity.did,
@@ -365,6 +421,9 @@ impl Governance {
             policy,
             trust: TrustManager::new(trust_config),
             audit: AuditLogger::new(),
+            redactor,
+            response_scanner,
+            tool_rate_limiter,
             rate_limiter: RateLimiter::new(500.0, 1000.0, 50.0, 100.0),
             behavior: BehaviorMonitor::new(100, 20, 10),
             metrics: GovernanceMetrics::new(),
@@ -589,6 +648,93 @@ impl Governance {
         Some(ctx)
     }
 
+    // ── Credential Redaction (AGT CredentialRedactor) ────────────────────
+
+    /// Redact credentials from text. Tracks metrics and audit.
+    pub fn redact_text(&self, text: &str) -> String {
+        let result = self.redactor.redact(text);
+        if !result.detected.is_empty() {
+            self.metrics.redactions.fetch_add(1, Ordering::Relaxed);
+            let kinds: Vec<&str> = result.detected.iter().map(|k: &CredentialKind| k.as_str()).collect();
+            for kind in &kinds {
+                metrics::AGT_REDACTIONS.with_label_values(&[kind]).inc();
+            }
+            tracing::warn!(
+                sandbox = %self.sandbox_name,
+                kinds = ?kinds,
+                "Credential redacted from output"
+            );
+            self.audit.log(&self.sandbox_name, &format!("credential_redacted:{}", kinds.join(",")), "sanitized");
+        }
+        result.sanitized
+    }
+
+    // ── Response Scanning (AGT McpResponseScanner) ──────────────────────
+
+    /// Scan model response text for threats (prompt injection, exfil URLs, etc.).
+    /// Returns the sanitized text and whether any threats were found.
+    pub fn scan_response(&self, text: &str) -> (String, bool) {
+        match self.response_scanner.scan_text(text) {
+            Ok(result) => {
+                if !result.findings.is_empty() {
+                    self.metrics.response_threats.fetch_add(result.findings.len() as u64, Ordering::Relaxed);
+                    for finding in &result.findings {
+                        let label = match finding.threat_type {
+                            McpResponseThreatType::PromptInjectionTag => "prompt_injection",
+                            McpResponseThreatType::ImperativePhrasing => "imperative_phrasing",
+                            McpResponseThreatType::CredentialLeakage => "credential_leakage",
+                            McpResponseThreatType::ExfiltrationUrl => "exfiltration_url",
+                        };
+                        metrics::AGT_RESPONSE_THREATS.with_label_values(&[label]).inc();
+                    }
+                    let types: Vec<&str> = result.findings.iter().map(|f| match f.threat_type {
+                        McpResponseThreatType::PromptInjectionTag => "prompt_injection",
+                        McpResponseThreatType::ImperativePhrasing => "imperative_phrasing",
+                        McpResponseThreatType::CredentialLeakage => "credential_leakage",
+                        McpResponseThreatType::ExfiltrationUrl => "exfiltration_url",
+                    }).collect();
+                    tracing::warn!(
+                        sandbox = %self.sandbox_name,
+                        threats = ?types,
+                        "Response threats detected"
+                    );
+                    self.audit.log(&self.sandbox_name, &format!("response_threat:{}", types.join(",")), "flagged");
+                }
+                (result.sanitized, !result.findings.is_empty())
+            }
+            Err(e) => {
+                tracing::warn!(sandbox = %self.sandbox_name, "Response scan error: {e}");
+                (text.to_string(), false)
+            }
+        }
+    }
+
+    // ── Per-Tool Rate Limiting (AGT McpSlidingRateLimiter) ──────────────
+
+    /// Check per-tool rate limit. Returns (allowed, retry_after_secs).
+    pub fn check_tool_rate(&self, tool: &str) -> (bool, u64) {
+        match self.tool_rate_limiter.check(tool) {
+            Ok(decision) => {
+                if !decision.allowed {
+                    self.metrics.tool_rate_limits.fetch_add(1, Ordering::Relaxed);
+                    metrics::AGT_TOOL_RATE_LIMITS.with_label_values(&[tool]).inc();
+                    tracing::warn!(
+                        sandbox = %self.sandbox_name,
+                        tool,
+                        retry_after = decision.retry_after_secs,
+                        "Per-tool rate limit exceeded"
+                    );
+                    self.audit.log(&self.sandbox_name, &format!("tool_rate_limited:{tool}"), "denied");
+                }
+                (decision.allowed, decision.retry_after_secs)
+            }
+            Err(e) => {
+                tracing::warn!(sandbox = %self.sandbox_name, "Tool rate check error: {e}");
+                (true, 0) // fail-open
+            }
+        }
+    }
+
     // ── Trust ────────────────────────────────────────────────────────────
 
     /// Update trust score with clamped semantics.
@@ -784,6 +930,12 @@ impl Governance {
             "behavior_alerts": self.behavior.alert_count(),
             "behavior_alerts_detail": self.behavior.alerts_detail(),
             "content_flags": self.metrics.content_flags.load(Ordering::Relaxed),
+            "redactions_total": self.metrics.redactions.load(Ordering::Relaxed),
+            "response_threats_total": self.metrics.response_threats.load(Ordering::Relaxed),
+            "tool_rate_limits_total": self.metrics.tool_rate_limits.load(Ordering::Relaxed),
+            "messages_signed": self.metrics.messages_signed.load(Ordering::Relaxed),
+            "messages_verified": self.metrics.messages_verified.load(Ordering::Relaxed),
+            "signatures_rejected": self.metrics.signatures_rejected.load(Ordering::Relaxed),
             "uptime_secs": self.start_time.elapsed().as_secs(),
             "relay_url": relay_url,
             "registry_url": registry_url,
