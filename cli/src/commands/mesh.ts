@@ -619,7 +619,7 @@ export function meshCommand(): Command {
 
             const child = spawn("kubectl", [
               "port-forward", t.svc, `${t.localPort}:${t.remotePort}`,
-              "-n", "agentmesh",
+              "-n", "agentmesh", "--address", "0.0.0.0",
             ], { stdio: ["ignore", outFd, outFd], detached: true });
 
             const logPath = path.join(logDir, `pf-${t.label.toLowerCase()}.log`);
@@ -748,7 +748,7 @@ export function meshCommand(): Command {
 
           const child = spawn("kubectl", [
             "port-forward", t.svc, `${t.localPort}:${t.remotePort}`,
-            "-n", "agentmesh",
+            "-n", "agentmesh", "--address", "0.0.0.0",
           ], { stdio: ["ignore", outFd, outFd], detached: true });
 
           // Wait for port-forward to be ready by polling the log file
