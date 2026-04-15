@@ -1722,6 +1722,21 @@ async fn agt_evaluate(
         .unwrap_or("unknown");
     let extra_context = body.get("context").cloned();
 
+    // Per-tool sliding window rate limit (AGT McpSlidingRateLimiter)
+    // Extract tool name from action format "tool:exec_command" or "tool:http_fetch"
+    if let Some(tool_name) = action.strip_prefix("tool:") {
+        let (allowed, retry_after) = state.governance.check_tool_rate(tool_name);
+        if !allowed {
+            return Json(serde_json::json!({
+                "allowed": false,
+                "reason": format!("per-tool rate limit exceeded for '{}'", tool_name),
+                "retry_after_secs": retry_after,
+                "decision": "Deny"
+            }))
+            .into_response();
+        }
+    }
+
     let result = state
         .governance
         .evaluate(agent_id, action, extra_context.as_ref());
