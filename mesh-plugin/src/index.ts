@@ -260,23 +260,30 @@ function findTokenInObject(obj: any, depth = 0): string | undefined {
   return undefined;
 }
 
-async function meshPairHandler(params: any): Promise<string> {
-  // OpenClaw may pass args in various shapes — extract token defensively.
-  // Some LLMs/runtimes put tool-call IDs or other junk in `params.token`,
-  // so we also deep-scan all string values for the azcp_1_ prefix.
-  let token: string | undefined =
-    params?.token ??
-    params?.arguments?.token ??
-    params?.params?.token ??
-    (typeof params === "string" ? params : undefined);
-
-  // If the extracted value doesn't look like a real token, scan all values
-  if (!token || !token.startsWith("azcp_1_")) {
-    token = findTokenInObject(params);
+async function meshPairHandler(...args: any[]): Promise<string> {
+  // OpenClaw gateway passes (tool_call_id, params) — the first arg is often
+  // just an OpenAI tool_call ID string like "chatcmpl-tool-xxx".
+  // Scan ALL arguments to find the real token.
+  let token: string | undefined;
+  for (const arg of args) {
+    // Direct property access on object-shaped args
+    const candidate =
+      arg?.token ?? arg?.arguments?.token ?? arg?.params?.token;
+    if (candidate && typeof candidate === "string" && candidate.startsWith("azcp_1_")) {
+      token = candidate;
+      break;
+    }
+    // Deep scan for azcp_1_ in any shape
+    const found = findTokenInObject(arg);
+    if (found) {
+      token = found;
+      break;
+    }
   }
 
   if (!token) {
-    return `❌ No token provided. Pass a pairing token starting with azcp_1_. (received: ${JSON.stringify(params).slice(0, 200)})`;
+    const dump = args.map((a: any) => JSON.stringify(a)).join(" | ").slice(0, 300);
+    return `❌ No token provided. Pass a pairing token starting with azcp_1_. (received args[${args.length}]: ${dump})`;
   }
 
   const payload = decodeToken(token);
