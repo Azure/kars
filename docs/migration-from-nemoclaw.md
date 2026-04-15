@@ -19,7 +19,7 @@
 ```bash
 # 1. Install
 git clone https://github.com/Azure/azureclaw.git
-cd azureclaw/cli && npm install && npm run build && npm link
+cd azureclaw/cli && npm ci && npm run build && npm link
 
 # 2. Deploy (preflight checks auth + prompts for region/sub)
 azureclaw up

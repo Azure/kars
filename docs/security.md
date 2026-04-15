@@ -1,6 +1,6 @@
 # AzureClaw Security
 
-AzureClaw implements defense-in-depth: eight infrastructure layers (always on) plus two behavioral governance layers (opt-in via AGT). Together: 10/10 OWASP Agentic Security Index coverage.
+AzureClaw implements defense-in-depth: nine security layers covering infrastructure, governance, and encrypted communications. Together: 10/10 OWASP Agentic Security Index coverage.
 
 ---
 
@@ -42,7 +42,7 @@ Applied to every sandbox pod:
 | Isolation Level | seccomp Profile | Effect |
 |-----------------|----------------|--------|
 | standard | RuntimeDefault | Kernel's default syscall filter |
-| enhanced (default) | Localhost `azureclaw-strict` | Custom strict allowlist (175 syscalls). Blocks: mount, ptrace, bpf, unshare, setns, init_module, kexec_load, pivot_root, chroot, reboot, perf_event_open. |
+| enhanced (default) | Localhost `azureclaw-strict` | Custom strict allowlist (219 allowed syscalls, 28 explicitly blocked). Blocks: mount, ptrace, bpf, unshare, setns, init_module, kexec_load, pivot_root, chroot, reboot, perf_event_open. |
 | confidential | RuntimeDefault | Kata VM provides the isolation boundary |
 
 The seccomp profile is installed on every node via a DaemonSet that writes `azureclaw-strict.json` to `/var/lib/kubelet/seccomp/profiles/`.
@@ -150,17 +150,19 @@ The init container (egress-guard) runs as root with NET_ADMIN to install iptable
 
 ## Layer 7: Behavioral Governance — AGT
 
-When `spec.governance.enabled: true`, the [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (`@agentmesh/sdk`) adds application-layer governance at two levels:
+When `spec.governance.enabled: true`, AGT governance runs **natively inside the Rust inference router** — no sidecar, no external process. The router implements PolicyEngine, TrustManager, AuditLogger, RateLimiter, and BehaviorMonitor as compiled-in Rust modules with <1µs evaluation latency. The OpenClaw plugin connects to the AGT relay (via `@agentmesh/sdk`) for E2E encrypted inter-agent messaging only — governance evaluation always goes through the router.
 
-**Application Layer** (OpenClaw plugin, `@agentmesh/sdk` TypeScript SDK):
+**Router (native Rust)** — all governance evaluation happens here:
 
 | Control | Implementation | Integration |
 |---------|----------------|-------------|
-| **Tool-level policy** | AGT `PolicyEngine` gates `exec_command` and `http_fetch` pre-execution via `POST /evaluate`; denies sensitive files, recon tools, cloud metadata, destructive commands | Plugin forwards to router before tool runs |
-| **Trust scoring** | AGT `createTrustStore()` — Ed25519 identity, 0-1000 scale, 5 tiers | Plugin tracks agent trust |
-| **Audit logging** | AGT `createAuditLogger()` — hash-chain, OWASP ASI compliance | Plugin logs all governance decisions |
+| **Tool-level policy** | `PolicyEngine` (YAML rules, hot-reloaded) gates `exec_command` and `http_fetch` pre-execution via `POST /agt/evaluate`; denies sensitive files, recon tools, cloud metadata, destructive commands | Plugin forwards to router before tool runs |
+| **Trust scoring** | `TrustManager` — Ed25519 identity, 0-1000 scale, 5 tiers, clamped ±200/update | Per-agent trust tracked in router |
+| **Audit logging** | `AuditLogger` — SHA-256 Merkle hash-chain, tamper detection, integrity verification | Append-only log in router |
+| **Rate limiting** | `RateLimiter` — 500 req/sec global, 50/sec per-agent, token bucket with burst | In-process enforcement |
+| **Behavior monitoring** | `BehaviorMonitor` — burst detection (100/60s), failure tracking (20), denial tracking (10/60s) | Alerts on anomalous patterns |
 
-**Infrastructure Layer** (Rust inference router, native implementation):
+**Mesh & Communication Layer** (E2E encryption via `@agentmesh/sdk`):
 
 | Control | Implementation | API Endpoint |
 |---------|----------------|--------------|

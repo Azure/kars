@@ -15,16 +15,16 @@ We acknowledge receipt within 24 hours and respond within 72 hours.
 
 ## Security Design
 
-Seven independent defense-in-depth layers plus AGT governance, all active by default:
+Nine independent defense-in-depth layers, all active by default:
 
 1. **Azure Infrastructure** — NSG, AKS API server IP allowlist, DDoS protection
 2. **Azure Linux** — SELinux-enforcing nodes, automatic security patching
 3. **Kata VM** (confidential) — per-pod dedicated kernel
 4. **Container Hardening** — read-only rootfs, non-root (UID 1000), drop ALL capabilities
-5. **Kernel Confinement** — custom seccomp profile (`azureclaw-strict`, ~150 allowed syscalls)
-6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + domain blocklist (53k+)
+5. **Kernel Confinement** — custom seccomp profile (`azureclaw-strict`, 219 allowed syscalls, 28 explicitly blocked)
+6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + domain blocklist (51k+)
 7. **Inference Safety** — Content Safety + Prompt Shields (circuit breaker, fail-open) + per-sandbox token budgets
-8. **AGT Governance** — PolicyEvaluator (YAML rules) gates tool execution pre-call, FileTrustStore (0–1000 scoring, clamped ±200), SHA-256 Merkle audit chain, RateLimiter (100 req/min), AgentBehaviorMonitor. Denies sensitive file access, recon tools, cloud metadata, destructive commands.
+8. **AGT Governance** — PolicyEngine (YAML rules) gates tool execution pre-call, TrustManager (0–1000 scoring, clamped ±200, Ed25519 signed), SHA-256 Merkle audit chain, RateLimiter (500 req/sec global, 50/sec per-agent), BehaviorMonitor. Denies sensitive file access, recon tools, cloud metadata, destructive commands.
 9. **E2E Encrypted Mesh** — Signal Protocol (X3DH + Double Ratchet), KNOCK trust handshake, per-message forward secrecy via AgentMesh relay/registry
 
 See [docs/security.md](docs/security.md) for the full breakdown.

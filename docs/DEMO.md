@@ -20,7 +20,7 @@ During the demo, **Fabrikam's agent gets compromised** through an indirect promp
 4. **Privilege escalation** — tries to mount the host filesystem and install a crypto miner
 5. **Token theft** — tries to access IMDS to steal Azure credentials for the entire cluster
 
-AzureClaw's 8 security layers catch and contain **every single attack** — and the other companies' agents continue operating without interruption.
+AzureClaw's 9 security layers catch and contain **every single attack** — and the other companies' agents continue operating without interruption.
 
 ---
 
