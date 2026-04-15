@@ -13,6 +13,7 @@
 
 mod crd;
 mod fedcred;
+mod mesh_peer;
 mod pairing;
 mod pairing_reconciler;
 mod reconciler;
@@ -37,6 +38,7 @@ async fn main() -> Result<()> {
 
     // Run sandbox and pairing controllers concurrently.
     // Pairing controller is non-fatal — if CRD is missing, it exits gracefully.
+    // Mesh peer is opt-in — only starts if MESH_PEER_ENABLED=true.
     let sandbox_handle = {
         let client = client.clone();
         tokio::spawn(async move { reconciler::run(client).await })
@@ -45,12 +47,28 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { pairing_reconciler::run(client).await })
     };
+    let mesh_peer_handle = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            if std::env::var("MESH_PEER_ENABLED").unwrap_or_default() == "true" {
+                tracing::info!("Mesh peer enabled — starting relay connection");
+                mesh_peer::run(client).await
+            } else {
+                tracing::info!("Mesh peer disabled (set MESH_PEER_ENABLED=true to enable federation)");
+                // Park forever — don't exit so select! doesn't trigger
+                std::future::pending::<Result<()>>().await
+            }
+        })
+    };
 
     tokio::select! {
         res = sandbox_handle => {
             res??;
         }
         res = pairing_handle => {
+            res??;
+        }
+        res = mesh_peer_handle => {
             res??;
         }
     }
