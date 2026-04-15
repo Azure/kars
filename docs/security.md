@@ -1,6 +1,6 @@
 # AzureClaw Security
 
-AzureClaw implements defense-in-depth: nine security layers covering infrastructure, governance, and encrypted communications. Together: 10/10 OWASP Agentic Security Index coverage.
+AzureClaw implements defense-in-depth: nine security layers covering infrastructure, governance, and encrypted communications.
 
 ---
 
@@ -254,18 +254,20 @@ the relay sees only encrypted payloads while endpoints see plaintext.
 
 ## OWASP Agentic Top 10 Coverage
 
-| Risk | ASI | AzureClaw (infra) | AGT (behavioral) |
-|------|-----|-------------------|-------------------|
-| Agent Goal Hijacking | ASI-01 | Content Safety + Prompt Shields | Policy engine blocks unauthorized goals |
-| Excessive Capabilities | ASI-02 | iptables + NetworkPolicy | Capability model (least-privilege) |
-| Identity & Privilege Abuse | ASI-03 | Workload Identity (OIDC) | DID/Ed25519 agent identities |
-| Uncontrolled Code Execution | ASI-04 | seccomp + Kata VM + read-only rootfs | Execution rings + sandboxing |
-| Insecure Output Handling | ASI-05 | Content Safety + Prompt Shields | Content output policies |
-| Memory Poisoning | ASI-06 | Content Safety pre-model | CMVK majority voting (AGT) |
-| Unsafe Inter-Agent Comms | ASI-07 | NetworkPolicy + E2E encryption | Signal Protocol encrypted relay + trust gates |
-| Cascading Failures | ASI-08 | Token budgets + concurrency limit | Circuit breakers + SLOs |
-| Human-Agent Trust | ASI-09 | Approve/deny workflow | Audit trails + flight recorder |
-| Rogue Agents | ASI-10 | eBPF tracing + iptables kill | Behavioral anomaly + kill switch |
+| Risk | ASI | AzureClaw (infra) | AGT (behavioral) | Status |
+|------|-----|-------------------|-------------------|--------|
+| Agent Goal Hijacking | ASI-01 | Foundry Guardrails (jailbreak + indirect attack detection) | Policy engine blocks unauthorized actions | ⚠️ Partial — action-level blocking, not semantic goal-drift detection |
+| Excessive Capabilities | ASI-02 | iptables UID isolation + NetworkPolicy + seccomp (219 syscalls) | Capability allow/deny lists (least-privilege) | ✅ Strong |
+| Identity & Privilege Abuse | ASI-03 | Workload Identity (OIDC token exchange) | Ed25519 keypairs + AMID derivation | ⚠️ Partial — identities generated but not verified on message receipt |
+| Uncontrolled Code Execution | ASI-04 | seccomp + Kata VM + read-only rootfs + drop ALL caps | UID isolation (1000/1001) + non-root | ✅ Strong |
+| Insecure Output Handling | ASI-05 | Foundry Guardrails (prompt-side only) | Output policy evaluation (log-only) | ⚠️ Partial — input filtered, output only logged not blocked |
+| Memory Poisoning | ASI-06 | — | — | ❌ Not implemented — memory APIs proxy to Foundry without safety checks |
+| Unsafe Inter-Agent Comms | ASI-07 | NetworkPolicy default-deny | Signal Protocol Double Ratchet E2E encryption | ✅ Strong |
+| Cascading Failures | ASI-08 | Token budgets + concurrency semaphore (256) + rate limiter (500/s) | Behavior monitor thresholds | ⚠️ Partial — no circuit breaker, no SLO enforcement |
+| Human-Agent Trust | ASI-09 | RequiresApproval policy decision type | Audit logging (every policy decision) | ⚠️ Partial — audit works, but no approval UI/workflow |
+| Rogue Agents | ASI-10 | iptables network kill + `azureclaw destroy` | BehaviorMonitor (burst/failure/denial detection) | ⚠️ Partial — anomaly detected but no automated response |
+
+**Legend:** ✅ Strong = implemented and tested | ⚠️ Partial = core infra works, behavioral gaps remain | ❌ = not implemented
 
 ---
 

@@ -363,7 +363,7 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 | **NetworkPolicy** | Default-deny egress at the Kubernetes level (Cilium-enforced) |
 | **Domain blocklist** | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus every 6h |
 | **Inference safety** | Content Safety + Prompt Shields on every request + per-agent token budgets |
-| **Content Safety circuit breaker** | Foundry-side guardrails (`DefaultV2`) — content filter annotations parsed from model responses; no separate API call needed |
+| **Content Safety** | Foundry-side guardrails (`DefaultV2`) — content filter annotations parsed from model responses; no separate API call needed |
 | **Zero Azure credentials** | Agent never sees Azure auth tokens — router authenticates via IMDS/Workload Identity |
 | **Admin token** | From K8s Secret mounted at `/etc/azureclaw/secrets/` — never hardcoded; required for trust mutation via `x-azureclaw-admin` header |
 | **AGT policy evaluation** | Per-request governance on inference, spawn, mesh receive, and response actions |

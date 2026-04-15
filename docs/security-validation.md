@@ -272,20 +272,22 @@ Auth mode: Workload Identity (AKS mode)
 
 ---
 
-## OWASP Agentic Security Index: 10/10 Coverage
+## OWASP Agentic Security Index Coverage
 
 | Risk | ASI | Layer(s) | Status |
 |------|-----|----------|--------|
-| Agent Goal Hijacking | ASI-01 | L6 Content Safety + Prompt Shields | ✅ |
-| Excessive Capabilities | ASI-02 | L5 iptables + NetworkPolicy | ✅ |
-| Identity & Privilege Abuse | ASI-03 | Workload Identity (OIDC) | ✅ |
-| Uncontrolled Code Execution | ASI-04 | L2 Kata VM + L4 seccomp + L3 read-only rootfs | ✅ |
-| Insecure Output Handling | ASI-05 | L6 Content Safety + Prompt Shields | ✅ |
-| Memory Poisoning | ASI-06 | L6 Content Safety pre-model | ✅ |
-| Unsafe Inter-Agent Comms | ASI-07 | L5 NetworkPolicy + L8 Signal Protocol E2E | ✅ |
-| Cascading Failures | ASI-08 | L6 Token budgets + concurrency limits | ✅ |
-| Human-Agent Trust | ASI-09 | L7 AGT audit trails | ✅ |
-| Rogue Agents | ASI-10 | L5 iptables kill + L7 behavioral anomaly | ✅ |
+| Agent Goal Hijacking | ASI-01 | L6 Foundry Guardrails (jailbreak/indirect attack) + policy deny lists | ⚠️ Partial |
+| Excessive Capabilities | ASI-02 | L4 seccomp + L5 iptables + NetworkPolicy + capability allow/deny | ✅ |
+| Identity & Privilege Abuse | ASI-03 | Workload Identity (OIDC) + Ed25519 keypairs | ⚠️ Partial |
+| Uncontrolled Code Execution | ASI-04 | L2 Kata VM + L4 seccomp + L3 read-only rootfs + drop ALL caps | ✅ |
+| Insecure Output Handling | ASI-05 | L6 Foundry Guardrails (prompt-side) + output policy (log-only) | ⚠️ Partial |
+| Memory Poisoning | ASI-06 | Not implemented | ❌ |
+| Unsafe Inter-Agent Comms | ASI-07 | L5 NetworkPolicy + L8 Signal Protocol Double Ratchet E2E | ✅ |
+| Cascading Failures | ASI-08 | L6 Token budgets + rate limiter + concurrency semaphore | ⚠️ Partial |
+| Human-Agent Trust | ASI-09 | L7 AGT audit logging + RequiresApproval decision type | ⚠️ Partial |
+| Rogue Agents | ASI-10 | L5 iptables kill + L7 BehaviorMonitor anomaly detection | ⚠️ Partial |
+
+**4/10 strong, 5/10 partial, 1/10 not implemented.** See [docs/security.md](security.md) for detailed per-risk breakdown.
 
 ---
 

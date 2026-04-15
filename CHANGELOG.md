@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AGT inference rate limit bumped from 120 → 500 calls/60s (policy) and router token bucket from 100 → 500 global req/s (needed for multi-agent handoff traffic)
 
 ### Security
-- Circuit breaker fails open instead of closed (prevents total service lockout)
+- Foundry-side Content Safety guardrails (`DefaultV2`) — content filter annotations parsed from model responses and reported to AGT governance
 - iptables UID-based egress — agent process restricted to localhost
 - Zero Azure credentials in agent container — router authenticates via Workload Identity
 - Kata Confidential VM support — per-pod dedicated kernel
