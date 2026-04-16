@@ -13,7 +13,23 @@
  */
 
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as http from "node:http";
+import * as net from "node:net";
 import type { MeshIdentity } from "./identity.js";
+
+// ---------------------------------------------------------------------------
+// Build fingerprint — printed at load time for deployment verification
+// ---------------------------------------------------------------------------
+
+const BUILD_HASH = (() => {
+  try {
+    const src = fs.readFileSync(new URL(import.meta.url).pathname);
+    return crypto.createHash("sha256").update(src).digest("hex").slice(0, 12);
+  } catch { return "unknown"; }
+})();
+
+console.log(`[mesh] connection.js loaded (build: ${BUILD_HASH})`);
 
 // ---------------------------------------------------------------------------
 // Constants — must match cli/src/plugin.ts for interop
@@ -119,11 +135,43 @@ export class MeshConnection {
       );
     });
 
+    console.log(`[mesh] Connecting to relay: ${this.config.relayUrl}`);
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+
+    // When behind a CONNECT proxy (e.g. OpenShell/NemoClaw sandbox), the
+    // sandbox namespace only allows TCP to the proxy. Direct connections are
+    // rejected by iptables. We establish a CONNECT tunnel first, then run
+    // the WebSocket upgrade through it. Raw net.createConnection is used for
+    // the tunnel to bypass Node 22's EnvHttpProxyAgent which intercepts
+    // http.request() even with custom agents. See NemoClaw#557.
+    let tunnelSocket: net.Socket | undefined;
+    if (proxyUrl) {
+      console.log(`[mesh] Proxy detected (${proxyUrl}) — establishing CONNECT tunnel`);
+      try {
+        tunnelSocket = await this.createProxyTunnel(proxyUrl, this.config.relayUrl);
+        console.log(`[mesh] CONNECT tunnel established`);
+      } catch (err: any) {
+        console.log(`[mesh] CONNECT tunnel failed: ${err.message} — falling back to direct`);
+      }
+    }
+
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.config.relayUrl);
+      let ws: InstanceType<typeof WebSocket>;
+      if (tunnelSocket) {
+        // Route WebSocket upgrade through the pre-established CONNECT tunnel.
+        const agent = new http.Agent();
+        agent.createConnection = (_options: any, callback: any) => {
+          callback(null, tunnelSocket);
+          return tunnelSocket!;
+        };
+        ws = new WebSocket(this.config.relayUrl, { agent });
+      } else {
+        ws = new WebSocket(this.config.relayUrl);
+      }
       this.wsObj = ws;
 
       const timeout = setTimeout(() => {
+        console.log(`[mesh] Relay connection timed out after 10s`);
         ws.close();
         reject(new Error("Relay connection timed out (10s)"));
       }, 10_000);
@@ -131,6 +179,7 @@ export class MeshConnection {
       ws.on("open", () => {
         clearTimeout(timeout);
         this.connected = true;
+        console.log(`[mesh] WebSocket open — sending auth (AMID: ${this.config.identity.amid})`);
         this.sendAuth();
         this.startKeepalive();
         this.startTransferCleanup();
@@ -140,21 +189,28 @@ export class MeshConnection {
       ws.on("message", (data: Buffer) => {
         try {
           const msg: RelayEnvelope = JSON.parse(data.toString());
+          if (msg.type === "connected") {
+            console.log(`[mesh] ✅ Authenticated with relay (session: ${(msg as any).session_id?.slice(0, 8)}..., pending: ${(msg as any).pending_messages ?? 0})`);
+          } else if (msg.type === "error") {
+            console.log(`[mesh] ❌ Relay error: ${(msg as any).message || JSON.stringify(msg)}`);
+          }
           this.handleRelayMessage(msg);
         } catch {
           // skip unparseable
         }
       });
 
-      ws.on("close", () => {
+      ws.on("close", (code: number, reason: Buffer) => {
         this.connected = false;
         this.stopKeepalive();
+        console.log(`[mesh] WebSocket closed (code: ${code}, reason: ${reason?.toString() || "none"})`);
         this.config.onDisconnect?.();
         this.scheduleReconnect();
       });
 
       ws.on("error", (err: Error) => {
         clearTimeout(timeout);
+        console.log(`[mesh] WebSocket error: ${err.message}`);
         if (!this.connected) {
           reject(err);
         }
@@ -198,6 +254,54 @@ export class MeshConnection {
     }, delay);
   }
 
+  // ── Proxy CONNECT tunnel ─────────────────────────────────────────────
+
+  private createProxyTunnel(proxyUrl: string, targetUrl: string): Promise<net.Socket> {
+    return new Promise((resolve, reject) => {
+      const proxy = new URL(proxyUrl);
+      const target = new URL(targetUrl);
+      const host = target.hostname;
+      const port = target.port || (target.protocol === "wss:" ? "443" : "80");
+
+      const sock = net.createConnection(
+        parseInt(proxy.port || "3128", 10),
+        proxy.hostname,
+        () => {
+          sock.write(
+            `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`
+          );
+        }
+      );
+
+      const timer = setTimeout(() => {
+        sock.destroy();
+        reject(new Error("Proxy CONNECT tunnel timed out (10s)"));
+      }, 10_000);
+
+      let buf = "";
+      const onData = (data: Buffer) => {
+        buf += data.toString();
+        // Wait for the complete header block
+        if (!buf.includes("\r\n\r\n")) return;
+        sock.removeListener("data", onData);
+        clearTimeout(timer);
+        const statusLine = buf.split("\r\n")[0];
+        if (statusLine.includes("200")) {
+          resolve(sock);
+        } else {
+          sock.destroy();
+          reject(new Error(`Proxy CONNECT denied: ${statusLine}`));
+        }
+      };
+
+      sock.on("data", onData);
+      sock.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
   // ── Auth ─────────────────────────────────────────────────────────────
 
   private sendAuth(): void {
@@ -212,6 +316,7 @@ export class MeshConnection {
       timestamp,
       p2p_capable: false,
     };
+    console.log(`[mesh] Sending auth: type=connect, amid=${this.config.identity.amid}, ts=${timestamp}`);
     this.wsSend(authMsg);
   }
 
