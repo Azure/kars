@@ -146,9 +146,100 @@ The plugin automatically receives status updates and the final result via the me
 | `~/.azureclaw/identity.json` | Ed25519 keypair (AES-256-GCM encrypted) + AMID |
 | `~/.azureclaw/pairings.json` | Stored pairing metadata (relay URL, cluster name, budget) |
 
-## Testing with NemoClaw (or any OpenClaw)
+## NemoClaw / OpenShell sandbox setup
 
-1. Install NemoClaw / OpenClaw on your machine
+NemoClaw sandboxes enforce deny-by-default networking. The plugin needs
+an egress policy preset to reach the AzureClaw relay (WebSocket) and
+registry (REST). A ready-made preset is included in `nemoclaw/policies/presets/`.
+
+### 1. Copy the preset into your NemoClaw blueprint
+
+```bash
+cp mesh-plugin/nemoclaw/policies/presets/azureclaw-mesh.yaml \
+   ~/.nemoclaw/source/nemoclaw-blueprint/policies/presets/
+```
+
+### 2. Bake the plugin into the sandbox image
+
+Copy the compiled plugin into the NemoClaw source tree so it's included
+in the next image build:
+
+```bash
+mkdir -p ~/.nemoclaw/source/scripts/azureclaw-mesh
+cp -r mesh-plugin/dist/ ~/.nemoclaw/source/scripts/azureclaw-mesh/dist/
+cp mesh-plugin/openclaw.plugin.json ~/.nemoclaw/source/scripts/azureclaw-mesh/
+cp mesh-plugin/package.json ~/.nemoclaw/source/scripts/azureclaw-mesh/
+```
+
+Then add this `COPY` to your NemoClaw `Dockerfile` (before the
+entrypoint):
+
+```dockerfile
+COPY scripts/azureclaw-mesh/ /sandbox/.openclaw-data/extensions/azureclaw-mesh/
+```
+
+Rebuild the sandbox image.
+
+### 3. Apply the egress preset
+
+After the sandbox is running:
+
+```bash
+nemoclaw <sandbox-name> policy-add azureclaw-mesh
+```
+
+The preset includes `allowed_ips` for SSRF override, so
+`host.docker.internal` (private IP) is authorized without manual TUI
+approval.
+
+### 4. Pair and use
+
+Inside the sandbox agent session:
+
+> "Pair with AzureClaw using this token: azcp_1_eyJ..."
+
+### How the proxy tunnel works
+
+NemoClaw sandboxes route all egress through an HTTP CONNECT proxy.
+The plugin automatically detects `HTTPS_PROXY` / `HTTP_PROXY` and:
+
+1. Opens a raw TCP connection to the proxy (bypasses Node 22's undici interception)
+2. Sends `CONNECT host:port` and waits for `200 Connection Established`
+3. Runs the WebSocket upgrade inside the tunnel
+4. Falls back to direct connection when no proxy is detected
+
+No iptables changes or network hacks required — it works through
+OpenShell's standard policy controls.
+
+### Customising for production
+
+The default preset uses `host.docker.internal` for local development.
+For production deployments, edit the preset to use your public endpoints:
+
+```yaml
+endpoints:
+  - host: relay.yourdomain.com
+    port: 443
+    access: full
+    binaries:
+      - { path: /usr/local/bin/node }
+  - host: registry.yourdomain.com
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+      - allow: { method: PUT, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+```
+
+Public hostnames don't need `allowed_ips` (no SSRF override required).
+
+## Testing with OpenClaw (no sandbox)
+
+1. Install OpenClaw on your machine
 2. Install this plugin (see [Install](#install))
 3. Register the plugin in your OpenClaw config
 4. Start your agent: `openclaw agent --local`
@@ -191,6 +282,9 @@ azureclaw pair revoke alice-laptop
 | "No available slots" | Wait for current offload to finish, or ask admin to increase slots |
 | "Budget exceeded" | Ask admin to create a new pairing with higher budget |
 | Tools not showing | Verify plugin is in `plugins.allow` AND `plugins.entries` in OpenClaw config |
+| ECONNREFUSED in sandbox | Apply the `azureclaw-mesh` preset (`nemoclaw <name> policy-add azureclaw-mesh`) |
+| Proxy CONNECT denied | Check `allowed_ips` in preset matches the resolved IP. Run `nemoclaw <name> policy-list` to verify preset is applied |
+| `engine:ssrf` in proxy log | The host resolves to a private IP. Add `allowed_ips` to the preset endpoint (see `nemoclaw/policies/presets/azureclaw-mesh.yaml`) |
 
 ## Development
 

@@ -1,0 +1,47 @@
+# AzureClaw mesh federation — relay (WebSocket) and registry (REST)
+#
+# This preset enables NemoClaw/OpenShell sandbox agents to connect to an
+# AzureClaw cluster via AgentMesh federation.
+#
+# The relay endpoint uses a CONNECT tunnel (access: full) for WebSocket.
+# The registry endpoint uses L7 REST inspection.
+#
+# For local development, host.docker.internal resolves to a private IP
+# (192.168.65.254 on Docker Desktop for Mac). The allowed_ips field
+# provides an SSRF override so the connection is allowed without manual
+# approval in the OpenShell TUI.
+#
+# For production deployments, replace host.docker.internal with your
+# public relay/registry hostnames and remove the allowed_ips field.
+
+preset:
+  name: azureclaw-mesh
+  description: "AzureClaw mesh federation relay and registry access"
+
+network_policies:
+  azureclaw_mesh:
+    name: azureclaw_mesh
+    endpoints:
+      # Relay — WebSocket over CONNECT tunnel (L4).
+      - host: host.docker.internal
+        port: 18765
+        access: full
+        allowed_ips:
+          - 192.168.65.254
+        binaries:
+          - { path: /usr/local/bin/node }
+          - { path: /usr/local/bin/openclaw }
+      # Registry — REST API (L7).
+      - host: host.docker.internal
+        port: 18080
+        protocol: rest
+        enforcement: enforce
+        allowed_ips:
+          - 192.168.65.254
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+          - allow: { method: PUT, path: "/**" }
+        binaries:
+          - { path: /usr/local/bin/node }
+          - { path: /usr/local/bin/openclaw }
