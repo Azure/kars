@@ -154,6 +154,19 @@ registry (REST). A ready-made preset is included in `nemoclaw/policies/presets/`
 
 ### 1. Copy the preset into your NemoClaw blueprint
 
+The preset uses `host.docker.internal` which resolves to different IPs
+per platform. The setup script resolves the DNS and renders the preset
+automatically:
+
+```bash
+cd mesh-plugin/nemoclaw
+./setup.sh --install          # resolves host IP, copies preset to NemoClaw blueprint
+./setup.sh --install --apply  # also applies preset to a running sandbox
+./setup.sh                    # just prints the rendered preset to stdout
+```
+
+Or copy manually (you'll need to replace `__HOST_IP__` yourself):
+
 ```bash
 cp mesh-plugin/nemoclaw/policies/presets/azureclaw-mesh.yaml \
    ~/.nemoclaw/source/nemoclaw-blueprint/policies/presets/

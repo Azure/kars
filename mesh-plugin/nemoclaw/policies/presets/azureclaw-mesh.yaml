@@ -6,13 +6,13 @@
 # The relay endpoint uses a CONNECT tunnel (access: full) for WebSocket.
 # The registry endpoint uses L7 REST inspection.
 #
-# For local development, host.docker.internal resolves to a private IP
-# (192.168.65.254 on Docker Desktop for Mac). The allowed_ips field
-# provides an SSRF override so the connection is allowed without manual
-# approval in the OpenShell TUI.
+# allowed_ips uses the placeholder __HOST_IP__ which is resolved
+# automatically by setup.sh at sandbox startup. This handles platform
+# differences (Mac: 192.168.65.254, Linux: 172.17.0.1, WSL2: varies).
 #
 # For production deployments, replace host.docker.internal with your
-# public relay/registry hostnames and remove the allowed_ips field.
+# public relay/registry hostnames and remove the allowed_ips field
+# entirely (no SSRF override needed for public IPs).
 
 preset:
   name: azureclaw-mesh
@@ -27,7 +27,7 @@ network_policies:
         port: 18765
         access: full
         allowed_ips:
-          - 192.168.65.254
+          - __HOST_IP__
         binaries:
           - { path: /usr/local/bin/node }
           - { path: /usr/local/bin/openclaw }
@@ -37,7 +37,7 @@ network_policies:
         protocol: rest
         enforcement: enforce
         allowed_ips:
-          - 192.168.65.254
+          - __HOST_IP__
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
