@@ -52,8 +52,46 @@ Files changed:
   `get_reputation_leaderboard`: `reputation_feedbacks` → `reputation_feedback`,
   `from_tier` → `rater_tier`, `sqlx::query!` → `sqlx::query_as`
 
+### 4. Operational hardening
+
+Multiple stability and security fixes for production deployment:
+
+**Graceful shutdown**: Added SIGTERM/Ctrl+C signal handling with Actix
+`ServerHandle::stop(true)` — drains in-flight requests before exit instead of
+killing them immediately. Prevents data corruption on container restarts.
+
+**Stale agent cleanup**: Background task (6-hour interval) deletes agents not
+seen in 7 days to prevent DB bloat. Search already filters at 5 minutes, but
+zombie entries accumulated indefinitely. Dormant agents (handoff predecessors)
+are preserved for succession lookups.
+
+**Health endpoint honesty**: `/v1/health` now returns 503 if the DB query fails
+instead of silently returning `(0, 0)` via `unwrap_or_default()`. K8s probes
+will correctly detect DB connectivity issues.
+
+**Input validation**:
+- Capabilities capped at 50 per registration (prevents storage DoS)
+- One-time prekeys capped at 100 per upload (prevents storage DoS)
+- Search pagination limit clamped to max 100 (prevents memory DoS)
+
+**TOCTOU race fix**: `delete_stale_by_display_name` now includes
+`last_seen < NOW() - INTERVAL '5 minutes'` condition, so concurrent
+registrations with the same display_name won't delete freshly-registered agents.
+
+**Startup panic fix**: Static file serving (`./static/index.html`) is now
+conditional — only mounts the Files service if the static directory exists.
+Previous code used `.expect()` which panicked on deployments without frontend
+assets.
+
+Files changed:
+- `src/main.rs` — graceful shutdown, stale cleanup task, conditional static files
+- `src/handlers.rs` — health DB error propagation, capabilities limit,
+  prekey limit, pagination cap
+- `src/db.rs` — `cleanup_stale_agents`, staleness condition in
+  `delete_stale_by_display_name`
+
 ## Build
 
 ```sh
-docker build --platform linux/amd64 -t azureclawacr.azurecr.io/agentmesh-registry:v0.3.1-rawts .
+docker build --platform linux/amd64 -t azureclawacr.azurecr.io/agentmesh-registry:latest .
 ```

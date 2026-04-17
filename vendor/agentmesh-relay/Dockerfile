@@ -49,10 +49,11 @@ COPY --from=builder /app/target/release/agentmesh-relay /app/relay
 RUN useradd -r -u 1000 -M -s /sbin/nologin agentmesh
 USER agentmesh
 
-# Expose WebSocket port
-EXPOSE 8765
+# Expose WebSocket port + health endpoint
+EXPOSE 8765 8766
 
 ENV RUST_LOG=agentmesh_relay=info
 ENV RELAY_ADDR=0.0.0.0:8765
+ENV HEALTH_PORT=8766
 
 CMD ["/app/relay"]

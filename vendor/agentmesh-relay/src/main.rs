@@ -34,6 +34,12 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = addr.parse()?;
 
+    // Health endpoint port (separate from WebSocket to avoid "Handshake not finished" from K8s probes)
+    let health_port: u16 = std::env::var("HEALTH_PORT")
+        .unwrap_or_else(|_| "8766".to_string())
+        .parse()
+        .unwrap_or(8766);
+
     // Create shared state
     let connection_manager = Arc::new(ConnectionManager::new());
     let store_forward = Arc::new(StoreForward::new());
@@ -48,10 +54,18 @@ async fn main() -> anyhow::Result<()> {
         sf_clone.cleanup_expired_loop().await;
     });
 
+    // Start HTTP health endpoint (for K8s readiness/liveness probes)
+    let cm_health = connection_manager.clone();
+    let sf_health = store_forward.clone();
+    tokio::spawn(async move {
+        serve_health(health_port, cm_health, sf_health).await;
+    });
+
     // Bind TCP listener
     let listener = TcpListener::bind(&addr).await?;
     info!("AgentMesh Relay Server listening on {}", addr);
-    info!("Protocol version: agentmesh/0.1");
+    info!("Health endpoint on :{}", health_port);
+    info!("Protocol version: agentmesh/0.2");
 
     // Accept connections
     loop {
@@ -79,5 +93,51 @@ async fn main() -> anyhow::Result<()> {
                 error!("Failed to accept connection: {}", e);
             }
         }
+    }
+}
+
+/// Serve a minimal HTTP health endpoint on a separate port.
+/// This prevents K8s TCP readiness probes from triggering "Handshake not finished"
+/// errors on the WebSocket port.
+async fn serve_health(
+    port: u16,
+    manager: Arc<ConnectionManager>,
+    store_forward: Arc<StoreForward>,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind health endpoint on :{}: {}", port, e);
+            return;
+        }
+    };
+
+    loop {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let connected = manager.connection_count();
+        let sf_stats = store_forward.stats();
+
+        let body = format!(
+            r#"{{"status":"healthy","protocol":"agentmesh/0.2","connected_agents":{},"stored_messages":{},"agents_with_pending":{}}}"#,
+            connected,
+            sf_stats.total_messages,
+            sf_stats.agents_with_pending,
+        );
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
     }
 }
