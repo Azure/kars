@@ -62,15 +62,28 @@ impl ConnectionManager {
         let now = Utc::now();
 
         // If there's an existing connection for this AMID, supersede it.
-        // Dropping the old sender closes the channel, which causes the old
-        // handler tasks (outgoing, ping) to detect the break and exit.
+        // BEFORE dropping the old sender, send an explicit Error message so
+        // the old client can distinguish this from a network drop and
+        // suppress its own reconnect logic. The subsequent drop closes the
+        // channel, causing the old handler tasks to exit cleanly.
         if let Some((_, old)) = self.connections.remove(&amid) {
+            let old_session = self
+                .agents
+                .get(&amid)
+                .map(|a| a.session_id)
+                .unwrap_or_default();
             info!(
                 "Superseding existing connection for {} (old session: {})",
-                amid,
-                self.agents.get(&amid).map(|a| a.session_id).unwrap_or_default()
+                amid, old_session
             );
-            // Drop old sender explicitly (it's moved out by remove)
+            let _ = old.sender.send(RelayMessage::Error {
+                code: ErrorCode::SessionReplaced,
+                message: format!(
+                    "Connection superseded by newer session for AMID {}",
+                    amid
+                ),
+                retry_after_seconds: None,
+            });
             drop(old.sender);
         }
 
@@ -258,6 +271,7 @@ pub async fn handle_connection(
                 let amid = amid.clone();
                 let manager = manager.clone();
                 let my_session_id = session_id;
+                let tx_for_error = tx.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
                     loop {
@@ -266,6 +280,17 @@ pub async fn handle_connection(
                         // Check if we received pong from last ping
                         if !pong_received_clone.load(Ordering::Relaxed) {
                             warn!("Agent {} did not respond to ping, disconnecting", amid);
+                            // Notify client before dropping — lets it log a
+                            // clear reason and schedule a clean reconnect
+                            // instead of interpreting the drop as a mystery.
+                            let _ = tx_for_error.send(RelayMessage::Error {
+                                code: ErrorCode::PingTimeout,
+                                message: format!(
+                                    "No Pong received within {}s — closing connection",
+                                    PING_TIMEOUT_SECS
+                                ),
+                                retry_after_seconds: Some(1),
+                            });
                             manager.unregister(&amid, my_session_id);
                             break;
                         }

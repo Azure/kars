@@ -423,6 +423,29 @@ for existing active sessions instead of throwing. `establishSession` detects
 `reused: true`, syncs `activeSessions`, and returns early (skips redundant
 KNOCK + activate).
 
+### 11. `wsFactory` + `plaintextPeers` — extensibility hooks for heterogeneous peers
+**Files:** `dist/chunk-WM5AX4U5.js` (`RelayTransport`), `dist/index.js`
+(`AgentMeshClient`), `dist/index.d.ts`
+
+Two additions needed to run the SDK inside the NemoClaw mesh-plugin:
+
+1. **`TransportOptions.wsFactory?: (url) => WebSocket`** — `RelayTransport`
+   previously did `new WebSocket(this.relayUrl)` directly, which in Node 22
+   ignores `HTTPS_PROXY` (global fetch/undici quirk). `wsFactory` lets the
+   caller inject a WebSocket built on top of a CONNECT-tunneled socket.
+   Threaded through `AgentMeshClient` via
+   `ClientOptions.transportOptions.wsFactory`.
+
+2. **`ClientOptions.plaintextPeers?: string[]`** plus runtime methods
+   `addPlaintextPeer` / `removePlaintextPeer` / `getPlaintextPeers`.
+   AMIDs in this set bypass Signal E2E and use the legacy wire format
+   (`encrypted_payload = base64(JSON.stringify(message))`). Needed for peers
+   that have not yet adopted the SDK (e.g. the Rust controller). Both the
+   send path and the `receive` handler check the set; plaintext peers skip
+   KNOCK, X3DH, and SessionManager entirely.
+
+Both hooks are purely additive — defaults match upstream behavior.
+
 ## License
 
 MIT

@@ -22,6 +22,10 @@ var RelayTransport = class {
     this.p2pCapable = options.p2pCapable ?? false;
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
     this.reconnectBaseDelay = options.reconnectBaseDelay ?? 1e3;
+    // PATCH #9: wsFactory lets callers inject a custom WebSocket (e.g. routed
+    // through a CONNECT proxy tunnel in Node 22 where global fetch ignores
+    // HTTPS_PROXY). Falls back to the global WebSocket constructor.
+    this.wsFactory = options.wsFactory ?? null;
   }
   /**
    * Check if connected to relay.
@@ -50,7 +54,7 @@ var RelayTransport = class {
     }
     return new Promise((resolve) => {
       try {
-        this.ws = new WebSocket(this.relayUrl);
+        this.ws = this.wsFactory ? this.wsFactory(this.relayUrl) : new WebSocket(this.relayUrl);
         this.ws.onopen = async () => {
           const [timestamp, signature] = await this.identity.signTimestamp();
           const connectMsg = {

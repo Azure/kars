@@ -61,6 +61,23 @@ Files changed:
 - `src/main.rs` — Added `serve_health()` function on separate TCP listener
 - `Dockerfile` — Expose port 8766, set `HEALTH_PORT` env var
 
+## Patch 4: explicit close reason error codes
+
+**Problem**: When the relay supersedes an old connection (same AMID reconnects)
+or times out a ping, it drops the WebSocket without telling the client *why*.
+Clients then auto-reconnect and get superseded again, creating a reconnect storm.
+
+**Fix**: Added two new `ErrorCode` variants — `SessionReplaced` and `PingTimeout`
+— and the relay now sends an `{"type":"error","code":"SESSION_REPLACED",...}`
+frame on the old sender before dropping it (similarly for ping timeouts). The
+mesh-plugin client treats `SESSION_REPLACED` as an intentional close and stops
+auto-reconnecting, eliminating the fight between two sessions.
+
+Files changed:
+- `src/types.rs` — Added `SessionReplaced` and `PingTimeout` variants to `ErrorCode`
+- `src/connection.rs` — `register()` supersede path sends `SessionReplaced` before
+  drop; ping watchdog sends `PingTimeout` before unregister
+
 ## Build
 
 ```sh

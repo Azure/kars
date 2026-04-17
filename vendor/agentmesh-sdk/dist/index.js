@@ -2823,9 +2823,16 @@ var AgentMeshClient = class _AgentMeshClient {
     this.relayUrl = options.relayUrl || "wss://relay.agentmesh.online/v1/connect";
     this.registry = new RegistryClient(this.registryUrl);
     const transportOptions = {
-      relayUrl: this.relayUrl
+      relayUrl: this.relayUrl,
+      // PATCH #9: forward caller-supplied transport options (e.g. wsFactory
+      // for CONNECT-tunneled WebSocket upgrades through HTTPS_PROXY).
+      ...(options.transportOptions || {})
     };
     this.transport = new RelayTransport(identity, transportOptions);
+    // PATCH #9: peers listed here bypass Signal E2E — send() wraps the
+    // plaintext JSON as base64 in `encrypted_payload` (matches the legacy
+    // wire format used by peers that have not yet adopted the SDK).
+    this.plaintextPeers = new Set(options.plaintextPeers || []);
     this.prekeyManager = new PrekeyManager(identity, this.storage);
     this.sessionManager = new SessionManager(identity, this.storage, this.prekeyManager, options.sessionConfig);
     this.protocolSessions = new ProtocolSessionManager();
@@ -2871,6 +2878,28 @@ var AgentMeshClient = class _AgentMeshClient {
     return new _AgentMeshClient(identity, options);
   }
   /**
+   * PATCH #9: Add a peer to the plaintext-compat set at runtime. Sends and
+   * receives to this AMID skip Signal E2E and use the legacy base64(JSON)
+   * wire format. Used for peers (e.g. Rust controller) that do not yet
+   * speak the full Signal Protocol.
+   */
+  addPlaintextPeer(amid) {
+    if (amid) this.plaintextPeers.add(amid);
+  }
+  /**
+   * PATCH #9: Remove a plaintext-compat peer (e.g. after it upgrades to
+   * real Signal).
+   */
+  removePlaintextPeer(amid) {
+    this.plaintextPeers.delete(amid);
+  }
+  /**
+   * PATCH #9: Snapshot the current plaintext-peer set (for diagnostics).
+   */
+  getPlaintextPeers() {
+    return Array.from(this.plaintextPeers);
+  }
+  /**
    * Get the underlying identity.
    */
   getIdentity() {
@@ -2909,6 +2938,22 @@ var AgentMeshClient = class _AgentMeshClient {
       const fromAmid = data.from;
       const rawPayload = data.encrypted_payload;
       const msgType = data.message_type;
+      // PATCH #9: plaintext peers send base64(JSON) instead of Signal envelopes.
+      // Decode and deliver directly, skipping KNOCK / Signal entirely.
+      if (this.plaintextPeers.has(fromAmid)) {
+        let payloadStr;
+        try {
+          payloadStr = Buffer.from(rawPayload, "base64").toString("utf8");
+        } catch {
+          payloadStr = rawPayload;
+        }
+        let parsedPlain;
+        try { parsedPlain = JSON.parse(payloadStr); } catch { parsedPlain = payloadStr; }
+        for (const handler of this.messageHandlers) {
+          try { handler(fromAmid, parsedPlain); } catch {}
+        }
+        return;
+      }
       try {
         const parsed = JSON.parse(rawPayload);
         if (msgType === "knock") {
@@ -3133,6 +3178,15 @@ var AgentMeshClient = class _AgentMeshClient {
     }
     if (this.rateLimiter) {
       this.rateLimiter.consume(toAmid);
+    }
+    // PATCH #9: plaintext peers bypass Signal — wire format matches the
+    // legacy controllers/agents that pre-date full SDK adoption:
+    //   encrypted_payload = base64(JSON.stringify(message))
+    if (this.plaintextPeers.has(toAmid)) {
+      const b64 = Buffer.from(JSON.stringify(message), "utf8").toString("base64");
+      await this.transport.send(toAmid, b64, "message");
+      await this.auditLogger.logMessageSent(toAmid, "plaintext-peer");
+      return;
     }
     let sessionId = this.activeSessions.get(toAmid);
     const intent = options.intent || "*";
