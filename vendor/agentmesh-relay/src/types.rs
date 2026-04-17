@@ -179,6 +179,16 @@ pub struct AgentConnection {
     pub p2p_capable: bool,
 }
 
+/// Result of attempting to send a message to an agent
+pub enum SendResult {
+    /// Message delivered to the agent's channel
+    Delivered,
+    /// Agent is not connected (no channel exists)
+    Offline,
+    /// Agent was connected but the channel is broken (stale entry)
+    ChannelBroken,
+}
+
 /// Rate limiter state per agent
 #[derive(Debug, Clone)]
 pub struct RateLimitState {

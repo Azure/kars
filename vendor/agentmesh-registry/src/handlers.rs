@@ -382,7 +382,7 @@ async fn simple_health_check() -> impl Responder {
         .body(r#"{"status":"ok"}"#)
 }
 
-/// Health check endpoint - returns 503 during startup, 200 when ready
+/// Health check endpoint - returns 503 during startup or if DB is unreachable, 200 when ready
 async fn health_check(state: web::Data<Arc<AppState>>) -> impl Responder {
     if !state.is_ready() {
         return HttpResponse::ServiceUnavailable()
@@ -390,14 +390,22 @@ async fn health_check(state: web::Data<Arc<AppState>>) -> impl Responder {
             .body(r#"{"status":"starting","message":"Database initialization in progress"}"#);
     }
 
-    let stats = db::get_stats(&state.pool).await.unwrap_or_default();
-
-    HttpResponse::Ok().json(HealthResponse {
-        status: "healthy".to_string(),
-        version: "agentmesh/0.2".to_string(),
-        agents_registered: stats.0,
-        agents_online: stats.1,
-    })
+    match db::get_stats(&state.pool).await {
+        Ok(stats) => {
+            HttpResponse::Ok().json(HealthResponse {
+                status: "healthy".to_string(),
+                version: "agentmesh/0.2".to_string(),
+                agents_registered: stats.0,
+                agents_online: stats.1,
+            })
+        }
+        Err(e) => {
+            error!("Health check DB query failed: {}", e);
+            HttpResponse::ServiceUnavailable()
+                .content_type("application/json")
+                .body(r#"{"status":"unhealthy","message":"Database unreachable"}"#)
+        }
+    }
 }
 
 /// Register a new agent
@@ -428,6 +436,13 @@ async fn register_agent(
             certificate: None,
             error: Some(format!("Signature verification failed: {}", auth_err)),
         });
+    }
+
+    // Input validation: cap capabilities to prevent storage abuse
+    if req.capabilities.len() > 50 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Too many capabilities ({}, max 50)", req.capabilities.len())
+        }));
     }
 
     // Check if already registered (same AMID)
@@ -693,6 +708,10 @@ async fn search_capabilities(
         Ok(p) => p,
         Err(_) => return service_unavailable(),
     };
+
+    // Clamp pagination limit to prevent unbounded queries
+    let mut query = query.into_inner();
+    query.limit = query.limit.min(100);
 
     match db::search_by_capability(pool, &query).await {
         Ok((agents, total)) => {
@@ -1077,6 +1096,13 @@ async fn upload_prekeys(
         warn!("Prekey upload signature verification failed for {}: {:?}", req.amid, auth_err);
         return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": format!("Signature verification failed: {}", auth_err)
+        }));
+    }
+
+    // Input validation: cap one-time prekeys to prevent storage abuse
+    if req.one_time_prekeys.len() > 100 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Too many one-time prekeys ({}, max 100)", req.one_time_prekeys.len())
         }));
     }
 

@@ -134,6 +134,27 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Background stale agent cleanup — removes agents not seen in 7 days.
+    // Search already filters at 5 minutes; this prevents DB bloat from
+    // accumulating zombie entries. Dormant (handoff predecessors) are preserved.
+    let cleanup_pool = pool.clone();
+    let cleanup_state = app_state.clone();
+    tokio::spawn(async move {
+        loop {
+            if cleanup_state.is_ready() { break; }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        info!("Stale agent cleanup task started (6hr interval)");
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+            match db::cleanup_stale_agents(&cleanup_pool).await {
+                Ok(0) => {}
+                Ok(n) => info!("Stale cleanup: removed {} agents not seen in 7 days", n),
+                Err(e) => warn!("Stale agent cleanup error: {}", e),
+            }
+        }
+    });
+
     // Server config
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = std::env::var("PORT")
@@ -144,27 +165,40 @@ async fn main() -> anyhow::Result<()> {
 
     // Start server immediately (don't wait for DB)
     let server_state = app_state.clone();
-    HttpServer::new(move || {
-        App::new()
+    let server = HttpServer::new(move || {
+        let mut app = App::new()
             .app_data(web::Data::new(server_state.clone()))
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
             // API routes first (higher priority)
-            .configure(handlers::configure_routes)
-            // Static files with SPA fallback (lower priority)
-            // Serves from ./static directory, falls back to index.html for client-side routing
-            .service(
+            .configure(handlers::configure_routes);
+
+        // Static files with SPA fallback — only if static dir exists
+        // (avoids panic when deployed without frontend assets)
+        if std::path::Path::new("./static/index.html").exists() {
+            app = app.service(
                 Files::new("/", "./static")
                     .index_file("index.html")
                     .default_handler(
                         actix_files::NamedFile::open("./static/index.html")
-                            .expect("index.html should exist in ./static directory")
+                            .expect("checked above")
                     )
-            )
+            );
+        }
+        app
     })
     .bind((host.as_str(), port))?
-    .run()
-    .await?;
+    .run();
+
+    // Graceful shutdown: listen for SIGTERM/Ctrl+C, then drain in-flight requests
+    let handle = server.handle();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutdown signal received, draining connections...");
+        handle.stop(true).await;
+    });
+
+    server.await?;
 
     Ok(())
 }

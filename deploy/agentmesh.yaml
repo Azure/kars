@@ -165,6 +165,12 @@ spec:
               path: /v1/health
               port: 8080
             periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
           resources:
             requests:
               cpu: 100m
@@ -206,11 +212,14 @@ spec:
           image: azureclawacr.azurecr.io/agentmesh-relay:latest
           ports:
             - containerPort: 8765
+            - containerPort: 8766
           env:
             - name: RUST_LOG
               value: agentmesh_relay=info
             - name: RELAY_ADDR
               value: "0.0.0.0:8765"
+            - name: HEALTH_PORT
+              value: "8766"
             # Registry URL for agent registration verification
             - name: REGISTRY_URL
               value: "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"
@@ -218,9 +227,16 @@ spec:
             - name: REQUIRE_REGISTRATION
               value: "true"
           readinessProbe:
-            tcpSocket:
-              port: 8765
+            httpGet:
+              path: /
+              port: 8766
             periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8766
+            initialDelaySeconds: 5
+            periodSeconds: 30
           resources:
             requests:
               cpu: 100m

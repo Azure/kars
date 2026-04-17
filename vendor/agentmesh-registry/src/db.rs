@@ -153,10 +153,15 @@ pub async fn delete_stale_by_display_name(
 ) -> Result<u64> {
     // Skip dormant agents — they are handed-off predecessors with active
     // succession redirects. Deleting them would break lookup chains.
+    // Only delete agents not seen in 5+ minutes — prevents a concurrent
+    // registration from deleting a freshly-registered agent (TOCTOU race).
     let result = sqlx::query(
         r#"
         DELETE FROM agents
-        WHERE display_name = $1 AND amid != $2 AND status != 'dormant'
+        WHERE display_name = $1
+          AND amid != $2
+          AND status != 'dormant'
+          AND last_seen < NOW() - INTERVAL '5 minutes'
         "#
     )
     .bind(display_name)
@@ -222,6 +227,22 @@ pub async fn demote_expired_certs(pool: &PgPool) -> Result<u64> {
             AND c.certificate IS NOT NULL
             AND c.created_at < NOW() - INTERVAL '365 days'
         )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Remove agents not seen in 7 days to prevent DB bloat.
+/// Dormant agents (handoff predecessors) are preserved for succession lookups.
+pub async fn cleanup_stale_agents(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM agents
+        WHERE status != 'dormant'
+          AND last_seen < NOW() - INTERVAL '7 days'
         "#
     )
     .execute(pool)

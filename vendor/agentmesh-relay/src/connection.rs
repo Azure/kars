@@ -22,10 +22,16 @@ const PING_INTERVAL_SECS: u64 = 25;
 /// Ping timeout - if no pong received within this time, disconnect
 const PING_TIMEOUT_SECS: u64 = 10;
 
+/// A single connection entry — sender channel tagged with its session ID.
+struct ConnectionEntry {
+    session_id: Uuid,
+    sender: mpsc::UnboundedSender<RelayMessage>,
+}
+
 /// Manages all active agent connections
 pub struct ConnectionManager {
-    /// Map of AMID -> sender channel for that agent
-    connections: DashMap<Amid, mpsc::UnboundedSender<RelayMessage>>,
+    /// Map of AMID -> connection entry (sender + session_id)
+    connections: DashMap<Amid, ConnectionEntry>,
     /// Agent metadata
     agents: DashMap<Amid, AgentConnection>,
     /// Rate limiting state per AMID
@@ -44,7 +50,8 @@ impl ConnectionManager {
         }
     }
 
-    /// Register a new connection
+    /// Register a new connection, superseding any existing one for the same AMID.
+    /// Returns the session UUID for this connection.
     pub fn register(
         &self,
         amid: Amid,
@@ -54,7 +61,23 @@ impl ConnectionManager {
         let session_id = Uuid::new_v4();
         let now = Utc::now();
 
-        self.connections.insert(amid.clone(), sender);
+        // If there's an existing connection for this AMID, supersede it.
+        // Dropping the old sender closes the channel, which causes the old
+        // handler tasks (outgoing, ping) to detect the break and exit.
+        if let Some((_, old)) = self.connections.remove(&amid) {
+            info!(
+                "Superseding existing connection for {} (old session: {})",
+                amid,
+                self.agents.get(&amid).map(|a| a.session_id).unwrap_or_default()
+            );
+            // Drop old sender explicitly (it's moved out by remove)
+            drop(old.sender);
+        }
+
+        self.connections.insert(amid.clone(), ConnectionEntry {
+            session_id,
+            sender,
+        });
         self.agents.insert(amid.clone(), AgentConnection {
             amid: amid.clone(),
             session_id,
@@ -68,11 +91,12 @@ impl ConnectionManager {
         session_id
     }
 
-    /// Unregister a connection
-    pub fn unregister(&self, amid: &Amid) {
-        self.connections.remove(amid);
-        self.agents.remove(amid);
-        self.rate_limits.remove(amid);
+    /// Unregister a connection, but ONLY if the given session_id matches.
+    /// This prevents a stale handler from removing a newer connection's entry.
+    pub fn unregister(&self, amid: &Amid, session_id: Uuid) {
+        self.connections.remove_if(amid, |_, entry| entry.session_id == session_id);
+        self.agents.remove_if(amid, |_, agent| agent.session_id == session_id);
+        // Rate limits are cheap — leave them for reuse on reconnect
     }
 
     /// Update agent presence status
@@ -98,12 +122,25 @@ impl ConnectionManager {
         self.connections.contains_key(amid)
     }
 
-    /// Send a message to an agent
-    pub fn send_to(&self, amid: &Amid, message: RelayMessage) -> bool {
-        if let Some(sender) = self.connections.get(amid) {
-            sender.send(message).is_ok()
+    /// Send a message to an agent. Returns a SendResult indicating the outcome.
+    /// If the channel is broken (stale entry), it cleans up automatically.
+    pub fn send_to(&self, amid: &Amid, message: RelayMessage) -> SendResult {
+        if let Some(entry) = self.connections.get(amid) {
+            match entry.sender.send(message) {
+                Ok(()) => SendResult::Delivered,
+                Err(_) => {
+                    // Channel is broken — the connection handler has exited but
+                    // unregister hasn't been called yet. Clean up proactively.
+                    let session_id = entry.session_id;
+                    drop(entry); // release DashMap ref before modifying
+                    self.connections.remove_if(amid, |_, e| e.session_id == session_id);
+                    self.agents.remove_if(amid, |_, a| a.session_id == session_id);
+                    warn!("Cleaned up broken channel for agent {}", amid);
+                    SendResult::ChannelBroken
+                }
+            }
         } else {
-            false
+            SendResult::Offline
         }
     }
 
@@ -163,9 +200,9 @@ pub async fn handle_connection(
     let (tx, rx) = mpsc::unbounded_channel::<RelayMessage>();
 
     // Handle authentication first
-    let (amid, session_id) = match handle_auth(read, &tx, &manager, &registry_verifier).await {
-        Ok((ws_read, amid, session_id, p2p_capable)) => {
-            // Register connection
+    let (_amid, _session_id) = match handle_auth(read, &tx, &manager, &registry_verifier).await {
+        Ok((ws_read, amid, _auth_session_id, p2p_capable)) => {
+            // Register connection (supersedes any existing one for this AMID)
             let session_id = manager.register(amid.clone(), tx.clone(), p2p_capable);
 
             // Send connected response with pending message count
@@ -177,6 +214,9 @@ pub async fn handle_connection(
 
             // Deliver any stored messages
             let stored = store_forward.retrieve(&amid);
+            if !stored.is_empty() {
+                info!("Delivering {} stored messages to {}", stored.len(), amid);
+            }
             for msg in stored {
                 let _ = tx.send(RelayMessage::Receive {
                     from: msg.from,
@@ -198,7 +238,7 @@ pub async fn handle_connection(
             let ws_tx_clone = ws_tx.clone();
 
             // Forward RelayMessages to WebSocket message channel
-            let relay_rx_task = {
+            let _relay_rx_task = {
                 let ws_tx = ws_tx.clone();
                 tokio::spawn(async move {
                     let mut rx = rx;
@@ -212,10 +252,12 @@ pub async fn handle_connection(
                 })
             };
 
-            // Spawn ping task for keepalive
-            let ping_task = {
+            // Spawn ping task for keepalive — carries session_id so it can
+            // validate it still owns the connection before unregistering.
+            let _ping_task = {
                 let amid = amid.clone();
                 let manager = manager.clone();
+                let my_session_id = session_id;
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
                     loop {
@@ -224,7 +266,7 @@ pub async fn handle_connection(
                         // Check if we received pong from last ping
                         if !pong_received_clone.load(Ordering::Relaxed) {
                             warn!("Agent {} did not respond to ping, disconnecting", amid);
-                            manager.unregister(&amid);
+                            manager.unregister(&amid, my_session_id);
                             break;
                         }
 
@@ -238,9 +280,9 @@ pub async fn handle_connection(
                 })
             };
 
-            // Spawn handlers
+            // Spawn handlers — incoming handler also carries session_id
             tokio::spawn(handle_outgoing(write, ws_rx));
-            tokio::spawn(handle_incoming(ws_read, amid.clone(), manager.clone(), store_forward.clone(), pong_received));
+            tokio::spawn(handle_incoming(ws_read, amid.clone(), session_id, manager.clone(), store_forward.clone(), pong_received));
 
             (amid, session_id)
         }
@@ -345,10 +387,12 @@ async fn handle_outgoing(
     }
 }
 
-/// Handle incoming messages from this connection
+/// Handle incoming messages from this connection.
+/// Carries `session_id` to validate ownership before unregistering on disconnect.
 async fn handle_incoming(
     mut read: SplitStream<WebSocketStream<TcpStream>>,
     amid: Amid,
+    session_id: Uuid,
     manager: Arc<ConnectionManager>,
     store_forward: Arc<StoreForward>,
     pong_received: Arc<AtomicBool>,
@@ -392,9 +436,9 @@ async fn handle_incoming(
         handle_relay_message(&amid, relay_msg, &manager, &store_forward).await;
     }
 
-    // Clean up on disconnect
-    manager.unregister(&amid);
-    info!("Agent {} unregistered", amid);
+    // Clean up on disconnect — only if we're still the current connection
+    manager.unregister(&amid, session_id);
+    info!("Agent {} handler exited (session: {})", amid, session_id);
 }
 
 /// Process a relay message
@@ -426,28 +470,32 @@ async fn handle_relay_message(
                 ice_candidates,
             };
 
-            if manager.send_to(&to, receive_msg) {
-                debug!("Delivered message from {} to {}", from, to);
-            } else {
-                // Store for later delivery
-                let stored = StoredMessage {
-                    id: Uuid::new_v4(),
-                    from: from.clone(),
-                    to: to.clone(),
-                    encrypted_payload,
-                    message_type,
-                    timestamp: Utc::now(),
-                    expires_at: Utc::now() + chrono::Duration::hours(72),
-                };
+            match manager.send_to(&to, receive_msg) {
+                SendResult::Delivered => {
+                    debug!("Delivered message from {} to {}", from, to);
+                }
+                SendResult::Offline | SendResult::ChannelBroken => {
+                    // Store for later delivery (handles both truly offline and
+                    // stale channels that were just cleaned up)
+                    let stored = StoredMessage {
+                        id: Uuid::new_v4(),
+                        from: from.clone(),
+                        to: to.clone(),
+                        encrypted_payload,
+                        message_type,
+                        timestamp: Utc::now(),
+                        expires_at: Utc::now() + chrono::Duration::hours(72),
+                    };
 
-                if store_forward.store(stored) {
-                    debug!("Stored message from {} for offline agent {}", from, to);
-                } else {
-                    manager.send_to(from, RelayMessage::Error {
-                        code: ErrorCode::RecipientOffline,
-                        message: format!("Agent {} is offline and message queue is full", to),
-                        retry_after_seconds: None,
-                    });
+                    if store_forward.store(stored) {
+                        debug!("Stored message from {} for offline agent {}", from, to);
+                    } else {
+                        manager.send_to(from, RelayMessage::Error {
+                            code: ErrorCode::RecipientOffline,
+                            message: format!("Agent {} is offline and message queue is full", to),
+                            retry_after_seconds: None,
+                        });
+                    }
                 }
             }
         }
@@ -473,30 +521,31 @@ async fn handle_relay_message(
 
         RelayMessage::IceOffer { to, sdp, candidates } => {
             // Forward ICE offer for P2P negotiation
-            if manager.send_to(&to, RelayMessage::IceOffer {
+            match manager.send_to(&to, RelayMessage::IceOffer {
                 to: from.clone(),  // Swap 'to' to be sender's AMID for receiver
                 sdp,
                 candidates,
             }) {
-                debug!("Forwarded ICE offer from {} to {}", from, to);
-            } else {
-                manager.send_to(from, RelayMessage::Error {
-                    code: ErrorCode::RecipientOffline,
-                    message: format!("Cannot establish P2P: agent {} is offline", to),
-                    retry_after_seconds: None,
-                });
+                SendResult::Delivered => {
+                    debug!("Forwarded ICE offer from {} to {}", from, to);
+                }
+                _ => {
+                    manager.send_to(from, RelayMessage::Error {
+                        code: ErrorCode::RecipientOffline,
+                        message: format!("Cannot establish P2P: agent {} is offline", to),
+                        retry_after_seconds: None,
+                    });
+                }
             }
         }
 
         RelayMessage::IceAnswer { to, sdp, candidates } => {
             // Forward ICE answer
-            if manager.send_to(&to, RelayMessage::IceAnswer {
+            let _ = manager.send_to(&to, RelayMessage::IceAnswer {
                 to: from.clone(),
                 sdp,
                 candidates,
-            }) {
-                debug!("Forwarded ICE answer from {} to {}", from, to);
-            }
+            });
         }
 
         RelayMessage::P2PEstablished { peer } => {
@@ -513,7 +562,10 @@ async fn handle_relay_message(
 
         RelayMessage::Disconnect { reason } => {
             info!("Agent {} disconnecting: {}", from, reason);
-            manager.unregister(from);
+            // Graceful disconnect — remove regardless of session (agent requested it)
+            if let Some(agent) = manager.get_agent(from) {
+                manager.unregister(from, agent.session_id);
+            }
         }
 
         _ => {
