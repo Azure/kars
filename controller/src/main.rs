@@ -38,7 +38,8 @@ async fn main() -> Result<()> {
 
     // Run sandbox and pairing controllers concurrently.
     // Pairing controller is non-fatal — if CRD is missing, it exits gracefully.
-    // Mesh peer is opt-in — only starts if MESH_PEER_ENABLED=true.
+    // Mesh peer defaults to ON (federation is required for external agent
+    // pairing to work). Set MESH_PEER_ENABLED=false to opt out.
     let sandbox_handle = {
         let client = client.clone();
         tokio::spawn(async move { reconciler::run(client).await })
@@ -50,12 +51,17 @@ async fn main() -> Result<()> {
     let mesh_peer_handle = {
         let client = client.clone();
         tokio::spawn(async move {
-            if std::env::var("MESH_PEER_ENABLED").unwrap_or_default() == "true" {
+            // Default: enabled. Explicit "false" or "0" disables.
+            let raw = std::env::var("MESH_PEER_ENABLED").unwrap_or_else(|_| "true".into());
+            let enabled = !matches!(raw.to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off");
+            if enabled {
                 tracing::info!("Mesh peer enabled — starting relay connection");
                 mesh_peer::run(client).await
             } else {
-                tracing::info!(
-                    "Mesh peer disabled (set MESH_PEER_ENABLED=true to enable federation)"
+                tracing::warn!(
+                    "Mesh peer disabled (MESH_PEER_ENABLED={}). External agent pairing will NOT work. \
+                     Re-run `azureclaw up` (without --no-mesh-peer) to enable federation.",
+                    raw
                 );
                 // Park forever — don't exit so select! doesn't trigger
                 std::future::pending::<Result<()>>().await

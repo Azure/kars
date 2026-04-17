@@ -55,6 +55,10 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Leader election for mesh peer (only one replica connects to relay)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
 ---
 # Bind controller role
 apiVersion: rbac.authorization.k8s.io/v1

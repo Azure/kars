@@ -17,10 +17,12 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp -r skills dist/skills && cp openclaw.plugin.json dist/",
     "test": "vitest run",
     "lint": "oxlint src/",
     "typecheck": "tsc --noEmit",
+    "sync:nemoclaw": "npm run build && NEMOCLAW_PATH=\"${NEMOCLAW_PATH:-${HOME}/.nemoclaw/source}\" bash scripts/patch-nemoclaw.sh",
+    "patch:nemoclaw": "bash scripts/patch-nemoclaw.sh",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -41,6 +43,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@agentmesh/sdk": "file:../vendor/agentmesh-sdk",
     "ws": "^8.18"
   },
   "devDependencies": {

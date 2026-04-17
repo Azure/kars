@@ -1,21 +1,29 @@
 /**
- * Direct relay + registry connection for the standalone mesh plugin.
+ * Mesh connection adapter — wraps @agentmesh/sdk's `AgentMeshClient`.
  *
- * This module connects to AgentMesh relay (WebSocket) and registry (HTTP)
- * without requiring the full @agentmesh/sdk client. It implements just
- * enough of the protocol for pairing, messaging, file transfer, and discovery.
+ * Before: this module reimplemented a subset of the AgentMesh protocol on top
+ * of a raw WebSocket. That worked only because every peer on the network used
+ * `base64(plain JSON)` in `encrypted_payload` — a misnomer, not real Signal.
  *
- * Protocol (from vendor/agentmesh-relay/src/types.rs):
- * - Connect: { protocol, amid, public_key, signature, timestamp, p2p_capable }
- * - Send: { to, encrypted_payload, message_type }
- * - Receive: { from, encrypted_payload, message_type, timestamp }
- * - Keepalive: Ping/Pong every 30s
+ * Now: we delegate WebSocket lifecycle, authentication, prekey registration,
+ * X3DH, and Double Ratchet to the SDK. This module keeps ownership of:
+ *   - app-layer chunking (compatible with sandbox plugin `meshSend()`)
+ *   - waiters / inbox / consumeInbox (poll-style handlers)
+ *   - file transfer protocol (file_transfer + file_transfer_ack dance)
+ *   - mesh:ping / mesh:pong helpers
+ *   - registry discovery fan-out (seed capability list)
+ *   - CONNECT-tunnel for Node-22 HTTPS_PROXY (injected via wsFactory)
+ *
+ * Legacy plaintext-compat: the Rust controller still writes `base64(JSON)` on
+ * the wire. For those peers only, we call `client.addPlaintextPeer(amid)` so
+ * the SDK bypasses Signal and uses the legacy wire format.
  */
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
+import { WebSocket as WsWebSocket } from "ws";
 import type { MeshIdentity } from "./identity.js";
 
 // ---------------------------------------------------------------------------
@@ -29,7 +37,7 @@ const BUILD_HASH = (() => {
   } catch { return "unknown"; }
 })();
 
-console.log(`[mesh] connection.js loaded (build: ${BUILD_HASH})`);
+console.log(`[mesh] connection.js loaded (build: ${BUILD_HASH}, signal-sdk)`);
 
 // ---------------------------------------------------------------------------
 // Constants — must match cli/src/plugin.ts for interop
@@ -49,25 +57,22 @@ export interface ConnectionConfig {
   registryUrl: string;
   identity: MeshIdentity;
   displayName?: string;
-  onMessage?: (from: string, payload: unknown) => void;
-  onDisconnect?: () => void;
-}
-
-interface RelayEnvelope {
-  from?: string;
-  to?: string;
-  encrypted_payload?: string;
-  message_type?: string;
-  timestamp?: string;
-  protocol?: string;
-  amid?: string;
-  public_key?: string;
-  signature?: string;
-  p2p_capable?: boolean;
-  type?: string;
-  code?: number;
-  message?: string;
-  pong?: boolean;
+  /**
+   * Capabilities advertised during registry upsert on connect. Defaults to
+   * ["mesh-peer"] if not provided.
+   */
+  capabilities?: string[];
+  /**
+   * AMIDs of peers that should bypass Signal E2E and use the legacy
+   * base64(JSON) wire format. The Rust controller is the primary user until
+   * it ships an SDK-equivalent client. Can also be added at runtime via
+   * {@link MeshConnection.addPlaintextPeer}.
+   */
+  plaintextPeers?: string[];
+  /**
+   * Maximum inbox messages. Default 5000. Old messages are trimmed FIFO.
+   */
+  maxInboxSize?: number;
 }
 
 interface InboxMessage {
@@ -100,25 +105,35 @@ export interface FileTransferAck {
 // ---------------------------------------------------------------------------
 
 export class MeshConnection {
-  private ws: import("node:net").Socket | null = null;
-  private wsObj: any = null;
   private config: ConnectionConfig;
   private inbox: InboxMessage[] = [];
-  private connected = false;
-  private intentionalClose = false;
-  private reconnectAttempts = 0;
-  private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private maxInboxSize = 500;
+  private maxInboxSize: number;
   private pendingTransfers = new Map<string, PendingTransfer>();
   private transferCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private connectInFlight: Promise<void> | null = null;
+
+  // Lazily loaded SDK client + the wsFactory's current CONNECT tunnel socket.
+  // The SDK owns the WebSocket, auth, prekey upload, Signal E2E, and reconnect.
+  private client: any | null = null;
+
+  /**
+   * Active predicate subscriptions for waitForMessage. Multiple concurrent
+   * waiters are supported — each message is offered to every waiter until
+   * one claims it.
+   */
+  private waiters = new Set<{
+    predicate: (content: unknown, from: string) => unknown;
+    resolve: (v: unknown) => void;
+    consume: boolean;
+  }>();
 
   constructor(config: ConnectionConfig) {
     this.config = config;
+    this.maxInboxSize = config.maxInboxSize ?? 5000;
   }
 
   get isConnected(): boolean {
-    return this.connected;
+    return !!this.client?.isConnected;
   }
 
   get amid(): string {
@@ -128,133 +143,175 @@ export class MeshConnection {
   // ── Connect ──────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
-    this.intentionalClose = false;
-    const { WebSocket } = await import("ws").catch(() => {
+    if (this.connectInFlight) return this.connectInFlight;
+    if (this.isConnected) return;
+
+    this.connectInFlight = this.doConnect().finally(() => {
+      this.connectInFlight = null;
+    });
+    return this.connectInFlight;
+  }
+
+  private async doConnect(): Promise<void> {
+    const sdk = await import("@agentmesh/sdk").catch((err) => {
       throw new Error(
-        "ws package required for relay connection. Install with: npm install ws"
+        `@agentmesh/sdk is required for mesh connection: ${err?.message || err}`,
       );
     });
 
-    console.log(`[mesh] Connecting to relay: ${this.config.relayUrl}`);
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const wsFactory = this.makeWsFactory();
 
-    // When behind a CONNECT proxy (e.g. OpenShell/NemoClaw sandbox), the
-    // sandbox namespace only allows TCP to the proxy. Direct connections are
-    // rejected by iptables. We establish a CONNECT tunnel first, then run
-    // the WebSocket upgrade through it. Raw net.createConnection is used for
-    // the tunnel to bypass Node 22's EnvHttpProxyAgent which intercepts
-    // http.request() even with custom agents. See NemoClaw#557.
-    let tunnelSocket: net.Socket | undefined;
-    if (proxyUrl) {
-      console.log(`[mesh] Proxy detected (${proxyUrl}) — establishing CONNECT tunnel`);
-      try {
-        tunnelSocket = await this.createProxyTunnel(proxyUrl, this.config.relayUrl);
-        console.log(`[mesh] CONNECT tunnel established`);
-      } catch (err: any) {
-        console.log(`[mesh] CONNECT tunnel failed: ${err.message} — falling back to direct`);
-      }
+    // The SDK's RegistryClient prepends paths like `/registry/register` and
+    // `/registry/prekeys`. Legacy tokens carry a base URL without the `/v1`
+    // prefix (the old mesh-plugin added it itself). Normalize here so the
+    // SDK hits the correct routes on existing registries.
+    const registryUrl = this.normalizeRegistryUrl(this.config.registryUrl);
+
+    // Build the client from our existing Ed25519/X25519 identity so the AMID
+    // on the wire matches what the pairing handshake advertised.
+    this.client = sdk.AgentMeshClient.fromIdentity(this.config.identity.sdkIdentity, {
+      registryUrl,
+      relayUrl: this.config.relayUrl,
+      storage: new sdk.MemoryStorage(),
+      plaintextPeers: this.config.plaintextPeers || [],
+      transportOptions: wsFactory ? { wsFactory } : undefined,
+    });
+
+    // Wire message handler BEFORE connect — messages can arrive immediately
+    // after the WebSocket opens.
+    this.client.onMessage((from: string, content: unknown) => {
+      this.onClientMessage(from, content);
+    });
+
+    // Auto-accept KNOCKs. AzureClaw gating lives at the controller/router,
+    // not in the mesh transport. Without this, peers that initiate Signal
+    // sessions get rejected.
+    this.client.onKnock(async () => ({ accept: true }));
+
+    console.log(
+      `[mesh] Connecting to relay via SDK: ${this.config.relayUrl} ` +
+      `(amid=${this.config.identity.amid}, plaintextPeers=${(this.config.plaintextPeers || []).length})`,
+    );
+
+    await this.client.connect({
+      capabilities: this.config.capabilities ?? ["mesh-peer"],
+      displayName: this.config.displayName,
+      autoUploadPrekeys: true,
+    });
+
+    // The SDK sometimes resolves connect() even when the underlying WebSocket
+    // never reached OPEN (e.g. wsFactory throws, tunnel fails). Guard against
+    // that so the caller sees a real error instead of a false-positive.
+    if (!this.client.isConnected) {
+      const err = new Error(
+        `SDK connect() resolved but isConnected=false — WebSocket never opened. ` +
+          `Check /tmp/gateway.log for "Failed to connect to relay" lines.`,
+      );
+      try { await this.client.disconnect(); } catch { /* noop */ }
+      this.client = null;
+      throw err;
     }
 
-    return new Promise((resolve, reject) => {
-      let ws: InstanceType<typeof WebSocket>;
-      if (tunnelSocket) {
-        // Route WebSocket upgrade through the pre-established CONNECT tunnel.
-        const agent = new http.Agent();
-        agent.createConnection = (_options: any, callback: any) => {
-          callback(null, tunnelSocket);
-          return tunnelSocket!;
-        };
-        ws = new WebSocket(this.config.relayUrl, { agent });
-      } else {
-        ws = new WebSocket(this.config.relayUrl);
-      }
-      this.wsObj = ws;
-
-      const timeout = setTimeout(() => {
-        console.log(`[mesh] Relay connection timed out after 10s`);
-        ws.close();
-        reject(new Error("Relay connection timed out (10s)"));
-      }, 10_000);
-
-      ws.on("open", () => {
-        clearTimeout(timeout);
-        this.connected = true;
-        console.log(`[mesh] WebSocket open — sending auth (AMID: ${this.config.identity.amid})`);
-        this.sendAuth();
-        this.startKeepalive();
-        this.startTransferCleanup();
-        resolve();
-      });
-
-      ws.on("message", (data: Buffer) => {
-        try {
-          const msg: RelayEnvelope = JSON.parse(data.toString());
-          if (msg.type === "connected") {
-            console.log(`[mesh] ✅ Authenticated with relay (session: ${(msg as any).session_id?.slice(0, 8)}..., pending: ${(msg as any).pending_messages ?? 0})`);
-          } else if (msg.type === "error") {
-            console.log(`[mesh] ❌ Relay error: ${(msg as any).message || JSON.stringify(msg)}`);
-          }
-          this.handleRelayMessage(msg);
-        } catch {
-          // skip unparseable
-        }
-      });
-
-      ws.on("close", (code: number, reason: Buffer) => {
-        this.connected = false;
-        this.stopKeepalive();
-        console.log(`[mesh] WebSocket closed (code: ${code}, reason: ${reason?.toString() || "none"})`);
-        this.config.onDisconnect?.();
-        this.scheduleReconnect();
-      });
-
-      ws.on("error", (err: Error) => {
-        clearTimeout(timeout);
-        console.log(`[mesh] WebSocket error: ${err.message}`);
-        if (!this.connected) {
-          reject(err);
-        }
-      });
-    });
+    this.startTransferCleanup();
+    console.log(`[mesh] ✅ Connected — Signal-ready (amid=${this.config.identity.amid.slice(0, 12)}...)`);
   }
 
   async disconnect(): Promise<void> {
-    this.intentionalClose = true;
-    this.stopKeepalive();
     if (this.transferCleanupTimer) {
       clearInterval(this.transferCleanupTimer);
       this.transferCleanupTimer = null;
     }
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
+    if (this.client) {
+      try { await this.client.disconnect(); } catch { /* noop */ }
+      this.client = null;
     }
-    if (this.wsObj) {
-      this.wsObj.close();
-      this.wsObj = null;
+    for (const w of this.waiters) {
+      try { w.resolve(new Error("Connection closing")); } catch { /* noop */ }
     }
-    this.connected = false;
+    this.waiters.clear();
   }
 
-  private scheduleReconnect(): void {
-    if (this.intentionalClose) return;
-    if (this.reconnectTimer) return;
-    const delay = Math.min(5000 * Math.pow(2, this.reconnectAttempts), 60_000);
-    this.reconnectAttempts++;
-    console.log(`[mesh] Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})...`);
-    this.reconnectTimer = setTimeout(async () => {
-      this.reconnectTimer = null;
-      try {
-        await this.connect();
-        this.reconnectAttempts = 0;
-        console.log("[mesh] Reconnected to relay");
-      } catch {
-        this.scheduleReconnect();
-      }
-    }, delay);
+  // ── Plaintext-compat peer set ────────────────────────────────────────
+
+  /**
+   * Register `amid` as a legacy plaintext peer. Future sends to this AMID
+   * skip Signal E2E and use the base64(JSON) wire format. Required for peers
+   * that haven't adopted the full SDK yet (e.g. Rust controller).
+   */
+  addPlaintextPeer(amid: string): void {
+    if (!amid) return;
+    if (!this.config.plaintextPeers) this.config.plaintextPeers = [];
+    if (!this.config.plaintextPeers.includes(amid)) {
+      this.config.plaintextPeers.push(amid);
+    }
+    this.client?.addPlaintextPeer?.(amid);
   }
 
-  // ── Proxy CONNECT tunnel ─────────────────────────────────────────────
+  removePlaintextPeer(amid: string): void {
+    if (!amid) return;
+    if (this.config.plaintextPeers) {
+      this.config.plaintextPeers = this.config.plaintextPeers.filter((a) => a !== amid);
+    }
+    this.client?.removePlaintextPeer?.(amid);
+  }
+
+  getPlaintextPeers(): string[] {
+    return this.client?.getPlaintextPeers?.() || [...(this.config.plaintextPeers || [])];
+  }
+
+  // ── URL helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Normalize the registry URL so the SDK's RegistryClient lands on the
+   * right versioned routes. Legacy pairing tokens carry URLs like
+   *   http://host.docker.internal:18080
+   * while the registry routes live under `/v1/registry/...`. The old
+   * mesh-plugin added `/v1` manually inside each request; the SDK instead
+   * prepends `/registry/...` to whatever base URL we hand it. Append `/v1`
+   * iff the URL has no versioned path yet.
+   */
+  private normalizeRegistryUrl(url: string): string {
+    const trimmed = url.replace(/\/$/, "");
+    if (/\/v\d+(?:\/|$)/.test(trimmed)) return trimmed;
+    return `${trimmed}/v1`;
+  }
+
+  // ── WS factory: CONNECT-tunnel for HTTPS_PROXY environments ──────────
+
+  /**
+   * Build a `wsFactory` for the SDK's RelayTransport if a proxy is present.
+   * In sandbox namespaces (OpenShell/NemoClaw), only the proxy is reachable
+   * over TCP — direct relay connections are iptables-rejected. We open a
+   * `CONNECT` tunnel with raw net.createConnection (bypassing Node 22's
+   * built-in EnvHttpProxyAgent which hijacks http.request).
+   *
+   * The SDK assigns `this.ws = wsFactory(url)` synchronously, so the factory
+   * MUST return a WebSocket immediately — not a Promise. We therefore do the
+   * async tunnel setup inside a custom `http.Agent.createConnection` callback,
+   * which `ws` invokes at connect time and is contractually async-capable.
+   * Returns undefined when no proxy is configured; the SDK then does a direct
+   * connection with its default `new WebSocket()`.
+   */
+  private makeWsFactory(): ((url: string) => unknown) | undefined {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    if (!proxyUrl) return undefined;
+
+    const createProxyTunnel = this.createProxyTunnel.bind(this);
+
+    return (relayUrl: string): unknown => {
+      const agent = new http.Agent();
+      (agent as any).createConnection = (
+        _options: unknown,
+        callback: (err: Error | null, sock?: net.Socket) => void,
+      ) => {
+        createProxyTunnel(proxyUrl, relayUrl).then(
+          (sock) => callback(null, sock),
+          (err) => callback(err),
+        );
+      };
+      return new WsWebSocket(relayUrl, { agent });
+    };
+  }
 
   private createProxyTunnel(proxyUrl: string, targetUrl: string): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
@@ -268,9 +325,9 @@ export class MeshConnection {
         proxy.hostname,
         () => {
           sock.write(
-            `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`
+            `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`,
           );
-        }
+        },
       );
 
       const timer = setTimeout(() => {
@@ -281,7 +338,6 @@ export class MeshConnection {
       let buf = "";
       const onData = (data: Buffer) => {
         buf += data.toString();
-        // Wait for the complete header block
         if (!buf.includes("\r\n\r\n")) return;
         sock.removeListener("data", onData);
         clearTimeout(timer);
@@ -302,95 +358,70 @@ export class MeshConnection {
     });
   }
 
-  // ── Auth ─────────────────────────────────────────────────────────────
-
-  private sendAuth(): void {
-    const timestamp = new Date().toISOString();
-    const signature = this.signTimestamp(timestamp);
-    const authMsg = {
-      type: "connect",
-      protocol: "agentmesh/0.2",
-      amid: this.config.identity.amid,
-      public_key: this.config.identity.signingPublicKey.toString("base64"),
-      signature,
-      timestamp,
-      p2p_capable: false,
-    };
-    console.log(`[mesh] Sending auth: type=connect, amid=${this.config.identity.amid}, ts=${timestamp}`);
-    this.wsSend(authMsg);
-  }
-
-  private signTimestamp(timestamp: string): string {
-    const sign = crypto.sign(
-      null,
-      Buffer.from(timestamp),
-      {
-        key: Buffer.concat([
-          // Ed25519 PKCS#8 prefix (https://www.rfc-editor.org/rfc/rfc8032)
-          Buffer.from("302e020100300506032b6570042204200", "hex"),
-          // pad to 16 bytes then append the actual 32-byte private key
-          this.config.identity.signingPrivateKey,
-        ]),
-        format: "der",
-        type: "pkcs8",
-      }
-    );
-    return sign.toString("base64");
-  }
-
   // ── Message handling ─────────────────────────────────────────────────
 
-  private handleRelayMessage(msg: RelayEnvelope): void {
-    // Peer message (from relay)
-    if (msg.from && msg.encrypted_payload) {
+  /**
+   * Deliver content to any pending waiters. Matches consume the message;
+   * otherwise it's stored in the inbox.
+   * Returns true if a waiter claimed it (and it should NOT be stored in inbox).
+   */
+  private deliverToWaiters(from: string, content: unknown): boolean {
+    if (this.waiters.size === 0) return false;
+    for (const waiter of [...this.waiters]) {
+      let result: unknown;
       try {
-        const payloadBytes = Buffer.from(msg.encrypted_payload, "base64");
-        const content = JSON.parse(payloadBytes.toString());
-
-        // Handle chunked transfer protocol transparently
-        const transportResult = this.handleTransportMessage(msg.from, content);
-        if (transportResult === "absorbed") return;
-        if (transportResult !== null) {
-          // Reassembled message — deliver to inbox/callback
-          const inboxMsg: InboxMessage = {
-            from: msg.from,
-            content: transportResult,
-            timestamp: msg.timestamp || new Date().toISOString(),
-          };
-          this.inbox.push(inboxMsg);
-          if (this.inbox.length > this.maxInboxSize) this.inbox.shift();
-          this.config.onMessage?.(msg.from, transportResult);
-          return;
-        }
-
-        // Regular (non-transport) message
-        const inboxMsg: InboxMessage = {
-          from: msg.from,
-          content,
-          timestamp: msg.timestamp || new Date().toISOString(),
-        };
-        this.inbox.push(inboxMsg);
-        if (this.inbox.length > this.maxInboxSize) {
-          this.inbox.shift();
-        }
-        this.config.onMessage?.(msg.from, content);
-      } catch {
-        // non-JSON payload — store raw
-        this.inbox.push({
-          from: msg.from,
-          content: msg.encrypted_payload,
-          timestamp: msg.timestamp || new Date().toISOString(),
-        });
+        result = waiter.predicate(content, from);
+      } catch (err) {
+        this.waiters.delete(waiter);
+        waiter.resolve(err);
+        return waiter.consume;
       }
-      return;
+      if (result !== null && result !== undefined) {
+        this.waiters.delete(waiter);
+        waiter.resolve(result);
+        if (waiter.consume) return true;
+      }
+    }
+    return false;
+  }
+
+  private pushInbox(msg: InboxMessage): void {
+    this.inbox.push(msg);
+    while (this.inbox.length > this.maxInboxSize) this.inbox.shift();
+  }
+
+  /**
+   * Handle a decrypted message from the SDK. The SDK has already unwrapped
+   * Signal encryption (or plaintext base64 for controller peers) and given
+   * us the app-layer JSON object.
+   */
+  private onClientMessage(from: string, content: unknown): void {
+    // Offload idle-watcher signal: when running as an offload sandbox, poke
+    // the activity file on every inbound message from the parent AMID. The
+    // entrypoint's idle-watcher reads this mtime to decide when to self-
+    // terminate. Failures (e.g. read-only FS in unit tests) are swallowed.
+    const parentAmid = process.env.OFFLOAD_PARENT_AMID;
+    const activityFile = process.env.OFFLOAD_ACTIVITY_FILE;
+    if (parentAmid && activityFile && from === parentAmid) {
+      try {
+        const now = Date.now();
+        fs.utimesSync(activityFile, now / 1000, now / 1000);
+      } catch {
+        // File missing — try to create it so subsequent touches land.
+        try { fs.writeFileSync(activityFile, ""); } catch { /* give up */ }
+      }
     }
 
-    // Pong
-    if (msg.pong || msg.type === "pong") return;
+    // Chunk-reassembly runs before fan-out.
+    const transportResult = this.handleTransportMessage(from, content);
+    if (transportResult === "absorbed") return;
 
-    // Error
-    if (msg.type === "error") {
-      console.error(`[mesh] Relay error ${msg.code}: ${msg.message}`);
+    const final: unknown = transportResult !== null ? transportResult : content;
+    const ts = new Date().toISOString();
+
+    const claimed = this.deliverToWaiters(from, final);
+    if (!claimed) {
+      this.pushInbox({ from, content: final, timestamp: ts });
     }
   }
 
@@ -416,6 +447,7 @@ export class MeshConnection {
     const key = `${fromAmid}:${transferId}`;
 
     if (msgType === "mesh:transfer_manifest") {
+      // Start a new pending transfer
       this.pendingTransfers.set(key, {
         from_amid: fromAmid,
         transfer_id: transferId,
@@ -431,65 +463,71 @@ export class MeshConnection {
     }
 
     // mesh:transfer_chunk
-    let transfer = this.pendingTransfers.get(key);
+    const transfer = this.pendingTransfers.get(key);
     if (!transfer) {
-      // Chunk arrived before manifest — search by transfer_id
-      for (const [, t] of this.pendingTransfers) {
-        if (t.transfer_id === transferId && t.from_amid === fromAmid) {
-          transfer = t;
-          break;
-        }
-      }
-      if (!transfer) return "absorbed"; // no manifest — drop
+      // Chunk arrived before manifest (rare) — drop
+      return "absorbed";
     }
 
-    // Verify chunk hash before accepting
-    if (message.hash && transfer.chunk_hashes[message.chunk_index]) {
-      const computed = crypto.createHash("sha256").update(message.data).digest("hex");
-      if (computed !== message.hash) {
-        console.warn(`[mesh] Chunk ${message.chunk_index} hash mismatch (transfer ${transferId.slice(0, 8)}) — rejected`);
+    const chunkIndex = message.chunk_index as number;
+    const chunkData = message.data as string;
+    const chunkHash = message.hash as string;
+
+    // Verify per-chunk SHA-256
+    const actualHash = crypto.createHash("sha256").update(chunkData).digest("hex");
+    if (actualHash !== chunkHash) {
+      console.warn(
+        `[mesh] Chunk ${chunkIndex} hash mismatch for transfer ${transferId.slice(0, 8)} — dropping transfer`,
+      );
+      this.pendingTransfers.delete(key);
+      return "absorbed";
+    }
+
+    transfer.chunks.set(chunkIndex, chunkData);
+
+    // Still accumulating?
+    if (transfer.chunks.size < transfer.total_chunks) {
+      return "absorbed";
+    }
+
+    // All chunks received — reassemble
+    const ordered: string[] = [];
+    for (let i = 0; i < transfer.total_chunks; i++) {
+      const c = transfer.chunks.get(i);
+      if (c === undefined) {
+        console.warn(`[mesh] Transfer ${transferId.slice(0, 8)} missing chunk ${i} — dropping`);
+        this.pendingTransfers.delete(key);
         return "absorbed";
       }
+      ordered.push(c);
     }
+    const reassembled = ordered.join("");
 
-    transfer.chunks.set(message.chunk_index, message.data);
-
-    if (transfer.chunks.size < transfer.total_chunks) {
-      return "absorbed"; // still accumulating
-    }
-
-    // All chunks received — verify manifest hash and reassemble
-    const actualHashes: string[] = [];
-    for (let i = 0; i < transfer.total_chunks; i++) {
-      actualHashes.push(
-        crypto.createHash("sha256").update(transfer.chunks.get(i) || "").digest("hex")
-      );
-    }
-    const actualManifestHash = crypto.createHash("sha256").update(actualHashes.join(":")).digest("hex");
+    // Verify manifest hash
+    const actualManifestHash = crypto
+      .createHash("sha256")
+      .update(transfer.chunk_hashes.join(":"))
+      .digest("hex");
     if (transfer.manifest_hash && actualManifestHash !== transfer.manifest_hash) {
       console.warn(
-        `[mesh] Transfer ${transferId.slice(0, 8)}: manifest hash mismatch — ` +
-        `expected ${transfer.manifest_hash.slice(0, 12)}, got ${actualManifestHash.slice(0, 12)}`
+        `[mesh] Transfer ${transferId.slice(0, 8)} manifest hash mismatch — dropping`,
       );
+      this.pendingTransfers.delete(key);
+      return "absorbed";
     }
 
-    const parts: string[] = [];
-    for (let i = 0; i < transfer.total_chunks; i++) {
-      parts.push(transfer.chunks.get(i) || "");
-    }
-    const reassembledJson = parts.join("");
     this.pendingTransfers.delete(key);
 
     try {
-      return JSON.parse(reassembledJson);
+      return JSON.parse(reassembled);
     } catch {
-      console.warn(`[mesh] Transfer ${transferId.slice(0, 8)}: reassembled JSON parse failed`);
       return "absorbed";
     }
   }
 
   // Expire stale incomplete transfers (5 minute TTL)
   private startTransferCleanup(): void {
+    if (this.transferCleanupTimer) return;
     this.transferCleanupTimer = setInterval(() => {
       const now = Date.now();
       for (const [key, t] of this.pendingTransfers) {
@@ -502,9 +540,14 @@ export class MeshConnection {
 
   // ── Send ─────────────────────────────────────────────────────────────
 
-  /** Send a message, auto-chunking if payload exceeds 512KB. */
+  /**
+   * Send a message, auto-chunking if the JSON-encoded payload exceeds 512KB.
+   * Each chunk is a separate SDK `send()` call so the SDK's Signal layer
+   * encrypts each chunk independently (or bypasses encryption for peers in
+   * `plaintextPeers`).
+   */
   async send(toAmid: string, payload: unknown): Promise<string | undefined> {
-    if (!this.connected || !this.wsObj) {
+    if (!this.client || !this.isConnected) {
       throw new Error("Not connected to relay");
     }
 
@@ -512,13 +555,10 @@ export class MeshConnection {
 
     // Fast path — single message
     if (json.length <= CHUNK_THRESHOLD) {
-      const payloadB64 = Buffer.from(json).toString("base64");
-      this.wsSend({
-        type: "send",
-        to: toAmid,
-        encrypted_payload: payloadB64,
-        message_type: "message",
-      });
+      const obj = typeof payload === "object" && payload !== null
+        ? (payload as Record<string, unknown>)
+        : { type: "message", value: payload };
+      await this.client.send(toAmid, obj);
       return undefined;
     }
 
@@ -527,14 +567,13 @@ export class MeshConnection {
     if (totalChunks > MAX_CHUNKS) {
       throw new Error(
         `Payload too large: ${(json.length / 1024 / 1024).toFixed(1)} MB ` +
-        `(${totalChunks} chunks exceeds max ${MAX_CHUNKS})`
+        `(${totalChunks} chunks exceeds max ${MAX_CHUNKS})`,
       );
     }
 
     const transferId = crypto.randomUUID();
     const displayName = this.config.displayName || this.config.identity.amid.slice(0, 12);
 
-    // Compute per-chunk SHA-256 for integrity
     const chunkHashes: string[] = [];
     for (let i = 0; i < totalChunks; i++) {
       const chunk = json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
@@ -543,7 +582,7 @@ export class MeshConnection {
     const manifestHash = crypto.createHash("sha256").update(chunkHashes.join(":")).digest("hex");
 
     // 1. Send manifest
-    await this.sendRaw(toAmid, {
+    await this.client.send(toAmid, {
       type: "mesh:transfer_manifest",
       transfer_id: transferId,
       original_type: (payload as any)?.type || "message",
@@ -558,7 +597,7 @@ export class MeshConnection {
     // 2. Send chunks sequentially (relay preserves FIFO per peer)
     for (let i = 0; i < totalChunks; i++) {
       const chunkData = json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-      await this.sendRaw(toAmid, {
+      await this.client.send(toAmid, {
         type: "mesh:transfer_chunk",
         transfer_id: transferId,
         chunk_index: i,
@@ -572,41 +611,27 @@ export class MeshConnection {
     return transferId;
   }
 
-  /** Send a raw relay envelope (no chunking). Used internally for chunks/manifests. */
-  private async sendRaw(toAmid: string, payload: unknown): Promise<void> {
-    const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload);
-    const payloadB64 = Buffer.from(payloadStr).toString("base64");
-    this.wsSend({
-      type: "send",
-      to: toAmid,
-      encrypted_payload: payloadB64,
-      message_type: "message",
-    });
-  }
-
   // ── File transfer ───────────────────────────────────────────────────
 
   /**
    * Send a file via E2E encrypted mesh. Reads the file, base64-encodes it,
    * and sends via the chunked transfer protocol. Waits for ACK from receiver.
-   *
-   * @returns ACK result with success/failure and save path
    */
   async sendFile(
     toAmid: string,
     filePath: string,
     opts?: { description?: string; timeoutMs?: number; retries?: number },
   ): Promise<FileTransferAck> {
-    const fs = await import("node:fs");
+    const fsMod = await import("node:fs");
     const pathMod = await import("node:path");
 
-    const stat = fs.statSync(filePath);
+    const stat = fsMod.statSync(filePath);
     if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
     if (stat.size > MAX_FILE_SIZE) {
       throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`);
     }
 
-    const fileData = fs.readFileSync(filePath);
+    const fileData = fsMod.readFileSync(filePath);
     const b64Data = fileData.toString("base64");
     const fileName = pathMod.basename(filePath);
     const displayName = this.config.displayName || this.config.identity.amid.slice(0, 12);
@@ -627,12 +652,9 @@ export class MeshConnection {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 3000)); // backoff between retries
+        await new Promise((r) => setTimeout(r, 3000));
       }
-
       await this.send(toAmid, fileMsg);
-
-      // Wait for file_transfer_ack
       try {
         const ack = await this.waitForMessage<FileTransferAck>(
           (content) => {
@@ -660,7 +682,6 @@ export class MeshConnection {
 
   /**
    * Handle incoming file_transfer messages — save to local directory and ACK.
-   * Call this from onMessage handler or process inbox messages.
    */
   async handleFileTransfer(
     fromAmid: string,
@@ -670,40 +691,32 @@ export class MeshConnection {
     if (message.type !== "file_transfer" || !message.file_data || !message.file_name) {
       return null;
     }
-
-    const fs = await import("node:fs");
+    const fsMod = await import("node:fs");
     const pathMod = await import("node:path");
 
-    // Sanitize filename — strip path components, block traversal
     const rawName = String(message.file_name);
-    const safeName = pathMod.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, "_");
-    if (!safeName || safeName.startsWith(".")) {
-      await this.send(fromAmid, {
-        type: "file_transfer_ack",
-        file_name: rawName,
-        success: false,
-        error: "Invalid file name",
-        timestamp: new Date().toISOString(),
-      });
-      return null;
+    const safeName = pathMod.basename(rawName); // strip any directory traversal
+    const destPath = pathMod.join(saveDir, safeName);
+
+    let success = false;
+    let error: string | undefined;
+    let buf = Buffer.alloc(0);
+    try {
+      fsMod.mkdirSync(saveDir, { recursive: true });
+      buf = Buffer.from(String(message.file_data), "base64");
+      fsMod.writeFileSync(destPath, buf);
+      success = true;
+    } catch (err: any) {
+      error = err?.message || String(err);
     }
 
-    fs.mkdirSync(saveDir, { recursive: true });
-    const destPath = pathMod.join(saveDir, safeName);
-    const buf = Buffer.from(String(message.file_data), "base64");
-    fs.writeFileSync(destPath, buf, { mode: 0o600 });
-
-    // Verify write
-    const stat = fs.statSync(destPath);
-    const success = stat.size === buf.length;
-
-    // Send ACK
     await this.send(fromAmid, {
       type: "file_transfer_ack",
       from_agent: this.config.displayName || this.config.identity.amid.slice(0, 12),
       file_name: safeName,
       success,
       saved_to: destPath,
+      error,
       timestamp: new Date().toISOString(),
     });
 
@@ -723,92 +736,186 @@ export class MeshConnection {
     return msgs;
   }
 
-  /** Wait for a message matching a predicate, with timeout. */
+  /**
+   * Remove and return all inbox messages matching `predicate`.
+   */
+  consumeInbox(
+    predicate: (msg: InboxMessage) => boolean,
+  ): InboxMessage[] {
+    const claimed: InboxMessage[] = [];
+    const kept: InboxMessage[] = [];
+    for (const m of this.inbox) {
+      if (predicate(m)) claimed.push(m);
+      else kept.push(m);
+    }
+    if (claimed.length > 0) this.inbox = kept;
+    return claimed;
+  }
+
+  /**
+   * Wait for a message matching a predicate, with timeout.
+   */
   async waitForMessage<T>(
     predicate: (content: unknown, from: string) => T | null,
-    timeoutMs = 15_000
+    timeoutMs = 15_000,
+    opts: { consume?: boolean } = {},
   ): Promise<T> {
-    // Check existing inbox first
+    const consume = opts.consume !== false;
     for (let i = 0; i < this.inbox.length; i++) {
       const msg = this.inbox[i];
       const result = predicate(msg.content, msg.from);
-      if (result !== null) {
-        this.inbox.splice(i, 1); // consume matched message
+      if (result !== null && result !== undefined) {
+        if (consume) this.inbox.splice(i, 1);
         return result;
       }
     }
 
-    // Wait for new messages
     return new Promise<T>((resolve, reject) => {
+      const waiter = {
+        predicate: predicate as (content: unknown, from: string) => unknown,
+        consume,
+        resolve: (v: unknown) => {
+          clearTimeout(timer);
+          if (v instanceof Error) reject(v);
+          else resolve(v as T);
+        },
+      };
       const timer = setTimeout(() => {
-        cleanup();
+        this.waiters.delete(waiter);
         reject(new Error(`Timed out waiting for message (${timeoutMs}ms)`));
       }, timeoutMs);
-
-      const originalHandler = this.config.onMessage;
-      const cleanup = () => {
-        clearTimeout(timer);
-        this.config.onMessage = originalHandler;
-      };
-
-      this.config.onMessage = (from: string, content: unknown) => {
-        originalHandler?.(from, content);
-        const result = predicate(content, from);
-        if (result !== null) {
-          cleanup();
-          resolve(result);
-        }
-      };
+      this.waiters.add(waiter);
     });
   }
 
-  // ── Discovery (registry HTTP) ────────────────────────────────────────
+  /**
+   * Send a message and wait for an ack matching `ackPredicate`.
+   */
+  async sendWithAck<T>(
+    toAmid: string,
+    payload: unknown,
+    ackPredicate: (content: unknown, from: string) => T | null,
+    opts: { timeoutMs?: number; retries?: number; retryDelayMs?: number } = {},
+  ): Promise<T> {
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    const retries = opts.retries ?? 2;
+    const retryDelayMs = opts.retryDelayMs ?? 1500;
+
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (!this.isConnected) {
+        throw new Error("Not connected to relay");
+      }
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+      try {
+        await this.send(toAmid, payload);
+      } catch (err: any) {
+        lastErr = err;
+        continue;
+      }
+      try {
+        return await this.waitForMessage(ackPredicate, timeoutMs);
+      } catch (err: any) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error(`No ack after ${retries + 1} attempts`);
+  }
+
+  /**
+   * Send a mesh-level ping to a peer and wait for `mesh:pong` reply.
+   */
+  async pingPeer(
+    toAmid: string,
+    opts: { timeoutMs?: number; retries?: number } = {},
+  ): Promise<{ rttMs: number; pong: Record<string, unknown> }> {
+    const nonce = crypto.randomUUID();
+    const sentAt = Date.now();
+    const pong = await this.sendWithAck<Record<string, unknown>>(
+      toAmid,
+      {
+        type: "mesh:ping",
+        nonce,
+        from_agent: this.config.displayName || this.config.identity.amid.slice(0, 12),
+        timestamp: new Date().toISOString(),
+      },
+      (content, from) => {
+        const m = content as Record<string, unknown>;
+        if (from === toAmid && m?.type === "mesh:pong" && m?.nonce === nonce) {
+          return m;
+        }
+        return null;
+      },
+      {
+        timeoutMs: opts.timeoutMs ?? 3000,
+        retries: opts.retries ?? 2,
+        retryDelayMs: 1000,
+      },
+    );
+    return { rttMs: Date.now() - sentAt, pong };
+  }
+
+  // ── Discovery (SDK-backed, with multi-capability fan-out) ────────────
 
   async discover(opts?: {
     capability?: string;
     limit?: number;
   }): Promise<Array<{ amid: string; displayName?: string; capabilities?: string[] }>> {
-    const url = new URL("/v1/agents", this.config.registryUrl);
-    if (opts?.capability) url.searchParams.set("capability", opts.capability);
-    if (opts?.limit) url.searchParams.set("limit", String(opts.limit));
+    if (!this.client) throw new Error("Not connected to relay");
 
-    const resp = await fetch(url.toString(), {
-      headers: { "X-AMID": this.config.identity.amid },
-    });
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    return Array.isArray(data) ? data : data.agents || [];
+    // Multi-capability fan-out when no capability filter is specified. The
+    // registry's search requires `capability = ANY(capabilities)` — there's
+    // no "list all" endpoint — so we aggregate well-known labels.
+    if (!opts?.capability) {
+      const seeds = [
+        "azureclaw-agent",
+        "task-execution",
+        "cluster-controller",
+        "offload",
+        "offload-sandbox",
+        "mesh-peer",
+        "chat",
+        "assistant",
+      ];
+      const seen = new Map<string, { amid: string; displayName?: string; capabilities?: string[] }>();
+      await Promise.all(
+        seeds.map(async (cap) => {
+          try {
+            const batch = await this.discover({ capability: cap, limit: opts?.limit ?? 50 });
+            for (const a of batch) {
+              if (a.amid && !seen.has(a.amid)) seen.set(a.amid, a);
+            }
+          } catch { /* best-effort aggregation */ }
+        }),
+      );
+      return Array.from(seen.values()).slice(0, opts?.limit ?? 50);
+    }
+
+    try {
+      const results = await this.client.search(opts.capability, { limit: opts.limit });
+      return (results as Array<Record<string, unknown>>).map((a) => ({
+        amid: String(a.amid ?? ""),
+        displayName:
+          (a.displayName as string | undefined) ??
+          (a.display_name as string | undefined),
+        capabilities: a.capabilities as string[] | undefined,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   /** Resolve an agent name to its AMID via registry search. */
   async resolveAmid(name: string): Promise<string | null> {
-    const agents = await this.discover({ capability: name });
-    const match = agents.find(
-      (a) => a.displayName === name || a.capabilities?.includes(name)
+    const byCap = await this.discover({ capability: name });
+    let match = byCap.find(
+      (a) => a.displayName === name || a.capabilities?.includes(name),
     );
+    if (match?.amid) return match.amid;
+    const all = await this.discover({ limit: 50 });
+    match = all.find((a) => a.displayName === name);
     return match?.amid || null;
-  }
-
-  // ── Keepalive ────────────────────────────────────────────────────────
-
-  private startKeepalive(): void {
-    this.keepaliveTimer = setInterval(() => {
-      if (this.connected && this.wsObj) {
-        this.wsObj.ping?.();
-      }
-    }, 25_000);
-  }
-
-  private stopKeepalive(): void {
-    if (this.keepaliveTimer) {
-      clearInterval(this.keepaliveTimer);
-      this.keepaliveTimer = null;
-    }
-  }
-
-  private wsSend(msg: unknown): void {
-    if (this.wsObj?.readyState === 1 /* OPEN */) {
-      this.wsObj.send(JSON.stringify(msg));
-    }
   }
 }

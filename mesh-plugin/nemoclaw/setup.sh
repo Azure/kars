@@ -16,12 +16,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/policies/presets/azureclaw-mesh.yaml"
-NEMOCLAW_PRESETS="${HOME}/.nemoclaw/source/nemoclaw-blueprint/policies/presets"
+NEMOCLAW_PRESETS="${NEMOCLAW_PRESETS:-${HOME}/.nemoclaw/source/nemoclaw-blueprint/policies/presets}"
 
 # --- Resolve host.docker.internal -----------------------------------------
 
 resolve_host_ip() {
   local ip
+
+  # Explicit override
+  if [[ -n "${HOST_IP:-}" ]]; then echo "$HOST_IP"; return; fi
 
   # Try getent first (Linux)
   if command -v getent &>/dev/null; then
@@ -29,24 +32,34 @@ resolve_host_ip() {
     if [[ -n "$ip" ]]; then echo "$ip"; return; fi
   fi
 
-  # Fall back to nslookup
+  # nslookup — only trust answers with a valid "Name:" section (not NXDOMAIN)
   if command -v nslookup &>/dev/null; then
-    ip=$(nslookup host.docker.internal 2>/dev/null | awk '/^Address:/{a=$2} END{print a}')
-    if [[ -n "$ip" && "$ip" != "#53" ]]; then echo "$ip"; return; fi
+    local out
+    out=$(nslookup host.docker.internal 2>/dev/null)
+    if echo "$out" | grep -q "^Name:"; then
+      ip=$(echo "$out" | awk '/^Name:/{found=1; next} found && /^Address:/{print $2; exit}')
+      if [[ -n "$ip" ]]; then echo "$ip"; return; fi
+    fi
   fi
 
-  # Fall back to dig
+  # dig
   if command -v dig &>/dev/null; then
     ip=$(dig +short host.docker.internal 2>/dev/null | head -1)
     if [[ -n "$ip" ]]; then echo "$ip"; return; fi
   fi
 
-  # Fall back to /etc/hosts
+  # /etc/hosts (set inside Docker containers)
   ip=$(grep -m1 host.docker.internal /etc/hosts 2>/dev/null | awk '{print $1}')
   if [[ -n "$ip" ]]; then echo "$ip"; return; fi
 
-  echo >&2 "ERROR: cannot resolve host.docker.internal"
-  echo >&2 "       Are you running inside a Docker/NemoClaw container?"
+  # Platform defaults — useful when running on the host (outside Docker)
+  case "$(uname -s)" in
+    Darwin) echo "192.168.65.254"; return ;;   # Docker Desktop on macOS
+    Linux)  echo "172.17.0.1";     return ;;   # default docker0 bridge
+  esac
+
+  echo >&2 "ERROR: cannot resolve host.docker.internal and no platform default"
+  echo >&2 "       Set HOST_IP=x.x.x.x explicitly."
   exit 1
 }
 

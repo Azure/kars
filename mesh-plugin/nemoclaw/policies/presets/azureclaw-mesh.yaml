@@ -28,9 +28,6 @@ network_policies:
         access: full
         allowed_ips:
           - __HOST_IP__
-        binaries:
-          - { path: /usr/local/bin/node }
-          - { path: /usr/local/bin/openclaw }
       # Registry — REST API (L7).
       - host: host.docker.internal
         port: 18080
@@ -42,6 +39,6 @@ network_policies:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
           - allow: { method: PUT, path: "/**" }
-        binaries:
-          - { path: /usr/local/bin/node }
-          - { path: /usr/local/bin/openclaw }
+    binaries:
+      - { path: /usr/local/bin/node }
+      - { path: /usr/local/bin/openclaw }

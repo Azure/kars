@@ -30,9 +30,9 @@ function relayDecode(b64: string): unknown {
 
 describe("federation protocol roundtrip", () => {
   describe("pairing ceremony", () => {
-    it("full pair flow: token → pair_request → pair_response", () => {
+    it("full pair flow: token → pair_request → pair_response", async () => {
       // 1. Admin generates a pairing token
-      const controllerIdentity = generateIdentity();
+      const controllerIdentity = await generateIdentity();
       const secret = crypto.randomUUID();
       const tokenPayload = {
         controller_amid: controllerIdentity.amid,
@@ -50,7 +50,7 @@ describe("federation protocol roundtrip", () => {
       expect(decoded!.secret).toBe(secret);
 
       // 3. External agent creates identity and sends pair_request
-      const externalIdentity = generateIdentity();
+      const externalIdentity = await generateIdentity();
       const pairRequest: PairRequestMessage = {
         type: "pair_request",
         secret,
@@ -188,18 +188,18 @@ describe("federation protocol roundtrip", () => {
   });
 
   describe("AMID consistency", () => {
-    it("AMID derivation is consistent between identity instances", () => {
-      const id = generateIdentity();
+    it("AMID derivation is consistent between identity instances", async () => {
+      const id = await generateIdentity();
       const amid1 = deriveAmid(id.signingPublicKey);
       const amid2 = deriveAmid(id.signingPublicKey);
       expect(amid1).toBe(amid2);
       expect(amid1).toBe(id.amid);
     });
 
-    it("different agents have different AMIDs", () => {
+    it("different agents have different AMIDs", async () => {
       const amids = new Set<string>();
       for (let i = 0; i < 10; i++) {
-        amids.add(generateIdentity().amid);
+        amids.add((await generateIdentity()).amid);
       }
       expect(amids.size).toBe(10);
     });
