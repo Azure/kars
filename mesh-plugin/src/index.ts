@@ -722,7 +722,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
  */
 async function sendOffloadCleanup(
   requestId: string,
-  reason: "done" | "error" | "cancelled",
+  reason: "done" | "error" | "cancelled" | "discovery_timeout",
 ): Promise<void> {
   if (!connection || !activePairing?.controllerAmid) return;
   try {
@@ -862,20 +862,39 @@ async function runOffloadOrchestrator(
   activeOffload.sandboxName = sandboxName;
   recordStage("ready", `Sandbox '${sandboxName}' is running`);
 
-  // Phase 3: Discover sandbox AMID via registry (sandbox auto-registers on boot)
+  // Phase 3: Discover sandbox AMID via registry (sandbox auto-registers on boot).
+  // Discovery must span the full cold-start budget: pod Ready ≠ mesh-Ready. The
+  // sandbox still has to finish entrypoint (incl. up to 120s Entra token retry),
+  // load openclaw, load the plugin, dial the relay, and register with the
+  // registry. On Kata/confidential pods this can reach 90–120s.
   recordStage("connecting", `Discovering sandbox '${sandboxName}' on the mesh`);
   let sandboxAmid: string | null = null;
-  const discoveryAttempts = 15;
+  const discoveryIntervalMs = 2000;
+  const discoveryAttempts = Math.max(
+    15,
+    Math.ceil(TIMEOUTS.COLD_START / discoveryIntervalMs),
+  );
   for (let i = 0; i < discoveryAttempts; i++) {
     try {
       sandboxAmid = await conn.resolveAmid(sandboxName);
     } catch { /* registry hiccup, retry */ }
     if (sandboxAmid) break;
-    await new Promise((r) => setTimeout(r, 2000));
+    if (i > 0 && i % 15 === 0) {
+      recordStage(
+        "connecting",
+        `Still discovering sandbox '${sandboxName}' (attempt ${i}/${discoveryAttempts}) — cold start in progress`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, discoveryIntervalMs));
   }
 
   if (!sandboxAmid) {
-    failOffload(`Could not discover sandbox '${sandboxName}' on the mesh after ${discoveryAttempts} attempts. The sandbox may have failed to register.`);
+    failOffload(
+      `Could not discover sandbox '${sandboxName}' on the mesh after ${discoveryAttempts} attempts (${(discoveryAttempts * discoveryIntervalMs / 1000).toFixed(0)}s). The sandbox may have failed to register.`,
+    );
+    // Best effort: tell the controller to tear the sandbox down so we don't
+    // leave a zombie pod producing orphan messages into mesh_inbox.
+    try { void sendOffloadCleanup(requestId, "discovery_timeout"); } catch { /* best effort */ }
     return;
   }
 
