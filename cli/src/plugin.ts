@@ -1546,6 +1546,16 @@ async function startProactiveOffloadIfNeeded(
 
   const fromAgent = agtSandboxName || process.env.SANDBOX_NAME || "sandbox";
 
+  // Seed the name→AMID cache with the literal alias 'parent'. Sub-agent tool
+  // calls like mesh_send(to_agent='parent') otherwise fall through to registry
+  // lookup which won't return a match (the parent display name is e.g.
+  // 'nemoclawtest', not 'parent'). Seeding here + the offload-mode rewrite in
+  // the tool handlers guarantees all outbound traffic reaches the real parent.
+  nameToAmid.set("parent", parentAmid);
+  if (parentName && parentName !== "parent") {
+    nameToAmid.set(parentName, parentAmid);
+  }
+
   // 1. Announce: "hi, I'm up, received task, starting now"
   try {
     await agtMeshClient.send(parentAmid, {
@@ -4764,8 +4774,16 @@ const azureClawPlugin = definePluginEntry({
         required: ["to_agent", "content"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
-        const agentName = params.to_agent as string;
+        let agentName = params.to_agent as string;
         const msgContent = params.content as string;
+
+        // OFFLOAD HARDENING: native agents in offload sandboxes may call this
+        // tool with their own sandbox name or an arbitrary sibling. Force
+        // routing to 'parent' — the only legitimate destination in offload mode.
+        if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
+          log.warn(`azureclaw_mesh_send: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
+          agentName = "parent";
+        }
 
         // ── Primary path: AGT SDK relay (E2E encrypted) ──
         if (agtMeshClient && agtIdentity) {
@@ -5079,9 +5097,17 @@ const azureClawPlugin = definePluginEntry({
         required: ["to_agent", "file_path"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
-        const agentName = params.to_agent as string;
+        let agentName = params.to_agent as string;
         const filePath = params.file_path as string;
         const desc = (params.description as string) || "";
+
+        // OFFLOAD HARDENING: same rule as mesh_send — offload workers may
+        // only ship files back to 'parent'. Seen in the wild: agent sent
+        // aks-pricing-cheatsheet.md to its own sandbox name instead of parent.
+        if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
+          log.warn(`azureclaw_mesh_transfer_file: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
+          agentName = "parent";
+        }
 
         if (!agtMeshClient || !agtIdentity) {
           return { content: [{ type: "text", text: JSON.stringify({
