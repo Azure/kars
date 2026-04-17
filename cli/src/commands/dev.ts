@@ -1,6 +1,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadConfig, promptAndSaveCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from "../config.js";
 
@@ -386,7 +388,69 @@ export function devCommand(): Command {
               : `Global registry returned ${resp.status} — may not be ready`
             );
           } catch (e: any) {
-            stepper.done(`Global registry health check failed: ${e.message ?? e} — will retry on first use`);
+            // Registry not reachable — attempt auto-promote
+            stepper.done(`Global registry not reachable — attempting mesh promote...`);
+            try {
+              const { killProcessesOnPorts } = await import("./mesh.js");
+              const regPort = parseInt(new URL(registryUrl).port || "18080", 10);
+              const relayPort = regPort === 18080 ? 18765 : regPort + 1;
+
+              // Kill stale port-forwards and restart
+              await killProcessesOnPorts([regPort, relayPort]);
+              const { spawn: spawnChild } = await import("node:child_process");
+              const { mkdirSync, openSync, readFileSync, writeFileSync, closeSync } = await import("node:fs");
+
+              const tunnels = [
+                { svc: "svc/agentmesh-registry", localPort: regPort, remotePort: 8080, label: "Registry" },
+                { svc: "svc/agentmesh-relay", localPort: relayPort, remotePort: 8765, label: "Relay" },
+              ];
+              const logDir = path.join(os.homedir(), ".azureclaw", "logs");
+              mkdirSync(logDir, { recursive: true });
+              const pids: Record<string, number> = {};
+
+              for (const t of tunnels) {
+                const outFd = openSync(path.join(logDir, `pf-${t.label.toLowerCase()}.log`), "w");
+                const child = spawnChild("kubectl", [
+                  "port-forward", t.svc, `${t.localPort}:${t.remotePort}`,
+                  "-n", "agentmesh", "--address", "0.0.0.0",
+                ], { stdio: ["ignore", outFd, outFd], detached: true });
+
+                const logPath = path.join(logDir, `pf-${t.label.toLowerCase()}.log`);
+                let ready = false;
+                for (let attempt = 0; attempt < 30; attempt++) {
+                  await new Promise(r => setTimeout(r, 500));
+                  try {
+                    const content = readFileSync(logPath, "utf-8");
+                    if (content.includes("Forwarding from")) { ready = true; break; }
+                  } catch { /* file not written yet */ }
+                }
+                child.unref();
+                closeSync(outFd);
+                if (ready && child.pid) pids[t.label] = child.pid;
+              }
+
+              const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+              writeFileSync(pidFile, JSON.stringify(pids, null, 2));
+
+              // Kill any stale listeners that aren't our spawned PIDs
+              const { killStaleListeners } = await import("./mesh.js");
+              const portPidMap: Array<{ port: number; pid: number }> = [];
+              if (pids.Registry) portPidMap.push({ port: regPort, pid: pids.Registry });
+              if (pids.Relay) portPidMap.push({ port: relayPort, pid: pids.Relay });
+              await killStaleListeners(portPidMap);
+
+              // Re-check after promote
+              const retryResp = await fetch(`${registryUrl.replace(/\/$/, "")}/v1/health`, {
+                signal: AbortSignal.timeout(5000),
+              });
+              agtReady = retryResp.ok;
+              if (agtReady) {
+                stepper.update(`Auto-promoted mesh tunnels — registry connected`);
+              }
+            } catch {
+              // Auto-promote failed — continue without registry
+              stepper.update(`Auto-promote failed — will retry on first use`);
+            }
           }
 
           // Store the container-reachable URL for env injection below

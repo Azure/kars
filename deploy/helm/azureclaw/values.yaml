@@ -91,9 +91,12 @@ networkPolicy:
       port: 443
       methods: ["GET"]
 
-# Mesh federation — enables external agents to pair and offload tasks
+# Mesh federation — enables external agents to pair and offload tasks.
+# Enabled by default so `azureclaw pair add` works out-of-the-box. The
+# controller joins the in-cluster relay on startup (leader-elected so only
+# one replica connects per AMID). Set to false to opt out.
 meshPeer:
-  enabled: false            # Set to true to enable federation
+  enabled: true             # Set to false to disable federation
   relayUrl: ""              # Override relay URL (default: ws://agentmesh-relay.agentmesh.svc.cluster.local:8765)
   clusterName: ""           # Display name shown to external agents during pairing
 

@@ -33,6 +33,10 @@ spec:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                       description: "OpenClaw configuration (openclaw.json equivalent)"
+                    extraEnv:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                      description: "Extra environment variables (key/value map) injected into the openclaw container. Used by the controller for offload parameters (OFFLOAD_REQUEST_ID, OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES)."
                 sandbox:
                   type: object
                   properties:

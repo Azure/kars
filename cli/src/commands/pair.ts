@@ -90,7 +90,7 @@ export function pairCommand(): Command {
         // The controller will create its real identity on startup
         controllerAmid = `ctrl_${crypto.randomBytes(10).toString("hex")}`;
         console.log(chalk.dim("  Controller mesh identity not found — using generated AMID"));
-        console.log(chalk.dim("  (Controller will bind its real AMID on first startup with MESH_PEER_ENABLED=true)"));
+        console.log(chalk.dim("  (Controller will bind its real AMID once it starts and joins the relay)"));
       }
 
       // Generate the pairing secret (256-bit random)

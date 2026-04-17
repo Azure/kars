@@ -43,6 +43,7 @@ export function upCommand(): Command {
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
     .option("--dry-run", "Show what would be done without executing", false)
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
+    .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
     .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
     .action(async (options) => {
@@ -116,6 +117,13 @@ export function upCommand(): Command {
         }
         if (ctx.imdsClientId) {
           helmArgs.push("--set", `foundry.imdsClientId=${ctx.imdsClientId}`);
+        }
+        // meshPeer defaults to ON in values.yaml. Only pass a --set flag
+        // when the user explicitly opts out via --no-mesh-peer (commander
+        // sets options.meshPeer === false). options.meshPeer === true
+        // (explicit --mesh-peer) is already the default, no action needed.
+        if (options.meshPeer === false) {
+          helmArgs.push("--set", "meshPeer.enabled=false");
         }
         // Fedcred config for controller auto-creation
         if (ctx.oidcIssuerUrl) {

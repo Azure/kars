@@ -56,10 +56,17 @@ pub struct ClawSandboxSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenClawConfig {
     pub version: Option<String>,
     pub image: Option<String>,
     pub config: Option<serde_json::Value>,
+    /// Extra environment variables injected into the openclaw container as `key: value`
+    /// pairs. Used by the controller to propagate offload parameters
+    /// (`OFFLOAD_REQUEST_ID`, `OFFLOAD_PARENT_AMID`, `OFFLOAD_TASK`,
+    /// `OFFLOAD_TIMEOUT_MINUTES`) into offload sandboxes.
+    #[serde(default)]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
