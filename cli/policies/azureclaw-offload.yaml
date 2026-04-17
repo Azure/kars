@@ -1,0 +1,93 @@
+# AzureClaw AGT Governance Policy — OFFLOAD profile
+#
+# Applied only to cloud-offload sandboxes created via federation from an
+# external NemoClaw/AzureClaw parent. Denies child-sandbox spawn and handoff
+# to keep offloads as leaf workers — no recursion, no forwarding.
+#
+# Shell + inference + mesh allowances mirror the default profile so research
+# and file-generation tasks still work.
+
+version: "1.0"
+agent: azureclaw-offload
+
+policies:
+  # ── Leaf-worker restrictions (offload-specific) ──────────────────────
+  # Offload sandboxes must NOT spawn child sandboxes — that would recurse
+  # offloads indefinitely and bypass the per-pair concurrency budget.
+  - name: offload-no-spawn
+    type: capability
+    denied_actions:
+      - "spawn:*"
+      - "tool:azureclaw_spawn"
+      - "tool:azureclaw_spawn_status"
+      - "tool:azureclaw_spawn_destroy"
+      - "tool:azureclaw_spawn_list"
+    priority: 200
+
+  # Offload sandboxes must NOT initiate agent-to-agent handoffs — the only
+  # peer they may talk to is the requester (enforced by trustedPeers).
+  - name: offload-no-handoff
+    type: capability
+    denied_actions:
+      - "tool:azureclaw_handoff_request"
+      - "tool:azureclaw_handoff_confirm"
+      - "handoff:*"
+    priority: 200
+
+  # ── Shell safety (mirrors default) ───────────────────────────────────
+  - name: shell-destructive-deny
+    type: capability
+    denied_actions:
+      - "shell:rm"
+      - "shell:mkfs"
+      - "shell:shutdown"
+      - "shell:reboot"
+      - "shell:dd"
+      - "shell:nmap"
+      - "shell:nc"
+      - "shell:netcat"
+      - "shell:socat"
+      - "shell:nsenter"
+      - "shell:unshare"
+      - "shell:chroot"
+    priority: 100
+
+  - name: shell-safe-commands
+    type: capability
+    allowed_actions:
+      - "shell:ls"
+      - "shell:cat"
+      - "shell:grep"
+      - "shell:find"
+      - "shell:echo"
+      - "shell:head"
+      - "shell:tail"
+      - "shell:wc"
+      - "shell:sort"
+      - "shell:uniq"
+      - "shell:diff"
+      - "shell:python"
+      - "shell:python3"
+      - "shell:pip"
+      - "shell:node"
+      - "shell:npm"
+      - "shell:git"
+      - "shell:curl"
+      - "shell:jq"
+    priority: 50
+
+  # ── Inference (offload uses whatever model the parent requested) ─────
+  - name: inference-allow
+    type: capability
+    allowed_actions:
+      - "inference:*"
+      - "image_generation:*"
+    priority: 50
+
+  # ── Mesh (reply only to the requester — trustedPeers enforces scope) ─
+  - name: mesh-allow
+    type: capability
+    allowed_actions:
+      - "mesh:send:*"
+      - "mesh:receive"
+    priority: 50

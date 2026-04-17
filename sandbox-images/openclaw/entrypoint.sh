@@ -111,22 +111,52 @@ if [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FIL
    [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
    [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
   echo "[entrypoint] Exchanging Workload Identity token for Entra ID access token..."
-  _FED_TOKEN=$(cat "$AZURE_FEDERATED_TOKEN_FILE")
-  _TOKEN_RESP=$(curl -s --max-time 10 \
-    "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
-    -d "client_id=${AZURE_CLIENT_ID}" \
-    -d "scope=api://agentmesh/.default" \
-    -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-    -d "client_assertion=${_FED_TOKEN}" \
-    -d "grant_type=client_credentials" 2>/dev/null || echo "")
-  _ACCESS_TOKEN=$(echo "$_TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+  # Retry with exponential-ish backoff — confidential (Kata) VMs can take
+  # 20–30 s for IMDS/AAD network plumbing to come up. Keep trying for up
+  # to ~2 min before giving up and falling back to anonymous tier.
+  _ACCESS_TOKEN=""
+  _DELAY=1
+  _ELAPSED=0
+  _MAX_WAIT="${ENTRA_TOKEN_MAX_WAIT:-120}"
+  _ATTEMPT=0
+  while [ "$_ELAPSED" -lt "$_MAX_WAIT" ]; do
+    _ATTEMPT=$((_ATTEMPT + 1))
+    _FED_TOKEN=$(cat "$AZURE_FEDERATED_TOKEN_FILE")
+    # UID 1000 is blocked from direct egress by the egress-guard iptables rules;
+    # the only working path is the router's forward proxy on 127.0.0.1:8444.
+    # Use -4 to avoid IPv6 connect hangs and --connect-timeout to fail fast while
+    # the forward proxy is still coming up in the first few seconds.
+    _TOKEN_RESP=$(curl -s -4 --connect-timeout 3 --max-time 10 \
+      -x "${ENTRA_PROXY:-http://127.0.0.1:8444}" \
+      "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
+      -d "client_id=${AZURE_CLIENT_ID}" \
+      -d "scope=api://agentmesh/.default" \
+      -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+      -d "client_assertion=${_FED_TOKEN}" \
+      -d "grant_type=client_credentials" 2>/dev/null || echo "")
+    _ACCESS_TOKEN=$(echo "$_TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+    if [ -n "$_ACCESS_TOKEN" ]; then
+      echo "[entrypoint] Entra ID token acquired after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — agent will register as verified tier"
+      break
+    fi
+    # Fail-fast on unrecoverable tenant-config errors: AADSTS500011 means the
+    # api://agentmesh service principal is not provisioned in this tenant.
+    # No amount of retrying will fix it — break out and register as anonymous.
+    if echo "$_TOKEN_RESP" | grep -q "AADSTS500011"; then
+      echo "[entrypoint] Entra: api://agentmesh SP not provisioned in tenant — skipping retries, registering as anonymous tier"
+      break
+    fi
+    sleep "$_DELAY"
+    _ELAPSED=$((_ELAPSED + _DELAY))
+    # Back off: 1, 2, 4, 4, 4, … (cap at 4s so we never wait >1 cycle past success)
+    if [ "$_DELAY" -lt 4 ]; then _DELAY=$((_DELAY * 2)); fi
+  done
   if [ -n "$_ACCESS_TOKEN" ]; then
     export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
-    echo "[entrypoint] Entra ID token acquired — agent will register as verified tier"
   else
-    echo "[entrypoint] Entra token exchange failed — agent will register as anonymous tier"
+    echo "[entrypoint] Entra token exchange failed after ${_ELAPSED}s (${_ATTEMPT} attempts) — agent will register as anonymous tier"
   fi
-  unset _FED_TOKEN _TOKEN_RESP _ACCESS_TOKEN
+  unset _FED_TOKEN _TOKEN_RESP _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
 fi
 
 # Get config from env vars (set by azureclaw dev/up)
@@ -719,21 +749,54 @@ else
   echo "[azureclaw] Inference router provided by AKS container (workload-identity mode)"
 fi
 
-# ── Offload timeout enforcement ─────────────────────────────────────────────
+# ── Offload idle timeout enforcement ────────────────────────────────────────
 # When OFFLOAD_TIMEOUT_MINUTES is set (by the controller for offload sandboxes),
-# start a background kill timer. The sandbox runs as a full agent (normal mode)
-# and communicates directly with the external agent via mesh. After timeout,
-# the container exits to release resources.
+# start a background idle watcher. The sandbox self-terminates after the idle
+# window elapses with no inbound traffic from OFFLOAD_PARENT_AMID.
+#
+# Activity signal: the azureclaw-mesh plugin touches $OFFLOAD_ACTIVITY_FILE
+# on every decrypted inbound message from the parent AMID. This file's mtime
+# is the single source of truth for "last heard from parent".
+#
+# Exit path: we can't just `kill 1` — bash PID 1 ignores SIGTERM while waiting
+# on a foreground `tail -f` (no trap, no exec replacement). Instead we install
+# a SIGTERM trap that kills the tail child, letting the script exit cleanly.
+OFFLOAD_ACTIVITY_FILE=/tmp/offload-last-activity
+export OFFLOAD_ACTIVITY_FILE
 if [ -n "${OFFLOAD_TIMEOUT_MINUTES:-}" ] && [ "$OFFLOAD_TIMEOUT_MINUTES" != "0" ]; then
-  OFFLOAD_TIMEOUT_SECONDS=$(( OFFLOAD_TIMEOUT_MINUTES * 60 ))
-  echo "[azureclaw] Offload sandbox — auto-terminate in ${OFFLOAD_TIMEOUT_MINUTES}m (${OFFLOAD_TIMEOUT_SECONDS}s)"
+  OFFLOAD_IDLE_SECONDS=$(( OFFLOAD_TIMEOUT_MINUTES * 60 ))
+  echo "[azureclaw] Offload sandbox — idle timeout ${OFFLOAD_TIMEOUT_MINUTES}m (${OFFLOAD_IDLE_SECONDS}s) since last parent message"
   echo "[azureclaw] Request ID:  ${OFFLOAD_REQUEST_ID:-unknown}"
   echo "[azureclaw] Parent AMID: ${OFFLOAD_PARENT_AMID:-unknown}"
+  # Seed the activity file so we don't self-terminate at T=0 before any
+  # message arrives. The watcher starts counting from *now*.
+  touch "$OFFLOAD_ACTIVITY_FILE"
+  [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox "$OFFLOAD_ACTIVITY_FILE"
+  chmod 0664 "$OFFLOAD_ACTIVITY_FILE"
   (
-    sleep "$OFFLOAD_TIMEOUT_SECONDS"
-    echo "[azureclaw] ⏰ Offload timeout reached (${OFFLOAD_TIMEOUT_MINUTES}m) — shutting down"
-    kill 1 2>/dev/null || true
+    while :; do
+      sleep 60
+      now=$(date +%s)
+      last=$(stat -c %Y "$OFFLOAD_ACTIVITY_FILE" 2>/dev/null || echo "$now")
+      idle=$(( now - last ))
+      if [ "$idle" -ge "$OFFLOAD_IDLE_SECONDS" ]; then
+        echo "[azureclaw] ⏰ Offload idle ${idle}s ≥ ${OFFLOAD_IDLE_SECONDS}s — shutting down"
+        # Killing the foreground `tail -f` child unblocks PID 1 bash,
+        # which then hits the trap below and exits the container.
+        # The tail PID is written to /tmp/offload-tail.pid by the main script
+        # below; reading it here avoids a fork-time variable race.
+        tpid=$(cat /tmp/offload-tail.pid 2>/dev/null || true)
+        if [ -n "$tpid" ]; then
+          kill -TERM "$tpid" 2>/dev/null || true
+        fi
+        # Belt and suspenders: after 5s, force-kill PID 1.
+        sleep 5
+        kill -KILL 1 2>/dev/null || true
+        exit 0
+      fi
+    done
   ) &
+  IDLE_WATCHER_PID=$!
 fi
 
 # ── Normal mode: start gateway + node host + TUI ───────────────────────────
@@ -798,5 +861,14 @@ echo "[azureclaw] Node host starting (PID: $NODE_PID)"
 #   - delegateToNativeAgent spawns openclaw agent sessions on the SAME gateway (no conflicts).
 
 # Keep the container alive — don't use exec (it would kill the gateway)
-# Instead, wait forever while keeping the gateway backgrounded
-tail -f /dev/null
+# Instead, wait forever while keeping the gateway backgrounded.
+# We track the tail PID so the idle-watcher above can SIGTERM it and unblock
+# bash PID 1. Without this, `kill 1` is swallowed and the container never dies.
+tail -f /dev/null &
+IDLE_TAIL_PID=$!
+echo "$IDLE_TAIL_PID" > /tmp/offload-tail.pid
+# Trap SIGTERM so docker stop / kubectl delete terminate cleanly.
+# (For offload sandboxes the idle watcher also installs a trap earlier, but
+# this covers non-offload sandboxes too.)
+trap 'kill -TERM "$IDLE_TAIL_PID" 2>/dev/null || true; exit 0' TERM INT
+wait "$IDLE_TAIL_PID"

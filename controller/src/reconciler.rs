@@ -681,6 +681,46 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         router_agt_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
     }
 
+    // ── extraEnv: user/controller-provided env vars on spec.openclaw.extraEnv ──
+    // Used by the controller to propagate offload parameters (OFFLOAD_REQUEST_ID,
+    // OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES) into offload
+    // sandboxes. Keys are validated to avoid clobbering reserved prefixes.
+    if let Some(extra) = openclaw_config.extra_env.as_ref() {
+        // Reserved prefixes that must come from the reconciler itself, not user input.
+        const RESERVED_PREFIXES: &[&str] =
+            &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "AZURECLAW_"];
+        // Names already set above — skip silently if caller provided a duplicate.
+        let mut existing: std::collections::HashSet<String> = openclaw_env
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        for (k, v) in extra {
+            if k.is_empty()
+                || !k
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || k.chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
+                tracing::warn!(key = %k, "extraEnv: invalid env var name, skipping");
+                continue;
+            }
+            if RESERVED_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                tracing::warn!(key = %k, "extraEnv: key uses reserved prefix, skipping");
+                continue;
+            }
+            if v.contains('\0') {
+                tracing::warn!(key = %k, "extraEnv: value contains NUL byte, skipping");
+                continue;
+            }
+            if existing.contains(k) {
+                tracing::debug!(key = %k, "extraEnv: overridden by reconciler, skipping");
+                continue;
+            }
+            openclaw_env.push(json!({"name": k, "value": v}));
+            existing.insert(k.clone());
+        }
+    }
+
     // Build the inference-router env array
     let mut router_env = vec![
         json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
@@ -1095,9 +1135,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             )
             .await?;
 
-        // Create ConfigMap with default policy YAML
+        // Create ConfigMap with the policy YAML matching the requested profile.
+        // Known profiles: "default" (interactive/normal) and "offload" (leaf worker,
+        // no spawn/handoff). Unknown profile names fall back to default to preserve
+        // backward compatibility — the router will still load whatever YAML key we ship.
         let policy_profile = &governance_config.tool_policy;
-        let policy_yaml = include_str!("../../cli/policies/azureclaw-default.yaml");
+        let policy_yaml: &str = match policy_profile.as_str() {
+            "offload" => include_str!("../../cli/policies/azureclaw-offload.yaml"),
+            _ => include_str!("../../cli/policies/azureclaw-default.yaml"),
+        };
         let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
         let cm_name = format!("agt-policy-{}", policy_profile);
         let cm: ConfigMap = serde_json::from_value(json!({

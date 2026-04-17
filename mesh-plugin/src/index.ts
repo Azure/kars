@@ -18,6 +18,7 @@ import {
   type StoredPairing,
 } from "./pairing.js";
 import { MeshConnection } from "./connection.js";
+import { TIMEOUTS, RETRIES } from "./timers.js";
 import type {
   PairRequestMessage,
   PairResponseMessage,
@@ -39,14 +40,154 @@ let connection: MeshConnection | null = null;
 let meshIdentity: MeshIdentity | null = null;
 let activePairing: StoredPairing | null = null;
 let initialized = false;
-let activeOffload: {
+
+/**
+ * Offload state. Updated by the background orchestrator; read by
+ * offload_status. Keeps the LLM round free of long waits.
+ */
+type OffloadPhase =
+  | "submitted"
+  | "validating"
+  | "spawning"
+  | "scheduled"
+  | "ready"
+  | "connecting"
+  | "acknowledged"
+  | "verifying"
+  | "uploading"
+  | "dispatching"
+  | "running"
+  | "returning"
+  | "done"
+  | "error";
+
+interface OffloadStageEvent {
+  at: string;
+  phase: OffloadPhase;
+  message: string;
+}
+
+interface ActiveOffload {
   requestId: string;
   startedAt: number;
   sandboxName?: string;
   sandboxAmid?: string;
-  filesSent?: number;
-  phase: string;
-} | null = null;
+  filesTotal: number;
+  filesSent: number;
+  phase: OffloadPhase;
+  lastMessage: string;
+  events: OffloadStageEvent[];
+  error?: string;
+  done?: boolean;
+  doneSummary?: string;
+  doneFiles?: string[];
+  tokensUsed?: { prompt: number; completion: number };
+  durationSeconds?: number;
+  receivedFiles: Array<{ fileName: string; savedPath: string; sizeBytes: number }>;
+  pingRttMs?: number;
+  taskAckedAt?: number;
+  helloReceivedAt?: number; // set when sandbox proactively announces itself
+  // Long-poll / change-detection bookkeeping (not persisted)
+  lastPolledAt?: number;
+  lastPolledEventCount?: number;
+}
+
+let activeOffload: ActiveOffload | null = null;
+
+// Recent offloads (completed or in-flight) — used to deduplicate accidental
+// LLM re-emissions of the same `cloud_offload` call from stale/repeating
+// context.  Kept in memory only; a fresh agent session starts clean.
+interface RecentOffloadEntry {
+  requestId: string;
+  taskNormalized: string;
+  submittedAt: number;
+  done: boolean;
+  status: string;
+}
+const RECENT_OFFLOADS: RecentOffloadEntry[] = [];
+const RECENT_OFFLOAD_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const RECENT_OFFLOADS_MAX = 20;
+
+function normalizeTask(task: string): string {
+  return task.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function findRecentDuplicateOffload(task: string): RecentOffloadEntry | null {
+  const norm = normalizeTask(task);
+  const now = Date.now();
+  // Prune stale entries while we're here.
+  for (let i = RECENT_OFFLOADS.length - 1; i >= 0; i--) {
+    if (now - RECENT_OFFLOADS[i].submittedAt > RECENT_OFFLOAD_WINDOW_MS) {
+      RECENT_OFFLOADS.splice(i, 1);
+    }
+  }
+  return RECENT_OFFLOADS.find((e) => e.taskNormalized === norm) ?? null;
+}
+
+function recordRecentOffload(requestId: string, task: string): void {
+  RECENT_OFFLOADS.push({
+    requestId,
+    taskNormalized: normalizeTask(task),
+    submittedAt: Date.now(),
+    done: false,
+    status: "submitted",
+  });
+  if (RECENT_OFFLOADS.length > RECENT_OFFLOADS_MAX) {
+    RECENT_OFFLOADS.shift();
+  }
+}
+
+// ─── Ambient user-notification queue ────────────────────────────────────────
+// Populated whenever a state change is observed for an active offload (new
+// phase, progress tick, file received, done/error). Drained by:
+//   • the `message_sending` hook (prepends to outgoing assistant/channel msg)
+//   • the `/offload` slash command (renders + clears)
+//   • stderr mirror (always-on, for TUIs that tail plugin logs)
+// This is intentionally out-of-band from the LLM tool-call loop so progress
+// reaches the user without the agent having to poll `offload_status`.
+interface PendingNotification {
+  requestId: string;
+  at: number;
+  line: string;        // rendered, user-visible
+  kind: "progress" | "done" | "error" | "file" | "phase";
+}
+const PENDING_NOTIFICATIONS: PendingNotification[] = [];
+const PENDING_NOTIF_MAX = 10;
+const PENDING_NOTIF_COALESCE_KINDS = new Set<PendingNotification["kind"]>(["progress", "phase"]);
+
+function pushNotification(n: Omit<PendingNotification, "at">): void {
+  // Coalesce successive progress/phase lines for the same request — the user
+  // only needs the latest ambient tick, not every 20 s sample.
+  if (PENDING_NOTIF_COALESCE_KINDS.has(n.kind)) {
+    for (let i = PENDING_NOTIFICATIONS.length - 1; i >= 0; i--) {
+      const prev = PENDING_NOTIFICATIONS[i];
+      if (prev.requestId === n.requestId && PENDING_NOTIF_COALESCE_KINDS.has(prev.kind)) {
+        PENDING_NOTIFICATIONS.splice(i, 1);
+        break;
+      }
+    }
+  }
+  PENDING_NOTIFICATIONS.push({ ...n, at: Date.now() });
+  while (PENDING_NOTIFICATIONS.length > PENDING_NOTIF_MAX) {
+    PENDING_NOTIFICATIONS.shift();
+  }
+  // Always also mirror to stderr so TUIs that tail plugin logs render it.
+  try {
+    process.stderr.write(`[azureclaw-mesh] ${n.line}\n`);
+  } catch {
+    /* best effort */
+  }
+}
+
+function drainPendingNotifications(): string[] {
+  const out = PENDING_NOTIFICATIONS.map((n) => n.line);
+  PENDING_NOTIFICATIONS.length = 0;
+  return out;
+}
+
+function peekPendingNotifications(): string[] {
+  return PENDING_NOTIFICATIONS.map((n) => n.line);
+}
 
 // Directory to save incoming files from sandboxes
 const INCOMING_DIR = path.join(
@@ -117,6 +258,13 @@ export function definePluginEntry() {
               type: "number",
               description: "Maximum runtime in minutes (default: 30)",
             },
+            force: {
+              type: "boolean",
+              description:
+                "Allow submitting this task even if an identical one was offloaded in the last 10 minutes. " +
+                "Use only when the user EXPLICITLY asks to re-run the task. " +
+                "If omitted/false, a duplicate task returns the existing request's status instead of spawning a new sandbox.",
+            },
           },
           required: ["task"],
         },
@@ -125,17 +273,70 @@ export function definePluginEntry() {
       });
 
       // ── offload_status ──
+      // Registered as OPTIONAL (not auto-allowed) so the LLM does not see it
+      // by default. Users can expose it via config if they want LLM-driven
+      // polling; otherwise ambient push notifications + the /offload command
+      // cover the status-query UX without burning tokens on tight poll loops.
+      api.registerTool(
+        {
+          name: "offload_status",
+          description:
+            "Return a snapshot of the currently active cloud offload. " +
+            "Non-blocking; returns immediately. " +
+            "You almost never need to call this: offload progress is pushed to " +
+            "the user automatically via ambient notifications, and the user can " +
+            "type `/offload` for an instant status line. Call this only when " +
+            "the user explicitly asks you to fetch status on their behalf.",
+          parameters: {
+            type: "object",
+            properties: {},
+          },
+          handler: offloadStatusHandler,
+          execute: offloadStatusHandler,
+        },
+        { optional: true },
+      );
+
+      // ── offload_cancel ──
+      // Call only when the user EXPLICITLY asks to cancel/abort the current
+      // cloud offload. This sends a cleanup signal to the controller which
+      // deletes the cloud sandbox + tears down the namespace, and clears
+      // local offload state so a new `cloud_offload` can be started.
+      const offloadCancelHandler = async () => {
+        if (!activeOffload) {
+          return {
+            content: [{ type: "text", text: "No active cloud offload to cancel." }],
+          };
+        }
+        const rid = activeOffload.requestId;
+        try {
+          void sendOffloadCleanup(rid, "cancelled");
+        } catch {
+          /* best effort — cleanup is async */
+        }
+        failOffload("Cancelled by user via offload_cancel");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `🛑 Offload ${rid.slice(0, 8)} cancelled. Cluster CRD cleanup signal sent; the sandbox will be torn down shortly.`,
+            },
+          ],
+        };
+      };
       api.registerTool({
-        name: "offload_status",
+        name: "offload_cancel",
         description:
-          "Check the status of an active cloud offload. " +
-          "Returns current phase, progress percentage, and status message.",
+          "Cancel the currently active cloud offload. " +
+          "Sends a cleanup signal to the controller (deletes the cloud sandbox) " +
+          "and clears local offload state so a new offload can be started. " +
+          "Use ONLY when the user explicitly asks to cancel/abort. No-op if no offload is active.",
         parameters: {
           type: "object",
           properties: {},
         },
-        handler: offloadStatusHandler,
-        execute: offloadStatusHandler,
+        handler: offloadCancelHandler,
+        execute: offloadCancelHandler,
       });
 
       // ── mesh_send ──
@@ -201,6 +402,86 @@ export function definePluginEntry() {
         handler: discoverHandler,
         execute: discoverHandler,
       });
+
+      // ── /offload slash command (bypasses the LLM) ──────────────────────
+      // User types `/offload` or `/offload status` to get an instant,
+      // zero-token status snapshot without burning an LLM turn.
+      try {
+        api.registerCommand?.({
+          name: "offload",
+          description: "Show active cloud-offload status (no LLM invocation).",
+          async handler(_ctx: unknown, args: string[] = []) {
+            const sub = (args[0] || "status").toLowerCase();
+            if (sub === "cancel") {
+              if (!activeOffload) return { reply: "No active offload to cancel." };
+              const rid = activeOffload.requestId;
+              try { void sendOffloadCleanup(rid, "cancelled"); } catch { /* best effort */ }
+              failOffload("Cancelled by user via /offload cancel");
+              return { reply: `🛑 Offload ${rid.slice(0, 8)} cancel request sent.` };
+            }
+            // Default: status
+            await drainOffloadInbox().catch(() => { /* best effort */ });
+            if (!activeOffload) {
+              // Surface any pending notifications for a just-completed offload.
+              const pending = drainPendingNotifications();
+              if (pending.length > 0) return { reply: pending.join("\n") };
+              return { reply: "No active offload. Use cloud_offload to start one." };
+            }
+            const elapsed = Math.round((Date.now() - activeOffload.startedAt) / 1000);
+            const pending = drainPendingNotifications();
+            const snap = renderOffloadStatus(elapsed);
+            return {
+              reply: pending.length > 0 ? pending.join("\n") + "\n\n" + snap : snap,
+            };
+          },
+        });
+      } catch { /* older OpenClaw: command API not present */ }
+
+      // ── message_sending hook: ambient push of offload progress ─────────
+      // On every outgoing assistant / channel message, prepend queued
+      // offload notifications (progress, phase, file, done, error) and
+      // clear the queue. No LLM round-trip needed; the user sees live
+      // progress piggybacked on any reply the agent produces.
+      try {
+        api.registerHook?.(
+          "message_sending",
+          async (event: { content: string }, _ctx: unknown) => {
+            const lines = drainPendingNotifications();
+            if (lines.length === 0) return;
+            const banner = lines.join("\n");
+            return { content: `${banner}\n\n${event.content ?? ""}` };
+          },
+        );
+      } catch { /* older OpenClaw: hook API not present */ }
+
+      // ── background inbox-drain service ─────────────────────────────────
+      // Keeps offload state advancing (and therefore notifications flowing)
+      // even when the agent is idle / the user is typing. Short interval
+      // because the cost is a single decrypt-and-consume pass over the SDK
+      // inbox queue — no network call.
+      try {
+        api.registerService?.({
+          id: "azureclaw-mesh-offload-drain",
+          description: "Drains offload mesh inbox while an offload is active.",
+          async start() {
+            const INTERVAL_MS = 2000;
+            const tick = async () => {
+              try {
+                if (activeOffload && connection && initialized) {
+                  await drainOffloadInbox();
+                }
+              } catch { /* best effort */ }
+            };
+            const handle = setInterval(tick, INTERVAL_MS);
+            (handle as any).unref?.();
+            return {
+              async stop() {
+                clearInterval(handle);
+              },
+            };
+          },
+        });
+      } catch { /* older OpenClaw: service API not present */ }
     },
   };
 }
@@ -212,7 +493,7 @@ export function definePluginEntry() {
 async function ensureInitialized(): Promise<string | null> {
   if (initialized) return null;
 
-  meshIdentity = loadOrCreateIdentity();
+  meshIdentity = await loadOrCreateIdentity();
   activePairing = getDefaultPairing();
 
   if (activePairing) {
@@ -221,6 +502,11 @@ async function ensureInitialized(): Promise<string | null> {
         relayUrl: activePairing.relayUrl,
         registryUrl: activePairing.registryUrl,
         identity: meshIdentity,
+        // The controller speaks legacy base64(JSON), not Signal E2E — route
+        // its traffic through the plaintext-compat bypass in the SDK.
+        plaintextPeers: activePairing.controllerAmid
+          ? [activePairing.controllerAmid]
+          : undefined,
       });
       await connection.connect();
       initialized = true;
@@ -291,19 +577,53 @@ async function meshPairHandler(...args: any[]): Promise<string> {
     return `❌ Invalid pairing token. Must start with azcp_1_ and contain valid data. (token length: ${token.length}, starts: ${token.slice(0, 20)}...)`;
   }
 
-  meshIdentity = loadOrCreateIdentity();
+  meshIdentity = await loadOrCreateIdentity();
   const identityPath = getIdentityPath();
 
-  // Connect to relay
-  try {
+  // If we already have a live connection to the same relay, reuse it.
+  // This avoids double-connect churn when the user re-pairs after the
+  // plugin already auto-connected via an existing stored pairing.
+  const connectStart = Date.now();
+  const reuseExisting =
+    connection?.isConnected &&
+    (connection as any)["config"]?.relayUrl === payload.relay_url;
+
+  if (!reuseExisting) {
+    try { await connection?.disconnect(); } catch { /* noop */ }
     connection = new MeshConnection({
       relayUrl: payload.relay_url,
       registryUrl: payload.registry_url,
       identity: meshIdentity,
+      // The Rust controller still uses the legacy base64(JSON) wire format
+      // instead of full Signal E2E. Register it as a plaintext-compat peer
+      // so our SDK bypasses X3DH/Ratchet for messages to the controller.
+      plaintextPeers: [payload.controller_amid],
     });
-    await connection.connect();
-  } catch (err: any) {
-    return `❌ Failed to connect to mesh relay: ${err.message}`;
+    try {
+      await connection.connect();
+    } catch (err: any) {
+      // Differentiate common failure modes so the user can act.
+      const msg = String(err?.message || err);
+      if (msg.includes("ECONNREFUSED") || msg.includes("EHOSTUNREACH")) {
+        return `❌ Cannot reach relay at ${payload.relay_url}. The AzureClaw cluster may be offline or the relay address is wrong.`;
+      }
+      if (msg.includes("timed out")) {
+        return `❌ Relay connection timed out (${TIMEOUTS.RELAY_CONNECT / 1000}s). Check your network/proxy to ${payload.relay_url}.`;
+      }
+      if (msg.includes("certificate") || msg.includes("CERT_")) {
+        return `❌ TLS error connecting to relay: ${msg}. Check the relay's certificate.`;
+      }
+      return `❌ Failed to connect to mesh relay: ${msg}`;
+    }
+  } else {
+    // Live connection reused — make sure the controller is registered as a
+    // plaintext-compat peer on this existing client.
+    connection?.addPlaintextPeer(payload.controller_amid);
+  }
+
+  const connectMs = Date.now() - connectStart;
+  if (!connection?.isConnected) {
+    return "❌ Connection reported success but isConnected=false. Please try again.";
   }
 
   // Send pair_request
@@ -321,23 +641,41 @@ async function meshPairHandler(...args: any[]): Promise<string> {
     return `❌ Failed to send pair request: ${err.message}`;
   }
 
-  // Wait for pair_response (up to 15s)
+  // Wait for pair_response. Short timeout: the controller's pair handler
+  // runs in <1s on a healthy cluster, so longer timeouts just stall the LLM.
+  // If the controller isn't there (mesh peer disabled or offline), failing
+  // fast is better than waiting.
+  const PAIR_TIMEOUT_MS = TIMEOUTS.PAIR_HANDSHAKE;
   let response: PairResponseMessage | null = null;
   try {
     response = await connection.waitForMessage<PairResponseMessage>(
-      (content) => {
+      (content, from) => {
         const msg = content as Record<string, unknown>;
-        if (msg?.type === "pair_response") return msg as unknown as PairResponseMessage;
-        return null;
+        if (msg?.type !== "pair_response") return null;
+        // Only accept from the controller we paired with (prevents spoofing).
+        if (from !== payload.controller_amid) return null;
+        return msg as unknown as PairResponseMessage;
       },
-      15_000
+      PAIR_TIMEOUT_MS,
     );
   } catch {
-    return "❌ Pairing timed out — no response from controller after 15s. Is the cluster online?";
+    // Distinguish "relay dead" from "controller silent"
+    const stillConnected = connection.isConnected;
+    if (!stillConnected) {
+      return `❌ Pairing lost relay connection mid-handshake (connect took ${connectMs}ms). The cluster or relay may be unhealthy.`;
+    }
+    return [
+      `❌ Pairing timed out after ${PAIR_TIMEOUT_MS / 1000}s — the relay is reachable but the cluster controller (${payload.controller_amid.slice(0, 16)}...) did not respond.`,
+      `  Common causes (in order of likelihood):`,
+      `    1. Mesh peer not enabled on the cluster — run \`azureclaw up\` on the cluster host (federation is on by default in current builds)`,
+      `    2. Controller pod is not Running — check \`kubectl get pods -n azureclaw-system\``,
+      `    3. Controller is not the leader yet — retry in 15s`,
+      `    4. Token belongs to a different cluster/relay — confirm the token is fresh`,
+    ].join("\n");
   }
 
   if (!response.success) {
-    return `❌ Pairing rejected: ${response.error || "Unknown error"}`;
+    return `❌ Pairing rejected by cluster: ${response.error || "Unknown error"}`;
   }
 
   // Persist pairing
@@ -366,22 +704,406 @@ async function meshPairHandler(...args: any[]): Promise<string> {
     `  Budget:        ${budgetStr} tokens`,
     `  Capabilities:  ${(response.capabilities_granted || []).join(", ")}`,
     `  Expires:       ${response.expires_at || "—"}`,
+    `  Relay RTT:     ${connectMs}ms (handshake)`,
     "",
     "You can now use cloud_offload to delegate tasks to the cloud.",
   ].join("\n");
 }
 
-async function cloudOffloadHandler(params: {
-  task: string;
-  files?: string[];
-  model?: string;
-  timeout_minutes?: number;
-}): Promise<string> {
+// ---------------------------------------------------------------------------
+// Offload helpers — stage tracking & background orchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Tell the cluster controller to tear down the offload ClawSandbox CRD so
+ * the reconciler stops keeping the pod alive. Best-effort: if the mesh is
+ * down or the controller rejects the message, we log and continue — the
+ * controller also has an idle-timeout fallback.
+ */
+async function sendOffloadCleanup(
+  requestId: string,
+  reason: "done" | "error" | "cancelled",
+): Promise<void> {
+  if (!connection || !activePairing?.controllerAmid) return;
+  try {
+    await connection.send(activePairing.controllerAmid, {
+      type: "offload_cleanup",
+      request_id: requestId,
+      reason,
+      timestamp: new Date().toISOString(),
+    });
+    console.log(`[mesh] offload[${requestId.slice(0, 8)}] cleanup requested (${reason})`);
+  } catch (err: any) {
+    console.warn(`[mesh] offload cleanup send failed: ${err?.message || err}`);
+  }
+}
+
+function recordStage(phase: OffloadPhase, message: string): void {
+  if (!activeOffload) return;
+  const prevPhase = activeOffload.phase;
+  activeOffload.phase = phase;
+  activeOffload.lastMessage = message;
+  activeOffload.events.push({
+    at: new Date().toISOString(),
+    phase,
+    message,
+  });
+  // Cap at last 40 events to keep memory bounded
+  if (activeOffload.events.length > 40) {
+    activeOffload.events.splice(0, activeOffload.events.length - 40);
+  }
+  // Mirror into the recent-offload ledger so dedup responses reflect current state.
+  const rec = RECENT_OFFLOADS.find((e) => e.requestId === activeOffload!.requestId);
+  if (rec) {
+    rec.status = phase;
+    rec.done = activeOffload.done === true;
+  }
+  console.log(`[mesh] offload[${activeOffload.requestId.slice(0, 8)}] ${phase}: ${message}`);
+
+  // Ambient push: progress ticks coalesce, phase transitions + file events
+  // queue distinct lines so the next outgoing message surfaces them all.
+  const shortId = activeOffload.requestId.slice(0, 8);
+  if (phase === "returning" && /Received output file/.test(message)) {
+    pushNotification({ requestId: activeOffload.requestId, kind: "file", line: `📥 [offload ${shortId}] ${message}` });
+  } else if (phase !== prevPhase) {
+    pushNotification({ requestId: activeOffload.requestId, kind: "phase", line: `ℹ️ [offload ${shortId}] phase → ${phase}: ${message}` });
+  } else {
+    pushNotification({ requestId: activeOffload.requestId, kind: "progress", line: `⚙️ [offload ${shortId}] ${message}` });
+  }
+}
+
+function failOffload(err: string): void {
+  if (!activeOffload) return;
+  activeOffload.phase = "error";
+  activeOffload.lastMessage = err;
+  activeOffload.error = err;
+  activeOffload.done = true;
+  activeOffload.events.push({
+    at: new Date().toISOString(),
+    phase: "error",
+    message: err,
+  });
+  console.log(`[mesh] offload[${activeOffload.requestId.slice(0, 8)}] FAILED: ${err}`);
+  pushNotification({
+    requestId: activeOffload.requestId,
+    kind: "error",
+    line: `❌ [offload ${activeOffload.requestId.slice(0, 8)}] failed: ${err}`,
+  });
+}
+
+/**
+ * Background orchestrator for cloud_offload. Drives the state machine:
+ * submitted → validating → spawning → scheduled → ready → connecting →
+ * verifying (sandbox ping) → uploading → dispatching → running → done.
+ *
+ * Runs detached; the LLM gets immediate feedback from cloud_offload and
+ * polls progress via offload_status.
+ */
+async function runOffloadOrchestrator(
+  conn: MeshConnection,
+  controllerAmid: string,
+  request: OffloadRequestMessage,
+  validFiles: string[],
+): Promise<void> {
+  const requestId = request.request_id;
+
+  // Phase 1: Send offload request to controller (matchmaker)
+  try {
+    await conn.send(controllerAmid, request);
+    recordStage("submitted", "Offload request sent to cluster controller");
+  } catch (err: any) {
+    failOffload(`Failed to send offload request: ${err.message}`);
+    return;
+  }
+
+  // Phase 2: Wait for controller to report "ready" with sandbox_name.
+  // Also absorb intermediate phases (validating/spawning/scheduled) for UX.
+  const readyTimeoutMs = 5 * 60 * 1000;
+  let sandboxName: string | null = null;
+
+  try {
+    const readyStatus = await conn.waitForMessage<OffloadStatusMessage>(
+      (content, from) => {
+        if (from !== controllerAmid) return null;
+        const msg = content as Record<string, unknown>;
+        if (msg?.request_id !== requestId) return null;
+
+        if (msg?.type === "offload_error") {
+          throw new Error(`${msg.error} (phase: ${msg.phase})`);
+        }
+
+        if (msg?.type === "offload_status") {
+          const phase = String(msg.phase) as OffloadPhase;
+          const statusMsg = String(msg.message ?? "");
+          // Stream intermediate phases into our tracker.
+          if (phase === "validating" || phase === "spawning" || phase === "scheduled") {
+            recordStage(phase, statusMsg || `Controller: ${phase}`);
+            return null; // keep waiting
+          }
+          if (phase === "ready" && msg.sandbox_name) {
+            return msg as unknown as OffloadStatusMessage;
+          }
+        }
+        return null;
+      },
+      readyTimeoutMs,
+    );
+    sandboxName = readyStatus.sandbox_name || null;
+  } catch (err: any) {
+    failOffload(`Controller did not deliver sandbox: ${err.message}`);
+    return;
+  }
+
+  if (!sandboxName || !activeOffload) {
+    failOffload("Controller reported ready but no sandbox name — cannot proceed.");
+    return;
+  }
+
+  activeOffload.sandboxName = sandboxName;
+  recordStage("ready", `Sandbox '${sandboxName}' is running`);
+
+  // Phase 3: Discover sandbox AMID via registry (sandbox auto-registers on boot)
+  recordStage("connecting", `Discovering sandbox '${sandboxName}' on the mesh`);
+  let sandboxAmid: string | null = null;
+  const discoveryAttempts = 15;
+  for (let i = 0; i < discoveryAttempts; i++) {
+    try {
+      sandboxAmid = await conn.resolveAmid(sandboxName);
+    } catch { /* registry hiccup, retry */ }
+    if (sandboxAmid) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  if (!sandboxAmid) {
+    failOffload(`Could not discover sandbox '${sandboxName}' on the mesh after ${discoveryAttempts} attempts. The sandbox may have failed to register.`);
+    return;
+  }
+
+  activeOffload.sandboxAmid = sandboxAmid;
+
+  // Phase 3b: Race for proactive sandbox hello. The sandbox reads OFFLOAD_*
+  // env vars set by the controller and auto-sends `offload_hello` the moment
+  // its mesh is up. If we receive hello within the window, skip the ping +
+  // upload + dispatch round-trip entirely — the sandbox already has the task
+  // and is running it. If no hello (older sandbox image, or env path failed),
+  // fall back to the legacy ping/upload/dispatch flow for backward compat.
+  //
+  // Window sized for cold-start cost: controller signals `ready` when the pod
+  // is Running (2/2 containers live), but the openclaw plugin still needs to
+  // finish Node startup + plugin load + AGT relay connect before it can send
+  // `offload_hello`. Typical 25–40s on AKS cold starts; Kata/confidential
+  // sandboxes can hit 90–120s, plus the 120s Entra token-retry budget in
+  // the sandbox entrypoint. TIMEOUTS.COLD_START (default 180s) spans both.
+  const HELLO_WAIT_MS = TIMEOUTS.COLD_START;
+  let helloReceived = false;
+  try {
+    const hello = await conn.waitForMessage(
+      (content, from) => {
+        if (from !== sandboxAmid) return null;
+        const m = content as Record<string, unknown>;
+        if (m?.type === "offload_hello" && m?.request_id === requestId) {
+          return m;
+        }
+        return null;
+      },
+      HELLO_WAIT_MS,
+    );
+    if (hello) {
+      helloReceived = true;
+      if (activeOffload) activeOffload.helloReceivedAt = Date.now();
+      const preview = String((hello as any).task_preview || "").slice(0, 80);
+      recordStage(
+        "acknowledged",
+        `Sandbox announced itself (proactive) — task received and executing${preview ? ": " + preview : ""}`,
+      );
+      recordStage("running", "Sandbox is executing the task — progress will stream via mesh");
+    }
+  } catch { /* waitForMessage may throw on timeout in some impls — fall through */ }
+
+  if (helloReceived) {
+    // Sandbox is self-driving via OFFLOAD_* env. Files (if any) were passed
+    // via env as well by the controller for this path. Progress, file_transfer
+    // outputs, and offload_done will arrive via inbox and be consumed by
+    // offload_status. Orchestrator work is complete.
+    if (validFiles.length > 0) {
+      // Upload files after hello so the sandbox has them available during
+      // execution. This is a best-effort path — sandbox runs even without.
+      recordStage("uploading", `Uploading ${validFiles.length} file(s) to self-driving sandbox`);
+      for (const filePath of validFiles) {
+        const fileName = path.basename(filePath);
+        try {
+          const ack = await conn.sendFile(sandboxAmid, filePath, {
+            description: `Offload file for request ${requestId}`,
+            timeoutMs: TIMEOUTS.PROGRESS,
+            retries: RETRIES.PROGRESS.count,
+          });
+          if (ack.success) {
+            activeOffload.filesSent++;
+            recordStage("uploading", `Uploaded ${activeOffload.filesSent}/${validFiles.length}: ${fileName}`);
+          }
+        } catch { /* best-effort, sandbox may have inline copy */ }
+      }
+      recordStage("running", "Files uploaded — sandbox continuing execution");
+    }
+    return;
+  }
+
+  // ── Legacy fallback path (sandbox did NOT announce via offload_hello) ──
+  // Older sandbox images don't set up proactive offload; use round-trip flow.
+
+  // Phase 4: Sandbox ping verification — confirm the sandbox is actually
+  // reachable on the mesh (not just registered) BEFORE sending files/task.
+  recordStage("verifying", `Pinging sandbox at ${sandboxAmid.slice(0, 16)}... to verify E2E reachability`);
+  try {
+    const { rttMs } = await conn.pingPeer(sandboxAmid, {
+      timeoutMs: TIMEOUTS.PING,
+      retries: RETRIES.PING.count,
+    });
+    activeOffload.pingRttMs = rttMs;
+    recordStage("verifying", `Sandbox acknowledged ping (rtt ${rttMs}ms) — ready for files/task`);
+  } catch (err: any) {
+    failOffload(`Sandbox '${sandboxName}' is registered but not responding to mesh pings: ${err.message}`);
+    return;
+  }
+
+  // Phase 5: Upload files (if any) — per-file ACKs already built into sendFile
+  if (validFiles.length > 0) {
+    recordStage("uploading", `Uploading ${validFiles.length} file(s) to sandbox`);
+    for (const filePath of validFiles) {
+      const fileName = path.basename(filePath);
+      try {
+        const ack = await conn.sendFile(sandboxAmid, filePath, {
+          description: `Offload file for request ${requestId}`,
+          timeoutMs: TIMEOUTS.PROGRESS,
+          retries: RETRIES.PROGRESS.count,
+        });
+        if (!ack.success) {
+          failOffload(`File transfer failed for '${fileName}': ${ack.error || "no ACK"}`);
+          return;
+        }
+        activeOffload.filesSent++;
+        recordStage("uploading", `Uploaded ${activeOffload.filesSent}/${validFiles.length}: ${fileName}`);
+      } catch (err: any) {
+        failOffload(`File transfer error for '${fileName}': ${err.message}`);
+        return;
+      }
+    }
+  }
+
+  // Phase 6: Dispatch the task and require an ack from the sandbox.
+  // Sandbox responds with { type: "task_received", request_id } on receipt.
+  recordStage("dispatching", "Sending task to sandbox and awaiting acknowledgment");
+  try {
+    await conn.sendWithAck(
+      sandboxAmid,
+      {
+        type: "offload_task",
+        request_id: requestId,
+        task: request.task,
+        files: request.files,
+        from_agent: conn.amid,
+        timestamp: new Date().toISOString(),
+      },
+      (content, from) => {
+        if (from !== sandboxAmid) return null;
+        const m = content as Record<string, unknown>;
+        if (m?.type === "task_received" && m?.request_id === requestId) {
+          return m;
+        }
+        return null;
+      },
+      { timeoutMs: TIMEOUTS.ACK, retries: RETRIES.ACK.count, retryDelayMs: RETRIES.ACK.delayMs },
+    );
+    if (activeOffload) activeOffload.taskAckedAt = Date.now();
+    recordStage("running", "Sandbox acknowledged task — execution in progress");
+  } catch (err: any) {
+    // Task may still have been received; surface a clear warning but mark failed.
+    failOffload(`Sandbox did not acknowledge task receipt: ${err.message}`);
+    return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// cloud_offload — immediate return, background orchestrator drives stages
+// ---------------------------------------------------------------------------
+
+async function cloudOffloadHandler(...args: any[]): Promise<string> {
+  const raw = extractParams(args);
+
+  // Accept param aliases — LLMs frequently pass `prompt`, `description`,
+  // `request`, or `content` instead of the declared `task`. Normalize here.
+  const params: {
+    task: string;
+    files?: string[];
+    model?: string;
+    timeout_minutes?: number;
+    force?: boolean;
+  } = {
+    task: String(
+      (raw as any).task ??
+      (raw as any).prompt ??
+      (raw as any).description ??
+      (raw as any).request ??
+      (raw as any).content ??
+      (raw as any).instruction ??
+      (raw as any).query ??
+      "",
+    ),
+    files: Array.isArray((raw as any).files)
+      ? ((raw as any).files as string[])
+      : Array.isArray((raw as any).file_paths)
+        ? ((raw as any).file_paths as string[])
+        : undefined,
+    model: typeof (raw as any).model === "string" ? (raw as any).model : undefined,
+    timeout_minutes: typeof (raw as any).timeout_minutes === "number"
+      ? (raw as any).timeout_minutes
+      : typeof (raw as any).timeout === "number"
+        ? (raw as any).timeout
+        : undefined,
+    force: (raw as any).force === true || (raw as any).force === "true",
+  };
+
+  if (!params.task || !params.task.trim()) {
+    return "❌ cloud_offload requires a `task` parameter describing what the sandbox should do. " +
+           "Aliases accepted: task, prompt, description, request, content, instruction, query.";
+  }
+
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!activePairing) return "❌ Not paired with any AzureClaw cluster. Use mesh_pair first.";
-  if (!connection?.isConnected) return "❌ Mesh connection lost. Reconnecting...";
-  if (activeOffload) return `❌ Offload already in progress (${activeOffload.requestId}). Use offload_status to check.`;
+  if (!connection?.isConnected) {
+    // Attempt a one-shot reconnect before failing — avoids hard failure on
+    // transient WebSocket flaps. If the connection is still broken, bail with
+    // a clear message.
+    try { await connection?.connect(); } catch { /* noop */ }
+    if (!connection?.isConnected) {
+      return "❌ Mesh connection is not live. Wait for automatic reconnect or call mesh_pair again.";
+    }
+  }
+  if (activeOffload && !activeOffload.done) {
+    return `❌ Offload already in progress (${activeOffload.requestId}). Use \`/offload\` for status or \`/offload cancel\` to abort.`;
+  }
+
+  // Dedup: LLMs at high context saturation often re-emit the same tool call
+  // from stale history. Unless the user explicitly asks to re-run (force=true),
+  // return the existing offload's status instead of spawning a duplicate
+  // sandbox on the cluster.
+  if (!params.force) {
+    const dup = findRecentDuplicateOffload(params.task);
+    if (dup) {
+      const ageSec = Math.round((Date.now() - dup.submittedAt) / 1000);
+      return [
+        `⚠️  This task was already offloaded ${ageSec}s ago — not starting a new sandbox.`,
+        "",
+        `  Existing request ID: ${dup.requestId}`,
+        `  Status:              ${dup.status}${dup.done ? " (done)" : " (in progress)"}`,
+        "",
+        "Use `offload_status` to check progress.",
+        "To run this task again anyway (e.g., user explicitly requested a re-run),",
+        "pass `force: true` to cloud_offload.",
+      ].join("\n");
+    }
+  }
 
   const requestId = crypto.randomUUID();
 
@@ -416,164 +1138,119 @@ async function cloudOffloadHandler(params: {
     timestamp: new Date().toISOString(),
   };
 
-  // Phase 1: Send offload request to controller (matchmaker)
-  try {
-    await connection.send(activePairing.controllerAmid, request);
-  } catch (sendErr: any) {
-    return `❌ Failed to send offload request: ${sendErr.message}`;
-  }
+  // Initialize tracker BEFORE launching orchestrator so the first
+  // recordStage() call has state to write into.
+  activeOffload = {
+    requestId,
+    startedAt: Date.now(),
+    filesTotal: validFiles.length,
+    filesSent: 0,
+    phase: "submitted",
+    lastMessage: "Dispatching offload request",
+    events: [],
+    receivedFiles: [],
+  };
+  recordStage("submitted", "Validating offload request locally");
+  recordRecentOffload(requestId, params.task);
 
-  activeOffload = { requestId, startedAt: Date.now(), phase: "submitted" };
+  // Background orchestrator — does NOT block the LLM round.
+  // Errors are captured into activeOffload via failOffload(); the LLM polls
+  // via offload_status to observe progress.
+  setImmediate(() => {
+    runOffloadOrchestrator(connection!, activePairing!.controllerAmid, request, validFiles)
+      .catch((err) => {
+        failOffload(`Orchestrator crashed: ${err?.message || String(err)}`);
+      });
+  });
 
-  // Phase 2: Wait for controller to spawn sandbox and report "ready" with sandbox_name.
-  // Controller flow: validate pairing → create CRD → wait for pod Running → send sandbox_name.
-  // This can take up to ~5 minutes (image pull, scheduling).
-  const readyTimeoutMs = 5 * 60 * 1000;
-  let sandboxName: string | null = null;
-
-  try {
-    const readyStatus = await connection.waitForMessage<OffloadStatusMessage>(
-      (content) => {
-        const msg = content as Record<string, unknown>;
-        if (msg?.request_id !== requestId) return null;
-
-        // Handle errors at any phase
-        if (msg?.type === "offload_error") {
-          throw new Error(`${msg.error} (phase: ${msg.phase})`);
-        }
-
-        // Absorb intermediate statuses (validating, spawning, scheduled)
-        if (msg?.type === "offload_status") {
-          activeOffload!.phase = String(msg.phase);
-          if (msg.phase === "ready" && msg.sandbox_name) {
-            return msg as unknown as OffloadStatusMessage;
-          }
-        }
-        return null;
-      },
-      readyTimeoutMs,
-    );
-    sandboxName = readyStatus.sandbox_name || null;
-  } catch (waitErr: any) {
-    activeOffload = null;
-    return `❌ Offload failed: ${waitErr.message}`;
-  }
-
-  if (!sandboxName) {
-    activeOffload = null;
-    return "❌ Controller reported ready but no sandbox name — cannot proceed.";
-  }
-
-  activeOffload.sandboxName = sandboxName;
-  activeOffload.phase = "connecting";
-
-  // Phase 3: Discover sandbox AMID via registry
-  let sandboxAmid: string | null = null;
-  const discoveryRetries = 10;
-  for (let i = 0; i < discoveryRetries; i++) {
-    sandboxAmid = await connection.resolveAmid(sandboxName);
-    if (sandboxAmid) break;
-    await new Promise((r) => setTimeout(r, 3000)); // sandbox may still be registering
-  }
-
-  if (!sandboxAmid) {
-    activeOffload = null;
-    return `❌ Could not find sandbox '${sandboxName}' on the mesh after ${discoveryRetries} attempts. It may have failed to start.`;
-  }
-
-  activeOffload.sandboxAmid = sandboxAmid;
-
-  // Phase 4: Send files directly to sandbox (if any)
-  if (validFiles.length > 0) {
-    activeOffload.phase = "uploading";
-    activeOffload.filesSent = 0;
-
-    for (const filePath of validFiles) {
-      const fileName = path.basename(filePath);
-      try {
-        const ack = await connection.sendFile(sandboxAmid, filePath, {
-          description: `Offload file for request ${requestId}`,
-          timeoutMs: 30_000,
-          retries: 3,
-        });
-
-        if (!ack.success) {
-          activeOffload = null;
-          return `❌ File transfer failed for '${fileName}': ${ack.error || "no ACK"}`;
-        }
-
-        activeOffload.filesSent = (activeOffload.filesSent || 0) + 1;
-      } catch (ftErr: any) {
-        activeOffload = null;
-        return `❌ File transfer error for '${fileName}': ${ftErr.message}`;
-      }
-    }
-  }
-
-  // Phase 5: Send the task to sandbox directly via mesh
-  activeOffload.phase = "running";
-  try {
-    await connection.send(sandboxAmid, {
-      type: "offload_task",
-      request_id: requestId,
-      task: params.task,
-      files: validFiles.map((f) => path.basename(f)),
-      from_agent: connection.amid,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (taskErr: any) {
-    activeOffload = null;
-    return `❌ Failed to send task to sandbox: ${taskErr.message}`;
-  }
-
-  // Return immediately — sandbox works asynchronously.
-  // Results arrive via mesh (offload_done, file_transfer) and are picked up by offload_status.
   const filesInfo = validFiles.length > 0
-    ? `${validFiles.length} file(s) (${(totalBytes / 1024).toFixed(1)} KB) uploaded`
+    ? `${validFiles.length} file(s) (${(totalBytes / 1024).toFixed(1)} KB) queued`
     : "no files";
 
   return [
-    `☁️ Offload running`,
+    `☁️ Offload submitted — orchestrating in background`,
     "",
-    `  Request ID:  ${requestId}`,
-    `  Sandbox:     ${sandboxName}`,
-    `  Task:        ${params.task.slice(0, 100)}${params.task.length > 100 ? "..." : ""}`,
-    `  Files:       ${filesInfo}`,
-    `  Timeout:     ${params.timeout_minutes || 30}m`,
+    `  Request ID:    ${requestId}`,
+    `  Model:         ${params.model || "default"}`,
+    `  Task:          ${params.task.slice(0, 120)}${params.task.length > 120 ? "..." : ""}`,
+    `  Files:         ${filesInfo}`,
+    `  Timeout:       ${params.timeout_minutes || 30}m`,
     "",
-    "The sandbox is working on your task. Use offload_status to check progress.",
-    "Results and output files will arrive automatically via mesh.",
+    "Stages will progress automatically. Poll with offload_status to see:",
+    "  • Controller validating / spawning sandbox",
+    "  • Sandbox ready + discovered on mesh",
+    "  • Mesh ping verification (RTT)",
+    "  • File upload progress (per-file ACKs)",
+    "  • Task dispatched + acknowledged by sandbox",
+    "  • Final results and output files (auto-saved to ~/.azureclaw-mesh/incoming/)",
   ].join("\n");
 }
 
-async function offloadStatusHandler(_params: Record<string, unknown>): Promise<string> {
+// ---------------------------------------------------------------------------
+// offload_status — polls tracker + inbox; no blocking waits
+// ---------------------------------------------------------------------------
+
+// Extract the first object-shaped argument from a (tool_call_id, params) call.
+// OpenClaw gateway invokes non-bundled plugin handlers with this signature.
+function extractParams(args: any[]): Record<string, unknown> {
+  for (const a of args) {
+    if (a && typeof a === "object" && !Array.isArray(a)) {
+      return a as Record<string, unknown>;
+    }
+  }
+  return {};
+}
+
+async function offloadStatusHandler(..._args: any[]): Promise<string> {
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!connection) return "❌ Mesh client not connected.";
   if (!activeOffload) return "No active offload. Use cloud_offload to start one.";
 
-  const inbox = connection.getInbox();
+  // Snapshot-only: drain inbox once, return immediately. Ambient updates are
+  // delivered out-of-band via the message_sending hook, /offload slash command,
+  // and a background drain service — so we never block the LLM turn on polling.
+  await drainOffloadInbox();
+
+  const elapsed = Math.round((Date.now() - activeOffload.startedAt) / 1000);
+  activeOffload.lastPolledAt = Date.now();
+  activeOffload.lastPolledEventCount = activeOffload.events.length;
+  return renderOffloadStatus(elapsed);
+}
+
+/** Shared inbox-draining logic used by both the initial pass and long-poll ticks. */
+async function drainOffloadInbox(): Promise<void> {
+  if (!activeOffload || !connection) return;
   const requestId = activeOffload.requestId;
   const sandboxAmid = activeOffload.sandboxAmid;
-  const elapsed = Math.round((Date.now() - activeOffload.startedAt) / 1000);
 
-  // Scan inbox for messages from the sandbox or controller about this offload
+  const claimed = connection.consumeInbox((m) => {
+    const c = m.content as Record<string, unknown> | null;
+    if (!c) return false;
+    if (c.request_id === requestId) return true;
+    if (sandboxAmid && m.from === sandboxAmid) return true;
+    return false;
+  });
+
   let latestProgress: OffloadProgressMessage | null = null;
   let doneMsg: OffloadDoneMessage | null = null;
   let errorMsg: OffloadErrorMessage | null = null;
-  const receivedFiles: string[] = [];
 
-  for (const msg of inbox) {
+  for (const msg of claimed) {
     const content = msg.content as Record<string, unknown>;
-    if (!content) continue;
-
-    // Match by request_id or by sender (sandbox AMID)
-    const matchesRequest = content.request_id === requestId;
-    const matchesSandbox = sandboxAmid && msg.from === sandboxAmid;
-
-    if (!matchesRequest && !matchesSandbox) continue;
-
     switch (content.type) {
+      case "offload_hello":
+        if (sandboxAmid && msg.from === sandboxAmid && content.request_id === activeOffload.requestId) {
+          if (!activeOffload.helloReceivedAt) {
+            activeOffload.helloReceivedAt = Date.now();
+            const preview = String(content.task_preview || "").slice(0, 80);
+            recordStage(
+              "acknowledged",
+              `Sandbox announced itself (late)${preview ? ": " + preview : ""}`,
+            );
+          }
+        }
+        break;
       case "offload_progress":
         latestProgress = content as unknown as OffloadProgressMessage;
         break;
@@ -584,16 +1261,19 @@ async function offloadStatusHandler(_params: Record<string, unknown>): Promise<s
         errorMsg = content as unknown as OffloadErrorMessage;
         break;
       case "file_transfer":
-        // Auto-save incoming file from sandbox
-        if (matchesSandbox && content.file_name) {
+        if (sandboxAmid && msg.from === sandboxAmid && content.file_name) {
           try {
-            const result = await connection!.handleFileTransfer(
+            const result = await connection.handleFileTransfer(
               msg.from,
-              content as Record<string, unknown>,
+              content,
               INCOMING_DIR,
             );
             if (result) {
-              receivedFiles.push(`${result.fileName} (${(result.sizeBytes / 1024).toFixed(1)} KB) → ${result.savedPath}`);
+              activeOffload.receivedFiles.push(result);
+              recordStage(
+                "returning",
+                `Received output file: ${result.fileName} (${(result.sizeBytes / 1024).toFixed(1)} KB)`,
+              );
             }
           } catch { /* best effort */ }
         }
@@ -601,71 +1281,175 @@ async function offloadStatusHandler(_params: Record<string, unknown>): Promise<s
     }
   }
 
-  if (errorMsg) {
-    activeOffload = null;
-    return `❌ Offload failed (phase: ${errorMsg.phase}): ${errorMsg.error}`;
+  if (errorMsg && activeOffload.phase !== "error") {
+    failOffload(`Sandbox reported error (phase: ${errorMsg.phase}): ${errorMsg.error}`);
+    try {
+      void sendOffloadCleanup(activeOffload.requestId, "error");
+    } catch { /* best effort */ }
   }
 
-  if (doneMsg) {
-    activeOffload = null;
-    const totalTokens = (doneMsg.tokens_used?.prompt || 0) + (doneMsg.tokens_used?.completion || 0);
+  if (latestProgress && !activeOffload.done) {
+    recordStage(
+      "running",
+      `${latestProgress.stage} ${latestProgress.pct}% — ${latestProgress.message}`,
+    );
+  }
+
+  if (doneMsg && !activeOffload.done) {
+    activeOffload.phase = "done";
+    activeOffload.done = true;
+    activeOffload.doneSummary = doneMsg.summary;
+    activeOffload.doneFiles = doneMsg.output_files || [];
+    activeOffload.tokensUsed = doneMsg.tokens_used;
+    activeOffload.durationSeconds = doneMsg.duration_seconds;
+    activeOffload.lastMessage = "Task complete";
+    const shortId = activeOffload.requestId.slice(0, 8);
+    const fileSuffix = (doneMsg.output_files ?? []).length > 0
+      ? ` — files: ${(doneMsg.output_files ?? []).join(", ")}`
+      : "";
+    pushNotification({
+      requestId: activeOffload.requestId,
+      kind: "done",
+      line: `✅ [offload ${shortId}] complete (${doneMsg.duration_seconds ?? "?"}s)${fileSuffix}`,
+    });
+    // Fire-and-forget cleanup request to the controller so the ClawSandbox CRD
+    // is torn down (and the reconciler stops keeping the offload pod alive).
+    try {
+      void sendOffloadCleanup(activeOffload.requestId, "done");
+    } catch { /* best effort */ }
+  }
+}
+
+function renderOffloadStatus(elapsed: number): string {
+  if (!activeOffload) return "No active offload.";
+
+  if (activeOffload.phase === "done" && activeOffload.doneSummary !== undefined) {
+    const total = (activeOffload.tokensUsed?.prompt ?? 0) + (activeOffload.tokensUsed?.completion ?? 0);
     const lines = [
       `✅ Offload complete`,
       "",
-      `  Duration:     ${doneMsg.duration_seconds}s`,
-      `  Tokens used:  ${totalTokens.toLocaleString()}`,
+      `  Request ID:    ${activeOffload.requestId}`,
+      `  Duration:      ${activeOffload.durationSeconds ?? elapsed}s`,
+      `  Tokens used:   ${total.toLocaleString()}`,
     ];
-    if (doneMsg.output_files.length > 0) {
-      lines.push(`  Output files: ${doneMsg.output_files.join(", ")}`);
+    if ((activeOffload.doneFiles ?? []).length > 0) {
+      lines.push(`  Output files:  ${(activeOffload.doneFiles ?? []).join(", ")}`);
     }
-    if (receivedFiles.length > 0) {
-      lines.push(`  Saved files:  ${receivedFiles.length}`);
-      for (const f of receivedFiles) {
-        lines.push(`    • ${f}`);
+    if (activeOffload.receivedFiles.length > 0) {
+      lines.push(`  Saved files:   ${activeOffload.receivedFiles.length}`);
+      for (const f of activeOffload.receivedFiles) {
+        lines.push(`    • ${f.fileName} (${(f.sizeBytes / 1024).toFixed(1)} KB) → ${f.savedPath}`);
       }
     }
-    lines.push("", doneMsg.summary);
-    return lines.join("\n");
+    lines.push("", activeOffload.doneSummary);
+    // Clear after delivery so next cloud_offload can run
+    const out = lines.join("\n");
+    activeOffload = null;
+    return out;
   }
 
-  if (latestProgress) {
-    return `☁️ Running (${latestProgress.pct}%) — ${latestProgress.stage}: ${latestProgress.message} [${elapsed}s]`;
+  if (activeOffload.phase === "error") {
+    const out = [
+      `❌ Offload failed [${elapsed}s]`,
+      "",
+      `  Request ID:    ${activeOffload.requestId}`,
+      `  Phase:         ${activeOffload.events[activeOffload.events.length - 2]?.phase || "?"}`,
+      `  Error:         ${activeOffload.error || activeOffload.lastMessage}`,
+    ].join("\n");
+    activeOffload = null;
+    return out;
   }
 
-  // Show current phase from the offload tracker
-  const phase = activeOffload.phase || "running";
-  const sandbox = activeOffload.sandboxName || "pending";
-  const filesInfo = activeOffload.filesSent
-    ? `${activeOffload.filesSent} file(s) sent`
-    : "";
+  const phaseIcon: Record<OffloadPhase, string> = {
+    submitted: "📤",
+    validating: "🔎",
+    spawning: "🚀",
+    scheduled: "📅",
+    ready: "🟢",
+    connecting: "🔗",
+    acknowledged: "👋",
+    verifying: "🏓",
+    uploading: "📦",
+    dispatching: "📬",
+    running: "⚙️",
+    returning: "📥",
+    done: "✅",
+    error: "❌",
+  };
 
-  return [
+  const lines: string[] = [
     `☁️ Offload in progress [${elapsed}s]`,
-    `  Phase:   ${phase}`,
-    `  Sandbox: ${sandbox}`,
-    filesInfo ? `  Files:   ${filesInfo}` : "",
     "",
-    "Waiting for results from sandbox...",
-  ].filter(Boolean).join("\n");
+    `  Request ID:    ${activeOffload.requestId}`,
+    `  Sandbox:       ${activeOffload.sandboxName || "— (awaiting controller)"}`,
+    `  Phase:         ${phaseIcon[activeOffload.phase] || "•"} ${activeOffload.phase}`,
+    `  Current:       ${activeOffload.lastMessage}`,
+  ];
+  if (activeOffload.pingRttMs !== undefined) {
+    lines.push(`  Sandbox ping:  ${activeOffload.pingRttMs}ms RTT`);
+  }
+  if (activeOffload.filesTotal > 0) {
+    lines.push(`  Files:         ${activeOffload.filesSent}/${activeOffload.filesTotal} uploaded`);
+  }
+  if (activeOffload.taskAckedAt) {
+    const ackAge = Math.round((Date.now() - activeOffload.taskAckedAt) / 1000);
+    lines.push(`  Task ack:      ${ackAge}s ago`);
+  }
+
+  // Recent events (last 5) for trail
+  const recent = activeOffload.events.slice(-5);
+  if (recent.length > 1) {
+    lines.push("", "  Recent stages:");
+    for (const e of recent) {
+      lines.push(`    • ${e.phase}: ${e.message}`);
+    }
+  }
+
+  lines.push("", "Results and output files will arrive automatically via mesh.");
+  return lines.join("\n");
 }
 
-async function meshSendHandler(params: {
-  to: string;
-  message: string;
-}): Promise<string> {
+async function meshSendHandler(...args: any[]): Promise<string> {
+  const params = extractParams(args) as {
+    to?: string; to_amid?: string; to_agent?: string; target?: string; amid?: string; recipient?: string;
+    message?: string; content?: string; body?: string; text?: string;
+  };
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!connection?.isConnected) return "❌ Mesh client not connected. Pair first with mesh_pair.";
 
+  // LLMs frequently use parameter aliases — accept common variants.
+  const to = params.to ?? params.to_amid ?? params.to_agent ?? params.target ?? params.amid ?? params.recipient;
+  const message = params.message ?? params.content ?? params.body ?? params.text;
+  if (!to || typeof to !== "string") {
+    return "❌ mesh_send requires `to` (AMID or agent name). Use `discover` to list known agents.";
+  }
+  if (!message || typeof message !== "string") {
+    return "❌ mesh_send requires `message` content.";
+  }
+
+  // Resolve a display-name to an AMID if needed (AMIDs are ~27+ char base58).
+  let targetAmid = to;
+  if (!/^[A-Za-z0-9]{20,}$/.test(to) && connection) {
+    try {
+      const resolved = await connection.resolveAmid(to);
+      if (resolved) targetAmid = resolved;
+    } catch {
+      // fall through; registry resolution is best-effort
+    }
+  }
+
   try {
-    await connection.send(params.to, { type: "message", content: params.message });
-    return `✓ Message sent to ${params.to} (E2E encrypted)`;
+    await connection.send(targetAmid, { type: "message", content: message });
+    const shown = targetAmid === to ? targetAmid : `${to} (${targetAmid.slice(0, 16)}...)`;
+    return `✓ Message sent to ${shown} (E2E encrypted)`;
   } catch (err: any) {
     return `❌ Send failed: ${err.message}`;
   }
 }
 
-async function meshInboxHandler(params: { limit?: number }): Promise<string> {
+async function meshInboxHandler(...args: any[]): Promise<string> {
+  const params = extractParams(args) as { limit?: number };
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!connection) return "❌ Mesh client not connected.";
@@ -686,10 +1470,8 @@ async function meshInboxHandler(params: { limit?: number }): Promise<string> {
   return `📬 ${messages.length} message(s):\n${lines.join("\n")}`;
 }
 
-async function discoverHandler(params: {
-  capability?: string;
-  limit?: number;
-}): Promise<string> {
+async function discoverHandler(...args: any[]): Promise<string> {
+  const params = extractParams(args) as { capability?: string; limit?: number };
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!connection) return "❌ Mesh client not connected.";
