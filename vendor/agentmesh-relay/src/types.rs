@@ -154,6 +154,13 @@ pub enum ErrorCode {
     InternalError,
     ProtocolMismatch,
     Unauthorized,
+    /// This connection has been superseded by a newer session for the same AMID.
+    /// Sent to the OLD connection right before it is dropped so the client can
+    /// distinguish supersede from network drop and skip the reconnect storm.
+    SessionReplaced,
+    /// The relay did not receive a Pong within the keepalive window and is
+    /// force-closing this connection. The client should reconnect.
+    PingTimeout,
 }
 
 /// Stored message for offline delivery

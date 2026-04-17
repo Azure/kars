@@ -16,6 +16,7 @@
 
 - [Channels & Plugins](channels-plugins.md) — Telegram, Slack, Discord, WhatsApp, search plugins, Foundry Bing Grounding
 - [Architecture — Foundry Integration](architecture.md#foundry-standalone-apis-18-api-groups-imds-auth) — Responses API, Memory Store, Foundry IQ
+- [Any-OpenClaw + Cloud Offload](any-openclaw-cloud-offload.md) — Run the `azureclaw-mesh` plugin in *any* OpenClaw host (NemoClaw, laptop, …) and offload tasks to AzureClaw sandboxes over Signal E2E
 
 ## Operations
 

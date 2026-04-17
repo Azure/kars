@@ -1,5 +1,11 @@
 # Migrating from NemoClaw to AzureClaw
 
+> **Keeping both?** If you want NemoClaw (or any other OpenClaw host) to
+> **stay put** and just offload heavy work to an AzureClaw cluster over
+> Signal-encrypted mesh, see
+> [Any-OpenClaw + Cloud Offload](any-openclaw-cloud-offload.md) instead.
+> This page covers full migration off NemoClaw.
+
 ## Concept Mapping
 
 | NemoClaw | AzureClaw |
