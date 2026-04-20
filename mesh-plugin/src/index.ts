@@ -281,12 +281,17 @@ export function definePluginEntry() {
         {
           name: "offload_status",
           description:
-            "Return a snapshot of the currently active cloud offload. " +
-            "Non-blocking; returns immediately. " +
-            "You almost never need to call this: offload progress is pushed to " +
-            "the user automatically via ambient notifications, and the user can " +
-            "type `/offload` for an instant status line. Call this only when " +
-            "the user explicitly asks you to fetch status on their behalf.",
+            "Return a snapshot of the currently active cloud offload (state, " +
+            "request id, start time, last update). Non-blocking — returns " +
+            "immediately. Call this tool ONCE when the user asks about the " +
+            "status, progress, or state of a cloud offload (e.g. 'how is " +
+            "the offload going?', 'offload status', 'what's happening with " +
+            "the cloud task?'). Do NOT answer those questions from memory " +
+            "and do NOT tell the user to type a slash command — invoke this " +
+            "tool. Strict rule: call AT MOST ONCE per user message. Do NOT " +
+            "call it again in the same turn or in a loop — if the handler " +
+            "returns 'no change', stop polling and wait for the next user " +
+            "message or a completion event.",
           parameters: {
             type: "object",
             properties: {},
@@ -294,7 +299,6 @@ export function definePluginEntry() {
           handler: offloadStatusHandler,
           execute: offloadStatusHandler,
         },
-        { optional: true },
       );
 
       // ── offload_cancel ──
@@ -367,7 +371,11 @@ export function definePluginEntry() {
       api.registerTool({
         name: "mesh_inbox",
         description:
-          "Read incoming messages from the E2E encrypted mesh inbox.",
+          "Read incoming messages from the E2E encrypted mesh inbox. " +
+          "Call this whenever the user asks you to check the inbox, check " +
+          "for replies, or see if a peer/cloud agent has responded. It is " +
+          "safe to call at any time, including during an active cloud " +
+          "offload — the user may ask you to peek at raw mesh traffic.",
         parameters: {
           type: "object",
           properties: {
@@ -1117,7 +1125,9 @@ async function cloudOffloadHandler(...args: any[]): Promise<string> {
         `  Existing request ID: ${dup.requestId}`,
         `  Status:              ${dup.status}${dup.done ? " (done)" : " (in progress)"}`,
         "",
-        "Use `offload_status` to check progress.",
+        "Use `offload_status` only if the user explicitly asks you to.",
+        "Otherwise ambient progress notifications will arrive automatically on",
+        "your next reply — do NOT poll `mesh_inbox` or `offload_status`.",
         "To run this task again anyway (e.g., user explicitly requested a re-run),",
         "pass `force: true` to cloud_offload.",
       ].join("\n");
@@ -1195,13 +1205,15 @@ async function cloudOffloadHandler(...args: any[]): Promise<string> {
     `  Files:         ${filesInfo}`,
     `  Timeout:       ${params.timeout_minutes || 30}m`,
     "",
-    "Stages will progress automatically. Poll with offload_status to see:",
-    "  • Controller validating / spawning sandbox",
-    "  • Sandbox ready + discovered on mesh",
-    "  • Mesh ping verification (RTT)",
-    "  • File upload progress (per-file ACKs)",
-    "  • Task dispatched + acknowledged by sandbox",
-    "  • Final results and output files (auto-saved to ~/.azureclaw-mesh/incoming/)",
+    "The sandbox is orchestrating in background. DO NOT call any tools to",
+    "check on it — offload_status, mesh_inbox, exec_command, etc. will only",
+    "waste tokens. Progress, file deliveries, and completion are pushed to",
+    "the user automatically as ambient notifications prepended to your next",
+    "reply. The user can also type `/offload` for an instant status line.",
+    "",
+    "Your next action: send the user a brief acknowledgement of the",
+    "submission (1–2 sentences) and then STOP tool-calling. The system",
+    "will surface progress on the next turn without any polling from you.",
   ].join("\n");
 }
 
@@ -1226,14 +1238,34 @@ async function offloadStatusHandler(..._args: any[]): Promise<string> {
   if (!connection) return "❌ Mesh client not connected.";
   if (!activeOffload) return "No active offload. Use cloud_offload to start one.";
 
+  // Anti-poll throttle: if called within 15s of the previous call AND no new
+  // events arrived in the meantime, return a short "no change" response so the
+  // LLM doesn't waste tokens burst-polling. A non-zero delta always returns
+  // the full snapshot.
+  const now = Date.now();
+  const lastAt = activeOffload.lastPolledAt ?? 0;
+  const lastCount = activeOffload.lastPolledEventCount ?? 0;
+  const sinceLastMs = now - lastAt;
+
   // Snapshot-only: drain inbox once, return immediately. Ambient updates are
   // delivered out-of-band via the message_sending hook, /offload slash command,
   // and a background drain service — so we never block the LLM turn on polling.
   await drainOffloadInbox();
 
-  const elapsed = Math.round((Date.now() - activeOffload.startedAt) / 1000);
+  const elapsed = Math.round((now - activeOffload.startedAt) / 1000);
+  const newEvents = activeOffload.events.length - lastCount;
   activeOffload.lastPolledAt = Date.now();
   activeOffload.lastPolledEventCount = activeOffload.events.length;
+
+  if (lastAt > 0 && sinceLastMs < 15_000 && newEvents <= 0) {
+    const secs = Math.round(sinceLastMs / 1000);
+    return (
+      `⏳ No change since last check ${secs}s ago (offload still running, ` +
+      `elapsed ${elapsed}s). Stop polling — wait for the user to ask again, ` +
+      `or wait for the next completion event.`
+    );
+  }
+
   return renderOffloadStatus(elapsed);
 }
 
@@ -1323,13 +1355,16 @@ async function drainOffloadInbox(): Promise<void> {
     activeOffload.durationSeconds = doneMsg.duration_seconds;
     activeOffload.lastMessage = "Task complete";
     const shortId = activeOffload.requestId.slice(0, 8);
-    const fileSuffix = (doneMsg.output_files ?? []).length > 0
-      ? ` — files: ${(doneMsg.output_files ?? []).join(", ")}`
-      : "";
+    const outFiles = doneMsg.output_files ?? [];
+    const fileSuffix = outFiles.length > 0 ? ` — files: ${outFiles.join(", ")}` : "";
+    const tokenSuffix =
+      typeof doneMsg.tokens_used === "number" && doneMsg.tokens_used > 0
+        ? ` · ${doneMsg.tokens_used} tokens`
+        : "";
     pushNotification({
       requestId: activeOffload.requestId,
       kind: "done",
-      line: `✅ [offload ${shortId}] complete (${doneMsg.duration_seconds ?? "?"}s)${fileSuffix}`,
+      line: `✅ [offload ${shortId}] complete (${doneMsg.duration_seconds ?? "?"}s${tokenSuffix})${fileSuffix}`,
     });
     // Fire-and-forget cleanup request to the controller so the ClawSandbox CRD
     // is torn down (and the reconciler stops keeping the offload pod alive).
