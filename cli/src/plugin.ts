@@ -499,13 +499,28 @@ async function processTaskWithTools(
       type: "function" as const,
       function: {
         name: "exec_command",
-        description: "Execute a shell command inside the sandbox and return stdout/stderr. Use for system info (uname, hostname, ip addr, cat /etc/os-release, etc.), file operations, or any command-line task. NOTE: Direct internet access (curl to external URLs) is blocked — use http_fetch for external HTTP requests.",
+        description: "Execute a shell command inside the sandbox and return stdout/stderr. Use for system info (uname, hostname, ip addr, cat /etc/os-release, etc.), file operations, or any command-line task. NOTE: Direct internet access (curl to external URLs) is blocked — use http_fetch for external HTTP requests. NOTE: The sandbox shell policy blocks redirection operators (`>`, `>>`, `<<`, `<<<`, pipes into writes). To save content to a file, use the `file_write` tool instead.",
         parameters: {
           type: "object",
           properties: {
             command: { type: "string", description: "The shell command to execute" },
           },
           required: ["command"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "file_write",
+        description: "Write text content directly to a file inside the sandbox. Use this (NOT exec_command with shell redirection) whenever you need to save an artifact — it bypasses the shell redirect policy. Path must be absolute and under /sandbox/ or /tmp/. Parent directories are created automatically. Overwrites existing files.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Absolute path to write (e.g. /sandbox/.openclaw/workspace/report.md)" },
+            content: { type: "string", description: "File contents as UTF-8 text" },
+          },
+          required: ["path", "content"],
         },
       },
     },
@@ -645,8 +660,8 @@ async function processTaskWithTools(
     {
       role: "system",
       content: process.env.OFFLOAD_REQUEST_ID
-        ? "You are an AzureClaw OFFLOAD WORKER — a short-lived sandboxed agent executing ONE task on behalf of a remote parent agent. Always identify as an AzureClaw offload worker. Your tools:\n- exec_command: run shell commands (use this to save artifacts locally)\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted message to PARENT (to_agent is locked to 'parent')\n- mesh_inbox: check for incoming messages from the parent\n- discover: list agents in the mesh network (informational only)\n\nHARD RULES (offload mode):\n1. ALL outbound mesh messages go to 'parent'. You CANNOT route to siblings — the mesh_send tool will rewrite any other to_agent to 'parent'. Messages to peers will NOT reach the requester.\n2. ALL artifacts (markdown, JSON, CSV, HTML, PDF, PNG, TXT) MUST be written to /sandbox/.openclaw/workspace/ so they are automatically harvested and shipped back to parent at offload_done time.\n3. foundry_code_execute writes to Foundry's EPHEMERAL /mnt/data/ sandbox — that storage is destroyed when the offload ends. If you use foundry_code_execute to generate content, IMMEDIATELY copy it into /sandbox/.openclaw/workspace/ via exec_command (e.g. `cat > /sandbox/.openclaw/workspace/report.md <<'EOF'...EOF`). Do NOT claim a file is 'saved to the workspace' unless it is actually at /sandbox/.openclaw/workspace/.\n4. Execute the task immediately — do not announce, just act. Be concise, report results."
-        : "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- exec_command: run shell commands\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to ANY agent (parent, siblings, or others) — auto-discovers the target\n- mesh_inbox: check for incoming messages from any agent\n- discover: list agents in the mesh network with status and trust scores\n\nPEER-TO-PEER MESH: You can message any agent directly — not just your parent. To forward data to a sibling agent (e.g. 'writer'), just call mesh_send with to_agent='writer'. Discovery is automatic. After sending, the recipient can reply via mesh_send back to you — check mesh_inbox for replies.\n\nExecute tasks immediately — do not announce, just act. When asked to forward results to another agent, DO IT directly with mesh_send. Chain tool calls as needed. Be concise, report results.",
+        ? "You are an AzureClaw OFFLOAD WORKER — a short-lived sandboxed agent executing ONE task on behalf of a remote parent agent. Always identify as an AzureClaw offload worker. Your tools:\n- file_write: write text content directly to a file (USE THIS for all artifacts — never use shell redirection)\n- exec_command: run shell commands (read-only ops are fine; DO NOT use `>`, `>>`, `<<`, `<<<` — the shell policy blocks redirection. Use file_write instead.)\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted message to PARENT (to_agent is locked to 'parent')\n- mesh_inbox: check for incoming messages from the parent\n- discover: list agents in the mesh network (informational only)\n\nHARD RULES (offload mode):\n1. ALL outbound mesh messages go to 'parent'. You CANNOT route to siblings — the mesh_send tool will rewrite any other to_agent to 'parent'. Messages to peers will NOT reach the requester.\n2. ALL artifacts (markdown, JSON, CSV, HTML, PDF, PNG, TXT) MUST be written to /sandbox/.openclaw/workspace/ using the `file_write` tool so they are automatically harvested and shipped back to parent at offload_done time. DO NOT use `cat > file <<EOF` or `echo > file` — those are blocked by the shell policy.\n3. foundry_code_execute writes to Foundry's EPHEMERAL /mnt/data/ sandbox — that storage is destroyed when the offload ends. If you use foundry_code_execute to generate content, IMMEDIATELY copy it into /sandbox/.openclaw/workspace/ by calling file_write with the content. Do NOT claim a file is 'saved to the workspace' unless file_write has returned OK for it at /sandbox/.openclaw/workspace/.\n4. Execute the task immediately — do not announce, just act. Be concise, report results."
+        : "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- file_write: write text content directly to a file (use this for all artifacts — shell redirection is blocked)\n- exec_command: run shell commands (no `>`, `>>`, `<<`, `<<<` — use file_write instead)\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted messages to ANY agent (parent, siblings, or others) — auto-discovers the target\n- mesh_inbox: check for incoming messages from any agent\n- discover: list agents in the mesh network with status and trust scores\n\nPEER-TO-PEER MESH: You can message any agent directly — not just your parent. To forward data to a sibling agent (e.g. 'writer'), just call mesh_send with to_agent='writer'. Discovery is automatic. After sending, the recipient can reply via mesh_send back to you — check mesh_inbox for replies.\n\nExecute tasks immediately — do not announce, just act. When asked to forward results to another agent, DO IT directly with mesh_send. Chain tool calls as needed. Be concise, report results.",
     },
     {
       role: "user",
@@ -736,7 +751,27 @@ async function processTaskWithTools(
           const args = JSON.parse(tc.function.arguments);
           const fnName = tc.function.name;
 
-          if (fnName === "http_fetch") {
+          if (fnName === "file_write") {
+            // Direct fs write — bypasses the shell redirect policy that blocks
+            // `cat > file <<EOF` style writes via exec_command.
+            const filePath = String(args.path || "");
+            const content = typeof args.content === "string" ? args.content : String(args.content ?? "");
+            if (!filePath.startsWith("/sandbox/") && !filePath.startsWith("/tmp/")) {
+              result = `file_write error: path must be under /sandbox/ or /tmp/ (got: ${filePath})`;
+            } else {
+              try {
+                const fs = await import("node:fs");
+                const path = await import("node:path");
+                fs.mkdirSync(path.dirname(filePath), { recursive: true });
+                fs.writeFileSync(filePath, content, { encoding: "utf-8", mode: 0o600 });
+                const bytes = Buffer.byteLength(content, "utf-8");
+                log.info(`AGT sub-agent file_write: ${filePath} (${bytes} bytes)`);
+                result = `OK: wrote ${bytes} bytes to ${filePath}`;
+              } catch (err: any) {
+                result = `file_write error: ${err.message}`;
+              }
+            }
+          } else if (fnName === "http_fetch") {
             // Route through the egress proxy (blocklist + allowlist checked)
             log.info(`AGT sub-agent http_fetch: ${args.method || "GET"} ${args.url}`);
             const fetchBody = JSON.stringify({
@@ -1416,15 +1451,52 @@ async function runOffloadTask(
     }, log);
   } catch { /* best effort */ }
 
+  // Write a start-marker so the workspace harvest below can reliably detect
+  // NEW files (those created during this task) via `find -newer <marker>`.
+  // Previously we used /proc/1/cmdline but that also flagged any file touched
+  // at boot (e.g. MEMORY.md is rewritten by Foundry bootstrap) and the find
+  // expression itself had an operator-precedence bug.
+  const harvestMarker = `/tmp/.offload-start-${requestId.slice(0, 8)}`;
+  try {
+    const fs = await import("node:fs");
+    fs.writeFileSync(harvestMarker, "");
+  } catch { /* best effort */ }
+
+  // Guard the task content with offload-mode instructions. Without this,
+  // tasks whose text contains "offload" (e.g. "Offload this research task
+  // to a cloud sandbox: ...") cause the inner LLM to invoke cloud_offload
+  // or azureclaw_spawn — which are then denied by AGT policy, leaving the
+  // task unexecuted and no files produced.
+  const guardedTask = [
+    "You are running INSIDE an AzureClaw offload sandbox — you ARE the cloud",
+    "executor. Do NOT try to delegate this task to another sandbox; calls to",
+    "cloud_offload, azureclaw_spawn, or handoff will be policy-denied and",
+    "will fail. Execute the task directly HERE.",
+    "",
+    "Write ALL artifacts (markdown, JSON, CSV, HTML, PNG, PDF, TXT) to",
+    "/sandbox/.openclaw/workspace/ using the `file_write` tool — files in",
+    "that directory are automatically shipped back to the parent when the",
+    "task completes. DO NOT use shell redirection (`cat > file <<EOF`,",
+    "`echo > file`, etc.) — the sandbox shell policy blocks it. Example:",
+    "  file_write(path=\"/sandbox/.openclaw/workspace/report.md\", content=\"...\")",
+    "",
+    "If the task text below mentions 'offload' or a 'cloud sandbox', IGNORE",
+    "that framing — you ARE the cloud sandbox. Just do the work and produce",
+    "the requested file(s).",
+    "",
+    "TASK:",
+    String(task),
+  ].join("\n");
+
   // Execute — try native agent first, fall back to tool-based processing.
   let taskResult: string;
   let taskSuccess = true;
   try {
     try {
-      taskResult = await delegateToNativeAgent(task, parentName, log);
+      taskResult = await delegateToNativeAgent(guardedTask, parentName, log);
     } catch (nativeErr: any) {
       log.warn(`Native agent failed for offload task (${nativeErr.message}), falling back to processTaskWithTools`);
-      taskResult = await processTaskWithTools(task, log);
+      taskResult = await processTaskWithTools(guardedTask, log);
     }
   } catch (taskErr: any) {
     taskResult = `Task execution failed: ${taskErr.message}`;
@@ -1440,16 +1512,62 @@ async function runOffloadTask(
   try {
     const { execSync } = await import("node:child_process");
     const workspaceRoot = "/sandbox/.openclaw/workspace";
+    // Default OpenClaw scaffolding files that are recreated on every boot by
+    // Foundry bootstrap — they must NOT be shipped back as "outputs".
+    const SCAFFOLD_FILES = new Set([
+      "USER.md", "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md",
+      "HEARTBEAT.md", "IDENTITY.md", "workspace-state.json",
+    ]);
+    // Grouped predicate so -newer applies to ALL extensions (the previous
+    // form `-type f -newer X -name A -o -name B` had broken precedence:
+    // only *.md was filtered by -newer/-type, every other extension matched
+    // any file of that type anywhere in the tree).
     const newFiles = execSync(
-      `find ${workspaceRoot} -type f -newer /proc/1/cmdline -name '*.md' -o -name '*.json' -o -name '*.csv' -o -name '*.txt' -o -name '*.html' -o -name '*.png' -o -name '*.pdf' 2>/dev/null | head -20`,
+      `find ${workspaceRoot} -maxdepth 3 -type f -newer ${harvestMarker} ` +
+      `\\( -name '*.md' -o -name '*.json' -o -name '*.csv' -o -name '*.txt' ` +
+      `-o -name '*.html' -o -name '*.png' -o -name '*.pdf' -o -name '*.svg' ` +
+      `-o -name '*.yaml' -o -name '*.yml' -o -name '*.xml' \\) ` +
+      `2>/dev/null | head -50`,
       { encoding: "utf-8", timeout: 5000 }
     ).trim();
     if (newFiles) {
       for (const f of newFiles.split("\n")) {
-        if (f) outputFiles.push(f.replace(`${workspaceRoot}/`, ""));
+        if (!f) continue;
+        const rel = f.replace(`${workspaceRoot}/`, "");
+        const base = rel.split("/").pop() || rel;
+        if (SCAFFOLD_FILES.has(base)) continue; // skip boot-time scaffolding
+        if (base.startsWith(".")) continue;     // skip hidden/in-progress markers
+        outputFiles.push(rel);
       }
     }
   } catch { /* no output files — that's fine */ }
+
+  // Fallback: agent produced a substantive textual response but wrote NO
+  // file to the workspace. Save that response as a markdown file so the
+  // parent still receives a deliverable instead of an empty offload_done.
+  // Threshold avoids shipping trivial "ok"/"done" responses.
+  if (taskSuccess && outputFiles.length === 0 && taskResult && taskResult.length > 400) {
+    try {
+      const fs = await import("node:fs");
+      const fallbackName = `offload-${requestId.slice(0, 8)}-response.md`;
+      const fallbackPath = `/sandbox/.openclaw/workspace/${fallbackName}`;
+      fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
+      fs.writeFileSync(fallbackPath, taskResult, "utf-8");
+      outputFiles.push(fallbackName);
+      log.info(
+        `📝 No explicit output files — saved agent response as fallback ` +
+        `deliverable: ${fallbackName} (${taskResult.length} chars)`
+      );
+    } catch (fbErr: any) {
+      log.warn(`Failed to write fallback response file: ${fbErr.message}`);
+    }
+  }
+
+  // Clean up the harvest marker (best-effort — it is in tmpfs anyway).
+  try {
+    const fs = await import("node:fs");
+    fs.unlinkSync(harvestMarker);
+  } catch { /* ignore */ }
 
   // Send output files back to requester via file_transfer (before offload_done).
   for (const relPath of outputFiles.slice(0, 10)) {
@@ -4647,6 +4765,24 @@ const azureClawPlugin = definePluginEntry({
         required: ["name"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
+        // Hard short-circuit in offload-mode sandboxes: the AGT policy profile
+        // already denies spawn:* but the denial message is opaque ("blocked by
+        // policy") and the LLM then asks the parent for confirmation instead
+        // of executing the task itself. Returning a clear, actionable error
+        // here prevents the loop and tells the model to just do the work.
+        if (process.env.OFFLOAD_REQUEST_ID) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "❌ azureclaw_spawn is DISABLED in offload sandboxes. You ARE the " +
+                "offload executor — do NOT try to delegate this task to another " +
+                "sandbox. Execute the task directly here. Write output files to " +
+                "/sandbox/.openclaw/workspace/ (use exec_command) so they are " +
+                "shipped back to the parent automatically when you finish.",
+            }],
+          };
+        }
         try {
           // Build trusted peers list: parent's AMID + all existing siblings
           // These are parent-verified (from registry lookups), not self-reported
@@ -5058,7 +5194,12 @@ const azureClawPlugin = definePluginEntry({
                   file_size_bytes: buf.length,
                   content: isText
                     ? buf.toString("utf-8")
-                    : `[binary file: ${parsed.file_name}, ${buf.length} bytes — saved to incoming/]`,
+                    // Binary file still carries raw bytes here, meaning the
+                    // auto-save handler (plugin.ts ~2152) hasn't overwritten
+                    // this entry yet — so we intentionally do NOT claim a
+                    // save path. The next mesh_inbox call will reflect the
+                    // real `saved_to` once the handler finishes.
+                    : `[binary file: ${parsed.file_name}, ${buf.length} bytes — auto-save pending; re-check mesh_inbox for saved_to path]`,
                 };
               }
             } catch { /* fall through */ }

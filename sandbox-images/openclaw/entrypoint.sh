@@ -269,6 +269,31 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
 EOF
   chmod 600 "$OPENCLAW_CONFIG"
 
+  # Seed auth-profiles.json for the "main" agent. Required by the embedded-mode
+  # lane of `openclaw agent --message ...` subprocesses (spawned from the
+  # azureclaw plugin's delegateToNativeAgent / processTaskWithTools paths).
+  # Without this file, the subprocess's embedded fallback errors out with
+  # "No API key found for provider 'openai'" even though the gateway itself
+  # routes through the inference router just fine.
+  #
+  # The key value is a routing stub — the inference router at 127.0.0.1:8443
+  # doesn't validate it; real auth happens upstream via IMDS/WI. No real
+  # credential material is written here.
+  AGENT_DIR="$OPENCLAW_DIR/agents/main/agent"
+  mkdir -p "$AGENT_DIR"
+  [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox "$OPENCLAW_DIR/agents"
+  cat > "$AGENT_DIR/auth-profiles.json" << 'AUTHPROFEOF'
+{
+  "version": 1,
+  "profiles": {
+    "openai:default": { "type": "api_key", "provider": "openai", "key": "routed-via-inference-router", "displayName": "router-stub" },
+    "azure-openai:default": { "type": "api_key", "provider": "azure-openai", "key": "routed-via-inference-router", "displayName": "router-stub" }
+  },
+  "defaults": { "openai": "openai:default", "azure-openai": "azure-openai:default" }
+}
+AUTHPROFEOF
+  chmod 600 "$AGENT_DIR/auth-profiles.json"
+
   # Build channels config dynamically from env vars.
   # Built-in channel extensions need BOTH:
   #   1. A channel block in channels.* with credentials
@@ -596,40 +621,51 @@ fi
 # Always re-install AzureClaw plugin from the image (plugin code may have changed
 # even though config persists on the volume). This is safe because the plugin
 # directory is small and cp is idempotent.
+#
+# IMPORTANT: `/opt/azureclaw-plugin` is chmod -R a-w in the Dockerfile (image-level
+# hardening). Default `cp` preserves source mode, so destination files end up
+# read-only (444) and directories 555. That makes subsequent container restarts
+# (emptyDir survives restart — only pod recreation wipes it) fail with
+# "Permission denied" when trying to overwrite. We solve this two ways:
+#   1. Remove the stale install tree up front, so overwrites never happen.
+#   2. Pass `--no-preserve=mode` so newly-copied files are writable by the owner
+#      even if the next restart still needs to write (belt-and-suspenders).
 if [ -d /opt/azureclaw-plugin ]; then
+  # Clean slate — the plugin is small and always comes from the image.
+  rm -rf "$OPENCLAW_DIR/extensions/azureclaw" 2>/dev/null || true
   mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
-  cp /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
-  cp /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
+  cp --no-preserve=mode /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
+  cp --no-preserve=mode /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
   # Copy built JS/TS output
-  cp -r /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-  cp -r /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-  cp -r /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  cp -r --no-preserve=mode /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  cp -r --no-preserve=mode /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  cp -r --no-preserve=mode /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   if [ -d /opt/azureclaw-plugin/commands ]; then
-    cp -r /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/"
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/"
   fi
   # Copy Foundry skills (SKILL.md files)
   if [ -d /opt/azureclaw-plugin/skills ]; then
-    cp -r /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
     mkdir -p "$WORKSPACE_DIR/skills"
-    cp -r /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
     echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
   fi
   # Copy pre-installed ClawHub skills (from Docker build)
   if [ -d /opt/clawhub-skills ] && [ "$(ls -A /opt/clawhub-skills 2>/dev/null)" ]; then
     mkdir -p "$WORKSPACE_DIR/skills"
-    cp -r /opt/clawhub-skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+    cp -r --no-preserve=mode /opt/clawhub-skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
     echo "[azureclaw] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
   fi
   # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
   if [ -d /opt/azureclaw-plugin/node_modules ]; then
-    cp -r /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
     echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
   fi
   # Copy AGT policies if governance enabled
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"
-    cp /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
+    cp --no-preserve=mode /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
     # AGT governance runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
     # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
     # chown -R sandbox:sandbox /sandbox — see below.
