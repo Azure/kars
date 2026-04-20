@@ -180,10 +180,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 Api::namespaced(client.clone(), crate::mesh_peer::IDENTITY_NAMESPACE);
             if let Ok(list) = pairings_api.list(&ListParams::default()).await
                 && let Some(pairing) = list.items.iter().find(|p| {
-                    p.status
-                        .as_ref()
-                        .and_then(|s| s.bound_amid.as_deref())
-                        == Some(requester)
+                    p.status.as_ref().and_then(|s| s.bound_amid.as_deref()) == Some(requester)
                 })
             {
                 let pairing_name = pairing.name_any();
@@ -677,9 +674,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // "abuse" by the self-burst detector. Non-offload profiles keep
         // the router's built-in default.
         if governance_config.tool_policy == "offload" {
-            router_agt_env.push(
-                json!({"name": "AGT_BEHAVIOR_BURST_THRESHOLD", "value": "1000"}),
-            );
+            router_agt_env.push(json!({"name": "AGT_BEHAVIOR_BURST_THRESHOLD", "value": "1000"}));
         }
         if let Some(peers) = valid_peers {
             router_agt_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
@@ -707,9 +702,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .collect();
         for (k, v) in extra {
             if k.is_empty()
-                || !k
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 || k.chars().next().is_some_and(|c| c.is_ascii_digit())
             {
                 tracing::warn!(key = %k, "extraEnv: invalid env var name, skipping");

@@ -53,7 +53,10 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             // Default: enabled. Explicit "false" or "0" disables.
             let raw = std::env::var("MESH_PEER_ENABLED").unwrap_or_else(|_| "true".into());
-            let enabled = !matches!(raw.to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off");
+            let enabled = !matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            );
             if enabled {
                 tracing::info!("Mesh peer enabled — starting relay connection");
                 mesh_peer::run(client).await
