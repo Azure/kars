@@ -670,6 +670,17 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         router_agt_env
             .push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
         router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+        // Behavior-monitor burst threshold: offload workers run long
+        // research loops that make many tool/inference calls in short
+        // bursts. Bump the burst limit well above the interactive default
+        // (100/60s) so legitimate research bursts aren't flagged as
+        // "abuse" by the self-burst detector. Non-offload profiles keep
+        // the router's built-in default.
+        if governance_config.tool_policy == "offload" {
+            router_agt_env.push(
+                json!({"name": "AGT_BEHAVIOR_BURST_THRESHOLD", "value": "1000"}),
+            );
+        }
         if let Some(peers) = valid_peers {
             router_agt_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
         }

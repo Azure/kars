@@ -333,6 +333,12 @@ pub struct Governance {
     pub metrics: GovernanceMetrics,
     pub sandbox_name: String,
     pub trust_threshold: u32,
+    /// Per-peer last-interaction timestamps (SDK's TrustScore doesn't expose
+    /// this, so we track it alongside). Used by the operator UX to render
+    /// recency of mesh peers — without it, peers whose name doesn't match a
+    /// known sandbox CR (e.g. cloud-offload parents identified only by AMID)
+    /// are filtered out of the peer panel.
+    peer_last_seen: std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>,
     start_time: Instant,
     policy_rule_count: AtomicU64,
 }
@@ -423,11 +429,29 @@ impl Governance {
             response_scanner,
             tool_rate_limiter,
             rate_limiter: RateLimiter::new(500.0, 1000.0, 50.0, 100.0),
-            behavior: BehaviorMonitor::new(100, 20, 10),
+            behavior: BehaviorMonitor::new(
+                // Behavior-monitor thresholds. Defaults tuned for interactive
+                // AzureClaw sandboxes; offload workers (research loops with
+                // many tool/inference calls in short bursts) get higher
+                // limits injected via env vars by the controller reconciler.
+                std::env::var("AGT_BEHAVIOR_BURST_THRESHOLD")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(100),
+                std::env::var("AGT_BEHAVIOR_CONSECUTIVE_FAILURE_THRESHOLD")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(20),
+                std::env::var("AGT_BEHAVIOR_COOLDOWN_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(10),
+            ),
             metrics: GovernanceMetrics::new(),
             sandbox_name: sandbox_name.to_string(),
             trust_threshold,
             policy_rule_count,
+            peer_last_seen: std::sync::Mutex::new(std::collections::HashMap::new()),
             start_time: Instant::now(),
         }
     }
@@ -798,6 +822,12 @@ impl Governance {
         let updated = self.trust.get_trust_score(agent_id);
         metrics::AGT_KNOWN_AGENTS.set(self.trust.all_agents().len() as i64);
 
+        // Record last-interaction timestamp for operator UX (SDK TrustScore
+        // doesn't expose this).
+        if let Ok(mut map) = self.peer_last_seen.lock() {
+            map.insert(agent_id.to_string(), std::time::SystemTime::now());
+        }
+
         self.audit
             .log(agent_id, &format!("trust_update:{}", agent_id), "success");
 
@@ -811,16 +841,31 @@ impl Governance {
 
     /// Get all trust scores with tier labels (matching API JSON shape).
     pub fn all_trust_scores(&self) -> Vec<Value> {
+        let last_seen = self
+            .peer_last_seen
+            .lock()
+            .ok()
+            .map(|m| m.clone())
+            .unwrap_or_default();
         self.trust
             .all_agents()
             .into_iter()
             .map(|ts| {
+                let last_iso = last_seen
+                    .get(&ts.agent_id)
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| {
+                        // Emit epoch-seconds with 'Z' suffix — operator.ts
+                        // parser recognises /^\d+Z$/ and converts to ms.
+                        format!("{}Z", d.as_secs())
+                    })
+                    .unwrap_or_default();
                 serde_json::json!({
                     "agent_id": ts.agent_id,
                     "score": ts.score,
                     "tier": tier_label(ts.score),
                     "interactions": ts.interactions,
-                    "last_interaction": "", // TrustManager doesn't expose timestamps in TrustScore
+                    "last_interaction": last_iso,
                 })
             })
             .collect()
