@@ -405,11 +405,7 @@ async fn try_acquire_lease(client: &Client, namespace: &str) -> bool {
                 }
                 let patch = json!({ "spec": patch_spec });
                 match leases
-                    .patch(
-                        LEASE_NAME,
-                        &PatchParams::default(),
-                        &Patch::Merge(patch),
-                    )
+                    .patch(LEASE_NAME, &PatchParams::default(), &Patch::Merge(patch))
                     .await
                 {
                     Ok(_) => true,
@@ -534,7 +530,10 @@ pub async fn run(client: Client) -> Result<()> {
             }
         }
         if purged > 0 {
-            tracing::warn!(purged, "Dropped stale outbox messages from prior leader tenure");
+            tracing::warn!(
+                purged,
+                "Dropped stale outbox messages from prior leader tenure"
+            );
         }
 
         // Resume any offload watchers stranded by a prior controller restart.
@@ -603,9 +602,7 @@ async fn connect_and_listen(
         p2p_capable: false,
     };
     ws_stream
-        .send(WsMessage::Text(
-            serde_json::to_string(&connect_msg)?.into(),
-        ))
+        .send(WsMessage::Text(serde_json::to_string(&connect_msg)?.into()))
         .await?;
 
     // Channel for outgoing messages — handlers and keepalive send through this.
@@ -907,9 +904,7 @@ async fn handle_peer_message(
             tracing::debug!(from = %from_amid, "Ignoring pair_response (we are the controller)");
         }
         FederationMessage::OffloadCleanup {
-            request_id,
-            reason,
-            ..
+            request_id, reason, ..
         } => {
             tracing::info!(
                 from = %from_amid,
@@ -1070,9 +1065,7 @@ async fn send_to_peer(
         message_type: "message".into(),
     };
     out_tx
-        .send(WsMessage::Text(
-            serde_json::to_string(&send_msg)?.into(),
-        ))
+        .send(WsMessage::Text(serde_json::to_string(&send_msg)?.into()))
         .context("WebSocket channel closed")?;
     Ok(())
 }
@@ -1316,9 +1309,7 @@ async fn handle_offload_request(
         &FederationMessage::OffloadStatus {
             request_id: request_id.into(),
             phase: "scheduled".into(),
-            message: format!(
-                "Sandbox '{sandbox_name}' created, waiting for it to start..."
-            ),
+            message: format!("Sandbox '{sandbox_name}' created, waiting for it to start..."),
             sandbox_name: None,
         },
     )
@@ -1400,9 +1391,8 @@ async fn handle_offload_cleanup(
     let api: Api<kube::api::DynamicObject> =
         Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
 
-    let lp = kube::api::ListParams::default().labels(&format!(
-        "azureclaw.azure.com/request-id={request_id}"
-    ));
+    let lp = kube::api::ListParams::default()
+        .labels(&format!("azureclaw.azure.com/request-id={request_id}"));
     let list = match api.list(&lp).await {
         Ok(list) => list,
         Err(e) => {
@@ -1566,7 +1556,9 @@ async fn watch_sandbox_ready(
                 FederationMessage::OffloadStatus {
                     request_id: request_id.into(),
                     phase: "ready".into(),
-                    message: format!("Sandbox '{sandbox_name}' is running — send files and task directly via mesh"),
+                    message: format!(
+                        "Sandbox '{sandbox_name}' is running — send files and task directly via mesh"
+                    ),
                     sandbox_name: Some(sandbox_name.into()),
                 },
             )?;
