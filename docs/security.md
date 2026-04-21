@@ -325,3 +325,11 @@ Mesh identity stored in `~/.azureclaw/mesh-identity.json`:
 - Private key encrypted with AES-256-GCM
 - Encryption key derived from machine-specific seed (hostname + homedir)
 - File permissions restricted to owner (0600), directory (0700)
+
+---
+
+## Upstream Alignment
+
+AzureClaw governs the agent runtime **without forking OpenClaw.** The native `sessions_spawn` / `sessions_send` tools are denied via upstream's own `tools.deny` config, and governance-aware replacements (`cloud_offload`, `azureclaw_spawn`, `mesh_send`, …) are registered through the upstream `api.registerTool()` plugin API. The `vendor/` directory contains only AgentMesh forks — there is **no OpenClaw fork**.
+
+See [Upstream Alignment](upstream-alignment.md) for the full rationale and file-level references.
