@@ -15,6 +15,13 @@ Zero-credential inference through Azure AI Foundry. Optional Kata VM isolation. 
 
 ---
 
+> **Not a fork.** AzureClaw extends [OpenClaw](https://openclaw.ai) using its native
+> plugin API and `tools.deny` config — no OpenClaw source is modified, patched, or
+> vendored. Any upstream OpenClaw release is drop-in compatible. See
+> [Upstream Alignment](docs/upstream-alignment.md) for the full rationale.
+
+---
+
 ## What is AzureClaw?
 
 AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside a hardened sandbox on AKS — with a Rust inference router that mediates all external access. Agents never see Azure credentials (the router authenticates via Workload Identity), every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. AGT governance (policy, trust, audit) runs natively inside the router — no sidecar needed. For maximum isolation, upgrade to Kata Confidential VMs — per-pod dedicated kernels where container escapes hit a hardware boundary. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
