@@ -12,6 +12,7 @@
 - [E2E Encryption Proof](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging with traffic capture evidence
 - [Security Validation](security-validation.md) — Live cluster evidence for every security layer
 - [Upstream Alignment](upstream-alignment.md) — How AzureClaw extends OpenClaw via upstream extension points (no fork)
+- [AGT Mesh Migration — Gap Analysis](agt-mesh-migration-analysis.md) — Whether we can replace the vendored amitayks/agentmesh stack with AGT's agent-mesh
 
 ## Agent Capabilities
 
