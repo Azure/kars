@@ -11,6 +11,7 @@
 - [Network Egress & Proxy](egress-proxy.md) — Blocklist, allowlist, approval flow, learn mode
 - [E2E Encryption Proof](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging with traffic capture evidence
 - [Security Validation](security-validation.md) — Live cluster evidence for every security layer
+- [Upstream Alignment](upstream-alignment.md) — How AzureClaw extends OpenClaw via upstream extension points (no fork)
 
 ## Agent Capabilities
 
