@@ -41,12 +41,12 @@ fi
 # owned by the running user, and have mode 700 (security check rejects
 # world-writable dirs). Docker --tmpfs /tmp starts empty, so create them here.
 _oc_tmpdir="/tmp/openclaw-$(id -u)"
-mkdir -p "$_oc_tmpdir" && chmod 700 "$_oc_tmpdir"
+mkdir -p "$_oc_tmpdir" && chmod 700 "$_oc_tmpdir" 2>/dev/null || true
 if [ "$IS_ROOT" = "true" ]; then
   # Dev mode: also create dirs for sandbox (1000) and router (1001)
   for _uid in 1000 1001; do
     _dir="/tmp/openclaw-${_uid}"
-    mkdir -p "$_dir" && chown "${_uid}:${_uid}" "$_dir" && chmod 700 "$_dir"
+    mkdir -p "$_dir" && chown "${_uid}:${_uid}" "$_dir" && chmod 700 "$_dir" 2>/dev/null || true
   done
 fi
 
@@ -267,7 +267,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   }
 }
 EOF
-  chmod 600 "$OPENCLAW_CONFIG"
+  chmod 600 "$OPENCLAW_CONFIG" 2>/dev/null || true
 
   # Seed auth-profiles.json for the "main" agent. Required by the embedded-mode
   # lane of `openclaw agent --message ...` subprocesses (spawned from the
@@ -281,7 +281,6 @@ EOF
   # credential material is written here.
   AGENT_DIR="$OPENCLAW_DIR/agents/main/agent"
   mkdir -p "$AGENT_DIR"
-  [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox "$OPENCLAW_DIR/agents"
   cat > "$AGENT_DIR/auth-profiles.json" << 'AUTHPROFEOF'
 {
   "version": 1,
@@ -292,7 +291,12 @@ EOF
   "defaults": { "openai": "openai:default", "azure-openai": "azure-openai:default" }
 }
 AUTHPROFEOF
-  chmod 600 "$AGENT_DIR/auth-profiles.json"
+  chmod 600 "$AGENT_DIR/auth-profiles.json" 2>/dev/null || true
+  # In dev mode we run as root; the sandbox user needs to own + read this file.
+  # (AKS pods already run as UID 1000, so chown is a no-op / skipped.)
+  if [ "$IS_ROOT" = "true" ]; then
+    chown -R sandbox:sandbox "$OPENCLAW_DIR/agents" 2>/dev/null || true
+  fi
 
   # Build channels config dynamically from env vars.
   # Built-in channel extensions need BOTH:
@@ -634,18 +638,24 @@ if [ -d /opt/azureclaw-plugin ]; then
   # Clean slate — the plugin is small and always comes from the image.
   rm -rf "$OPENCLAW_DIR/extensions/azureclaw" 2>/dev/null || true
   mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
-  cp --no-preserve=mode /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/"
-  cp --no-preserve=mode /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/"
+  # NOTE: on some Docker Desktop hosts, fchmod(2) on newly-written files in
+  # the sandbox volume returns EPERM even though the file content is written
+  # successfully. We tolerate cp's non-zero exit (content is what matters; the
+  # mode bits are re-applied later by the hardening block at the bottom of
+  # this script) via `|| true` on every cp. This keeps `set -e` semantics for
+  # the rest of the script.
+  cp --no-preserve=mode /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
+  cp --no-preserve=mode /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
   # Copy built JS/TS output
   cp -r --no-preserve=mode /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   cp -r --no-preserve=mode /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   cp -r --no-preserve=mode /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   if [ -d /opt/azureclaw-plugin/commands ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/"
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   fi
   # Copy Foundry skills (SKILL.md files)
   if [ -d /opt/azureclaw-plugin/skills ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/"
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     mkdir -p "$WORKSPACE_DIR/skills"
     cp -r --no-preserve=mode /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
     echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
@@ -659,20 +669,34 @@ if [ -d /opt/azureclaw-plugin ]; then
   fi
   # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
   if [ -d /opt/azureclaw-plugin/node_modules ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/"
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
   fi
   # Copy AGT policies if governance enabled
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"
-    cp --no-preserve=mode /opt/azureclaw-plugin/policies/*.yaml "$OPENCLAW_DIR/policies/" 2>/dev/null || true
+    # Copy only the profile that matches AGT_POLICY_PROFILE. The router loads
+    # and unions rules from ALL *.yaml files in AGT_POLICY_DIR, so copying
+    # every profile would leak (e.g.) offload's "no-spawn" deny into the
+    # default dev profile. Default → azureclaw-default.yaml. Offload →
+    # azureclaw-offload.yaml. Anything else → <profile>.yaml if it exists,
+    # otherwise fall back to default.
+    POLICY_PROFILE="${AGT_POLICY_PROFILE:-default}"
+    POLICY_SRC="/opt/azureclaw-plugin/policies/azureclaw-${POLICY_PROFILE}.yaml"
+    if [ ! -f "$POLICY_SRC" ]; then
+      echo "[azureclaw] WARN: policy profile '${POLICY_PROFILE}' not found, falling back to default"
+      POLICY_SRC="/opt/azureclaw-plugin/policies/azureclaw-default.yaml"
+    fi
+    # Remove any stale profile YAMLs from previous runs before copying.
+    rm -f "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
+    cp --no-preserve=mode "$POLICY_SRC" "$OPENCLAW_DIR/policies/" 2>/dev/null || true
     # AGT governance runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
     # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
     # chown -R sandbox:sandbox /sandbox — see below.
-    chmod o+x "$OPENCLAW_DIR"
-    chmod 755 "$OPENCLAW_DIR/policies"
+    chmod o+x "$OPENCLAW_DIR" 2>/dev/null || true
+    chmod 755 "$OPENCLAW_DIR/policies" 2>/dev/null || true
     export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
-    echo "[azureclaw] AGT governance enabled (policy: ${AGT_POLICY_PROFILE:-default}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
+    echo "[azureclaw] AGT governance enabled (policy: ${POLICY_PROFILE}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
   fi
   cd /sandbox
   echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
@@ -686,7 +710,7 @@ echo "export OPENCLAW_GATEWAY_TOKEN=\"${GATEWAY_TOKEN}\"" >> /sandbox/.bashrc
 echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 
 # Ensure all sandbox files are owned by sandbox user
-[ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /sandbox
+[ "$IS_ROOT" = "true" ] && { chown -R sandbox:sandbox /sandbox 2>/dev/null || true; }
 
 # ── Code integrity hardening ──────────────────────────────────────────────
 # After the blanket chown, lock down all executable code so the agent (UID 1000)
@@ -697,15 +721,18 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 #
 # Pattern: root owns the code, sandbox user gets read + execute only.
 # Same approach already used for policy YAML files.
+# NOTE: chmod/chown failures are tolerated (|| true) — some Docker Desktop
+# hosts return EPERM on fchmod against the sandbox volume. Hardening is
+# best-effort; the content is correct either way.
 if [ "$IS_ROOT" = "true" ]; then
   # Plugin code (JS, type defs, source maps, manifests)
   PLUGIN_DIR="$OPENCLAW_DIR/extensions/azureclaw"
   if [ -d "$PLUGIN_DIR" ]; then
-    chown -R root:sandbox "$PLUGIN_DIR"
+    chown -R root:sandbox "$PLUGIN_DIR" 2>/dev/null || true
     # Directories: read + execute (traverse) for sandbox group
-    find "$PLUGIN_DIR" -type d -exec chmod 750 {} +
+    find "$PLUGIN_DIR" -type d -exec chmod 750 {} + 2>/dev/null || true
     # Files: read-only for sandbox group
-    find "$PLUGIN_DIR" -type f -exec chmod 640 {} +
+    find "$PLUGIN_DIR" -type f -exec chmod 640 {} + 2>/dev/null || true
     echo "[azureclaw] Plugin code hardened (root-owned, read-only for sandbox)"
   fi
 
@@ -717,9 +744,9 @@ if [ "$IS_ROOT" = "true" ]; then
 
   # Curated skills installed into workspace (SKILL.md files)
   if [ -d "$WORKSPACE_DIR/skills" ]; then
-    chown -R root:sandbox "$WORKSPACE_DIR/skills"
-    find "$WORKSPACE_DIR/skills" -type d -exec chmod 750 {} +
-    find "$WORKSPACE_DIR/skills" -type f -exec chmod 640 {} +
+    chown -R root:sandbox "$WORKSPACE_DIR/skills" 2>/dev/null || true
+    find "$WORKSPACE_DIR/skills" -type d -exec chmod 750 {} + 2>/dev/null || true
+    find "$WORKSPACE_DIR/skills" -type f -exec chmod 640 {} + 2>/dev/null || true
   fi
 fi
 
@@ -747,7 +774,7 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   mkdir -p /tmp/agt
   if [ "$IS_ROOT" = "true" ]; then
     chown 1001:1001 /tmp/agt
-    chmod 700 /tmp/agt
+    chmod 700 /tmp/agt 2>/dev/null || true
   fi
 
   # Ensure router can write its log file (remove stale file from previous runs)
