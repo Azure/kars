@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.dev.yml — local dev stack for inner-loop testing (plan T4)
+#
+# Runs the FakeRouter on 127.0.0.1:8443 backed by the sanitized Foundry
+# fixtures. Use this to exercise any CLI or plugin code that honours
+# AZURECLAW_ROUTER_URL without rebuilding the sandbox image or deploying
+# to AKS.
+#
+# Prerequisites:
+#   cd cli && npm ci                         # installs tsx (no build step required)
+#
+# Start:
+#   docker compose -f docker-compose.dev.yml up         # foreground
+#   docker compose -f docker-compose.dev.yml up -d      # background
+#
+# Verify:
+#   curl -s http://127.0.0.1:8443/v1/models | jq .
+#   curl -sX POST http://127.0.0.1:8443/v1/chat/completions \
+#        -H 'content-type: application/json' -d '{"model":"gpt-4o"}' | jq .
+#
+# Point any AzureClaw client at the fake:
+#   AZURECLAW_ROUTER_URL=http://127.0.0.1:8443 <your command>
+#
+# Stop:
+#   docker compose -f docker-compose.dev.yml down
+#
+# Scope notes:
+#   - This stack intentionally does NOT run the sandbox image — the point
+#     is to skip the rebuild loop. Scenarios run either in-process (vitest)
+#     or as raw HTTP against this router.
+#   - No real router, relay, or registry. Real router integration tests
+#     live in inference-router/tests/ and spin everything up in-process.
+#   - Runs TypeScript directly via tsx so the stack is unaffected by the
+#     pre-existing @agentmesh/sdk resolution error in plugin.ts that
+#     currently blocks `npm run build`.
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  fake-router:
+    # Azure Linux matches the rest of the repo's base images (controller,
+    # router, sandbox, relay, registry all use mcr.microsoft.com/azurelinux).
+    # The nodejs repo only publishes Node 20 and 24 tags — 24 is forward-
+    # compatible for the fake router's tiny surface (node:http, fetch,
+    # node:fs/promises, node:path, node:util).
+    image: mcr.microsoft.com/azurelinux/base/nodejs:24
+    container_name: azureclaw-fake-router
+    working_dir: /cli
+    ports:
+      - "127.0.0.1:8443:8443"
+    volumes:
+      # Mount the CLI source + the fixture directory. We run via tsx, so
+      # no build artifacts are required on the host.
+      - ./cli:/cli:ro
+      - ./inference-router/tests/fixtures/foundry:/fixtures:ro
+    command:
+      - npx
+      - tsx
+      - src/testing/fake-router-cli.ts
+      - --port
+      - "8443"
+      - --fixtures
+      - /fixtures
+    healthcheck:
+      # Node is always present in this image; use it for the probe instead of
+      # assuming wget/curl ship in the base.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:8443/v1/models', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

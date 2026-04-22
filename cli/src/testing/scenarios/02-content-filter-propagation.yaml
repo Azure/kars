@@ -1,0 +1,36 @@
+# Scenario 02 — content-filter propagation
+#
+# The router's job is to pass through Foundry prompt_filter_results so that the
+# AGT governance layer can report them. This scenario asserts the fixture for
+# a filtered response carries a `content_filter_results` block with self-harm
+# flags surfaced correctly.
+
+name: "content-filter flags propagate"
+description: >
+  When Foundry flags a response, the filter annotation must survive the
+  round-trip unchanged.
+
+router:
+  fixtures_dir: ../../../../inference-router/tests/fixtures/foundry
+  routes:
+    - method: POST
+      path: /v1/chat/completions
+      body:
+        fixtureFile: chat_completion_filtered.json
+
+steps:
+  - name: "filtered response is propagated intact"
+    request:
+      method: POST
+      path: /v1/chat/completions
+      body:
+        model: gpt-4.1
+        messages:
+          - role: user
+            content: "<redacted: test prompt that triggers the filter>"
+    expect:
+      status: 200
+      body_contains:
+        - "prompt_filter_results"
+        - "content_filter_results"
+        - "self_harm"
