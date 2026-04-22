@@ -13,7 +13,7 @@
 
 export interface IMeshTransport {
   // ── Connection lifecycle ─────────────────────────────────────
-  connect(): Promise<void>;
+  connect(opts?: { capabilities?: string[]; displayName?: string }): Promise<void>;
   disconnect(): Promise<void>;
   readonly isConnected: boolean;
   readonly agentId: string; // AMID or DID
@@ -22,13 +22,18 @@ export interface IMeshTransport {
   send(toId: string, payload: unknown): Promise<string | undefined>;
   onMessage(handler: (fromId: string, payload: unknown) => void): void;
 
+  // ── KNOCK ────────────────────────────────────────────────────
+  onKnock(handler: (fromId: string, intent: unknown) => Promise<{ accept: boolean }>): void;
+
   // ── Plaintext peers (Rust controller compat) ─────────────────
   addPlaintextPeer(id: string): void;
   removePlaintextPeer(id: string): void;
   isPlaintextPeer(id: string): boolean;
+  getPlaintextPeers(): string[];
 
   // ── Discovery ────────────────────────────────────────────────
-  discover(opts?: { capabilities?: string[]; limit?: number }): Promise<Array<{ id: string; capabilities: string[] }>>;
+  discover(opts?: { capabilities?: string[]; limit?: number }): Promise<Array<{ id: string; displayName?: string; capabilities?: string[] }>>;
+  search(capability: string, opts?: { limit?: number }): Promise<Array<Record<string, unknown>>>;
 
   // ── Heartbeat / presence ─────────────────────────────────────
   sendHeartbeat(): void;

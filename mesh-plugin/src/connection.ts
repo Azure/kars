@@ -1,12 +1,9 @@
 /**
- * Mesh connection adapter — wraps @agentmesh/sdk's `AgentMeshClient`.
+ * Mesh connection adapter — wraps AgtTransport (backed by @microsoft/agentmesh-sdk).
  *
- * Before: this module reimplemented a subset of the AgentMesh protocol on top
- * of a raw WebSocket. That worked only because every peer on the network used
- * `base64(plain JSON)` in `encrypted_payload` — a misnomer, not real Signal.
- *
- * Now: we delegate WebSocket lifecycle, authentication, prekey registration,
- * X3DH, and Double Ratchet to the SDK. This module keeps ownership of:
+ * Delegates WebSocket lifecycle, authentication, prekey registration,
+ * X3DH, and Double Ratchet to the AGT SDK via AgtTransport. This module
+ * keeps ownership of:
  *   - app-layer chunking (compatible with sandbox plugin `meshSend()`)
  *   - waiters / inbox / consumeInbox (poll-style handlers)
  *   - file transfer protocol (file_transfer + file_transfer_ack dance)
@@ -15,7 +12,7 @@
  *   - CONNECT-tunnel for Node-22 HTTPS_PROXY (injected via wsFactory)
  *
  * Legacy plaintext-compat: the Rust controller still writes `base64(JSON)` on
- * the wire. For those peers only, we call `client.addPlaintextPeer(amid)` so
+ * the wire. For those peers only, we call `transport.addPlaintextPeer(amid)` so
  * the SDK bypasses Signal and uses the legacy wire format.
  */
 
@@ -25,6 +22,8 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { WebSocket as WsWebSocket } from "ws";
 import type { MeshIdentity } from "./identity.js";
+import type { IMeshTransport } from "./transport-interface.js";
+import { AgtTransport } from "./agt-transport.js";
 
 // ---------------------------------------------------------------------------
 // Build fingerprint — printed at load time for deployment verification
@@ -112,9 +111,9 @@ export class MeshConnection {
   private transferCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private connectInFlight: Promise<void> | null = null;
 
-  // Lazily loaded SDK client + the wsFactory's current CONNECT tunnel socket.
-  // The SDK owns the WebSocket, auth, prekey upload, Signal E2E, and reconnect.
-  private client: any | null = null;
+  // Lazily initialized transport (AGT-backed). Owns WebSocket, auth, prekey,
+  // Signal E2E, and reconnect.
+  private client: IMeshTransport | null = null;
 
   /**
    * Active predicate subscriptions for waitForMessage. Multiple concurrent
@@ -153,28 +152,20 @@ export class MeshConnection {
   }
 
   private async doConnect(): Promise<void> {
-    const sdk = await import("@agentmesh/sdk").catch((err) => {
-      throw new Error(
-        `@agentmesh/sdk is required for mesh connection: ${err?.message || err}`,
-      );
-    });
-
     const wsFactory = this.makeWsFactory();
 
-    // The SDK's RegistryClient prepends paths like `/registry/register` and
-    // `/registry/prekeys`. Legacy tokens carry a base URL without the `/v1`
-    // prefix (the old mesh-plugin added it itself). Normalize here so the
-    // SDK hits the correct routes on existing registries.
+    // Normalize the registry URL — legacy pairing tokens carry URLs without
+    // the `/v1` prefix that the registry routes live under.
     const registryUrl = this.normalizeRegistryUrl(this.config.registryUrl);
 
-    // Build the client from our existing Ed25519/X25519 identity so the AMID
-    // on the wire matches what the pairing handshake advertised.
-    this.client = sdk.AgentMeshClient.fromIdentity(this.config.identity.sdkIdentity, {
-      registryUrl,
+    // Build the AGT transport from our Ed25519 identity.
+    this.client = new AgtTransport({
       relayUrl: this.config.relayUrl,
-      storage: new sdk.MemoryStorage(),
-      plaintextPeers: this.config.plaintextPeers || [],
-      transportOptions: wsFactory ? { wsFactory } : undefined,
+      registryUrl,
+      identity: this.config.identity,
+      displayName: this.config.displayName,
+      wsFactory: wsFactory as any,
+      plaintextPeers: this.config.plaintextPeers,
     });
 
     // Wire message handler BEFORE connect — messages can arrive immediately
@@ -189,22 +180,19 @@ export class MeshConnection {
     this.client.onKnock(async () => ({ accept: true }));
 
     console.log(
-      `[mesh] Connecting to relay via SDK: ${this.config.relayUrl} ` +
+      `[mesh] Connecting to relay via AGT SDK: ${this.config.relayUrl} ` +
       `(amid=${this.config.identity.amid}, plaintextPeers=${(this.config.plaintextPeers || []).length})`,
     );
 
     await this.client.connect({
       capabilities: this.config.capabilities ?? ["mesh-peer"],
       displayName: this.config.displayName,
-      autoUploadPrekeys: true,
     });
 
-    // The SDK sometimes resolves connect() even when the underlying WebSocket
-    // never reached OPEN (e.g. wsFactory throws, tunnel fails). Guard against
-    // that so the caller sees a real error instead of a false-positive.
+    // Guard against transport resolving connect() when the WebSocket never opened.
     if (!this.client.isConnected) {
       const err = new Error(
-        `SDK connect() resolved but isConnected=false — WebSocket never opened. ` +
+        `Transport connect() resolved but isConnected=false — WebSocket never opened. ` +
           `Check /tmp/gateway.log for "Failed to connect to relay" lines.`,
       );
       try { await this.client.disconnect(); } catch { /* noop */ }
@@ -895,7 +883,7 @@ export class MeshConnection {
 
     try {
       const results = await this.client.search(opts.capability, { limit: opts.limit });
-      return (results as Array<Record<string, unknown>>).map((a) => ({
+      return (results as Array<Record<string, unknown>>).map((a: Record<string, unknown>) => ({
         amid: String(a.amid ?? ""),
         displayName:
           (a.displayName as string | undefined) ??

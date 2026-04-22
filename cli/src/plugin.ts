@@ -5,7 +5,7 @@
  * and agent tools (spawn, mesh, inbox, destroy) within the OpenClaw
  * plugin system using the native definePluginEntry SDK.
  *
- * AGT Integration: Uses @agentmesh/sdk for tool-level policy evaluation,
+ * AGT Integration: Uses @microsoft/agentmesh-sdk for tool-level policy evaluation,
  * trust scoring, and audit logging. AzureClaw's Rust router handles
  * infrastructure-level controls (mesh routing, content safety, token budgets).
  *
@@ -1750,12 +1750,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // ESM import preferred; fall back to CJS require if extension loader context rejects it
     let sdk: any;
     try {
-      sdk = await import("@agentmesh/sdk");
+      sdk = await import("@microsoft/agentmesh-sdk");
     } catch {
       // ESM import failed — load CJS entry via createRequire
       const { createRequire } = await import("node:module");
       const _require = createRequire(import.meta.url);
-      sdk = _require("@agentmesh/sdk");
+      sdk = _require("@microsoft/agentmesh-sdk");
     }
 
     // Policy engine — tool allow/deny evaluation
@@ -1942,7 +1942,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           pushSigningCounter("rejected");
           pushTrustToRouter(fromName, -0.3);
         } else {
-          const sdk = await import("@agentmesh/sdk");
+          const sdk = await import("@microsoft/agentmesh-sdk");
           const pubKey = await resolveSigningKey(senderAmid);
           if (pubKey) {
             try {
@@ -3321,7 +3321,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Distinguish module-not-found from other errors
     const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
     if (isModuleError) {
-      log.warn(`AGT SDK not installed: ${e.message}. Install @agentmesh/sdk to enable inter-agent communication.`);
+      log.warn(`AGT SDK not installed: ${e.message}. Install @microsoft/agentmesh-sdk to enable inter-agent communication.`);
     } else {
       log.warn(`AGT SDK init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
     }
@@ -6860,7 +6860,7 @@ const azureClawPlugin = definePluginEntry({
             const decision = agtPolicy.evaluate(action);
             return {
               text: [
-                `**AGT Policy Check** (via @agentmesh/sdk)`,
+                `**AGT Policy Check** (via @microsoft/agentmesh-sdk)`,
                 `Action: \`${action}\``,
                 `Decision: **${decision.effect}**`,
                 decision.effect === "deny" ? "Blocked by AGT policy" : "Allowed",
@@ -6886,7 +6886,7 @@ const azureClawPlugin = definePluginEntry({
         }
 
         // Status mode
-        const sdkStatus = agtPolicy ? "active (@agentmesh/sdk)" : "unavailable (using router-native)";
+        const sdkStatus = agtPolicy ? "active (@microsoft/agentmesh-sdk)" : "unavailable (using router-native)";
         const trustStatus = agtTrustStore ? "active (Ed25519, 0-1000 scale)" : "unavailable";
         const auditStatus = agtAuditLogger ? "active (hash-chain)" : "unavailable";
         const meshStatus = agtMeshClient
@@ -6907,7 +6907,7 @@ const azureClawPlugin = definePluginEntry({
             text: [
               "**AzureClaw AGT Governance**",
               "",
-              "**Application Layer** (plugin, @agentmesh/sdk):",
+              "**Application Layer** (plugin, @microsoft/agentmesh-sdk):",
               `  Identity: ${identityStatus}`,
               `  Mesh client: ${meshStatus}`,
               `  Policy engine: ${sdkStatus}`,

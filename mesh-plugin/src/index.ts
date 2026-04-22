@@ -501,7 +501,7 @@ export function definePluginEntry() {
 async function ensureInitialized(): Promise<string | null> {
   if (initialized) return null;
 
-  meshIdentity = await loadOrCreateIdentity();
+  meshIdentity = loadOrCreateIdentity();
   activePairing = getDefaultPairing();
 
   if (activePairing) {
@@ -585,7 +585,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
     return `❌ Invalid pairing token. Must start with azcp_1_ and contain valid data. (token length: ${token.length}, starts: ${token.slice(0, 20)}...)`;
   }
 
-  meshIdentity = await loadOrCreateIdentity();
+  meshIdentity = loadOrCreateIdentity();
   const identityPath = getIdentityPath();
 
   // If we already have a live connection to the same relay, reuse it.
@@ -638,7 +638,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
   const pairRequest: PairRequestMessage = {
     type: "pair_request",
     secret: payload.secret,
-    pubkey_ed25519: meshIdentity.signingPublicKey.toString("base64"),
+    pubkey_ed25519: Buffer.from(meshIdentity.signingPublicKey).toString("base64"),
     display_name: `external-${meshIdentity.amid.slice(0, 8)}`,
     capabilities_requested: ["offload", "handoff"],
   };

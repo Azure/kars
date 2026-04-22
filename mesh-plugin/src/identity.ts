@@ -1,50 +1,42 @@
 /**
- * Mesh identity management — Ed25519 signing + X25519 exchange keypairs.
+ * Mesh identity management — Ed25519 signing keypairs.
  *
- * Identity is owned by `@agentmesh/sdk` (full Signal-capable `Identity` class).
- * We persist the SDK's `IdentityData` JSON at ~/.azureclaw/identity.json,
- * encrypted at rest with AES-256-GCM (key derived from hostname+homedir).
+ * Uses Node.js built-in crypto for Ed25519 key generation — no external
+ * dependency on @agentmesh/sdk. Identity is persisted encrypted at rest
+ * with AES-256-GCM (key derived from hostname + homedir).
  *
- * Exposes a `MeshIdentity` facade so the rest of the plugin sees a stable
- * shape (amid + raw signing keys). The SDK `Identity` object is carried
- * alongside for direct use with `AgentMeshClient.fromIdentity()`.
+ * Backward-compatible: reads legacy schema-2 files (from the old SDK-based
+ * implementation) and migrates them to schema-3 on next save. The AMID and
+ * signing keys are preserved across the migration.
+ *
+ * Identity implements IMeshIdentity so it can be passed directly to
+ * AgtTransport without conversion.
  */
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-import { Identity, type IdentityData } from "@agentmesh/sdk";
+import type { IMeshIdentity } from "./transport-interface.js";
 
 const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
 const IDENTITY_FILE = path.join(IDENTITY_DIR, "identity.json");
 
-/** Envelope written to disk — SDK IdentityData encrypted with AES-256-GCM. */
-interface MeshIdentityEnvelope {
-  /** Envelope schema version. Bump when the on-disk format changes. */
-  schema: 2;
-  /** Opaque — base64 AES-256-GCM ciphertext of `JSON.stringify(IdentityData)` */
-  ciphertext: string;
-  iv: string;
-  authTag: string;
-  createdAt: string;
-}
+// ---------------------------------------------------------------------------
+// MeshIdentity — public shape consumed by connection.ts, index.ts, tests
+// ---------------------------------------------------------------------------
 
-export interface MeshIdentity {
-  /** AgentMesh ID — derived from the Ed25519 signing public key. */
+export interface MeshIdentity extends IMeshIdentity {
+  /** AgentMesh ID — base58(sha256(pubkey)[:20]). Primary routing address. */
   amid: string;
   /** Ed25519 signing public key (raw 32 bytes). */
-  signingPublicKey: Buffer;
+  signingPublicKey: Uint8Array;
   /** Ed25519 signing private key (raw 32 bytes). */
-  signingPrivateKey: Buffer;
-  /** The SDK-native Identity object, used by AgentMeshClient.fromIdentity(). */
-  sdkIdentity: Identity;
+  signingPrivateKey: Uint8Array;
 }
 
 // ---------------------------------------------------------------------------
-// AMID derivation — matches the SDK: base58(sha256(pubkey)[:20]).
-// Kept exported for legacy callers; the SDK derives the same value.
+// AMID / DID derivation
 // ---------------------------------------------------------------------------
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -68,7 +60,7 @@ function encodeBase58(bytes: Uint8Array): string {
   return result;
 }
 
-export function deriveAmid(signingPublicKey: Buffer): string {
+export function deriveAmid(signingPublicKey: Uint8Array): string {
   const hash = crypto.createHash("sha256").update(signingPublicKey).digest();
   return encodeBase58(hash.subarray(0, 20));
 }
@@ -82,118 +74,183 @@ function deriveEncryptionKey(): Buffer {
   return crypto.createHash("sha256").update(seed).digest();
 }
 
-function encryptJson(json: string): { ciphertext: string; iv: string; authTag: string } {
-  const key = deriveEncryptionKey();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([cipher.update(Buffer.from(json, "utf8")), cipher.final()]);
-  return {
-    ciphertext: encrypted.toString("base64"),
-    iv: iv.toString("base64"),
-    authTag: cipher.getAuthTag().toString("base64"),
-  };
+// ---------------------------------------------------------------------------
+// On-disk envelope formats
+// ---------------------------------------------------------------------------
+
+/** Legacy schema-2: full SDK IdentityData blob encrypted. */
+interface LegacyEnvelope {
+  schema: 2;
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  createdAt: string;
 }
 
-function decryptJson(envelope: MeshIdentityEnvelope): string {
-  const key = deriveEncryptionKey();
-  const decipher = crypto.createDecipheriv(
-    "aes-256-gcm",
-    key,
-    Buffer.from(envelope.iv, "base64")
-  );
-  decipher.setAuthTag(Buffer.from(envelope.authTag, "base64"));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(envelope.ciphertext, "base64")),
-    decipher.final(),
-  ]);
-  return decrypted.toString("utf8");
+/** Schema-3: Ed25519 keys only, no SDK dependency. */
+interface Envelope {
+  schema: 3;
+  signingPublicKey: string;  // hex
+  signingPrivateKey: string; // hex, AES-256-GCM encrypted
+  iv: string;
+  authTag: string;
+  amid: string;
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------
-// SDK key extraction — "ed25519:<base64>" / "x25519:<base64>" → Buffer(raw)
+// Raw Ed25519 key extraction from Node.js DER structures
 // ---------------------------------------------------------------------------
 
-function stripPrefix(value: string, prefix: string): string {
-  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+function rawEd25519PublicKey(keyObject: crypto.KeyObject): Uint8Array {
+  const der = keyObject.export({ type: "spki", format: "der" });
+  return new Uint8Array(der.subarray(der.length - 32));
 }
 
-function rawFromPrefixedB64(value: string, prefix: string): Buffer {
-  return Buffer.from(stripPrefix(value, prefix), "base64");
-}
-
-// ---------------------------------------------------------------------------
-// Build MeshIdentity from an SDK Identity
-// ---------------------------------------------------------------------------
-
-async function buildFacade(sdkIdentity: Identity): Promise<MeshIdentity> {
-  const data = await sdkIdentity.toData();
-  return {
-    amid: sdkIdentity.amid,
-    signingPublicKey: rawFromPrefixedB64(data.signing_public_key, "ed25519:"),
-    signingPrivateKey: rawFromPrefixedB64(data.signing_private_key, "ed25519:"),
-    sdkIdentity,
-  };
+function rawEd25519PrivateKey(keyObject: crypto.KeyObject): Uint8Array {
+  const der = keyObject.export({ type: "pkcs8", format: "der" });
+  return new Uint8Array(der.subarray(der.length - 32));
 }
 
 // ---------------------------------------------------------------------------
 // Generate / Load / Save
 // ---------------------------------------------------------------------------
 
-/** Generate a fresh identity (Ed25519 signing + X25519 exchange) via the SDK. */
-export async function generateIdentity(): Promise<MeshIdentity> {
-  const sdkIdentity = await Identity.generate();
-  return buildFacade(sdkIdentity);
+/** Generate a fresh Ed25519 identity using Node.js crypto. */
+export function generateIdentity(): MeshIdentity {
+  const keyPair = crypto.generateKeyPairSync("ed25519");
+  const signingPublicKey = rawEd25519PublicKey(keyPair.publicKey);
+  const signingPrivateKey = rawEd25519PrivateKey(keyPair.privateKey);
+  const amid = deriveAmid(signingPublicKey);
+  return {
+    agentId: amid,
+    amid,
+    signingPublicKey,
+    signingPrivateKey,
+  };
 }
 
-/** Persist identity to ~/.azureclaw/identity.json (encrypted envelope). */
-export async function saveIdentity(identity: MeshIdentity): Promise<void> {
+/** Persist identity to ~/.azureclaw/identity.json (schema-3 envelope). */
+export function saveIdentity(identity: MeshIdentity): void {
   fs.mkdirSync(IDENTITY_DIR, { recursive: true });
-  const data = await identity.sdkIdentity.toData();
-  const { ciphertext, iv, authTag } = encryptJson(JSON.stringify(data));
-  const envelope: MeshIdentityEnvelope = {
-    schema: 2,
-    ciphertext,
-    iv,
-    authTag,
+
+  const key = deriveEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(Buffer.from(identity.signingPrivateKey)),
+    cipher.final(),
+  ]);
+
+  const envelope: Envelope = {
+    schema: 3,
+    signingPublicKey: Buffer.from(identity.signingPublicKey).toString("hex"),
+    signingPrivateKey: encrypted.toString("hex"),
+    iv: iv.toString("hex"),
+    authTag: cipher.getAuthTag().toString("hex"),
+    amid: identity.amid,
     createdAt: new Date().toISOString(),
   };
+
   fs.writeFileSync(IDENTITY_FILE, JSON.stringify(envelope, null, 2), { mode: 0o600 });
 }
 
 /**
- * Load identity from disk. Returns `null` if the file is missing, corrupt,
- * or written in a legacy (pre-X25519) format. Callers should fall back to
- * `generateIdentity()` in that case.
+ * Load identity from disk. Supports both schema-2 (legacy SDK) and schema-3.
+ * Returns `null` if the file is missing or corrupt.
  */
-export async function loadIdentity(): Promise<MeshIdentity | null> {
+export function loadIdentity(): MeshIdentity | null {
   if (!fs.existsSync(IDENTITY_FILE)) return null;
   try {
-    const raw = fs.readFileSync(IDENTITY_FILE, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<MeshIdentityEnvelope>;
-    // Reject legacy Ed25519-only envelopes — we require X25519 too for Signal.
-    if (parsed.schema !== 2 || !parsed.ciphertext || !parsed.iv || !parsed.authTag) {
-      return null;
+    const raw = JSON.parse(fs.readFileSync(IDENTITY_FILE, "utf-8"));
+
+    if (raw.schema === 3) {
+      return loadSchema3(raw as Envelope);
     }
-    const json = decryptJson(parsed as MeshIdentityEnvelope);
-    const data = JSON.parse(json) as IdentityData;
-    if (!data.exchange_private_key || !data.exchange_public_key) return null;
-    const sdkIdentity = await Identity.fromData(data);
-    return await buildFacade(sdkIdentity);
+
+    if (raw.schema === 2) {
+      return loadSchema2(raw as LegacyEnvelope);
+    }
+
+    return null;
   } catch {
     return null;
   }
 }
 
+/** Load schema-3 (native format). */
+function loadSchema3(envelope: Envelope): MeshIdentity | null {
+  if (!envelope.signingPublicKey || !envelope.signingPrivateKey) return null;
+
+  const key = deriveEncryptionKey();
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm", key, Buffer.from(envelope.iv, "hex"),
+  );
+  decipher.setAuthTag(Buffer.from(envelope.authTag, "hex"));
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(envelope.signingPrivateKey, "hex")),
+    decipher.final(),
+  ]);
+
+  const signingPublicKey = new Uint8Array(Buffer.from(envelope.signingPublicKey, "hex"));
+  const signingPrivateKey = new Uint8Array(decrypted);
+  const amid = deriveAmid(signingPublicKey);
+
+  return { agentId: amid, amid, signingPublicKey, signingPrivateKey };
+}
+
+/** Load legacy schema-2 (old @agentmesh/sdk IdentityData blob). */
+function loadSchema2(envelope: LegacyEnvelope): MeshIdentity | null {
+  if (!envelope.ciphertext || !envelope.iv || !envelope.authTag) return null;
+
+  const key = deriveEncryptionKey();
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm", key, Buffer.from(envelope.iv, "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(envelope.authTag, "base64"));
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(envelope.ciphertext, "base64")),
+    decipher.final(),
+  ]);
+
+  const data = JSON.parse(decrypted.toString("utf8"));
+
+  // SDK stored keys as "ed25519:<base64>" — strip prefix, decode
+  const pubB64 = stripPrefix(data.signing_public_key ?? "", "ed25519:");
+  const privB64 = stripPrefix(data.signing_private_key ?? "", "ed25519:");
+  if (!pubB64 || !privB64) return null;
+
+  const signingPublicKey = new Uint8Array(Buffer.from(pubB64, "base64"));
+  const signingPrivateKey = new Uint8Array(Buffer.from(privB64, "base64"));
+  if (signingPublicKey.length !== 32 || signingPrivateKey.length !== 32) return null;
+
+  const amid = deriveAmid(signingPublicKey);
+  return { agentId: amid, amid, signingPublicKey, signingPrivateKey };
+}
+
+function stripPrefix(value: string, prefix: string): string {
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+}
+
 /**
- * Load the existing identity or generate a fresh one. A legacy identity file
- * (Ed25519-only, schema < 2) is treated as absent and replaced — the Signal
- * upgrade needs X25519 exchange keys that the legacy format never stored.
+ * Load existing identity or generate a fresh one. If a legacy schema-2
+ * file is loaded, it is automatically migrated to schema-3 on save.
  */
-export async function loadOrCreateIdentity(): Promise<MeshIdentity> {
-  const existing = await loadIdentity();
-  if (existing) return existing;
-  const identity = await generateIdentity();
-  await saveIdentity(identity);
+export function loadOrCreateIdentity(): MeshIdentity {
+  const existing = loadIdentity();
+  if (existing) {
+    // Auto-migrate legacy schema-2 → schema-3
+    try {
+      const raw = JSON.parse(fs.readFileSync(IDENTITY_FILE, "utf-8"));
+      if (raw.schema === 2) {
+        saveIdentity(existing);
+        console.log("[mesh] Migrated identity from schema-2 to schema-3");
+      }
+    } catch { /* best effort */ }
+    return existing;
+  }
+  const identity = generateIdentity();
+  saveIdentity(identity);
   return identity;
 }
 
@@ -201,4 +258,3 @@ export async function loadOrCreateIdentity(): Promise<MeshIdentity> {
 export function getIdentityPath(): string {
   return IDENTITY_FILE;
 }
-

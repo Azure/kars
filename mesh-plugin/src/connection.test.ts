@@ -5,12 +5,11 @@ import { generateIdentity } from "./identity.js";
 /**
  * These tests exercise MeshConnection's app-layer logic (inbox, waiters,
  * chunk reassembly, sendWithAck, pingPeer) without touching the real SDK.
- * The `@agentmesh/sdk` client is replaced with a stub that just captures
- * `send()` calls and lets us synthesise inbound messages via the registered
- * onMessage handler.
+ * The transport is replaced with a stub that captures `send()` calls
+ * and lets us synthesise inbound messages via the registered onMessage handler.
  *
  * WebSocket, auth, prekey upload, Signal E2E, and reconnect are owned by
- * the SDK and covered by its own test suite.
+ * the AGT SDK and covered by its own test suite.
  */
 
 function makeStubClient() {
@@ -23,21 +22,26 @@ function makeStubClient() {
     onKnock(_h: any) {},
     addPlaintextPeer(a: string) { plaintextPeers.add(a); },
     removePlaintextPeer(a: string) { plaintextPeers.delete(a); },
+    isPlaintextPeer(id: string) { return plaintextPeers.has(id); },
     getPlaintextPeers() { return [...plaintextPeers]; },
     async connect(_opts?: any) { this._isConnected = true; },
     async disconnect() { this._isConnected = false; },
     get isConnected() { return this._isConnected; },
     send: vi.fn(async (_to: string, _msg: any) => { /* captured */ }),
+    sendHeartbeat() {},
+    async search(_cap: string, _opts?: any) { return []; },
+    async discover(_opts?: any) { return []; },
+    get agentId() { return "test-agent"; },
   };
 }
 
 /**
- * Build a MeshConnection with its SDK client swapped out, bypassing the
- * real `doConnect()`. Returns the connection and the stub client so tests
+ * Build a MeshConnection with its transport swapped out, bypassing the
+ * real `doConnect()`. Returns the connection and the stub transport so tests
  * can inspect/drive it.
  */
 async function makeConnection(opts?: { maxInboxSize?: number }) {
-  const identity = await generateIdentity();
+  const identity = generateIdentity();
   const conn = new MeshConnection({
     relayUrl: "wss://relay.example.com/v1/connect",
     registryUrl: "https://registry.example.com/v1",
@@ -56,7 +60,7 @@ async function makeConnection(opts?: { maxInboxSize?: number }) {
 
 describe("MeshConnection", () => {
   it("initializes with correct state", async () => {
-    const identity = await generateIdentity();
+    const identity = generateIdentity();
     const conn = new MeshConnection({
       relayUrl: "wss://relay.example.com/v1/connect",
       registryUrl: "https://registry.example.com/v1",
@@ -67,7 +71,7 @@ describe("MeshConnection", () => {
   });
 
   it("getInbox returns empty array initially", async () => {
-    const identity = await generateIdentity();
+    const identity = generateIdentity();
     const conn = new MeshConnection({
       relayUrl: "wss://relay.example.com/v1/connect",
       registryUrl: "https://registry.example.com/v1",
@@ -78,7 +82,7 @@ describe("MeshConnection", () => {
   });
 
   it("rejects send when not connected", async () => {
-    const identity = await generateIdentity();
+    const identity = generateIdentity();
     const conn = new MeshConnection({
       relayUrl: "wss://relay.example.com/v1/connect",
       registryUrl: "https://registry.example.com/v1",
@@ -90,7 +94,7 @@ describe("MeshConnection", () => {
   });
 
   it("waitForMessage times out when no message arrives", async () => {
-    const identity = await generateIdentity();
+    const identity = generateIdentity();
     const conn = new MeshConnection({
       relayUrl: "wss://relay.example.com/v1/connect",
       registryUrl: "https://registry.example.com/v1",
@@ -103,7 +107,7 @@ describe("MeshConnection", () => {
 
   // ── connect() is single-flight — concurrent callers share one attempt ──
   it("connect() is single-flight", async () => {
-    const identity = await generateIdentity();
+    const identity = generateIdentity();
     const conn = new MeshConnection({
       relayUrl: "wss://relay.example.com/v1/connect",
       registryUrl: "https://registry.example.com/v1",
@@ -167,7 +171,7 @@ describe("MeshConnection", () => {
   });
 
   it("default maxInboxSize is 5000", async () => {
-    const identity = await generateIdentity();
+    const identity = generateIdentity();
     const conn = new MeshConnection({
       relayUrl: "wss://relay.example.com/v1/connect",
       registryUrl: "https://registry.example.com/v1",

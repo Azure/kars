@@ -9,7 +9,7 @@
 import type { IMeshTransport, IMeshIdentity } from "./transport-interface.js";
 
 // AGT SDK imports — @microsoft/agentmesh-sdk
-// These will resolve once the dependency is swapped in package.json
+// Lazy-loaded to allow graceful failure if the package isn't installed.
 let agtSdk: typeof import("@microsoft/agentmesh-sdk") | null = null;
 
 async function loadAgtSdk() {
@@ -20,7 +20,7 @@ async function loadAgtSdk() {
   } catch (e: unknown) {
     throw new Error(
       `@microsoft/agentmesh-sdk is required for AGT mesh transport. ` +
-      `Install it: npm install @microsoft/agentmesh-sdk. ` +
+      `Install it: npm install @microsoft/agentmesh-sdk@^3.2.0. ` +
       `Error: ${(e as Error)?.message ?? e}`,
     );
   }
@@ -31,18 +31,21 @@ export interface AgtTransportOptions {
   registryUrl: string;
   identity: IMeshIdentity;
   displayName?: string;
-  wsFactory?: (url: string) => WebSocket;
+  wsFactory?: (url: string) => unknown;
   plaintextPeers?: string[];
 }
 
 export class AgtTransport implements IMeshTransport {
   private options: AgtTransportOptions;
-  private client: InstanceType<typeof import("@microsoft/agentmesh-sdk").MeshClient> | null = null;
+  private client: any | null = null;
   private messageHandlers: Array<(fromId: string, payload: unknown) => void> = [];
+  private knockHandlers: Array<(fromId: string, intent: unknown) => Promise<{ accept: boolean }>> = [];
   private _isConnected = false;
+  private _plaintextPeers: Set<string>;
 
   constructor(options: AgtTransportOptions) {
     this.options = options;
+    this._plaintextPeers = new Set(options.plaintextPeers ?? []);
   }
 
   get isConnected(): boolean {
@@ -53,7 +56,7 @@ export class AgtTransport implements IMeshTransport {
     return this.options.identity.agentId;
   }
 
-  async connect(): Promise<void> {
+  async connect(opts?: { capabilities?: string[]; displayName?: string }): Promise<void> {
     const sdk = await loadAgtSdk();
 
     const keyManager = new sdk.X3DHKeyManager(
@@ -68,9 +71,9 @@ export class AgtTransport implements IMeshTransport {
       registryUrl: this.options.registryUrl,
       keyManager,
       agentDid: this.options.identity.agentId,
-      displayName: this.options.displayName,
-      wsFactory: this.options.wsFactory,
-      plaintextPeers: this.options.plaintextPeers,
+      displayName: opts?.displayName ?? this.options.displayName,
+      wsFactory: this.options.wsFactory as any,
+      plaintextPeers: [...this._plaintextPeers],
     });
 
     // Wire message handler
@@ -78,6 +81,15 @@ export class AgtTransport implements IMeshTransport {
       for (const handler of this.messageHandlers) {
         handler(from, payload);
       }
+    });
+
+    // Wire KNOCK handler — delegate to registered handlers
+    this.client.onKnock(async (from: string, intent: unknown) => {
+      for (const handler of this.knockHandlers) {
+        const result = await handler(from, intent);
+        if (!result.accept) return false;
+      }
+      return true; // accept by default if no handler rejects
     });
 
     await this.client.connect();
@@ -95,33 +107,99 @@ export class AgtTransport implements IMeshTransport {
   async send(toId: string, payload: unknown): Promise<string | undefined> {
     if (!this.client) throw new Error("Not connected");
     await this.client.send(toId, payload);
-    return undefined; // MeshClient doesn't return message IDs from send
+    return undefined;
   }
 
   onMessage(handler: (fromId: string, payload: unknown) => void): void {
     this.messageHandlers.push(handler);
   }
 
+  onKnock(handler: (fromId: string, intent: unknown) => Promise<{ accept: boolean }>): void {
+    this.knockHandlers.push(handler);
+  }
+
   addPlaintextPeer(id: string): void {
+    this._plaintextPeers.add(id);
     this.client?.addPlaintextPeer(id);
   }
 
   removePlaintextPeer(id: string): void {
+    this._plaintextPeers.delete(id);
     this.client?.removePlaintextPeer(id);
   }
 
   isPlaintextPeer(id: string): boolean {
-    return this.client?.isPlaintextPeer(id) ?? false;
+    return this._plaintextPeers.has(id);
   }
 
-  async discover(opts?: { capabilities?: string[]; limit?: number }): Promise<Array<{ id: string; capabilities: string[] }>> {
-    // Discovery goes through the registry REST API
-    // For now, return empty — full registry client integration in next PR
-    console.warn("[agt-transport] discover() not yet wired to AGT registry");
-    return [];
+  getPlaintextPeers(): string[] {
+    return [...this._plaintextPeers];
+  }
+
+  /**
+   * Discovery via the AGT registry REST API.
+   * Queries GET /agents?capability=<cap> for each requested capability.
+   */
+  async discover(opts?: { capabilities?: string[]; limit?: number }): Promise<Array<{ id: string; displayName?: string; capabilities?: string[] }>> {
+    const limit = opts?.limit ?? 50;
+    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+
+    if (!opts?.capabilities || opts.capabilities.length === 0) {
+      // No capability filter — try listing all agents
+      try {
+        const resp = await fetch(`${registryUrl}/agents?limit=${limit}`);
+        if (!resp.ok) return [];
+        const data = await resp.json() as Array<Record<string, unknown>>;
+        return data.slice(0, limit).map(mapAgent);
+      } catch {
+        return [];
+      }
+    }
+
+    // Search by each capability, deduplicate
+    const seen = new Map<string, { id: string; displayName?: string; capabilities?: string[] }>();
+    await Promise.all(
+      opts.capabilities.map(async (cap) => {
+        try {
+          const resp = await fetch(`${registryUrl}/agents?capability=${encodeURIComponent(cap)}&limit=${limit}`);
+          if (!resp.ok) return;
+          const data = await resp.json() as Array<Record<string, unknown>>;
+          for (const a of data) {
+            const mapped = mapAgent(a);
+            if (mapped.id && !seen.has(mapped.id)) seen.set(mapped.id, mapped);
+          }
+        } catch { /* best-effort */ }
+      }),
+    );
+
+    return Array.from(seen.values()).slice(0, limit);
+  }
+
+  /**
+   * Low-level search by single capability — backward compat with
+   * connection.ts's discover() method.
+   */
+  async search(capability: string, opts?: { limit?: number }): Promise<Array<Record<string, unknown>>> {
+    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    const limit = opts?.limit ?? 50;
+    try {
+      const resp = await fetch(`${registryUrl}/agents?capability=${encodeURIComponent(capability)}&limit=${limit}`);
+      if (!resp.ok) return [];
+      return await resp.json() as Array<Record<string, unknown>>;
+    } catch {
+      return [];
+    }
   }
 
   sendHeartbeat(): void {
     this.client?.sendHeartbeat();
   }
+}
+
+function mapAgent(a: Record<string, unknown>): { id: string; displayName?: string; capabilities?: string[] } {
+  return {
+    id: String(a.amid ?? a.agent_id ?? a.id ?? ""),
+    displayName: (a.displayName ?? a.display_name) as string | undefined,
+    capabilities: a.capabilities as string[] | undefined,
+  };
 }
