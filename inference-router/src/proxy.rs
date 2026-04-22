@@ -155,6 +155,20 @@ pub async fn forward(
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
+
+    // r6 — surface Azure-side request ids so one log line carries both our
+    // trace_id (from the outer tracing span) and Azure's correlation ids.
+    // `x-ms-request-id` identifies the Azure OpenAI request; `apim-request-id`
+    // identifies the APIM frontend; both are what Azure support asks for.
+    let azure_request_id = response_headers
+        .get("x-ms-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let apim_request_id = response_headers
+        .get("apim-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
     let response_body = response
         .bytes()
         .await
@@ -163,7 +177,15 @@ pub async fn forward(
 
     record_metrics(upstream, status, latency, &response_body);
 
-    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), resp_len = response_body.len(), "Foundry complete");
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        status = %status.as_u16(),
+        latency_ms = %latency.as_millis(),
+        resp_len = response_body.len(),
+        azure_request_id = %azure_request_id,
+        apim_request_id = %apim_request_id,
+        "Foundry complete"
+    );
     Ok((status, response_headers, response_body))
 }
 
@@ -327,6 +349,24 @@ pub async fn forward_stream(
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
+
+    // r6 — log Azure correlation ids for the stream path too. Emitted at
+    // stream-start because headers arrive before any bytes.
+    let azure_request_id = response_headers
+        .get("x-ms-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let apim_request_id = response_headers
+        .get("apim-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        status = %status.as_u16(),
+        azure_request_id = %azure_request_id,
+        apim_request_id = %apim_request_id,
+        "Foundry stream headers received"
+    );
 
     // Record request count immediately
     let status_label = if status.is_success() { "ok" } else { "error" };

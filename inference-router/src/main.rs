@@ -25,9 +25,25 @@
 use azureclaw_inference_router::{config, forward_proxy, governance, handoff, routes};
 
 use anyhow::Result;
-use axum::{Router, extract::Request, http::StatusCode, middleware::Next, response::IntoResponse};
+use axum::{
+    Router,
+    extract::Request,
+    http::{HeaderName, HeaderValue, StatusCode},
+    middleware::Next,
+    response::IntoResponse,
+};
 use std::sync::Arc;
+use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Header used for end-to-end correlation across CLI, router, and upstream
+/// logs. Accepted on inbound (propagated when present), otherwise generated.
+/// Also emitted on every response so clients can correlate their side.
+const TRACE_ID_HEADER: &str = "x-azureclaw-trace-id";
+
+/// Maximum accepted length for an incoming trace id. Longer values are
+/// rejected — we don't want a caller burying 2MB into every log line.
+const MAX_TRACE_ID_LEN: usize = 128;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -124,6 +140,37 @@ async fn main() -> Result<()> {
             })
             .map(Arc::new);
 
+    // s3 — optional origin allowlist for the admin API. Comma-separated
+    // IPv4/IPv6 literals. Empty/unset = token-only legacy behaviour.
+    let admin_allow_ips: Arc<Vec<std::net::IpAddr>> = Arc::new(
+        std::env::var("ROUTER_ADMIN_ALLOW_IPS")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                let mut ips = Vec::new();
+                for entry in s.split(',').map(|e| e.trim()).filter(|e| !e.is_empty()) {
+                    match entry.parse::<std::net::IpAddr>() {
+                        Ok(ip) => ips.push(ip),
+                        Err(err) => {
+                            tracing::error!(
+                                entry,
+                                %err,
+                                "Invalid entry in ROUTER_ADMIN_ALLOW_IPS; skipping"
+                            );
+                        }
+                    }
+                }
+                if !ips.is_empty() {
+                    tracing::info!(
+                        count = ips.len(),
+                        "Admin-API origin allowlist active (s3)"
+                    );
+                }
+                ips
+            })
+            .unwrap_or_default(),
+    );
+
     let app = {
         // Public routes — no admin token required (health, metrics, inference, Foundry proxies, mesh)
         let public = Router::new()
@@ -143,9 +190,11 @@ async fn main() -> Result<()> {
 
         let protected = if let Some(ref token) = admin_token {
             let token = token.clone();
+            let allow_ips = admin_allow_ips.clone();
             protected.layer(axum::middleware::from_fn(move |req, next| {
                 let token = token.clone();
-                admin_auth_middleware(token, req, next)
+                let allow_ips = allow_ips.clone();
+                admin_auth_middleware(token, allow_ips, req, next)
             }))
         } else {
             // Unreachable — auto-generated token above guarantees Some
@@ -187,6 +236,10 @@ async fn main() -> Result<()> {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(256),
             ))
+            // r6 — trace-id middleware is outermost so every request gets a
+            // trace span before any other layer runs (concurrency limit,
+            // connection_close, auth gates all log inside the span).
+            .layer(axum::middleware::from_fn(trace_id_middleware))
     };
 
     let addr = format!("0.0.0.0:{}", config.port);
@@ -311,23 +364,61 @@ async fn connection_close_middleware(req: Request, next: Next) -> impl IntoRespo
 
 /// Middleware that gates protected endpoints for non-localhost callers.
 ///
-/// - Localhost (127.0.0.1 / ::1) → always allowed (agent + kubectl exec are same-pod)
-/// - Non-localhost → requires `Authorization: Bearer <ADMIN_TOKEN>` (cross-pod mesh traffic)
+/// Three-layer gate:
+/// 1. Localhost (127.0.0.1 / ::1) → always allowed (agent + kubectl exec are same-pod).
+/// 2. Non-localhost → if `ROUTER_ADMIN_ALLOW_IPS` is set, the remote IP **must**
+///    appear in the comma-separated list. Empty/unset = legacy behaviour (any
+///    IP accepted with the right token).
+/// 3. Non-localhost → requires `Authorization: Bearer <ADMIN_TOKEN>`.
 ///
-/// This ensures the agent process can call /egress/fetch, /sandbox/spawn, etc. without a token,
-/// while preventing other pods in the cluster from calling sensitive endpoints without auth.
+/// Layer 2 is the s3 hardening: token leak alone is not enough to pwn the
+/// admin API; attacker must also have a pod at an allowlisted address.
 async fn admin_auth_middleware(
     expected_token: Arc<String>,
+    allow_ips: Arc<Vec<std::net::IpAddr>>,
     req: Request,
     next: Next,
 ) -> impl IntoResponse {
     // Allow all localhost connections without auth — same pod is trusted.
-    if let Some(connect_info) = req
+    let remote_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        && connect_info.0.ip().is_loopback()
+        .map(|c| c.0.ip());
+
+    if let Some(ip) = remote_ip
+        && ip.is_loopback()
     {
         return next.run(req).await.into_response();
+    }
+
+    // s3 — origin allowlist (defence in depth against admin-token theft).
+    if !allow_ips.is_empty() {
+        match remote_ip {
+            Some(ip) if allow_ips.contains(&ip) => {}
+            Some(ip) => {
+                tracing::warn!(
+                    path = %req.uri().path(),
+                    remote = %ip,
+                    "Admin auth: remote IP not in ROUTER_ADMIN_ALLOW_IPS"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Admin origin not allowed",
+                )
+                    .into_response();
+            }
+            None => {
+                tracing::warn!(
+                    path = %req.uri().path(),
+                    "Admin auth: missing ConnectInfo while allowlist is set"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Admin origin not allowed",
+                )
+                    .into_response();
+            }
+        }
     }
 
     // Non-localhost: require bearer token
@@ -360,5 +451,304 @@ async fn admin_auth_middleware(
             )
                 .into_response()
         }
+    }
+}
+
+// ── Trace-id middleware (r6) ────────────────────────────────────────────────
+//
+// Attaches a stable correlation id to every request so logs emitted from
+// the CLI, router, and upstream Azure services can be joined. Accepts an
+// incoming `X-Azureclaw-Trace-Id` verbatim if the caller supplied one (so
+// CLI→router correlation works), otherwise generates 64 random bits as
+// 16 hex characters.
+//
+// The id is:
+//   • placed in request extensions (for handlers that want it directly)
+//   • inserted back into request headers (so proxy::forward's generic
+//     header-copy picks it up and forwards to Azure upstream)
+//   • used to open a tracing span so *every* log event from this request
+//     inherits the `trace_id` field in the JSON logs
+//   • echoed back in the response as `X-Azureclaw-Trace-Id`
+async fn trace_id_middleware(mut req: Request, next: Next) -> impl IntoResponse {
+    let trace_id = req
+        .headers()
+        .get(TRACE_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty() && s.len() <= MAX_TRACE_ID_LEN && is_safe_trace_id(s))
+        .map(|s| s.to_owned())
+        .unwrap_or_else(generate_trace_id);
+
+    // Normalise back into the request so forward() will propagate it.
+    if let Ok(hv) = HeaderValue::from_str(&trace_id) {
+        req.headers_mut().insert(
+            HeaderName::from_static(TRACE_ID_HEADER),
+            hv.clone(),
+        );
+    }
+    req.extensions_mut().insert(TraceId(trace_id.clone()));
+
+    let span = tracing::info_span!("request", trace_id = %trace_id);
+    let mut response = next.run(req).instrument(span).await.into_response();
+
+    if let Ok(hv) = HeaderValue::from_str(&trace_id) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(TRACE_ID_HEADER), hv);
+    }
+    response
+}
+
+/// Request-extension wrapper for the trace id. Handlers can pull this out
+/// with `.extensions().get::<TraceId>()` if they need to log with it
+/// directly (most don't — the tracing span handles it automatically).
+#[derive(Clone, Debug)]
+pub struct TraceId(pub String);
+
+/// Tight charset for trace ids to prevent log-injection (CRLF, tabs, ANSI
+/// escapes) when a caller passes their own id. Allowed: ASCII alphanumeric,
+/// `-`, `_`. Anything else → regenerate.
+fn is_safe_trace_id(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Generate a 64-bit trace id as 16 hex characters. Collision-resistant
+/// for the volumes we care about (log correlation within a short window),
+/// without pulling in a full UUID dependency.
+fn generate_trace_id() -> String {
+    use rand::Rng;
+    format!("{:016x}", rand::rng().random::<u64>())
+}
+
+// ── Tests (r6, s3) ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, StatusCode},
+        routing::get,
+    };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::ServiceExt;
+
+    async fn ok() -> &'static str {
+        "ok"
+    }
+
+    fn build_app(
+        token: Arc<String>,
+        allow_ips: Arc<Vec<IpAddr>>,
+    ) -> Router {
+        let token_for_closure = token.clone();
+        Router::new()
+            .route("/admin/ping", get(ok))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let token = token_for_closure.clone();
+                let allow_ips = allow_ips.clone();
+                admin_auth_middleware(token, allow_ips, req, next)
+            }))
+            .layer(axum::middleware::from_fn(trace_id_middleware))
+    }
+
+    fn req_from(ip: IpAddr, auth: Option<&str>, trace: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri("/admin/ping");
+        if let Some(t) = auth {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(t) = trace {
+            builder = builder.header(TRACE_ID_HEADER, t);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(ip, 49_000)));
+        req
+    }
+
+    // ── trace-id sanitizer (r6) ──────────────────────────────────────────────
+
+    #[test]
+    fn is_safe_trace_id_accepts_hex() {
+        assert!(is_safe_trace_id("9f3a2b1883c04e70"));
+    }
+
+    #[test]
+    fn is_safe_trace_id_accepts_caller_supplied() {
+        assert!(is_safe_trace_id("my-debug-run_42"));
+    }
+
+    #[test]
+    fn is_safe_trace_id_rejects_log_injection() {
+        assert!(!is_safe_trace_id("abc\n\"evil\":\"true")); // CRLF + JSON
+        assert!(!is_safe_trace_id("abc\r\nLog-Forge"));
+        assert!(!is_safe_trace_id("abc\tinject"));
+        assert!(!is_safe_trace_id("abc\x1b[31mred")); // ANSI escape
+        assert!(!is_safe_trace_id("abc/../etc")); // path-ish
+        assert!(!is_safe_trace_id("abc def")); // whitespace
+    }
+
+    #[test]
+    fn generate_trace_id_is_16_hex_chars() {
+        let id = generate_trace_id();
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generate_trace_id_is_unique_across_calls() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            seen.insert(generate_trace_id());
+        }
+        // 1000 64-bit ids: collision probability ≈ 2.7e-14
+        assert_eq!(seen.len(), 1000);
+    }
+
+    // ── trace-id middleware behaviour (r6) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn trace_id_generated_when_absent() {
+        let app = build_app(
+            Arc::new("ignored".into()),
+            Arc::new(Vec::new()),
+        );
+        let req = req_from(IpAddr::V4(Ipv4Addr::LOCALHOST), None, None);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let hv = resp.headers().get(TRACE_ID_HEADER).expect("response carries trace-id");
+        let id = hv.to_str().unwrap();
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn trace_id_propagated_from_caller() {
+        let app = build_app(
+            Arc::new("ignored".into()),
+            Arc::new(Vec::new()),
+        );
+        let req = req_from(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            None,
+            Some("my-debug-run-42"),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(TRACE_ID_HEADER).unwrap(),
+            "my-debug-run-42"
+        );
+    }
+
+    #[tokio::test]
+    async fn malicious_trace_id_is_regenerated() {
+        let app = build_app(
+            Arc::new("ignored".into()),
+            Arc::new(Vec::new()),
+        );
+        // The http crate already rejects CR/LF/NUL in header values at
+        // request build time, so we exercise our sanitizer with a payload
+        // that's a valid HTTP header *value* but still dangerous if echoed
+        // verbatim into a log line or a file path: traversal + quote chars.
+        let req = req_from(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            None,
+            Some("../../../etc/passwd\"injected"),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        // Request still succeeds (we silently regenerate) but response trace id
+        // must NOT echo the attack payload — must be our 16-hex-char fresh id.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let id = resp
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert!(!id.contains('/'));
+        assert!(!id.contains('.'));
+        assert!(!id.contains('"'));
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── admin origin allowlist (s3) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn localhost_bypasses_everything() {
+        let app = build_app(
+            Arc::new("secret".into()),
+            Arc::new(vec![IpAddr::V4(Ipv4Addr::new(10, 200, 0, 5))]),
+        );
+        let req = req_from(IpAddr::V4(Ipv4Addr::LOCALHOST), None, None);
+        let resp = app.oneshot(req).await.unwrap();
+        // Localhost allowed without token, without allowlist match.
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn allowlist_off_token_gate_still_works() {
+        let app = build_app(
+            Arc::new("secret".into()),
+            Arc::new(Vec::new()),
+        );
+        let non_local = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 99));
+
+        // Good token → 200
+        let resp = app
+            .clone()
+            .oneshot(req_from(non_local, Some("secret"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Bad token → 401
+        let resp = app
+            .clone()
+            .oneshot(req_from(non_local, Some("wrong"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn allowlist_on_wrong_ip_gets_403_even_with_token() {
+        let allow = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 5));
+        let attacker = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 99));
+        let app = build_app(Arc::new("secret".into()), Arc::new(vec![allow]));
+
+        // Attacker has a valid token but wrong origin → 403.
+        let resp = app
+            .oneshot(req_from(attacker, Some("secret"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn allowlist_on_right_ip_wrong_token_still_rejected() {
+        let allow = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 5));
+        let app = build_app(Arc::new("secret".into()), Arc::new(vec![allow]));
+
+        let resp = app
+            .oneshot(req_from(allow, Some("wrong"), None))
+            .await
+            .unwrap();
+        // Origin passes but token wrong → 401 (not 403).
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn allowlist_on_right_ip_right_token_accepted() {
+        let allow = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 5));
+        let app = build_app(Arc::new("secret".into()), Arc::new(vec![allow]));
+
+        let resp = app
+            .oneshot(req_from(allow, Some("secret"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
