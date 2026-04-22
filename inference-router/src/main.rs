@@ -202,12 +202,24 @@ async fn main() -> Result<()> {
     let proxy_shutdown = forward_proxy::start(&proxy_addr, proxy_blocklist).await;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(
+    let shutdown_timeout = resolve_shutdown_timeout();
+    tracing::info!(
+        shutdown_timeout_secs = shutdown_timeout.as_secs(),
+        "graceful shutdown timeout configured"
+    );
+    let serve_fut = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .with_graceful_shutdown(shutdown_signal());
+
+    match tokio::time::timeout(shutdown_timeout, serve_fut).await {
+        Ok(res) => res?,
+        Err(_) => tracing::warn!(
+            shutdown_timeout_secs = shutdown_timeout.as_secs(),
+            "graceful shutdown timed out with in-flight requests; forcing shutdown"
+        ),
+    }
 
     // Signal the forward proxy to drain and shut down
     proxy_shutdown.cancel();
@@ -218,18 +230,60 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Derive the graceful-shutdown deadline.
+///
+/// Resolution order (first that yields a positive duration wins):
+/// 1. `SHUTDOWN_TIMEOUT_SECS` — explicit operator override.
+/// 2. `TERMINATION_GRACE_PERIOD_SECS` − 5s, floored at 10s — matches the K8s
+///    `terminationGracePeriodSeconds` so we self-abort a few seconds before
+///    the kubelet escalates to SIGKILL.
+/// 3. 25s — sensible default for the K8s 30s pod-termination convention.
+fn resolve_shutdown_timeout() -> std::time::Duration {
+    const FLOOR_SECS: u64 = 10;
+    const DEFAULT_SECS: u64 = 25;
+
+    if let Some(v) = std::env::var("SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+    {
+        return std::time::Duration::from_secs(v);
+    }
+    if let Some(grace) = std::env::var("TERMINATION_GRACE_PERIOD_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        let derived = grace.saturating_sub(5).max(FLOOR_SECS);
+        return std::time::Duration::from_secs(derived);
+    }
+    std::time::Duration::from_secs(DEFAULT_SECS)
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(
+                error = %err,
+                "failed to install Ctrl+C handler; process will not shut down cleanly on SIGINT"
+            );
+            // Park this branch so the SIGTERM arm can still drive shutdown.
+            std::future::pending::<()>().await;
+        }
     };
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to install SIGTERM handler; process will not shut down cleanly on SIGTERM"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();

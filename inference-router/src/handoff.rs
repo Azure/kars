@@ -428,6 +428,9 @@ impl PendingHandoffStore {
         if let Some(last) = guard.last_request_at {
             let elapsed = last.elapsed().as_secs();
             if elapsed < HANDOFF_REQUEST_COOLDOWN_SECS {
+                crate::metrics::HANDOFF_PENDING_EVENTS
+                    .with_label_values(&["rate_limited"])
+                    .inc();
                 return Err(PendingHandoffError::RateLimited {
                     retry_after_secs: HANDOFF_REQUEST_COOLDOWN_SECS - elapsed,
                 });
@@ -451,6 +454,9 @@ impl PendingHandoffStore {
         });
         guard.last_request_at = Some(Instant::now());
 
+        crate::metrics::HANDOFF_PENDING_EVENTS
+            .with_label_values(&["created"])
+            .inc();
         Ok(token)
     }
 
@@ -468,14 +474,22 @@ impl PendingHandoffStore {
     ) -> Result<(HandoffDirection, String), PendingHandoffError> {
         let mut guard = self.inner.write().await;
 
-        let pending = guard
-            .pending
-            .as_ref()
-            .ok_or(PendingHandoffError::NoPending)?;
+        let pending = match guard.pending.as_ref() {
+            Some(p) => p,
+            None => {
+                crate::metrics::HANDOFF_PENDING_EVENTS
+                    .with_label_values(&["no_pending"])
+                    .inc();
+                return Err(PendingHandoffError::NoPending);
+            }
+        };
 
         // Check expiry
         if pending.created_at.elapsed() > pending.ttl {
             guard.pending = None;
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["expired"])
+                .inc();
             return Err(PendingHandoffError::Expired);
         }
 
@@ -483,6 +497,9 @@ impl PendingHandoffStore {
         let elapsed_ms = pending.created_at.elapsed().as_millis() as u64;
         let min_delay_ms = CONFIRMATION_MIN_DELAY_SECS * 1000;
         if elapsed_ms < min_delay_ms {
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["too_fast"])
+                .inc();
             return Err(PendingHandoffError::TooFast {
                 elapsed_ms,
                 min_delay_ms,
@@ -491,6 +508,9 @@ impl PendingHandoffStore {
 
         // Token validation (constant-time)
         if !constant_time_eq(token.as_bytes(), pending.confirmation_token.as_bytes()) {
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["invalid_token"])
+                .inc();
             return Err(PendingHandoffError::InvalidToken);
         }
 
@@ -499,6 +519,9 @@ impl PendingHandoffStore {
         let reason = pending.reason.clone();
         guard.pending = None;
 
+        crate::metrics::HANDOFF_PENDING_EVENTS
+            .with_label_values(&["confirmed"])
+            .inc();
         Ok((direction, reason))
     }
 
@@ -526,7 +549,17 @@ impl PendingHandoffStore {
 
     /// Cancel any pending request.
     pub async fn cancel(&self) {
-        self.inner.write().await.pending = None;
+        let had_pending = {
+            let mut guard = self.inner.write().await;
+            let had = guard.pending.is_some();
+            guard.pending = None;
+            had
+        };
+        if had_pending {
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["cancelled"])
+                .inc();
+        }
     }
 }
 
@@ -587,6 +620,11 @@ impl std::fmt::Display for HandoffPhase {
     }
 }
 
+/// Metric-safe label string for a phase (lowercase, bounded cardinality).
+fn phase_label(p: HandoffPhase) -> String {
+    p.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotItemCounts {
     pub chat_messages: u32,
@@ -638,6 +676,7 @@ impl HandoffSession {
     /// Returns Err if the transition is not allowed from the current phase.
     pub async fn try_transition(&self, target: HandoffPhase) -> Result<(), String> {
         let mut inner = self.inner.write().await;
+        let from = inner.phase;
         let allowed = match target {
             HandoffPhase::Initialized => matches!(
                 inner.phase,
@@ -668,6 +707,12 @@ impl HandoffSession {
             HandoffPhase::Failed => true, // can fail from any phase
             HandoffPhase::Idle => true,   // reset always allowed
         };
+        let result_label = if allowed { "ok" } else { "rejected" };
+        let from_label = phase_label(from);
+        let to_label = phase_label(target);
+        crate::metrics::HANDOFF_PHASE_TRANSITIONS
+            .with_label_values(&[from_label.as_str(), to_label.as_str(), result_label])
+            .inc();
         if allowed {
             inner.phase = target;
             Ok(())
@@ -2417,6 +2462,74 @@ mod tests {
             workspaces.len(),
             0,
             "empty workspace + empty task_context should be filtered out"
+        );
+    }
+
+    // ── R5: handoff metrics wiring ─────────────────────────────────────────
+
+    fn pending_event_count(action: &str) -> u64 {
+        crate::metrics::HANDOFF_PENDING_EVENTS
+            .with_label_values(&[action])
+            .get()
+    }
+
+    fn phase_transition_count(from: &str, to: &str, result: &str) -> u64 {
+        crate::metrics::HANDOFF_PHASE_TRANSITIONS
+            .with_label_values(&[from, to, result])
+            .get()
+    }
+
+    #[tokio::test]
+    async fn metric_created_increments_on_create_pending() {
+        let pending = PendingHandoffStore::new();
+        let before = pending_event_count("created");
+        let _ = pending
+            .create_pending(HandoffDirection::LocalToAks, "test".into())
+            .await
+            .unwrap();
+        // Other tests may run in parallel and also bump `created`; assert
+        // strictly greater instead of +1 to keep this test order-independent.
+        assert!(pending_event_count("created") > before);
+    }
+
+    #[tokio::test]
+    async fn metric_no_pending_increments_on_confirm_empty() {
+        let pending = PendingHandoffStore::new();
+        let before = pending_event_count("no_pending");
+        let res = pending.confirm("deadbeef").await;
+        assert!(matches!(res, Err(PendingHandoffError::NoPending)));
+        assert!(pending_event_count("no_pending") > before);
+    }
+
+    #[tokio::test]
+    async fn metric_too_fast_increments_on_quick_confirm() {
+        let pending = PendingHandoffStore::new();
+        let token = pending
+            .create_pending(HandoffDirection::LocalToAks, "test".into())
+            .await
+            .unwrap();
+        let before = pending_event_count("too_fast");
+        let res = pending.confirm(&token).await;
+        assert!(matches!(res, Err(PendingHandoffError::TooFast { .. })));
+        assert!(pending_event_count("too_fast") > before);
+    }
+
+    #[tokio::test]
+    async fn metric_phase_transitions_record_ok_and_rejected() {
+        let session = HandoffSession::new();
+        let ok_before = phase_transition_count("idle", "initialized", "ok");
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
+        assert!(phase_transition_count("idle", "initialized", "ok") > ok_before);
+
+        // Invalid: Initialized → Complete is not allowed (needs Verifying / Decommissioning).
+        let rejected_before = phase_transition_count("initialized", "complete", "rejected");
+        let res = session.try_transition(HandoffPhase::Complete).await;
+        assert!(res.is_err());
+        assert!(
+            phase_transition_count("initialized", "complete", "rejected") > rejected_before
         );
     }
 }
