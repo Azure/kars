@@ -168,6 +168,40 @@ impl AppState {
     }
 }
 
+/// Extract the admin bearer token from either `Authorization: Bearer <token>`
+/// (canonical) or the legacy `x-azureclaw-admin: <token>` header.
+///
+/// Q3: `Authorization: Bearer` is canonical; `x-azureclaw-admin` is accepted
+/// for backward compatibility but logs a deprecation warning (once per
+/// process — see `DEPRECATED_ADMIN_HEADER_WARNED`) so operators notice and
+/// migrate callers. The legacy header will be removed in a future release.
+fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Some(value.to_string());
+    }
+    if let Some(value) = headers
+        .get("x-azureclaw-admin")
+        .and_then(|v| v.to_str().ok())
+    {
+        if !DEPRECATED_ADMIN_HEADER_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "Deprecated header 'x-azureclaw-admin' used for admin auth. \
+                 Migrate to 'Authorization: Bearer <token>'. This header will \
+                 be removed in a future release."
+            );
+        }
+        return Some(value.to_string());
+    }
+    None
+}
+
+static DEPRECATED_ADMIN_HEADER_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Inference API routes — proxied to Azure AI Foundry.
 pub fn inference_routes() -> Router<AppState> {
     Router::new()
@@ -1779,12 +1813,8 @@ async fn agt_trust_delete(
     // Trust mutations require admin token even from localhost — prevents sandbox
     // (UID 1000) from forging peer trust scores via the localhost auth exemption.
     if let Some(ref expected) = state.admin_token {
-        let provided = headers
-            .get("x-azureclaw-admin")
-            .or_else(|| headers.get("authorization"))
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
-        match provided {
+        let provided = extract_admin_token(&headers);
+        match provided.as_deref() {
             Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!(
@@ -1938,12 +1968,8 @@ async fn agt_trust_update(
     // Trust mutations require admin token even from localhost — prevents sandbox
     // (UID 1000) from forging peer trust scores via the localhost auth exemption.
     if let Some(ref expected) = state.admin_token {
-        let provided = headers
-            .get("x-azureclaw-admin")
-            .or_else(|| headers.get("authorization"))
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
-        match provided {
+        let provided = extract_admin_token(&headers);
+        match provided.as_deref() {
             Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!("POST /agt/trust denied: missing or invalid admin token");
@@ -1999,12 +2025,8 @@ async fn agt_rate_limit_update(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Some(ref expected) = state.admin_token {
-        let provided = headers
-            .get("x-azureclaw-admin")
-            .or_else(|| headers.get("authorization"))
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
-        match provided {
+        let provided = extract_admin_token(&headers);
+        match provided.as_deref() {
             Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!("PUT /agt/rate-limit denied: missing or invalid admin token");
