@@ -43,7 +43,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@microsoft/agentmesh-sdk": "file:../../../agent-governance-toolkit/packages/agent-mesh/sdks/typescript",
+    "@microsoft/agentmesh-sdk": "^3.2.1",
     "ws": "^8.18"
   },
   "devDependencies": {
