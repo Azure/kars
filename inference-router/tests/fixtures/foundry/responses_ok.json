@@ -1,0 +1,22 @@
+{
+  "id": "resp_REDACTED22222222222222222",
+  "object": "response",
+  "created_at": 1700000002,
+  "status": "completed",
+  "model": "gpt-4o-2024-08-06",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_REDACTED",
+      "role": "assistant",
+      "content": [
+        { "type": "output_text", "text": "Sanitized Responses API reply.", "annotations": [] }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 21,
+    "output_tokens": 6,
+    "total_tokens": 27
+  }
+}
