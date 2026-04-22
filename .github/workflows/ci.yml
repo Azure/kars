@@ -26,6 +26,21 @@ jobs:
       - run: cargo build --release
       - run: cargo test --all
 
+  cargo-audit:
+    name: Rust Dependency Audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    # Non-blocking on the PR (advisories can appear overnight) but visible in CI.
+    # Promote to required-check once the advisory noise is triaged.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
+
   cli-build:
     name: CLI Build & Test
     runs-on: ubuntu-latest

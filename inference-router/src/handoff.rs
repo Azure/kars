@@ -1265,7 +1265,11 @@ fn hex_sha256(data: &[u8]) -> String {
 }
 
 /// Constant-time string comparison (prevents timing attacks on token validation).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// Shared with `routes.rs` and `main.rs` admin-token checks — do not inline.
+/// `pub` (not `pub(crate)`) because `main.rs` compiles as the bin crate and
+/// imports `azureclaw_inference_router::handoff` as an external crate.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

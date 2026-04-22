@@ -29,6 +29,7 @@ fn claw_sandbox_api_resource() -> ApiResource {
 
 /// Request body for `POST /sandbox/spawn`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnRequest {
     /// Name for the sub-agent sandbox (must be DNS-safe).
     pub name: String,
@@ -58,6 +59,7 @@ pub struct SpawnRequest {
 
 /// Handoff metadata attached to a spawn request.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandoffMeta {
     /// "restore" = target will receive state from predecessor via mesh.
     pub mode: String,
@@ -1118,4 +1120,45 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
         phase: Some("Terminated".into()),
         message: Some(format!("Sub-agent '{}' container removed", name)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_request_rejects_unknown_fields() {
+        // deny_unknown_fields — a typo in the client payload must fail loudly
+        // instead of silently ignoring the intended value.
+        let payload = r#"{
+            "name": "child",
+            "modl": "gpt-4o"
+        }"#;
+        let err = serde_json::from_str::<SpawnRequest>(payload).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn spawn_request_accepts_known_fields() {
+        let payload = r#"{
+            "name": "child",
+            "model": "gpt-4o",
+            "governance": true,
+            "trust_threshold": 500
+        }"#;
+        let req: SpawnRequest = serde_json::from_str(payload).unwrap();
+        assert_eq!(req.name, "child");
+        assert_eq!(req.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(req.trust_threshold, Some(500));
+    }
+
+    #[test]
+    fn handoff_meta_rejects_unknown_fields() {
+        let payload = r#"{"mode":"restore","predecessor":"p","extra":"smuggled"}"#;
+        let err = serde_json::from_str::<HandoffMeta>(payload).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
 }

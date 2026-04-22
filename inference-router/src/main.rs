@@ -285,7 +285,7 @@ async fn admin_auth_middleware(
     match auth_header {
         Some(value) if value.starts_with("Bearer ") => {
             let provided = &value[7..];
-            if provided == expected_token.as_str() {
+            if handoff::constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
                 next.run(req).await.into_response()
             } else {
                 tracing::warn!(

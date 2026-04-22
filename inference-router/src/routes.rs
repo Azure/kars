@@ -1785,7 +1785,7 @@ async fn agt_trust_delete(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
         match provided {
-            Some(tok) if tok == expected.as_str() => {}
+            Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!(
                     "DELETE /agt/trust/{} denied: missing or invalid admin token",
@@ -1944,7 +1944,7 @@ async fn agt_trust_update(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
         match provided {
-            Some(tok) if tok == expected.as_str() => {}
+            Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!("POST /agt/trust denied: missing or invalid admin token");
                 return (
@@ -2005,7 +2005,7 @@ async fn agt_rate_limit_update(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
         match provided {
-            Some(tok) if tok == expected.as_str() => {}
+            Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!("PUT /agt/rate-limit denied: missing or invalid admin token");
                 return (
