@@ -2532,4 +2532,94 @@ mod tests {
             phase_transition_count("initialized", "complete", "rejected") > rejected_before
         );
     }
+
+    // ── Property-based tests (s5-proptest) ────────────────────────────────────
+    //
+    // Fuzz-adjacent coverage that runs under regular `cargo test`. Targets the
+    // parsers + sanitizers + crypto helpers that take attacker-controlled bytes
+    // and must not panic.
+    use proptest::prelude::*;
+
+    proptest! {
+        /// constant_time_eq MUST be equivalent to `==` as a boolean predicate.
+        /// (We don't assert on timing here — that's a job for hardware-level
+        /// benchmarks — but we at least pin the functional contract so a naive
+        /// refactor can't subtly break equality.)
+        #[test]
+        fn prop_constant_time_eq_matches_equality(
+            a in proptest::collection::vec(any::<u8>(), 0..256),
+            b in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            prop_assert_eq!(constant_time_eq(&a, &b), a == b);
+        }
+
+        /// Same input → same result (reflexive — shadowed by above but a useful
+        /// sanity check on its own for refactors that might compare by ref).
+        #[test]
+        fn prop_constant_time_eq_reflexive(
+            a in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            prop_assert!(constant_time_eq(&a, &a));
+        }
+
+        /// deserialize_state MUST NOT panic on arbitrary attacker-controlled
+        /// bytes. Malformed gzip, zip bombs, truncated streams, and invalid
+        /// JSON must all return Err, never panic or abort.
+        #[test]
+        fn prop_deserialize_state_never_panics(
+            bytes in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            // Err is fine; Ok is fine; panic is a bug.
+            let _ = deserialize_state(&bytes);
+        }
+
+        /// sanitize_chat_snapshot MUST be a total function over all byte
+        /// inputs (including non-UTF8 and malformed JSON). It returns Vec<u8>
+        /// so there's no Result — any panic is a hard bug because adversarial
+        /// chat snapshots reach this directly from the handoff path.
+        #[test]
+        fn prop_sanitize_chat_snapshot_total(
+            bytes in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            let out = sanitize_chat_snapshot(&bytes);
+            // Output size is bounded — sanitizer can rewrite but never amplifies
+            // beyond a constant factor relative to the JSON re-serialization.
+            // Conservative bound: 2× input + 64 (covers "[]" empty-array case).
+            prop_assert!(out.len() <= bytes.len().saturating_mul(2) + 64);
+        }
+
+        /// Encrypt + decrypt round-trip: any plaintext + any (salt, secret)
+        /// MUST round-trip exactly.
+        #[test]
+        fn prop_encrypt_decrypt_roundtrip(
+            plaintext in proptest::collection::vec(any::<u8>(), 0..1024),
+            secret in proptest::collection::vec(any::<u8>(), 1..128),
+            salt in proptest::collection::vec(any::<u8>(), 1..64),
+        ) {
+            let blob = encrypt_state(&plaintext, &secret, &salt).unwrap();
+            let decrypted = decrypt_state(&blob, &secret).unwrap();
+            prop_assert_eq!(decrypted, plaintext);
+        }
+
+        /// Tampering with the ciphertext MUST produce an error (AES-GCM
+        /// integrity). Flipping one byte either corrupts the base64 (Err) or
+        /// fails the GCM tag (Err) — never silently returns garbage plaintext.
+        #[test]
+        fn prop_decrypt_detects_tamper(
+            plaintext in proptest::collection::vec(any::<u8>(), 1..1024),
+            secret in proptest::collection::vec(any::<u8>(), 1..128),
+            salt in proptest::collection::vec(any::<u8>(), 1..64),
+            flip_idx in any::<u16>(),
+        ) {
+            let mut blob = encrypt_state(&plaintext, &secret, &salt).unwrap();
+            let mut bytes = BASE64.decode(&blob.ciphertext).unwrap();
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            let idx = (flip_idx as usize) % bytes.len();
+            bytes[idx] ^= 0xFF;
+            blob.ciphertext = BASE64.encode(&bytes);
+            prop_assert!(decrypt_state(&blob, &secret).is_err());
+        }
+    }
 }

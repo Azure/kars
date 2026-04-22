@@ -1,0 +1,47 @@
+[package]
+name = "azureclaw-inference-router-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# NOTE: This crate is intentionally NOT a workspace member (see root
+# Cargo.toml `exclude`). cargo-fuzz requires nightly + libfuzzer-sys,
+# which we don't want to force on the regular build.
+#
+# Run with:
+#   cargo install cargo-fuzz   # once
+#   cd inference-router
+#   cargo +nightly fuzz run fuzz_deserialize_state     -- -max_total_time=60
+#   cargo +nightly fuzz run fuzz_sanitize_chat         -- -max_total_time=60
+#   cargo +nightly fuzz run fuzz_parse_streaming_pf    -- -max_total_time=60
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+azureclaw-inference-router = { path = ".." }
+
+[[bin]]
+name = "fuzz_deserialize_state"
+path = "fuzz_targets/fuzz_deserialize_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sanitize_chat"
+path = "fuzz_targets/fuzz_sanitize_chat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_streaming_pf"
+path = "fuzz_targets/fuzz_parse_streaming_pf.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

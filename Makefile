@@ -138,6 +138,20 @@ scenario: ## Run YAML scenarios (default: all in cli/src/testing/scenarios/). Us
 install-cli: cli ## Install CLI globally via npm link
 	cd cli && npm link
 
+# ─── Fuzz (s4) ────────────────────────────────────────────────────────────────
+
+fuzz: ## Run all inference-router fuzz targets for 60s each (requires nightly + cargo-fuzz)
+	@cd inference-router && for t in fuzz_deserialize_state fuzz_sanitize_chat fuzz_parse_streaming_pf; do \
+		echo "▶ fuzzing $$t"; \
+		cargo +nightly fuzz run $$t -- -max_total_time=60 || exit 1; \
+	done
+
+fuzz-quick: ## Smoke-run each fuzz target for 10s (CI-fast)
+	@cd inference-router && for t in fuzz_deserialize_state fuzz_sanitize_chat fuzz_parse_streaming_pf; do \
+		echo "▶ smoke fuzz $$t"; \
+		cargo +nightly fuzz run $$t -- -max_total_time=10 -runs=100000 || exit 1; \
+	done
+
 # ─── Clean ────────────────────────────────────────────────────────────────────
 
 clean: ## Remove build artifacts
