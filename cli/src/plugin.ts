@@ -40,6 +40,36 @@ process.on("unhandledRejection", (reason: any) => {
 });
 
 // ---------------------------------------------------------------------------
+// Router URL configuration — single source of truth (plan item q7).
+//
+// The sandbox's iptables egress-guard blocks UID 1000 from direct network
+// egress except to 127.0.0.1:8443 (inference router) and DNS. All plugin
+// traffic therefore flows through ROUTER_BASE. Override via
+// AZURECLAW_ROUTER_URL for tests (FakeRouter, docker-compose.dev.yml).
+//
+// Late-binding: the env var is re-read on every call so tests can set it
+// after module load.
+// ---------------------------------------------------------------------------
+const DEFAULT_ROUTER_BASE = "http://127.0.0.1:8443";
+
+export function routerBase(): string {
+  return process.env.AZURECLAW_ROUTER_URL || DEFAULT_ROUTER_BASE;
+}
+
+export function routerWsBase(): string {
+  // http → ws, https → wss; preserves host:port and trailing path if any.
+  return routerBase().replace(/^http/, "ws");
+}
+
+export function routerUrl(path: string): string {
+  return new URL(path, routerBase()).toString();
+}
+
+export function routerWsUrl(path: string): string {
+  return new URL(path, routerWsBase()).toString();
+}
+
+// ---------------------------------------------------------------------------
 // AGT SDK — AgentMesh (amitayks/agentmesh)
 // Full E2E encrypted inter-agent communication via self-hosted relay/registry.
 // Also: tool-level policy, trust scoring, audit logging.
@@ -157,7 +187,7 @@ async function resolveAmidToName(amid: string): Promise<string> {
     const http = await import("node:http");
     const body = await new Promise<string>((resolve, reject) => {
       const req = http.get(
-        `http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${amid}`,
+        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
         (res) => {
           let d = "";
           res.on("data", (c: Buffer) => { d += c.toString(); });
@@ -186,7 +216,7 @@ async function resolveSigningKey(amid: string): Promise<string> {
     const http = await import("node:http");
     const body = await new Promise<string>((resolve, reject) => {
       const req = http.get(
-        `http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${amid}`,
+        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
         (res) => {
           let d = "";
           res.on("data", (c: Buffer) => { d += c.toString(); });
@@ -234,7 +264,7 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
     };
     if (adminToken) headers["x-azureclaw-admin"] = adminToken;
     await new Promise<void>((resolve, reject) => {
-      const req = http.request("http://127.0.0.1:8443/agt/trust", {
+      const req = http.request(routerUrl("/agt/trust"), {
         method: "POST",
         headers,
         timeout: 5000,
@@ -305,7 +335,7 @@ async function recordMeshSession(
       signature,
     });
     await new Promise<void>((resolve, reject) => {
-      const req = http.request("http://127.0.0.1:8443/agt/registry/registry/reputation/session", {
+      const req = http.request(routerUrl("/agt/registry/registry/reputation/session"), {
         method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
         timeout: 5000,
@@ -708,7 +738,7 @@ async function processTaskWithTools(
 
     const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
-      const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
+      const req = http.request(routerUrl("/v1/chat/completions"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -782,7 +812,7 @@ async function processTaskWithTools(
             });
             const http = await import("node:http");
             const fetchResult = await new Promise<string>((resolve) => {
-              const req = http.request("http://127.0.0.1:8443/egress/fetch", {
+              const req = http.request(routerUrl("/egress/fetch"), {
                 method: "POST", timeout: 35000,
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
               }, (res) => {
@@ -805,7 +835,7 @@ async function processTaskWithTools(
               let connId: string | undefined;
               try {
                 const connsRaw = await new Promise<string>((resolve, reject) => {
-                  const r = http.get("http://127.0.0.1:8443/connections?api-version=2025-05-15-preview", { timeout: 10000 }, (res) => {
+                  const r = http.get(routerUrl("/connections?api-version=2025-05-15-preview"), { timeout: 10000 }, (res) => {
                     let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
                   });
                   r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
@@ -842,7 +872,7 @@ async function processTaskWithTools(
             // Use Node HTTP instead of curl to avoid shell escaping issues
             const foundryResult = await new Promise<string>((resolve, reject) => {
               const postBody = JSON.stringify(reqBody);
-              const req = http.request("http://127.0.0.1:8443/openai/responses?api-version=2025-11-15-preview", {
+              const req = http.request(routerUrl("/openai/responses?api-version=2025-11-15-preview"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
                 timeout: 60000,
@@ -902,7 +932,7 @@ async function processTaskWithTools(
 
             const memResult = await new Promise<string>((resolve, reject) => {
               const postBody = JSON.stringify(memBody);
-              const req = http.request(`http://127.0.0.1:8443${memPath}`, {
+              const req = http.request(routerUrl(`${memPath}`), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
                 timeout: 30000,
@@ -929,7 +959,7 @@ async function processTaskWithTools(
                       options: { user_profile_enabled: true, chat_summary_enabled: true } },
                   });
                   await new Promise<void>((resolve, reject) => {
-                    const req = http.request(`http://127.0.0.1:8443/memory_stores?${apiVer}`, {
+                    const req = http.request(routerUrl(`/memory_stores?${apiVer}`), {
                       method: "POST",
                       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(createBody) },
                       timeout: 15000,
@@ -941,7 +971,7 @@ async function processTaskWithTools(
                   // Retry the original operation
                   const retryResult = await new Promise<string>((resolve, reject) => {
                     const postBody = JSON.stringify(memBody);
-                    const req = http.request(`http://127.0.0.1:8443${memPath}`, {
+                    const req = http.request(routerUrl(`${memPath}`), {
                       method: "POST",
                       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
                       timeout: 30000,
@@ -982,7 +1012,7 @@ async function processTaskWithTools(
             });
             const imgResult = await new Promise<string>((resolve, reject) => {
               const req = http.request(
-                `http://127.0.0.1:8443/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
+                routerUrl(`/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`),
                 { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(imgBody) }, timeout: 120000 },
                 (res) => { let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body)); },
               );
@@ -1036,7 +1066,7 @@ async function processTaskWithTools(
               }
 
               // Auto-discover with retry (match parent's reliability)
-              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
               for (let attempt = 0; attempt < 8 && !targetAmid; attempt++) {
                 if (attempt > 0) {
                   log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
@@ -1102,7 +1132,7 @@ async function processTaskWithTools(
             const pattern = (args.pattern as string) || "*";
             log.info(`AGT sub-agent discover: pattern=${pattern}`);
             try {
-              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
               const discoverResult = await new Promise<string>((resolve, reject) => {
                 const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
                   let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
@@ -1142,7 +1172,7 @@ async function processTaskWithTools(
               const policyHttp = await import("node:http");
               const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
               const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request("http://127.0.0.1:8443/agt/evaluate", {
+                const req = policyHttp.request(routerUrl("/agt/evaluate"), {
                   method: "POST", timeout: 2000,
                   headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
                 }, (res) => {
@@ -1788,8 +1818,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // The router (UID 1001) proxies: /agt/relay → relay service, /agt/registry/* → registry service.
     // On AKS, router reads AGT_RELAY_URL/AGT_REGISTRY_URL to find the services.
     // In dev, same env vars point to Docker containers on the shared network.
-    const registryUrl = "http://127.0.0.1:8443/agt/registry";
-    const relayUrl = "ws://127.0.0.1:8443/agt/relay";
+    const registryUrl = routerUrl("/agt/registry");
+    const relayUrl = routerWsUrl("/agt/relay");
 
     agtMeshClient = new sdk.AgentMeshClient(agtIdentity, {
       storage: new sdk.MemoryStorage(),
@@ -2049,7 +2079,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { trust_score: senderTrustScore, from_agent: fromName },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
+            const req = http.request(routerUrl("/agt/evaluate"), {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -2103,7 +2133,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
+            const req = http.request(routerUrl("/agt/evaluate"), {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -3278,7 +3308,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         if (agtConnected) {
           try {
             const http = await import("node:http");
-            const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
+            const req = http.request(routerUrl("/agt/status"), { timeout: 3000 }, () => {});
             req.on("error", () => {});
             req.end();
           } catch { /* best effort */ }
@@ -3287,7 +3317,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             try {
               const http = await import("node:http");
               const body = JSON.stringify({ amid: agtIdentity.amid });
-              const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
+              const req = http.request(routerUrl("/agt/registry/registry/heartbeat"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
                 timeout: 3000,
@@ -3337,11 +3367,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 // Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
 // ---------------------------------------------------------------------------
 
-const ROUTER_BASE = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
-
 async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
-  const url = new URL(path, ROUTER_BASE);
+  const url = new URL(path, routerBase());
   return new Promise((resolve, reject) => {
     const opts: any = {
       hostname: url.hostname,
@@ -3370,7 +3398,7 @@ async function _routerCall(method: string, path: string, body?: unknown, timeout
 // Strict variant that rejects on HTTP >= 400 — used by handoff orchestration
 async function _routerCallStrict(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
-  const url = new URL(path, ROUTER_BASE);
+  const url = new URL(path, routerBase());
   return new Promise((resolve, reject) => {
     const opts: any = {
       hostname: url.hostname,
@@ -4624,7 +4652,7 @@ const azureClawPlugin = definePluginEntry({
         const http = await import("node:http");
         const postData = JSON.stringify({ action, context: { tool: toolName } });
         const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, _reject) => {
-          const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
+          const req = http.request(routerUrl("/agt/evaluate"), {
             method: "POST", timeout: 2000,
             headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
           }, (res) => {
@@ -4695,10 +4723,9 @@ const azureClawPlugin = definePluginEntry({
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
-    const ROUTER = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
     async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
       const http = await import("node:http");
-      const url = `${ROUTER}${path}`;
+      const url = routerUrl(path);
       return new Promise((resolve, reject) => {
         const opts: any = {
           method,
@@ -4956,7 +4983,7 @@ const azureClawPlugin = definePluginEntry({
                   const http = await import("node:http");
                   const regResult: any = await new Promise((resolve, reject) => {
                     const req = http.get(
-                      `http://127.0.0.1:8443/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`,
+                      routerUrl(`/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`),
                       (res: any) => {
                         let data = "";
                         res.on("data", (c: Buffer) => { data += c.toString(); });
@@ -6543,7 +6570,7 @@ const azureClawPlugin = definePluginEntry({
             const http = await import("node:http");
             try {
               const body = await new Promise<string>((resolve, reject) => {
-                const req = http.get("http://127.0.0.1:8443/metrics", (res) => {
+                const req = http.get(routerUrl("/metrics"), (res) => {
                   let data = "";
                   res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
                   res.on("end", () => resolve(data));
@@ -6554,7 +6581,7 @@ const azureClawPlugin = definePluginEntry({
               console.log("AzureClaw Inference Router — Prometheus Metrics\n");
               console.log(body);
             } catch {
-              console.log("AzureClaw Inference Router: not reachable (http://127.0.0.1:8443/metrics)");
+              console.log(`AzureClaw Inference Router: not reachable (${routerUrl("/metrics")})`);
             }
           });
 
@@ -6627,7 +6654,7 @@ const azureClawPlugin = definePluginEntry({
           // Query actual Foundry deployments (not the full catalog)
           const body = await new Promise<string>((resolve, reject) => {
             const req = http.get(
-              "http://127.0.0.1:8443/deployments?api-version=2025-11-15-preview",
+              routerUrl("/deployments?api-version=2025-11-15-preview"),
               { headers: { "x-azureclaw-sandbox": "self" } },
               (res) => {
                 let data = "";
@@ -6838,7 +6865,7 @@ const azureClawPlugin = definePluginEntry({
             `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (azureclaw-strict)"}`,
             `Network: default-deny egress + iptables UID guard`,
             `Inference: routed through AzureClaw inference router`,
-            `Foundry Agent API: proxied via localhost:8443/agents/*`,
+            `Foundry Agent API: proxied via ${routerBase()}/agents/*`,
             `Auth: IMDS (kubelet MI, zero keys)`,
           ].join("\n"),
         };
@@ -6897,7 +6924,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/agt/status", (res) => {
+            const req = http.get(routerUrl("/agt/status"), (res) => {
               let data = ""; res.on("data", (c: Buffer) => { data += c.toString(); }); res.on("end", () => resolve(data));
             });
             req.on("error", reject); req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
@@ -6956,7 +6983,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/agents", (res) => {
+            const req = http.get(routerUrl("/agents"), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -6973,7 +7000,7 @@ const azureClawPlugin = definePluginEntry({
                 "",
                 "Create an agent via the Foundry Agent API:",
                 "```",
-                "POST http://localhost:8443/agents",
+                `POST ${routerBase()}/agents`,
                 '{"name": "my-agent", "model": "gpt-4.1", "instructions": "You are a helpful assistant"}',
                 "```",
                 "",
@@ -7009,7 +7036,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get(`http://127.0.0.1:8443/agents/${agentId}/threads`, (res) => {
+            const req = http.get(routerUrl(`/agents/${agentId}/threads`), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -7155,7 +7182,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/sandbox/list", (res) => {
+            const req = http.get(routerUrl("/sandbox/list"), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -7243,7 +7270,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get(`http://127.0.0.1:8443/sandbox/${encodeURIComponent(name)}/status`, (res) => {
+            const req = http.get(routerUrl(`/sandbox/${encodeURIComponent(name)}/status`), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
