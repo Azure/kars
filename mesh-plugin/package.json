@@ -43,7 +43,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@microsoft/agentmesh-sdk": "^3.2.1",
+    "@microsoft/agentmesh-sdk": "^3.2.2",
     "ws": "^8.18"
   },
   "devDependencies": {
