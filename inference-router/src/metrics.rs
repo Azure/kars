@@ -197,3 +197,19 @@ pub static HANDOFF_PHASE_TRANSITIONS: LazyLock<IntCounterVec> = LazyLock::new(||
     )
     .unwrap()
 });
+
+/// Upstream (Azure OpenAI) retry count, broken out by reason.
+///
+/// Labels:
+/// - `sandbox` — sandbox name.
+/// - `reason` — `transport` (connect/timeout) or `status` (502/503/504).
+pub static UPSTREAM_RETRIES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_upstream_retries_total",
+            "Upstream Azure OpenAI retries on idempotent requests"
+        ),
+        &["sandbox", "reason"]
+    )
+    .unwrap()
+});
