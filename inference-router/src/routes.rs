@@ -18,6 +18,7 @@ use crate::auth::WorkloadIdentityAuth;
 use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::{Config, RegistryMode};
+use crate::errors;
 use crate::governance::Governance;
 use crate::handoff::{self, DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
@@ -1821,9 +1822,9 @@ async fn agt_trust_delete(
                     "DELETE /agt/trust/{} denied: missing or invalid admin token",
                     agent_id
                 );
-                return (
+                return errors::flat(
                     StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": "Admin token required for trust mutations"})),
+                    "Admin token required for trust mutations",
                 );
             }
         }
@@ -1973,9 +1974,9 @@ async fn agt_trust_update(
             Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!("POST /agt/trust denied: missing or invalid admin token");
-                return (
+                return errors::flat(
                     StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": "Admin token required for trust mutations"})),
+                    "Admin token required for trust mutations",
                 );
             }
         }
@@ -1998,10 +1999,7 @@ async fn agt_trust_update(
 
     match state.governance.update_trust(agent_id, score, interactions) {
         Ok(json) => (StatusCode::OK, Json(json)),
-        Err(msg) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        ),
+        Err(msg) => errors::flat(StatusCode::BAD_REQUEST, msg),
     }
 }
 
@@ -2030,10 +2028,7 @@ async fn agt_rate_limit_update(
             Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
             _ => {
                 tracing::warn!("PUT /agt/rate-limit denied: missing or invalid admin token");
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": "Admin token required"})),
-                );
+                return errors::flat(StatusCode::FORBIDDEN, "Admin token required");
             }
         }
     }
@@ -2902,13 +2897,11 @@ async fn sandbox_spawn(
                 .and_then(|r| r.as_str())
                 .unwrap_or("policy denied");
             tracing::warn!(parent = %parent_name, child = %req.agent_id, %reason, "AGT policy DENIED spawn");
-            return (
+            return errors::flat(
                 StatusCode::FORBIDDEN,
-                Json(
-                    serde_json::json!({ "error": format!("Spawn blocked by policy: {}", reason) }),
-                ),
+                format!("Spawn blocked by policy: {}", reason),
             )
-                .into_response();
+            .into_response();
         }
     }
 
@@ -2918,11 +2911,7 @@ async fn sandbox_spawn(
             Json(serde_json::to_value(resp).unwrap()),
         )
             .into_response(),
-        Err(msg) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": msg })),
-        )
-            .into_response(),
+        Err(msg) => errors::flat(StatusCode::BAD_REQUEST, msg).into_response(),
     }
 }
 
@@ -2956,11 +2945,7 @@ async fn sandbox_list(State(_state): State<AppState>) -> impl IntoResponse {
 async fn sandbox_status(Path(name): Path<String>) -> impl IntoResponse {
     match spawn::get_sandbox_status(&name).await {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
-        Err(msg) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": msg })),
-        )
-            .into_response(),
+        Err(msg) => errors::flat(StatusCode::NOT_FOUND, msg).into_response(),
     }
 }
 
@@ -2980,11 +2965,7 @@ async fn sandbox_delete(
 
     match result {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
-        Err(msg) => (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": msg })),
-        )
-            .into_response(),
+        Err(msg) => errors::flat(StatusCode::FORBIDDEN, msg).into_response(),
     }
 }
 
