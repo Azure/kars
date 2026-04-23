@@ -1,0 +1,858 @@
+[
+  {
+    "fq_path": "routes::AppState",
+    "kind": "struct",
+    "token_sha256": "ba83a5a8836fb04e19e5080bc0655edafb1d6f65d9fa76da2083b5e3f6e898fd",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 30
+  },
+  {
+    "fq_path": "routes::DEPRECATED_ADMIN_HEADER_WARNED",
+    "kind": "static",
+    "token_sha256": "4bd2850563000309d38e95041d08475dcd722bc31ebe099d4781134485d16781",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 203
+  },
+  {
+    "fq_path": "routes::admin_get_model",
+    "kind": "fn",
+    "token_sha256": "1b387da585aab3e5d613259b74fee36c756f5fd4eeea42d65878b13c9bb5dfb2",
+    "body_sha256": "277f45a5a731a733f350ea050aaf11c279e6fae90f3092096cf8fc9e637f2276",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1381
+  },
+  {
+    "fq_path": "routes::admin_routes",
+    "kind": "fn",
+    "token_sha256": "9a5e3132025621a36ad79b05ab00c74871cf626814f6e0b9d32e5bd7bed826bc",
+    "body_sha256": "c9abb2b861a9ea0fb216612c15dc0c54a87ff3801897415c972cfac4df930fc2",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 370
+  },
+  {
+    "fq_path": "routes::admin_set_model",
+    "kind": "fn",
+    "token_sha256": "f1b2f224704d5ebd09e1a427fc1ca92bd0161bcaf644e444582cc75b012dbe27",
+    "body_sha256": "e43c99c664d5ff09b6fc2986a60c0cf562040552328b3edcaf8d78c36eac0c8d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1392
+  },
+  {
+    "fq_path": "routes::agt_audit",
+    "kind": "fn",
+    "token_sha256": "0d1cb886bdcbfbfd72512de33f01456b40a994055e174170562b49f83a3065a9",
+    "body_sha256": "b3c32fb1963465876096644d6018791af89713ef920e7a3c81819b324ed9eeb7",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1847
+  },
+  {
+    "fq_path": "routes::agt_audit_verify",
+    "kind": "fn",
+    "token_sha256": "3a88a41e6f15464cfc1f02b372689b7171a7f96ca06c03c597a73927ae2e579e",
+    "body_sha256": "a3beca5cf00f5d61861a76a4673c16799b3b8c4ed45c0138cd52f381f2dc58fc",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1852
+  },
+  {
+    "fq_path": "routes::agt_evaluate",
+    "kind": "fn",
+    "token_sha256": "e9f62e4d43fa7fa598d8b5c3b069f707b0088db0eac26bd70de71c7cac72b250",
+    "body_sha256": "e744217f00d4ce068b62d829d8446d4f6e75df9d24d81fa81512076b0c5104d0",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1762
+  },
+  {
+    "fq_path": "routes::agt_mesh_inbox",
+    "kind": "fn",
+    "token_sha256": "937435a0f7fba22be05fb3a21aa28d02d68a3a22b1c537531494cbbdc3cf945b",
+    "body_sha256": "ab6dc3924a1cbc28949b42771dfeaca5e5de66011fd67087904854c4670fa5ce",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1857
+  },
+  {
+    "fq_path": "routes::agt_rate_limit_get",
+    "kind": "fn",
+    "token_sha256": "0c2ab4d0c7e02c9529496a9d662ac0dfa9ad634968e21e1ada3e2c51a9b4f355",
+    "body_sha256": "6752dd0e8a5a04876d42ecaba085324a7637e0d549d6fb790b9c6e8d96d23622",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2016
+  },
+  {
+    "fq_path": "routes::agt_rate_limit_update",
+    "kind": "fn",
+    "token_sha256": "f5f69e1c3815072e67eeda8eef2f8fd295f6345027b5a666304d5b803b4ebd09",
+    "body_sha256": "f74fb764464d1b3c0a2c6b0d9bf717c41e06a3979aa87bbf9215366052de9a62",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2026
+  },
+  {
+    "fq_path": "routes::agt_registry_proxy",
+    "kind": "fn",
+    "token_sha256": "b6cc13f2690dd805b1cd0d95e670e198fed830aa8a76017b58125752ac9fe9e8",
+    "body_sha256": "955a7b589adf59b88667cd7d427e6da4ee7a992e54b678673ddf7b722853cc11",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2345
+  },
+  {
+    "fq_path": "routes::agt_relay_proxy",
+    "kind": "fn",
+    "token_sha256": "cb4c92fae589dcc9048f6dd22429f0fc17f6ad321e87ea3253295998fb625136",
+    "body_sha256": "c4dc55169eeecdeaeb9743956a5e6e9a9323f1b008464788456eb58b3e18dcd4",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2136
+  },
+  {
+    "fq_path": "routes::agt_reputation",
+    "kind": "fn",
+    "token_sha256": "60925afd834a9c80ff2f568d29fb2c82f1b987e60b726636d810f55b2b28b143",
+    "body_sha256": "7c1384a712d935299908a490381f4c80f862de3c49df85660b3e8abe9321ed4b",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2085
+  },
+  {
+    "fq_path": "routes::agt_signing_counter",
+    "kind": "fn",
+    "token_sha256": "ecf15064a307527e033f2ee27f0e820f449b6ded727d52dae071006c33740e63",
+    "body_sha256": "3dcfc62371636c216835bf39da2641463ac993207a397d7888e37992f3185824",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1926
+  },
+  {
+    "fq_path": "routes::agt_status",
+    "kind": "fn",
+    "token_sha256": "7f08cbb220a44275f5ddff61f1231accc65a56ef4ad3aa7e1edbdd12cf14a2b6",
+    "body_sha256": "c2ba37ef4ad9ba690a01706a0bab033f1b2115895b3ff0fff767d00c0d24cdf7",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1866
+  },
+  {
+    "fq_path": "routes::agt_trust_delete",
+    "kind": "fn",
+    "token_sha256": "38c6ec46ca337220e8b29ce0cae8ba663cf63ad88bd8e13032b468b3572d6de9",
+    "body_sha256": "4391974f9cae0531148703e2dc6e6eac1f513f14b2288880a2d3970af0fe5c94",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1818
+  },
+  {
+    "fq_path": "routes::agt_trust_get",
+    "kind": "fn",
+    "token_sha256": "2c5afab0a32545440ff8e317e541b9b9dc06c01b7dc9f0903320904d92ccc3b3",
+    "body_sha256": "6daeeb2ec2f295378ff06b4cbfa9dda5040ae9fb4cef24d9a86550102d86b8fc",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1804
+  },
+  {
+    "fq_path": "routes::agt_trust_list",
+    "kind": "fn",
+    "token_sha256": "dfae3f2d0ba8523ea33c4bff1133edbb0e67054577db9f3a1ea484f578950f03",
+    "body_sha256": "4761e189ab916dda803c713e3d9ce2457e5da78ef3910f91cd8230fd950b02c9",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1798
+  },
+  {
+    "fq_path": "routes::agt_trust_update",
+    "kind": "fn",
+    "token_sha256": "8e332640a533a8a1852d518720af7696fdf8d6b929e26cf65966278443008e8b",
+    "body_sha256": "e1644b45d1ebc2d9a851dc88fa2d2cbde6df777091091377011aec3853d95c9d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1972
+  },
+  {
+    "fq_path": "routes::blocklist_check",
+    "kind": "fn",
+    "token_sha256": "2dbaecdc9c90155aed3d1aeb8acf23863279f42f3e1d78b4bd324f0d4f5196e4",
+    "body_sha256": "8a5f43fe39faeb9247a18e47c5bbdec369f250227c71447bc78e956c6cdd0d58",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2484
+  },
+  {
+    "fq_path": "routes::blocklist_status",
+    "kind": "fn",
+    "token_sha256": "c203cac3f8c737fca78ee22b7f6e3567a97cfdbff29bb70afe80ccc2759b9d57",
+    "body_sha256": "21101bcee0f1a69866fd67dee9f3048095dbc6c7d3517037b9741466d908bcba",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2473
+  },
+  {
+    "fq_path": "routes::chat_completions",
+    "kind": "fn",
+    "token_sha256": "9b61cfd34ecffc49fc0362991a8747eb43c249e15bd42ace1297d3a9738a5f81",
+    "body_sha256": "5553150726581c2c6f5a9d0d3c8a3ec756b6de2ae3d8a20317c7f2e1ca473094",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 434
+  },
+  {
+    "fq_path": "routes::chat_to_responses_body",
+    "kind": "fn",
+    "token_sha256": "33b4b3b5a4a6175dfee6f54a315b550527b43354e3ccff23372e260a589b448e",
+    "body_sha256": "76f5e78888450fc81042256cccc410848cfe6239e229b0a29e0542709e8d903a",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4431
+  },
+  {
+    "fq_path": "routes::completions",
+    "kind": "fn",
+    "token_sha256": "c5bbef843931061a2fcdfadf8e9bf086c33c9d13a9fdabadc2dfd67269711696",
+    "body_sha256": "e16352e2a1b41282a4e0e510f0ac7b799e59d3365b32bbb31de811b9c981013d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1036
+  },
+  {
+    "fq_path": "routes::egress_allowlist",
+    "kind": "fn",
+    "token_sha256": "f5f5dcb2b8684957a61aa03d9f8b05990d4eb0a3d3fc554a3666e39754863ab9",
+    "body_sha256": "341d26cfe0a7c41e32936046f10311f3a9e0be51cb5749ecb9aa2d7e045d2c0b",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2738
+  },
+  {
+    "fq_path": "routes::egress_approve",
+    "kind": "fn",
+    "token_sha256": "830f0fc2e0799e31e2e0d14285f92e2a67d1d1af695840a16de74558b2871990",
+    "body_sha256": "a9685de7eb83f5ced46270a79219fcd2d0a03926b6379495fe932373c25073e0",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2756
+  },
+  {
+    "fq_path": "routes::egress_deny",
+    "kind": "fn",
+    "token_sha256": "e7b060440ed931ab7dc994eca88e9d7070461add070736d1462f6acd9cfd650b",
+    "body_sha256": "97e1917bcc4528bb4d8a6b708b4ff6a22063907b809fc327b9a7807c90337d50",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2778
+  },
+  {
+    "fq_path": "routes::egress_enforce",
+    "kind": "fn",
+    "token_sha256": "9a814b4ee03df0fd5f237bfee6717b0590374dfeaf90c162dfe6106b1598da2b",
+    "body_sha256": "05ef00750e6073f02b34bd719f95dafaa21c3c917b44ba9a2cd1b4f426c384cd",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2800
+  },
+  {
+    "fq_path": "routes::egress_fetch",
+    "kind": "fn",
+    "token_sha256": "6a8a975b4ff65a017ac341953ffd09c248cf113587a2e3c0cc429a3b0c8354d9",
+    "body_sha256": "144e02e057931b70edf24423ed3cd6c0e412dfeffc9b27ee1ac7bc0b9f91c650",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2564
+  },
+  {
+    "fq_path": "routes::egress_learn_toggle",
+    "kind": "fn",
+    "token_sha256": "0a523b166de28e87d3ce8384c4438d0dfa1dca9c34ed2fcb31a53c81e9bd075b",
+    "body_sha256": "0edc6f8c000ed2c1afa50535769682c20ffe18a58664cd1a5402dc51c0fbe637",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2540
+  },
+  {
+    "fq_path": "routes::egress_learned",
+    "kind": "fn",
+    "token_sha256": "e78f493b926d734bc761135401f20edba0a4adde07b1c2bf4da34a72836bfb8a",
+    "body_sha256": "87a8db6fd71f5dda3f0471a4ae4ece8823bea1bc5e40d7eba3a69ed0ce0ba7b0",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2530
+  },
+  {
+    "fq_path": "routes::egress_learned_clear",
+    "kind": "fn",
+    "token_sha256": "eb1aafc40551b93d8184e51e520bdeee3144a5909dd0373744ebb1f8770ccfaf",
+    "body_sha256": "aa61a96d17c032e22fa7b3b36f889cd675937352d1120e2fdfac9892810eebf9",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2555
+  },
+  {
+    "fq_path": "routes::egress_pending",
+    "kind": "fn",
+    "token_sha256": "ebd5f1e65db6b38b867a870dbbac452c2f083d19745f513a940e7db56911bee7",
+    "body_sha256": "6b4ca153a43ea4c65e8ba6d1dda182861e1cc9d089b5b6a67c86da6ee61dbd9e",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2747
+  },
+  {
+    "fq_path": "routes::egress_routes",
+    "kind": "fn",
+    "token_sha256": "d42e2ab0edef1afce90837cb0f4755139f43250fc7fdb69ed4d45c6e2aa4c921",
+    "body_sha256": "ceacfa67c37f3da69d875c6e658f7838ae4fce4adaf3f01adf1cdd0176950c80",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 420
+  },
+  {
+    "fq_path": "routes::embeddings",
+    "kind": "fn",
+    "token_sha256": "b7e8f728c084760bc64aacc23307085e22a86b5f413888310c3c113701e2682d",
+    "body_sha256": "64f5bf68d4977682f9a91fa26d109242e54c9dca12c8a2f3feca947a05fd2a4f",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1169
+  },
+  {
+    "fq_path": "routes::extract_admin_token",
+    "kind": "fn",
+    "token_sha256": "c084eddbaeee4a31d27d84c410c234db9dabf089c4537967d96b39249e87a996",
+    "body_sha256": "0abe63303e216fac131fd1a5ec18b809d02f32d57d4c70605d3bdf320ae109af",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 172
+  },
+  {
+    "fq_path": "routes::foundry_agent_routes",
+    "kind": "fn",
+    "token_sha256": "43795fdda963bdfdd9b807ae7fb0c6d575ae49c12f17dfc3389451da2be7f979",
+    "body_sha256": "2eac5773524ec0f0bf9e8f7b68c3412cd57865b4b0bd1af69245abdafcaf9c4e",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 224
+  },
+  {
+    "fq_path": "routes::foundry_proxy",
+    "kind": "fn",
+    "token_sha256": "86092b793f612243b17b734ca2c26adf46db12ff6ab858a0db5f530267e1a869",
+    "body_sha256": "348d30a5cc9d7c33cfdd59a4bca3267e941a4c187772a2d54940d324e59f29f1",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1530
+  },
+  {
+    "fq_path": "routes::foundry_standalone_routes",
+    "kind": "fn",
+    "token_sha256": "fa3aa51b216da23384d85a11f863da8b143968e4c9b4598615ea21f5b2d95db5",
+    "body_sha256": "5b248b0e6e0157582fe5a84b7976ba216067b887778a1fb9955183e83e3c61b5",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 235
+  },
+  {
+    "fq_path": "routes::handoff_abort",
+    "kind": "fn",
+    "token_sha256": "1ab2abb46095bfc19fe0d1afb2b3666144197cf6b9440c5249f7ab86be0b4ab2",
+    "body_sha256": "6951c4cacc3ad7373d021f9ed399caecd52d6c70e492e5f0095c3a4eb8f8c86c",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3868
+  },
+  {
+    "fq_path": "routes::handoff_confirm",
+    "kind": "fn",
+    "token_sha256": "3c4195adc0e3f277070e3f6058792009aa9477a0159fbb6afc4230285225dde0",
+    "body_sha256": "2af1ac788f9f514b0dd94012052b9f746b36e7192124b6f07cf4616bbb439d09",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4255
+  },
+  {
+    "fq_path": "routes::handoff_decommission",
+    "kind": "fn",
+    "token_sha256": "c421c739f1cbfbdcacc3c2d9a0f7a1584f5b300a6c1424a40f66937751afadb8",
+    "body_sha256": "4607ff8d9ff256a36cb1325b0a77f00af1fe1b817bdc89081b5cac5490cef7ce",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3831
+  },
+  {
+    "fq_path": "routes::handoff_drain",
+    "kind": "fn",
+    "token_sha256": "b35333b6640007fc254399330b79e6023b902d6b20154b0056ad38f3caec3669",
+    "body_sha256": "781cbe11f8673cd568c3f4c0b319f3914a84cd2eab3bd1c4894318630a586a97",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3789
+  },
+  {
+    "fq_path": "routes::handoff_init_handler",
+    "kind": "fn",
+    "token_sha256": "4d70f47bd5867cad6c327dd1143f8c4d4c2f67265f258de5ff11ada8b04ce427",
+    "body_sha256": "8afe99c6a91b769714358c407f9f9fd19e6a36fa79f0b32659b7b38414dbf9e2",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2988
+  },
+  {
+    "fq_path": "routes::handoff_init_routes",
+    "kind": "fn",
+    "token_sha256": "4bf7c7edded703ecf26bb6e22f41726671b9d7e53aa980443b04f869ef1e113d",
+    "body_sha256": "29af5c44da14d7004ab12c4d82247b6d8dc79ac5cc99c51454426cbaec46b70b",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2957
+  },
+  {
+    "fq_path": "routes::handoff_pending",
+    "kind": "fn",
+    "token_sha256": "4e5720f89699ad8bb9f907ced3b50de456587b07230557c10f63d034aae2c066",
+    "body_sha256": "5fd78cc1f1cacad6eff039b3bd08e2baaace1aee63641003c9a39641ad6de3bb",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4156
+  },
+  {
+    "fq_path": "routes::handoff_protected_routes",
+    "kind": "fn",
+    "token_sha256": "4082de2a48e5aebc8121f0f7fca6fc6312ae372ce65aee56b97dc6e55e1807a9",
+    "body_sha256": "0de08d6220113216ca4f435755cbbd312fa568ea7fd3e54f9bfbc70b13b2a3f3",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2962
+  },
+  {
+    "fq_path": "routes::handoff_restore",
+    "kind": "fn",
+    "token_sha256": "36d6c54e625d566b5e1e2742f26065e368058ca241b6fd353772078dcb1423ff",
+    "body_sha256": "c8be0a1c7023c7924ddb94933413a8b4dd946b5f7644e11f0f240ce6a914cd10",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3309
+  },
+  {
+    "fq_path": "routes::handoff_resume",
+    "kind": "fn",
+    "token_sha256": "fb276b30c304cfe758c24b7307b815f95388d1e24522db11293ad5d22fc72d65",
+    "body_sha256": "ba80ec5787e902af4d5b70bbf65bb72d300fc7f60766d81e98dd6c1ed5d83180",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4132
+  },
+  {
+    "fq_path": "routes::handoff_snapshot",
+    "kind": "fn",
+    "token_sha256": "90c243e6fff0abae05437516e6f29d73e13405d6df65d5617770d07d3fb97b44",
+    "body_sha256": "afe20bb30b311aefc4fb468042d73cc75ed03f78c77e3ebccdf0c82703320395",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3088
+  },
+  {
+    "fq_path": "routes::handoff_status",
+    "kind": "fn",
+    "token_sha256": "88b471e68369d0465d14331c43e14bdfbc50b94bc24915c5a5385fa5a2ca7d6d",
+    "body_sha256": "6ae4f67546ef5e81f3ff52f7b47fcc188c615b079e5f74bc9a3b36d575ec7c8a",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4399
+  },
+  {
+    "fq_path": "routes::handoff_status_routes",
+    "kind": "fn",
+    "token_sha256": "940329593d6fa8086fd38157fc9c76de90ec78e94f97d383ae88ead1cbed260b",
+    "body_sha256": "4a4e6d6fc1a5fedeb4927c128a19d27b5035492585bdadb1f095502c616f14ed",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2977
+  },
+  {
+    "fq_path": "routes::handoff_sub_agents",
+    "kind": "fn",
+    "token_sha256": "9aac4f574ed4df8fd7af3adb220511a133fa763c7bc844e742721c876958bb17",
+    "body_sha256": "4fce088075c7cc5f3d8e4b1824b082256fd552b30f346d5d1292c21e883855e8",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4363
+  },
+  {
+    "fq_path": "routes::handoff_succession",
+    "kind": "fn",
+    "token_sha256": "f6354b99379b68e86c002c96aac741dfc5a50b88e0b817d4543346072f64338d",
+    "body_sha256": "b32f007c6dd58b572d72f0e8ae0f84b042c30e6f314c1f5c89b239a76103cc1c",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3919
+  },
+  {
+    "fq_path": "routes::handoff_verify",
+    "kind": "fn",
+    "token_sha256": "cfed3ee14a22d595ff89d7bed56c5e5986f0be9b8c9f151f4574700be24a22af",
+    "body_sha256": "a48f0d9ed3e300df49a8055cf569fed0b30a3ffb8d5480ace3fce18d0f7fd6f5",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3713
+  },
+  {
+    "fq_path": "routes::health_routes",
+    "kind": "fn",
+    "token_sha256": "3832681e03bd50bf0d599cb95de53747c9e15c5949dec3a0c37b7486f5558913",
+    "body_sha256": "4fbda0544759293f148774bd9f17df7fcede53f3654c0827cf2556b5f120a45e",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 358
+  },
+  {
+    "fq_path": "routes::healthz",
+    "kind": "fn",
+    "token_sha256": "630ce0b514b03ef2b84f88eab91b1b1dde3464132525489e3362da6fcb28adfb",
+    "body_sha256": "c375bcf46674a62bc6bd136cdaad58530912da09216f78790f5e3ea0280388c4",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1317
+  },
+  {
+    "fq_path": "routes::images_generations",
+    "kind": "fn",
+    "token_sha256": "ea1db6dc31544e8f2b7dfe3fb7613098ad1f825f597d7496658efeac8232d7fe",
+    "body_sha256": "2111f669654c4987d98927f2965f4338271eebae6032c176482335955fd32d2d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1210
+  },
+  {
+    "fq_path": "routes::images_generations_v1",
+    "kind": "fn",
+    "token_sha256": "ab943a40b84d45fd473c55751fc6418ecd666cd583bb5046bbd59648a507e8be",
+    "body_sha256": "95ecd20df82b1ce6cfa1a0f6915456963a01ceef005b33cff3c02c9489d628ad",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1290
+  },
+  {
+    "fq_path": "routes::impl::AppState",
+    "kind": "impl",
+    "token_sha256": "92dd6c0c7d23ea408bb6e0e7ed15a7332fbe184992fb969821ede61194d5abb6",
+    "body_sha256": "e324b34cad41381128bcbf9cb5600e83e54860bdb3e11490ee68020f8eb1b15e",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 59
+  },
+  {
+    "fq_path": "routes::impl::AppState::new",
+    "kind": "impl_fn",
+    "token_sha256": "d178275eb55590845937dc69eb53eafbc1fe776cf7e259686cea6df9fd9d22b9",
+    "body_sha256": "c8592e5fa6f7756634defe18241aef5516e2a27713965bac45bdec8412d2179a",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 60
+  },
+  {
+    "fq_path": "routes::impl::AppState::upstream_config",
+    "kind": "impl_fn",
+    "token_sha256": "e15f07afbbbf9321ced3a3c2973578820027918603abd5e09c24fd7d9b0166c7",
+    "body_sha256": "e0eb37afc6740325e132b92c68f2f4543833d3311ca6fb2507183035225bd9a4",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 145
+  },
+  {
+    "fq_path": "routes::inference_routes",
+    "kind": "fn",
+    "token_sha256": "8b2ca99e2ec3ff4abdeb0464894a0f7b3cf1e3e830dd6d06026665783284ae6a",
+    "body_sha256": "6aa51bfe59aafd6bb0a7e6ab0d42648a4dbad073a7330668dc0f71272c3ffbc0",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 206
+  },
+  {
+    "fq_path": "routes::list_deployments",
+    "kind": "fn",
+    "token_sha256": "68de2cffd08743d3df518716cc7f3e4dff9a96f55d469d928601e756319f4a5b",
+    "body_sha256": "f75e9997d9224edb8338306fa1579d10beec93eac29a541a917b889a03aa4c0b",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1474
+  },
+  {
+    "fq_path": "routes::list_models",
+    "kind": "fn",
+    "token_sha256": "6026d8889f64db4486799405726111124e3eef176a8cd79086aa268382da4c4c",
+    "body_sha256": "80af4cb8b385b84564c5c5a98c97605b1d4dfbe9fac2184d4d785a1d2e4693c8",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1416
+  },
+  {
+    "fq_path": "routes::lookup_parent_amid",
+    "kind": "fn",
+    "token_sha256": "4621e06af876fd6cdf7418942a02732010562c04e75e4b3a15d8e71117132da0",
+    "body_sha256": "47d7c0b1af77143ec48258629d098cb242ed84f806366a1bc91ce613a49325c1",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2437
+  },
+  {
+    "fq_path": "routes::mesh_routes",
+    "kind": "fn",
+    "token_sha256": "16027856c2c3e306371c4cfac11fbe14c48faf074fe788a901332333a5b4d7fb",
+    "body_sha256": "34f434bd00a6b98d93453e89aa166fb95bbd8a3036789d23109aba925bc91ccb",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 404
+  },
+  {
+    "fq_path": "routes::metrics",
+    "kind": "fn",
+    "token_sha256": "227de62c7d39735ba22bf7106654ad1b29440d30da45dea72f3b70742669c7a3",
+    "body_sha256": "39ae4692a8670686895ad45acb94b689411ac925d028ae5a8938a10db2234dd4",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1372
+  },
+  {
+    "fq_path": "routes::metrics_routes",
+    "kind": "fn",
+    "token_sha256": "e6941a91dc5d6296a749a71057738d24826ef58b17e072389b7c25ef89dd1d60",
+    "body_sha256": "f94d8c86a8cfbcdf8d18855c23037bcbb3edeb39f5b85febb8a43b47f0291693",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 365
+  },
+  {
+    "fq_path": "routes::readyz",
+    "kind": "fn",
+    "token_sha256": "e5c13fda18a46b9b5431715a529494d1da32e5c2a9c3aa88d7cdbecc2928558a",
+    "body_sha256": "ce2098f3e6f105ea0cba44b489641aa3571b4c387f2a222ad2e8fa270de68adc",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1321
+  },
+  {
+    "fq_path": "routes::relay_websocket_bridge",
+    "kind": "fn",
+    "token_sha256": "33b553d491b569e208be0006fe51ed62ef65ba26311607d456ee7f204fd18e30",
+    "body_sha256": "e25010ae9b7a655d8a8c2234c29c692209130a950019dedf7ec94f1c8e464d78",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2149
+  },
+  {
+    "fq_path": "routes::responses",
+    "kind": "fn",
+    "token_sha256": "676b197db7495a0d9607b1e268b8e5ae3a7fc537644f9abb7953b3e6670a9761",
+    "body_sha256": "c7de51766593e2cc3d6df2a8ce8816acfdc9954dc7ef644689ca30f7ced4b3da",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 1066
+  },
+  {
+    "fq_path": "routes::responses_to_chat_body",
+    "kind": "fn",
+    "token_sha256": "9e591830280a175e479efc959a58e6e2252c556bd34adfe7254308dd91915669",
+    "body_sha256": "8295bf97d4baf3a8720e945cd7c633e4c1d59ea35269e764b4e25a12b9bb3f2d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4655
+  },
+  {
+    "fq_path": "routes::sandbox_delete",
+    "kind": "fn",
+    "token_sha256": "d4bc382acd1ba897c816b5d93336b63d5bb5f7273b2851472a0b5bce5eb2bb3c",
+    "body_sha256": "0fb1d73fafc97b940be76b4890f9c059003eedfc65158c56e2d7dbbd1cab5617",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2933
+  },
+  {
+    "fq_path": "routes::sandbox_list",
+    "kind": "fn",
+    "token_sha256": "835ca0a7c632d6de61e3fbc6490f23c367c095893414072418fe430e1e6505ba",
+    "body_sha256": "2a3d1b9668fd30722046d77632d146079a1a72151287887c263cc2ecc4af3362",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2899
+  },
+  {
+    "fq_path": "routes::sandbox_spawn",
+    "kind": "fn",
+    "token_sha256": "d28a628c34abf76afdfeddaabb3faf607dd3dc0e63c0b8de6483510ecbbb3d25",
+    "body_sha256": "c05756891bef38ef614a03721236dc3370254eba160608b85a762eb4e96ea70d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2860
+  },
+  {
+    "fq_path": "routes::sandbox_status",
+    "kind": "fn",
+    "token_sha256": "47e39d903060505f4800e87e873c2e74e454dba5be95a112640827aeb3f761f0",
+    "body_sha256": "1abf0b2dee5daae5aee18ba7a897420a69ddfc588e5272a1731bd5a7b81912d1",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2925
+  },
+  {
+    "fq_path": "routes::sensitive_agt_routes",
+    "kind": "fn",
+    "token_sha256": "9d14de3a9943d4c9206655bcb60739ac3bf49e0284eb08ff9589e8b12a6e6153",
+    "body_sha256": "4c42c834c3d5d1dcacfb78307b0ebdd881ad8a0fbc5cbba9efa1e5901ef64021",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 375
+  },
+  {
+    "fq_path": "routes::spawn_routes",
+    "kind": "fn",
+    "token_sha256": "2ff39b8f5954b33f0b34f8cefc8fc1d784f46490bea5a7c88f6e7a0f219a9cfc",
+    "body_sha256": "15bba3ba664df5b9fd0afd60e295cba9ffc635d6e3b238ee5fbb893826810a7d",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2851
+  },
+  {
+    "fq_path": "routes::tests",
+    "kind": "mod",
+    "token_sha256": "3dd809b0f1070090fdf21ab06c992a847e04ecfa501a0699b2c0faaadb52033e",
+    "body_sha256": "f5745c1948c82ca5a417a1a989e69c2fb6d53e7d9359df77087cb95047b439e0",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4756
+  },
+  {
+    "fq_path": "routes::tests::test_chat_to_responses_simple_message",
+    "kind": "fn",
+    "token_sha256": "840f169d3dfa8d0f803793314cc834088afeb074e71662cc95c4689eb5362f12",
+    "body_sha256": "03c07be797b3bd4b5b8c187eac636253effd3f5a0a28f709bcca9113fb7e14cc",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4761
+  },
+  {
+    "fq_path": "routes::tests::test_chat_to_responses_system_to_developer",
+    "kind": "fn",
+    "token_sha256": "aa4cf97034724161d6bdabeb19aca8d44d79e0e44695dac251e1550fbef3c7ed",
+    "body_sha256": "6014faf456729051f1abb2e10895f2dc12e6943d9468466068e3a9e582f2517f",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4849
+  },
+  {
+    "fq_path": "routes::tests::test_chat_to_responses_tool_calls",
+    "kind": "fn",
+    "token_sha256": "42320a462a1a3d6b8e46ff78c68e1d0b1a37f274eec381370c96a0a540cccb9b",
+    "body_sha256": "3a2da3351f551e03c520c16b5bd44b47b83e79a75b81fceb7acc179c09f2f00c",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4786
+  },
+  {
+    "fq_path": "routes::tests::test_responses_to_chat_with_null_error",
+    "kind": "fn",
+    "token_sha256": "b495e46322b4cf920b163f70f50ced05f498eedf58551cad7d4668f9fdedae50",
+    "body_sha256": "14925b2461a6d3adc33a00d1cc857d156a07262895e5dbaf5a02d9dffca91117",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4865
+  },
+  {
+    "fq_path": "routes::tests::test_responses_to_chat_with_tool_calls",
+    "kind": "fn",
+    "token_sha256": "a42f45ddd5415e3326f3ace1ec9267f383a57e1d0f18e0d0f3e846de5b6148b8",
+    "body_sha256": "cbc26007cfeb12804d0e9502490766c6103240474e84adee3a46733f477a201e",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4828
+  },
+  {
+    "fq_path": "routes::tests::use::5d9f812e",
+    "kind": "use",
+    "token_sha256": "5d9f812e6d6973f484fcf6f9205e773ecbb4503112229f85e702d7904367395b",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4758
+  },
+  {
+    "fq_path": "routes::tests::use::951265cd",
+    "kind": "use",
+    "token_sha256": "951265cddd4a72bb6df4652192f630ea7eef87cca2ee2dff7ee2e9fa91304aec",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4759
+  },
+  {
+    "fq_path": "routes::use::014c0f0c",
+    "kind": "use",
+    "token_sha256": "014c0f0cedc58db9e0abf9e76df4f42a65016dbaa3c39bd493548ebff5567188",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 18
+  },
+  {
+    "fq_path": "routes::use::059f6911",
+    "kind": "use",
+    "token_sha256": "059f6911a5f6611d8515f1d1fa61ebc075776c837ee5f172452d1d016ca5613f",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 25
+  },
+  {
+    "fq_path": "routes::use::29d40f31",
+    "kind": "use",
+    "token_sha256": "29d40f314480907e64c0558697420296a766b33d94eaaa40381b6fde6d1b2b01",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 17
+  },
+  {
+    "fq_path": "routes::use::364a9aca",
+    "kind": "use",
+    "token_sha256": "364a9aca8181012889514aa3d8481772e05aa716fb760b78fdf5a333c1cc8df5",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 20
+  },
+  {
+    "fq_path": "routes::use::3ef11074",
+    "kind": "use",
+    "token_sha256": "3ef11074de35b8ab613ded05c168e34178d34946ec88cff7b6d61093f42f3a62",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 3
+  },
+  {
+    "fq_path": "routes::use::4c0410fb",
+    "kind": "use",
+    "token_sha256": "4c0410fbfc7210b20576ea7d487a393bec3f0680885e1b12300ad72da0958ced",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 28
+  },
+  {
+    "fq_path": "routes::use::607c5c03",
+    "kind": "use",
+    "token_sha256": "607c5c03e4a9ca6eefb07f9db42730f23ba35d149cc262f80a9e2f094f27c75f",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 27
+  },
+  {
+    "fq_path": "routes::use::6b5e32f2",
+    "kind": "use",
+    "token_sha256": "6b5e32f265e741b2e81cdcd9bd76e6f0e28d2f6f882279e34a9dabd405f70b0a",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 21
+  },
+  {
+    "fq_path": "routes::use::7f756560",
+    "kind": "use",
+    "token_sha256": "7f756560eebd15dcf9a51d4078bc1ef2e1fa6a662fdc601c323d1ec347442c70",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 15
+  },
+  {
+    "fq_path": "routes::use::951265cd",
+    "kind": "use",
+    "token_sha256": "951265cddd4a72bb6df4652192f630ea7eef87cca2ee2dff7ee2e9fa91304aec",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 14
+  },
+  {
+    "fq_path": "routes::use::b20861b4",
+    "kind": "use",
+    "token_sha256": "b20861b439d916c6f7b4b8a5171110e1752f8dc5317b8b656eba1a083a916b34",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 19
+  },
+  {
+    "fq_path": "routes::use::bf7c7000",
+    "kind": "use",
+    "token_sha256": "bf7c700055053638d745c7a363f93b3f21262ae1617101f42fb18945c7a50a38",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 5
+  },
+  {
+    "fq_path": "routes::use::c9a13509",
+    "kind": "use",
+    "token_sha256": "c9a13509ad7c57b9f7e4eb3ee4d1b40db270be92a7cb10700acb1710e770e8fc",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 4
+  },
+  {
+    "fq_path": "routes::use::cfc386f7",
+    "kind": "use",
+    "token_sha256": "cfc386f79d24b0ea508c07186c1a859c2a3f11cf1807f32a928099eb17defaaf",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 24
+  },
+  {
+    "fq_path": "routes::use::d1894c60",
+    "kind": "use",
+    "token_sha256": "d1894c603cf816cbb21424928271e116110c84386b62eb6f182b94f3e7ca7233",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 26
+  },
+  {
+    "fq_path": "routes::use::d2a904ef",
+    "kind": "use",
+    "token_sha256": "d2a904ef53811b08637a7da69da30d08242d343211fefa7c470fef830d913172",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 6
+  },
+  {
+    "fq_path": "routes::use::f278afaf",
+    "kind": "use",
+    "token_sha256": "f278afafe8d467cd10a6f82d6b176067caa15090980ced38daa89a91696ab5e2",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 22
+  },
+  {
+    "fq_path": "routes::use::f37b9708",
+    "kind": "use",
+    "token_sha256": "f37b9708bce1727c1de0174fd2149ab04abddb0f2d028b542b68a2806db78f83",
+    "body_sha256": "",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 23
+  },
+  {
+    "fq_path": "routes::uuid_v4",
+    "kind": "fn",
+    "token_sha256": "052e01e8c456fb284b19b2f2b86d2d6b5a22947628f6c127a3893b9421a934e1",
+    "body_sha256": "8a612875f404140c17b388ec3153fb37bb14fea87f6c3a18a59d295572aa3954",
+    "file": "/tmp/pre-q1-routes.rs",
+    "line": 2521
+  }
+]
