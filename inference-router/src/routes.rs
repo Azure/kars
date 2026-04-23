@@ -644,9 +644,12 @@ async fn chat_completions(
             }
             Err(e) => {
                 tracing::error!(sandbox = %sandbox_name, "Responses API error: {e:#}");
-                return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                    "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
-                }))).into_response();
+                return errors::openai(
+                    StatusCode::BAD_GATEWAY,
+                    "Failed to reach inference backend",
+                    errors::PROXY_ERROR,
+                )
+                .into_response();
             }
         }
     }
@@ -735,9 +738,12 @@ async fn chat_completions(
                         }
                         Err(e) => {
                             tracing::error!(sandbox = %sandbox_name, "Responses fallback error: {e:#}");
-                            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                                "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
-                            }))).into_response()
+                            errors::openai(
+                                StatusCode::BAD_GATEWAY,
+                                "Failed to reach inference backend",
+                                errors::PROXY_ERROR,
+                            )
+                            .into_response()
                         }
                     }
                 } else {
@@ -808,9 +814,12 @@ async fn chat_completions(
             }
             Err(e) => {
                 tracing::error!(sandbox = %sandbox_name, "Stream proxy error: {e:#}");
-                (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                    "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
-                }))).into_response()
+                errors::openai(
+                    StatusCode::BAD_GATEWAY,
+                    "Failed to reach inference backend",
+                    errors::PROXY_ERROR,
+                )
+                .into_response()
             }
         }
     } else {
@@ -879,9 +888,12 @@ async fn chat_completions(
                     }
                     Err(e) => {
                         tracing::error!(sandbox = %sandbox_name, "Responses fallback proxy error: {e:#}");
-                        (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                            "error": {"message": "Failed to reach inference backend", "type": "proxy_error"}
-                        }))).into_response()
+                        errors::openai(
+                            StatusCode::BAD_GATEWAY,
+                            "Failed to reach inference backend",
+                            errors::PROXY_ERROR,
+                        )
+                        .into_response()
                     }
                 }
             }
@@ -1104,13 +1116,12 @@ async fn responses(
 
     // Budget check
     if let Err(msg) = state.budget.check_budget(sandbox_name).await {
-        return (
+        return errors::openai(
             StatusCode::TOO_MANY_REQUESTS,
-            Json(
-                serde_json::json!({ "error": { "message": msg, "type": "token_budget_exceeded" } }),
-            ),
+            msg,
+            errors::TOKEN_BUDGET_EXCEEDED,
         )
-            .into_response();
+        .into_response();
     }
 
     let upstream = state.upstream_config(sandbox_name);
@@ -1145,13 +1156,12 @@ async fn responses(
         }
         Err(e) => {
             tracing::error!(sandbox = %sandbox_name, "Responses proxy error: {e:#}");
-            (
+            errors::openai(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": { "message": "Failed to reach inference backend", "type": "proxy_error" }
-                })),
+                "Failed to reach inference backend",
+                errors::PROXY_ERROR,
             )
-                .into_response()
+            .into_response()
         }
     }
 }
@@ -1428,13 +1438,12 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     let token = match state.auth.get_token(audience).await {
         Ok(t) => t,
         Err(e) => {
-            return (
+            return errors::openai(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
-                })),
+                format!("Token error: {e}"),
+                errors::AUTH_ERROR,
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -1453,13 +1462,12 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
             let body = r.bytes().await.unwrap_or_default();
             (status, Body::from(body)).into_response()
         }
-        Err(e) => (
+        Err(e) => errors::openai(
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "error": {"message": format!("Failed to list models: {e}"), "type": "proxy_error"}
-            })),
+            format!("Failed to list models: {e}"),
+            errors::PROXY_ERROR,
         )
-            .into_response(),
+        .into_response(),
     }
 }
 
@@ -1487,13 +1495,12 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
     let token = match state.auth.get_token(audience).await {
         Ok(t) => t,
         Err(e) => {
-            return (
+            return errors::openai(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": {"message": format!("Token error: {e}"), "type": "auth_error"}
-                })),
+                format!("Token error: {e}"),
+                errors::AUTH_ERROR,
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -1511,11 +1518,12 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
             let body = r.bytes().await.unwrap_or_default();
             (status, Body::from(body)).into_response()
         }
-        Err(e) => {
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": {"message": format!("Failed to list deployments: {e}"), "type": "proxy_error"}
-            }))).into_response()
-        }
+        Err(e) => errors::openai(
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to list deployments: {e}"),
+            errors::PROXY_ERROR,
+        )
+        .into_response(),
     }
 }
 
@@ -1669,13 +1677,12 @@ async fn foundry_proxy(
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Foundry proxy auth failed: {e}");
-            return (
+            return errors::openai(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": {"message": format!("Auth error: {e}"), "type": "auth_error"}
-                })),
+                format!("Auth error: {e}"),
+                errors::AUTH_ERROR,
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -1739,9 +1746,12 @@ async fn foundry_proxy(
         }
         Err(e) => {
             tracing::error!(sandbox = %sandbox_name, "Foundry proxy error: {e}");
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": {"message": format!("Foundry Agent API error: {e}"), "type": "proxy_error"}
-            }))).into_response()
+            errors::openai(
+                StatusCode::BAD_GATEWAY,
+                format!("Foundry Agent API error: {e}"),
+                errors::PROXY_ERROR,
+            )
+            .into_response()
         }
     }
 }
