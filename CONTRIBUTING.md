@@ -122,11 +122,11 @@ splitting (see plan.md Q1):
 | File | LOC | Suggested split |
 |---|---|---|
 | `inference-router/src/routes.rs` | ~5000 | `routes/{inference,governance,mesh,egress,admin}.rs` |
-| `inference-router/src/handoff.rs` | ~2400 | State machine + crypto are separable |
-| `controller/src/reconciler.rs` | ~2300 | Per-resource builders are separable |
-| `controller/src/mesh_peer.rs` | ~2000 | Discovery vs. connection state |
+| `inference-router/src/handoff.rs` | ~2625 | State machine + crypto are separable |
+| `controller/src/reconciler.rs` | ~2380 | Per-resource builders are separable |
+| `controller/src/mesh_peer.rs` | ~1970 | Discovery vs. connection state |
 | `inference-router/src/governance.rs` | ~1250 | Near budget — watch before extending |
-| `inference-router/src/spawn.rs` | ~1120 | Near budget — watch before extending |
+| `inference-router/src/spawn.rs` | ~1160 | Near budget — watch before extending |
 
 **Rule of thumb:** a PR that pushes any file over 1500 LOC should either
 (a) split the file in the same PR, or (b) include a follow-up tracking

@@ -1380,10 +1380,21 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 /// How long to wait before requeuing a failed reconcile, by error kind.
 ///
 /// Extracted from [`error_policy`] so it can be unit-tested without
-/// constructing a full controller [`Context`] (which requires a live kube
-/// [`Client`]). The returned duration must always be positive — a zero
-/// requeue would hot-loop the controller against a kubeapi that is
-/// rejecting our writes.
+/// constructing a full controller [`Context`] (which would need a live
+/// kube [`Client`]). The returned duration must always be positive — a
+/// zero requeue would hot-loop the controller against a kubeapi that
+/// is rejecting our writes.
+///
+/// **Behaviour change vs. pre-r4 main:** `main` used a single 30s
+/// requeue for every error. This splits by kind:
+///   * `Kube(_)` stays at 30s — transient throttle / reset / 5xx; these
+///     heal quickly and we want fast recovery.
+///   * `SerdeJson(_)` goes to 300s — deserialisation errors are
+///     deterministic; the same CR will fail again until a human edits
+///     it. 30s would log-spam every 30 seconds while the CR is broken.
+///     Operators debugging a malformed CR should expect a 5-minute
+///     back-off, not 30 seconds. A corresponding log line at `error!`
+///     level is always emitted so the delay is not silent.
 ///
 /// **Watch-stream resilience is _not_ our concern here.** When the kube
 /// watch stream itself errors (kubeapi rolling restart, network blip,

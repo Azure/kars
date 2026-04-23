@@ -218,10 +218,27 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 502..=504)
 }
 
-/// Decide whether to retry based on a reqwest error. We retry only on
-/// transport-level failures that cannot have reached the upstream
-/// (connect / timeout before headers received). Errors that surface after
-/// the upstream already accepted the request body are NOT retried.
+/// Decide whether to retry based on a reqwest error.
+///
+/// Two classes are treated as retryable:
+///
+///   • `is_connect()` — TCP/TLS handshake never completed, so the
+///     upstream cannot have observed the request at all. Always safe.
+///
+///   • `is_timeout()` — the full request/response deadline elapsed.
+///     Note: this covers **any** phase, including timeouts that occur
+///     after the request body has been fully sent and while we're
+///     waiting for response bytes. This is only called from
+///     `send_with_retry` with `retryable=true`, which the caller only
+///     sets for idempotent requests (see `is_idempotent_method` +
+///     `/embeddings` allowlist). For those — GET, HEAD, and the
+///     deterministic POST `/embeddings` endpoint — re-sending is safe
+///     regardless of when in the request cycle the timeout fired.
+///
+/// For any non-idempotent request (`chat/completions`, `completions`,
+/// `responses`, PUT, DELETE, PATCH) the retry loop is disabled at the
+/// caller, so this classifier is never consulted and a timeout mid-body
+/// or mid-response produces a single failure, not a double-send.
 fn is_retryable_error(err: &reqwest::Error) -> bool {
     err.is_connect() || err.is_timeout()
 }
