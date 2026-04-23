@@ -2362,11 +2362,7 @@ async fn agt_registry_proxy(
     let path_valid =
         valid_prefixes.iter().any(|prefix| path.starts_with(prefix)) && !path.contains("..");
     if !path_valid {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid registry path"})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::BAD_REQUEST, "Invalid registry path").into_response();
     }
 
     let mut url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
@@ -2419,13 +2415,11 @@ async fn agt_registry_proxy(
         }
         Err(e) => {
             tracing::warn!(url = %url, error = %e, "AGT registry proxy failed");
-            (
+            errors::flat(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("Registry unreachable: {}", e)
-                })),
+                format!("Registry unreachable: {}", e),
             )
-                .into_response()
+            .into_response()
         }
     }
 }
@@ -2489,12 +2483,7 @@ async fn blocklist_check(
         .unwrap_or("");
 
     if input.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Provide 'domain' or 'url' field"
-            })),
-        )
+        return errors::flat(StatusCode::BAD_REQUEST, "Provide 'domain' or 'url' field")
             .into_response();
     }
 
@@ -2585,13 +2574,7 @@ async fn egress_fetch(
     let req_headers = req.get("headers").and_then(|v| v.as_object());
 
     if url.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Missing 'url' field"
-            })),
-        )
-            .into_response();
+        return errors::flat(StatusCode::BAD_REQUEST, "Missing 'url' field").into_response();
     }
 
     // SSRF protection: reject requests to localhost/private IPs
@@ -2768,13 +2751,7 @@ async fn egress_approve(
 ) -> impl IntoResponse {
     let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
     if domain.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Missing 'domain' field"
-            })),
-        )
-            .into_response();
+        return errors::flat(StatusCode::BAD_REQUEST, "Missing 'domain' field").into_response();
     }
     state.blocklist.allow_domain(domain).await;
     tracing::info!(domain = %domain, "Egress domain approved");
@@ -2796,13 +2773,7 @@ async fn egress_deny(
 ) -> impl IntoResponse {
     let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
     if domain.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Missing 'domain' field"
-            })),
-        )
-            .into_response();
+        return errors::flat(StatusCode::BAD_REQUEST, "Missing 'domain' field").into_response();
     }
     state.blocklist.deny_domain(domain).await;
     tracing::info!(domain = %domain, "Egress domain denied");
@@ -3116,7 +3087,7 @@ async fn handoff_snapshot(
         .try_transition(handoff::HandoffPhase::Snapshotting)
         .await
     {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+        return errors::flat(StatusCode::CONFLICT, e).into_response();
     }
 
     let predecessor_amid = body
@@ -3137,11 +3108,7 @@ async fn handoff_snapshot(
             .handoff_session
             .fail("Missing shared_secret".into())
             .await;
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "shared_secret is required"})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::BAD_REQUEST, "shared_secret is required").into_response();
     }
 
     let direction = state
@@ -3157,11 +3124,7 @@ async fn handoff_snapshot(
             Ok(s) => s,
             Err(e) => {
                 state.handoff_session.fail(e.clone()).await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e})),
-                )
-                    .into_response();
+                return errors::flat(StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
             }
         };
 
@@ -3234,11 +3197,7 @@ async fn handoff_snapshot(
             handoff::MAX_BLOB_SIZE_BYTES / (1024 * 1024)
         );
         state.handoff_session.fail(msg.clone()).await;
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
     }
 
     // Compute verification hash BEFORE encryption
@@ -3260,13 +3219,11 @@ async fn handoff_snapshot(
                     .handoff_session
                     .fail(format!("Invalid shared_secret: {e}"))
                     .await;
-                return (
+                return errors::flat(
                     StatusCode::BAD_REQUEST,
-                    Json(
-                        serde_json::json!({"error": format!("Invalid shared_secret base64: {e}")}),
-                    ),
+                    format!("Invalid shared_secret base64: {e}"),
                 )
-                    .into_response();
+                .into_response();
             }
         };
 
@@ -3275,11 +3232,7 @@ async fn handoff_snapshot(
         Ok(b) => b,
         Err(e) => {
             state.handoff_session.fail(e.clone()).await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
+            return errors::flat(StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     };
 
@@ -3353,7 +3306,7 @@ async fn handoff_restore(
         .try_transition(handoff::HandoffPhase::Restoring)
         .await
     {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+        return errors::flat(StatusCode::CONFLICT, e).into_response();
     }
 
     let shared_secret = body
@@ -3366,11 +3319,7 @@ async fn handoff_restore(
             .handoff_session
             .fail("Missing shared_secret".into())
             .await;
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "shared_secret is required"})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::BAD_REQUEST, "shared_secret is required").into_response();
     }
 
     // Parse the encrypted blob
@@ -3382,20 +3331,16 @@ async fn handoff_restore(
                     .handoff_session
                     .fail(format!("Invalid blob: {e}"))
                     .await;
-                return (
+                return errors::flat(
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("Invalid blob format: {e}")})),
+                    format!("Invalid blob format: {e}"),
                 )
-                    .into_response();
+                .into_response();
             }
         },
         None => {
             state.handoff_session.fail("Missing blob".into()).await;
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "blob is required"})),
-            )
-                .into_response();
+            return errors::flat(StatusCode::BAD_REQUEST, "blob is required").into_response();
         }
     };
 
@@ -3407,11 +3352,11 @@ async fn handoff_restore(
                     .handoff_session
                     .fail(format!("Invalid shared_secret: {e}"))
                     .await;
-                return (
+                return errors::flat(
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("Invalid shared_secret: {e}")})),
+                    format!("Invalid shared_secret: {e}"),
                 )
-                    .into_response();
+                .into_response();
             }
         };
 
@@ -3451,11 +3396,11 @@ async fn handoff_restore(
         Ok(s) => s,
         Err(e) => {
             state.handoff_session.fail(e.clone()).await;
-            return (
+            return errors::flat(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({"error": format!("State deserialization failed: {e}")})),
+                format!("State deserialization failed: {e}"),
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -3467,11 +3412,7 @@ async fn handoff_restore(
             handoff::HANDOFF_STATE_VERSION
         );
         state.handoff_session.fail(msg.clone()).await;
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::UNPROCESSABLE_ENTITY, msg).into_response();
     }
 
     // ── §9.9.4: State blob size/DoS limits ──────────────────────────────────
@@ -3488,22 +3429,14 @@ async fn handoff_restore(
             "handoff:restore:rejected",
             &format!("blob_too_large size={}B", compressed.len()),
         );
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
     }
 
     // Workspace tar size check
     if restored_state.workspace_tar.len() > handoff::MAX_BLOB_SIZE_BYTES {
         let msg = "Workspace tar exceeds size limit";
         state.handoff_session.fail(msg.into()).await;
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response();
+        return errors::flat(StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
     }
 
     // ── §9.9.1: State blob prompt injection protections ─────────────────────
@@ -3777,7 +3710,7 @@ async fn handoff_verify(
         .try_transition(handoff::HandoffPhase::Verifying)
         .await
     {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+        return errors::flat(StatusCode::CONFLICT, e).into_response();
     }
 
     // Use the hash computed during restore (same compressed bytes as the source)
@@ -3805,19 +3738,11 @@ async fn handoff_verify(
                 Ok(s) => match handoff::serialize_state(&s) {
                     Ok(c) => handoff::compute_verification_hash(&c),
                     Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": e})),
-                        )
-                            .into_response();
+                        return errors::flat(StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
                     }
                 },
                 Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": e})),
-                    )
-                        .into_response();
+                    return errors::flat(StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
                 }
             }
         }
@@ -3873,7 +3798,7 @@ async fn handoff_drain(State(state): State<AppState>) -> impl IntoResponse {
         .await
     {
         state.drain_state.stop_drain().await;
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+        return errors::flat(StatusCode::CONFLICT, e).into_response();
     }
 
     state
@@ -3900,7 +3825,7 @@ async fn handoff_decommission(State(state): State<AppState>) -> impl IntoRespons
         .try_transition(handoff::HandoffPhase::Decommissioning)
         .await
     {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response();
+        return errors::flat(StatusCode::CONFLICT, e).into_response();
     }
 
     // Stop drain if still active
@@ -3997,13 +3922,11 @@ async fn handoff_succession(
     let successor_amid = match body.get("successor_amid").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
         None => {
-            return (
+            return errors::flat(
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Missing required field: successor_amid",
-                })),
+                "Missing required field: successor_amid",
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -4016,13 +3939,11 @@ async fn handoff_succession(
     let registry_url = match std::env::var("AGT_REGISTRY_URL") {
         Ok(url) => url,
         Err(_) => {
-            return (
+            return errors::flat(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "AGT_REGISTRY_URL not configured — cannot perform succession",
-                })),
+                "AGT_REGISTRY_URL not configured — cannot perform succession",
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -4076,36 +3997,30 @@ async fn handoff_succession(
                 }
             },
             Err(e) => {
-                return (
+                return errors::flat(
                     StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": format!("Failed to parse registry lookup response: {}", e),
-                    })),
+                    format!("Failed to parse registry lookup response: {}", e),
                 )
-                    .into_response();
+                .into_response();
             }
         },
         Ok(resp) => {
-            return (
+            return errors::flat(
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": format!(
-                        "Successor {} not found in registry (status {})",
-                        successor_amid,
-                        resp.status()
-                    ),
-                })),
+                format!(
+                    "Successor {} not found in registry (status {})",
+                    successor_amid,
+                    resp.status()
+                ),
             )
-                .into_response();
+            .into_response();
         }
         Err(e) => {
-            return (
+            return errors::flat(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("Failed to reach registry for successor lookup: {}", e),
-                })),
+                format!("Failed to reach registry for successor lookup: {}", e),
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -4195,13 +4110,11 @@ async fn handoff_succession(
         }
         Err(e) => {
             tracing::error!("Failed to submit succession to registry: {}", e);
-            (
+            errors::flat(
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("Failed to reach registry: {}", e),
-                })),
+                format!("Failed to reach registry: {}", e),
             )
-                .into_response()
+            .into_response()
         }
     }
 }
@@ -4226,13 +4139,7 @@ async fn handoff_resume(State(state): State<AppState>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(msg) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": msg,
-            })),
-        )
-            .into_response(),
+        Err(msg) => errors::flat(StatusCode::CONFLICT, msg).into_response(),
     }
 }
 
@@ -4330,7 +4237,7 @@ async fn handoff_pending(
                 &format!("{e}"),
             );
 
-            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+            errors::flat(status, e.to_string()).into_response()
         }
     }
 }
@@ -4360,10 +4267,7 @@ async fn handoff_confirm(
     let token = match body.get("confirmation_token").and_then(|v| v.as_str()) {
         Some(t) => t,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "confirmation_token is required"})),
-            )
+            return errors::flat(StatusCode::BAD_REQUEST, "confirmation_token is required")
                 .into_response();
         }
     };
@@ -4441,7 +4345,7 @@ async fn handoff_confirm(
                 );
             }
 
-            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+            errors::flat(status, e.to_string()).into_response()
         }
     }
 }
