@@ -1,0 +1,40 @@
+{
+  "id": "chatcmpl-REDACTED111111111111111111",
+  "object": "chat.completion",
+  "created": 1700000001,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null
+      },
+      "finish_reason": "content_filter",
+      "logprobs": null,
+      "content_filter_results": {
+        "hate": { "filtered": true, "severity": "high" },
+        "self_harm": { "filtered": false, "severity": "safe" },
+        "sexual": { "filtered": false, "severity": "safe" },
+        "violence": { "filtered": false, "severity": "safe" }
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 33,
+    "completion_tokens": 0,
+    "total_tokens": 33
+  },
+  "prompt_filter_results": [
+    {
+      "prompt_index": 0,
+      "content_filter_results": {
+        "hate": { "filtered": true, "severity": "high" },
+        "self_harm": { "filtered": false, "severity": "safe" },
+        "sexual": { "filtered": false, "severity": "safe" },
+        "violence": { "filtered": false, "severity": "safe" },
+        "jailbreak": { "filtered": true, "detected": true }
+      }
+    }
+  ]
+}

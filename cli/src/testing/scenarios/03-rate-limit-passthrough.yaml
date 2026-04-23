@@ -1,0 +1,35 @@
+# Scenario 03 — rate-limit surface passthrough
+#
+# Foundry emits HTTP 429 with a `retry_after_seconds` field when a deployment
+# is over-budget. The router must pass this through untouched so the
+# plugin/agent can back off.
+
+name: "429 rate-limit surface passthrough"
+description: >
+  A deliberate 429 response from the upstream survives the fake-router
+  pass-through, status + body intact.
+
+router:
+  fixtures_dir: ../../../../inference-router/tests/fixtures/foundry
+  routes:
+    - method: POST
+      path: /v1/chat/completions
+      status: 429
+      body:
+        fixtureFile: error_429.json
+
+steps:
+  - name: "upstream 429 is returned to the caller"
+    request:
+      method: POST
+      path: /v1/chat/completions
+      body:
+        model: gpt-4.1
+        messages:
+          - role: user
+            content: "Hi."
+    expect:
+      status: 429
+      body_contains:
+        - "rate_limit_exceeded"
+        - "Try again"

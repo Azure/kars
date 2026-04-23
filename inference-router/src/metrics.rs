@@ -157,3 +157,59 @@ pub static AGT_MESSAGE_SIGNATURES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+// ── Handoff metrics ────────────────────────────────────────────────────────
+
+/// Pending-handoff lifecycle events.
+///
+/// Action labels:
+/// - `created` — new pending request accepted.
+/// - `rate_limited` — request rejected by cooldown.
+/// - `confirmed` — confirmation token accepted.
+/// - `invalid_token` — confirm called with a wrong token.
+/// - `too_fast` — confirm called before `CONFIRMATION_MIN_DELAY_SECS`.
+/// - `expired` — pending request aged past TTL before confirm.
+/// - `no_pending` — confirm called with no outstanding request.
+/// - `cancelled` — explicit cancel() call.
+pub static HANDOFF_PENDING_EVENTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_handoff_pending_events_total",
+            "Pending-handoff lifecycle events"
+        ),
+        &["action"]
+    )
+    .unwrap()
+});
+
+/// Handoff session phase transitions.
+///
+/// Labels:
+/// - `from` / `to` — phase names (lowercase).
+/// - `result` — `ok` or `rejected` (invalid transition).
+pub static HANDOFF_PHASE_TRANSITIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_handoff_phase_transitions_total",
+            "Handoff session phase transitions"
+        ),
+        &["from", "to", "result"]
+    )
+    .unwrap()
+});
+
+/// Upstream (Azure OpenAI) retry count, broken out by reason.
+///
+/// Labels:
+/// - `sandbox` — sandbox name.
+/// - `reason` — `transport` (connect/timeout) or `status` (502/503/504).
+pub static UPSTREAM_RETRIES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_upstream_retries_total",
+            "Upstream Azure OpenAI retries on idempotent requests"
+        ),
+        &["sandbox", "reason"]
+    )
+    .unwrap()
+});

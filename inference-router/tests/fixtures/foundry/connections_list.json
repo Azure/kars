@@ -1,0 +1,33 @@
+{
+  "value": [
+    {
+      "name": "azure-openai-default",
+      "id": "/subscriptions/REDACTED/resourceGroups/REDACTED/providers/Microsoft.CognitiveServices/accounts/REDACTED/projects/REDACTED/connections/azure-openai-default",
+      "type": "Microsoft.CognitiveServices/accounts/projects/connections",
+      "properties": {
+        "category": "AzureOpenAI",
+        "target": "https://REDACTED.openai.azure.com/",
+        "authType": "AAD",
+        "isSharedToAll": true,
+        "metadata": {
+          "ApiType": "Azure",
+          "ApiVersion": "2024-10-21"
+        }
+      }
+    },
+    {
+      "name": "bing-grounding",
+      "id": "/subscriptions/REDACTED/resourceGroups/REDACTED/providers/Microsoft.CognitiveServices/accounts/REDACTED/projects/REDACTED/connections/bing-grounding",
+      "type": "Microsoft.CognitiveServices/accounts/projects/connections",
+      "properties": {
+        "category": "ApiKey",
+        "target": "https://api.bing.microsoft.com/",
+        "authType": "ApiKey",
+        "isSharedToAll": true,
+        "metadata": {
+          "type": "bing_grounding"
+        }
+      }
+    }
+  ]
+}

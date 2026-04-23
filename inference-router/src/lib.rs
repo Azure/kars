@@ -14,6 +14,7 @@ pub mod auth;
 pub mod blocklist;
 pub mod budget;
 pub mod config;
+pub mod errors;
 pub mod forward_proxy;
 pub mod governance;
 pub mod handoff;

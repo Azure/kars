@@ -1,0 +1,23 @@
+# Allowlisted fn body mutations for the q1 routes split (waves 1-5).
+#
+# Format: one fn leaf-name per line; '#' starts a comment. Each entry MUST
+# have a justification in the commit that introduced it — this file is
+# evidence, not a blanket waiver.
+
+# Wave 4 (commit a277a14) — namespace-resolution fix:
+#   super::handoff::MAX_BLOB_SIZE_BYTES  →  handoff::MAX_BLOB_SIZE_BYTES
+# At routes.rs top-level, `super` = crate root, so `super::handoff` resolved
+# to `crate::handoff`. After moving into routes/handoff.rs, `super::handoff`
+# would recurse to the enclosing module itself. The local `use crate::handoff;`
+# makes `handoff::X` resolve to `crate::handoff::X` — same constant,
+# byte-identical runtime behavior.
+handoff_protected_routes
+
+# Post-fmt — trailing-comma normalization (cargo fmt):
+# After extraction into a less-indented module, rustfmt could collapse a
+# multi-line errors::flat(...) call onto a single line, which removed the
+# final trailing comma. Token-different (Punct `,` removed) but semantically
+# identical — same function, same arguments, same return. Verified by
+# `cargo test` (all 275 pass) and by reading the diff
+# (`git log -p -- inference-router/src/routes/handoff.rs`).
+handoff_restore

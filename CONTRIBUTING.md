@@ -110,6 +110,37 @@ Credentials are stored in a K8s secret named `<sandbox-name>-credentials` in the
 3. `make test && make lint` passes
 4. Documentation updated if applicable
 
+## Code Style Policies
+
+### File size (Rust)
+
+Source files **should stay under 1500 LOC**. Files over that threshold
+tend to hide bugs, slow down reviews, and make refactoring risky. Today
+the following files are over budget and are candidates for incremental
+splitting (see plan.md Q1):
+
+| File | LOC | Suggested split |
+|---|---|---|
+| `inference-router/src/routes.rs` | ~5000 | `routes/{inference,governance,mesh,egress,admin}.rs` |
+| `inference-router/src/handoff.rs` | ~2625 | State machine + crypto are separable |
+| `controller/src/reconciler.rs` | ~2380 | Per-resource builders are separable |
+| `controller/src/mesh_peer.rs` | ~1970 | Discovery vs. connection state |
+| `inference-router/src/governance.rs` | ~1250 | Near budget — watch before extending |
+| `inference-router/src/spawn.rs` | ~1160 | Near budget — watch before extending |
+
+**Rule of thumb:** a PR that pushes any file over 1500 LOC should either
+(a) split the file in the same PR, or (b) include a follow-up tracking
+item in plan.md. Reviewers are expected to flag this.
+
+This is a soft rule — edge cases exist (e.g., generated code, large
+lookup tables). Use judgement; call it out in the PR description when
+you exceed it intentionally.
+
+### File size (TypeScript)
+
+`cli/src/plugin.ts` is a known outlier (>4000 LOC) tracked separately —
+same rule applies to new TS files.
+
 ## Code of Conduct
 
 [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/) · [FAQ](https://opensource.microsoft.com/codeofconduct/faq/) · [opencode@microsoft.com](mailto:opencode@microsoft.com)

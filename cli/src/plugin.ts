@@ -40,6 +40,36 @@ process.on("unhandledRejection", (reason: any) => {
 });
 
 // ---------------------------------------------------------------------------
+// Router URL configuration — single source of truth (plan item q7).
+//
+// The sandbox's iptables egress-guard blocks UID 1000 from direct network
+// egress except to 127.0.0.1:8443 (inference router) and DNS. All plugin
+// traffic therefore flows through ROUTER_BASE. Override via
+// AZURECLAW_ROUTER_URL for tests (FakeRouter, docker-compose.dev.yml).
+//
+// Late-binding: the env var is re-read on every call so tests can set it
+// after module load.
+// ---------------------------------------------------------------------------
+const DEFAULT_ROUTER_BASE = "http://127.0.0.1:8443";
+
+export function routerBase(): string {
+  return process.env.AZURECLAW_ROUTER_URL || DEFAULT_ROUTER_BASE;
+}
+
+export function routerWsBase(): string {
+  // http → ws, https → wss; preserves host:port and trailing path if any.
+  return routerBase().replace(/^http/, "ws");
+}
+
+export function routerUrl(path: string): string {
+  return new URL(path, routerBase()).toString();
+}
+
+export function routerWsUrl(path: string): string {
+  return new URL(path, routerWsBase()).toString();
+}
+
+// ---------------------------------------------------------------------------
 // AGT SDK — AgentMesh (amitayks/agentmesh)
 // Full E2E encrypted inter-agent communication via self-hosted relay/registry.
 // Also: tool-level policy, trust scoring, audit logging.
@@ -157,7 +187,7 @@ async function resolveAmidToName(amid: string): Promise<string> {
     const http = await import("node:http");
     const body = await new Promise<string>((resolve, reject) => {
       const req = http.get(
-        `http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${amid}`,
+        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
         (res) => {
           let d = "";
           res.on("data", (c: Buffer) => { d += c.toString(); });
@@ -186,7 +216,7 @@ async function resolveSigningKey(amid: string): Promise<string> {
     const http = await import("node:http");
     const body = await new Promise<string>((resolve, reject) => {
       const req = http.get(
-        `http://127.0.0.1:8443/agt/registry/registry/lookup?amid=${amid}`,
+        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
         (res) => {
           let d = "";
           res.on("data", (c: Buffer) => { d += c.toString(); });
@@ -234,7 +264,7 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
     };
     if (adminToken) headers["x-azureclaw-admin"] = adminToken;
     await new Promise<void>((resolve, reject) => {
-      const req = http.request("http://127.0.0.1:8443/agt/trust", {
+      const req = http.request(routerUrl("/agt/trust"), {
         method: "POST",
         headers,
         timeout: 5000,
@@ -305,7 +335,7 @@ async function recordMeshSession(
       signature,
     });
     await new Promise<void>((resolve, reject) => {
-      const req = http.request("http://127.0.0.1:8443/agt/registry/registry/reputation/session", {
+      const req = http.request(routerUrl("/agt/registry/registry/reputation/session"), {
         method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
         timeout: 5000,
@@ -708,7 +738,7 @@ async function processTaskWithTools(
 
     const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
     const response = await new Promise<any>((resolve, reject) => {
-      const req = http.request("http://127.0.0.1:8443/v1/chat/completions", {
+      const req = http.request(routerUrl("/v1/chat/completions"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -782,7 +812,7 @@ async function processTaskWithTools(
             });
             const http = await import("node:http");
             const fetchResult = await new Promise<string>((resolve) => {
-              const req = http.request("http://127.0.0.1:8443/egress/fetch", {
+              const req = http.request(routerUrl("/egress/fetch"), {
                 method: "POST", timeout: 35000,
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
               }, (res) => {
@@ -805,7 +835,7 @@ async function processTaskWithTools(
               let connId: string | undefined;
               try {
                 const connsRaw = await new Promise<string>((resolve, reject) => {
-                  const r = http.get("http://127.0.0.1:8443/connections?api-version=2025-05-15-preview", { timeout: 10000 }, (res) => {
+                  const r = http.get(routerUrl("/connections?api-version=2025-05-15-preview"), { timeout: 10000 }, (res) => {
                     let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
                   });
                   r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
@@ -842,7 +872,7 @@ async function processTaskWithTools(
             // Use Node HTTP instead of curl to avoid shell escaping issues
             const foundryResult = await new Promise<string>((resolve, reject) => {
               const postBody = JSON.stringify(reqBody);
-              const req = http.request("http://127.0.0.1:8443/openai/responses?api-version=2025-11-15-preview", {
+              const req = http.request(routerUrl("/openai/responses?api-version=2025-11-15-preview"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
                 timeout: 60000,
@@ -902,7 +932,7 @@ async function processTaskWithTools(
 
             const memResult = await new Promise<string>((resolve, reject) => {
               const postBody = JSON.stringify(memBody);
-              const req = http.request(`http://127.0.0.1:8443${memPath}`, {
+              const req = http.request(routerUrl(`${memPath}`), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
                 timeout: 30000,
@@ -929,7 +959,7 @@ async function processTaskWithTools(
                       options: { user_profile_enabled: true, chat_summary_enabled: true } },
                   });
                   await new Promise<void>((resolve, reject) => {
-                    const req = http.request(`http://127.0.0.1:8443/memory_stores?${apiVer}`, {
+                    const req = http.request(routerUrl(`/memory_stores?${apiVer}`), {
                       method: "POST",
                       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(createBody) },
                       timeout: 15000,
@@ -941,7 +971,7 @@ async function processTaskWithTools(
                   // Retry the original operation
                   const retryResult = await new Promise<string>((resolve, reject) => {
                     const postBody = JSON.stringify(memBody);
-                    const req = http.request(`http://127.0.0.1:8443${memPath}`, {
+                    const req = http.request(routerUrl(`${memPath}`), {
                       method: "POST",
                       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postBody) },
                       timeout: 30000,
@@ -982,7 +1012,7 @@ async function processTaskWithTools(
             });
             const imgResult = await new Promise<string>((resolve, reject) => {
               const req = http.request(
-                `http://127.0.0.1:8443/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`,
+                routerUrl(`/openai/deployments/${encodeURIComponent(imgModel)}/images/generations?api-version=2025-04-01-preview`),
                 { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(imgBody) }, timeout: 120000 },
                 (res) => { let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body)); },
               );
@@ -1036,7 +1066,7 @@ async function processTaskWithTools(
               }
 
               // Auto-discover with retry (match parent's reliability)
-              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
               for (let attempt = 0; attempt < 8 && !targetAmid; attempt++) {
                 if (attempt > 0) {
                   log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
@@ -1102,7 +1132,7 @@ async function processTaskWithTools(
             const pattern = (args.pattern as string) || "*";
             log.info(`AGT sub-agent discover: pattern=${pattern}`);
             try {
-              const registryBase = process.env.AGT_REGISTRY_URL || "http://127.0.0.1:8443/agt/registry";
+              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
               const discoverResult = await new Promise<string>((resolve, reject) => {
                 const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
                   let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
@@ -1142,7 +1172,7 @@ async function processTaskWithTools(
               const policyHttp = await import("node:http");
               const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
               const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request("http://127.0.0.1:8443/agt/evaluate", {
+                const req = policyHttp.request(routerUrl("/agt/evaluate"), {
                   method: "POST", timeout: 2000,
                   headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
                 }, (res) => {
@@ -1788,8 +1818,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // The router (UID 1001) proxies: /agt/relay → relay service, /agt/registry/* → registry service.
     // On AKS, router reads AGT_RELAY_URL/AGT_REGISTRY_URL to find the services.
     // In dev, same env vars point to Docker containers on the shared network.
-    const registryUrl = "http://127.0.0.1:8443/agt/registry";
-    const relayUrl = "ws://127.0.0.1:8443/agt/relay";
+    const registryUrl = routerUrl("/agt/registry");
+    const relayUrl = routerWsUrl("/agt/relay");
 
     agtMeshClient = new sdk.AgentMeshClient(agtIdentity, {
       storage: new sdk.MemoryStorage(),
@@ -2049,7 +2079,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { trust_score: senderTrustScore, from_agent: fromName },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
+            const req = http.request(routerUrl("/agt/evaluate"), {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -2103,7 +2133,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
           });
           const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
+            const req = http.request(routerUrl("/agt/evaluate"), {
               method: "POST",
               headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
             }, (res) => {
@@ -3278,7 +3308,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         if (agtConnected) {
           try {
             const http = await import("node:http");
-            const req = http.request("http://127.0.0.1:8443/agt/status", { timeout: 3000 }, () => {});
+            const req = http.request(routerUrl("/agt/status"), { timeout: 3000 }, () => {});
             req.on("error", () => {});
             req.end();
           } catch { /* best effort */ }
@@ -3287,7 +3317,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             try {
               const http = await import("node:http");
               const body = JSON.stringify({ amid: agtIdentity.amid });
-              const req = http.request("http://127.0.0.1:8443/agt/registry/registry/heartbeat", {
+              const req = http.request(routerUrl("/agt/registry/registry/heartbeat"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
                 timeout: 3000,
@@ -3337,11 +3367,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 // Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
 // ---------------------------------------------------------------------------
 
-const ROUTER_BASE = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
-
 async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
-  const url = new URL(path, ROUTER_BASE);
+  const url = new URL(path, routerBase());
   return new Promise((resolve, reject) => {
     const opts: any = {
       hostname: url.hostname,
@@ -3370,7 +3398,7 @@ async function _routerCall(method: string, path: string, body?: unknown, timeout
 // Strict variant that rejects on HTTP >= 400 — used by handoff orchestration
 async function _routerCallStrict(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
   const http = await import("node:http");
-  const url = new URL(path, ROUTER_BASE);
+  const url = new URL(path, routerBase());
   return new Promise((resolve, reject) => {
     const opts: any = {
       hostname: url.hostname,
@@ -3640,7 +3668,7 @@ async function _runHandoffOrchestration(
 
     try {
       await _routerCall("POST", "/sandbox/spawn", {
-        name: targetName,
+        agent_id: targetName,
         model: process.env.DEFAULT_MODEL || "gpt-4.1",
         governance: true,
         trust_threshold: 500,
@@ -4624,7 +4652,7 @@ const azureClawPlugin = definePluginEntry({
         const http = await import("node:http");
         const postData = JSON.stringify({ action, context: { tool: toolName } });
         const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, _reject) => {
-          const req = http.request("http://127.0.0.1:8443/agt/evaluate", {
+          const req = http.request(routerUrl("/agt/evaluate"), {
             method: "POST", timeout: 2000,
             headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
           }, (res) => {
@@ -4695,10 +4723,9 @@ const azureClawPlugin = definePluginEntry({
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
-    const ROUTER = process.env.AZURECLAW_ROUTER_URL || "http://127.0.0.1:8443";
     async function routerCall(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<any> {
       const http = await import("node:http");
-      const url = `${ROUTER}${path}`;
+      const url = routerUrl(path);
       return new Promise((resolve, reject) => {
         const opts: any = {
           method,
@@ -4729,6 +4756,36 @@ const azureClawPlugin = definePluginEntry({
         if (body) req.write(JSON.stringify(body));
         req.end();
       });
+    }
+
+    // Terminal sub-agent pod phases — polling loops bail out when the pod reaches
+    // one of these. Anything else (including Pending, Running, Unknown, or transient
+    // status-endpoint errors) is treated as "still alive, keep retrying".
+    const POD_DEAD_PHASES = new Set(["Failed", "Terminating", "Exited"]);
+
+    // Probe sub-agent pod phase. Returns:
+    //   { alive: true,  phase }            → keep polling
+    //   { alive: false, phase?, reason }   → bail; pod is gone/dead
+    //   null                               → transient error (router down, brief 5xx);
+    //                                         treat as still alive, keep polling
+    async function probeSubAgentAlive(
+      name: string,
+    ): Promise<{ alive: boolean; phase?: string; reason?: string } | null> {
+      try {
+        const status: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+        const phase: string = status?.phase || "Unknown";
+        if (POD_DEAD_PHASES.has(phase)) {
+          return { alive: false, phase, reason: `sub-agent phase is ${phase}` };
+        }
+        return { alive: true, phase };
+      } catch (e: any) {
+        const msg = (e && e.message) || "";
+        if (msg.startsWith("HTTP 404")) {
+          return { alive: false, reason: "sub-agent sandbox not found (CRD deleted)" };
+        }
+        // transient — router busy, short network hiccup; keep retrying
+        return null;
+      }
     }
 
     // Safe JSON response for tool output — truncate to avoid blowing WebSocket frames
@@ -4795,7 +4852,7 @@ const azureClawPlugin = definePluginEntry({
           }
 
           const result = await routerCall("POST", "/sandbox/spawn", {
-            name: params.name,
+            agent_id: params.name,
             model: params.model || "gpt-4.1",
             governance: params.governance !== false,
             trust_threshold: 500,
@@ -4879,7 +4936,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_spawn_status",
       label: "Sub-Agent Status",
-      description: "Check the status of a spawned sub-agent. Returns phase (Pending/Running/Terminating), namespace, and readiness. Poll this after spawning until phase is 'Running' before sending mesh messages.",
+      description: "Check the status of a spawned sub-agent. Returns phase (Pending/Running/Terminating), namespace, mesh_registered (true once the sub-agent has registered with the AGT mesh), and mesh_ready (Running AND mesh_registered). Prefer polling until mesh_ready=true before sending mesh messages — phase=Running alone is not sufficient because mesh registration happens asynchronously (~60s on AKS) after the pod becomes Ready.",
       parameters: {
         type: "object",
         properties: {
@@ -4888,9 +4945,27 @@ const azureClawPlugin = definePluginEntry({
         required: ["name"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
+        const name = params.name as string;
         try {
-          const result = await routerCall("GET", `/sandbox/${encodeURIComponent(params.name as string)}/status`);
-          return { content: [{ type: "text", text: safeJson(result) }] };
+          const result: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+          // Best-effort registry probe — don't fail status on registry hiccups.
+          let mesh_registered = false;
+          try {
+            const search: any = await routerCall(
+              "GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(name)}`,
+            );
+            const agents = (search && Array.isArray(search.results)) ? search.results : [];
+            mesh_registered = agents.some(
+              (a: any) => a.display_name === name || (a.capabilities || []).includes(name),
+            );
+          } catch { /* registry unavailable — report as not-registered */ }
+          const enriched = {
+            ...result,
+            mesh_registered,
+            mesh_ready: result?.phase === "Running" && mesh_registered,
+          };
+          return { content: [{ type: "text", text: safeJson(enriched) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Status check failed: ${e.message}` }] };
         }
@@ -4900,7 +4975,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply. You can also instruct sub-agents to forward results to each other directly (they have peer-to-peer mesh access). Automatically waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply. You can also instruct sub-agents to forward results to each other directly (they have peer-to-peer mesh access). Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
       parameters: {
         type: "object",
         properties: {
@@ -4939,24 +5014,44 @@ const azureClawPlugin = definePluginEntry({
             }
           }
           try {
-            // 1. Discover target agent's AMID via registry search (with retry for boot timing)
-            // Check cache first — with container reuse, AMIDs are stable once established.
+            // Discover the target sub-agent's AMID and send — retry continuously while
+            // the sub-agent's pod is alive. The only terminal conditions are:
+            //   • pod reaches Failed/Terminating/Exited (or CRD is gone)
+            //   • meshSend returns a non-transient error (not a prekey / stale-AMID case)
+            // This removes the old hand-rolled 12-attempt discovery + 15-attempt prekey
+            // windows that were too short on AKS (router-to-relay connect alone is ~60–70s).
+            // Check cache first — AMIDs are stable once established.
             let targetAmid: string | undefined = nameToAmid.get(agentName);
             if (targetAmid) {
               log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
             }
-            for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
-              if (attempt > 0) {
-                  log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
-                  await new Promise(r => setTimeout(r, 2000));
-                }
 
-                // Try direct registry HTTP search by capability (most reliable)
+            const waitStart = Date.now();
+            let nextHeartbeatAt = waitStart + 10_000;
+            let sendSucceeded = false;
+            let finalSendErr: Error | null = null;
+
+            while (!sendSucceeded) {
+              // (a) Is the sub-agent still alive? Bail only on terminal phases.
+              const probe = await probeSubAgentAlive(agentName);
+              if (probe && probe.alive === false) {
+                log.warn(`AGT relay: aborting send to '${agentName}' — ${probe.reason}`);
+                return { content: [{ type: "text", text: JSON.stringify({
+                  error: "E2E encrypted send aborted — sub-agent is no longer running",
+                  reason: probe.reason,
+                  phase: probe.phase,
+                  agent: agentName,
+                  hint: "Sub-agent was deleted, failed, or is terminating. Respawn with azureclaw_spawn before retrying.",
+                }, null, 2) }] };
+              }
+
+              // (b) Discover AMID via registry search if we don't have one yet.
+              if (!targetAmid) {
                 try {
                   const http = await import("node:http");
                   const regResult: any = await new Promise((resolve, reject) => {
                     const req = http.get(
-                      `http://127.0.0.1:8443/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`,
+                      routerUrl(`/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`),
                       (res: any) => {
                         let data = "";
                         res.on("data", (c: Buffer) => { data += c.toString(); });
@@ -4967,7 +5062,7 @@ const azureClawPlugin = definePluginEntry({
                     req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
                   });
                   if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
-                    // Prefer online agents, then most recently seen
+                    // Prefer online agents, then most recently seen.
                     const sorted = regResult.results
                       .filter((a: any) => a.display_name === agentName || a.capabilities?.includes(agentName))
                       .sort((a: any, b: any) => {
@@ -4976,137 +5071,141 @@ const azureClawPlugin = definePluginEntry({
                         return (b.last_seen || "").localeCompare(a.last_seen || "");
                       });
                     const match = sorted[0] || regResult.results[0];
-                    targetAmid = match.amid;
-                  }
-                } catch (regErr: any) {
-                  if (attempt === 0) log.warn(`AGT registry search: ${regErr.message}`);
-                }
-              }
-
-              if (targetAmid) {
-                nameToAmid.set(agentName, targetAmid);
-                amidToName.set(targetAmid, agentName);
-              }
-
-            if (targetAmid) {
-              // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
-              // Uses meshSend for auto-chunking — large payloads are transparently
-              // split into chunks and reassembled on the receiver side.
-              // Retry loop: target may need time to upload prekeys after registering
-              let sendErr: Error | null = null;
-              for (let sendAttempt = 0; sendAttempt < 15; sendAttempt++) {
-                try {
-                  await meshSend(agtMeshClient, targetAmid, {
-                    type: "task_request",
-                    content: msgContent,
-                    from_agent: process.env.SANDBOX_NAME || "unknown",
-                    timestamp: new Date().toISOString(),
-                  }, log);
-                  sendErr = null;
-                  break;
-                } catch (e: any) {
-                  sendErr = e;
-                  if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
-                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/15)...`);
-                    await new Promise(r => setTimeout(r, 3000));
-                  } else if (e.message?.includes("not found") || e.message?.includes("closed") || e.message?.includes("AGENT_NOT_FOUND")) {
-                    // Stale cached AMID — invalidate and re-discover
-                    log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
-                    nameToAmid.delete(agentName);
-                    amidToName.delete(targetAmid!);
-                    targetAmid = undefined;
-                    break;
-                  } else {
-                    break; // non-prekey error — don't retry
-                  }
-                }
-              }
-              if (!sendErr && targetAmid) {
-                log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
-                const messageId = crypto.randomUUID();
-                const sendStart = new Date().toISOString();
-
-                // Auto-wait for reply: poll agtInbox for a response from this agent
-                const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
-                const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
-                const waitStart = Date.now();
-                let replyContent: string | null = null;
-                log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
-
-                while (Date.now() - waitStart < waitMaxMs) {
-                  // Check inbox for a reply from this target, skipping protocol messages
-                  const replyIdx = agtInbox.findIndex((m) => {
-                    if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
-                    // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
-                    const mt = m.message_type || "";
-                    if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
-                    // Also check content for JSON protocol messages
-                    if (typeof m.content === "string") {
-                      try {
-                        const parsed = JSON.parse(m.content);
-                        if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
-                      } catch { /* not JSON, treat as real content */ }
-                    }
-                    return true;
-                  });
-                  if (replyIdx >= 0) {
-                    const reply = agtInbox.splice(replyIdx, 1)[0];
-                    replyContent = typeof reply.content === "string"
-                      ? reply.content
-                      : JSON.stringify(reply.content);
-                    log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - waitStart) / 1000).toFixed(1)}s`);
-                    break;
-                  }
-                  // Drain protocol messages to keep inbox clean
-                  for (let i = agtInbox.length - 1; i >= 0; i--) {
-                    const m = agtInbox[i];
-                    if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
-                        (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
-                      agtInbox.splice(i, 1);
+                    if (match?.amid) {
+                      targetAmid = match.amid;
+                      nameToAmid.set(agentName, targetAmid!);
+                      amidToName.set(targetAmid!, agentName);
                     }
                   }
-                  await new Promise((r) => setTimeout(r, pollIntervalMs));
-                }
-
-                const result: any = {
-                  status: replyContent ? "delivered_and_replied" : "delivered_via_agt_relay",
-                  to_agent: agentName,
-                  to_amid: targetAmid,
-                  from_amid: agtIdentity.amid,
-                  protocol: "AGT E2E encrypted (Signal Protocol)",
-                  message_id: messageId,
-                };
-                if (replyContent) {
-                  result.reply = replyContent;
-                  // Parent rates sub-agent — only meaningful for long-lived sub-agents
-                  // whose reputation will be queried again. Short-lived ones will die
-                  // and their score is lost, but the audit trail remains.
-                  try {
-                    const ok = await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
-                    pushTrustToRouter(agentName, 0.9);
-                    await recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
-                    log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
-                  } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
-                } else {
-                  result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
-                }
-                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                } catch { /* transient registry error — keep retrying */ }
               }
-              log.warn(`AGT relay send failed after 15 retries: ${sendErr?.message}`);
+
+              if (!targetAmid) {
+                if (Date.now() >= nextHeartbeatAt) {
+                  const elapsed = Math.round((Date.now() - waitStart) / 1000);
+                  log.info(`AGT relay: still waiting for '${agentName}' to register (${elapsed}s, pod alive)...`);
+                  nextHeartbeatAt = Date.now() + 10_000;
+                }
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+              }
+
+              // (c) Try to send. Bail only on non-transient errors.
+              try {
+                await meshSend(agtMeshClient, targetAmid, {
+                  type: "task_request",
+                  content: msgContent,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                }, log);
+                sendSucceeded = true;
+                break;
+              } catch (e: any) {
+                const msg = (e && e.message) || "";
+                if (msg.includes("prekey")) {
+                  // Child registered but hasn't uploaded prekeys yet — keep waiting.
+                  if (Date.now() >= nextHeartbeatAt) {
+                    const elapsed = Math.round((Date.now() - waitStart) / 1000);
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${elapsed}s, pod alive)...`);
+                    nextHeartbeatAt = Date.now() + 10_000;
+                  }
+                  await new Promise(r => setTimeout(r, 3000));
+                  continue;
+                }
+                if (msg.includes("not found") || msg.includes("closed") || msg.includes("AGENT_NOT_FOUND")) {
+                  // Cached/registered AMID is stale (sub-agent was recycled) — invalidate and re-discover.
+                  log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
+                  nameToAmid.delete(agentName);
+                  amidToName.delete(targetAmid!);
+                  targetAmid = undefined;
+                  await new Promise(r => setTimeout(r, 2000));
+                  continue;
+                }
+                // Non-transient failure — give up.
+                finalSendErr = e;
+                break;
+              }
+            }
+
+            if (!sendSucceeded) {
+              log.warn(`AGT relay send failed: ${finalSendErr?.message}`);
               return { content: [{ type: "text", text: JSON.stringify({
                 error: "E2E encrypted send failed — message NOT delivered",
-                reason: sendErr?.message || "unknown",
+                reason: finalSendErr?.message || "unknown",
                 agent: agentName,
-                hint: "The sub-agent prekey registration takes up to 45s after pod is Running. Wait 30s and retry with azureclaw_mesh_send.",
-              }, null, 2) }] };
-            } else {
-              log.warn(`AGT relay: target '${agentName}' not found in registry after polling`);
-              return { content: [{ type: "text", text: JSON.stringify({
-                error: "Target agent not found in AGT registry — message NOT delivered",
-                agent: agentName,
-                hint: "The sub-agent has not registered with the mesh. Check azureclaw_spawn_status, ensure it is Running, then retry.",
+                hint: "Non-transient send error — verify the sub-agent is healthy with azureclaw_spawn_status.",
               }, null, 2) }] };
             }
+
+            log.info(`AGT relay: sent to ${agentName} (${targetAmid!.slice(0, 12)}...) via E2E encrypted relay`);
+            const messageId = crypto.randomUUID();
+            const sendStart = new Date().toISOString();
+
+            // Auto-wait for reply: poll agtInbox for a response from this agent
+            const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
+            const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
+            const replyWaitStart = Date.now();
+            let replyContent: string | null = null;
+            log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+
+            while (Date.now() - replyWaitStart < waitMaxMs) {
+              // Check inbox for a reply from this target, skipping protocol messages
+              const replyIdx = agtInbox.findIndex((m) => {
+                if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
+                // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                const mt = m.message_type || "";
+                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                // Also check content for JSON protocol messages
+                if (typeof m.content === "string") {
+                  try {
+                    const parsed = JSON.parse(m.content);
+                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                  } catch { /* not JSON, treat as real content */ }
+                }
+                return true;
+              });
+              if (replyIdx >= 0) {
+                const reply = agtInbox.splice(replyIdx, 1)[0];
+                replyContent = typeof reply.content === "string"
+                  ? reply.content
+                  : JSON.stringify(reply.content);
+                log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                break;
+              }
+              // Drain protocol messages to keep inbox clean
+              for (let i = agtInbox.length - 1; i >= 0; i--) {
+                const m = agtInbox[i];
+                if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
+                    (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                  agtInbox.splice(i, 1);
+                }
+              }
+              await new Promise((r) => setTimeout(r, pollIntervalMs));
+            }
+
+            const result: any = {
+              status: replyContent ? "delivered_and_replied" : "delivered_via_agt_relay",
+              to_agent: agentName,
+              to_amid: targetAmid,
+              from_amid: agtIdentity.amid,
+              protocol: "AGT E2E encrypted (Signal Protocol)",
+              message_id: messageId,
+            };
+            if (replyContent) {
+              result.reply = replyContent;
+              // Parent rates sub-agent — only meaningful for long-lived sub-agents
+              // whose reputation will be queried again. Short-lived ones will die
+              // and their score is lost, but the audit trail remains.
+              try {
+                const ok = await agtMeshClient.submitReputation(targetAmid!, messageId, 0.9, ["fast_response", "reliable"]);
+                pushTrustToRouter(agentName, 0.9);
+                await recordMeshSession(targetAmid!, messageId, "mesh_send", "success", sendStart);
+                log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
+              } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
+            } else {
+              result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
+            }
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
           } catch (agtErr: any) {
             log.warn(`AGT relay send failed: ${agtErr.message}`);
             return { content: [{ type: "text", text: JSON.stringify({
@@ -6543,7 +6642,7 @@ const azureClawPlugin = definePluginEntry({
             const http = await import("node:http");
             try {
               const body = await new Promise<string>((resolve, reject) => {
-                const req = http.get("http://127.0.0.1:8443/metrics", (res) => {
+                const req = http.get(routerUrl("/metrics"), (res) => {
                   let data = "";
                   res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
                   res.on("end", () => resolve(data));
@@ -6554,7 +6653,7 @@ const azureClawPlugin = definePluginEntry({
               console.log("AzureClaw Inference Router — Prometheus Metrics\n");
               console.log(body);
             } catch {
-              console.log("AzureClaw Inference Router: not reachable (http://127.0.0.1:8443/metrics)");
+              console.log(`AzureClaw Inference Router: not reachable (${routerUrl("/metrics")})`);
             }
           });
 
@@ -6627,7 +6726,7 @@ const azureClawPlugin = definePluginEntry({
           // Query actual Foundry deployments (not the full catalog)
           const body = await new Promise<string>((resolve, reject) => {
             const req = http.get(
-              "http://127.0.0.1:8443/deployments?api-version=2025-11-15-preview",
+              routerUrl("/deployments?api-version=2025-11-15-preview"),
               { headers: { "x-azureclaw-sandbox": "self" } },
               (res) => {
                 let data = "";
@@ -6838,7 +6937,7 @@ const azureClawPlugin = definePluginEntry({
             `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (azureclaw-strict)"}`,
             `Network: default-deny egress + iptables UID guard`,
             `Inference: routed through AzureClaw inference router`,
-            `Foundry Agent API: proxied via localhost:8443/agents/*`,
+            `Foundry Agent API: proxied via ${routerBase()}/agents/*`,
             `Auth: IMDS (kubelet MI, zero keys)`,
           ].join("\n"),
         };
@@ -6897,7 +6996,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/agt/status", (res) => {
+            const req = http.get(routerUrl("/agt/status"), (res) => {
               let data = ""; res.on("data", (c: Buffer) => { data += c.toString(); }); res.on("end", () => resolve(data));
             });
             req.on("error", reject); req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
@@ -6956,7 +7055,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/agents", (res) => {
+            const req = http.get(routerUrl("/agents"), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -6973,7 +7072,7 @@ const azureClawPlugin = definePluginEntry({
                 "",
                 "Create an agent via the Foundry Agent API:",
                 "```",
-                "POST http://localhost:8443/agents",
+                `POST ${routerBase()}/agents`,
                 '{"name": "my-agent", "model": "gpt-4.1", "instructions": "You are a helpful assistant"}',
                 "```",
                 "",
@@ -7009,7 +7108,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get(`http://127.0.0.1:8443/agents/${agentId}/threads`, (res) => {
+            const req = http.get(routerUrl(`/agents/${agentId}/threads`), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -7071,7 +7170,7 @@ const azureClawPlugin = definePluginEntry({
         // Parse args: first token is name, rest are flags
         const tokens = raw.split(/\s+/);
         const name = tokens[0];
-        const body: Record<string, unknown> = { name };
+        const body: Record<string, unknown> = { agent_id: name };
 
         for (let i = 1; i < tokens.length; i++) {
           switch (tokens[i]) {
@@ -7128,7 +7227,7 @@ const azureClawPlugin = definePluginEntry({
           }
           return {
             text: [
-              `**Sub-agent spawned:** ${parsed.name}`,
+              `**Sub-agent spawned:** ${parsed.agent_id}`,
               `Namespace: ${parsed.namespace || "pending"}`,
               `Phase: ${parsed.phase || "Pending"}`,
               parsed.message || "",
@@ -7155,7 +7254,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get("http://127.0.0.1:8443/sandbox/list", (res) => {
+            const req = http.get(routerUrl("/sandbox/list"), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -7176,7 +7275,7 @@ const azureClawPlugin = definePluginEntry({
               `**Sub-Agents** (${sandboxes.length})`,
               "",
               ...sandboxes.map((s: any) =>
-                `- **${s.name}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
+                `- **${s.agent_id}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
               ),
               "",
               "Communicate via azureclaw_mesh_send tool (E2E encrypted)",
@@ -7223,7 +7322,7 @@ const azureClawPlugin = definePluginEntry({
           if (parsed.error) {
             return { text: `**Delete failed:** ${parsed.error}` };
           }
-          return { text: `**Destroyed:** ${parsed.name} — ${parsed.message || "teardown in progress"}` };
+          return { text: `**Destroyed:** ${parsed.agent_id} — ${parsed.message || "teardown in progress"}` };
         } catch {
           return { text: `Could not delete sub-agent '${name}'. Is the inference router running?` };
         }
@@ -7243,7 +7342,7 @@ const azureClawPlugin = definePluginEntry({
         try {
           const http = await import("node:http");
           const body = await new Promise<string>((resolve, reject) => {
-            const req = http.get(`http://127.0.0.1:8443/sandbox/${encodeURIComponent(name)}/status`, (res) => {
+            const req = http.get(routerUrl(`/sandbox/${encodeURIComponent(name)}/status`), (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
               res.on("end", () => resolve(data));
@@ -7258,7 +7357,7 @@ const azureClawPlugin = definePluginEntry({
           const ready = parsed.phase === "Running";
           return {
             text: [
-              `**Sub-Agent: ${parsed.name}**`,
+              `**Sub-Agent: ${parsed.agent_id}**`,
               `Phase: ${parsed.phase || "unknown"} ${ready ? "(ready for mesh)" : "(not ready yet)"}`,
               parsed.namespace ? `Namespace: ${parsed.namespace}` : "",
               "",

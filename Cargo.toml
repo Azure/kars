@@ -7,6 +7,13 @@ members = [
 exclude = [
     "vendor/agentmesh-registry",
     "vendor/agentmesh-relay",
+    # cargo-fuzz targets build with libfuzzer-sys (nightly-only). Excluded
+    # from the workspace so stable `cargo build --workspace` is unaffected.
+    # Run targets with: cargo +nightly fuzz run <target> (see fuzz/README.md).
+    "inference-router/fuzz",
+    # Repo-local tooling: standalone crate used for the byte-equivalence
+    # proof that gates large mechanical refactors (see tools/item-manifest/README.md).
+    "tools/item-manifest",
 ]
 
 [workspace.package]

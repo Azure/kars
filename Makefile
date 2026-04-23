@@ -118,8 +118,39 @@ dev: cli ## Start local development sandbox
 	cd cli && npm link
 	azureclaw dev
 
+dev-compose-up: cli ## Start the local fake-router dev stack (plan T4)
+	docker compose -f docker-compose.dev.yml up -d
+	@echo
+	@echo "Fake router live at http://127.0.0.1:8443"
+	@echo "  Point AZURECLAW_ROUTER_URL=http://127.0.0.1:8443 at any AzureClaw client."
+	@echo "  Tear down with: make dev-compose-down"
+
+dev-compose-down: ## Stop the local fake-router dev stack
+	docker compose -f docker-compose.dev.yml down
+
+scenario: ## Run YAML scenarios (default: all in cli/src/testing/scenarios/). Usage: make scenario [SCENARIO=path]
+	@cd cli && if [ -n "$(SCENARIO)" ]; then \
+		npx tsx src/testing/scenario-runner-cli.ts "$(SCENARIO)"; \
+	else \
+		npx tsx src/testing/scenario-runner-cli.ts src/testing/scenarios; \
+	fi
+
 install-cli: cli ## Install CLI globally via npm link
 	cd cli && npm link
+
+# ─── Fuzz (s4) ────────────────────────────────────────────────────────────────
+
+fuzz: ## Run all inference-router fuzz targets for 60s each (requires nightly + cargo-fuzz)
+	@cd inference-router && for t in fuzz_deserialize_state fuzz_sanitize_chat fuzz_parse_streaming_pf; do \
+		echo "▶ fuzzing $$t"; \
+		cargo +nightly fuzz run $$t -- -max_total_time=60 || exit 1; \
+	done
+
+fuzz-quick: ## Smoke-run each fuzz target for 10s (CI-fast)
+	@cd inference-router && for t in fuzz_deserialize_state fuzz_sanitize_chat fuzz_parse_streaming_pf; do \
+		echo "▶ smoke fuzz $$t"; \
+		cargo +nightly fuzz run $$t -- -max_total_time=10 -runs=100000 || exit 1; \
+	done
 
 # ─── Clean ────────────────────────────────────────────────────────────────────
 
