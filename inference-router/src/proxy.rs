@@ -140,18 +140,35 @@ pub async fn forward(
 
     tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
 
-    let response = client
-        .request(method, &upstream_url)
-        .headers(headers)
-        .body(body)
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-        .context("Foundry upstream request failed")?;
+    let retryable = is_idempotent(&method, path);
+    let response = send_with_retry(
+        client,
+        &method,
+        &upstream_url,
+        &headers,
+        body,
+        retryable,
+        &upstream.sandbox_name,
+    )
+    .await?;
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
+
+    // r6 — surface Azure-side request ids so one log line carries both our
+    // trace_id (from the outer tracing span) and Azure's correlation ids.
+    // `x-ms-request-id` identifies the Azure OpenAI request; `apim-request-id`
+    // identifies the APIM frontend; both are what Azure support asks for.
+    let azure_request_id = response_headers
+        .get("x-ms-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let apim_request_id = response_headers
+        .get("apim-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
     let response_body = response
         .bytes()
         .await
@@ -160,8 +177,148 @@ pub async fn forward(
 
     record_metrics(upstream, status, latency, &response_body);
 
-    tracing::info!(sandbox = %upstream.sandbox_name, status = %status.as_u16(), latency_ms = %latency.as_millis(), resp_len = response_body.len(), "Foundry complete");
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        status = %status.as_u16(),
+        latency_ms = %latency.as_millis(),
+        resp_len = response_body.len(),
+        azure_request_id = %azure_request_id,
+        apim_request_id = %apim_request_id,
+        "Foundry complete"
+    );
     Ok((status, response_headers, response_body))
+}
+
+// ── Retry logic (R3) ─────────────────────────────────────────────────────────
+//
+// Brief Azure OpenAI blips (TCP reset, 502/503/504) previously surfaced as
+// immediate 5xx to the agent. We now retry *idempotent* upstream calls with
+// bounded exponential backoff. Non-idempotent calls (chat completions,
+// responses, streaming) are never retried: they may have billed the caller
+// or committed state on the first attempt.
+
+/// Request methods + paths that are safe to retry. Must match Azure OpenAI
+/// semantics — `POST /embeddings` is stateless-idempotent (no randomness),
+/// `POST /chat/completions` and `POST /responses` are NOT (non-determinism +
+/// billed tokens on every attempt).
+fn is_idempotent(method: &Method, path: &str) -> bool {
+    if method == Method::GET || method == Method::HEAD {
+        return true;
+    }
+    if method == Method::POST && path.trim_end_matches('/').ends_with("/embeddings") {
+        return true;
+    }
+    false
+}
+
+/// Decide whether to retry based on a received HTTP status. Only the three
+/// "upstream degraded" classes — bad gateway, service unavailable, gateway
+/// timeout — are safe to retry; 4xx signals a caller bug.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 502..=504)
+}
+
+/// Decide whether to retry based on a reqwest error.
+///
+/// Two classes are treated as retryable:
+///
+///   • `is_connect()` — TCP/TLS handshake never completed, so the
+///     upstream cannot have observed the request at all. Always safe.
+///
+///   • `is_timeout()` — the full request/response deadline elapsed.
+///     Note: this covers **any** phase, including timeouts that occur
+///     after the request body has been fully sent and while we're
+///     waiting for response bytes. This is only called from
+///     `send_with_retry` with `retryable=true`, which the caller only
+///     sets for idempotent requests (see `is_idempotent_method` +
+///     `/embeddings` allowlist). For those — GET, HEAD, and the
+///     deterministic POST `/embeddings` endpoint — re-sending is safe
+///     regardless of when in the request cycle the timeout fired.
+///
+/// For any non-idempotent request (`chat/completions`, `completions`,
+/// `responses`, PUT, DELETE, PATCH) the retry loop is disabled at the
+/// caller, so this classifier is never consulted and a timeout mid-body
+/// or mid-response produces a single failure, not a double-send.
+fn is_retryable_error(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout()
+}
+
+/// Send with up to `MAX_ATTEMPTS` tries + exponential backoff. Caller passes
+/// `retryable=false` for non-idempotent requests to force a single attempt.
+async fn send_with_retry(
+    client: &Client,
+    method: &Method,
+    url: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    retryable: bool,
+    sandbox_name: &str,
+) -> Result<reqwest::Response> {
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF_MS: [u64; 2] = [250, 750]; // after attempts 1 and 2
+
+    let attempts = if retryable { MAX_ATTEMPTS } else { 1 };
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=attempts {
+        // RequestBuilder is not Clone, so rebuild per attempt. Body is a
+        // Bytes (cheap ref-counted clone) — no real cost.
+        let response = client
+            .request(method.clone(), url)
+            .headers(headers.clone())
+            .body(body.clone())
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                let status = resp.status();
+                if retryable && is_retryable_status(status) && attempt < attempts {
+                    tracing::warn!(
+                        sandbox = %sandbox_name,
+                        status = %status.as_u16(),
+                        attempt,
+                        "Upstream returned retryable status; backing off"
+                    );
+                    metrics::UPSTREAM_RETRIES
+                        .with_label_values(&[sandbox_name, "status"])
+                        .inc();
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        BACKOFF_MS[(attempt - 1) as usize],
+                    ))
+                    .await;
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(err) => {
+                if retryable && is_retryable_error(&err) && attempt < attempts {
+                    tracing::warn!(
+                        sandbox = %sandbox_name,
+                        error = %err,
+                        attempt,
+                        "Upstream transport error; backing off"
+                    );
+                    metrics::UPSTREAM_RETRIES
+                        .with_label_values(&[sandbox_name, "transport"])
+                        .inc();
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        BACKOFF_MS[(attempt - 1) as usize],
+                    ))
+                    .await;
+                    last_err = Some(anyhow::Error::from(err));
+                    continue;
+                }
+                return Err(anyhow::Error::from(err).context("Foundry upstream request failed"));
+            }
+        }
+    }
+
+    // Exhausted all retries with transport errors. Propagate the last one.
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("Upstream request failed after {MAX_ATTEMPTS} attempts"))
+        .context("Foundry upstream request failed after retries"))
 }
 
 /// Forward a streaming (SSE) inference request. Returns a byte stream
@@ -209,6 +366,24 @@ pub async fn forward_stream(
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
+
+    // r6 — log Azure correlation ids for the stream path too. Emitted at
+    // stream-start because headers arrive before any bytes.
+    let azure_request_id = response_headers
+        .get("x-ms-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let apim_request_id = response_headers
+        .get("apim-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        status = %status.as_u16(),
+        azure_request_id = %azure_request_id,
+        apim_request_id = %apim_request_id,
+        "Foundry stream headers received"
+    );
 
     // Record request count immediately
     let status_label = if status.is_success() { "ok" } else { "error" };
@@ -313,4 +488,75 @@ fn build_upstream_url(
         request_body
     };
     Ok((url, body))
+}
+
+// ── Retry-logic unit tests (R3) ──────────────────────────────────────────────
+//
+// Full retry behaviour is exercised end-to-end in
+// `tests/proxy_fake_upstream.rs`. These inline tests pin the idempotency +
+// status classifier so adding a new endpoint can't silently make a
+// non-idempotent request retryable.
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{is_idempotent, is_retryable_status};
+    use axum::http::Method;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn get_and_head_are_idempotent() {
+        assert!(is_idempotent(&Method::GET, "/anything"));
+        assert!(is_idempotent(&Method::HEAD, "/anything"));
+    }
+
+    #[test]
+    fn post_embeddings_is_idempotent() {
+        assert!(is_idempotent(&Method::POST, "/openai/v1/embeddings"));
+        assert!(is_idempotent(&Method::POST, "/openai/v1/embeddings/"));
+    }
+
+    #[test]
+    fn post_chat_completions_is_not_idempotent() {
+        assert!(!is_idempotent(&Method::POST, "/openai/v1/chat/completions"));
+        assert!(!is_idempotent(&Method::POST, "/openai/v1/responses"));
+        assert!(!is_idempotent(&Method::POST, "/openai/v1/completions"));
+    }
+
+    #[test]
+    fn put_delete_patch_are_not_idempotent() {
+        // Azure AI Foundry memory-store / eval APIs use PUT + DELETE. These
+        // mutate server state — retries can double-apply.
+        assert!(!is_idempotent(&Method::PUT, "/memory-stores/x"));
+        assert!(!is_idempotent(&Method::DELETE, "/memory-stores/x"));
+        assert!(!is_idempotent(&Method::PATCH, "/memory-stores/x"));
+    }
+
+    #[test]
+    fn retryable_statuses_are_5xx_upstream_only() {
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+    }
+
+    #[test]
+    fn client_errors_are_not_retryable() {
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_retryable_status(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+
+    #[test]
+    fn server_500_and_501_are_not_retryable() {
+        // 500 = upstream logic bug, 501 = method not supported. Retrying
+        // won't help and may waste billed tokens.
+        assert!(!is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!is_retryable_status(StatusCode::NOT_IMPLEMENTED));
+    }
+
+    #[test]
+    fn success_is_not_retryable() {
+        assert!(!is_retryable_status(StatusCode::OK));
+        assert!(!is_retryable_status(StatusCode::CREATED));
+    }
 }

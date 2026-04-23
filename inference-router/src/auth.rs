@@ -105,7 +105,12 @@ impl WorkloadIdentityAuth {
         let tenant_id = std::env::var("AZURE_TENANT_ID").context("AZURE_TENANT_ID not set")?;
         let client_id = std::env::var("AZURE_CLIENT_ID").context("AZURE_CLIENT_ID not set")?;
 
-        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+        // AZURE_AD_ENDPOINT override exists solely for integration tests (fake AD server
+        // pointed at loopback). In production the env is unset and the real AAD host is used.
+        // The env is set by the pod spec — an attacker who can set pod env has already escaped.
+        let ad_endpoint = std::env::var("AZURE_AD_ENDPOINT")
+            .unwrap_or_else(|_| "https://login.microsoftonline.com".to_string());
+        let token_url = format!("{ad_endpoint}/{tenant_id}/oauth2/v2.0/token");
 
         let scope = format!("{resource}/.default");
         let resp = self
@@ -161,8 +166,12 @@ impl WorkloadIdentityAuth {
         let client_id = std::env::var("IMDS_CLIENT_ID")
             .or_else(|_| std::env::var("AZURE_CLIENT_ID"))
             .unwrap_or_default();
+        // AZURE_IMDS_ENDPOINT override exists solely for integration tests (fake IMDS server
+        // on loopback). See note on AZURE_AD_ENDPOINT above — pod-env threat model applies.
+        let imds_endpoint = std::env::var("AZURE_IMDS_ENDPOINT")
+            .unwrap_or_else(|_| "http://169.254.169.254".to_string());
         let mut url = format!(
-            "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={resource}"
+            "{imds_endpoint}/metadata/identity/oauth2/token?api-version=2018-02-01&resource={resource}"
         );
         if !client_id.is_empty() {
             url.push_str(&format!("&client_id={client_id}"));

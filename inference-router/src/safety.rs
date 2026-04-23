@@ -487,4 +487,50 @@ data: [DONE]"#;
         assert_eq!(flags.trust_penalty(), 0);
         assert!(!flags.any_detected());
     }
+
+    // ── Property-based tests (s5-proptest) ────────────────────────────────────
+    //
+    // Content-safety parsers run on every Azure OpenAI response — including
+    // adversarial / corrupted / partial responses. They must never panic.
+    use proptest::prelude::*;
+
+    fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|n| serde_json::json!(n)),
+            ".*".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(4, 32, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(serde_json::Value::Array),
+                proptest::collection::hash_map(".*", inner, 0..8)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        /// parse_prompt_filter_results MUST NOT panic on arbitrary JSON.
+        /// Attacker may send `prompt_filter_results: 42` or a deeply nested
+        /// object — parser must degrade to default flags, never crash.
+        #[test]
+        fn prop_parse_prompt_filter_never_panics(v in arb_json()) {
+            let _ = parse_prompt_filter_results(&v);
+        }
+
+        /// parse_error_content_filter MUST NOT panic on arbitrary JSON.
+        #[test]
+        fn prop_parse_error_content_filter_never_panics(v in arb_json()) {
+            let _ = parse_error_content_filter(&v);
+        }
+
+        /// parse_streaming_prompt_filter MUST NOT panic on arbitrary UTF-8
+        /// strings. SSE stream parsing is stringly-typed and bytes could be
+        /// anything (Azure retries, partial chunks, stray CRLFs, etc.).
+        #[test]
+        fn prop_parse_streaming_never_panics(s in ".*") {
+            let _ = parse_streaming_prompt_filter(&s);
+        }
+    }
 }

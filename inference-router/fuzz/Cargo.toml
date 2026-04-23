@@ -1,0 +1,52 @@
+[package]
+name = "azureclaw-inference-router-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standalone — NOT a member of the parent workspace. Root Cargo.toml also
+# lists `inference-router/fuzz` in `exclude`, but cargo's workspace auto-
+# detection still walks up; the empty `[workspace]` below pins this as
+# its own root. cargo-fuzz requires nightly + libfuzzer-sys which we don't
+# want on the regular build.
+#
+# Run with:
+#   cargo install cargo-fuzz   # once
+#   rustup toolchain install nightly
+#   cd inference-router
+#   cargo +nightly fuzz run fuzz_deserialize_state     -- -max_total_time=60
+#   cargo +nightly fuzz run fuzz_sanitize_chat         -- -max_total_time=60
+#   cargo +nightly fuzz run fuzz_parse_streaming_pf    -- -max_total_time=60
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+azureclaw-inference-router = { path = ".." }
+
+[[bin]]
+name = "fuzz_deserialize_state"
+path = "fuzz_targets/fuzz_deserialize_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sanitize_chat"
+path = "fuzz_targets/fuzz_sanitize_chat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_streaming_pf"
+path = "fuzz_targets/fuzz_parse_streaming_pf.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

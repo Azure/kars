@@ -1,0 +1,41 @@
+{
+  "id": "chatcmpl-REDACTED000000000000000000",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Sanitized fixture response. This replaces real Azure OpenAI output."
+      },
+      "finish_reason": "stop",
+      "logprobs": null,
+      "content_filter_results": {
+        "hate": { "filtered": false, "severity": "safe" },
+        "self_harm": { "filtered": false, "severity": "safe" },
+        "sexual": { "filtered": false, "severity": "safe" },
+        "violence": { "filtered": false, "severity": "safe" }
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 13,
+    "total_tokens": 55
+  },
+  "prompt_filter_results": [
+    {
+      "prompt_index": 0,
+      "content_filter_results": {
+        "hate": { "filtered": false, "severity": "safe" },
+        "self_harm": { "filtered": false, "severity": "safe" },
+        "sexual": { "filtered": false, "severity": "safe" },
+        "violence": { "filtered": false, "severity": "safe" },
+        "jailbreak": { "filtered": false, "detected": false }
+      }
+    }
+  ],
+  "system_fingerprint": "fp_REDACTED"
+}

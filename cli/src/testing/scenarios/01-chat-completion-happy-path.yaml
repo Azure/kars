@@ -1,0 +1,62 @@
+# Scenario 01 — chat-completion happy path
+#
+# Fires a canonical Foundry chat completion against the FakeRouter using the
+# sanitized fixture recorded in inference-router/tests/fixtures/foundry/. A
+# PR that accidentally changes the chat fixture's model name will break this
+# scenario instantly — no AKS round-trip, no LLM cycle, no pod restart.
+
+name: "chat-completion happy path"
+description: >
+  Smoke test: POST /v1/chat/completions returns a finish_reason=stop response
+  with token usage and no content-safety flags.
+
+router:
+  fixtures_dir: ../../../../inference-router/tests/fixtures/foundry
+  routes:
+    - method: GET
+      path: /v1/models
+      body:
+        fixtureFile: models_list.json
+
+    - method: POST
+      path: /v1/chat/completions
+      body:
+        fixtureFile: chat_completion_ok.json
+
+steps:
+  - name: "list deployed models"
+    request:
+      method: GET
+      path: /v1/models
+    expect:
+      status: 200
+      body_contains:
+        - "gpt-4o"
+        - "text-embedding-3-small"
+      log:
+        total_requests: 1
+        last_method: GET
+        last_path: /v1/models
+
+  - name: "chat completion returns finish_reason=stop"
+    request:
+      method: POST
+      path: /v1/chat/completions
+      headers:
+        authorization: "Bearer test-token"
+      body:
+        model: gpt-4.1
+        messages:
+          - role: system
+            content: "You are a helpful assistant."
+          - role: user
+            content: "Say hi."
+    expect:
+      status: 200
+      body_contains:
+        - '"finish_reason":"stop"'
+        - '"role":"assistant"'
+      log:
+        total_requests: 2
+        last_method: POST
+        last_path: /v1/chat/completions

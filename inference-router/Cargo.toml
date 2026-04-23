@@ -59,3 +59,8 @@ sha2 = "0.10"
 rand = "0.9"
 base64 = "0.22"
 flate2 = "1"
+
+[dev-dependencies]
+# Property-based testing (s5) — inline #[cfg(test)] proptest! blocks exercise
+# parsers/sanitizers with generated inputs. Shrinks counterexamples automatically.
+proptest = "1"

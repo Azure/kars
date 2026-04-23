@@ -28,10 +28,19 @@ fn claw_sandbox_api_resource() -> ApiResource {
 }
 
 /// Request body for `POST /sandbox/spawn`.
+///
+/// The canonical identifier for a sub-agent on the wire is `agent_id` (a
+/// DNS-safe k8s metadata.name, 1–63 chars, `[a-z0-9-]`). The serde alias
+/// `name` remains accepted on deserialise for backward compatibility with
+/// any in-flight plugin or client that hasn't been updated yet; the alias
+/// will be retired once all callers have migrated.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnRequest {
-    /// Name for the sub-agent sandbox (must be DNS-safe).
-    pub name: String,
+    /// Name for the sub-agent sandbox (must be DNS-safe). Canonical wire
+    /// name is `agent_id`; `name` is accepted as a deserialise-only alias.
+    #[serde(alias = "name")]
+    pub agent_id: String,
     /// Model deployment to use (default: gpt-4.1).
     pub model: Option<String>,
     /// Enable AGT governance (default: true).
@@ -58,6 +67,7 @@ pub struct SpawnRequest {
 
 /// Handoff metadata attached to a spawn request.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandoffMeta {
     /// "restore" = target will receive state from predecessor via mesh.
     pub mode: String,
@@ -69,7 +79,7 @@ pub struct HandoffMeta {
 #[derive(Debug, Serialize)]
 pub struct SpawnResponse {
     pub status: String,
-    pub name: String,
+    pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +91,7 @@ pub struct SpawnResponse {
 /// Sub-agent entry for list response.
 #[derive(Debug, Serialize)]
 pub struct SubAgentEntry {
-    pub name: String,
+    pub agent_id: String,
     pub namespace: Option<String>,
     pub phase: Option<String>,
     pub model: Option<String>,
@@ -94,17 +104,17 @@ pub async fn create_sandbox(
     req: &SpawnRequest,
 ) -> Result<SpawnResponse, String> {
     // Validate name: must be DNS-safe
-    if req.name.is_empty() || req.name.len() > 63 {
+    if req.agent_id.is_empty() || req.agent_id.len() > 63 {
         return Err("name must be 1-63 characters".into());
     }
     if !req
-        .name
+        .agent_id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err("name must contain only lowercase alphanumeric characters and hyphens".into());
     }
-    if req.name.starts_with('-') || req.name.ends_with('-') {
+    if req.agent_id.starts_with('-') || req.agent_id.ends_with('-') {
         return Err("name must not start or end with a hyphen".into());
     }
 
@@ -118,7 +128,7 @@ pub async fn create_sandbox(
     if is_dev && is_handoff {
         tracing::info!(
             parent = %parent_name,
-            child = %req.name,
+            child = %req.agent_id,
             "Handoff spawn — bypassing Docker dev mode, creating K8s CRD on AKS"
         );
     }
@@ -242,7 +252,7 @@ pub async fn create_sandbox(
         "apiVersion": "azureclaw.azure.com/v1alpha1",
         "kind": "ClawSandbox",
         "metadata": {
-            "name": req.name,
+            "name": req.agent_id,
             "namespace": namespace,
             "labels": labels,
         },
@@ -254,12 +264,12 @@ pub async fn create_sandbox(
 
     match api.create(&PostParams::default(), &obj).await {
         Ok(_created) => {
-            tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent sandbox created");
+            tracing::info!(parent = %parent_name, child = %req.agent_id, "Sub-agent sandbox created");
 
             // For handoff targets, propagate channel/plugin credentials to the
             // target namespace so the cloud agent gets Telegram, Slack, etc.
             if req.handoff.is_some() {
-                let child_name = req.name.clone();
+                let child_name = req.agent_id.clone();
                 let client_clone = Client::try_default().await.ok();
                 if let Some(kc) = client_clone {
                     tokio::spawn(async move {
@@ -275,31 +285,31 @@ pub async fn create_sandbox(
 
             Ok(SpawnResponse {
                 status: "created".into(),
-                name: req.name.clone(),
-                namespace: Some(format!("azureclaw-{}", req.name)),
+                agent_id: req.agent_id.clone(),
+                namespace: Some(format!("azureclaw-{}", req.agent_id)),
                 phase: Some("Pending".into()),
                 message: Some(format!(
                     "Sub-agent '{}' spawned (model: {}, governance: {}). Use AGT mesh to communicate.",
-                    req.name, model, req.governance
+                    req.agent_id, model, req.governance
                 )),
             })
         }
         Err(kube::Error::Api(resp)) if resp.code == 409 => {
             // Already exists — reuse rather than error
-            tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent sandbox already exists — reusing");
+            tracing::info!(parent = %parent_name, child = %req.agent_id, "Sub-agent sandbox already exists — reusing");
             Ok(SpawnResponse {
                 status: "created".into(),
-                name: req.name.clone(),
-                namespace: Some(format!("azureclaw-{}", req.name)),
+                agent_id: req.agent_id.clone(),
+                namespace: Some(format!("azureclaw-{}", req.agent_id)),
                 phase: Some("Running".into()),
                 message: Some(format!(
                     "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
-                    req.name, model, req.governance
+                    req.agent_id, model, req.governance
                 )),
             })
         }
         Err(e) => {
-            tracing::error!(parent = %parent_name, child = %req.name, "Failed to create sandbox: {e}");
+            tracing::error!(parent = %parent_name, child = %req.agent_id, "Failed to create sandbox: {e}");
             Err(format!("Failed to create sandbox: {e}"))
         }
     }
@@ -448,7 +458,7 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
                 .unwrap_or(false);
 
             SubAgentEntry {
-                name,
+                agent_id: name,
                 namespace: ns,
                 phase,
                 model,
@@ -496,7 +506,7 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
 
     Ok(SpawnResponse {
         status: "ok".into(),
-        name: name.to_string(),
+        agent_id: name.to_string(),
         namespace: ns,
         phase,
         message: None,
@@ -538,7 +548,7 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
     tracing::info!(parent = %parent_name, child = %name, "Sub-agent sandbox deleted");
     Ok(SpawnResponse {
         status: "deleted".into(),
-        name: name.to_string(),
+        agent_id: name.to_string(),
         namespace: None,
         phase: Some("Terminating".into()),
         message: Some(format!("Sub-agent '{}' is being torn down", name)),
@@ -643,7 +653,7 @@ pub async fn collect_sub_agent_snapshots(
             .map(String::from);
 
         let spawn_config = SpawnRequest {
-            name: name.clone(),
+            agent_id: name.clone(),
             model,
             governance,
             trust_threshold,
@@ -656,7 +666,7 @@ pub async fn collect_sub_agent_snapshots(
         };
 
         snapshots.push(crate::handoff::SubAgentSnapshot {
-            name: name.clone(),
+            agent_id: name.clone(),
             original_amid: String::new(), // Set by caller if registry available
             spawn_config,
             task_context: format!("Sub-agent '{name}' (phase: {phase})"),
@@ -736,7 +746,7 @@ async fn collect_sub_agent_snapshots_docker(
             .map(String::from);
 
         let spawn_config = SpawnRequest {
-            name: name.clone(),
+            agent_id: name.clone(),
             model,
             governance: true,
             trust_threshold: None,
@@ -749,7 +759,7 @@ async fn collect_sub_agent_snapshots_docker(
         };
 
         snapshots.push(crate::handoff::SubAgentSnapshot {
-            name: name.clone(),
+            agent_id: name.clone(),
             original_amid: String::new(),
             spawn_config,
             task_context: format!("Sub-agent '{name}' (Docker)"),
@@ -788,7 +798,7 @@ fn docker_create_body(
         format!("OPENCLAW_MODEL={}", model),
         format!("AZURE_OPENAI_ENDPOINT={}", endpoint),
         format!("AZURE_OPENAI_API_KEY={}", api_key),
-        format!("SANDBOX_NAME={}", req.name),
+        format!("SANDBOX_NAME={}", req.agent_id),
         "AZURECLAW_DEV_MODE=true".to_string(),
         format!("DOCKER_NETWORK={}", network),
         "EGRESS_LEARN_MODE=true".to_string(),
@@ -821,7 +831,7 @@ fn docker_create_body(
 
     serde_json::json!({
         "Image": image,
-        "Hostname": req.name,
+        "Hostname": req.agent_id,
         "Env": env,
         "Labels": labels,
         "HostConfig": {
@@ -899,7 +909,7 @@ async fn create_sandbox_docker(
     parent_name: &str,
     req: &SpawnRequest,
 ) -> Result<SpawnResponse, String> {
-    let container_name = format!("azureclaw-{}", req.name);
+    let container_name = format!("azureclaw-{}", req.agent_id);
     let model = req.model.as_deref().unwrap_or("gpt-4.1");
 
     // Check if container already exists and is running — reuse it
@@ -913,15 +923,15 @@ async fn create_sandbox_docker(
                 .and_then(|r| r.as_bool())
                 .unwrap_or(false);
             if is_running {
-                tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent container already running — reusing");
+                tracing::info!(parent = %parent_name, child = %req.agent_id, "Sub-agent container already running — reusing");
                 return Ok(SpawnResponse {
                     status: "created".into(),
-                    name: req.name.clone(),
+                    agent_id: req.agent_id.clone(),
                     namespace: Some(container_name),
                     phase: Some("Running".into()),
                     message: Some(format!(
                         "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
-                        req.name, model, req.governance
+                        req.agent_id, model, req.governance
                     )),
                 });
             }
@@ -978,15 +988,15 @@ async fn create_sandbox_docker(
     .await
     .map_err(|e| format!("Docker start failed: {e}"))?;
 
-    tracing::info!(parent = %parent_name, child = %req.name, "Sub-agent container spawned (dev mode)");
+    tracing::info!(parent = %parent_name, child = %req.agent_id, "Sub-agent container spawned (dev mode)");
     Ok(SpawnResponse {
         status: "created".into(),
-        name: req.name.clone(),
+        agent_id: req.agent_id.clone(),
         namespace: Some(container_name),
         phase: Some("Running".into()),
         message: Some(format!(
             "Sub-agent '{}' spawned as Docker container (model: {}, governance: {}). Use AGT mesh to communicate.",
-            req.name, model, req.governance
+            req.agent_id, model, req.governance
         )),
     })
 }
@@ -1021,7 +1031,7 @@ async fn get_sandbox_status_docker(name: &str) -> Result<SpawnResponse, String> 
 
     Ok(SpawnResponse {
         status: "ok".into(),
-        name: name.to_string(),
+        agent_id: name.to_string(),
         namespace: Some(container_name),
         phase: Some(phase.to_string()),
         message: None,
@@ -1066,7 +1076,7 @@ pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntr
             };
 
             Some(SubAgentEntry {
-                name,
+                agent_id: name,
                 namespace: Some(raw_name.to_string()),
                 phase: Some(phase.to_string()),
                 model: None,
@@ -1113,9 +1123,77 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
     tracing::info!(parent = %parent_name, child = %name, "Sub-agent container deleted (dev mode)");
     Ok(SpawnResponse {
         status: "deleted".into(),
-        name: name.to_string(),
+        agent_id: name.to_string(),
         namespace: None,
         phase: Some("Terminated".into()),
         message: Some(format!("Sub-agent '{}' container removed", name)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_request_rejects_unknown_fields() {
+        // deny_unknown_fields — a typo in the client payload must fail loudly
+        // instead of silently ignoring the intended value.
+        let payload = r#"{
+            "agent_id": "child",
+            "modl": "gpt-4o"
+        }"#;
+        let err = serde_json::from_str::<SpawnRequest>(payload).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn spawn_request_accepts_canonical_agent_id() {
+        let payload = r#"{
+            "agent_id": "child",
+            "model": "gpt-4o",
+            "governance": true,
+            "trust_threshold": 500
+        }"#;
+        let req: SpawnRequest = serde_json::from_str(payload).unwrap();
+        assert_eq!(req.agent_id, "child");
+        assert_eq!(req.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(req.trust_threshold, Some(500));
+    }
+
+    #[test]
+    fn spawn_request_accepts_legacy_name_alias() {
+        // Backward compatibility: plugins still in-flight may send `name`.
+        // serde(alias = "name") lets them keep working during migration.
+        let payload = r#"{
+            "name": "child",
+            "model": "gpt-4o"
+        }"#;
+        let req: SpawnRequest = serde_json::from_str(payload).unwrap();
+        assert_eq!(req.agent_id, "child");
+    }
+
+    #[test]
+    fn spawn_request_rejects_both_name_and_agent_id() {
+        // If both fields are present, serde treats it as a duplicate and errors.
+        // This guards against a client sending inconsistent values.
+        let payload = r#"{
+            "agent_id": "one",
+            "name": "two"
+        }"#;
+        let err = serde_json::from_str::<SpawnRequest>(payload).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "expected duplicate-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn handoff_meta_rejects_unknown_fields() {
+        let payload = r#"{"mode":"restore","predecessor":"p","extra":"smuggled"}"#;
+        let err = serde_json::from_str::<HandoffMeta>(payload).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
 }

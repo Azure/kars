@@ -198,7 +198,7 @@ sequenceDiagram
     rect rgb(255, 245, 238)
         Note over Plugin,K8s: Step 1: Create Sub-Agent
         Plugin->>Plugin: Build trusted_peers list<br/>(parent AMID + siblings)
-        Plugin->>Router: POST /sandbox/spawn<br/>{name, model, governance, trusted_peers}
+        Plugin->>Router: POST /sandbox/spawn<br/>{agent_id, model, governance, trusted_peers}
         Router->>K8s: Create ClawSandbox CRD<br/>(inherits parent isolation level)
         K8s->>Ctrl: Watch event
         Ctrl->>Child: Reconcile → create namespace,<br/>deployment, networkpolicy...

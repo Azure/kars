@@ -185,6 +185,50 @@ describe("federation protocol roundtrip", () => {
       expect(decoded.error).toContain("No available slots");
       expect(decoded.phase).toBe("validating");
     });
+
+    // Boundary guard: cloud-offload uses its own wire protocol
+    // (`OffloadRequestMessage` → controller → ClawSandbox CRD, built directly
+    // in `controller/src/mesh_peer.rs::handle_offload_request`). It does
+    // *not* go through the router's `POST /sandbox/spawn` endpoint or
+    // `SpawnRequest` struct, which is why the q4 rename of
+    // `SpawnRequest.name` → `SpawnRequest.agent_id` is invisible to this
+    // flow. If someone ever rewires cloud-offload to call `/sandbox/spawn`,
+    // these assertions will fail and force them to think about backward
+    // compatibility with both wire formats.
+    it("offload wire format does NOT overlap with /sandbox/spawn fields", () => {
+      const request: OffloadRequestMessage = {
+        type: "offload_request",
+        task: "boundary test",
+        files: [],
+        file_count: 0,
+        total_bytes: 0,
+        request_id: "guard-1",
+        timestamp: new Date().toISOString(),
+      };
+      // OffloadRequestMessage must not carry a sub-agent identity field.
+      // The controller is the CRD creator; it names the sandbox itself.
+      expect((request as Record<string, unknown>).agent_id).toBeUndefined();
+      expect((request as Record<string, unknown>).name).toBeUndefined();
+      expect((request as Record<string, unknown>).sandbox_name).toBeUndefined();
+
+      // OffloadStatusMessage uses `sandbox_name` (NOT `agent_id`) when the
+      // controller echoes the CRD name back. This is a deliberate separate
+      // channel from the router's spawn/handoff wire format.
+      const status: OffloadStatusMessage = {
+        type: "offload_status",
+        request_id: "guard-1",
+        phase: "ready",
+        message: "Sandbox ready",
+        sandbox_name: "offload-guard-1-abc",
+      };
+      expect((status as Record<string, unknown>).agent_id).toBeUndefined();
+      expect(status.sandbox_name).toBe("offload-guard-1-abc");
+
+      // Roundtrip sanity — the controller, not the caller, assigns the name.
+      const enc = relayEncode(status);
+      const dec = relayDecode(enc) as OffloadStatusMessage;
+      expect(dec.sandbox_name).toBe("offload-guard-1-abc");
+    });
   });
 
   describe("AMID consistency", () => {

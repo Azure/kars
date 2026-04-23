@@ -132,6 +132,22 @@ describe("plugin.register() — tool definitions", () => {
     expect(tool.parameters.required).toContain("name");
   });
 
+  it("azureclaw_spawn_status description references mesh_ready (not just phase)", () => {
+    // After the AKS mesh-registration fix, callers must poll mesh_ready, not phase alone.
+    // Running pods need ~60s after Ready before they appear in the AGT registry.
+    const tool = tools.get("azureclaw_spawn_status")!;
+    expect(tool.description).toContain("mesh_ready");
+    expect(tool.description).toContain("mesh_registered");
+  });
+
+  it("azureclaw_mesh_send description documents unbounded retry while pod alive", () => {
+    // Regression: the old code used hand-rolled 12-attempt / 15-attempt windows
+    // that were too short on AKS. The new behavior retries until the pod dies.
+    const tool = tools.get("azureclaw_mesh_send")!;
+    expect(tool.description).toMatch(/retr(y|ies).+alive/i);
+    expect(tool.description).toMatch(/Failed|Terminating|Exited/);
+  });
+
   it("registers azureclaw_mesh_send with required to_agent and content", () => {
     expect(tools.has("azureclaw_mesh_send")).toBe(true);
     const tool = tools.get("azureclaw_mesh_send")!;

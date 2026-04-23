@@ -123,7 +123,10 @@ pub struct TokenUsage {
 /// Sub-agent state for re-spawn on the target host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentSnapshot {
-    pub name: String,
+    /// DNS-safe sub-agent identifier. Accepts `name` as a deserialise-only
+    /// alias for backward compatibility with in-flight handoff envelopes.
+    #[serde(alias = "name")]
+    pub agent_id: String,
     pub original_amid: String,
     pub spawn_config: SpawnRequest,
     pub task_context: String,
@@ -428,6 +431,9 @@ impl PendingHandoffStore {
         if let Some(last) = guard.last_request_at {
             let elapsed = last.elapsed().as_secs();
             if elapsed < HANDOFF_REQUEST_COOLDOWN_SECS {
+                crate::metrics::HANDOFF_PENDING_EVENTS
+                    .with_label_values(&["rate_limited"])
+                    .inc();
                 return Err(PendingHandoffError::RateLimited {
                     retry_after_secs: HANDOFF_REQUEST_COOLDOWN_SECS - elapsed,
                 });
@@ -451,6 +457,9 @@ impl PendingHandoffStore {
         });
         guard.last_request_at = Some(Instant::now());
 
+        crate::metrics::HANDOFF_PENDING_EVENTS
+            .with_label_values(&["created"])
+            .inc();
         Ok(token)
     }
 
@@ -468,14 +477,22 @@ impl PendingHandoffStore {
     ) -> Result<(HandoffDirection, String), PendingHandoffError> {
         let mut guard = self.inner.write().await;
 
-        let pending = guard
-            .pending
-            .as_ref()
-            .ok_or(PendingHandoffError::NoPending)?;
+        let pending = match guard.pending.as_ref() {
+            Some(p) => p,
+            None => {
+                crate::metrics::HANDOFF_PENDING_EVENTS
+                    .with_label_values(&["no_pending"])
+                    .inc();
+                return Err(PendingHandoffError::NoPending);
+            }
+        };
 
         // Check expiry
         if pending.created_at.elapsed() > pending.ttl {
             guard.pending = None;
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["expired"])
+                .inc();
             return Err(PendingHandoffError::Expired);
         }
 
@@ -483,6 +500,9 @@ impl PendingHandoffStore {
         let elapsed_ms = pending.created_at.elapsed().as_millis() as u64;
         let min_delay_ms = CONFIRMATION_MIN_DELAY_SECS * 1000;
         if elapsed_ms < min_delay_ms {
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["too_fast"])
+                .inc();
             return Err(PendingHandoffError::TooFast {
                 elapsed_ms,
                 min_delay_ms,
@@ -491,6 +511,9 @@ impl PendingHandoffStore {
 
         // Token validation (constant-time)
         if !constant_time_eq(token.as_bytes(), pending.confirmation_token.as_bytes()) {
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["invalid_token"])
+                .inc();
             return Err(PendingHandoffError::InvalidToken);
         }
 
@@ -499,6 +522,9 @@ impl PendingHandoffStore {
         let reason = pending.reason.clone();
         guard.pending = None;
 
+        crate::metrics::HANDOFF_PENDING_EVENTS
+            .with_label_values(&["confirmed"])
+            .inc();
         Ok((direction, reason))
     }
 
@@ -526,7 +552,17 @@ impl PendingHandoffStore {
 
     /// Cancel any pending request.
     pub async fn cancel(&self) {
-        self.inner.write().await.pending = None;
+        let had_pending = {
+            let mut guard = self.inner.write().await;
+            let had = guard.pending.is_some();
+            guard.pending = None;
+            had
+        };
+        if had_pending {
+            crate::metrics::HANDOFF_PENDING_EVENTS
+                .with_label_values(&["cancelled"])
+                .inc();
+        }
     }
 }
 
@@ -587,6 +623,11 @@ impl std::fmt::Display for HandoffPhase {
     }
 }
 
+/// Metric-safe label string for a phase (lowercase, bounded cardinality).
+fn phase_label(p: HandoffPhase) -> String {
+    p.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotItemCounts {
     pub chat_messages: u32,
@@ -638,6 +679,7 @@ impl HandoffSession {
     /// Returns Err if the transition is not allowed from the current phase.
     pub async fn try_transition(&self, target: HandoffPhase) -> Result<(), String> {
         let mut inner = self.inner.write().await;
+        let from = inner.phase;
         let allowed = match target {
             HandoffPhase::Initialized => matches!(
                 inner.phase,
@@ -668,6 +710,12 @@ impl HandoffSession {
             HandoffPhase::Failed => true, // can fail from any phase
             HandoffPhase::Idle => true,   // reset always allowed
         };
+        let result_label = if allowed { "ok" } else { "rejected" };
+        let from_label = phase_label(from);
+        let to_label = phase_label(target);
+        crate::metrics::HANDOFF_PHASE_TRANSITIONS
+            .with_label_values(&[from_label.as_str(), to_label.as_str(), result_label])
+            .inc();
         if allowed {
             inner.phase = target;
             Ok(())
@@ -1265,7 +1313,11 @@ fn hex_sha256(data: &[u8]) -> String {
 }
 
 /// Constant-time string comparison (prevents timing attacks on token validation).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// Shared with `routes.rs` and `main.rs` admin-token checks — do not inline.
+/// `pub` (not `pub(crate)`) because `main.rs` compiles as the bin crate and
+/// imports `azureclaw_inference_router::handoff` as an external crate.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -1698,10 +1750,10 @@ mod tests {
             chat_snapshot: Some(vec![5, 6, 7, 8]),
             policy_yaml: "- deny: web_search\n- allow: code_execution".to_string(),
             sub_agent_snapshots: vec![SubAgentSnapshot {
-                name: "researcher".to_string(),
+                agent_id: "researcher".to_string(),
                 original_amid: "AMID_SUB1".to_string(),
                 spawn_config: SpawnRequest {
-                    name: "researcher".to_string(),
+                    agent_id: "researcher".to_string(),
                     model: Some("gpt-4.1".to_string()),
                     governance: true,
                     trust_threshold: Some(500),
@@ -2140,10 +2192,10 @@ mod tests {
 
         // 1. Create snapshot like collect_sub_agent_snapshots_docker does
         let snap = SubAgentSnapshot {
-            name: "researcher".to_string(),
+            agent_id: "researcher".to_string(),
             original_amid: String::new(),
             spawn_config: SpawnRequest {
-                name: "researcher".to_string(),
+                agent_id: "researcher".to_string(),
                 model: None,
                 governance: true,
                 trust_threshold: None,
@@ -2181,7 +2233,7 @@ mod tests {
         match &result {
             Ok(snaps) => {
                 assert_eq!(snaps.len(), 1);
-                assert_eq!(snaps[0].name, "researcher");
+                assert_eq!(snaps[0].agent_id, "researcher");
                 assert_eq!(snaps[0].original_amid, "test_amid_12345");
                 assert_eq!(snaps[0].workspace_tar, fake_tar);
                 assert!(!snaps[0].workspace_tar.is_empty());
@@ -2203,10 +2255,10 @@ mod tests {
         // Two sub-agents: one with workspace data, one without (typical after handoff)
         let snaps = [
             SubAgentSnapshot {
-                name: "researcher".to_string(),
+                agent_id: "researcher".to_string(),
                 original_amid: "AMID_OLD_1".to_string(),
                 spawn_config: SpawnRequest {
-                    name: "researcher".to_string(),
+                    agent_id: "researcher".to_string(),
                     model: None,
                     governance: true,
                     trust_threshold: None,
@@ -2223,10 +2275,10 @@ mod tests {
                 workspace_tar: vec![9, 10, 11], // has workspace
             },
             SubAgentSnapshot {
-                name: "data-collector".to_string(),
+                agent_id: "data-collector".to_string(),
                 original_amid: "AMID_OLD_2".to_string(),
                 spawn_config: SpawnRequest {
-                    name: "data-collector".to_string(),
+                    agent_id: "data-collector".to_string(),
                     model: None,
                     governance: true,
                     trust_threshold: None,
@@ -2250,7 +2302,7 @@ mod tests {
             .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
             .map(|s| {
                 serde_json::json!({
-                    "name": s.name,
+                    "agent_id": s.agent_id,
                     "original_amid": s.original_amid,
                     "workspace_tar": if s.workspace_tar.is_empty() {
                         serde_json::Value::Null
@@ -2272,7 +2324,7 @@ mod tests {
         );
 
         // First has workspace_tar as base64 string
-        assert_eq!(sub_agent_workspaces[0]["name"], "researcher");
+        assert_eq!(sub_agent_workspaces[0]["agent_id"], "researcher");
         assert!(sub_agent_workspaces[0]["workspace_tar"].is_string());
         let ws_b64 = sub_agent_workspaces[0]["workspace_tar"].as_str().unwrap();
         let decoded = base64::engine::general_purpose::STANDARD
@@ -2281,7 +2333,7 @@ mod tests {
         assert_eq!(decoded, vec![9, 10, 11]);
 
         // Second has workspace_tar as null (empty)
-        assert_eq!(sub_agent_workspaces[1]["name"], "data-collector");
+        assert_eq!(sub_agent_workspaces[1]["agent_id"], "data-collector");
         assert!(sub_agent_workspaces[1]["workspace_tar"].is_null());
 
         // Both have task_context
@@ -2307,10 +2359,10 @@ mod tests {
         let mut state = make_test_state();
         // Add a second sub-agent with empty workspace (Docker-collected, no mesh workspace)
         state.sub_agent_snapshots.push(SubAgentSnapshot {
-            name: "data-collector".to_string(),
+            agent_id: "data-collector".to_string(),
             original_amid: "AMID_SUB2".to_string(),
             spawn_config: SpawnRequest {
-                name: "data-collector".to_string(),
+                agent_id: "data-collector".to_string(),
                 model: Some("gpt-4.1".to_string()),
                 governance: true,
                 trust_threshold: None,
@@ -2339,7 +2391,7 @@ mod tests {
         assert_eq!(restored.sub_agent_snapshots.len(), 2);
 
         // First has workspace data preserved
-        assert_eq!(restored.sub_agent_snapshots[0].name, "researcher");
+        assert_eq!(restored.sub_agent_snapshots[0].agent_id, "researcher");
         assert_eq!(
             restored.sub_agent_snapshots[0].workspace_tar,
             vec![9, 10, 11]
@@ -2347,7 +2399,7 @@ mod tests {
         assert!(!restored.sub_agent_snapshots[0].workspace_tar.is_empty());
 
         // Second has empty workspace but valid task_context
-        assert_eq!(restored.sub_agent_snapshots[1].name, "data-collector");
+        assert_eq!(restored.sub_agent_snapshots[1].agent_id, "data-collector");
         assert!(restored.sub_agent_snapshots[1].workspace_tar.is_empty());
         assert_eq!(
             restored.sub_agent_snapshots[1].task_context,
@@ -2371,7 +2423,7 @@ mod tests {
         let results: Vec<serde_json::Value> = restored
             .sub_agent_snapshots
             .iter()
-            .map(|s| serde_json::json!({"name": s.name, "status": "spawned"}))
+            .map(|s| serde_json::json!({"agent_id": s.agent_id, "status": "spawned"}))
             .collect();
         assert_eq!(
             results.len(),
@@ -2385,10 +2437,10 @@ mod tests {
     #[test]
     fn test_empty_workspace_and_task_context_filtered_out() {
         let snaps = [SubAgentSnapshot {
-            name: "ghost".to_string(),
+            agent_id: "ghost".to_string(),
             original_amid: String::new(),
             spawn_config: SpawnRequest {
-                name: "ghost".to_string(),
+                agent_id: "ghost".to_string(),
                 model: None,
                 governance: true,
                 trust_threshold: None,
@@ -2414,5 +2466,161 @@ mod tests {
             0,
             "empty workspace + empty task_context should be filtered out"
         );
+    }
+
+    // ── R5: handoff metrics wiring ─────────────────────────────────────────
+
+    fn pending_event_count(action: &str) -> u64 {
+        crate::metrics::HANDOFF_PENDING_EVENTS
+            .with_label_values(&[action])
+            .get()
+    }
+
+    fn phase_transition_count(from: &str, to: &str, result: &str) -> u64 {
+        crate::metrics::HANDOFF_PHASE_TRANSITIONS
+            .with_label_values(&[from, to, result])
+            .get()
+    }
+
+    #[tokio::test]
+    async fn metric_created_increments_on_create_pending() {
+        let pending = PendingHandoffStore::new();
+        let before = pending_event_count("created");
+        let _ = pending
+            .create_pending(HandoffDirection::LocalToAks, "test".into())
+            .await
+            .unwrap();
+        // Other tests may run in parallel and also bump `created`; assert
+        // strictly greater instead of +1 to keep this test order-independent.
+        assert!(pending_event_count("created") > before);
+    }
+
+    #[tokio::test]
+    async fn metric_no_pending_increments_on_confirm_empty() {
+        let pending = PendingHandoffStore::new();
+        let before = pending_event_count("no_pending");
+        let res = pending.confirm("deadbeef").await;
+        assert!(matches!(res, Err(PendingHandoffError::NoPending)));
+        assert!(pending_event_count("no_pending") > before);
+    }
+
+    #[tokio::test]
+    async fn metric_too_fast_increments_on_quick_confirm() {
+        let pending = PendingHandoffStore::new();
+        let token = pending
+            .create_pending(HandoffDirection::LocalToAks, "test".into())
+            .await
+            .unwrap();
+        let before = pending_event_count("too_fast");
+        let res = pending.confirm(&token).await;
+        assert!(matches!(res, Err(PendingHandoffError::TooFast { .. })));
+        assert!(pending_event_count("too_fast") > before);
+    }
+
+    #[tokio::test]
+    async fn metric_phase_transitions_record_ok_and_rejected() {
+        let session = HandoffSession::new();
+        let ok_before = phase_transition_count("idle", "initialized", "ok");
+        session
+            .try_transition(HandoffPhase::Initialized)
+            .await
+            .unwrap();
+        assert!(phase_transition_count("idle", "initialized", "ok") > ok_before);
+
+        // Invalid: Initialized → Complete is not allowed (needs Verifying / Decommissioning).
+        let rejected_before = phase_transition_count("initialized", "complete", "rejected");
+        let res = session.try_transition(HandoffPhase::Complete).await;
+        assert!(res.is_err());
+        assert!(phase_transition_count("initialized", "complete", "rejected") > rejected_before);
+    }
+
+    // ── Property-based tests (s5-proptest) ────────────────────────────────────
+    //
+    // Fuzz-adjacent coverage that runs under regular `cargo test`. Targets the
+    // parsers + sanitizers + crypto helpers that take attacker-controlled bytes
+    // and must not panic.
+    use proptest::prelude::*;
+
+    proptest! {
+        /// constant_time_eq MUST be equivalent to `==` as a boolean predicate.
+        /// (We don't assert on timing here — that's a job for hardware-level
+        /// benchmarks — but we at least pin the functional contract so a naive
+        /// refactor can't subtly break equality.)
+        #[test]
+        fn prop_constant_time_eq_matches_equality(
+            a in proptest::collection::vec(any::<u8>(), 0..256),
+            b in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            prop_assert_eq!(constant_time_eq(&a, &b), a == b);
+        }
+
+        /// Same input → same result (reflexive — shadowed by above but a useful
+        /// sanity check on its own for refactors that might compare by ref).
+        #[test]
+        fn prop_constant_time_eq_reflexive(
+            a in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            prop_assert!(constant_time_eq(&a, &a));
+        }
+
+        /// deserialize_state MUST NOT panic on arbitrary attacker-controlled
+        /// bytes. Malformed gzip, zip bombs, truncated streams, and invalid
+        /// JSON must all return Err, never panic or abort.
+        #[test]
+        fn prop_deserialize_state_never_panics(
+            bytes in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            // Err is fine; Ok is fine; panic is a bug.
+            let _ = deserialize_state(&bytes);
+        }
+
+        /// sanitize_chat_snapshot MUST be a total function over all byte
+        /// inputs (including non-UTF8 and malformed JSON). It returns Vec<u8>
+        /// so there's no Result — any panic is a hard bug because adversarial
+        /// chat snapshots reach this directly from the handoff path.
+        #[test]
+        fn prop_sanitize_chat_snapshot_total(
+            bytes in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            let out = sanitize_chat_snapshot(&bytes);
+            // Output size is bounded — sanitizer can rewrite but never amplifies
+            // beyond a constant factor relative to the JSON re-serialization.
+            // Conservative bound: 2× input + 64 (covers "[]" empty-array case).
+            prop_assert!(out.len() <= bytes.len().saturating_mul(2) + 64);
+        }
+
+        /// Encrypt + decrypt round-trip: any plaintext + any (salt, secret)
+        /// MUST round-trip exactly.
+        #[test]
+        fn prop_encrypt_decrypt_roundtrip(
+            plaintext in proptest::collection::vec(any::<u8>(), 0..1024),
+            secret in proptest::collection::vec(any::<u8>(), 1..128),
+            salt in proptest::collection::vec(any::<u8>(), 1..64),
+        ) {
+            let blob = encrypt_state(&plaintext, &secret, &salt).unwrap();
+            let decrypted = decrypt_state(&blob, &secret).unwrap();
+            prop_assert_eq!(decrypted, plaintext);
+        }
+
+        /// Tampering with the ciphertext MUST produce an error (AES-GCM
+        /// integrity). Flipping one byte either corrupts the base64 (Err) or
+        /// fails the GCM tag (Err) — never silently returns garbage plaintext.
+        #[test]
+        fn prop_decrypt_detects_tamper(
+            plaintext in proptest::collection::vec(any::<u8>(), 1..1024),
+            secret in proptest::collection::vec(any::<u8>(), 1..128),
+            salt in proptest::collection::vec(any::<u8>(), 1..64),
+            flip_idx in any::<u16>(),
+        ) {
+            let mut blob = encrypt_state(&plaintext, &secret, &salt).unwrap();
+            let mut bytes = BASE64.decode(&blob.ciphertext).unwrap();
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            let idx = (flip_idx as usize) % bytes.len();
+            bytes[idx] ^= 0xFF;
+            blob.ciphertext = BASE64.encode(&bytes);
+            prop_assert!(decrypt_state(&blob, &secret).is_err());
+        }
     }
 }

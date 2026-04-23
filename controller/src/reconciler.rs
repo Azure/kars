@@ -1377,6 +1377,45 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
+/// How long to wait before requeuing a failed reconcile, by error kind.
+///
+/// Extracted from [`error_policy`] so it can be unit-tested without
+/// constructing a full controller [`Context`] (which would need a live
+/// kube [`Client`]). The returned duration must always be positive — a
+/// zero requeue would hot-loop the controller against a kubeapi that
+/// is rejecting our writes.
+///
+/// **Behaviour change vs. pre-r4 main:** `main` used a single 30s
+/// requeue for every error. This splits by kind:
+///   * `Kube(_)` stays at 30s — transient throttle / reset / 5xx; these
+///     heal quickly and we want fast recovery.
+///   * `SerdeJson(_)` goes to 300s — deserialisation errors are
+///     deterministic; the same CR will fail again until a human edits
+///     it. 30s would log-spam every 30 seconds while the CR is broken.
+///     Operators debugging a malformed CR should expect a 5-minute
+///     back-off, not 30 seconds. A corresponding log line at `error!`
+///     level is always emitted so the delay is not silent.
+///
+/// **Watch-stream resilience is _not_ our concern here.** When the kube
+/// watch stream itself errors (kubeapi rolling restart, network blip,
+/// WATCH too old), the `kube::runtime::watcher` underneath
+/// [`Controller::new`] transparently reconnects with exponential backoff
+/// and replays a `list+watch` sync. This function only governs what
+/// happens when our *reconcile* function returns an error — a distinct
+/// failure mode from a broken watch stream. See `kube-rs` runtime docs
+/// for the watch-level behaviour.
+fn error_requeue_duration(error: &ReconcileError) -> Duration {
+    match error {
+        // Transient kube API errors (throttling, connection reset, 5xx):
+        // retry soon so we don't starve legitimate work.
+        ReconcileError::Kube(_) => Duration::from_secs(30),
+        // Serde errors are deterministic — the same body will fail again.
+        // Back off longer so we don't spam logs while a human fixes the
+        // bad CR.
+        ReconcileError::SerdeJson(_) => Duration::from_secs(300),
+    }
+}
+
 /// Error policy — what to do when reconciliation fails.
 fn error_policy(sandbox: Arc<ClawSandbox>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
     tracing::error!(
@@ -1384,7 +1423,7 @@ fn error_policy(sandbox: Arc<ClawSandbox>, error: &ReconcileError, _ctx: Arc<Con
         sandbox.name_any(),
         error
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(error_requeue_duration(error))
 }
 
 /// Run the controller — blocks forever, watching ClawSandbox CRDs.
@@ -2295,5 +2334,50 @@ mod tests {
             ctx["seccompProfile"]["localhostProfile"],
             "profiles/my-custom-profile.json"
         );
+    }
+
+    // ── Error-policy / watch-resilience contract (r4) ───────────────────
+    //
+    // These tests guard the reconcile-error requeue contract. The
+    // watch-stream itself is kube-rs's problem (Controller::new +
+    // watcher::Config handle stream reconnect with built-in backoff) —
+    // we only test the piece we own: that any ReconcileError yields a
+    // positive, bounded requeue duration. A regression to
+    // `Duration::ZERO` would hot-loop the controller.
+
+    #[test]
+    fn error_requeue_kube_is_short() {
+        let err = ReconcileError::Kube(kube::Error::LinesCodecMaxLineLengthExceeded);
+        let d = error_requeue_duration(&err);
+        assert!(d >= Duration::from_secs(10), "too short: {:?}", d);
+        assert!(d <= Duration::from_secs(120), "too long: {:?}", d);
+    }
+
+    #[test]
+    fn error_requeue_serde_is_long() {
+        // Produce a real serde_json::Error without an unwrap panic.
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = ReconcileError::SerdeJson(serde_err);
+        let d = error_requeue_duration(&err);
+        // Serde errors won't heal on retry — we want a longer backoff.
+        assert!(
+            d >= Duration::from_secs(60),
+            "serde backoff too short: {:?} — this would log-spam",
+            d
+        );
+    }
+
+    #[test]
+    fn error_requeue_is_never_zero() {
+        // Build one of each variant and confirm the requeue is strictly
+        // positive. A zero requeue would starve the controller event
+        // loop and pin a CPU.
+        let kube_err = ReconcileError::Kube(kube::Error::LinesCodecMaxLineLengthExceeded);
+        assert!(error_requeue_duration(&kube_err) > Duration::ZERO);
+
+        let serde_err = ReconcileError::SerdeJson(
+            serde_json::from_str::<serde_json::Value>("{bad").unwrap_err(),
+        );
+        assert!(error_requeue_duration(&serde_err) > Duration::ZERO);
     }
 }
