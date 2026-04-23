@@ -13,7 +13,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use bytes::Bytes;
 
-use super::{AppState, agt_mesh_inbox};
+use super::AppState;
+use super::governance::agt_mesh_inbox;
 use crate::errors;
 use crate::mesh::MeshMetrics;
 
@@ -33,6 +34,8 @@ pub fn mesh_routes() -> Router<AppState> {
         .route("/blocklist/check", post(blocklist_check))
 }
 
+/// GET /agt/relay — WebSocket proxy to the self-hosted AgentMesh relay.
+/// The plugin (UID 1000) can only reach localhost. The router (UID 1001) proxies
 /// WebSocket connections to the relay at agentmesh-relay.agentmesh.svc.cluster.local:8765.
 async fn agt_relay_proxy(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     let relay_url = std::env::var("AGT_RELAY_URL")
