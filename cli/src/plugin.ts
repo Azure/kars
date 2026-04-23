@@ -3668,7 +3668,7 @@ async function _runHandoffOrchestration(
 
     try {
       await _routerCall("POST", "/sandbox/spawn", {
-        name: targetName,
+        agent_id: targetName,
         model: process.env.DEFAULT_MODEL || "gpt-4.1",
         governance: true,
         trust_threshold: 500,
@@ -4822,7 +4822,7 @@ const azureClawPlugin = definePluginEntry({
           }
 
           const result = await routerCall("POST", "/sandbox/spawn", {
-            name: params.name,
+            agent_id: params.name,
             model: params.model || "gpt-4.1",
             governance: params.governance !== false,
             trust_threshold: 500,
@@ -7098,7 +7098,7 @@ const azureClawPlugin = definePluginEntry({
         // Parse args: first token is name, rest are flags
         const tokens = raw.split(/\s+/);
         const name = tokens[0];
-        const body: Record<string, unknown> = { name };
+        const body: Record<string, unknown> = { agent_id: name };
 
         for (let i = 1; i < tokens.length; i++) {
           switch (tokens[i]) {
@@ -7155,7 +7155,7 @@ const azureClawPlugin = definePluginEntry({
           }
           return {
             text: [
-              `**Sub-agent spawned:** ${parsed.name}`,
+              `**Sub-agent spawned:** ${parsed.agent_id}`,
               `Namespace: ${parsed.namespace || "pending"}`,
               `Phase: ${parsed.phase || "Pending"}`,
               parsed.message || "",
@@ -7203,7 +7203,7 @@ const azureClawPlugin = definePluginEntry({
               `**Sub-Agents** (${sandboxes.length})`,
               "",
               ...sandboxes.map((s: any) =>
-                `- **${s.name}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
+                `- **${s.agent_id}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
               ),
               "",
               "Communicate via azureclaw_mesh_send tool (E2E encrypted)",
@@ -7250,7 +7250,7 @@ const azureClawPlugin = definePluginEntry({
           if (parsed.error) {
             return { text: `**Delete failed:** ${parsed.error}` };
           }
-          return { text: `**Destroyed:** ${parsed.name} — ${parsed.message || "teardown in progress"}` };
+          return { text: `**Destroyed:** ${parsed.agent_id} — ${parsed.message || "teardown in progress"}` };
         } catch {
           return { text: `Could not delete sub-agent '${name}'. Is the inference router running?` };
         }
@@ -7285,7 +7285,7 @@ const azureClawPlugin = definePluginEntry({
           const ready = parsed.phase === "Running";
           return {
             text: [
-              `**Sub-Agent: ${parsed.name}**`,
+              `**Sub-Agent: ${parsed.agent_id}**`,
               `Phase: ${parsed.phase || "unknown"} ${ready ? "(ready for mesh)" : "(not ready yet)"}`,
               parsed.namespace ? `Namespace: ${parsed.namespace}` : "",
               "",

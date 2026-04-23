@@ -2890,7 +2890,7 @@ async fn sandbox_spawn(
 
     // AGT policy check — evaluate spawn action via native governance
     {
-        let action = format!("spawn:create:{}", req.name);
+        let action = format!("spawn:create:{}", req.agent_id);
         let result = state.governance.evaluate(&parent_name, &action, None);
         let allowed = result
             .get("allowed")
@@ -2901,7 +2901,7 @@ async fn sandbox_spawn(
                 .get("reason")
                 .and_then(|r| r.as_str())
                 .unwrap_or("policy denied");
-            tracing::warn!(parent = %parent_name, child = %req.name, %reason, "AGT policy DENIED spawn");
+            tracing::warn!(parent = %parent_name, child = %req.agent_id, %reason, "AGT policy DENIED spawn");
             return (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -3618,7 +3618,7 @@ async fn handoff_restore(
                             spawn_req.trusted_peers =
                                 Some(peers.replace(old_parent_amid, new_amid));
                             tracing::info!(
-                                sub_agent = %sub_snap.name,
+                                sub_agent = %sub_snap.agent_id,
                                 old = %old_parent_amid,
                                 new = %new_amid,
                                 "Remapped parent AMID in sub-agent trusted_peers"
@@ -3632,7 +3632,7 @@ async fn handoff_restore(
                         // No trusted_peers at all — set new parent as trusted
                         spawn_req.trusted_peers = Some(new_entry.clone());
                         tracing::info!(
-                            sub_agent = %sub_snap.name,
+                            sub_agent = %sub_snap.agent_id,
                             parent_amid = %new_amid,
                             "Set trusted_peers for sub-agent (was empty)"
                         );
@@ -3643,7 +3643,7 @@ async fn handoff_restore(
             match spawn::create_sandbox(&state.sandbox_name, &spawn_req).await {
                 Ok(resp) => {
                     tracing::info!(
-                        sub_agent = %sub_snap.name,
+                        sub_agent = %sub_snap.agent_id,
                         namespace = ?resp.namespace,
                         "Re-spawned sub-agent from handoff snapshot"
                     );
@@ -3652,11 +3652,11 @@ async fn handoff_restore(
                         "handoff:restore:sub-agent",
                         &format!(
                             "respawned={} original_amid={}",
-                            sub_snap.name, sub_snap.original_amid
+                            sub_snap.agent_id, sub_snap.original_amid
                         ),
                     );
                     sub_agent_results.push(serde_json::json!({
-                        "name": sub_snap.name,
+                        "agent_id": sub_snap.agent_id,
                         "original_amid": sub_snap.original_amid,
                         "status": "spawned",
                         "namespace": resp.namespace,
@@ -3664,12 +3664,12 @@ async fn handoff_restore(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        sub_agent = %sub_snap.name,
+                        sub_agent = %sub_snap.agent_id,
                         error = %e,
                         "Failed to re-spawn sub-agent — may already exist or quota exceeded"
                     );
                     sub_agent_results.push(serde_json::json!({
-                        "name": sub_snap.name,
+                        "agent_id": sub_snap.agent_id,
                         "original_amid": sub_snap.original_amid,
                         "status": "failed",
                         "error": e,
@@ -3729,7 +3729,7 @@ async fn handoff_restore(
     tracing::info!(
         snapshot_count = restored_state.sub_agent_snapshots.len(),
         names = %restored_state.sub_agent_snapshots.iter()
-            .map(|s| format!("{}(ws={}B,ctx={})", s.name, s.workspace_tar.len(), s.task_context.len()))
+            .map(|s| format!("{}(ws={}B,ctx={})", s.agent_id, s.workspace_tar.len(), s.task_context.len()))
             .collect::<Vec<_>>().join(", "),
         "Building sub_agent_workspaces from restored snapshots"
     );
@@ -3739,7 +3739,7 @@ async fn handoff_restore(
         .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
         .map(|s| {
             serde_json::json!({
-                "name": s.name,
+                "agent_id": s.agent_id,
                 "original_amid": s.original_amid,
                 "workspace_tar": if s.workspace_tar.is_empty() {
                     serde_json::Value::Null

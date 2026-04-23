@@ -123,7 +123,10 @@ pub struct TokenUsage {
 /// Sub-agent state for re-spawn on the target host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentSnapshot {
-    pub name: String,
+    /// DNS-safe sub-agent identifier. Accepts `name` as a deserialise-only
+    /// alias for backward compatibility with in-flight handoff envelopes.
+    #[serde(alias = "name")]
+    pub agent_id: String,
     pub original_amid: String,
     pub spawn_config: SpawnRequest,
     pub task_context: String,
@@ -1747,10 +1750,10 @@ mod tests {
             chat_snapshot: Some(vec![5, 6, 7, 8]),
             policy_yaml: "- deny: web_search\n- allow: code_execution".to_string(),
             sub_agent_snapshots: vec![SubAgentSnapshot {
-                name: "researcher".to_string(),
+                agent_id: "researcher".to_string(),
                 original_amid: "AMID_SUB1".to_string(),
                 spawn_config: SpawnRequest {
-                    name: "researcher".to_string(),
+                    agent_id: "researcher".to_string(),
                     model: Some("gpt-4.1".to_string()),
                     governance: true,
                     trust_threshold: Some(500),
@@ -2189,10 +2192,10 @@ mod tests {
 
         // 1. Create snapshot like collect_sub_agent_snapshots_docker does
         let snap = SubAgentSnapshot {
-            name: "researcher".to_string(),
+            agent_id: "researcher".to_string(),
             original_amid: String::new(),
             spawn_config: SpawnRequest {
-                name: "researcher".to_string(),
+                agent_id: "researcher".to_string(),
                 model: None,
                 governance: true,
                 trust_threshold: None,
@@ -2230,7 +2233,7 @@ mod tests {
         match &result {
             Ok(snaps) => {
                 assert_eq!(snaps.len(), 1);
-                assert_eq!(snaps[0].name, "researcher");
+                assert_eq!(snaps[0].agent_id, "researcher");
                 assert_eq!(snaps[0].original_amid, "test_amid_12345");
                 assert_eq!(snaps[0].workspace_tar, fake_tar);
                 assert!(!snaps[0].workspace_tar.is_empty());
@@ -2252,10 +2255,10 @@ mod tests {
         // Two sub-agents: one with workspace data, one without (typical after handoff)
         let snaps = [
             SubAgentSnapshot {
-                name: "researcher".to_string(),
+                agent_id: "researcher".to_string(),
                 original_amid: "AMID_OLD_1".to_string(),
                 spawn_config: SpawnRequest {
-                    name: "researcher".to_string(),
+                    agent_id: "researcher".to_string(),
                     model: None,
                     governance: true,
                     trust_threshold: None,
@@ -2272,10 +2275,10 @@ mod tests {
                 workspace_tar: vec![9, 10, 11], // has workspace
             },
             SubAgentSnapshot {
-                name: "data-collector".to_string(),
+                agent_id: "data-collector".to_string(),
                 original_amid: "AMID_OLD_2".to_string(),
                 spawn_config: SpawnRequest {
-                    name: "data-collector".to_string(),
+                    agent_id: "data-collector".to_string(),
                     model: None,
                     governance: true,
                     trust_threshold: None,
@@ -2299,7 +2302,7 @@ mod tests {
             .filter(|s| !s.workspace_tar.is_empty() || !s.task_context.is_empty())
             .map(|s| {
                 serde_json::json!({
-                    "name": s.name,
+                    "agent_id": s.agent_id,
                     "original_amid": s.original_amid,
                     "workspace_tar": if s.workspace_tar.is_empty() {
                         serde_json::Value::Null
@@ -2321,7 +2324,7 @@ mod tests {
         );
 
         // First has workspace_tar as base64 string
-        assert_eq!(sub_agent_workspaces[0]["name"], "researcher");
+        assert_eq!(sub_agent_workspaces[0]["agent_id"], "researcher");
         assert!(sub_agent_workspaces[0]["workspace_tar"].is_string());
         let ws_b64 = sub_agent_workspaces[0]["workspace_tar"].as_str().unwrap();
         let decoded = base64::engine::general_purpose::STANDARD
@@ -2330,7 +2333,7 @@ mod tests {
         assert_eq!(decoded, vec![9, 10, 11]);
 
         // Second has workspace_tar as null (empty)
-        assert_eq!(sub_agent_workspaces[1]["name"], "data-collector");
+        assert_eq!(sub_agent_workspaces[1]["agent_id"], "data-collector");
         assert!(sub_agent_workspaces[1]["workspace_tar"].is_null());
 
         // Both have task_context
@@ -2356,10 +2359,10 @@ mod tests {
         let mut state = make_test_state();
         // Add a second sub-agent with empty workspace (Docker-collected, no mesh workspace)
         state.sub_agent_snapshots.push(SubAgentSnapshot {
-            name: "data-collector".to_string(),
+            agent_id: "data-collector".to_string(),
             original_amid: "AMID_SUB2".to_string(),
             spawn_config: SpawnRequest {
-                name: "data-collector".to_string(),
+                agent_id: "data-collector".to_string(),
                 model: Some("gpt-4.1".to_string()),
                 governance: true,
                 trust_threshold: None,
@@ -2388,7 +2391,7 @@ mod tests {
         assert_eq!(restored.sub_agent_snapshots.len(), 2);
 
         // First has workspace data preserved
-        assert_eq!(restored.sub_agent_snapshots[0].name, "researcher");
+        assert_eq!(restored.sub_agent_snapshots[0].agent_id, "researcher");
         assert_eq!(
             restored.sub_agent_snapshots[0].workspace_tar,
             vec![9, 10, 11]
@@ -2396,7 +2399,7 @@ mod tests {
         assert!(!restored.sub_agent_snapshots[0].workspace_tar.is_empty());
 
         // Second has empty workspace but valid task_context
-        assert_eq!(restored.sub_agent_snapshots[1].name, "data-collector");
+        assert_eq!(restored.sub_agent_snapshots[1].agent_id, "data-collector");
         assert!(restored.sub_agent_snapshots[1].workspace_tar.is_empty());
         assert_eq!(
             restored.sub_agent_snapshots[1].task_context,
@@ -2420,7 +2423,7 @@ mod tests {
         let results: Vec<serde_json::Value> = restored
             .sub_agent_snapshots
             .iter()
-            .map(|s| serde_json::json!({"name": s.name, "status": "spawned"}))
+            .map(|s| serde_json::json!({"agent_id": s.agent_id, "status": "spawned"}))
             .collect();
         assert_eq!(
             results.len(),
@@ -2434,10 +2437,10 @@ mod tests {
     #[test]
     fn test_empty_workspace_and_task_context_filtered_out() {
         let snaps = [SubAgentSnapshot {
-            name: "ghost".to_string(),
+            agent_id: "ghost".to_string(),
             original_amid: String::new(),
             spawn_config: SpawnRequest {
-                name: "ghost".to_string(),
+                agent_id: "ghost".to_string(),
                 model: None,
                 governance: true,
                 trust_threshold: None,

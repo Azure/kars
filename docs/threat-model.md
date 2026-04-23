@@ -139,8 +139,8 @@ per-agent Foundry project isolation — not at the router.
 **Scope:** creates, lists, inspects, and deletes sub-agent sandboxes via the controller's CRD API.
 
 **Input validation:**
-- `SpawnRequest` is a typed struct (serde) with `#[serde(deny_unknown_fields)]` (`spawn.rs:32`). A typo like `{"nam": "x"}` is rejected with a 422 instead of silently falling back to a default.
-- AGT policy evaluation runs before CRD creation (`routes.rs:2894`) — a denied policy returns 403 without reaching kubeapi.
+- `SpawnRequest` is a typed struct (serde) with `#[serde(deny_unknown_fields)]` (`spawn.rs:37`). A typo like `{"nam": "x"}` is rejected with a 422 instead of silently falling back to a default. The canonical field is `agent_id` (a DNS-safe k8s metadata.name, 1–63 chars, `[a-z0-9-]`); `name` is accepted as a deserialise-only serde alias during the plugin-side migration window.
+- AGT policy evaluation runs before CRD creation (`routes.rs:2893`) — a denied policy returns 403 without reaching kubeapi.
 
 **Blast radius if bypassed:** attacker with admin token can spin up arbitrary sub-agent sandboxes with arbitrary images **iff** the controller accepts the CR. Controller-side validation (CRD schema + admission) is the second line of defence.
 
