@@ -257,18 +257,44 @@ async fn main() -> Result<()> {
         shutdown_timeout_secs = shutdown_timeout.as_secs(),
         "graceful shutdown timeout configured"
     );
+
+    // Observe when the shutdown signal actually fires — the drain-deadline
+    // timer MUST start from that moment, not from process startup.
+    //
+    // History: an earlier implementation wrapped the entire `serve_fut` in
+    // `tokio::time::timeout(shutdown_timeout, ...)`. Since serve_fut only
+    // completes *after* the shutdown signal fires, the timer raced the whole
+    // server lifetime and force-killed the router ~25s after startup — no
+    // signal required. The `bounded_drain_stays_alive_*` regression tests
+    // guard against re-introducing that pattern.
+    let (signal_fired_tx, signal_fired_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_fut = async move {
+        shutdown_signal().await;
+        let _ = signal_fired_tx.send(());
+    };
+
     let serve_fut = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal());
+    .with_graceful_shutdown(shutdown_fut)
+    .into_future();
+    tokio::pin!(serve_fut);
 
-    match tokio::time::timeout(shutdown_timeout, serve_fut).await {
-        Ok(res) => res?,
-        Err(_) => tracing::warn!(
-            shutdown_timeout_secs = shutdown_timeout.as_secs(),
-            "graceful shutdown timed out with in-flight requests; forcing shutdown"
-        ),
+    // Race the server exiting on its own (fatal bind/IO error) vs. the
+    // shutdown signal firing. Only AFTER the signal fires do we apply
+    // `shutdown_timeout` to the drain phase.
+    tokio::select! {
+        res = &mut serve_fut => res?,
+        _ = signal_fired_rx => {
+            match tokio::time::timeout(shutdown_timeout, serve_fut).await {
+                Ok(res) => res?,
+                Err(_) => tracing::warn!(
+                    shutdown_timeout_secs = shutdown_timeout.as_secs(),
+                    "graceful shutdown timed out with in-flight requests; forcing shutdown"
+                ),
+            }
+        }
     }
 
     // Signal the forward proxy to drain and shut down
@@ -725,5 +751,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── bounded-drain regression (shutdown bug) ─────────────────────────────
+    //
+    // The bug: an earlier `tokio::time::timeout(drain, serve_fut).await`
+    // applied the drain deadline to the entire server lifetime. The router
+    // force-exited ~25s after startup regardless of traffic, with no
+    // SIGINT/SIGTERM ever received.
+    //
+    // These tests replicate the exact pattern `main()` now uses, with a tiny
+    // drain timeout (200ms). If the pattern regresses, the server-alive
+    // assertions will fire within the test window.
+
+    /// Drive a miniature axum server using the same bounded-drain pattern as
+    /// `main()`. Returns (local_addr, serve_handle, signal_tx).
+    /// Pushing `()` through `signal_tx` simulates SIGTERM.
+    async fn spawn_mini_server_with_bounded_drain(
+        drain_timeout: std::time::Duration,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        use std::future::IntoFuture;
+        let app: Router = Router::new().route("/healthz", get(ok));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Caller's "signal" — pushed manually by the test.
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Internal "signal fired" observer wrapping the caller's signal.
+        let (signal_fired_tx, signal_fired_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown_fut = async move {
+            let _ = signal_rx.await;
+            let _ = signal_fired_tx.send(());
+        };
+
+        let handle = tokio::spawn(async move {
+            let serve_fut = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_fut)
+            .into_future();
+            tokio::pin!(serve_fut);
+
+            tokio::select! {
+                res = &mut serve_fut => { let _ = res; }
+                _ = signal_fired_rx => {
+                    let _ = tokio::time::timeout(drain_timeout, serve_fut).await;
+                }
+            }
+        });
+
+        (addr, handle, signal_tx)
+    }
+
+    /// Regression: the server MUST stay up for at least 3× the drain timeout
+    /// when no shutdown signal is ever sent. The old buggy code would kill
+    /// the server after exactly `drain_timeout`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_drain_stays_alive_when_no_signal() {
+        let drain = std::time::Duration::from_millis(200);
+        let (addr, handle, _signal_tx) = spawn_mini_server_with_bounded_drain(drain).await;
+
+        // Wait 3× the drain timeout — in the buggy version the server is dead
+        // by now (at t=drain).
+        tokio::time::sleep(drain * 3).await;
+
+        // Server must still accept connections.
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/healthz"))
+            .timeout(std::time::Duration::from_secs(1))
+            .send()
+            .await
+            .expect("server should still accept connections after 3× drain_timeout");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        // Task must not have terminated.
+        assert!(
+            !handle.is_finished(),
+            "serve task terminated without a signal"
+        );
+        handle.abort();
+    }
+
+    /// Regression: when the signal DOES fire, the server shuts down within
+    /// roughly the drain window (here: 200ms + slack). This proves the drain
+    /// timer is armed correctly after the signal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_drain_exits_after_signal() {
+        let drain = std::time::Duration::from_millis(200);
+        let (_addr, handle, signal_tx) = spawn_mini_server_with_bounded_drain(drain).await;
+
+        // Let the server get into steady state.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished(), "server exited before signal");
+
+        // Fire the signal; task should complete within ~drain + slack.
+        let _ = signal_tx.send(());
+        let res = tokio::time::timeout(drain + std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("server did not exit within drain window");
+        res.expect("serve task panicked");
     }
 }
