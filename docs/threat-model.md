@@ -139,7 +139,7 @@ per-agent Foundry project isolation — not at the router.
 **Scope:** creates, lists, inspects, and deletes sub-agent sandboxes via the controller's CRD API.
 
 **Input validation:**
-- `SpawnRequest` is a typed struct (serde) — unknown fields are currently **allowed** (no `#[serde(deny_unknown_fields)]`). S1 is the planned mitigation; tracked on `plan.md`.
+- `SpawnRequest` is a typed struct (serde) with `#[serde(deny_unknown_fields)]` (`spawn.rs:32`). A typo like `{"nam": "x"}` is rejected with a 422 instead of silently falling back to a default.
 - AGT policy evaluation runs before CRD creation (`routes.rs:2894`) — a denied policy returns 403 without reaching kubeapi.
 
 **Blast radius if bypassed:** attacker with admin token can spin up arbitrary sub-agent sandboxes with arbitrary images **iff** the controller accepts the CR. Controller-side validation (CRD schema + admission) is the second line of defence.
@@ -159,7 +159,7 @@ Routes: `/agt/evaluate`, `/agt/trust` (GET/POST/DELETE), `/agt/audit`, `/agt/aud
 **Input validation:**
 - Trust body fields pulled by `.get("agent_id").and_then(...).unwrap_or("unknown")` — loose; see Q2/Q4 in plan.md.
 - Rate-limit body fields are `u32`/`u64` with defaults.
-- No `deny_unknown_fields` yet (S1).
+- Handlers here take `Json<serde_json::Value>` rather than typed structs, so `deny_unknown_fields` does not apply. Input validation is per-field inline. Moving to typed DTOs is a separate refactor (Q2).
 
 **Blast radius if bypassed:**
 - `update_trust` rewrites AGT's signed trust store → attacker can downgrade a peer's trust tier and trigger AGT-driven policy changes (rate limits, permissions).
@@ -188,12 +188,12 @@ Routes: `/agt/evaluate`, `/agt/trust` (GET/POST/DELETE), `/agt/audit`, `/agt/aud
 
 **Input validation:**
 - Blob-size recheck after compression (`routes.rs:3249, 3498, 3518`) — defence-in-depth vs. a body-limit bypass.
-- Handoff state structs are serde-deserialized; no `deny_unknown_fields` yet (S1).
+- `HandoffMeta` DTO has `#[serde(deny_unknown_fields)]` (`spawn.rs:62`). Larger handoff state structs use untyped `Value` decode; ratchet-key decryption is the authoritative gate — a state blob that decrypts is authentic by definition.
 - Decryption must succeed before the state is trusted — ratchet keys are the real gate.
 
 **Blast radius if bypassed:** handoff snapshots contain encrypted workspace data, trust state, audit log, and per-agent secrets (not private keys — identity succession replaces key transfer, `handoff.rs:69`). Attacker with admin + handoff tokens can harvest this.
 
-**Residual risk:** the 200MB cap is a DoS shoulder — an adversarial handoff allocates ~200MB in serde before rejection. Tighter per-field streaming would bound this but is a bigger refactor (see s6 — deferred).
+**Residual risk:** the 200MB cap is a DoS shoulder — an adversarial handoff allocates ~200MB in serde before rejection. Tighter per-field streaming would bound this but is a bigger refactor. Mitigated in practice by handoff being admin-token-gated + no-localhost-bypass, so only an admin-credential-holder can exercise the allocation.
 
 ---
 
@@ -225,13 +225,11 @@ These apply to every group above, not just one:
 
 | Gap | Tracking |
 |---|---|
-| No `#[serde(deny_unknown_fields)]` on inbound DTOs | S1 — not yet shipped |
-| No per-tier body-size caps | S6 — **deferred**; analysis showed the framing didn't match where file transfers flow (relay WS, not router HTTP) |
+| `#[serde(deny_unknown_fields)]` coverage only applies to the two typed-struct bodies (`SpawnRequest`, `HandoffMeta`). Every other handler takes `Json<serde_json::Value>` and forwards opaquely — no struct to decorate. Migrating those to typed DTOs is part of Q2/Q4. | Q2, Q4 |
 | `routes.rs` is 5000 LOC | Q1 — deferred; high merge-conflict risk |
 | Inconsistent error shapes | Q2 — deferred |
 | Inconsistent identity field naming (`agent_id` vs `sandbox_name` vs `name`) | Q4 — deferred |
-| No kube-watcher chaos test | R4 — pending |
-| Cross-SDK mesh TODOs | T6 — pending |
+| Per-trust-tier body caps | S6 — **not pursued**. Analysis showed body-size is the wrong knob: inference large-context traffic legitimately approaches the axum 2MB default, file transfers flow through the AgentMesh WS relay (bypasses body-limit middleware), and admin endpoints are token-gated rather than tier-gated. The per-tier abuse defences that actually bite already exist: AGT `McpSlidingRateLimiter` (50 req/sec/agent) and `TokenBudgetTracker`. |
 
 ---
 
@@ -241,7 +239,7 @@ When adding a new route group to `routes.rs`, answer these in the PR:
 
 1. **Auth tier?** Pick one: public (agent/cluster), admin-gated, handoff-tiered, or custom. If public, justify why the agent being able to call this is safe.
 2. **Same-pod bypass?** If admin-gated, does localhost bypass make sense, or do you need `no_localhost_bypass` (like handoff)?
-3. **Input DTO has `deny_unknown_fields`?** (S1) If serde, yes.
+3. **Input DTO has `deny_unknown_fields`?** (S1) If you introduce a new typed struct body, yes. Handlers that forward opaque JSON are exempt by design.
 4. **Body size?** Explicit `DefaultBodyLimit` or relying on axum's 2MB default? Justify.
 5. **AGT policy hook?** If the action is agent-initiated and may be policy-relevant, call `state.governance.evaluate(...)` before the side-effecting code.
 6. **Audit logging?** Mutations should record to the audit chain.
