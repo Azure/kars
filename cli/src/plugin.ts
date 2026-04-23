@@ -4758,6 +4758,36 @@ const azureClawPlugin = definePluginEntry({
       });
     }
 
+    // Terminal sub-agent pod phases — polling loops bail out when the pod reaches
+    // one of these. Anything else (including Pending, Running, Unknown, or transient
+    // status-endpoint errors) is treated as "still alive, keep retrying".
+    const POD_DEAD_PHASES = new Set(["Failed", "Terminating", "Exited"]);
+
+    // Probe sub-agent pod phase. Returns:
+    //   { alive: true,  phase }            → keep polling
+    //   { alive: false, phase?, reason }   → bail; pod is gone/dead
+    //   null                               → transient error (router down, brief 5xx);
+    //                                         treat as still alive, keep polling
+    async function probeSubAgentAlive(
+      name: string,
+    ): Promise<{ alive: boolean; phase?: string; reason?: string } | null> {
+      try {
+        const status: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+        const phase: string = status?.phase || "Unknown";
+        if (POD_DEAD_PHASES.has(phase)) {
+          return { alive: false, phase, reason: `sub-agent phase is ${phase}` };
+        }
+        return { alive: true, phase };
+      } catch (e: any) {
+        const msg = (e && e.message) || "";
+        if (msg.startsWith("HTTP 404")) {
+          return { alive: false, reason: "sub-agent sandbox not found (CRD deleted)" };
+        }
+        // transient — router busy, short network hiccup; keep retrying
+        return null;
+      }
+    }
+
     // Safe JSON response for tool output — truncate to avoid blowing WebSocket frames
     function safeJson(obj: unknown, maxLen = 8000): string {
       try {
@@ -4906,7 +4936,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_spawn_status",
       label: "Sub-Agent Status",
-      description: "Check the status of a spawned sub-agent. Returns phase (Pending/Running/Terminating), namespace, and readiness. Poll this after spawning until phase is 'Running' before sending mesh messages.",
+      description: "Check the status of a spawned sub-agent. Returns phase (Pending/Running/Terminating), namespace, mesh_registered (true once the sub-agent has registered with the AGT mesh), and mesh_ready (Running AND mesh_registered). Prefer polling until mesh_ready=true before sending mesh messages — phase=Running alone is not sufficient because mesh registration happens asynchronously (~60s on AKS) after the pod becomes Ready.",
       parameters: {
         type: "object",
         properties: {
@@ -4915,9 +4945,27 @@ const azureClawPlugin = definePluginEntry({
         required: ["name"],
       },
       async execute(_id: string, params: Record<string, unknown>) {
+        const name = params.name as string;
         try {
-          const result = await routerCall("GET", `/sandbox/${encodeURIComponent(params.name as string)}/status`);
-          return { content: [{ type: "text", text: safeJson(result) }] };
+          const result: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+          // Best-effort registry probe — don't fail status on registry hiccups.
+          let mesh_registered = false;
+          try {
+            const search: any = await routerCall(
+              "GET",
+              `/agt/registry/registry/search?capability=${encodeURIComponent(name)}`,
+            );
+            const agents = (search && Array.isArray(search.results)) ? search.results : [];
+            mesh_registered = agents.some(
+              (a: any) => a.display_name === name || (a.capabilities || []).includes(name),
+            );
+          } catch { /* registry unavailable — report as not-registered */ }
+          const enriched = {
+            ...result,
+            mesh_registered,
+            mesh_ready: result?.phase === "Running" && mesh_registered,
+          };
+          return { content: [{ type: "text", text: safeJson(enriched) }] };
         } catch (e: any) {
           return { content: [{ type: "text", text: `Status check failed: ${e.message}` }] };
         }
@@ -4927,7 +4975,7 @@ const azureClawPlugin = definePluginEntry({
     api.registerTool({
       name: "azureclaw_mesh_send",
       label: "Send Mesh Task",
-      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply. You can also instruct sub-agents to forward results to each other directly (they have peer-to-peer mesh access). Automatically waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
+      description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply. You can also instruct sub-agents to forward results to each other directly (they have peer-to-peer mesh access). Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
       parameters: {
         type: "object",
         properties: {
@@ -4966,19 +5014,39 @@ const azureClawPlugin = definePluginEntry({
             }
           }
           try {
-            // 1. Discover target agent's AMID via registry search (with retry for boot timing)
-            // Check cache first — with container reuse, AMIDs are stable once established.
+            // Discover the target sub-agent's AMID and send — retry continuously while
+            // the sub-agent's pod is alive. The only terminal conditions are:
+            //   • pod reaches Failed/Terminating/Exited (or CRD is gone)
+            //   • meshSend returns a non-transient error (not a prekey / stale-AMID case)
+            // This removes the old hand-rolled 12-attempt discovery + 15-attempt prekey
+            // windows that were too short on AKS (router-to-relay connect alone is ~60–70s).
+            // Check cache first — AMIDs are stable once established.
             let targetAmid: string | undefined = nameToAmid.get(agentName);
             if (targetAmid) {
               log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
             }
-            for (let attempt = 0; attempt < 12 && !targetAmid; attempt++) {
-              if (attempt > 0) {
-                  log.info(`AGT relay: waiting for '${agentName}' to register (${attempt}/11)...`);
-                  await new Promise(r => setTimeout(r, 2000));
-                }
 
-                // Try direct registry HTTP search by capability (most reliable)
+            const waitStart = Date.now();
+            let nextHeartbeatAt = waitStart + 10_000;
+            let sendSucceeded = false;
+            let finalSendErr: Error | null = null;
+
+            while (!sendSucceeded) {
+              // (a) Is the sub-agent still alive? Bail only on terminal phases.
+              const probe = await probeSubAgentAlive(agentName);
+              if (probe && probe.alive === false) {
+                log.warn(`AGT relay: aborting send to '${agentName}' — ${probe.reason}`);
+                return { content: [{ type: "text", text: JSON.stringify({
+                  error: "E2E encrypted send aborted — sub-agent is no longer running",
+                  reason: probe.reason,
+                  phase: probe.phase,
+                  agent: agentName,
+                  hint: "Sub-agent was deleted, failed, or is terminating. Respawn with azureclaw_spawn before retrying.",
+                }, null, 2) }] };
+              }
+
+              // (b) Discover AMID via registry search if we don't have one yet.
+              if (!targetAmid) {
                 try {
                   const http = await import("node:http");
                   const regResult: any = await new Promise((resolve, reject) => {
@@ -4994,7 +5062,7 @@ const azureClawPlugin = definePluginEntry({
                     req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
                   });
                   if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
-                    // Prefer online agents, then most recently seen
+                    // Prefer online agents, then most recently seen.
                     const sorted = regResult.results
                       .filter((a: any) => a.display_name === agentName || a.capabilities?.includes(agentName))
                       .sort((a: any, b: any) => {
@@ -5003,137 +5071,141 @@ const azureClawPlugin = definePluginEntry({
                         return (b.last_seen || "").localeCompare(a.last_seen || "");
                       });
                     const match = sorted[0] || regResult.results[0];
-                    targetAmid = match.amid;
-                  }
-                } catch (regErr: any) {
-                  if (attempt === 0) log.warn(`AGT registry search: ${regErr.message}`);
-                }
-              }
-
-              if (targetAmid) {
-                nameToAmid.set(agentName, targetAmid);
-                amidToName.set(targetAmid, agentName);
-              }
-
-            if (targetAmid) {
-              // 2. Send via AGT relay (E2E encrypted, Signal Protocol)
-              // Uses meshSend for auto-chunking — large payloads are transparently
-              // split into chunks and reassembled on the receiver side.
-              // Retry loop: target may need time to upload prekeys after registering
-              let sendErr: Error | null = null;
-              for (let sendAttempt = 0; sendAttempt < 15; sendAttempt++) {
-                try {
-                  await meshSend(agtMeshClient, targetAmid, {
-                    type: "task_request",
-                    content: msgContent,
-                    from_agent: process.env.SANDBOX_NAME || "unknown",
-                    timestamp: new Date().toISOString(),
-                  }, log);
-                  sendErr = null;
-                  break;
-                } catch (e: any) {
-                  sendErr = e;
-                  if (e.message?.includes("prekeys") || e.message?.includes("prekey")) {
-                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${sendAttempt + 1}/15)...`);
-                    await new Promise(r => setTimeout(r, 3000));
-                  } else if (e.message?.includes("not found") || e.message?.includes("closed") || e.message?.includes("AGENT_NOT_FOUND")) {
-                    // Stale cached AMID — invalidate and re-discover
-                    log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
-                    nameToAmid.delete(agentName);
-                    amidToName.delete(targetAmid!);
-                    targetAmid = undefined;
-                    break;
-                  } else {
-                    break; // non-prekey error — don't retry
-                  }
-                }
-              }
-              if (!sendErr && targetAmid) {
-                log.info(`AGT relay: sent to ${agentName} (${targetAmid.slice(0, 12)}...) via E2E encrypted relay`);
-                const messageId = crypto.randomUUID();
-                const sendStart = new Date().toISOString();
-
-                // Auto-wait for reply: poll agtInbox for a response from this agent
-                const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
-                const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
-                const waitStart = Date.now();
-                let replyContent: string | null = null;
-                log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
-
-                while (Date.now() - waitStart < waitMaxMs) {
-                  // Check inbox for a reply from this target, skipping protocol messages
-                  const replyIdx = agtInbox.findIndex((m) => {
-                    if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
-                    // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
-                    const mt = m.message_type || "";
-                    if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
-                    // Also check content for JSON protocol messages
-                    if (typeof m.content === "string") {
-                      try {
-                        const parsed = JSON.parse(m.content);
-                        if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
-                      } catch { /* not JSON, treat as real content */ }
-                    }
-                    return true;
-                  });
-                  if (replyIdx >= 0) {
-                    const reply = agtInbox.splice(replyIdx, 1)[0];
-                    replyContent = typeof reply.content === "string"
-                      ? reply.content
-                      : JSON.stringify(reply.content);
-                    log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - waitStart) / 1000).toFixed(1)}s`);
-                    break;
-                  }
-                  // Drain protocol messages to keep inbox clean
-                  for (let i = agtInbox.length - 1; i >= 0; i--) {
-                    const m = agtInbox[i];
-                    if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
-                        (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
-                      agtInbox.splice(i, 1);
+                    if (match?.amid) {
+                      targetAmid = match.amid;
+                      nameToAmid.set(agentName, targetAmid!);
+                      amidToName.set(targetAmid!, agentName);
                     }
                   }
-                  await new Promise((r) => setTimeout(r, pollIntervalMs));
-                }
-
-                const result: any = {
-                  status: replyContent ? "delivered_and_replied" : "delivered_via_agt_relay",
-                  to_agent: agentName,
-                  to_amid: targetAmid,
-                  from_amid: agtIdentity.amid,
-                  protocol: "AGT E2E encrypted (Signal Protocol)",
-                  message_id: messageId,
-                };
-                if (replyContent) {
-                  result.reply = replyContent;
-                  // Parent rates sub-agent — only meaningful for long-lived sub-agents
-                  // whose reputation will be queried again. Short-lived ones will die
-                  // and their score is lost, but the audit trail remains.
-                  try {
-                    const ok = await agtMeshClient.submitReputation(targetAmid, messageId, 0.9, ["fast_response", "reliable"]);
-                    pushTrustToRouter(agentName, 0.9);
-                    await recordMeshSession(targetAmid, messageId, "mesh_send", "success", sendStart);
-                    log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
-                  } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
-                } else {
-                  result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
-                }
-                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                } catch { /* transient registry error — keep retrying */ }
               }
-              log.warn(`AGT relay send failed after 15 retries: ${sendErr?.message}`);
+
+              if (!targetAmid) {
+                if (Date.now() >= nextHeartbeatAt) {
+                  const elapsed = Math.round((Date.now() - waitStart) / 1000);
+                  log.info(`AGT relay: still waiting for '${agentName}' to register (${elapsed}s, pod alive)...`);
+                  nextHeartbeatAt = Date.now() + 10_000;
+                }
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+              }
+
+              // (c) Try to send. Bail only on non-transient errors.
+              try {
+                await meshSend(agtMeshClient, targetAmid, {
+                  type: "task_request",
+                  content: msgContent,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                }, log);
+                sendSucceeded = true;
+                break;
+              } catch (e: any) {
+                const msg = (e && e.message) || "";
+                if (msg.includes("prekey")) {
+                  // Child registered but hasn't uploaded prekeys yet — keep waiting.
+                  if (Date.now() >= nextHeartbeatAt) {
+                    const elapsed = Math.round((Date.now() - waitStart) / 1000);
+                    log.info(`AGT relay: waiting for prekeys from '${agentName}' (${elapsed}s, pod alive)...`);
+                    nextHeartbeatAt = Date.now() + 10_000;
+                  }
+                  await new Promise(r => setTimeout(r, 3000));
+                  continue;
+                }
+                if (msg.includes("not found") || msg.includes("closed") || msg.includes("AGENT_NOT_FOUND")) {
+                  // Cached/registered AMID is stale (sub-agent was recycled) — invalidate and re-discover.
+                  log.warn(`AGT relay: AMID ${targetAmid!.slice(0, 12)}... stale for '${agentName}', re-discovering`);
+                  nameToAmid.delete(agentName);
+                  amidToName.delete(targetAmid!);
+                  targetAmid = undefined;
+                  await new Promise(r => setTimeout(r, 2000));
+                  continue;
+                }
+                // Non-transient failure — give up.
+                finalSendErr = e;
+                break;
+              }
+            }
+
+            if (!sendSucceeded) {
+              log.warn(`AGT relay send failed: ${finalSendErr?.message}`);
               return { content: [{ type: "text", text: JSON.stringify({
                 error: "E2E encrypted send failed — message NOT delivered",
-                reason: sendErr?.message || "unknown",
+                reason: finalSendErr?.message || "unknown",
                 agent: agentName,
-                hint: "The sub-agent prekey registration takes up to 45s after pod is Running. Wait 30s and retry with azureclaw_mesh_send.",
-              }, null, 2) }] };
-            } else {
-              log.warn(`AGT relay: target '${agentName}' not found in registry after polling`);
-              return { content: [{ type: "text", text: JSON.stringify({
-                error: "Target agent not found in AGT registry — message NOT delivered",
-                agent: agentName,
-                hint: "The sub-agent has not registered with the mesh. Check azureclaw_spawn_status, ensure it is Running, then retry.",
+                hint: "Non-transient send error — verify the sub-agent is healthy with azureclaw_spawn_status.",
               }, null, 2) }] };
             }
+
+            log.info(`AGT relay: sent to ${agentName} (${targetAmid!.slice(0, 12)}...) via E2E encrypted relay`);
+            const messageId = crypto.randomUUID();
+            const sendStart = new Date().toISOString();
+
+            // Auto-wait for reply: poll agtInbox for a response from this agent
+            const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
+            const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
+            const replyWaitStart = Date.now();
+            let replyContent: string | null = null;
+            log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+
+            while (Date.now() - replyWaitStart < waitMaxMs) {
+              // Check inbox for a reply from this target, skipping protocol messages
+              const replyIdx = agtInbox.findIndex((m) => {
+                if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
+                // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                const mt = m.message_type || "";
+                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                // Also check content for JSON protocol messages
+                if (typeof m.content === "string") {
+                  try {
+                    const parsed = JSON.parse(m.content);
+                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                  } catch { /* not JSON, treat as real content */ }
+                }
+                return true;
+              });
+              if (replyIdx >= 0) {
+                const reply = agtInbox.splice(replyIdx, 1)[0];
+                replyContent = typeof reply.content === "string"
+                  ? reply.content
+                  : JSON.stringify(reply.content);
+                log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                break;
+              }
+              // Drain protocol messages to keep inbox clean
+              for (let i = agtInbox.length - 1; i >= 0; i--) {
+                const m = agtInbox[i];
+                if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
+                    (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                  agtInbox.splice(i, 1);
+                }
+              }
+              await new Promise((r) => setTimeout(r, pollIntervalMs));
+            }
+
+            const result: any = {
+              status: replyContent ? "delivered_and_replied" : "delivered_via_agt_relay",
+              to_agent: agentName,
+              to_amid: targetAmid,
+              from_amid: agtIdentity.amid,
+              protocol: "AGT E2E encrypted (Signal Protocol)",
+              message_id: messageId,
+            };
+            if (replyContent) {
+              result.reply = replyContent;
+              // Parent rates sub-agent — only meaningful for long-lived sub-agents
+              // whose reputation will be queried again. Short-lived ones will die
+              // and their score is lost, but the audit trail remains.
+              try {
+                const ok = await agtMeshClient.submitReputation(targetAmid!, messageId, 0.9, ["fast_response", "reliable"]);
+                pushTrustToRouter(agentName, 0.9);
+                await recordMeshSession(targetAmid!, messageId, "mesh_send", "success", sendStart);
+                log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
+              } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
+            } else {
+              result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
+            }
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
           } catch (agtErr: any) {
             log.warn(`AGT relay send failed: ${agtErr.message}`);
             return { content: [{ type: "text", text: JSON.stringify({
