@@ -6,8 +6,8 @@
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -418,4 +418,3 @@ async fn blocklist_check(
             .into_response(),
     }
 }
-

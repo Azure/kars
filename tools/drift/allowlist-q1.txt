@@ -12,3 +12,12 @@
 # makes `handoff::X` resolve to `crate::handoff::X` — same constant,
 # byte-identical runtime behavior.
 handoff_protected_routes
+
+# Post-fmt — trailing-comma normalization (cargo fmt):
+# After extraction into a less-indented module, rustfmt could collapse a
+# multi-line errors::flat(...) call onto a single line, which removed the
+# final trailing comma. Token-different (Punct `,` removed) but semantically
+# identical — same function, same arguments, same return. Verified by
+# `cargo test` (all 275 pass) and by reading the diff
+# (`git log -p -- inference-router/src/routes/handoff.rs`).
+handoff_restore

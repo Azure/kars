@@ -20,10 +20,10 @@ use crate::mesh::{MeshInbox, MeshMetrics};
 use crate::proxy::UpstreamConfig;
 
 mod handoff;
-pub use handoff::spawn_routes;
 pub use handoff::handoff_init_routes;
 pub use handoff::handoff_protected_routes;
 pub use handoff::handoff_status_routes;
+pub use handoff::spawn_routes;
 
 mod governance;
 pub use governance::sensitive_agt_routes;
@@ -35,7 +35,7 @@ mod egress;
 pub use egress::egress_routes;
 
 mod inference;
-pub use inference::{inference_routes, foundry_agent_routes, foundry_standalone_routes};
+pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -213,8 +213,6 @@ fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
 static DEPRECATED_ADMIN_HEADER_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-
-
 /// Health and readiness routes.
 pub fn health_routes() -> Router<AppState> {
     Router::new()
@@ -231,9 +229,6 @@ pub fn metrics_routes() -> Router<AppState> {
 pub fn admin_routes() -> Router<AppState> {
     Router::new().route("/admin/model", get(admin_get_model).put(admin_set_model))
 }
-
-
-
 
 async fn healthz() -> &'static str {
     "ok"
@@ -333,4 +328,3 @@ async fn admin_set_model(State(state): State<AppState>, body: Bytes) -> impl Int
         None => Json(serde_json::json!({ "error": "body must contain {\"model\": \"<name>\"}" })),
     }
 }
-

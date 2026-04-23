@@ -2531,9 +2531,7 @@ mod tests {
         let rejected_before = phase_transition_count("initialized", "complete", "rejected");
         let res = session.try_transition(HandoffPhase::Complete).await;
         assert!(res.is_err());
-        assert!(
-            phase_transition_count("initialized", "complete", "rejected") > rejected_before
-        );
+        assert!(phase_transition_count("initialized", "complete", "rejected") > rejected_before);
     }
 
     // ── Property-based tests (s5-proptest) ────────────────────────────────────

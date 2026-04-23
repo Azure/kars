@@ -510,11 +510,8 @@ async fn handoff_restore(
                     .handoff_session
                     .fail(format!("Invalid blob: {e}"))
                     .await;
-                return errors::flat(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid blob format: {e}"),
-                )
-                .into_response();
+                return errors::flat(StatusCode::BAD_REQUEST, format!("Invalid blob format: {e}"))
+                    .into_response();
             }
         },
         None => {
@@ -1594,4 +1591,3 @@ async fn handoff_status(State(state): State<AppState>) -> impl IntoResponse {
         "pending_confirmation": pending,
     }))
 }
-

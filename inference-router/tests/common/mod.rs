@@ -70,17 +70,15 @@ async fn record_and_extract(mut req: Request, log: &RequestLog) -> (Request, Vec
     let headers: Vec<(String, String)> = req
         .headers()
         .iter()
-        .map(|(k, v)| {
-            (
-                k.to_string(),
-                v.to_str().unwrap_or("<binary>").to_string(),
-            )
-        })
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
         .collect();
-    let body_bytes = axum::body::to_bytes(std::mem::replace(req.body_mut(), axum::body::Body::empty()), usize::MAX)
-        .await
-        .unwrap_or_default()
-        .to_vec();
+    let body_bytes = axum::body::to_bytes(
+        std::mem::replace(req.body_mut(), axum::body::Body::empty()),
+        usize::MAX,
+    )
+    .await
+    .unwrap_or_default()
+    .to_vec();
     log.push(RecordedRequest {
         method,
         path,
@@ -157,23 +155,24 @@ impl FakeAd {
     pub async fn start() -> Self {
         let log = RequestLog::new();
         let state = log.clone();
-        let app = Router::new()
-            .route(
-                "/{tenant}/oauth2/v2.0/token",
-                post(
-                    |Path(_tenant): Path<String>,
-                     State(log): State<RequestLog>,
-                     req: Request| async move {
-                        let (_req, _body) = record_and_extract(req, &log).await;
-                        Json(json!({
-                            "access_token": "fake-ad-bearer-token",
-                            "expires_in": 3599,
-                            "token_type": "Bearer",
-                        }))
-                    },
-                ),
-            )
-            .with_state(state);
+        let app =
+            Router::new()
+                .route(
+                    "/{tenant}/oauth2/v2.0/token",
+                    post(
+                        |Path(_tenant): Path<String>,
+                         State(log): State<RequestLog>,
+                         req: Request| async move {
+                            let (_req, _body) = record_and_extract(req, &log).await;
+                            Json(json!({
+                                "access_token": "fake-ad-bearer-token",
+                                "expires_in": 3599,
+                                "token_type": "Bearer",
+                            }))
+                        },
+                    ),
+                )
+                .with_state(state);
         let (addr, handle) = spawn_server(app).await;
         tokio::spawn(async move {
             let _ = handle.await;
@@ -204,8 +203,8 @@ impl FixtureRoute {
     pub fn from_file(method: &str, path_prefix: &str, fixture_rel: &str) -> Self {
         let fixtures_root = fixtures_dir();
         let full = fixtures_root.join(fixture_rel);
-        let raw = std::fs::read(&full)
-            .unwrap_or_else(|e| panic!("fixture {}: {}", full.display(), e));
+        let raw =
+            std::fs::read(&full).unwrap_or_else(|e| panic!("fixture {}: {}", full.display(), e));
         let body: Value = serde_json::from_slice(&raw)
             .unwrap_or_else(|e| panic!("fixture {} parse: {}", full.display(), e));
         Self {
@@ -236,9 +235,7 @@ impl FakeAzure {
     pub async fn start(routes: Vec<FixtureRoute>) -> Self {
         let log = RequestLog::new();
         let state = (log.clone(), Arc::new(routes));
-        let app: Router = Router::new()
-            .fallback(any(dispatch))
-            .with_state(state);
+        let app: Router = Router::new().fallback(any(dispatch)).with_state(state);
         let (addr, handle) = spawn_server(app).await;
         tokio::spawn(async move {
             let _ = handle.await;
@@ -288,9 +285,7 @@ async fn dispatch(
 // Server plumbing
 // ---------------------------------------------------------------------------
 
-async fn spawn_server(
-    app: Router,
-) -> (SocketAddr, tokio::task::JoinHandle<std::io::Result<()>>) {
+async fn spawn_server(app: Router) -> (SocketAddr, tokio::task::JoinHandle<std::io::Result<()>>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move { axum::serve(listener, app).await });

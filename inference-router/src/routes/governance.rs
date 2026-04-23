@@ -11,8 +11,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 
-use super::{AppState, extract_admin_token};
 use super::mesh::lookup_parent_amid;
+use super::{AppState, extract_admin_token};
 use crate::errors;
 
 /// AGT governance routes that expose sensitive data — require admin token.

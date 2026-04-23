@@ -161,10 +161,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 if !ips.is_empty() {
-                    tracing::info!(
-                        count = ips.len(),
-                        "Admin-API origin allowlist active (s3)"
-                    );
+                    tracing::info!(count = ips.len(), "Admin-API origin allowlist active (s3)");
                 }
                 ips
             })
@@ -401,22 +398,14 @@ async fn admin_auth_middleware(
                     remote = %ip,
                     "Admin auth: remote IP not in ROUTER_ADMIN_ALLOW_IPS"
                 );
-                return (
-                    StatusCode::FORBIDDEN,
-                    "Admin origin not allowed",
-                )
-                    .into_response();
+                return (StatusCode::FORBIDDEN, "Admin origin not allowed").into_response();
             }
             None => {
                 tracing::warn!(
                     path = %req.uri().path(),
                     "Admin auth: missing ConnectInfo while allowlist is set"
                 );
-                return (
-                    StatusCode::FORBIDDEN,
-                    "Admin origin not allowed",
-                )
-                    .into_response();
+                return (StatusCode::FORBIDDEN, "Admin origin not allowed").into_response();
             }
         }
     }
@@ -480,10 +469,8 @@ async fn trace_id_middleware(mut req: Request, next: Next) -> impl IntoResponse 
 
     // Normalise back into the request so forward() will propagate it.
     if let Ok(hv) = HeaderValue::from_str(&trace_id) {
-        req.headers_mut().insert(
-            HeaderName::from_static(TRACE_ID_HEADER),
-            hv.clone(),
-        );
+        req.headers_mut()
+            .insert(HeaderName::from_static(TRACE_ID_HEADER), hv.clone());
     }
     req.extensions_mut().insert(TraceId(trace_id.clone()));
 
@@ -539,10 +526,7 @@ mod tests {
         "ok"
     }
 
-    fn build_app(
-        token: Arc<String>,
-        allow_ips: Arc<Vec<IpAddr>>,
-    ) -> Router {
+    fn build_app(token: Arc<String>, allow_ips: Arc<Vec<IpAddr>>) -> Router {
         let token_for_closure = token.clone();
         Router::new()
             .route("/admin/ping", get(ok))
@@ -611,14 +595,14 @@ mod tests {
 
     #[tokio::test]
     async fn trace_id_generated_when_absent() {
-        let app = build_app(
-            Arc::new("ignored".into()),
-            Arc::new(Vec::new()),
-        );
+        let app = build_app(Arc::new("ignored".into()), Arc::new(Vec::new()));
         let req = req_from(IpAddr::V4(Ipv4Addr::LOCALHOST), None, None);
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let hv = resp.headers().get(TRACE_ID_HEADER).expect("response carries trace-id");
+        let hv = resp
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .expect("response carries trace-id");
         let id = hv.to_str().unwrap();
         assert_eq!(id.len(), 16);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
@@ -626,10 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn trace_id_propagated_from_caller() {
-        let app = build_app(
-            Arc::new("ignored".into()),
-            Arc::new(Vec::new()),
-        );
+        let app = build_app(Arc::new("ignored".into()), Arc::new(Vec::new()));
         let req = req_from(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             None,
@@ -645,10 +626,7 @@ mod tests {
 
     #[tokio::test]
     async fn malicious_trace_id_is_regenerated() {
-        let app = build_app(
-            Arc::new("ignored".into()),
-            Arc::new(Vec::new()),
-        );
+        let app = build_app(Arc::new("ignored".into()), Arc::new(Vec::new()));
         // The http crate already rejects CR/LF/NUL in header values at
         // request build time, so we exercise our sanitizer with a payload
         // that's a valid HTTP header *value* but still dangerous if echoed
@@ -690,10 +668,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowlist_off_token_gate_still_works() {
-        let app = build_app(
-            Arc::new("secret".into()),
-            Arc::new(Vec::new()),
-        );
+        let app = build_app(Arc::new("secret".into()), Arc::new(Vec::new()));
         let non_local = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 99));
 
         // Good token → 200

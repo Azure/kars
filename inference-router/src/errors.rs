@@ -105,9 +105,15 @@ mod tests {
         let (status, Json(body)) =
             openai(StatusCode::BAD_GATEWAY, "upstream timed out", PROXY_ERROR);
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        let err = body.get("error").and_then(Value::as_object).expect("error object");
+        let err = body
+            .get("error")
+            .and_then(Value::as_object)
+            .expect("error object");
         assert_eq!(err.len(), 2, "openai error must have exactly message+type");
-        assert_eq!(err.get("message").and_then(Value::as_str), Some("upstream timed out"));
+        assert_eq!(
+            err.get("message").and_then(Value::as_str),
+            Some("upstream timed out")
+        );
         assert_eq!(err.get("type").and_then(Value::as_str), Some("proxy_error"));
     }
 

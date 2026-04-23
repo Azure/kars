@@ -1147,7 +1147,8 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
 
     match resp {
         Ok(r) => {
-            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let body = r.bytes().await.unwrap_or_default();
             (status, Body::from(body)).into_response()
         }

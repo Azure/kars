@@ -4,12 +4,12 @@
 //! Function bodies are byte-identical to the originals (verified by
 //! `tools/item-manifest` drift-check).
 
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Json;
 
 use super::AppState;
 use crate::errors;
