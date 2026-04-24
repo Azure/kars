@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 
 use super::AppState;
+use super::audit_events::{handoff_event, handoff_init as audit_handoff_init};
 use super::mesh::lookup_parent_amid;
 use crate::config::RegistryMode;
 use crate::errors;
@@ -210,7 +211,7 @@ async fn handoff_init_handler(
         .initialize(direction, predecessor_amid)
         .await;
 
-    crate::routes::audit_events::handoff_init(&state, &state.sandbox_name, &token_hash).await;
+    audit_handoff_init(&state, &state.sandbox_name, &token_hash).await;
 
     tracing::info!(
         token_hash = &token_hash[..16],
@@ -416,15 +417,16 @@ async fn handoff_snapshot(
         .await;
 
     // Audit log
-    state.governance.audit.log(
-        &state.sandbox_name,
+    handoff_event(
+        &state,
         "handoff:snapshot",
         &format!(
             "size={}B hash={}",
             compressed.len(),
             &verification_hash[..16]
         ),
-    );
+    )
+    .await;
 
     tracing::info!(
         size_bytes = compressed.len(),
@@ -521,11 +523,12 @@ async fn handoff_restore(
             state.handoff_session.fail(e.clone()).await;
 
             // Audit: failed restore (potential tampering or wrong key)
-            state.governance.audit.log(
-                &state.sandbox_name,
+            handoff_event(
+                &state,
                 "handoff:restore:failed",
                 &format!("decryption_error={e}"),
-            );
+            )
+            .await;
 
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -578,11 +581,12 @@ async fn handoff_restore(
             handoff::MAX_BLOB_SIZE_BYTES / (1024 * 1024)
         );
         state.handoff_session.fail(msg.clone()).await;
-        state.governance.audit.log(
-            &state.sandbox_name,
+        handoff_event(
+            &state,
             "handoff:restore:rejected",
             &format!("blob_too_large size={}B", compressed.len()),
-        );
+        )
+        .await;
         return errors::flat(StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
     }
 
@@ -606,14 +610,12 @@ async fn handoff_restore(
                 sanitized_bytes = sanitized_len,
                 "Chat snapshot sanitized — removed suspicious system-prompt patterns"
             );
-            state.governance.audit.log(
-                &state.sandbox_name,
+            handoff_event(
+                &state,
                 "handoff:restore:sanitized",
-                &format!(
-                    "chat_sanitized original={}B sanitized={}B",
-                    original_len, sanitized_len
-                ),
-            );
+                &format!("chat_sanitized original={original_len}B sanitized={sanitized_len}B"),
+            )
+            .await;
         }
         restored_state.chat_snapshot = Some(sanitized);
     }
@@ -715,14 +717,15 @@ async fn handoff_restore(
                         namespace = ?resp.namespace,
                         "Re-spawned sub-agent from handoff snapshot"
                     );
-                    state.governance.audit.log(
-                        &state.sandbox_name,
+                    handoff_event(
+                        &state,
                         "handoff:restore:sub-agent",
                         &format!(
                             "respawned={} original_amid={}",
                             sub_snap.agent_id, sub_snap.original_amid
                         ),
-                    );
+                    )
+                    .await;
                     sub_agent_results.push(serde_json::json!({
                         "agent_id": sub_snap.agent_id,
                         "original_amid": sub_snap.original_amid,
@@ -774,15 +777,16 @@ async fn handoff_restore(
     };
 
     // Audit log the restore
-    state.governance.audit.log(
-        &state.sandbox_name,
+    handoff_event(
+        &state,
         "handoff:restore",
         &format!(
             "from={} size={}B",
             restored_state.predecessor_amid,
             compressed.len()
         ),
-    );
+    )
+    .await;
 
     tracing::info!(
         from = %restored_state.predecessor_amid,
@@ -907,15 +911,16 @@ async fn handoff_verify(
 
     let session_status = state.handoff_session.status().await;
 
-    state.governance.audit.log(
-        &state.sandbox_name,
+    handoff_event(
+        &state,
         "handoff:verify",
         &format!(
             "hash={} match={}",
             &verification_hash[..16],
             matches.map(|m| m.to_string()).unwrap_or("n/a".into())
         ),
-    );
+    )
+    .await;
 
     (
         StatusCode::OK,
@@ -1038,11 +1043,12 @@ async fn handoff_abort(State(state): State<AppState>) -> impl IntoResponse {
     // Mark aborted
     state.handoff_session.abort().await;
 
-    state.governance.audit.log(
-        &state.sandbox_name,
+    handoff_event(
+        &state,
         "handoff:abort",
         &format!("aborted_from_phase={current_phase}"),
-    );
+    )
+    .await;
 
     tracing::info!(
         from_phase = %current_phase,
@@ -1249,14 +1255,14 @@ async fn handoff_succession(
                 |_| serde_json::json!({"error": "Failed to parse registry response"}),
             );
 
-            state.governance.audit.log(
-                &state.sandbox_name,
+            handoff_event(
+                &state,
                 "handoff:succession",
                 &format!(
-                    "predecessor={} successor={} registry_status={}",
-                    predecessor_amid, successor_amid, status
+                    "predecessor={predecessor_amid} successor={successor_amid} registry_status={status}"
                 ),
-            );
+            )
+            .await;
 
             // Forward the registry's status code
             let axum_status =
@@ -1350,11 +1356,12 @@ async fn handoff_pending(
         .await
     {
         Ok(token) => {
-            state.governance.audit.log(
-                &state.sandbox_name,
+            handoff_event(
+                &state,
                 "handoff:pending",
                 &format!("direction={direction} reason={reason}"),
-            );
+            )
+            .await;
 
             tracing::info!(
                 direction = %direction,
@@ -1384,11 +1391,7 @@ async fn handoff_pending(
                 _ => StatusCode::BAD_REQUEST,
             };
 
-            state.governance.audit.log(
-                &state.sandbox_name,
-                "handoff:pending:rejected",
-                &format!("{e}"),
-            );
+            handoff_event(&state, "handoff:pending:rejected", &format!("{e}")).await;
 
             errors::flat(status, e.to_string()).into_response()
         }
@@ -1445,14 +1448,15 @@ async fn handoff_confirm(
                 .initialize(direction, predecessor_amid)
                 .await;
 
-            state.governance.audit.log(
-                &state.sandbox_name,
+            handoff_event(
+                &state,
                 "handoff:confirmed",
                 &format!(
                     "direction={direction} reason={reason} token_hash={}",
                     &token_hash[..16]
                 ),
-            );
+            )
+            .await;
 
             tracing::info!(
                 direction = %direction,
@@ -1485,11 +1489,7 @@ async fn handoff_confirm(
 
             let is_too_fast = matches!(e, handoff::PendingHandoffError::TooFast { .. });
 
-            state.governance.audit.log(
-                &state.sandbox_name,
-                "handoff:confirm:rejected",
-                &format!("{e}"),
-            );
+            handoff_event(&state, "handoff:confirm:rejected", &format!("{e}")).await;
 
             if is_too_fast {
                 tracing::warn!(

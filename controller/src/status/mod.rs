@@ -117,7 +117,10 @@ pub async fn stamp_degraded(
     reason_value: &'static str,
     message: &str,
 ) {
-    use kube::{Api, ResourceExt, api::{Patch, PatchParams}};
+    use kube::{
+        Api, ResourceExt,
+        api::{Patch, PatchParams},
+    };
     let sandbox_api: Api<ClawSandbox> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
     let patch = build_degraded_status_patch(sandbox, reason_value, message);
@@ -251,11 +254,8 @@ mod tests {
         };
         std::thread::sleep(std::time::Duration::from_millis(5));
         let sb = new_sandbox(Some(2), Some(prior));
-        let patch = build_degraded_status_patch(
-            &sb,
-            conditions::reason::SPEC_INVALID,
-            "still bad spec",
-        );
+        let patch =
+            build_degraded_status_patch(&sb, conditions::reason::SPEC_INVALID, "still bad spec");
         let degraded_ts = patch["status"]["conditions"]
             .as_array()
             .unwrap()
@@ -272,14 +272,10 @@ mod tests {
     #[test]
     fn degraded_patch_handles_missing_generation() {
         let sb = new_sandbox(None, None);
-        let patch = build_degraded_status_patch(
-            &sb,
-            conditions::reason::SPEC_INVALID,
-            "no generation",
-        );
+        let patch =
+            build_degraded_status_patch(&sb, conditions::reason::SPEC_INVALID, "no generation");
         assert!(patch["status"]["observedGeneration"].is_null());
         let degraded = patch["status"]["conditions"][0].clone();
         assert!(degraded["observedGeneration"].is_null());
     }
 }
-
