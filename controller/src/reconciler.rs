@@ -176,38 +176,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .as_ref()
             .and_then(|l| l.get("azureclaw.azure.com/offload-requester"))
         {
-            let pairings_api: Api<crate::pairing::ClawPairing> =
-                Api::namespaced(client.clone(), crate::mesh_peer::IDENTITY_NAMESPACE);
-            if let Ok(list) = pairings_api.list(&ListParams::default()).await
-                && let Some(pairing) = list.items.iter().find(|p| {
-                    p.status.as_ref().and_then(|s| s.bound_amid.as_deref()) == Some(requester)
-                })
-            {
-                let pairing_name = pairing.name_any();
-                let current_slots = pairing
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.slots_used)
-                    .unwrap_or(1);
-                let patch = json!({
-                    "status": {
-                        "slotsUsed": (current_slots - 1).max(0),
-                        "activeSandbox": serde_json::Value::Null,
-                    }
-                });
-                let _ = pairings_api
-                    .patch_status(
-                        &pairing_name,
-                        &PatchParams::apply("azureclaw-controller"),
-                        &Patch::Merge(patch),
-                    )
-                    .await;
-                tracing::info!(
-                    sandbox = %name,
-                    pairing = %pairing_name,
-                    "Offload slot released"
-                );
-            }
+            crate::pairing::release_offload_slot(client.clone(), requester, &name).await;
         }
 
         // Remove the finalizer so K8s can complete CRD deletion
@@ -1354,21 +1323,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // ── Step 5: Update status ────────────────────────────────────────────
     let sandbox_api: Api<ClawSandbox> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-    let mut status_obj = json!({
-        "status": {
-            "phase": "Running",
-            "namespace": sandbox_ns,
-            "sandboxPod": format!("{name}-*"),
-            "inferenceEndpoint": format!("https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8443"),
-            "pendingApprovals": 0
-        }
-    });
-    // Preserve existing foundryAgentId in status (set externally or by future controller logic)
-    if let Some(ref existing_status) = sandbox.status
-        && let Some(ref agent_id) = existing_status.foundry_agent_id
-    {
-        status_obj["status"]["foundryAgentId"] = json!(agent_id);
-    }
+    let status_obj = crate::status::build_running_status_patch(&sandbox, &sandbox_ns);
     let _ = sandbox_api
         .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
         .await;
