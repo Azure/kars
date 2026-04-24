@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
+mod drain;
+pub use drain::DrainState;
+
 use crate::routes::AppState;
 use crate::spawn::SpawnRequest;
 
@@ -1180,54 +1183,6 @@ pub async fn build_snapshot(
 
 // ── Drain mode ──────────────────────────────────────────────────────────────
 
-/// Drain state for the router — stops accepting new work, completes in-flight.
-#[derive(Clone)]
-pub struct DrainState {
-    inner: Arc<RwLock<DrainInner>>,
-}
-
-struct DrainInner {
-    draining: bool,
-    drain_started: Option<Instant>,
-}
-
-impl Default for DrainState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DrainState {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(DrainInner {
-                draining: false,
-                drain_started: None,
-            })),
-        }
-    }
-
-    pub async fn start_drain(&self) {
-        let mut inner = self.inner.write().await;
-        inner.draining = true;
-        inner.drain_started = Some(Instant::now());
-    }
-
-    pub async fn stop_drain(&self) {
-        let mut inner = self.inner.write().await;
-        inner.draining = false;
-        inner.drain_started = None;
-    }
-
-    pub async fn is_draining(&self) -> bool {
-        self.inner.read().await.draining
-    }
-
-    pub async fn drain_duration(&self) -> Option<Duration> {
-        self.inner.read().await.drain_started.map(|s| s.elapsed())
-    }
-}
-
 // ── Chat snapshot sanitization (§9.9.1) ─────────────────────────────────────
 
 /// System-prompt injection patterns to strip from transferred chat history.
@@ -1692,20 +1647,6 @@ mod tests {
         assert_eq!(status.phase, HandoffPhase::Failed);
         assert_eq!(status.error.as_deref(), Some("integrity check failed"));
         assert!(session.can_start().await);
-    }
-
-    #[tokio::test]
-    async fn test_drain_state() {
-        let drain = DrainState::new();
-        assert!(!drain.is_draining().await);
-        assert!(drain.drain_duration().await.is_none());
-
-        drain.start_drain().await;
-        assert!(drain.is_draining().await);
-        assert!(drain.drain_duration().await.is_some());
-
-        drain.stop_drain().await;
-        assert!(!drain.is_draining().await);
     }
 
     #[test]

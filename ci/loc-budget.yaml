@@ -33,12 +33,12 @@ files:
     phase3_cap: 800
     notes: "Split into cli/src/commands/operator/{tui,input,data,overlays,keymap}.ts."
 
-  - path: inference-router/src/handoff.rs
+  - path: inference-router/src/handoff/mod.rs
     baseline_2026_04_24: 2626
     phase0_cap: 2600
     phase1_cap: 1800
     phase2_cap: 800
-    notes: "Split client/server/crypto modules."
+    notes: "Split client/server/crypto submodules under inference-router/src/handoff/."
 
   - path: controller/src/reconciler.rs
     baseline_2026_04_24: 2383
