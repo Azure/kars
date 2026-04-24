@@ -32,29 +32,11 @@ async fn sandbox_spawn(
     Json(req): Json<spawn::SpawnRequest>,
 ) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
-
-    // AGT policy check — evaluate spawn action via native governance
+    if let Err(resp) =
+        crate::routes::spawn_policy::check_sandbox_spawn(&state, &parent_name, &req.agent_id).await
     {
-        let action = format!("spawn:create:{}", req.agent_id);
-        let result = state.governance.evaluate(&parent_name, &action, None);
-        let allowed = result
-            .get("allowed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if !allowed {
-            let reason = result
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("policy denied");
-            tracing::warn!(parent = %parent_name, child = %req.agent_id, %reason, "AGT policy DENIED spawn");
-            return errors::flat(
-                StatusCode::FORBIDDEN,
-                format!("Spawn blocked by policy: {}", reason),
-            )
-            .into_response();
-        }
+        return resp;
     }
-
     match spawn::create_sandbox(&parent_name, &req).await {
         Ok(resp) => (
             StatusCode::CREATED,
