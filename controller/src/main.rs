@@ -16,6 +16,7 @@ mod fedcred;
 mod mesh_peer;
 mod pairing;
 mod pairing_reconciler;
+mod providers;
 mod reconciler;
 
 use anyhow::Result;
