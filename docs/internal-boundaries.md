@@ -34,6 +34,17 @@ the posture reference in the relevant security-audit doc.
 
 ---
 
+## Per-CRD posture (added as CRDs land)
+
+| CRD | Posture vs Foundry / nearest neighbour | Justification |
+|---|---|---|
+| `ClawSandbox` | **Orthogonal** to Foundry agent service | Foundry orchestrates agent *behaviours*; `ClawSandbox` is the AKS *runtime substrate*. Foundry agents can deploy onto a `ClawSandbox`. |
+| `McpServer` | **Orthogonal** to Foundry MCP hosting | Foundry hosts managed/SaaS MCP servers. `McpServer` is for AKS-hosted private/custom tool servers (company-internal APIs, VPC-restricted tools). They co-exist; one tenant can use both. |
+| `ToolPolicy` | **Complementary** to Foundry guardrails | Foundry Content Safety stays the model-side filter. `ToolPolicy` is sandbox-side per-tool gating (rate limit, AP2 caps, approval). Both apply; neither replaces the other. AGT `PolicyEngine` is the verdict engine for `ToolPolicy`; Foundry does not police tool calls. |
+| `ClawSandbox.spec.a2a` | **Orthogonal** to Foundry A2A (native) | Foundry hosts its managed agents over A2A. `ClawSandbox.spec.a2a` exposes AKS-hosted agents over A2A 1.0.0. Interop is the spec. They never publish the same agent. |
+
+---
+
 ## Rule for new CRDs
 
 Every new CRD merges only if:
