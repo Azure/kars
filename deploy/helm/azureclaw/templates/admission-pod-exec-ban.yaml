@@ -1,0 +1,86 @@
+{{- /*
+  Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
+
+  ValidatingAdmissionPolicy that rejects kubectl exec / attach /
+  portforward / console against pods in sandbox namespaces (namespaces
+  labelled azureclaw.azure.com/isolated=strict).
+
+  Rationale
+  ---------
+  A compromised operator or unscoped cluster-admin token is the single
+  largest blast-radius for an agent sandbox: exec gives arbitrary code
+  execution inside the sandbox pod, bypassing every in-pod hardening
+  layer (seccomp, egress-guard, Landlock, Entra token scope). MCP02
+  "tool poisoning" becomes irrelevant if an operator can just
+  `kubectl exec` and pull the bearer token out of /proc.
+
+  This VAP is a cluster-wide deny on exec-class subresources for pods
+  whose *namespace* carries the sandbox label.
+
+  Break-glass
+  -----------
+  Set label azureclaw.azure.com/break-glass=true on the namespace. The
+  bypass is logged at the K8s apiserver audit layer and must be
+  reverted by the responder.
+
+  Why namespace-labelled (not pod-labelled): sandbox pods are
+  controller-managed; labels on them can in principle be mutated. The
+  namespace is created with the label at ClawSandbox reconciliation
+  time and the controller does not re-label. Pinning the deny rule to
+  the namespace label means a compromised controller can't disable the
+  policy by re-labelling a pod.
+
+  CEL notes
+  ---------
+  * `request.subResource` is one of {'exec','attach','portforward'}
+    when invoked via kubectl exec / attach / port-forward. The
+    'console' case (OpenShift / CRC) is defensive.
+  * `namespaceObject.metadata.labels` is populated by the apiserver
+    when matchConstraints includes a namespaceSelector (it doesn't for
+    us — so we read the label off the pod's namespace via a VAP
+    variable that uses the namespaceObject param).
+*/}}
+{{- if .Values.admission.podExecBan.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: azureclaw-sandbox-exec-ban
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["CONNECT"]
+        resources:   ["pods/exec", "pods/attach", "pods/portforward"]
+  matchConditions:
+    - name: in-sandbox-namespace
+      expression: |
+        has(namespaceObject.metadata.labels) &&
+        namespaceObject.metadata.labels[?'azureclaw.azure.com/isolated'].orValue('') == 'strict'
+    - name: not-break-glass
+      expression: |
+        namespaceObject.metadata.labels[?'azureclaw.azure.com/break-glass'].orValue('') != 'true'
+  validations:
+    - expression: "false"
+      messageExpression: |
+        'exec/attach/portforward denied on azureclaw sandbox namespace ' +
+        namespaceObject.metadata.name +
+        '. If this is an emergency, label the namespace ' +
+        'azureclaw.azure.com/break-glass=true; bypasses are audited.'
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: azureclaw-sandbox-exec-ban-binding
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: admission
+spec:
+  policyName: azureclaw-sandbox-exec-ban
+  validationActions: [Deny, Audit]
+{{- end }}
