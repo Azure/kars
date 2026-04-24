@@ -19,6 +19,7 @@ ALLOW_PATHS=(
   'inference-router/src/providers/signing.rs'
   'inference-router/src/providers/mesh.rs'
   'inference-router/src/auth.rs'          # IMDS/JWT verification; pre-existing
+  'inference-router/src/handoff/mod.rs'   # pre-existing handoff AES-GCM blob cipher; plan §4.1 slates extraction into a SigningProvider-backed submodule
   'vendor/'
   'tests/'
 )
