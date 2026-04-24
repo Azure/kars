@@ -318,13 +318,13 @@ impl BehaviorMonitor {
 
 // ── Main governance engine ───────────────────────────────────────────────────
 
-/// Native governance engine — single struct that owns all AGT components.
-/// Thread-safe, shared via `Arc<Governance>`.
+/// Native governance engine — single struct that owns all AGT components. Thread-safe, shared via `Arc<Governance>`.
 pub struct Governance {
     pub identity: AgentIdentity,
     pub policy: PolicyEngine,
     pub trust: TrustManager,
     pub audit: AuditLogger,
+    pub(crate) audit_dedup: crate::providers::audit_impl::AuditDedup,
     pub redactor: CredentialRedactor,
     pub response_scanner: McpResponseScanner,
     pub tool_rate_limiter: McpSlidingRateLimiter,
@@ -335,9 +335,8 @@ pub struct Governance {
     pub trust_threshold: u32,
     /// Per-peer last-interaction timestamps (SDK's TrustScore doesn't expose
     /// this, so we track it alongside). Used by the operator UX to render
-    /// recency of mesh peers — without it, peers whose name doesn't match a
-    /// known sandbox CR (e.g. cloud-offload parents identified only by AMID)
-    /// are filtered out of the peer panel.
+    /// recency of mesh peers — without it, peers whose name doesn't match
+    /// a known sandbox CR (e.g. cloud-offload parents identified only by AMID) are filtered out of the peer panel.
     peer_last_seen: std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>,
     start_time: Instant,
     policy_rule_count: AtomicU64,
@@ -425,6 +424,7 @@ impl Governance {
             policy,
             trust: TrustManager::new(trust_config),
             audit: AuditLogger::new(),
+            audit_dedup: crate::providers::audit_impl::AuditDedup::new(),
             redactor,
             response_scanner,
             tool_rate_limiter,
