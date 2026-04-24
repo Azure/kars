@@ -36,6 +36,7 @@ prometheus.workspace = true
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 
 # AGT governance (policy YAML parsing + native policy/trust/audit)
 serde_yaml = "0.9"
