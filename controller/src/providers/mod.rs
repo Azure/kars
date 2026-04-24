@@ -35,7 +35,7 @@ pub mod field_managers {
     pub const PROVIDER_BRIDGE: &str = "azureclaw-controller/provider-bridge";
 }
 
-/// Provider selection as read from `ClawSandbox.spec.agt.providers`.
+/// Selects which implementation of a contract a tenant uses.
 /// See `docs/implementation-plan.md` §1.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -64,6 +64,76 @@ impl ProviderKind {
         !matches!(self, Self::Null)
     }
 }
+
+/// Outage mode selected per `ClawSandbox` via `spec.agt.outageMode`.
+/// See `docs/implementation-plan.md` §1.3.
+///
+/// The router-side enforcement, pure decision function, and serde wire
+/// format live in `inference-router/src/providers/outage.rs`. The
+/// controller repeats the enum here (with a parser + env-validation
+/// helper) so reconciler admission rejects `degradedDev` on non-dev
+/// sandboxes before the router ever sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutageMode {
+    /// Fail-closed. Default per §0.2 #8.
+    #[default]
+    Strict,
+    /// Allow when a cached decision is under TTL; else fail-closed.
+    CachedRead,
+    /// Fail-open with a warning label. Rejected in prod.
+    DegradedDev,
+}
+
+impl OutageMode {
+    /// Parse from the CRD wire value. Accepts camelCase, kebab-case and
+    /// snake_case — matches the router-side parser so a sandbox's
+    /// `spec.agt.outageMode` round-trips identically through both sides.
+    pub fn from_spec(s: &str) -> Option<Self> {
+        match s {
+            "strict" | "Strict" => Some(Self::Strict),
+            "cachedRead" | "cached-read" | "cached_read" => Some(Self::CachedRead),
+            "degradedDev" | "degraded-dev" | "degraded_dev" => Some(Self::DegradedDev),
+            _ => None,
+        }
+    }
+
+    /// `true` only for `DegradedDev` — the sole mode admission must
+    /// restrict to dev-only sandboxes.
+    pub fn is_dev_only(self) -> bool {
+        matches!(self, Self::DegradedDev)
+    }
+
+    /// Returns `Err` when the chosen mode is illegal for the environment.
+    /// `is_dev_env` must be `true` only when the `ClawSandbox` already
+    /// carries `metadata.labels.azureclaw.azure.com/dev-only=true` — that
+    /// admission check lives in the null-provider VAP and must have run
+    /// before this helper is consulted.
+    pub fn validate_for_env(self, is_dev_env: bool) -> Result<(), OutageModeError> {
+        if self.is_dev_only() && !is_dev_env {
+            return Err(OutageModeError::DegradedDevInProd);
+        }
+        Ok(())
+    }
+}
+
+/// Reasons an `OutageMode` value is rejected by the controller before it
+/// ever reaches the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutageModeError {
+    DegradedDevInProd,
+}
+
+impl std::fmt::Display for OutageModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DegradedDevInProd => f.write_str(
+                "outageMode=degradedDev requires the sandbox to carry metadata.labels.azureclaw.azure.com/dev-only=true",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OutageModeError {}
 
 /// The four provider kinds a `ClawSandbox` selects. Each field reads from
 /// `spec.agt.providers.{mesh,policy,audit,signing}`.
@@ -149,5 +219,54 @@ mod tests {
             field_managers::PROVIDER_BRIDGE,
             "azureclaw-controller/provider-bridge"
         );
+    }
+
+    #[test]
+    fn outage_mode_default_is_strict() {
+        assert_eq!(OutageMode::default(), OutageMode::Strict);
+    }
+
+    #[test]
+    fn outage_mode_parses_camel_kebab_snake() {
+        assert_eq!(OutageMode::from_spec("strict"), Some(OutageMode::Strict));
+        assert_eq!(
+            OutageMode::from_spec("cachedRead"),
+            Some(OutageMode::CachedRead)
+        );
+        assert_eq!(
+            OutageMode::from_spec("cached-read"),
+            Some(OutageMode::CachedRead)
+        );
+        assert_eq!(
+            OutageMode::from_spec("cached_read"),
+            Some(OutageMode::CachedRead)
+        );
+        assert_eq!(
+            OutageMode::from_spec("degradedDev"),
+            Some(OutageMode::DegradedDev)
+        );
+        assert_eq!(OutageMode::from_spec("nope"), None);
+        assert_eq!(OutageMode::from_spec(""), None);
+    }
+
+    #[test]
+    fn outage_mode_dev_only_flag() {
+        assert!(!OutageMode::Strict.is_dev_only());
+        assert!(!OutageMode::CachedRead.is_dev_only());
+        assert!(OutageMode::DegradedDev.is_dev_only());
+    }
+
+    #[test]
+    fn outage_mode_validate_rejects_degraded_dev_in_prod() {
+        assert_eq!(
+            OutageMode::DegradedDev.validate_for_env(false),
+            Err(OutageModeError::DegradedDevInProd)
+        );
+        assert!(OutageMode::DegradedDev.validate_for_env(true).is_ok());
+        // Non-dev-only modes are legal in both environments.
+        assert!(OutageMode::Strict.validate_for_env(false).is_ok());
+        assert!(OutageMode::Strict.validate_for_env(true).is_ok());
+        assert!(OutageMode::CachedRead.validate_for_env(false).is_ok());
+        assert!(OutageMode::CachedRead.validate_for_env(true).is_ok());
     }
 }
