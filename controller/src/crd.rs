@@ -54,6 +54,121 @@ pub struct ClawSandboxSpec {
 
     /// Resource limits
     pub resources: Option<ResourceConfig>,
+
+    /// A2A 1.0.0 inbound exposure (default: not exposed).
+    ///
+    /// **Default OFF.** When `Some`, the controller emits a Service +
+    /// CiliumNetworkPolicy + a routing entry in the gateway ConfigMap.
+    /// When `None` or set to a struct with `enabled: false`, no inbound
+    /// A2A path exists for this sandbox.
+    ///
+    /// See ADR-0001 §D6 for the surgical-exposure design (allowedCallers
+    /// pinning, expiresAt, advertisedSkills, minimumTrustScore, rate
+    /// limit, body cap, session length, streaming flag, revoke-now).
+    ///
+    /// Reconciler-side enforcement lands in
+    /// `phase1/a2a-controller-revocation`; this branch is schema-only.
+    pub a2a: Option<A2aIngressConfig>,
+}
+
+/// `ClawSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.
+/// All sub-fields are admission-validated via CEL (Phase 1 §7 entry 12).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aIngressConfig {
+    /// Master switch. `false` (or block absent) ⇒ no inbound A2A.
+    /// Setting this back to `false` triggers immediate (target < 30s)
+    /// teardown of the Service + CNP + ConfigMap entry.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Required when `enabled: true`. Empty list ⇒ admission deny.
+    /// Each entry pins a remote AgentCard signing key by its JWS
+    /// thumbprint (RFC 7638). The router rejects calls whose card
+    /// signature does not chain to one of these thumbprints.
+    #[serde(default)]
+    pub allowed_callers: Vec<AllowedCaller>,
+
+    /// Required when `enabled: true`. RFC 3339 timestamp; max 30 days
+    /// in the future (admission CEL). Reconciler tears down the
+    /// exposure on expiry.
+    pub expires_at: Option<String>,
+
+    /// Skills advertised on this sandbox's `/.well-known/agent.json`.
+    /// Anything not in this list is *not* served, even if the agent
+    /// implements it. Empty ⇒ admission deny.
+    #[serde(default)]
+    pub advertised_skills: Vec<AdvertisedSkill>,
+
+    /// Trust floor for inbound callers (AGT TrustManager score).
+    /// Default 700. Below this, the gateway refuses the call before
+    /// it touches the router.
+    #[serde(default = "default_min_trust")]
+    pub minimum_trust_score: u32,
+
+    /// Per-caller rate limits enforced at the gateway layer.
+    pub rate_limit: Option<A2aRateLimit>,
+
+    /// Body cap in bytes (default 1 MiB; hard ceiling 4 MiB enforced
+    /// by admission CEL).
+    #[serde(default = "default_body_cap")]
+    pub body_cap_bytes: u32,
+
+    /// Session length cap (seconds; default 60). Hard ceiling 600.
+    #[serde(default = "default_session_max")]
+    pub session_max_seconds: u32,
+
+    /// Allow A2A streaming responses. Default `false` (fail-closed
+    /// per ADR-0001 D8).
+    #[serde(default)]
+    pub allow_streaming: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowedCaller {
+    /// Human-readable name for ops dashboards.
+    pub display_name: Option<String>,
+
+    /// JWS thumbprint of the caller's AgentCard signing key
+    /// (RFC 7638 — JSON Web Key Thumbprint, base64url-encoded SHA-256).
+    pub jws_thumbprint: String,
+
+    /// Optional issuer URI for the caller's identity provider. When set,
+    /// the gateway requires the inbound JWS `iss` claim to match.
+    pub issuer: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvertisedSkill {
+    /// Skill name (matches the skills[].name field in the AgentCard).
+    pub name: String,
+
+    /// Optional human-readable description.
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aRateLimit {
+    /// Requests per minute, per allowed caller.
+    pub rpm: Option<u32>,
+
+    /// Burst (token bucket).
+    pub burst: Option<u32>,
+}
+
+fn default_min_trust() -> u32 {
+    700
+}
+
+fn default_body_cap() -> u32 {
+    1_048_576 // 1 MiB
+}
+
+fn default_session_max() -> u32 {
+    60
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
