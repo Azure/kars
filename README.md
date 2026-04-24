@@ -372,7 +372,7 @@ Every sandbox runs in its own namespace with defense layers stacked in depth. So
 | **Inference safety** | Content Safety + Prompt Shields on every request + per-agent token budgets |
 | **Content Safety** | Foundry-side guardrails (`DefaultV2`) — content filter annotations parsed from model responses; no separate API call needed |
 | **Zero Azure credentials** | Agent never sees Azure auth tokens — router authenticates via IMDS/Workload Identity |
-| **Admin token** | From K8s Secret mounted at `/etc/azureclaw/secrets/` — never hardcoded; required for trust mutation via `x-azureclaw-admin` header |
+| **Admin token** | From K8s Secret mounted at `/etc/azureclaw/secrets/` — never hardcoded; required for trust mutation. Canonical header is `Authorization: Bearer <token>`; the legacy `x-azureclaw-admin` header is still accepted but emits a one-shot `warn!` on first use and will be removed in a future release. Compared in constant time (`handoff::constant_time_eq`). Optional `ROUTER_ADMIN_ALLOW_IPS` IP allowlist + `ADMIN_ALLOWED_ORIGINS` browser-origin gate add defence-in-depth on top of the token. |
 | **AGT policy evaluation** | Per-request governance on inference, spawn, mesh receive, and response actions |
 | **Audit chain** | SHA-256 Merkle tree with integrity verification (validated on AKS: `integrity=valid`) |
 

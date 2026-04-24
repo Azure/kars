@@ -162,6 +162,22 @@ When `spec.governance.enabled: true`, AGT governance runs **natively inside the 
 | **Rate limiting** | `RateLimiter` — 500 req/sec global, 50/sec per-agent, token bucket with burst | In-process enforcement |
 | **Behavior monitoring** | `BehaviorMonitor` — burst detection (100/60s), failure tracking (20), denial tracking (10/60s) | Alerts on anomalous patterns |
 
+**Admin-plane hardening (cross-cutting, applies to every admin-gated route):**
+
+| Control | Implementation | Source |
+|---------|----------------|--------|
+| **Constant-time admin-token compare** | `handoff::constant_time_eq` replaces all `==` compares for the admin token in `admin_auth_middleware`, `POST /agt/trust`, `DELETE /agt/trust/{id}`, `PUT /agt/rate-limit`, and the cross-pod bearer middleware in `main.rs`. Eliminates timing side channel on token validation. | `inference-router/src/handoff.rs`, `routes.rs:1788/1947/2008`, `main.rs:288` |
+| **Strict deserialization** | `#[serde(deny_unknown_fields)]` on `SpawnRequest` and `HandoffMeta` — typo'd or unknown fields are rejected with HTTP 422 instead of silently defaulting. Other handlers take `Json<serde_json::Value>` and forward opaquely; the encryption / admin-token gate is the authoritative trust boundary for them. | `inference-router/src/spawn.rs:37/62` |
+| **Optional source-IP allowlist** | `ROUTER_ADMIN_ALLOW_IPS` (CIDR list). When set, a leaked admin token is useless without a pod at an allowlisted address. Localhost is always allowed (same-pod agent path is governed by per-route `no_localhost_bypass` flags). | `main.rs:146,392` |
+| **Browser-origin gate** | `ADMIN_ALLOWED_ORIGINS` rejects admin-route requests carrying a browser `Origin` header unless on the allowlist (default: empty). CLI/curl traffic is unaffected (no `Origin`). Closes cross-site abuse on a leaked token. | `inference-router/src/main.rs` |
+| **Canonical bearer header** | `Authorization: Bearer <token>` is the canonical admin auth. The legacy `x-azureclaw-admin` is still accepted but emits a one-shot `warn!` per process and will be removed. | `main.rs:376` |
+| **Handoff middlewares — no localhost bypass** | `handoff_init_auth_middleware` and `handoff_auth_middleware` require the admin token unconditionally; the same-pod agent (UID 1000) cannot forge a handoff even via 127.0.0.1. Read-only `/agt/handoff/status` and `/agt/handoff/sub-agents` keep localhost allowed for self-poll. | `inference-router/src/handoff.rs` |
+| **Per-request size caps** | Default axum 2 MB body limit on inference; explicit `DefaultBodyLimit::max(MAX_BLOB_SIZE_BYTES)` (200 MB) on handoff snapshot/restore with post-decompress recheck. | `routes.rs:3012/3249/3498/3518` |
+| **Trace-id sanitization** | Inbound `X-Azureclaw-Trace-Id` rejected if it contains CRLF / ANSI / path traversal; otherwise propagated to upstream Azure calls and stamped onto every audit-chain entry. | `main.rs:~440` (`is_safe_trace_id`) |
+| **Test-only endpoint overrides — controller-set only** | `AZURE_IMDS_ENDPOINT` and `AZURE_AD_ENDPOINT` can redirect IMDS / AAD calls to test fakes. They are read once at startup from the controller-injected env; the threat model assumes anyone who can mutate the pod env has already escaped, so this is not a new attack surface. | `inference-router/src/auth.rs` |
+
+For a per-route auth-tier and blast-radius walkthrough, see [`docs/threat-model.md`](threat-model.md).
+
 **Mesh & Communication Layer** (E2E encryption via `@agentmesh/sdk`):
 
 | Control | Implementation | API Endpoint |
@@ -333,3 +349,33 @@ Mesh identity stored in `~/.azureclaw/mesh-identity.json`:
 AzureClaw governs the agent runtime **without forking OpenClaw.** The native `sessions_spawn` / `sessions_send` tools are denied via upstream's own `tools.deny` config, and governance-aware replacements (`cloud_offload`, `azureclaw_spawn`, `mesh_send`, …) are registered through the upstream `api.registerTool()` plugin API. The `vendor/` directory contains only AgentMesh forks — there is **no OpenClaw fork**.
 
 See [Upstream Alignment](upstream-alignment.md) for the full rationale and file-level references.
+
+The operator-facing TypeScript CLI and the OpenClaw plugin run *outside* the sandbox boundary (on the operator's workstation or in the sandbox's Node process), so they have their own hardening surface independent of the AKS controls above. CodeQL findings on this surface are tracked and closed as code-scanning alerts.
+
+| Control | Where | What it catches |
+|---------|-------|-----------------|
+| **`redactSecrets()` log filter** | `cli/src/plugin.ts:165` (wraps `_log.info` / `_log.warn`) | Bearer / Basic auth headers, JWTs (`eyJ…`), generic `<keyword>: <value>` secrets (api_key, access_token, refresh_token, handoff_token, admin_token, pairing_token, invite_code, authorization, …), AzureClaw `azcp_<n>_…` one-time pairing tokens, and full PEM key blocks are redacted before reaching `console.log`. ReDoS-bounded character classes (`{1,40}`, `{0,8192}?`) on the PEM regex. Covered by 9 unit tests in `cli/src/redact.test.ts`. |
+| **`sanitizeForLog()`** | `cli/src/stepper.ts:158`, `cli/src/commands/mesh.ts:179` | Strips CR/LF/tab from untrusted strings before they reach `console.log`/`console.error`, blocking log-injection payloads (CWE-117). Uses the classic split `.replace` pattern that CodeQL's JS query models as a sanitizer. |
+| **`escapeHtml()` on OAuth callback** | `cli/src/commands/mesh.ts:168/209` | The local OAuth-callback HTML response HTML-encodes the upstream error string before injecting into `<p>…</p>`, blocking reflected-XSS in `azureclaw mesh login` browser flows. |
+| **Per-request tmpdir** | `cli/src/plugin.ts:1513–1520` | `fs.mkdtempSync(os.tmpdir() + "/offload-")` replaces the predictable `/tmp/.offload-start-<requestId>` marker (CWE-377 insecure temporary file). The session banner-dedup marker moved from `/tmp/.azureclaw-banner-printed` to user-private `~/.cache/azureclaw/banner-printed` (mode 0700/0600). |
+| **TOCTOU-safe file reads** | `cli/src/plugin.ts:1650, 5440`, `mesh-plugin/src/connection.ts:634` | `fs.statSync(...)` → `fs.readFileSync(...)` was a CWE-367 race window. Replaced by `openSync` + `fstatSync` + `readSync` so size check and read happen on the **same fd**. |
+| **No-shell command exec** | `cli/src/plugin.ts:1573–1594` | The "find newly-created files since offload start" call replaces `execSync("find … | head -n 50")` with `execFileSync("find", [...args])`. The shell is removed entirely, the `head` cap is enforced via `.slice(0, 50)` in JS. Closes CWE-78 indirect command-line injection. |
+
+### Sandbox entrypoint hardening
+
+| Control | Where | Why |
+|---------|-------|-----|
+| **EPERM-tolerant `fchmod`/`chmod`** | `sandbox-images/openclaw/entrypoint.sh` | Some Docker Desktop + virtiofs combinations return EPERM on `fchmod(2)` against the sandbox volume even when content writes succeed. All `cp`/`chmod`/`chown` calls now use `|| true` so transient mode-bit failures don't kill the script under `set -e`. The hardening block re-applies modes later. |
+| **Policy profile leak fix** | `sandbox-images/openclaw/entrypoint.sh` | The router unions rules from every `*.yaml` in `AGT_POLICY_DIR`, so copying *all* profiles let the offload `no-spawn` deny leak into `default`. Entrypoint now copies only `azureclaw-${AGT_POLICY_PROFILE}.yaml` (with `default` fallback) and clears stale YAMLs first. |
+| **Plugin / SDK / node_modules read-only** | `sandbox-images/openclaw/entrypoint.sh:598–630`, `Dockerfile:65–67` | After the blanket `chown -R sandbox:sandbox /sandbox`, plugin code, vendored SDK, `node_modules`, and skills are re-`chown`'d back to root and made read-only. UID 1000 can read but not modify its own runtime. Asserted by a controller-side reconciler regression test (every hardening invariant — UID, RO rootfs, drop ALL caps, seccomp profile, NET_ADMIN drop after init, iptables egress-guard, plugin+SDK ownership). |
+
+### Supply-chain & dependency hygiene
+
+| Control | Where | What it catches |
+|---------|-------|-----------------|
+| **`cargo audit` CI job** | `.github/workflows/ci.yml` (`continue-on-error: true` pending triage cadence) | Caught RUSTSEC-2026-0098 / -0099 / -0104 (cert-name-constraint flaws in the `rustls-webpki` chain used by `reqwest`, `hyper-rustls`, `kube-client`, `tokio-tungstenite`); closed by bumping `rustls-webpki` 0.103.10 → 0.103.13. Remaining audit warning is a transitive `rand 0.8.5` soundness note via upstream `agentmesh 3.1.0`, requires upstream bump. |
+| **npm overrides for vulnerable transitives** | `cli/package.json` | Pins `uuid` ≥14.0.0 (GHSA-w5hq-g745-h8pq, via `@azure/msal-node`), `xml2js` ≥0.6.2 (prototype pollution via `blessed-contrib/map-canvas`), `lodash` ≥4.17.24 (GHSA-r5fr-rjxr-66jc `_.template` CVE). `npm audit` clean. |
+| **Vendored Python wheel bumps** | `sandbox-images/openclaw/Dockerfile.base` | `lxml` 6.0.2 → 6.1.0, `pillow` 12.1.1 → 12.2.0, `pypdf` 6.9.2 → 6.10.2, `cryptography` 46.0.6 → 46.0.7. |
+| **Sandbox Go toolchain** | `sandbox-images/openclaw/Dockerfile.base` | `golang:1.23-alpine` → `1.24-alpine` to pick up Go stdlib patches for the bundled CLIs. |
+| **Vendored AgentMesh `Cargo.lock` bumps** | `vendor/agentmesh-{relay,registry}/Cargo.lock` | `openssl` 0.10.76 → 0.10.78 (GHSA-hppc-g8h3-xhp3), `tokio` 1.50 → 1.52.1, `mio` 1.1.1 → 1.2.0. |
+| **Fuzz + proptest coverage** | `cargo +nightly fuzz` | Targets: handoff blob parser, blocklist domain parser, AGT policy evaluator, safety-response parser. `proptest`: handoff-chunking, Double-Ratchet state transitions, K8s name validation. |
