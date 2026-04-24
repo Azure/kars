@@ -1,0 +1,61 @@
+name: ci-gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    # Per docs/implementation-plan.md §4.4 — all gates fail-hard, no continue-on-error.
+    name: ${{ matrix.gate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gate:
+          - loc
+          - no-stubs
+          - no-custom-crypto
+          - no-null-provider-prod
+          - security-audit-required
+          - vendored-patch-audit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so BASE_REF diffs work
+
+      - name: Set BASE_REF
+        id: base
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "BASE_REF=origin/${{ github.base_ref }}" >> "$GITHUB_ENV"
+          else
+            echo "BASE_REF=HEAD~1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Make scripts executable
+        run: chmod +x ci/*.sh
+
+      - name: Run gate ${{ matrix.gate }}
+        shell: bash
+        env:
+          VERBOSE: "1"
+        run: |
+          case "${{ matrix.gate }}" in
+            loc)                       ./ci/check-loc.sh ;;
+            no-stubs)                  ./ci/no-stubs.sh ;;
+            no-custom-crypto)          ./ci/no-custom-crypto.sh ;;
+            no-null-provider-prod)     ./ci/no-null-provider-prod.sh ;;
+            security-audit-required)   ./ci/security-audit-required.sh ;;
+            vendored-patch-audit)      ./ci/vendored-patch-audit.sh ;;
+          esac
