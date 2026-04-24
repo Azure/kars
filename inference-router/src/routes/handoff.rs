@@ -210,11 +210,7 @@ async fn handoff_init_handler(
         .initialize(direction, predecessor_amid)
         .await;
 
-    state.governance.audit.log(
-        &state.sandbox_name,
-        "handoff:init",
-        &format!("token_hash={}", &token_hash[..16]),
-    );
+    crate::routes::audit_events::handoff_init(&state, &state.sandbox_name, &token_hash).await;
 
     tracing::info!(
         token_hash = &token_hash[..16],
