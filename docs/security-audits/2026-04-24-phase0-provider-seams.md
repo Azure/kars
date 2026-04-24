@@ -117,3 +117,5 @@ they'll be `Consume` against AGT per `docs/internal-boundaries.md`.
 - The traits evolve (method added / return type changed) → re-audit.
 
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
