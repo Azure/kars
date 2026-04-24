@@ -163,6 +163,26 @@ interface OAuthResult {
   error?: string;
 }
 
+// HTML-escape user-controlled strings before embedding in HTML responses
+// (CWE-79: reflected-xss). Minimal escaper for untrusted text content.
+function escapeHtml(s: unknown): string {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Strip CR/LF from untrusted data before logging so attackers can't forge
+// log lines (CWE-117: log-injection). Classic pattern recognized by CodeQL.
+function sanitizeForLog(s: unknown): string {
+  return String(s ?? "")
+    .replace(/\r/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\t/g, " ");
+}
+
 async function waitForOAuthCallback(
   port: number,
   timeoutMs: number = 300_000
@@ -180,12 +200,13 @@ async function waitForOAuthCallback(
               Buffer.from(resultJson, "base64").toString("utf-8")
             ) as OAuthResult;
 
-            // Return a nice HTML page
-            res.writeHead(200, { "Content-Type": "text/html" });
+            // Return a nice HTML page — escape user-controlled fields to
+            // prevent reflected XSS (result comes from the registry redirect).
+            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
             res.end(`
               <html><body style="font-family: system-ui; text-align: center; padding-top: 80px;">
                 <h2>${result.success ? "✅ Authenticated!" : "❌ Authentication failed"}</h2>
-                <p>${result.success ? "You can close this tab and return to the terminal." : result.error ?? "Unknown error"}</p>
+                <p>${result.success ? "You can close this tab and return to the terminal." : escapeHtml(result.error ?? "Unknown error")}</p>
               </body></html>
             `);
 
@@ -546,7 +567,7 @@ export function meshCommand(): Command {
           );
         } else {
           console.error(
-            chalk.red(`  ✘ Verification failed: ${result.error ?? "Unknown error"}`)
+            chalk.red(`  ✘ Verification failed: ${sanitizeForLog(result.error ?? "Unknown error")}`)
           );
           process.exit(1);
         }
