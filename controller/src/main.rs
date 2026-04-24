@@ -13,6 +13,8 @@
 
 mod crd;
 mod fedcred;
+#[allow(dead_code)] // scaffold-only; reconciler lands in phase1/mcp-2026-streamable-http-routes
+mod mcp_server;
 mod mesh_peer;
 mod pairing;
 mod pairing_reconciler;
