@@ -81,3 +81,5 @@ N/A — internal refactor.
   for Phase 1) — adds new functions in keymap.ts and new tests here.
 
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
