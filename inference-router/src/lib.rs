@@ -10,6 +10,7 @@
     clippy::unnecessary_unwrap
 )]
 
+pub mod a2a;
 pub mod auth;
 pub mod blocklist;
 pub mod budget;
