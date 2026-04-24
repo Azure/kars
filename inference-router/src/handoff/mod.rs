@@ -24,13 +24,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 use tokio::sync::RwLock;
 
 mod drain;
 mod pending;
+mod token;
 pub use drain::DrainState;
 pub use pending::{PendingHandoffError, PendingHandoffStatus, PendingHandoffStore};
+pub use token::{DEFAULT_TOKEN_TTL_SECS, HandoffTokenError, HandoffTokenStore};
 
 use crate::routes::AppState;
 use crate::spawn::SpawnRequest;
@@ -38,10 +40,8 @@ use crate::spawn::SpawnRequest;
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const HANDOFF_STATE_VERSION: u32 = 1;
-const HANDOFF_TOKEN_BYTES: usize = 32;
-/// Default TTL for handoff tokens (seconds).
-pub const DEFAULT_TOKEN_TTL_SECS: u64 = 300; // 5 minutes
-const MAX_TOKEN_TTL_SECS: u64 = 600; // 10 minutes
+// Handoff-token size/TTL constants moved to `token.rs`; `DEFAULT_TOKEN_TTL_SECS`
+// is re-exported below for `crate::handoff::DEFAULT_TOKEN_TTL_SECS` callers.
 const HKDF_INFO: &[u8] = b"azureclaw-handoff-v1";
 const AES_NONCE_BYTES: usize = 12;
 
@@ -199,136 +199,6 @@ pub struct EncryptedHandoffBlob {
     pub verification_hash: String,
 }
 
-// ── Handoff token store ─────────────────────────────────────────────────────
-
-/// In-memory handoff token store.
-///
-/// - Only ONE active token at a time (prevents concurrent handoff races)
-/// - Tokens auto-expire after TTL
-/// - Token is never persisted to disk or environment
-/// - Token hash (not value) is logged for audit
-#[derive(Clone)]
-pub struct HandoffTokenStore {
-    inner: Arc<RwLock<Option<ActiveToken>>>,
-}
-
-struct ActiveToken {
-    /// The raw token value (32 bytes, base64-encoded for comparison).
-    token_b64: String,
-    /// SHA-256 hash of the token for audit logging (hex).
-    token_hash: String,
-    /// When the token was created.
-    created_at: Instant,
-    /// Time-to-live.
-    ttl: Duration,
-}
-
-impl Default for HandoffTokenStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HandoffTokenStore {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    /// Create a new handoff token. Replaces any existing token.
-    ///
-    /// Returns (token_base64, token_hash_hex) — caller sends token to client,
-    /// stores hash for audit.
-    pub async fn create_token(&self, ttl_secs: u64) -> (String, String) {
-        let ttl_secs = ttl_secs.min(MAX_TOKEN_TTL_SECS);
-
-        // Generate random bytes BEFORE any await (ThreadRng is !Send).
-        let token_b64 = {
-            let mut rng = rand::rng();
-            let mut token_bytes = [0u8; HANDOFF_TOKEN_BYTES];
-            rng.fill(&mut token_bytes);
-            BASE64.encode(token_bytes)
-        };
-
-        let token_hash = hex_sha256(token_b64.as_bytes());
-
-        let active = ActiveToken {
-            token_b64: token_b64.clone(),
-            token_hash: token_hash.clone(),
-            created_at: Instant::now(),
-            ttl: Duration::from_secs(ttl_secs),
-        };
-
-        *self.inner.write().await = Some(active);
-        (token_b64, token_hash)
-    }
-
-    /// Validate a handoff token. Returns Ok(token_hash) on success.
-    ///
-    /// Tokens are validated against the store but not consumed — reuse within
-    /// a session is allowed (e.g. for snapshot/restore retries).
-    pub async fn validate(&self, provided: &str) -> Result<String, HandoffTokenError> {
-        let mut guard = self.inner.write().await;
-
-        let active = guard.as_mut().ok_or(HandoffTokenError::NoActiveToken)?;
-
-        // Check expiry
-        if active.created_at.elapsed() > active.ttl {
-            *guard = None;
-            return Err(HandoffTokenError::Expired);
-        }
-
-        // Check value
-        if !constant_time_eq(provided.as_bytes(), active.token_b64.as_bytes()) {
-            return Err(HandoffTokenError::Invalid);
-        }
-
-        // Check one-time use (for snapshot/restore we allow reuse within the session)
-        let hash = active.token_hash.clone();
-        Ok(hash)
-    }
-
-    /// Revoke the current token (on abort or decommission).
-    pub async fn revoke(&self) {
-        *self.inner.write().await = None;
-    }
-
-    /// Check if there's an active (non-expired) token.
-    pub async fn is_active(&self) -> bool {
-        let guard = self.inner.read().await;
-        match guard.as_ref() {
-            Some(t) => t.created_at.elapsed() <= t.ttl,
-            None => false,
-        }
-    }
-
-    /// Get the hash of the active token (for audit logging).
-    pub async fn active_token_hash(&self) -> Option<String> {
-        let guard = self.inner.read().await;
-        guard
-            .as_ref()
-            .filter(|t| t.created_at.elapsed() <= t.ttl)
-            .map(|t| t.token_hash.clone())
-    }
-}
-
-#[derive(Debug)]
-pub enum HandoffTokenError {
-    NoActiveToken,
-    Expired,
-    Invalid,
-}
-
-impl std::fmt::Display for HandoffTokenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoActiveToken => write!(f, "No active handoff token"),
-            Self::Expired => write!(f, "Handoff token expired"),
-            Self::Invalid => write!(f, "Invalid handoff token"),
-        }
-    }
-}
 
 
 // ── Handoff session tracker ─────────────────────────────────────────────────
@@ -1013,7 +883,7 @@ pub fn sanitize_chat_snapshot(chat_bytes: &[u8]) -> Vec<u8> {
 // ── Utility functions ───────────────────────────────────────────────────────
 
 /// SHA-256 hash as hex string.
-fn hex_sha256(data: &[u8]) -> String {
+pub(crate) fn hex_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let result = hasher.finalize();
@@ -1117,6 +987,7 @@ mod option_base64_bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_hex_sha256() {
