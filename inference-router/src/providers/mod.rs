@@ -35,6 +35,7 @@ pub mod audit;
 pub mod mesh;
 pub mod outage;
 pub mod policy;
+pub mod policy_impl;
 pub mod signing;
 
 pub use audit::{AuditEvent, AuditReceipt, AuditSink, ReceiptId};
@@ -44,7 +45,14 @@ pub use outage::{
     OutageConfigError, OutageMode, OutageParseError, decide_outage,
 };
 pub use policy::{PolicyDecisionProvider, PolicyRequest, PolicyVerdict};
+pub use policy_impl::verdict_to_legacy_json;
 pub use signing::{KeyRef, Signature, SigningProvider};
+// The in-tree `PolicyDecisionProvider` implementation lives in
+// `policy_impl.rs` (`impl PolicyDecisionProvider for Governance`). No
+// wrapper type exists for it. The word "vendored" is reserved for
+// `/vendor/` (patched upstream forks). AGT-SDK-backed concrete impls
+// will land in siblings under `providers/agt/` in a follow-up branch
+// and do carry their own types because they have state of their own.
 
 /// Selects which implementation of a contract a tenant uses.
 /// See `docs/implementation-plan.md` §1.4.
