@@ -18,6 +18,7 @@ pub mod errors;
 pub mod forward_proxy;
 pub mod governance;
 pub mod handoff;
+pub mod mcp;
 pub mod mesh;
 pub mod metrics;
 pub mod providers;
