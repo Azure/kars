@@ -21,6 +21,8 @@ mod pairing_reconciler;
 mod providers;
 mod reconciler;
 mod status;
+#[allow(dead_code)] // scaffold-only; reconciler lands in phase1/tool-policy-reconciler
+mod tool_policy;
 
 use anyhow::Result;
 use kube::Client;
