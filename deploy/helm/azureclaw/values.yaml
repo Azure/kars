@@ -175,3 +175,10 @@ azure:
   osconfig:
     enabled: false      # TODO: enable when azure-osconfig integration is ready
     benchmark: "CIS_AKS_Optimized_Azure_Linux_3"
+
+# Cilium-related toggles. AKS clusters with Azure CNI Powered by Cilium
+# get this for free; vanilla Azure CNI does not. Default off so the
+# helm chart still installs on a vanilla cluster — the equivalent
+# CiliumNetworkPolicy is then emitted per-sandbox by the controller.
+cilium:
+  enabled: false
