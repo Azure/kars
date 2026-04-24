@@ -5,19 +5,39 @@
 //! keeps `handoff.rs` under its §4.2 LOC budget while the
 //! `providers::AuditSink` seam is progressively adopted.
 //!
-//! New migrated call-sites land here, not in `handoff.rs`. The legacy
-//! `state.governance.audit.log(...)` direct-field calls continue to work
-//! unchanged — they're migrated incrementally, one per follow-up PR, to
-//! keep blast radius small.
+//! All handoff audit emissions land here (not in `handoff.rs`). They
+//! flow through the [`crate::providers::AuditSink`] trait on
+//! `AppState.audit_sink`, which the in-tree
+//! `impl AuditSink for Governance` writes onto the same hash-chained
+//! `agentmesh::AuditLogger` the legacy `audit.log` calls used. So this
+//! is a routing change, not a backend change — one chain, one set of
+//! receipts, accessed through the four-seam contract.
 
 use crate::providers::{AuditEvent, audit_now_ms};
 use crate::routes::AppState;
 
-/// Append a `handoff:init` audit event through the four-seam
-/// [`crate::providers::AuditSink`] trait. Errors are logged but do not
-/// fail the caller — audit append is non-fatal here (the hand-off token
-/// itself is already persisted, and rejecting it because the audit sink
-/// is unreachable would be a denial-of-service vector against the sink).
+/// Generic handoff audit helper. Appends an event through the four-seam
+/// [`crate::providers::AuditSink`] trait with `verdict = "info"` and a
+/// single `("detail", details)` label. Append errors are logged but
+/// never fail the caller — handoff state has already mutated by the
+/// time we audit it, and rejecting the request because the sink is
+/// unreachable would be a denial-of-service vector against the sink.
+pub async fn handoff_event(state: &AppState, action: &str, details: &str) {
+    let event = AuditEvent {
+        timestamp_ms: audit_now_ms(),
+        principal: state.sandbox_name.to_string(),
+        action: action.to_string(),
+        payload_digest_hex: String::new(),
+        verdict: "info".into(),
+        labels: vec![("detail".into(), details.to_string())],
+    };
+    if let Err(e) = state.audit_sink.append(event).await {
+        tracing::warn!(error = %e, action, "audit sink append failed (non-fatal)");
+    }
+}
+
+/// Append a `handoff:init` audit event. Specialised helper because the
+/// label key is `token_hash` (truncated to 16 chars), not `detail`.
 pub async fn handoff_init(state: &AppState, sandbox: &str, token_hash: &str) {
     let event = AuditEvent {
         timestamp_ms: audit_now_ms(),
