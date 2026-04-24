@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
-use crate::providers::PolicyDecisionProvider;
+use crate::providers::{AuditSink, PolicyDecisionProvider};
 use crate::proxy::UpstreamConfig;
 
 mod handoff;
@@ -27,6 +27,7 @@ pub use handoff::handoff_status_routes;
 pub use handoff::spawn_routes;
 
 pub(crate) mod spawn_policy;
+pub(crate) mod audit_events;
 
 mod governance;
 pub use governance::sensitive_agt_routes;
@@ -53,6 +54,11 @@ pub struct AppState {
     /// trait is implemented directly on `Governance`. Per-tenant swap to
     /// `Arc<AgtPolicyDecisionProvider>` is the next Phase 1 branch.
     pub policy_provider: Arc<dyn PolicyDecisionProvider>,
+    /// Four-seam audit contract view of `governance`. Same `Arc<Governance>`
+    /// coerced to `Arc<dyn AuditSink>`; the trait impl lives in
+    /// `providers/audit_impl.rs` and adds an in-process dedup cache on top
+    /// of the non-idempotent upstream `AuditLogger::log`.
+    pub audit_sink: Arc<dyn AuditSink>,
     pub blocklist: Blocklist,
     pub sandbox_name: Arc<String>,
     pub inbox: Arc<MeshInbox>,
@@ -139,6 +145,7 @@ impl AppState {
             config: Arc::new(config),
             budget,
             policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
+            audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
             governance,
             blocklist,
             sandbox_name: Arc::new(sandbox_name),

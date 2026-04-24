@@ -32,13 +32,15 @@
 #![allow(dead_code)]
 
 pub mod audit;
+pub mod audit_impl;
 pub mod mesh;
 pub mod outage;
 pub mod policy;
 pub mod policy_impl;
 pub mod signing;
 
-pub use audit::{AuditEvent, AuditReceipt, AuditSink, ReceiptId};
+pub use audit::{AuditError, AuditEvent, AuditReceipt, AuditSink, ReceiptId};
+pub(crate) use audit_impl::now_ms as audit_now_ms;
 pub use mesh::{MeshProvider, PeerId, SendResult, SessionId};
 pub use outage::{
     CachedDecision, DEFAULT_CACHED_TTL, MAX_CACHED_TTL, OutageAction, OutageConfig,
