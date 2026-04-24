@@ -1,0 +1,27 @@
+# Null-provider admission fixtures — positive case.
+# Dev-labelled ClawSandbox explicitly opts into a null provider. The
+# ValidatingAdmissionPolicy in deploy/helm/azureclaw/templates/
+# admission-null-provider.yaml must ACCEPT this manifest.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: dev-null-provider-ok
+  namespace: azureclaw-fixtures
+  labels:
+    azureclaw.azure.com/dev-only: "true"
+spec:
+  openclaw:
+    version: "0.1"
+  sandbox:
+    isolation: strict
+  inference:
+    endpoint: "https://example.openai.azure.com"
+  # Forward-compatible with Phase 1 CRD schema; current v1alpha1 has
+  # x-kubernetes-preserve-unknown-fields on spec, so this is accepted.
+  agt:
+    providers:
+      mesh: null
+      policy: vendored
+      audit: vendored
+      signing: vendored
