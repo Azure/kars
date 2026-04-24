@@ -38,6 +38,7 @@ pub mod outage;
 pub mod policy;
 pub mod policy_impl;
 pub mod signing;
+pub mod signing_impl;
 
 pub use audit::{AuditError, AuditEvent, AuditReceipt, AuditSink, ReceiptId};
 pub(crate) use audit_impl::now_ms as audit_now_ms;
@@ -48,7 +49,8 @@ pub use outage::{
 };
 pub use policy::{PolicyDecisionProvider, PolicyRequest, PolicyVerdict};
 pub use policy_impl::verdict_to_legacy_json;
-pub use signing::{KeyRef, Signature, SigningProvider};
+pub use signing::{KeyRef, Signature, SigningError, SigningProvider};
+pub(crate) use signing_impl::DEFAULT_KEY_REF;
 // The in-tree `PolicyDecisionProvider` implementation lives in
 // `policy_impl.rs` (`impl PolicyDecisionProvider for Governance`). No
 // wrapper type exists for it. The word "vendored" is reserved for

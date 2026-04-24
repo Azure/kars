@@ -19,9 +19,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::governance::Governance;
-use crate::providers::policy::{
-    PolicyDecisionProvider, PolicyError, PolicyRequest, PolicyVerdict,
-};
+use crate::providers::policy::{PolicyDecisionProvider, PolicyError, PolicyRequest, PolicyVerdict};
 
 // (no wrapper struct, no `providers/vendored/` directory) and preserves the
 // word "vendored" for `/vendor/` — the patched upstream forks — which is
@@ -35,9 +33,7 @@ use crate::providers::policy::{
 /// Map a [`PolicyRequest`] onto the `(agent_id, action, extra)` triple
 /// consumed by [`Governance::evaluate`]. Free function so both the trait
 /// impl and tests can reach it.
-fn policy_request_to_legacy_args(
-    request: &PolicyRequest,
-) -> (String, String, Option<Value>) {
+fn policy_request_to_legacy_args(request: &PolicyRequest) -> (String, String, Option<Value>) {
     let extra = if request.context.is_empty() && request.payload_digest_hex.is_empty() {
         None
     } else {
@@ -62,9 +58,7 @@ fn legacy_verdict_to_policy_verdict(value: Value) -> Result<PolicyVerdict, Polic
     let action = value
         .get("action")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            PolicyError::Internal("governance verdict missing `action` field".into())
-        })?;
+        .ok_or_else(|| PolicyError::Internal("governance verdict missing `action` field".into()))?;
     let reason = value
         .get("reason")
         .and_then(Value::as_str)
@@ -276,9 +270,8 @@ mod tests {
 
     #[test]
     fn verdict_to_legacy_json_allow_roundtrips() {
-        let back =
-            legacy_verdict_to_policy_verdict(verdict_to_legacy_json(&PolicyVerdict::Allow))
-                .unwrap();
+        let back = legacy_verdict_to_policy_verdict(verdict_to_legacy_json(&PolicyVerdict::Allow))
+            .unwrap();
         assert_eq!(back, PolicyVerdict::Allow);
     }
 
@@ -294,11 +287,9 @@ mod tests {
 
     #[test]
     fn verdict_to_legacy_json_deny_preserves_reason() {
-        let back = legacy_verdict_to_policy_verdict(verdict_to_legacy_json(
-            &PolicyVerdict::Deny {
-                reason: "malformed tool arg".into(),
-            },
-        ))
+        let back = legacy_verdict_to_policy_verdict(verdict_to_legacy_json(&PolicyVerdict::Deny {
+            reason: "malformed tool arg".into(),
+        }))
         .unwrap();
         assert_eq!(
             back,

@@ -27,10 +27,7 @@ pub async fn handoff_init(state: &AppState, sandbox: &str, token_hash: &str) {
         verdict: "success".into(),
         labels: vec![(
             "token_hash".into(),
-            token_hash
-                .get(..16)
-                .unwrap_or(token_hash)
-                .to_string(),
+            token_hash.get(..16).unwrap_or(token_hash).to_string(),
         )],
     };
     if let Err(e) = state.audit_sink.append(event).await {
