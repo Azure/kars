@@ -23,7 +23,7 @@ use azureclaw_inference_router::handoff::{
     DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore,
 };
 use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
-use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider};
+use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
 use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         budget: TokenBudgetTracker::new(1_000_000, 100_000),
         policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
         audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
+        signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
         governance,
         blocklist: Blocklist::disabled(),
         sandbox_name: Arc::new(sandbox.to_string()),

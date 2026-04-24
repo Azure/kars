@@ -199,8 +199,6 @@ pub struct EncryptedHandoffBlob {
     pub verification_hash: String,
 }
 
-
-
 // ── Handoff session tracker ─────────────────────────────────────────────────
 
 /// Tracks the state of an in-progress handoff.

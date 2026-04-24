@@ -181,7 +181,10 @@ mod tests {
     async fn test_active_token_hash_tracks_revoke() {
         let store = HandoffTokenStore::new();
         let (_token, hash) = store.create_token(60).await;
-        assert_eq!(store.active_token_hash().await.as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            store.active_token_hash().await.as_deref(),
+            Some(hash.as_str())
+        );
 
         store.revoke().await;
         assert!(store.active_token_hash().await.is_none());

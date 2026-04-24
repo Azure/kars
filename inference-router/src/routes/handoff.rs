@@ -1061,14 +1061,10 @@ async fn handoff_abort(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /agt/handoff/succession — sign and submit identity succession to registry.
-///
-/// The predecessor router signs the canonical succession message using its private
-/// Ed25519 key and forwards the complete request to the registry. This avoids
-/// exposing the private key to the CLI.
-///
-/// Request body: `{ "successor_amid": "...", "reason": "handoff" }`
-/// The router resolves its own AMID + signing key, plus the successor's key,
-/// by querying the registry.
+/// Router signs the canonical succession message with its Ed25519 key (via the
+/// `SigningProvider` seam) and forwards the full request to the registry so the
+/// private key never leaves the sandbox. Request body: `{ "successor_amid":
+/// "...", "reason": "handoff" }`.
 async fn handoff_succession(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -1211,9 +1207,15 @@ async fn handoff_succession(
         "succession:{}:{}:{}",
         predecessor_amid, successor_amid, timestamp
     );
-    let signature_bytes = state.governance.identity.sign(canonical_message.as_bytes());
-    let signature_b64 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signature_bytes);
+    let signature_b64 = match crate::routes::signing_ops::sign_default_b64_or_response(
+        &state,
+        canonical_message.as_bytes(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
 
     // Submit to registry
     let succession_request = serde_json::json!({
@@ -1299,11 +1301,8 @@ async fn handoff_resume(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /agt/handoff/status — read-only handoff status.
 /// POST /agt/handoff/pending — create a pending handoff request (§9.9.9 Stage 1).
-///
-/// Called by the agent tool (`azureclaw_handoff_request`). Generates a confirmation
-/// token that the user must echo back to confirm.
-///
-/// Rate limited: max 1 request per 5 minutes.
+/// Called by `azureclaw_handoff_request`; mints a confirmation token the user
+/// must echo back. Rate limited: max 1 request / 5 min.
 async fn handoff_pending(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,

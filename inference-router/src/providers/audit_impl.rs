@@ -28,9 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use crate::governance::Governance;
-use crate::providers::audit::{
-    AuditError, AuditEvent, AuditReceipt, AuditSink, ReceiptId,
-};
+use crate::providers::audit::{AuditError, AuditEvent, AuditReceipt, AuditSink, ReceiptId};
 
 /// Maximum number of distinct `(timestamp_ms, principal, action, digest)`
 /// tuples remembered for dedup. At ~200 bytes/entry this caps the cache
@@ -180,7 +178,9 @@ fn parse_iso8601_ms(s: &str) -> Option<u64> {
     let doy = (153 * m + 2) / 5 + da - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146097 + doe as i64 - 719468;
-    let secs = days.checked_mul(86_400)?.checked_add((h * 3600 + mi * 60 + se) as i64)?;
+    let secs = days
+        .checked_mul(86_400)?
+        .checked_add((h * 3600 + mi * 60 + se) as i64)?;
     let ms = (secs as i128) * 1000 + ms_frac as i128;
     u64::try_from(ms.max(0)).ok()
 }
@@ -256,7 +256,10 @@ mod tests {
         let gov = Governance::new("test-sandbox");
         let first = gov.append(sample_event(100, "a")).await.unwrap();
         let second = gov.append(sample_event(101, "b")).await.unwrap();
-        assert_eq!(second.prev_hash_hex.as_deref(), Some(first.entry_hash_hex.as_str()));
+        assert_eq!(
+            second.prev_hash_hex.as_deref(),
+            Some(first.entry_hash_hex.as_str())
+        );
     }
 
     #[tokio::test]
@@ -296,7 +299,11 @@ mod tests {
         gov.append(event).await.unwrap();
         let e = gov.audit.entries().into_iter().next().unwrap();
         assert!(e.decision.contains("tier=1"), "got: {}", e.decision);
-        assert!(e.decision.contains("digest=deadbeef"), "got: {}", e.decision);
+        assert!(
+            e.decision.contains("digest=deadbeef"),
+            "got: {}",
+            e.decision
+        );
         assert!(e.decision.starts_with("allow"));
     }
 
