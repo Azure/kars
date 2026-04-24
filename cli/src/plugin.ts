@@ -158,14 +158,29 @@ let handoffProgress: HandoffProgress | null = null;
 let handoffInterruptRequested = false;
 let handoffInterruptReason = "";
 
-// Redact values that look like secrets (tokens, bearer headers, API keys)
-// before they reach console.* sinks. Applied in _log.info/warn below and at
-// other logging sinks that accept interpolated strings.
-function redactSecrets(m: string): string {
+// Redact values that look like secrets (tokens, bearer headers, API keys,
+// PEM blocks, AzureClaw pairing tokens) before they reach console.* sinks.
+// Applied in _log.info/warn below and at other logging sinks that accept
+// interpolated strings. Exported for unit-testing.
+export function redactSecrets(m: string): string {
   return String(m)
-    .replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]+/gi, "$1***")
-    .replace(/((?:api[_-]?key|token|secret|password|authorization)["':=\s]+)["']?([A-Za-z0-9._\-+/=]{8,})["']?/gi, "$1***")
-    .replace(/(eyJ[A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+/g, "***JWT***");
+    // PEM private/public key blocks — redact the full block
+    .replace(/-----BEGIN [A-Z ]+-----[\s\S]+?-----END [A-Z ]+-----/g, "-----BEGIN ***REDACTED***-----")
+    // AzureClaw one-time pairing tokens (azcp_<version>_<base64>)
+    .replace(/\bazcp_\d+_[A-Za-z0-9_\-=]+/g, "azcp_***")
+    // HTTP Bearer / Basic auth headers
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._\-+/=]+/gi, "$1 ***")
+    // JWTs (three dot-separated base64url segments, first starts with eyJ)
+    .replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b/g, "***JWT***")
+    // Generic "keyword: value" style (api_key, token, secret, password, authorization,
+    // pairing_token, handoff_token, admin_token, invite_code, access_token, refresh_token)
+    .replace(
+      /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|handoff[_-]?token|admin[_-]?token|pairing[_-]?token|invite[_-]?code|token|secret|password|authorization)["':=\s]{1,4})["']?([A-Za-z0-9._\-+/=]{8,})["']?/gi,
+      "$1***",
+    )
+    // Azure subscription/client secrets (GUID-ish with dashes are fine to keep;
+    // but raw 32+ char base64 that follows "secret" is caught above)
+    ;
 }
 
 // Strip CR/LF from untrusted data before logging so attackers can't forge
