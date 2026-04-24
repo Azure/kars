@@ -142,6 +142,24 @@ admission:
     # runtime enforcement. Requires Kubernetes >= 1.30 (VAP GA).
     # Opt-out per object via label: azureclaw.azure.com/dev-only: "true"
     enabled: true
+  podExecBan:
+    # Deploy ValidatingAdmissionPolicy that rejects kubectl exec /
+    # attach / portforward / console against pods in sandbox namespaces
+    # (labelled azureclaw.azure.com/isolated=strict). Prevents operator
+    # shell-in-sandbox vector (MCP02 "tool poisoning" blast radius).
+    # Break-glass: set azureclaw.azure.com/break-glass=true on the
+    # namespace; admission bypasses (logged via audit policy).
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
+  sandboxPostureLock:
+    # Deploy ValidatingAdmissionPolicy that blocks posture downgrades
+    # on sandbox pods: flipping readOnlyRootFilesystem false, dropping
+    # runAsNonRoot, removing seccompProfile, escalating privileged.
+    # Applies to pods in namespaces labelled
+    # azureclaw.azure.com/isolated=strict on UPDATE only (CREATE is
+    # handled by the controller's own pod template).
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
 
 # Azure-specific configuration
 azure:
