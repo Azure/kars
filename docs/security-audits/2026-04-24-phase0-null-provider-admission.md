@@ -126,3 +126,5 @@ Consume-not-compete with the K8s admission surface; no overlap with AGT
   resourceRules` and add fixtures.
 
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
