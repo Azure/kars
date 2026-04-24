@@ -1,23 +1,62 @@
-//! `MeshProvider` contract.
+//! `MeshProvider` contract — **plugin-side**. No Rust implementation
+//! exists in the router and **none should**.
 //!
-//! Responsibility: session establishment between two peers, E2E-encrypted
-//! message send and receive, and relay/registry interaction. Hides the
-//! Signal-protocol-vs-AGT-mesh choice from call sites.
+//! ## Why this trait is here, but never `impl`'d in the router
 //!
-//! Implementations (Phase 1):
-//! - `VendoredAgentMeshProvider` — wraps the current `vendor/agentmesh-sdk`
-//!   client + `vendor/agentmesh-relay` + `vendor/agentmesh-registry` code path.
-//! - `AgtMeshProvider` — lands when AGT's AgentMesh relay/registry ships
-//!   (`docs/implementation-plan.md` §1.5).
-//! - `NullMeshProvider` — dev/test; `open_session` always errors.
+//! The router is a **proxy** for mesh traffic, not a Signal-protocol
+//! participant. End-to-end encryption between agents is performed in the
+//! sandbox by the **agent** (today: OpenClaw + the TypeScript
+//! `mesh-plugin/` + vendored `@agentmesh/sdk`). Keys live with the agent;
+//! the router only sees opaque ciphertext over the relay WebSocket.
+//!
+//! Concretely, the router's mesh role is:
+//! 1. Forward the relay WebSocket (`forward_proxy` + `routes/mesh.rs`).
+//! 2. Forward registry HTTPS calls (prekey upload, peer lookup).
+//! 3. Apply policy + audit + trust hooks around (1) and (2).
+//!
+//! Steps (1)–(2) are pure transport; step (3) is delivered by the
+//! existing `PolicyDecisionProvider` + `AuditSink` seams already wired
+//! into `AppState`. There is no Signal/X3DH/Double-Ratchet code in the
+//! router, and adding any would be a category error: it would force the
+//! router to handle key material it has no business holding.
+//!
+//! ## Why we still ship the trait file
+//!
+//! 1. **Documentation of the contract** that *some* mesh participant
+//!    must satisfy. This is the surface a future native-Rust agent (if
+//!    one ever lands) would have to implement; it is also the surface
+//!    that the current TypeScript SDK satisfies in spirit.
+//! 2. **Conformance corpus shape** (`docs/implementation-plan.md`
+//!    §Conformance) — the libsignal-derived test vectors that exercise
+//!    KNOCK / X3DH / Double-Ratchet are organised against this trait so
+//!    the same fixtures can be re-run against a future Rust impl.
+//! 3. **Cross-language parity check** — when the TS SDK or AGT's mesh
+//!    layer ships a Rust binding, this trait is what we'll verify the
+//!    binding against.
+//!
+//! ## Router-side seams (the real four)
+//!
+//! In the router there are **three** four-seam contracts that have real
+//! impls:
+//!
+//! * [`crate::providers::PolicyDecisionProvider`] — `decide(request)`.
+//! * [`crate::providers::AuditSink`]              — `append(event)`.
+//! * [`crate::providers::SigningProvider`]        — `sign(key_ref, payload)`.
+//!
+//! Mesh is the fourth contract conceptually, but it lives **outside** the
+//! router. The plan's "four-seam" language refers to the system as a
+//! whole; the router owns three of those four seams.
+//!
+//! ## Implementations (theoretical, plugin-side)
+//!
+//! - `VendoredAgentMeshProvider` (TypeScript today, in `mesh-plugin/`).
+//! - `AgtMeshProvider` lands when AGT delivers their AgentMesh relay/
+//!   registry; will also be plugin-side.
+//! - `NullMeshProvider` exists only as a conformance fixture target.
 //!
 //! Key custody: peer identity keys and ratchet state live inside the
-//! implementation. Callers never see raw key material.
-//!
-//! Phase 0 note: this file defines the contract only. Call-sites in
-//! `router/src/mesh.rs`, `router/src/handoff.rs`, and
-//! `controller/src/mesh_peer.rs` continue to use the vendored path
-//! directly until Phase 1.
+//! plugin. The router cannot satisfy this contract because by design it
+//! has no key material.
 
 use std::fmt;
 
