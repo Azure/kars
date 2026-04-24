@@ -158,10 +158,34 @@ let handoffProgress: HandoffProgress | null = null;
 let handoffInterruptRequested = false;
 let handoffInterruptReason = "";
 
+// Redact values that look like secrets (tokens, bearer headers, API keys,
+// PEM blocks, AzureClaw pairing tokens) before they reach console.* sinks.
+// Applied in _log.info/warn below and at other logging sinks that accept
+// interpolated strings. Exported for unit-testing.
+export function redactSecrets(m: string): string {
+  return String(m)
+    // PEM private/public key blocks — redact the full block. Bounded char
+    // classes + length limits so this regex cannot exhibit catastrophic
+    // backtracking (CWE-1333 ReDoS).
+    .replace(/-----BEGIN [A-Z ]{1,40}-----[\s\S]{0,8192}?-----END [A-Z ]{1,40}-----/g, "-----BEGIN ***REDACTED***-----")
+    // AzureClaw one-time pairing tokens (azcp_<version>_<base64>)
+    .replace(/\bazcp_\d+_[A-Za-z0-9_\-=]+/g, "azcp_***")
+    // HTTP Bearer / Basic auth headers
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._\-+/=]+/gi, "$1 ***")
+    // JWTs (three dot-separated base64url segments, first starts with eyJ)
+    .replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b/g, "***JWT***")
+    // Generic "keyword: value" style (api_key, token, secret, password, authorization,
+    // pairing_token, handoff_token, admin_token, invite_code, access_token, refresh_token)
+    .replace(
+      /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|handoff[_-]?token|admin[_-]?token|pairing[_-]?token|invite[_-]?code|token|secret|password|authorization)["':=\s]{1,4})["']?([A-Za-z0-9._\-+/=]{8,})["']?/gi,
+      "$1***",
+    );
+}
+
 // Module-level logger — set once during register(), used by background orchestration
 let _log: { info: (m: string) => void; warn: (m: string) => void } = {
-  info: (m: string) => console.log(`[azureclaw] ${m}`),
-  warn: (m: string) => console.warn(`[azureclaw] ${m}`),
+  info: (m: string) => console.log(`[azureclaw] ${redactSecrets(m)}`),
+  warn: (m: string) => console.warn(`[azureclaw] ${redactSecrets(m)}`),
 };
 
 // AMID → agent name mapping (populated during send via registry search)
@@ -1486,10 +1510,16 @@ async function runOffloadTask(
   // Previously we used /proc/1/cmdline but that also flagged any file touched
   // at boot (e.g. MEMORY.md is rewritten by Foundry bootstrap) and the find
   // expression itself had an operator-precedence bug.
-  const harvestMarker = `/tmp/.offload-start-${requestId.slice(0, 8)}`;
+  // Use mkdtempSync + crypto-random filename to avoid predictable tmp paths
+  // (CWE-377: insecure-temp-file).
+  let harvestMarker = "";
   try {
     const fs = await import("node:fs");
-    fs.writeFileSync(harvestMarker, "");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "offload-"));
+    harvestMarker = path.join(tmpDir, "start");
+    fs.writeFileSync(harvestMarker, "", { mode: 0o600 });
   } catch { /* best effort */ }
 
   // Guard the task content with offload-mode instructions. Without this,
@@ -1540,7 +1570,7 @@ async function runOffloadTask(
   // Collect output files — any new artifacts in the workspace.
   const outputFiles: string[] = [];
   try {
-    const { execSync } = await import("node:child_process");
+    const { execFileSync } = await import("node:child_process");
     const workspaceRoot = "/sandbox/.openclaw/workspace";
     // Default OpenClaw scaffolding files that are recreated on every boot by
     // Foundry bootstrap — they must NOT be shipped back as "outputs".
@@ -1548,18 +1578,24 @@ async function runOffloadTask(
       "USER.md", "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md",
       "HEARTBEAT.md", "IDENTITY.md", "workspace-state.json",
     ]);
-    // Grouped predicate so -newer applies to ALL extensions (the previous
-    // form `-type f -newer X -name A -o -name B` had broken precedence:
-    // only *.md was filtered by -newer/-type, every other extension matched
-    // any file of that type anywhere in the tree).
-    const newFiles = execSync(
-      `find ${workspaceRoot} -maxdepth 3 -type f -newer ${harvestMarker} ` +
-      `\\( -name '*.md' -o -name '*.json' -o -name '*.csv' -o -name '*.txt' ` +
-      `-o -name '*.html' -o -name '*.png' -o -name '*.pdf' -o -name '*.svg' ` +
-      `-o -name '*.yaml' -o -name '*.yml' -o -name '*.xml' \\) ` +
-      `2>/dev/null | head -50`,
-      { encoding: "utf-8", timeout: 5000 }
-    ).trim();
+    // Use execFileSync with an arg array (no shell) so nothing we pass can be
+    // interpreted as shell metacharacters (CWE-78 / js/indirect-command-line-injection).
+    // The "-newer" predicate is only added if we have a valid marker.
+    const findArgs: string[] = [workspaceRoot, "-maxdepth", "3", "-type", "f"];
+    if (harvestMarker) findArgs.push("-newer", harvestMarker);
+    findArgs.push(
+      "(",
+      "-name", "*.md", "-o", "-name", "*.json", "-o", "-name", "*.csv",
+      "-o", "-name", "*.txt", "-o", "-name", "*.html", "-o", "-name", "*.png",
+      "-o", "-name", "*.pdf", "-o", "-name", "*.svg", "-o", "-name", "*.yaml",
+      "-o", "-name", "*.yml", "-o", "-name", "*.xml",
+      ")",
+    );
+    const newFiles = execFileSync("find", findArgs, {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim().split("\n").slice(0, 50).join("\n");
     if (newFiles) {
       for (const f of newFiles.split("\n")) {
         if (!f) continue;
@@ -1595,8 +1631,13 @@ async function runOffloadTask(
 
   // Clean up the harvest marker (best-effort — it is in tmpfs anyway).
   try {
-    const fs = await import("node:fs");
-    fs.unlinkSync(harvestMarker);
+    if (harvestMarker) {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      fs.unlinkSync(harvestMarker);
+      // Remove the per-request tmp directory created by mkdtempSync as well.
+      try { fs.rmdirSync(path.dirname(harvestMarker)); } catch { /* ignore */ }
+    }
   } catch { /* ignore */ }
 
   // Send output files back to requester via file_transfer (before offload_done).
@@ -1604,9 +1645,19 @@ async function runOffloadTask(
     try {
       const fPath = `/sandbox/.openclaw/workspace/${relPath}`;
       const fs = await import("node:fs");
-      const fStat = fs.statSync(fPath);
-      if (fStat.size > 30 * 1024 * 1024) continue; // skip files >30MB
-      const fData = fs.readFileSync(fPath);
+      // Open once to avoid stat→read race (CWE-367 TOCTOU): reading via the
+      // same fd guarantees we act on the file we stat'd.
+      const fd = fs.openSync(fPath, "r");
+      let fStat: import("node:fs").Stats;
+      let fData: Buffer;
+      try {
+        fStat = fs.fstatSync(fd);
+        if (fStat.size > 30 * 1024 * 1024) { fs.closeSync(fd); continue; } // skip files >30MB
+        fData = Buffer.alloc(fStat.size);
+        fs.readSync(fd, fData, 0, fStat.size, 0);
+      } finally {
+        fs.closeSync(fd);
+      }
       const fName = relPath.split("/").pop() || relPath;
       await meshSend(agtMeshClient, parentAmid, {
         type: "file_transfer",
@@ -4580,7 +4631,12 @@ const azureClawPlugin = definePluginEntry({
       : "direct";
     const sandbox = process.env.SANDBOX_NAME || process.env.HOSTNAME || "local";
 
-    const bannerMarker = "/tmp/.azureclaw-banner-printed";
+    // Banner dedupe: stored under the user's home cache (random name) so the
+    // path is not predictable and a non-privileged attacker can't pre-seed it.
+    const _os = require("os");
+    const _path = require("path");
+    const bannerMarkerDir = _path.join(_os.homedir(), ".cache", "azureclaw");
+    const bannerMarker = _path.join(bannerMarkerDir, "banner-printed");
     let bannerAlreadyPrinted = false;
     // In tests (vitest sets VITEST=true) always print so assertions see it.
     const inTest = !!process.env.VITEST;
@@ -4608,7 +4664,10 @@ const azureClawPlugin = definePluginEntry({
         "",
       ].join("\n"));
       try {
-        if (!inTest) require("fs").writeFileSync(bannerMarker, `${Date.now()}\n`);
+        if (!inTest) {
+          require("fs").mkdirSync(bannerMarkerDir, { recursive: true, mode: 0o700 });
+          require("fs").writeFileSync(bannerMarker, `${Date.now()}\n`, { mode: 0o600 });
+        }
       } catch {
         /* best-effort — worst case banner prints twice */
       }
@@ -5370,21 +5429,40 @@ const azureClawPlugin = definePluginEntry({
             }, null, 2) }] };
           }
 
-          const stat = fs.statSync(resolvedPath);
-          if (!stat.isFile()) {
-            return { content: [{ type: "text", text: JSON.stringify({
-              error: `Not a regular file: ${filePath}`,
-            }, null, 2) }] };
-          }
-
           const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30MB
-          if (stat.size > MAX_FILE_SIZE) {
+
+          // Open once and do EVERYTHING (kind check, size check, read) via the
+          // same fd so the file cannot be swapped between stat and read
+          // (CWE-367 TOCTOU). No pre-open statSync — any path-race check
+          // performed before openSync is an additional race window.
+          let fd: number;
+          try {
+            fd = fs.openSync(resolvedPath, "r");
+          } catch (e: any) {
             return { content: [{ type: "text", text: JSON.stringify({
-              error: `File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`,
+              error: `Cannot open file ${filePath}: ${e.message}`,
             }, null, 2) }] };
           }
-
-          const fileData = fs.readFileSync(resolvedPath);
+          let fileData: Buffer;
+          let finalSize: number;
+          try {
+            const fstat = fs.fstatSync(fd);
+            if (!fstat.isFile()) {
+              return { content: [{ type: "text", text: JSON.stringify({
+                error: `Not a regular file: ${filePath}`,
+              }, null, 2) }] };
+            }
+            if (fstat.size > MAX_FILE_SIZE) {
+              return { content: [{ type: "text", text: JSON.stringify({
+                error: `File too large: ${(fstat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`,
+              }, null, 2) }] };
+            }
+            finalSize = fstat.size;
+            fileData = Buffer.alloc(finalSize);
+            fs.readSync(fd, fileData, 0, finalSize, 0);
+          } finally {
+            fs.closeSync(fd);
+          }
           const b64Data = fileData.toString("base64");
           const fileName = path.basename(resolvedPath);
 
@@ -5416,7 +5494,7 @@ const azureClawPlugin = definePluginEntry({
             file_name: fileName,
             file_path: filePath,
             file_data: b64Data,
-            size_bytes: stat.size,
+            size_bytes: finalSize,
             description: desc,
             from_agent: process.env.SANDBOX_NAME || "unknown",
             timestamp: new Date().toISOString(),
@@ -5464,10 +5542,10 @@ const azureClawPlugin = definePluginEntry({
             status: ackReceived ? "delivered" : "sent_no_ack",
             to_agent: agentName,
             file_name: fileName,
-            size_bytes: stat.size,
-            size_human: stat.size < 1024 ? `${stat.size}B`
-              : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)}KB`
-              : `${(stat.size / 1024 / 1024).toFixed(1)}MB`,
+            size_bytes: finalSize,
+            size_human: finalSize < 1024 ? `${finalSize}B`
+              : finalSize < 1024 * 1024 ? `${(finalSize / 1024).toFixed(1)}KB`
+              : `${(finalSize / 1024 / 1024).toFixed(1)}MB`,
             chunked: !!transferId,
             ...(ackReceived ? { saved_to: ackSavedTo } : {}),
             ...(ackError ? { ack_error: ackError } : {}),
