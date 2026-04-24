@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
-use crate::providers::{AuditSink, PolicyDecisionProvider};
+use crate::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
 use crate::proxy::UpstreamConfig;
 
 mod handoff;
@@ -26,8 +26,9 @@ pub use handoff::handoff_protected_routes;
 pub use handoff::handoff_status_routes;
 pub use handoff::spawn_routes;
 
-pub(crate) mod spawn_policy;
 pub(crate) mod audit_events;
+pub(crate) mod signing_ops;
+pub(crate) mod spawn_policy;
 
 mod governance;
 pub use governance::sensitive_agt_routes;
@@ -59,6 +60,11 @@ pub struct AppState {
     /// `providers/audit_impl.rs` and adds an in-process dedup cache on top
     /// of the non-idempotent upstream `AuditLogger::log`.
     pub audit_sink: Arc<dyn AuditSink>,
+    /// Four-seam signing contract view of `governance`. Same `Arc<Governance>`
+    /// coerced to `Arc<dyn SigningProvider>`; the trait impl lives in
+    /// `providers/signing_impl.rs` and delegates to the agent's Ed25519
+    /// keypair owned by `Governance.identity`.
+    pub signing_provider: Arc<dyn SigningProvider>,
     pub blocklist: Blocklist,
     pub sandbox_name: Arc<String>,
     pub inbox: Arc<MeshInbox>,
@@ -146,6 +152,7 @@ impl AppState {
             budget,
             policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
             audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
+            signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
             governance,
             blocklist,
             sandbox_name: Arc::new(sandbox_name),
