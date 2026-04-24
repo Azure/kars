@@ -27,6 +27,7 @@ pub use handoff::handoff_status_routes;
 pub use handoff::spawn_routes;
 
 pub(crate) mod audit_events;
+pub(crate) mod inference_policy;
 pub(crate) mod signing_ops;
 pub(crate) mod spawn_policy;
 
