@@ -126,6 +126,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         || !name.as_bytes()[0].is_ascii_alphanumeric()
     {
         tracing::error!(sandbox = %name, "Invalid sandbox name — must be lowercase alphanumeric with hyphens");
+        // Can't stamp Degraded here: without a K8s-legal name we can't
+        // target the CR with patch_status (would 404). Invalid-name CRs
+        // never make it into the cluster via the OpenAPI schema anyway;
+        // this path only fires on corrupt informer state.
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
@@ -223,21 +227,28 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // ── Validate CRD inputs ──────────────────────────────────────────────
     let isolation = &sandbox_config.isolation;
+    use crate::status::conditions::reason::{DEPENDENCY_MISSING, SPEC_INVALID};
+    // Stamp Degraded + requeue-60s. Shared by all validation-failure exits.
+    macro_rules! degrade {
+        ($reason:expr, $msg:expr) => {{
+            crate::status::stamp_degraded(client, &sandbox, &name, $reason, &$msg).await;
+            return Ok(Action::requeue(Duration::from_secs(60)));
+        }};
+    }
     if !["standard", "enhanced", "confidential"].contains(&isolation.as_str()) {
-        tracing::error!(
-            "Invalid isolation level: {isolation} (must be standard/enhanced/confidential)"
-        );
-        return Ok(Action::requeue(Duration::from_secs(60)));
+        tracing::error!("Invalid isolation level: {isolation}");
+        degrade!(SPEC_INVALID, format!("invalid sandbox.isolation: {isolation}"));
     }
     if inference_config.model.is_empty() {
         tracing::error!("ClawSandbox {name} has empty model — skipping reconciliation");
-        return Ok(Action::requeue(Duration::from_secs(60)));
+        degrade!(SPEC_INVALID, "inference.model is empty");
     }
     if ctx.foundry_endpoint.is_empty() && ctx.openai_endpoint.is_empty() {
-        tracing::error!(
-            "No inference endpoint configured (FOUNDRY_ENDPOINT or AZURE_OPENAI_ENDPOINT)"
+        tracing::error!("No inference endpoint configured");
+        degrade!(
+            DEPENDENCY_MISSING,
+            "no inference endpoint configured (FOUNDRY_ENDPOINT or AZURE_OPENAI_ENDPOINT)"
         );
-        return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
     // ── Step 1: Create namespace ─────────────────────────────────────────
@@ -1333,32 +1344,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
-///
-/// Extracted from [`error_policy`] so it can be unit-tested without
-/// constructing a full controller [`Context`] (which would need a live
-/// kube [`Client`]). The returned duration must always be positive — a
-/// zero requeue would hot-loop the controller against a kubeapi that
-/// is rejecting our writes.
-///
-/// **Behaviour change vs. pre-r4 main:** `main` used a single 30s
-/// requeue for every error. This splits by kind:
-///   * `Kube(_)` stays at 30s — transient throttle / reset / 5xx; these
-///     heal quickly and we want fast recovery.
-///   * `SerdeJson(_)` goes to 300s — deserialisation errors are
-///     deterministic; the same CR will fail again until a human edits
-///     it. 30s would log-spam every 30 seconds while the CR is broken.
-///     Operators debugging a malformed CR should expect a 5-minute
-///     back-off, not 30 seconds. A corresponding log line at `error!`
-///     level is always emitted so the delay is not silent.
-///
-/// **Watch-stream resilience is _not_ our concern here.** When the kube
-/// watch stream itself errors (kubeapi rolling restart, network blip,
-/// WATCH too old), the `kube::runtime::watcher` underneath
-/// [`Controller::new`] transparently reconnects with exponential backoff
-/// and replays a `list+watch` sync. This function only governs what
-/// happens when our *reconcile* function returns an error — a distinct
-/// failure mode from a broken watch stream. See `kube-rs` runtime docs
-/// for the watch-level behaviour.
 fn error_requeue_duration(error: &ReconcileError) -> Duration {
     match error {
         // Transient kube API errors (throttling, connection reset, 5xx):
