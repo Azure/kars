@@ -132,6 +132,17 @@ monitoring:
       traceDns: true        # DNS snooping for policy bypass detection
       traceMount: true      # Detect mount attempts (should be blocked)
 
+# Admission policies shipped with the chart.
+# See docs/implementation-plan.md §6 item 6 and §0.2 principle 9.
+admission:
+  nullProviderBlock:
+    # Deploy the ValidatingAdmissionPolicy that rejects
+    # spec.*.provider=(null|noop|disabled|none) on non-dev tenants.
+    # Mirror of ci/no-null-provider-prod.sh (static scan); this is the
+    # runtime enforcement. Requires Kubernetes >= 1.30 (VAP GA).
+    # Opt-out per object via label: azureclaw.azure.com/dev-only: "true"
+    enabled: true
+
 # Azure-specific configuration
 azure:
   workloadIdentity:
