@@ -21,6 +21,7 @@ pub mod handoff;
 pub mod mesh;
 pub mod metrics;
 pub mod proxy;
+pub mod providers;
 pub mod routes;
 pub mod safety;
 pub mod spawn;
