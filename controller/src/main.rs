@@ -18,6 +18,7 @@ mod pairing;
 mod pairing_reconciler;
 mod providers;
 mod reconciler;
+mod status;
 
 use anyhow::Result;
 use kube::Client;
