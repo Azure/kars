@@ -1,23 +1,41 @@
 //! Provider contracts for AzureClaw.
 //!
-//! Everything that crosses the AGT boundary goes through exactly four
-//! contracts defined in this module:
+//! ## Router-side seams (three real ones)
 //!
-//! * [`MeshProvider`]            — session establishment, E2E send/receive.
+//! Three contracts have real router-side implementations and are wired
+//! through `AppState`:
+//!
 //! * [`PolicyDecisionProvider`]  — `decide(request) -> verdict`.
 //! * [`AuditSink`]               — `append(event) -> ReceiptId`.
 //! * [`SigningProvider`]         — `sign(key_ref, payload) -> Signature`.
 //!
-//! Each contract will have three implementations (Phase 1):
+//! Each is implemented in-tree as `impl <Trait> for Governance`; the
+//! same `Arc<Governance>` coerces into `Arc<dyn Trait>` for each, so
+//! `policy_provider`, `audit_sink`, and `signing_provider` on `AppState`
+//! are three views of the same instance, not three separate pieces of
+//! state. AGT-SDK-backed alternates land in `providers/agt/*` and are
+//! tenant-flag selected.
 //!
-//! * `Vendored*` — current vendored-AgentMesh behaviour.
-//! * `Agt*`      — AGT SDK backed (policy/audit/signing now, mesh later).
-//! * `Null*`     — dev-only; admission rejects in prod unless the manifest
+//! ## The fourth seam ([`MeshProvider`]) lives in the plugin, not here
+//!
+//! The router is a proxy for mesh traffic — it forwards the relay
+//! WebSocket and registry HTTPS calls, and applies policy/audit hooks
+//! around them, but it never sees cleartext and holds no keys. Signal /
+//! X3DH / Double-Ratchet runs in the **agent** (TypeScript `mesh-plugin/`
+//! + vendored `@agentmesh/sdk` today). The `MeshProvider` trait file
+//! ships here as documentation of the cross-language contract and as the
+//! shape the conformance corpus targets, but it has **no router-side
+//! `impl` and should not get one**. See `providers/mesh.rs` for the
+//! full rationale.
+//!
+//! ## Implementation phases
+//!
+//! Each contract has up to three concrete backends (Phase 1):
+//!
+//! * `In-tree` — implemented on `Governance`, today's behaviour.
+//! * `Agt*`    — AGT SDK backed (policy/audit/signing now, mesh later).
+//! * `Null*`   — dev-only; admission rejects in prod unless the manifest
 //!   carries `azureclaw.azure.com/dev-only: "true"`.
-//!
-//! **Phase 0 status:** contracts only. No implementations and no call-site
-//! migrations land here. Provider construction, dispatch, and feature-flag
-//! plumbing are Phase 1 per `docs/implementation-plan.md` §7.
 //!
 //! **Outage semantics** (§1.3):
 //! * `Strict` (prod default) — fail-closed on AGT/Mesh down.
