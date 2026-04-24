@@ -33,22 +33,18 @@
 
 pub mod audit;
 pub mod mesh;
+pub mod outage;
 pub mod policy;
 pub mod signing;
 
 pub use audit::{AuditEvent, AuditReceipt, AuditSink, ReceiptId};
 pub use mesh::{MeshProvider, PeerId, SendResult, SessionId};
+pub use outage::{
+    CachedDecision, DEFAULT_CACHED_TTL, MAX_CACHED_TTL, OutageAction, OutageConfig,
+    OutageConfigError, OutageMode, OutageParseError, decide_outage,
+};
 pub use policy::{PolicyDecisionProvider, PolicyRequest, PolicyVerdict};
 pub use signing::{KeyRef, Signature, SigningProvider};
-
-/// Outage mode selected per `ClawSandbox` via `spec.agt.outageMode`.
-/// See `docs/implementation-plan.md` §1.3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutageMode {
-    Strict,
-    CachedRead,
-    DegradedDev,
-}
 
 /// Selects which implementation of a contract a tenant uses.
 /// See `docs/implementation-plan.md` §1.4.
