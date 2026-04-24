@@ -19,6 +19,7 @@ import { handoffCommand } from "./commands/handoff.js";
 import { meshCommand } from "./commands/mesh.js";
 import { pairCommand } from "./commands/pair.js";
 import { convertCommand } from "./commands/convert.js";
+import { a2aCommand } from "./commands/a2a.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -61,6 +62,7 @@ export function createCli(): Command {
 
   // Interop
   program.addCommand(convertCommand());
+  program.addCommand(a2aCommand());
 
   return program;
 }
