@@ -166,6 +166,8 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 | Helm | 3.14+ | AKS path only |
 | Rust | 1.88+ (edition 2024) | Building from source (both paths) |
 
+> **Azure RBAC:** `azureclaw up` needs `Contributor` **and** `User Access Administrator` at subscription scope (or `Owner`). See [`docs/permissions.md`](docs/permissions.md) for the full breakdown, a least-privilege custom role, and common failure modes. The CLI runs a preflight check automatically and fails fast in ≤30s if anything is missing.
+
 ### Step 1: Install the CLI
 
 ```bash
