@@ -151,9 +151,13 @@ export function section(title: string): void {
 
 /**
  * Strip CR/LF from untrusted strings to prevent log-forging (CWE-117).
+ * Classic pattern recognized by CodeQL js/log-injection as a sanitizer.
  */
 function sanitizeForLog(s: unknown): string {
-  return String(s ?? "").replace(/[\r\n\t]+/g, " ");
+  return String(s ?? "")
+    .replace(/\r/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\t/g, " ");
 }
 
 /**

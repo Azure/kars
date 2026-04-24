@@ -164,8 +164,10 @@ let handoffInterruptReason = "";
 // interpolated strings. Exported for unit-testing.
 export function redactSecrets(m: string): string {
   return String(m)
-    // PEM private/public key blocks — redact the full block
-    .replace(/-----BEGIN [A-Z ]+-----[\s\S]+?-----END [A-Z ]+-----/g, "-----BEGIN ***REDACTED***-----")
+    // PEM private/public key blocks — redact the full block. Bounded char
+    // classes + length limits so this regex cannot exhibit catastrophic
+    // backtracking (CWE-1333 ReDoS).
+    .replace(/-----BEGIN [A-Z ]{1,40}-----[\s\S]{0,8192}?-----END [A-Z ]{1,40}-----/g, "-----BEGIN ***REDACTED***-----")
     // AzureClaw one-time pairing tokens (azcp_<version>_<base64>)
     .replace(/\bazcp_\d+_[A-Za-z0-9_\-=]+/g, "azcp_***")
     // HTTP Bearer / Basic auth headers
@@ -177,16 +179,7 @@ export function redactSecrets(m: string): string {
     .replace(
       /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|handoff[_-]?token|admin[_-]?token|pairing[_-]?token|invite[_-]?code|token|secret|password|authorization)["':=\s]{1,4})["']?([A-Za-z0-9._\-+/=]{8,})["']?/gi,
       "$1***",
-    )
-    // Azure subscription/client secrets (GUID-ish with dashes are fine to keep;
-    // but raw 32+ char base64 that follows "secret" is caught above)
-    ;
-}
-
-// Strip CR/LF from untrusted data before logging so attackers can't forge
-// log lines (CWE-117: log injection).
-function sanitizeForLog(s: unknown): string {
-  return String(s ?? "").replace(/[\r\n\t]+/g, " ");
+    );
 }
 
 // Module-level logger — set once during register(), used by background orchestration
@@ -5436,22 +5429,20 @@ const azureClawPlugin = definePluginEntry({
             }, null, 2) }] };
           }
 
-          const stat = fs.statSync(resolvedPath);
-          if (!stat.isFile()) {
-            return { content: [{ type: "text", text: JSON.stringify({
-              error: `Not a regular file: ${filePath}`,
-            }, null, 2) }] };
-          }
-
           const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30MB
-          if (stat.size > MAX_FILE_SIZE) {
+
+          // Open once and do EVERYTHING (kind check, size check, read) via the
+          // same fd so the file cannot be swapped between stat and read
+          // (CWE-367 TOCTOU). No pre-open statSync — any path-race check
+          // performed before openSync is an additional race window.
+          let fd: number;
+          try {
+            fd = fs.openSync(resolvedPath, "r");
+          } catch (e: any) {
             return { content: [{ type: "text", text: JSON.stringify({
-              error: `File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`,
+              error: `Cannot open file ${filePath}: ${e.message}`,
             }, null, 2) }] };
           }
-
-          // Open once and read via fd to avoid stat→read TOCTOU race.
-          const fd = fs.openSync(resolvedPath, "r");
           let fileData: Buffer;
           let finalSize: number;
           try {
@@ -5503,7 +5494,7 @@ const azureClawPlugin = definePluginEntry({
             file_name: fileName,
             file_path: filePath,
             file_data: b64Data,
-            size_bytes: stat.size,
+            size_bytes: finalSize,
             description: desc,
             from_agent: process.env.SANDBOX_NAME || "unknown",
             timestamp: new Date().toISOString(),
@@ -5551,10 +5542,10 @@ const azureClawPlugin = definePluginEntry({
             status: ackReceived ? "delivered" : "sent_no_ack",
             to_agent: agentName,
             file_name: fileName,
-            size_bytes: stat.size,
-            size_human: stat.size < 1024 ? `${stat.size}B`
-              : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)}KB`
-              : `${(stat.size / 1024 / 1024).toFixed(1)}MB`,
+            size_bytes: finalSize,
+            size_human: finalSize < 1024 ? `${finalSize}B`
+              : finalSize < 1024 * 1024 ? `${(finalSize / 1024).toFixed(1)}KB`
+              : `${(finalSize / 1024 / 1024).toFixed(1)}MB`,
             chunked: !!transferId,
             ...(ackReceived ? { saved_to: ackSavedTo } : {}),
             ...(ackError ? { ack_error: ackError } : {}),
