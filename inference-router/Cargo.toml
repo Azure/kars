@@ -65,3 +65,7 @@ flate2 = "1"
 # Property-based testing (s5) — inline #[cfg(test)] proptest! blocks exercise
 # parsers/sanitizers with generated inputs. Shrinks counterexamples automatically.
 proptest = "1"
+# Ed25519 sign/verify exercised by a2a::signature unit tests. The router runtime
+# itself does not yet depend on ed25519-dalek — production signing is delegated
+# to SigningProvider — so the dep is test-only for now.
+ed25519-dalek.workspace = true
