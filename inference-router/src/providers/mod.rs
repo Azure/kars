@@ -22,7 +22,7 @@
 //! WebSocket and registry HTTPS calls, and applies policy/audit hooks
 //! around them, but it never sees cleartext and holds no keys. Signal /
 //! X3DH / Double-Ratchet runs in the **agent** (TypeScript `mesh-plugin/`
-//! + vendored `@agentmesh/sdk` today). The `MeshProvider` trait file
+//! plus vendored `@agentmesh/sdk` today). The `MeshProvider` trait file
 //! ships here as documentation of the cross-language contract and as the
 //! shape the conformance corpus targets, but it has **no router-side
 //! `impl` and should not get one**. See `providers/mesh.rs` for the

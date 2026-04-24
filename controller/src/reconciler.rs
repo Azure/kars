@@ -237,7 +237,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
     if !["standard", "enhanced", "confidential"].contains(&isolation.as_str()) {
         tracing::error!("Invalid isolation level: {isolation}");
-        degrade!(SPEC_INVALID, format!("invalid sandbox.isolation: {isolation}"));
+        degrade!(
+            SPEC_INVALID,
+            format!("invalid sandbox.isolation: {isolation}")
+        );
     }
     if inference_config.model.is_empty() {
         tracing::error!("ClawSandbox {name} has empty model — skipping reconciliation");
