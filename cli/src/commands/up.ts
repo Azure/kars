@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { existsSync } from "fs";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { saveContext, loadContext } from "../config.js";
+import { runPreflightChecks } from "../preflight.js";
 
 function isValidAzureHost(url: string, expectedSuffix: string): boolean {
   try {
@@ -46,6 +47,7 @@ export function upCommand(): Command {
     .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
     .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
+    .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
     .action(async (options) => {
       const blue = chalk.hex("#0078D4");
       const { default: inquirer } = await import("inquirer");
@@ -495,6 +497,24 @@ export function upCommand(): Command {
 
       const rg = options.resourceGroup || `azureclaw-${options.region}`;
 
+      // ── 3b. RBAC + provider preflight ──────────────────────────────
+      // Fails fast (≤30s) if the caller lacks roles / providers / features
+      // needed for the ~20-minute `up` flow. Skip on --dry-run and --skip-infra
+      // (the latter implies the cluster already exists and the caller already
+      // has cluster creds) and when the operator opts out explicitly.
+      if (!options.dryRun && !options.skipInfra && !options.skipPreflight) {
+        const pf = await runPreflightChecks({
+          region: options.region,
+          resourceGroup: rg,
+          isolation: options.isolation,
+          foundryEndpoint: options.foundryEndpoint,
+          skipPreflight: options.skipPreflight,
+        });
+        if (!pf.ok) {
+          process.exit(1);
+        }
+      }
+
       // ── 4. SKU availability check ──────────────────────────────────
       if (!options.dryRun && !options.skipInfra) {
         console.log();
@@ -603,7 +623,20 @@ export function upCommand(): Command {
       const clusterName = options.clusterName ?? "azureclaw";
       const baseName = clusterName.replace(/-aks$/, "");
       let acrName = ""; // resolved from Bicep output after deployment
-      const stepper = new Stepper({ totalSteps: 7 });
+      // Stepper counts the 9 runtime phases below (10 with --expose-registry).
+      // Preflight runs before the stepper (see runPreflightChecks above).
+      //   1. Resource group + preview features
+      //   2. Bicep deploy (or verify existing)
+      //   3. Network/firewalls/ACR attach
+      //   4. Get AKS credentials
+      //   5. Build OR import images
+      //   6. Helm install (CRD + controller + seccomp DS)
+      //   7. AgentMesh infrastructure (relay + registry)
+      //   8. (optional) AgentMesh Ingress — only with --expose-registry
+      //   9. Create ClawSandbox CR
+      //  10. Wait for sandbox Running
+      const totalSteps = 9 + (options.exposeRegistry ? 1 : 0);
+      const stepper = new Stepper({ totalSteps });
 
       try {
         const path = await import("path");
@@ -908,7 +941,7 @@ export function upCommand(): Command {
 
         stepper.done("Network access configured");
 
-        // ── Step 4: Get AKS credentials ──────────────────────────────
+        // ── Step 5: Get AKS credentials ──────────────────────────────
         stepper.step("Configuring kubectl...");
         await execa("az", [
           "aks", "get-credentials",
@@ -917,8 +950,9 @@ export function upCommand(): Command {
           "--overwrite-existing",
           "--output", "none",
         ], { stdio: "pipe" });
+        stepper.done("kubectl configured");
 
-        // ── Step 5: Get images into ACR ──────────────────────────────
+        // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
 
         if (options.build) {
