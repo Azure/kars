@@ -1,0 +1,70 @@
+{{- /*
+  Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
+
+  ValidatingAdmissionPolicy that prevents removal of the
+  azureclaw.azure.com/dev-only=true label from any resource that has
+  ever carried it. Pairs with admission-null-provider.yaml.
+
+  Rationale
+  ---------
+  The "dev-only" label is the single mechanism by which a tenant opts
+  out of production fail-closed defaults (Null* providers,
+  productionMode=false on McpServer, fail-open AGT outage modes, etc).
+  An attacker who flips the label OFF without admin intent would
+  silently re-enable strict policy on a pre-existing dev resource —
+  which is normally fine — BUT a more dangerous direction is the
+  reverse: if the label is *also* used as a compliance-exclusion
+  marker, the apiserver audit log must show a deliberate label
+  removal, not a silent CR replacement.
+
+  This VAP requires that ANY transition from
+  metadata.labels["azureclaw.azure.com/dev-only"] == "true" → absent
+  carry the audit annotation
+  azureclaw.azure.com/dev-only-removal-reason on the new object.
+
+  Break-glass
+  -----------
+  Set the annotation azureclaw.azure.com/dev-only-removal-reason
+  to a non-empty value on the new object. The annotation is logged
+  at the apiserver audit layer.
+
+  Scope
+  -----
+  Applies to ClawSandbox, McpServer, ToolPolicy. Add new resources to
+  matchConstraints.resourceRules as their CRDs land.
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: azureclaw-dev-only-label-immutable
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["azureclaw.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources:
+          - clawsandboxes
+          - mcpservers
+          - toolpolicies
+  validations:
+    - expression: |
+        !(
+          oldObject.metadata.?labels["azureclaw.azure.com/dev-only"].orValue("") == "true" &&
+          object.metadata.?labels["azureclaw.azure.com/dev-only"].orValue("") != "true" &&
+          object.metadata.?annotations["azureclaw.azure.com/dev-only-removal-reason"].orValue("") == ""
+        )
+      message: |
+        Removing the azureclaw.azure.com/dev-only=true label requires
+        an azureclaw.azure.com/dev-only-removal-reason annotation on
+        the new object (audit trail).
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: azureclaw-dev-only-label-immutable-binding
+spec:
+  policyName: azureclaw-dev-only-label-immutable
+  validationActions: [Deny, Audit]
