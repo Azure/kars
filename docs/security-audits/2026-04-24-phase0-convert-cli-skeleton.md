@@ -90,3 +90,5 @@ will re-evaluate against `docs/internal-boundaries.md`.
 - The command gains `--apply` or any cluster-writing flag.
 
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
