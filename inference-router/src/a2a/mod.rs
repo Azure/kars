@@ -2,6 +2,16 @@
 //!
 //! Spec: <https://a2a-protocol.org/v1.0.0/specification>
 //!
+//! ## Module isolation (ADR-0001 D4)
+//!
+//! This module is structurally prohibited from importing concrete
+//! credential-bearing types (`auth::ImdsToken`, `auth::FoundryCredentials`,
+//! etc.). All policy / signing / audit calls go through traits in
+//! `crate::providers::*`. The `forbid(unsafe_code)` attribute below
+//! prevents any `unsafe` block from sneaking into the parser path.
+//! `ci/a2a-module-isolation.sh` enforces the import constraint
+//! mechanically.
+//!
 //! ## Status: scaffold (`phase1/a2a-1.0.0-scaffold`)
 //!
 //! This PR lands type-level + signature-envelope primitives only. **No
@@ -51,6 +61,8 @@
 //!   <https://a2a-protocol.org/v1.0.0/specification>
 //! - RFC 7515 (JWS): <https://www.rfc-editor.org/rfc/rfc7515>
 //! - RFC 8037 (JOSE EdDSA): <https://www.rfc-editor.org/rfc/rfc8037>
+
+#![forbid(unsafe_code)]
 
 pub mod agent_card;
 pub mod error;
