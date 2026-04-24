@@ -20,6 +20,7 @@ ALLOW_PATHS=(
   'inference-router/src/providers/mesh.rs'
   'inference-router/src/auth.rs'          # IMDS/JWT verification; pre-existing
   'inference-router/src/handoff/mod.rs'   # pre-existing handoff AES-GCM blob cipher; plan §4.1 slates extraction into a SigningProvider-backed submodule
+  'inference-router/src/handoff/token.rs' # HandoffTokenStore — 32-byte random + SHA-256 hash + constant-time compare, extracted from mod.rs
   'vendor/'
   'tests/'
 )
