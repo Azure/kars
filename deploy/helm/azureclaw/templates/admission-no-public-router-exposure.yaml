@@ -1,0 +1,89 @@
+{{- /*
+  Phase 1 deliverable (implementation-plan.md §7 / ADR-0001 D2 + D3).
+
+  ValidatingAdmissionPolicy that enforces the "router is never publicly
+  exposed" invariant from ADR-0001 D2. Refuses any K8s object in a
+  sandbox namespace that would expose the router (or any other pod)
+  to the public internet.
+
+  Mechanically rejects:
+   - Service of type LoadBalancer
+   - Service of type NodePort
+   - Ingress objects (any ingressClassName)
+   - HTTPRoute objects in sandbox namespaces (Gateway API)
+   - NetworkPolicy with ingress.from.ipBlock that includes 0.0.0.0/0 or any /0
+
+  Sandbox namespaces are identified by the label
+  azureclaw.azure.com/isolated=strict (set by the controller on
+  reconcile). The policy is namespace-scoped via this label so
+  non-sandbox namespaces are unaffected.
+
+  Break-glass
+  -----------
+  None. This is the strongest invariant in the platform — the router
+  data plane MUST NOT be reachable from the public internet, ever.
+  Public A2A traffic MUST go through the dedicated
+  azureclaw-a2a-gateway component (per ADR-0001 D1) which lives in
+  its OWN namespace and is the only object permitted to terminate
+  A2A traffic.
+
+  See docs/adr/0001-a2a-ingress-front-edge.md.
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: azureclaw-no-public-router-exposure
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses", "networkpolicies"]
+      - apiGroups: ["gateway.networking.k8s.io"]
+        apiVersions: ["v1", "v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httproutes", "tlsroutes", "tcproutes"]
+    namespaceSelector:
+      matchLabels:
+        azureclaw.azure.com/isolated: strict
+  validations:
+    # Service: LoadBalancer / NodePort forbidden in sandbox namespaces.
+    - expression: |
+        !(object.kind == "Service" && (
+          object.spec.?type.orValue("ClusterIP") == "LoadBalancer" ||
+          object.spec.?type.orValue("ClusterIP") == "NodePort"
+        ))
+      message: "Sandbox namespaces forbid LoadBalancer/NodePort Services. A2A ingress goes through azureclaw-a2a-gateway only (ADR-0001 D2)."
+      reason: Forbidden
+    # Ingress / HTTPRoute / TLSRoute / TCPRoute: any object refusing.
+    - expression: |
+        !(object.kind == "Ingress" || object.kind == "HTTPRoute" ||
+          object.kind == "TLSRoute" || object.kind == "TCPRoute")
+      message: "Sandbox namespaces forbid ingress objects. A2A ingress goes through azureclaw-a2a-gateway only (ADR-0001 D2)."
+      reason: Forbidden
+    # NetworkPolicy ingress from 0.0.0.0/0 or ::/0 is implicitly public.
+    - expression: |
+        !(object.kind == "NetworkPolicy" &&
+          object.spec.?ingress.orValue([]).exists(rule,
+            rule.?from.orValue([]).exists(peer,
+              peer.?ipBlock.?cidr.orValue("") == "0.0.0.0/0" ||
+              peer.?ipBlock.?cidr.orValue("") == "::/0"
+            )
+          )
+        )
+      message: "NetworkPolicy ingress from 0.0.0.0/0 or ::/0 is forbidden in sandbox namespaces (ADR-0001 D2)."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: azureclaw-no-public-router-exposure-binding
+spec:
+  policyName: azureclaw-no-public-router-exposure
+  validationActions: [Deny, Audit]

@@ -1,0 +1,60 @@
+{{- /*
+  Phase 1 deliverable (ADR-0001 D3 — Cilium L7 defense in depth).
+
+  CiliumClusterwideNetworkPolicy that pins the inbound path for the
+  router :8445 listener (the future A2A internal endpoint, see
+  ADR-0001 D2) to a single ServiceAccount: the
+  azureclaw-a2a-gateway pod's SA.
+
+  Conditionally rendered: only emitted when .Values.cilium.enabled
+  is true. Without Cilium, the same isolation must come from the
+  controller-emitted CiliumNetworkPolicy per sandbox (lands in
+  phase1/a2a-controller-revocation).
+
+  Why clusterwide
+  ---------------
+  The A2A gateway lives in its own namespace; sandbox namespaces are
+  per-tenant. The connection is across namespaces, so a clusterwide
+  policy is more natural than one CCNP per sandbox.
+
+  Why ServiceAccount, not pod label
+  ---------------------------------
+  Labels on pods can in principle be set by anyone with edit on the
+  namespace. ServiceAccount is bound at pod-spec time and does not
+  retroactively change. Pinning to SA is harder to bypass than label
+  selection.
+
+  CCNP enforces L7 filtering — actual transport mTLS happens at the
+  gateway and is verified by the router via Workload Identity token
+  exchange (per ADR-0001 D3).
+*/ -}}
+{{- if .Values.cilium.enabled -}}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: azureclaw-a2a-gateway-to-router
+spec:
+  description: |
+    Restrict ingress on sandbox-namespace pods :8445 (the A2A internal
+    endpoint) to traffic originating from the azureclaw-a2a-gateway
+    ServiceAccount only. Per ADR-0001 D3.
+  endpointSelector:
+    matchLabels:
+      io.kubernetes.pod.label.azureclaw.azure.com/component: inference-router
+      io.kubernetes.pod.label.azureclaw.azure.com/isolated: strict
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.cilium.k8s.policy.serviceaccount: azureclaw-a2a-gateway
+            io.cilium.k8s.policy.serviceaccount.namespace: azureclaw-system
+      toPorts:
+        - ports:
+            - port: "8445"
+              protocol: TCP
+          rules:
+            http:
+              - method: "POST"
+                path: "/a2a/.+"
+              - method: "GET"
+                path: "/a2a/health"
+{{- end -}}
