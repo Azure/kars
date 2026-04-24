@@ -28,6 +28,7 @@ jobs:
           - no-null-provider-prod
           - security-audit-required
           - vendored-patch-audit
+          - a2a-module-isolation
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,4 +59,5 @@ jobs:
             no-null-provider-prod)     ./ci/no-null-provider-prod.sh ;;
             security-audit-required)   ./ci/security-audit-required.sh ;;
             vendored-patch-audit)      ./ci/vendored-patch-audit.sh ;;
+            a2a-module-isolation)      ./ci/a2a-module-isolation.sh ;;
           esac
