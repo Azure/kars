@@ -25,3 +25,4 @@ pub mod providers;
 pub mod routes;
 pub mod safety;
 pub mod spawn;
+pub mod telemetry;
