@@ -188,33 +188,22 @@ async fn chat_completions(
     // at inference time — no pre-flight calls needed. We parse the response
     // annotations after forwarding and report flags to AGT governance.
 
-    // AGT policy check — evaluate inference action via native governance
+    // AGT policy check via the four-seam PolicyDecisionProvider.
     {
         let model = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("model")?.as_str().map(String::from))
             .unwrap_or_default();
-        let action = format!("inference:chat_completions:{}", model);
-        let result = state.governance.evaluate(sandbox_name, &action, None);
-        let allowed = result
-            .get("allowed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let decision = result
-            .get("decision")
-            .and_then(|d| d.as_str())
-            .unwrap_or("allow");
-        if !allowed {
-            let reason = result
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("policy denied");
+        let action = format!("inference:chat_completions:{model}");
+        if let super::inference_policy::InferenceDecision::Deny(reason) =
+            super::inference_policy::check(&state, sandbox_name, &action).await
+        {
             tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED inference (enforcing)");
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
                     "error": {
-                        "message": format!("Blocked by governance policy: {}", reason),
+                        "message": format!("Blocked by governance policy: {reason}"),
                         "type": "policy_violation",
                         "code": "policy_denied"
                     }
@@ -222,7 +211,6 @@ async fn chat_completions(
             )
                 .into_response();
         }
-        tracing::debug!(sandbox = %sandbox_name, %decision, "AGT policy evaluated inference");
     }
 
     // Check token budget before forwarding
@@ -691,16 +679,9 @@ async fn chat_completions(
                             // 3. Policy check — blocking (was fire-and-forget)
                             let action =
                                 format!("output:{}", &sanitized[..sanitized.len().min(200)]);
-                            let result = state.governance.evaluate(sandbox_name, &action, None);
-                            let allowed = result
-                                .get("allowed")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
-                            if !allowed {
-                                let reason = result
-                                    .get("reason")
-                                    .and_then(|r| r.as_str())
-                                    .unwrap_or("output policy");
+                            if let super::inference_policy::InferenceDecision::Deny(reason) =
+                                super::inference_policy::check(&state, sandbox_name, &action).await
+                            {
                                 tracing::warn!(sandbox = %sandbox_name, %reason,
                                     "AGT: model response blocked by output policy");
                                 return (
@@ -815,29 +796,22 @@ async fn responses(
         })
         .unwrap_or("unknown");
 
-    // AGT policy check — native governance
+    // AGT policy check via the four-seam PolicyDecisionProvider.
     {
         let model = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("model")?.as_str().map(String::from))
             .unwrap_or_default();
-        let action = format!("inference:responses:{}", model);
-        let result = state.governance.evaluate(sandbox_name, &action, None);
-        let allowed = result
-            .get("allowed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if !allowed {
-            let reason = result
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("policy denied");
+        let action = format!("inference:responses:{model}");
+        if let super::inference_policy::InferenceDecision::Deny(reason) =
+            super::inference_policy::check(&state, sandbox_name, &action).await
+        {
             tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED responses inference");
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
                     "error": {
-                        "message": format!("Blocked by governance policy: {}", reason),
+                        "message": format!("Blocked by governance policy: {reason}"),
                         "type": "policy_violation",
                         "code": "policy_denied"
                     }
@@ -956,21 +930,14 @@ async fn images_generations(
 
     // AGT policy check — image generation is a tool invocation
     {
-        let action = format!("image_generation:{}", deployment);
-        let result = state.governance.evaluate(sandbox_name, &action, None);
-        let allowed = result
-            .get("allowed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if !allowed {
-            let reason = result
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("policy denied");
+        let action = format!("image_generation:{deployment}");
+        if let super::inference_policy::InferenceDecision::Deny(reason) =
+            super::inference_policy::check(&state, sandbox_name, &action).await
+        {
             tracing::warn!(sandbox = sandbox_name, deployment = %deployment, "Image generation denied: {}", reason);
             return (
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": {"message": format!("Image generation denied by policy: {}", reason)}})),
+                Json(serde_json::json!({"error": {"message": format!("Image generation denied by policy: {reason}")}})),
             )
                 .into_response();
         }
