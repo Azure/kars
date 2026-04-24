@@ -3,6 +3,7 @@
 //! This is the Rust representation of the ClawSandbox CRD.
 //! kube-rs derives the CRD schema, API bindings, and JSON schema automatically.
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -250,6 +251,17 @@ pub struct ClawSandboxStatus {
     pub pending_approvals: Option<i32>,
     /// Foundry Agent ID created by the controller.
     pub foundry_agent_id: Option<String>,
+    /// The `metadata.generation` that produced this status. Consumers
+    /// compare against `metadata.generation` to detect stale observations.
+    /// See `controller/src/status/conditions.rs` for semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// Standard K8s Condition list. Per convention, at most one entry per
+    /// `type`. Helpers in `controller::status::conditions` maintain this
+    /// list (upsert by type; preserve `lastTransitionTime` across same-
+    /// status reconciles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -401,6 +413,22 @@ mod tests {
         assert!(status.tokens_used.is_none());
         assert!(status.pending_approvals.is_none());
         assert!(status.foundry_agent_id.is_none());
+        assert!(status.observed_generation.is_none());
+        assert!(status.conditions.is_empty());
+    }
+
+    #[test]
+    fn sandbox_status_omits_empty_conditions_and_absent_generation_in_json() {
+        let status = ClawSandboxStatus::default();
+        let v = serde_json::to_value(&status).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("conditions"),
+            "empty conditions must not be emitted (would reset a populated status)"
+        );
+        assert!(
+            !v.as_object().unwrap().contains_key("observedGeneration"),
+            "None observedGeneration must be absent (would wipe a real value)"
+        );
     }
 
     #[test]

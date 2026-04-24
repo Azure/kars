@@ -116,6 +116,54 @@ pub mod phase {
     pub const REVOKED: &str = "Revoked";
 }
 
+/// Release one offload slot on whichever `ClawPairing` is bound to the
+/// given external requester AMID.
+///
+/// Looks up the pairing by `status.boundAmid`, decrements `slotsUsed`
+/// (floor 0), and clears `activeSandbox`. No-op if no matching pairing
+/// is found. Errors are logged and swallowed — this runs during the
+/// deletion path and must not block finalizer removal.
+pub async fn release_offload_slot(
+    client: kube::Client,
+    requester: &str,
+    sandbox_name: &str,
+) {
+    use kube::{
+        Api, ResourceExt,
+        api::{ListParams, Patch, PatchParams},
+    };
+    let pairings_api: Api<ClawPairing> =
+        Api::namespaced(client, crate::mesh_peer::IDENTITY_NAMESPACE);
+    let Ok(list) = pairings_api.list(&ListParams::default()).await else {
+        return;
+    };
+    let Some(pairing) = list.items.iter().find(|p| {
+        p.status.as_ref().and_then(|s| s.bound_amid.as_deref()) == Some(requester)
+    }) else {
+        return;
+    };
+    let pairing_name = pairing.name_any();
+    let slots = pairing.status.as_ref().and_then(|s| s.slots_used).unwrap_or(1);
+    let patch = serde_json::json!({
+        "status": {
+            "slotsUsed": (slots - 1).max(0),
+            "activeSandbox": serde_json::Value::Null,
+        }
+    });
+    let _ = pairings_api
+        .patch_status(
+            &pairing_name,
+            &PatchParams::apply("azureclaw-controller"),
+            &Patch::Merge(patch),
+        )
+        .await;
+    tracing::info!(
+        sandbox = %sandbox_name,
+        pairing = %pairing_name,
+        "Offload slot released"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
