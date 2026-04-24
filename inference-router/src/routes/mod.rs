@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
+use crate::providers::PolicyDecisionProvider;
 use crate::proxy::UpstreamConfig;
 
 mod handoff;
@@ -24,6 +25,8 @@ pub use handoff::handoff_init_routes;
 pub use handoff::handoff_protected_routes;
 pub use handoff::handoff_status_routes;
 pub use handoff::spawn_routes;
+
+pub(crate) mod spawn_policy;
 
 mod governance;
 pub use governance::sensitive_agt_routes;
@@ -45,6 +48,11 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
     pub governance: Arc<Governance>,
+    /// Four-seam policy contract view of `governance`. Today it's the same
+    /// `Arc<Governance>` coerced to `Arc<dyn PolicyDecisionProvider>` — the
+    /// trait is implemented directly on `Governance`. Per-tenant swap to
+    /// `Arc<AgtPolicyDecisionProvider>` is the next Phase 1 branch.
+    pub policy_provider: Arc<dyn PolicyDecisionProvider>,
     pub blocklist: Blocklist,
     pub sandbox_name: Arc<String>,
     pub inbox: Arc<MeshInbox>,
@@ -130,6 +138,7 @@ impl AppState {
             client: client.clone(),
             config: Arc::new(config),
             budget,
+            policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
             governance,
             blocklist,
             sandbox_name: Arc::new(sandbox_name),
