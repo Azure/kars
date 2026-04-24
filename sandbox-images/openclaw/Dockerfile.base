@@ -79,7 +79,7 @@ RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
-FROM golang:1.23-alpine AS go-builder
+FROM golang:1.24-alpine AS go-builder
 
 # Build Go CLI tools that enable built-in OpenClaw skills.
 # Each tool is a small static binary (~5-15MB) — discarded build cache doesn't bloat the runtime image.
