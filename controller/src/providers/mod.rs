@@ -175,11 +175,17 @@ mod tests {
 
     #[test]
     fn provider_kind_parses_all_aliases() {
-        assert_eq!(ProviderKind::from_spec("vendored"), Some(ProviderKind::Vendored));
+        assert_eq!(
+            ProviderKind::from_spec("vendored"),
+            Some(ProviderKind::Vendored)
+        );
         assert_eq!(ProviderKind::from_spec("agt"), Some(ProviderKind::Agt));
         assert_eq!(ProviderKind::from_spec("null"), Some(ProviderKind::Null));
         assert_eq!(ProviderKind::from_spec("noop"), Some(ProviderKind::Null));
-        assert_eq!(ProviderKind::from_spec("disabled"), Some(ProviderKind::Null));
+        assert_eq!(
+            ProviderKind::from_spec("disabled"),
+            Some(ProviderKind::Null)
+        );
         assert_eq!(ProviderKind::from_spec("vendoreed"), None);
         assert_eq!(ProviderKind::from_spec(""), None);
     }
@@ -212,7 +218,10 @@ mod tests {
 
     #[test]
     fn field_managers_are_stable_strings() {
-        assert_eq!(field_managers::RECONCILER, "azureclaw-controller/reconciler");
+        assert_eq!(
+            field_managers::RECONCILER,
+            "azureclaw-controller/reconciler"
+        );
         assert_eq!(field_managers::MESH, "azureclaw-controller/mesh");
         assert_eq!(field_managers::PAIRING, "azureclaw-controller/pairing");
         assert_eq!(

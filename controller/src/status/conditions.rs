@@ -121,7 +121,13 @@ pub fn preserve_transition_time(
             last_transition_time: p.last_transition_time.clone(),
             observed_generation,
         },
-        _ => new_condition(type_, status_value, reason_value, message, observed_generation),
+        _ => new_condition(
+            type_,
+            status_value,
+            reason_value,
+            message,
+            observed_generation,
+        ),
     }
 }
 
@@ -216,7 +222,13 @@ mod tests {
 
     #[test]
     fn preserve_stamps_new_timestamp_when_status_flips() {
-        let prior = new_condition(TYPE_READY, status::FALSE, reason::CREATING, "booting", Some(1));
+        let prior = new_condition(
+            TYPE_READY,
+            status::FALSE,
+            reason::CREATING,
+            "booting",
+            Some(1),
+        );
         std::thread::sleep(std::time::Duration::from_millis(5));
         let next = preserve_transition_time(
             Some(&prior),
@@ -264,7 +276,13 @@ mod tests {
         let mut v: Vec<Condition> = vec![];
         set(
             &mut v,
-            new_condition(TYPE_READY, status::FALSE, reason::CREATING, "start", Some(1)),
+            new_condition(
+                TYPE_READY,
+                status::FALSE,
+                reason::CREATING,
+                "start",
+                Some(1),
+            ),
         );
         set(
             &mut v,
