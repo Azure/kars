@@ -71,7 +71,7 @@ files:
     phase1_cap: 1200
     phase2_cap: 800
 
-  - path: inference-router/src/routes/handoff.rs
+  - path: inference-router/src/routes/handoff/mod.rs
     baseline_2026_04_24: 1593
     phase1_cap: 1200
     phase2_cap: 800
