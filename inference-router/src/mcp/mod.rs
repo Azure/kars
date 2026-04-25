@@ -59,6 +59,7 @@ pub mod error;
 pub mod initialize;
 pub mod jsonrpc;
 pub mod oauth;
+pub mod oauth_layer;
 pub mod pipeline;
 pub mod streamable_http;
 pub mod tools;
@@ -70,6 +71,7 @@ pub use initialize::{
 };
 pub use jsonrpc::{Frame, Id, Notification, Request, Response, parse_frame};
 pub use oauth::{OAuthError, OAuthVerifierConfig, VerifiedToken, verify_access_token};
+pub use oauth_layer::{OAuthLayer, OAuthService, verified_token};
 pub use pipeline::{ProcessOutcome, process_request};
 pub use streamable_http::{
     AcceptNegotiation, MAX_FRAME_BYTES, MCP_PROTOCOL_VERSION, SessionId, validate_accept_header,
