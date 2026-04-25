@@ -60,12 +60,13 @@ sha2 = "0.10"
 rand = "0.9"
 base64 = "0.22"
 flate2 = "1"
+# Ed25519 sign/verify for A2A 1.0.0 AgentCard signatures (a2a::card_signing).
+# Public-key crypto only — private key material flows through `SigningProvider`
+# in production paths. Verification is pure (no provider needed) and uses
+# the crate directly per `ci/no-custom-crypto.sh` allowlist.
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
 # Property-based testing (s5) — inline #[cfg(test)] proptest! blocks exercise
 # parsers/sanitizers with generated inputs. Shrinks counterexamples automatically.
 proptest = "1"
-# Ed25519 sign/verify exercised by a2a::signature unit tests. The router runtime
-# itself does not yet depend on ed25519-dalek — production signing is delegated
-# to SigningProvider — so the dep is test-only for now.
-ed25519-dalek.workspace = true
