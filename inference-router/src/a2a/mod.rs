@@ -67,6 +67,7 @@
 pub mod agent_card;
 pub mod card_server;
 pub mod card_signing;
+pub mod card_verifier;
 pub mod error;
 pub mod signature;
 
@@ -76,6 +77,9 @@ pub use agent_card::{
 };
 pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
 pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
+pub use card_verifier::{
+    CardVerifierConfig, CardVerifyError, VerifiedCallerIdentity, verify_inbound_card,
+};
 pub use error::{A2aError, A2aErrorCode};
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
