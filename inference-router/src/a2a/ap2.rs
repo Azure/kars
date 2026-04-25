@@ -275,6 +275,12 @@ pub enum Ap2Denial {
     AttemptTooOld { ts: i64, now: i64 },
     #[error("attempt total would overflow u64 sum")]
     ArithmeticOverflow,
+    /// The mandate's signature did not verify against the provided
+    /// trust map. Carries the rendered [`mandate_signing::MandateSignError`]
+    /// for audit-emission classification (the underlying error type is
+    /// not exposed here to keep this enum stable + matchable).
+    #[error("mandate signature is unauthentic: {0}")]
+    MandateUnauthentic(String),
 }
 
 /// Validate a [`PaymentAttempt`] against an [`IntentMandate`] and the
@@ -381,6 +387,38 @@ pub fn validate_payment_attempt(
     }
 
     Ok(PaymentRecord::from_attempt(attempt))
+}
+
+/// Like [`validate_payment_attempt`], but additionally verifies the
+/// mandate's detached-JWS `signature` against `trusted` BEFORE running
+/// any of the policy checks. This is the production entry point once
+/// the AGT-backed `SigningProvider` trust map is wired in; the unsigned
+/// variant remains for tests and migration.
+///
+/// Failure modes:
+///
+/// - Returns [`Ap2Denial::MandateUnauthentic`] (carrying the rendered
+///   underlying [`crate::a2a::mandate_signing::MandateSignError`]) when
+///   the mandate is unsigned, malformed, signed by an unknown / wrong
+///   key, or tampered after signing.
+/// - Otherwise delegates to [`validate_payment_attempt`] and propagates
+///   its denial unchanged.
+///
+/// # Errors
+///
+/// Returns [`Ap2Denial`] from either the signature check or the policy
+/// check; the signature check runs first so an unauthentic mandate can
+/// never observe ledger state or update timing oracles.
+pub fn validate_payment_attempt_signed(
+    mandate: &IntentMandate,
+    attempt: &PaymentAttempt,
+    ledger: &dyn MandateLedger,
+    now: i64,
+    trusted: &super::mandate_signing::TrustedKeys<'_>,
+) -> Result<PaymentRecord, Ap2Denial> {
+    super::mandate_signing::verify_mandate(mandate, trusted)
+        .map_err(|e| Ap2Denial::MandateUnauthentic(e.to_string()))?;
+    validate_payment_attempt(mandate, attempt, ledger, now)
 }
 
 fn counterparty_allowed(mandate: &IntentMandate, counterparty: &str) -> bool {
@@ -662,5 +700,118 @@ mod tests {
             "extra": "x"
         }"#;
         assert!(serde_json::from_str::<IntentMandate>(json).is_err());
+    }
+
+    // ---- validate_payment_attempt_signed: end-to-end sig check ----
+
+    fn signed_baseline(seed: u8, kid: &str) -> (IntentMandate, ed25519_dalek::VerifyingKey) {
+        use crate::a2a::mandate_signing::sign_mandate;
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key();
+        let unsigned = baseline_mandate();
+        let signed = sign_mandate(&unsigned, &sk, kid).expect("sign_mandate");
+        (signed, vk)
+    }
+
+    #[test]
+    fn signed_happy_path_accepted() {
+        let (mandate, vk) = signed_baseline(1, "k1");
+        let mut attempt = baseline_attempt();
+        attempt.mandate_id = mandate.mandate_id.clone();
+        let ledger = InMemoryMandateLedger::new();
+        let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
+        trusted.insert("k1", &vk);
+        validate_payment_attempt_signed(&mandate, &attempt, &ledger, 1_700_000_000, &trusted)
+            .expect("signed mandate + in-policy attempt accepted");
+    }
+
+    #[test]
+    fn signed_unsigned_mandate_rejected_before_policy() {
+        let mandate = baseline_mandate(); // signature is empty
+        let mut attempt = baseline_attempt();
+        attempt.mandate_id = mandate.mandate_id.clone();
+        let ledger = InMemoryMandateLedger::new();
+        let trusted = crate::a2a::mandate_signing::TrustedKeys::new();
+        let err = validate_payment_attempt_signed(
+            &mandate,
+            &attempt,
+            &ledger,
+            1_700_000_000,
+            &trusted,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Ap2Denial::MandateUnauthentic(_)));
+    }
+
+    #[test]
+    fn signed_tampered_mandate_rejected_before_policy() {
+        let (mut mandate, vk) = signed_baseline(2, "k1");
+        // Caps changed AFTER sign — verifier must reject before any
+        // cap check would have run.
+        mandate.daily_cap = u64::MAX;
+        mandate.monthly_cap = u64::MAX;
+        let mut attempt = baseline_attempt();
+        attempt.mandate_id = mandate.mandate_id.clone();
+        attempt.amount = 1_000_000_000; // would be in-policy after tamper
+        let ledger = InMemoryMandateLedger::new();
+        let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
+        trusted.insert("k1", &vk);
+        let err = validate_payment_attempt_signed(
+            &mandate,
+            &attempt,
+            &ledger,
+            1_700_000_000,
+            &trusted,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Ap2Denial::MandateUnauthentic(_)));
+    }
+
+    #[test]
+    fn signed_unknown_kid_rejected() {
+        let (mandate, _vk) = signed_baseline(3, "k-real");
+        let mut attempt = baseline_attempt();
+        attempt.mandate_id = mandate.mandate_id.clone();
+        let ledger = InMemoryMandateLedger::new();
+        // Trust a *different* kid only.
+        let other_vk = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]).verifying_key();
+        let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
+        trusted.insert("k-other", &other_vk);
+        let err = validate_payment_attempt_signed(
+            &mandate,
+            &attempt,
+            &ledger,
+            1_700_000_000,
+            &trusted,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Ap2Denial::MandateUnauthentic(_)));
+    }
+
+    #[test]
+    fn signed_policy_denials_still_propagate() {
+        // After signature verifies, regular cap-exceed still produces
+        // the underlying policy denial (not MandateUnauthentic).
+        use crate::a2a::mandate_signing::sign_mandate;
+        let mut unsigned = baseline_mandate();
+        unsigned.per_transfer_cap = 100;
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
+        let vk = sk.verifying_key();
+        let mandate = sign_mandate(&unsigned, &sk, "k1").unwrap();
+        let mut attempt = baseline_attempt();
+        attempt.mandate_id = mandate.mandate_id.clone();
+        attempt.amount = 200; // exceeds per_transfer_cap
+        let ledger = InMemoryMandateLedger::new();
+        let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
+        trusted.insert("k1", &vk);
+        let err = validate_payment_attempt_signed(
+            &mandate,
+            &attempt,
+            &ledger,
+            1_700_000_000,
+            &trusted,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Ap2Denial::PerTransferCapExceeded { .. }));
     }
 }

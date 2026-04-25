@@ -91,7 +91,7 @@ pub use mandate_signing::{
 pub use ap2::{
     Ap2Denial, COUNTERPARTY_WILDCARD, DAILY_WINDOW_SECS, InMemoryMandateLedger, IntentMandate,
     MONTHLY_WINDOW_SECS, MandateLedger, MandateLedgerMut, PaymentAttempt, PaymentRecord,
-    validate_payment_attempt,
+    validate_payment_attempt, validate_payment_attempt_signed,
 };
 pub use card_verifier::{
     CardVerifierConfig, CardVerifyError, VerifiedCallerIdentity, verify_inbound_card,
