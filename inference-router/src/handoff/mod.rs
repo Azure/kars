@@ -9,27 +9,27 @@
 //!
 //! All handoff endpoints are audit-logged with caller IP, timestamp, and outcome.
 
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::sync::RwLock;
+
 use axum::{
     extract::State,
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::IntoResponse,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use hkdf::Hkdf;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::sync::Arc;
-use std::time::SystemTime;
-use tokio::sync::RwLock;
 
+mod crypto;
 mod drain;
 mod pending;
 mod token;
+pub use crypto::{
+    EncryptedHandoffBlob, HANDOFF_STATE_VERSION, compute_verification_hash, decrypt_state,
+    deserialize_state, encrypt_state, serialize_state,
+};
 pub use drain::DrainState;
 pub use pending::{PendingHandoffError, PendingHandoffStatus, PendingHandoffStore};
 pub use token::{DEFAULT_TOKEN_TTL_SECS, HandoffTokenError, HandoffTokenStore};
@@ -39,11 +39,10 @@ use crate::spawn::SpawnRequest;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-pub const HANDOFF_STATE_VERSION: u32 = 1;
 // Handoff-token size/TTL constants moved to `token.rs`; `DEFAULT_TOKEN_TTL_SECS`
-// is re-exported below for `crate::handoff::DEFAULT_TOKEN_TTL_SECS` callers.
-const HKDF_INFO: &[u8] = b"azureclaw-handoff-v1";
-const AES_NONCE_BYTES: usize = 12;
+// is re-exported above for `crate::handoff::DEFAULT_TOKEN_TTL_SECS` callers.
+// HANDOFF_STATE_VERSION + AES-GCM blob types moved to `crypto.rs`; re-exported
+// above so existing `crate::handoff::EncryptedHandoffBlob` callers keep working.
 
 // ── Confirmation gate constants (§9.9.9) ────────────────────────────────────
 
@@ -183,21 +182,8 @@ impl std::fmt::Display for HandoffDirection {
 }
 
 // ── Encrypted blob ──────────────────────────────────────────────────────────
-
-/// Encrypted handoff state blob (AES-256-GCM).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EncryptedHandoffBlob {
-    /// Schema version.
-    pub version: u32,
-    /// AES-256-GCM nonce (base64).
-    pub nonce: String,
-    /// Encrypted + compressed state (base64).
-    pub ciphertext: String,
-    /// HKDF salt (base64) — needed by receiver to derive the same key.
-    pub hkdf_salt: String,
-    /// SHA-256 of plaintext for pre-decryption integrity check (hex).
-    pub verification_hash: String,
-}
+//
+// `EncryptedHandoffBlob` lives in `handoff::crypto`; re-exported above.
 
 // ── Handoff session tracker ─────────────────────────────────────────────────
 
@@ -421,115 +407,12 @@ impl HandoffSession {
 }
 
 // ── State serialization + encryption ────────────────────────────────────────
-
-/// Serialize a HandoffState to compressed JSON bytes.
-pub fn serialize_state(state: &HandoffState) -> Result<Vec<u8>, String> {
-    let json = serde_json::to_vec(state).map_err(|e| format!("JSON serialize: {e}"))?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&json)
-        .map_err(|e| format!("gzip compress: {e}"))?;
-    encoder.finish().map_err(|e| format!("gzip finish: {e}"))
-}
-
-/// Deserialize compressed JSON bytes back to HandoffState.
-pub fn deserialize_state(compressed: &[u8]) -> Result<HandoffState, String> {
-    let mut decoder = GzDecoder::new(compressed);
-    let mut json = Vec::new();
-    decoder
-        .read_to_end(&mut json)
-        .map_err(|e| format!("gzip decompress: {e}"))?;
-    serde_json::from_slice(&json).map_err(|e| format!("JSON deserialize: {e}"))
-}
-
-/// Encrypt state blob with AES-256-GCM.
-///
-/// Key is derived via HKDF from a shared secret (DH exchange between agents).
-/// For Phase H1, the shared secret is the handoff token itself (CLI knows both sides).
-/// Phase H2+ replaces this with actual X25519 DH shared secret.
-pub fn encrypt_state(
-    plaintext: &[u8],
-    shared_secret: &[u8],
-    salt: &[u8],
-) -> Result<EncryptedHandoffBlob, String> {
-    // Derive AES-256 key via HKDF-SHA256
-    let hk = Hkdf::<Sha256>::new(Some(salt), shared_secret);
-    let mut key_bytes = [0u8; 32];
-    hk.expand(HKDF_INFO, &mut key_bytes)
-        .map_err(|e| format!("HKDF expand: {e}"))?;
-
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("AES key init: {e}"))?;
-
-    // Random 96-bit nonce
-    let mut nonce_bytes = [0u8; AES_NONCE_BYTES];
-    rand::rng().fill(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| format!("AES-GCM encrypt: {e}"))?;
-
-    let verification_hash = hex_sha256(plaintext);
-
-    Ok(EncryptedHandoffBlob {
-        version: HANDOFF_STATE_VERSION,
-        nonce: BASE64.encode(nonce_bytes),
-        ciphertext: BASE64.encode(&ciphertext),
-        hkdf_salt: BASE64.encode(salt),
-        verification_hash,
-    })
-}
-
-/// Decrypt an encrypted handoff blob.
-pub fn decrypt_state(blob: &EncryptedHandoffBlob, shared_secret: &[u8]) -> Result<Vec<u8>, String> {
-    let salt = BASE64
-        .decode(&blob.hkdf_salt)
-        .map_err(|e| format!("decode salt: {e}"))?;
-    let nonce_bytes = BASE64
-        .decode(&blob.nonce)
-        .map_err(|e| format!("decode nonce: {e}"))?;
-    let ciphertext = BASE64
-        .decode(&blob.ciphertext)
-        .map_err(|e| format!("decode ciphertext: {e}"))?;
-
-    if nonce_bytes.len() != AES_NONCE_BYTES {
-        return Err(format!(
-            "invalid nonce length: {} (expected {AES_NONCE_BYTES})",
-            nonce_bytes.len()
-        ));
-    }
-
-    // Derive same key via HKDF
-    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
-    let mut key_bytes = [0u8; 32];
-    hk.expand(HKDF_INFO, &mut key_bytes)
-        .map_err(|e| format!("HKDF expand: {e}"))?;
-
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("AES key init: {e}"))?;
-
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| "AES-GCM decryption failed — wrong key or tampered ciphertext".to_string())?;
-
-    // Verify integrity
-    let hash = hex_sha256(&plaintext);
-    if hash != blob.verification_hash {
-        return Err(format!(
-            "integrity check failed: computed={} expected={}",
-            &hash[..16],
-            &blob.verification_hash[..16]
-        ));
-    }
-
-    Ok(plaintext)
-}
-
-/// Compute verification hash of a plaintext state blob.
-pub fn compute_verification_hash(plaintext: &[u8]) -> String {
-    hex_sha256(plaintext)
-}
+//
+// All AES-GCM / HKDF / gzip-JSON code lives in `handoff::crypto`. The public
+// names (`serialize_state`, `deserialize_state`, `encrypt_state`,
+// `decrypt_state`, `compute_verification_hash`, `HANDOFF_STATE_VERSION`,
+// `EncryptedHandoffBlob`) are re-exported at the top of this module so
+// existing call-sites under `crate::handoff::*` keep compiling unchanged.
 
 // ── Handoff auth middleware ──────────────────────────────────────────────────
 
@@ -880,13 +763,8 @@ pub fn sanitize_chat_snapshot(chat_bytes: &[u8]) -> Vec<u8> {
 
 // ── Utility functions ───────────────────────────────────────────────────────
 
-/// SHA-256 hash as hex string.
-pub(crate) fn hex_sha256(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    result.iter().map(|b| format!("{b:02x}")).collect()
-}
+// `hex_sha256` lives in `handoff::crypto`.
+use crypto::hex_sha256;
 
 /// Constant-time string comparison (prevents timing attacks on token validation).
 ///
@@ -985,6 +863,7 @@ mod option_base64_bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use std::time::Duration;
 
     #[test]
