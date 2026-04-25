@@ -82,10 +82,11 @@ files:
     phase2_cap: 700
     notes: "Becomes pure provider dispatch after full AGT provider landings."
 
-  - path: inference-router/src/spawn.rs
+  - path: inference-router/src/spawn/mod.rs
     baseline_2026_04_24: 1199
     phase1_cap: 900
     phase2_cap: 800
+    notes: "Path was inference-router/src/spawn.rs; converted to module after extracting docker dev-mode submodule (PR 43)."
 
   - path: cli/src/commands/handoff.ts
     baseline_2026_04_24: 1119
