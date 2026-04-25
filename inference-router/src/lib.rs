@@ -22,6 +22,7 @@ pub mod handoff;
 pub mod mcp;
 pub mod mesh;
 pub mod metrics;
+pub mod policy_envelope;
 pub mod providers;
 pub mod proxy;
 pub mod routes;
