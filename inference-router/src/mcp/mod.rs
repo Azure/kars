@@ -56,10 +56,15 @@
 //! - `Accept` header missing one of the required content types → reject.
 
 pub mod error;
+pub mod initialize;
 pub mod jsonrpc;
 pub mod streamable_http;
 
 pub use error::{ErrorCode, JsonRpcError};
+pub use initialize::{
+    InitializeConfig, InitializeOutcome, OsRngSessionMinter, ServerCapabilities, ServerInfo,
+    SessionMinter, handle_initialize,
+};
 pub use jsonrpc::{Frame, Id, Notification, Request, Response, parse_frame};
 pub use streamable_http::{
     AcceptNegotiation, MAX_FRAME_BYTES, MCP_PROTOCOL_VERSION, SessionId, validate_accept_header,
