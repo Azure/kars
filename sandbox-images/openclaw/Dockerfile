@@ -66,6 +66,14 @@ RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
 RUN chmod -R a-w /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk && \
     chmod -R a+rX /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk
 
+# Pre-create router-readable config dirs (root-owned, world-traversable).
+# /etc/azureclaw/policies/  — AGT governance policy YAMLs (populated by entrypoint)
+# /etc/azureclaw/blocklist/ — egress blocklist (populated by entrypoint)
+# These live OUTSIDE OpenClaw's data dir so the inference router (UID 1001)
+# can read them even after OpenClaw 2026.4.x re-locks ~/.openclaw/ to 0700.
+RUN mkdir -p /etc/azureclaw/policies /etc/azureclaw/blocklist && \
+    chmod 755 /etc/azureclaw /etc/azureclaw/policies /etc/azureclaw/blocklist
+
 # Copy entrypoint that auto-configures OpenClaw from mounted secrets
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

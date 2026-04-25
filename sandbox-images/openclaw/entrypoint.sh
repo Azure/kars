@@ -687,15 +687,19 @@ if [ -d /opt/azureclaw-plugin ]; then
       echo "[azureclaw] WARN: policy profile '${POLICY_PROFILE}' not found, falling back to default"
       POLICY_SRC="/opt/azureclaw-plugin/policies/azureclaw-default.yaml"
     fi
-    # Remove any stale profile YAMLs from previous runs before copying.
-    rm -f "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-    cp --no-preserve=mode "$POLICY_SRC" "$OPENCLAW_DIR/policies/" 2>/dev/null || true
-    # AGT governance runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
-    # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
-    # chown -R sandbox:sandbox /sandbox — see below.
-    chmod o+x "$OPENCLAW_DIR" 2>/dev/null || true
-    chmod 755 "$OPENCLAW_DIR/policies" 2>/dev/null || true
-    export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
+    # Policies live in /etc/azureclaw/policies/ — outside OpenClaw's data dir.
+    # OpenClaw 2026.4.x re-locks ~/.openclaw/ to mode 0700 (UID 1000 only) at
+    # config-write time, which silently breaks the inference router (UID 1001)
+    # policy hot-reload because read_dir on the policies subdir returns EACCES.
+    # /etc/azureclaw/ is root-owned and world-readable — same pattern already
+    # used for the egress blocklist (/etc/azureclaw/blocklist/).
+    mkdir -p /etc/azureclaw/policies 2>/dev/null || true
+    rm -f /etc/azureclaw/policies/*.yaml 2>/dev/null || true
+    cp --no-preserve=mode "$POLICY_SRC" /etc/azureclaw/policies/ 2>/dev/null || true
+    chown -R root:root /etc/azureclaw/policies 2>/dev/null || true
+    chmod 755 /etc/azureclaw/policies 2>/dev/null || true
+    chmod 444 /etc/azureclaw/policies/*.yaml 2>/dev/null || true
+    export AGT_POLICY_DIR=/etc/azureclaw/policies
     echo "[azureclaw] AGT governance enabled (policy: ${POLICY_PROFILE}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
   fi
   cd /sandbox
@@ -736,11 +740,8 @@ if [ "$IS_ROOT" = "true" ]; then
     echo "[azureclaw] Plugin code hardened (root-owned, read-only for sandbox)"
   fi
 
-  # AGT policy files
-  if [ -d "$OPENCLAW_DIR/policies" ]; then
-    chown root:root "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-    chmod 444 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-  fi
+  # AGT policy files now live in /etc/azureclaw/policies/ — hardened above
+  # at copy time (root:root, 0444). No further hardening needed here.
 
   # Curated skills installed into workspace (SKILL.md files)
   if [ -d "$WORKSPACE_DIR/skills" ]; then

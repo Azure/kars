@@ -13,6 +13,30 @@
  */
 
 import type { Command } from "commander";
+import { createRequire as __createRequire__ } from "node:module";
+
+// ---------------------------------------------------------------------------
+// CommonJS interop shim — OpenClaw 2026.4.x loads plugin entries as native
+// ESM via jiti. `cli/package.json` declares `"type": "module"`, so the
+// global `require` is undefined inside this file at runtime. We synthesize
+// a CJS-style require bound to *this module's* URL so that the small number
+// of `require(...)` call-sites below (Node built-ins + the OpenClaw plugin
+// SDK that does not yet publish ESM exports) keep working under both
+// CommonJS and ESM loaders. Do NOT add new `require` call-sites — prefer
+// `await import()` for any new dynamic dependency.
+// ---------------------------------------------------------------------------
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const require: NodeRequire = (() => {
+  try {
+    // ESM context: derive a require bound to this module URL.
+    return __createRequire__(import.meta.url);
+  } catch {
+    // CJS context (tsc target=commonjs, jest/vitest, older OpenClaw):
+    // the runtime-provided `require` is already in scope.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, no-undef
+    return (globalThis as any).require ?? __createRequire__(process.cwd() + "/");
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // OpenClaw Plugin SDK — loaded dynamically at runtime from the host OpenClaw
@@ -286,7 +310,7 @@ async function pushTrustToRouter(agentId: string, scoreDelta: number) {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(body),
     };
-    if (adminToken) headers["x-azureclaw-admin"] = adminToken;
+    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
     await new Promise<void>((resolve, reject) => {
       const req = http.request(routerUrl("/agt/trust"), {
         method: "POST",
@@ -3488,6 +3512,22 @@ async function _readAdminToken(): Promise<string> {
   return process.env.ADMIN_TOKEN || "";
 }
 
+// Synchronous variant for use inside `routerCall`. Cached after first hit so we
+// only stat the filesystem once per process. Returns "" if no token is available.
+let _cachedAdminToken: string | null = null;
+function _readAdminTokenSync(): string {
+  if (_cachedAdminToken !== null) return _cachedAdminToken;
+  // Use the createRequire shim (top of file) — `await import` is not usable
+  // inside this synchronous helper and we want zero per-call overhead.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fsSync = require("node:fs") as typeof import("node:fs");
+  for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
+    try { const t = fsSync.readFileSync(p, "utf-8").trim(); if (t) { _cachedAdminToken = t; return t; } } catch { /* skip */ }
+  }
+  _cachedAdminToken = process.env.ADMIN_TOKEN || "";
+  return _cachedAdminToken;
+}
+
 // Helper: update handoff progress tracker
 function _hp(phase: string, step: string) {
   if (!handoffProgress) return;
@@ -4792,6 +4832,13 @@ const azureClawPlugin = definePluginEntry({
           headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
         };
         if (body) opts.headers["Content-Type"] = "application/json";
+        // Auto-attach admin token for privileged endpoints. Caller can still
+        // override via extraHeaders. Without this, /agt/trust mutations and
+        // /admin/* calls return 401 — see also the spawn_destroy trust cleanup.
+        if (!opts.headers["Authorization"] && /^\/(agt\/trust|agt\/handoff|admin)\b/.test(path)) {
+          const tok = _readAdminTokenSync();
+          if (tok) opts.headers["Authorization"] = `Bearer ${tok}`;
+        }
         let settled = false;
         const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
         const req = http.request(url, opts, (res: any) => {
