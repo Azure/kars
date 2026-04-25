@@ -9,7 +9,11 @@ pub const A2A_PROTOCOL_VERSION: &str = "1.0";
 
 /// Self-describing manifest for an agent. Served at
 /// `/.well-known/agent.json`. See spec §4.4.1.
+///
+/// Wire format is camelCase per A2A 1.0.0 spec §4.4.1. Rust field
+/// names use snake_case; serde renames on the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentCard {
     pub name: String,
     pub description: String,
@@ -42,6 +46,7 @@ pub struct AgentProvider {
 
 /// Optional capabilities supported by an agent. Spec §4.4.3.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub streaming: Option<bool>,
@@ -68,6 +73,7 @@ pub struct AgentExtension {
 
 /// Distinct capability or function the agent can perform. Spec §4.4.5.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentSkill {
     pub id: String,
     pub name: String,
@@ -86,6 +92,7 @@ pub struct AgentSkill {
 /// Combination of target URL, transport binding, and protocol version
 /// the agent is reachable via. Spec §4.4.6.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentInterface {
     pub url: String,
     pub protocol_binding: ProtocolBinding,
