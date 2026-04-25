@@ -65,6 +65,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_card;
+pub mod ap2;
 pub mod card_server;
 pub mod card_signing;
 pub mod card_verifier;
@@ -78,6 +79,11 @@ pub use agent_card::{
 };
 pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
 pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
+pub use ap2::{
+    Ap2Denial, COUNTERPARTY_WILDCARD, DAILY_WINDOW_SECS, InMemoryMandateLedger, IntentMandate,
+    MONTHLY_WINDOW_SECS, MandateLedger, MandateLedgerMut, PaymentAttempt, PaymentRecord,
+    validate_payment_attempt,
+};
 pub use card_verifier::{
     CardVerifierConfig, CardVerifyError, VerifiedCallerIdentity, verify_inbound_card,
 };
