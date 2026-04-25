@@ -47,6 +47,9 @@ pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_r
 mod mcp;
 pub use mcp::{MCP_SESSION_HEADER, McpRouteState, mcp_route};
 
+mod a2a;
+pub use a2a::{A2aRouteState, a2a_routes};
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
