@@ -71,6 +71,7 @@ pub mod card_signing;
 pub mod card_verifier;
 pub mod error;
 pub mod jsonrpc_dispatch;
+pub mod mandate_signing;
 pub mod signature;
 pub mod trust_store;
 
@@ -80,6 +81,9 @@ pub use agent_card::{
 };
 pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
 pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
+pub use mandate_signing::{
+    MandateSignError, TrustedKeys as MandateTrustedKeys, sign_mandate, verify_mandate,
+};
 pub use ap2::{
     Ap2Denial, COUNTERPARTY_WILDCARD, DAILY_WINDOW_SECS, InMemoryMandateLedger, IntentMandate,
     MONTHLY_WINDOW_SECS, MandateLedger, MandateLedgerMut, PaymentAttempt, PaymentRecord,
