@@ -76,7 +76,7 @@ files:
     phase1_cap: 1200
     phase2_cap: 800
 
-  - path: inference-router/src/governance.rs
+  - path: inference-router/src/governance/mod.rs
     baseline_2026_04_24: 1252
     phase1_cap: 900
     phase2_cap: 700
