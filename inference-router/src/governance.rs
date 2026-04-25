@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::metrics;
+use crate::rate_limiter::RateLimiter;
 
 // ── Governance metrics ───────────────────────────────────────────────────────
 
@@ -74,107 +75,6 @@ impl GovernanceMetrics {
             return 0;
         }
         self.eval_latency_sum_us.load(Ordering::Relaxed) / total
-    }
-}
-
-// ── Token-bucket rate limiter ────────────────────────────────────────────────
-
-/// Simple token-bucket rate limiter matching the original governance semantics.
-pub struct RateLimiter {
-    global: Mutex<TokenBucket>,
-    per_agent: Mutex<HashMap<String, TokenBucket>>,
-    per_agent_config: Mutex<(f64, f64)>, // (rate, capacity)
-}
-
-struct TokenBucket {
-    tokens: f64,
-    capacity: f64,
-    rate: f64,
-    last_refill: Instant,
-}
-
-impl TokenBucket {
-    fn new(rate: f64, capacity: f64) -> Self {
-        Self {
-            tokens: capacity,
-            capacity,
-            rate,
-            last_refill: Instant::now(),
-        }
-    }
-
-    fn allow(&mut self) -> bool {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
-        self.last_refill = now;
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl RateLimiter {
-    pub fn new(
-        global_rate: f64,
-        global_capacity: f64,
-        per_agent_rate: f64,
-        per_agent_capacity: f64,
-    ) -> Self {
-        Self {
-            global: Mutex::new(TokenBucket::new(global_rate, global_capacity)),
-            per_agent: Mutex::new(HashMap::new()),
-            per_agent_config: Mutex::new((per_agent_rate, per_agent_capacity)),
-        }
-    }
-
-    pub fn allow(&self, agent_id: &str) -> bool {
-        let global_ok = self.global.lock().unwrap().allow();
-        if !global_ok {
-            return false;
-        }
-        let (pa_rate, pa_cap) = *self.per_agent_config.lock().unwrap();
-        let mut per_agent = self.per_agent.lock().unwrap();
-        let bucket = per_agent
-            .entry(agent_id.to_string())
-            .or_insert_with(|| TokenBucket::new(pa_rate, pa_cap));
-        bucket.allow()
-    }
-
-    /// Update rate limits at runtime (e.g. from API endpoint).
-    pub fn update_rates(
-        &self,
-        global_rate: f64,
-        global_capacity: f64,
-        per_agent_rate: f64,
-        per_agent_capacity: f64,
-    ) {
-        let mut global = self.global.lock().unwrap();
-        global.rate = global_rate;
-        global.capacity = global_capacity;
-        drop(global);
-        *self.per_agent_config.lock().unwrap() = (per_agent_rate, per_agent_capacity);
-        // Clear per-agent buckets so they pick up new rates on next call
-        self.per_agent.lock().unwrap().clear();
-    }
-
-    pub fn global_rate(&self) -> f64 {
-        self.global.lock().unwrap().rate
-    }
-
-    pub fn global_capacity(&self) -> f64 {
-        self.global.lock().unwrap().capacity
-    }
-
-    pub fn per_agent_rate(&self) -> f64 {
-        self.per_agent_config.lock().unwrap().0
-    }
-
-    pub fn per_agent_capacity(&self) -> f64 {
-        self.per_agent_config.lock().unwrap().1
     }
 }
 
