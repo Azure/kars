@@ -65,6 +65,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_card;
+pub mod card_server;
 pub mod card_signing;
 pub mod error;
 pub mod signature;
@@ -73,6 +74,7 @@ pub use agent_card::{
     A2A_PROTOCOL_VERSION, AgentCapabilities, AgentCard, AgentCardSignature, AgentExtension,
     AgentInterface, AgentProvider, AgentSkill, ProtocolBinding,
 };
+pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
 pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
 pub use error::{A2aError, A2aErrorCode};
 pub use signature::{
