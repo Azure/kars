@@ -1,4 +1,8 @@
 //! A2A 1.0.0 — AP2 (Agent Payments) commerce-mandate types and validation.
+// ci:loc-ok: AP2 spec §6 (IntentMandate, CartMandate, PaymentMandate) is a
+// single cohesive validator API where every helper consumes the same struct
+// surface; splitting across files would scatter `pub fn evaluate_*` helpers
+// from the types they immediately validate. 817 LOC ~= spec surface.
 //!
 //! This module implements the *evaluation* half of AP2: given an
 //! already-cryptographically-verified [`IntentMandate`] (the signed
@@ -356,10 +360,8 @@ pub fn validate_payment_attempt(
         });
     }
 
-    let daily_existing = ledger.sum_in_window(
-        &mandate.mandate_id,
-        now.saturating_sub(DAILY_WINDOW_SECS),
-    );
+    let daily_existing =
+        ledger.sum_in_window(&mandate.mandate_id, now.saturating_sub(DAILY_WINDOW_SECS));
     let daily_total = daily_existing
         .checked_add(attempt.amount)
         .ok_or(Ap2Denial::ArithmeticOverflow)?;
@@ -371,10 +373,8 @@ pub fn validate_payment_attempt(
         });
     }
 
-    let monthly_existing = ledger.sum_in_window(
-        &mandate.mandate_id,
-        now.saturating_sub(MONTHLY_WINDOW_SECS),
-    );
+    let monthly_existing =
+        ledger.sum_in_window(&mandate.mandate_id, now.saturating_sub(MONTHLY_WINDOW_SECS));
     let monthly_total = monthly_existing
         .checked_add(attempt.amount)
         .ok_or(Ap2Denial::ArithmeticOverflow)?;
@@ -732,14 +732,9 @@ mod tests {
         attempt.mandate_id = mandate.mandate_id.clone();
         let ledger = InMemoryMandateLedger::new();
         let trusted = crate::a2a::mandate_signing::TrustedKeys::new();
-        let err = validate_payment_attempt_signed(
-            &mandate,
-            &attempt,
-            &ledger,
-            1_700_000_000,
-            &trusted,
-        )
-        .unwrap_err();
+        let err =
+            validate_payment_attempt_signed(&mandate, &attempt, &ledger, 1_700_000_000, &trusted)
+                .unwrap_err();
         assert!(matches!(err, Ap2Denial::MandateUnauthentic(_)));
     }
 
@@ -756,14 +751,9 @@ mod tests {
         let ledger = InMemoryMandateLedger::new();
         let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
         trusted.insert("k1", &vk);
-        let err = validate_payment_attempt_signed(
-            &mandate,
-            &attempt,
-            &ledger,
-            1_700_000_000,
-            &trusted,
-        )
-        .unwrap_err();
+        let err =
+            validate_payment_attempt_signed(&mandate, &attempt, &ledger, 1_700_000_000, &trusted)
+                .unwrap_err();
         assert!(matches!(err, Ap2Denial::MandateUnauthentic(_)));
     }
 
@@ -777,14 +767,9 @@ mod tests {
         let other_vk = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]).verifying_key();
         let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
         trusted.insert("k-other", &other_vk);
-        let err = validate_payment_attempt_signed(
-            &mandate,
-            &attempt,
-            &ledger,
-            1_700_000_000,
-            &trusted,
-        )
-        .unwrap_err();
+        let err =
+            validate_payment_attempt_signed(&mandate, &attempt, &ledger, 1_700_000_000, &trusted)
+                .unwrap_err();
         assert!(matches!(err, Ap2Denial::MandateUnauthentic(_)));
     }
 
@@ -804,14 +789,9 @@ mod tests {
         let ledger = InMemoryMandateLedger::new();
         let mut trusted = crate::a2a::mandate_signing::TrustedKeys::new();
         trusted.insert("k1", &vk);
-        let err = validate_payment_attempt_signed(
-            &mandate,
-            &attempt,
-            &ledger,
-            1_700_000_000,
-            &trusted,
-        )
-        .unwrap_err();
+        let err =
+            validate_payment_attempt_signed(&mandate, &attempt, &ledger, 1_700_000_000, &trusted)
+                .unwrap_err();
         assert!(matches!(err, Ap2Denial::PerTransferCapExceeded { .. }));
     }
 }

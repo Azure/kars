@@ -275,10 +275,7 @@ fn handle_notification(_notif: &Notification) {
 /// Build a JSON-RPC error response from a [`ParseError`].
 fn parse_error_response(err: &ParseError) -> Response {
     let (code, data): (ErrorCode, Value) = match err {
-        ParseError::InvalidJson(msg) => (
-            ErrorCode::ParseError,
-            serde_json::json!({"reason": msg}),
-        ),
+        ParseError::InvalidJson(msg) => (ErrorCode::ParseError, serde_json::json!({"reason": msg})),
         ParseError::InvalidProtocolVersion(v) => (
             ErrorCode::InvalidRequest,
             serde_json::json!({"reason": "jsonrpc must be \"2.0\"", "got": v}),
@@ -314,10 +311,7 @@ fn error_response(id: &Id, code: ErrorCode, data: Option<Value>) -> Response {
 /// vectors as a JSON array. Per JSON-RPC §6, the server MUST respond
 /// with whichever shape the client sent, but our parser collapses the
 /// distinction at the Frame level — we use vector length here.
-fn json_rpc_response(
-    responses: Vec<Response>,
-    session_id: Option<SessionId>,
-) -> ProcessOutcome {
+fn json_rpc_response(responses: Vec<Response>, session_id: Option<SessionId>) -> ProcessOutcome {
     let body = if responses.len() == 1 {
         // Take ownership of the single response without cloning.
         let single = responses.into_iter().next().expect("len==1");
@@ -359,7 +353,7 @@ fn fallback_internal_error(reason: String) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::mcp::initialize::OsRngSessionMinter;
-    use crate::mcp::streamable_http::{MCP_PROTOCOL_VERSION, MAX_FRAME_BYTES};
+    use crate::mcp::streamable_http::{MAX_FRAME_BYTES, MCP_PROTOCOL_VERSION};
     use serde_json::json;
 
     struct FixedMinter(&'static str);
@@ -644,13 +638,7 @@ mod tests {
 
     #[test]
     fn os_rng_minter_works_at_pipeline_level() {
-        let out = process_request(
-            &init_body(),
-            ok_accept(),
-            &cfg(),
-            &OsRngSessionMinter,
-            None,
-        );
+        let out = process_request(&init_body(), ok_accept(), &cfg(), &OsRngSessionMinter, None);
         match out {
             ProcessOutcome::JsonRpcResponse { session_id, .. } => {
                 let id = session_id.unwrap();
@@ -676,7 +664,13 @@ mod tests {
             }
         ]))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("batch-session"), None);
+        let out = process_request(
+            &body,
+            ok_accept(),
+            &cfg(),
+            &FixedMinter("batch-session"),
+            None,
+        );
         match out {
             ProcessOutcome::JsonRpcResponse { session_id, .. } => {
                 assert_eq!(session_id.unwrap().as_str(), "batch-session");

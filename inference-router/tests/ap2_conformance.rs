@@ -48,9 +48,7 @@ struct Fixture {
 #[serde(deny_unknown_fields, tag = "verdict", rename_all = "lowercase")]
 enum Expected {
     Allow,
-    Deny {
-        kind: String,
-    },
+    Deny { kind: String },
 }
 
 fn fixtures_dir() -> PathBuf {

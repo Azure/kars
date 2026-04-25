@@ -88,3 +88,6 @@ None.
 - Capability author: Pal Lakatos-Toth — `Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>`
 - Independent reviewer: Pal Lakatos-Toth (single-reviewer carry-over per
   Phase 1 hotspot-pass2 governance) — `Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>`
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

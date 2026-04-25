@@ -73,7 +73,10 @@ fn body_well_under_max_is_processed_normally() {
         &FixedMinter("s-2"),
         None,
     );
-    assert!(matches!(out, ProcessOutcome::JsonRpcResponse { .. }), "{out:?}");
+    assert!(
+        matches!(out, ProcessOutcome::JsonRpcResponse { .. }),
+        "{out:?}"
+    );
 }
 
 // ---------------------------------------------------------------- 2.

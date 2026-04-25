@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt_round_trip() {
-        let secret = b"shared-secret-32-bytes-XXXXXXXXX";
+        let secret = b"shared-secret-32-bytes-aaaaaaaaa";
         let salt = b"random-salt-16!!";
         let pt = b"some plaintext payload";
         let blob = encrypt_state(pt, secret, salt).expect("encrypt");
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn decrypt_rejects_tampered_ciphertext() {
-        let secret = b"shared-secret-32-bytes-XXXXXXXXX";
+        let secret = b"shared-secret-32-bytes-aaaaaaaaa";
         let salt = b"random-salt-16!!";
         let pt = b"some plaintext payload";
         let mut blob = encrypt_state(pt, secret, salt).expect("encrypt");
@@ -224,13 +224,9 @@ mod tests {
     #[test]
     fn decrypt_rejects_wrong_key() {
         let salt = b"random-salt-16!!";
-        let blob = encrypt_state(
-            b"hello",
-            b"shared-secret-32-bytes-XXXXXXXXX",
-            salt,
-        )
-        .expect("encrypt");
-        let err = decrypt_state(&blob, b"different-secret-32bytes-XXXXXXX")
+        let blob =
+            encrypt_state(b"hello", b"shared-secret-32-bytes-aaaaaaaaa", salt).expect("encrypt");
+        let err = decrypt_state(&blob, b"different-secret-32bytes-bbbbbbb")
             .expect_err("must reject wrong key");
         assert!(err.contains("AES-GCM decryption failed"), "got: {err}");
     }
@@ -238,11 +234,11 @@ mod tests {
     #[test]
     fn decrypt_rejects_invalid_nonce_length() {
         let salt = b"random-salt-16!!";
-        let mut blob = encrypt_state(b"hello", b"shared-secret-32-bytes-XXXXXXXXX", salt)
-            .expect("encrypt");
+        let mut blob =
+            encrypt_state(b"hello", b"shared-secret-32-bytes-aaaaaaaaa", salt).expect("encrypt");
         // Truncate the nonce.
         blob.nonce = BASE64.encode([0u8; 8]);
-        let err = decrypt_state(&blob, b"shared-secret-32-bytes-XXXXXXXXX")
+        let err = decrypt_state(&blob, b"shared-secret-32-bytes-aaaaaaaaa")
             .expect_err("must reject short nonce");
         assert!(err.contains("invalid nonce length"), "got: {err}");
     }
@@ -254,7 +250,7 @@ mod tests {
         // plaintext. If somebody substitutes a fully-valid encryption
         // of a *different* plaintext while keeping the original
         // verification_hash, decrypt must reject.
-        let secret = b"shared-secret-32-bytes-XXXXXXXXX";
+        let secret = b"shared-secret-32-bytes-aaaaaaaaa";
         let salt = b"random-salt-16!!";
         let blob_a = encrypt_state(b"alpha", secret, salt).expect("encrypt a");
         let mut blob_b = encrypt_state(b"beta", secret, salt).expect("encrypt b");

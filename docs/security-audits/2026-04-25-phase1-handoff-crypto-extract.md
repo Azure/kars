@@ -138,5 +138,5 @@ Phase 1 hotspot decomposition pass #2 (plan §4.2 / §7 item 8). Pure
 refactor, all 585 lib tests green pre+post, clippy clean, all 6 CI
 gates green.
 
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

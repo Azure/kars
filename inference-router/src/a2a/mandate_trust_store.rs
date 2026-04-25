@@ -237,13 +237,17 @@ mod tests {
     fn arc_view_pins_pre_replace_snapshot() {
         let s = MandateTrustStore::new();
         s.replace_snapshot(MandateTrustStoreSnapshot::from_inner(snapshot_with_kid(
-            "kid-pinned", 9, None,
+            "kid-pinned",
+            9,
+            None,
         )));
         let pinned = s.snapshot();
 
         // Hot-reload to a different snapshot.
         s.replace_snapshot(MandateTrustStoreSnapshot::from_inner(snapshot_with_kid(
-            "kid-fresh", 10, None,
+            "kid-fresh",
+            10,
+            None,
         )));
 
         // Pinned view still sees pre-replace state.
@@ -265,7 +269,10 @@ mod tests {
         let v = s.snapshot();
         assert!(v.as_verifier_keys(99).contains_key("kid-exp"), "live");
         assert!(!v.as_verifier_keys(100).contains_key("kid-exp"), "expired");
-        assert!(!v.as_verifier_keys(101).contains_key("kid-exp"), "long expired");
+        assert!(
+            !v.as_verifier_keys(101).contains_key("kid-exp"),
+            "long expired"
+        );
     }
 
     #[test]

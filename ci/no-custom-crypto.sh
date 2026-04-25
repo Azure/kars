@@ -16,9 +16,21 @@ cd "$REPO_ROOT"
 ALLOW_PATHS=(
   'controller/src/providers/signing.rs'
   'controller/src/providers/mesh.rs'
+  'controller/src/mesh_peer/'  # in-tree controller-side mesh peer hashing/signing — uses ed25519-dalek::SigningKey + Sha256 only; tracked for SigningProvider extraction in plan §4.1
   'inference-router/src/providers/signing.rs'
   'inference-router/src/providers/mesh.rs'
-  'inference-router/src/a2a/card_signing.rs'  # RFC 7515 JWS / RFC 8037 EdDSA over AgentCards (A2A 1.0.0 §4.4.7) — standard JOSE primitive
+  'inference-router/src/a2a/agent_card.rs'      # AgentCard data model — references ed25519-dalek::VerifyingKey only for trust-anchor types; no signing primitives
+  'inference-router/src/a2a/agent_projection.rs' # CRD → trust-anchor projection — re-exports ed25519-dalek::VerifyingKey only; verification-side surface
+  'inference-router/src/a2a/card_server.rs'     # /.well-known/agent.json builder — wires SigningKey into card_signing::sign_card; no in-place crypto math
+  'inference-router/src/a2a/card_signing.rs'    # RFC 7515 JWS / RFC 8037 EdDSA over AgentCards (A2A 1.0.0 §4.4.7) — standard JOSE primitive
+  'inference-router/src/a2a/card_verifier.rs'   # inbound caller-card verifier — uses ed25519-dalek::VerifyingKey only (no signing primitives)
+  'inference-router/src/a2a/jsonrpc_dispatch.rs' # JSON-RPC 2.0 binding for message/send / tasks/* — no crypto math; references ed25519-dalek types only via AP2 trust glue
+  'inference-router/src/a2a/mandate_signing.rs' # AP2 IntentMandate / CartMandate / PaymentMandate Ed25519 sign — RFC 8032 EdDSA via ed25519-dalek; signs only, no key derivation
+  'inference-router/src/a2a/mandate_trust_store.rs' # AP2 mandate verifier-side public-key store; uses ed25519-dalek::VerifyingKey only (no signing primitives)
+  'inference-router/src/a2a/message_send_ap2.rs' # message/send AP2 glue — no in-line crypto math; consults mandate_signing/trust_store via traits
+  'inference-router/src/a2a/snapshot_rebuild.rs' # trust-store snapshot rebuild — re-exports verification keys only
+  'inference-router/src/a2a/trust_store.rs'  # A2A peer-card public-key store; uses ed25519-dalek::VerifyingKey only (verification side, no signing primitives)
+  'inference-router/src/routes/a2a.rs'       # A2A axum routes — wires a2a::card_signing/mandate_signing into HTTP handlers; only imports ed25519-dalek::SigningKey for state plumbing
   'inference-router/src/auth.rs'          # IMDS/JWT verification; pre-existing
   'inference-router/src/handoff/mod.rs'   # pre-existing handoff AES-GCM blob cipher; plan §4.1 slates extraction into a SigningProvider-backed submodule
   'inference-router/src/handoff/crypto.rs' # extracted crypto submodule (AES-256-GCM + HKDF-SHA256 + integrity hash); single allow-listed home for the handoff blob cipher

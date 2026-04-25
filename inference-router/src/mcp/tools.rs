@@ -197,12 +197,13 @@ impl ToolDispatcher for EchoDispatcher {
         if name != "echo" {
             return Err(DispatchError::UnknownTool(name.to_string()));
         }
-        let text = arguments.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
-            DispatchError::InvalidArguments {
+        let text = arguments
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| DispatchError::InvalidArguments {
                 tool: name.to_string(),
                 reason: "missing required string property `text`".to_string(),
-            }
-        })?;
+            })?;
         Ok(ToolCallOutput {
             content: vec![ToolContent::Text {
                 text: text.to_string(),
@@ -478,13 +479,17 @@ mod tests {
     fn tools_list_unknown_cursor_resets_to_first_page() {
         let d = EchoDispatcher::with_catalog(three_tool_catalog().with_page_size(2));
         let r = handle_tools_list(
-            &req(
-                "tools/list",
-                Some(serde_json::json!({"cursor": "garbage"})),
-            ),
+            &req("tools/list", Some(serde_json::json!({"cursor": "garbage"}))),
             &d,
         );
-        let tools = r.result.unwrap().get("tools").unwrap().as_array().unwrap().len();
+        let tools = r
+            .result
+            .unwrap()
+            .get("tools")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
         assert_eq!(tools, 2);
     }
 
@@ -522,8 +527,14 @@ mod tests {
         assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(false));
         let content = result.get("content").and_then(|c| c.as_array()).unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].get("type").and_then(|v| v.as_str()), Some("text"));
-        assert_eq!(content[0].get("text").and_then(|v| v.as_str()), Some("ping"));
+        assert_eq!(
+            content[0].get("type").and_then(|v| v.as_str()),
+            Some("text")
+        );
+        assert_eq!(
+            content[0].get("text").and_then(|v| v.as_str()),
+            Some("ping")
+        );
     }
 
     #[test]

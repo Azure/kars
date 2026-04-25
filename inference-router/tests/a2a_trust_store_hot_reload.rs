@@ -165,10 +165,7 @@ fn hot_reload_makes_new_kid_verify_within_one_replace() {
     let raw = serde_json::to_vec(&card).unwrap();
 
     // Hot-reload: install kid-new alongside kid-old.
-    let updated = agent_spec_with_keys(&[
-        ("kid-old", &vk_old, None),
-        ("kid-new", &vk_new, None),
-    ]);
+    let updated = agent_spec_with_keys(&[("kid-old", &vk_old, None), ("kid-new", &vk_new, None)]);
     store.replace_snapshot(project_into_snapshot(&updated, 2));
     let snap = store.snapshot();
     assert_eq!(snap.generation(), 2, "generation advances on replace");
@@ -189,10 +186,7 @@ fn snapshot_replace_can_revoke_previously_trusted_kid() {
     // Trust both old + new.
     let (sk_old, vk_old) = keypair(40);
     let (_sk_new, vk_new) = keypair(41);
-    let initial = agent_spec_with_keys(&[
-        ("kid-old", &vk_old, None),
-        ("kid-new", &vk_new, None),
-    ]);
+    let initial = agent_spec_with_keys(&[("kid-old", &vk_old, None), ("kid-new", &vk_new, None)]);
     store.replace_snapshot(project_into_snapshot(&initial, 1));
 
     let card = agent_card_with_kid("kid-old", &sk_old);

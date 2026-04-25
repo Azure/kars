@@ -1459,6 +1459,5 @@ pub async fn run(client: Client) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests;

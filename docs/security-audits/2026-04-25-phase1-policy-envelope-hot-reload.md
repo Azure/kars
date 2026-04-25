@@ -156,5 +156,5 @@ production code paths" applies; this module is reachable by no
 production caller until the Phase 2 reconciler PR wires it up, at
 which point that PR will carry its own audit doc).
 
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

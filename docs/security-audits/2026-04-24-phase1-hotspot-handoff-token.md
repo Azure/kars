@@ -77,3 +77,6 @@ The existing 10 token-related tests in `handoff/mod.rs::tests` continue to exerc
 
 - **Copilot (author)** — refactor is behaviour-preserving; all security properties re-verified by existing + new tests; CI gates green.
 - **pallakatos@microsoft.com** — pre-approved for this extraction pass per the standing Phase 1 hotspot-split charter (see `docs/security-audits/2026-04-24-phase1-hotspot-handoff-split.md` and `…-pending.md`). Same pattern, same scope, same reviewer.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

@@ -105,5 +105,5 @@ Phase 1 hotspot decomposition pass #2 (plan §4.2). spawn brought
 under Phase 1 cap (1199 → 762, target was 900). All 6 CI gates green;
 clippy clean.
 
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
