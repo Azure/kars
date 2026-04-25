@@ -69,6 +69,41 @@ pub struct ClawSandboxSpec {
     /// Reconciler-side enforcement lands in
     /// `phase1/a2a-controller-revocation`; this branch is schema-only.
     pub a2a: Option<A2aIngressConfig>,
+
+    /// Upstream-protocol compatibility opt-in (Phase 1 schema-only scaffold).
+    ///
+    /// When `Some`, the controller will (in a future reconciler branch) accept
+    /// inbound traffic in upstream wire formats (e.g. `sigs.k8s.io/agent-sandbox`
+    /// SandboxClaim semantics) and translate them into the canonical
+    /// AzureClaw runtime contracts before they reach the agent. The translation
+    /// path is **read-only at the boundary**: AzureClaw never mutates upstream
+    /// objects in cluster, only mirrors observed state and emits canonical
+    /// status conditions.
+    ///
+    /// **Default OFF.** Schema lands now so future reconciler branches are
+    /// pure wiring. No code path consumes this field yet.
+    pub upstream_compatibility: Option<UpstreamCompatibilityConfig>,
+}
+
+/// Upstream-protocol compatibility (Phase 1 scaffold).
+///
+/// Codifies §2 (TranslateMode) of the implementation plan as a CRD field.
+/// All values default to OFF — opt-in per sandbox.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamCompatibilityConfig {
+    /// `sigs.k8s.io/agent-sandbox` SandboxClaim translation mode.
+    /// Values: `"off"` (default), `"observe"` (mirror status only),
+    /// `"translate"` (accept SandboxClaim semantics on inbound).
+    /// Reconciler refuses unknown strings.
+    pub sigs_agent_sandbox: Option<String>,
+
+    /// CNCF AI Conformance reference-mode toggle. When `true`, the
+    /// reconciler emits the canonical conformance status block on the
+    /// ClawSandbox object regardless of other settings. **Schema-only**;
+    /// no code path consumes this yet.
+    #[serde(default)]
+    pub ai_conformance_reference: bool,
 }
 
 /// `ClawSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.
