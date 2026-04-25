@@ -281,8 +281,8 @@ impl Governance {
 
     /// Reload policies from disk (for hot-reload).
     pub fn reload_policies(&self) {
-        let dir = std::env::var("AGT_POLICY_DIR")
-            .unwrap_or_else(|_| "/etc/azureclaw/policies".into());
+        let dir =
+            std::env::var("AGT_POLICY_DIR").unwrap_or_else(|_| "/etc/azureclaw/policies".into());
         match self.load_policies_from_dir(&dir) {
             Ok(count) => tracing::info!(rules = count, "Policy hot-reloaded"),
             Err(e) => tracing::warn!(error = %e, "Policy hot-reload failed"),
@@ -292,8 +292,8 @@ impl Governance {
     /// Spawn a background task that watches AGT_POLICY_DIR for changes
     /// and reloads policies when file mtimes change.
     pub fn spawn_policy_watcher(governance: std::sync::Arc<Self>) {
-        let dir = std::env::var("AGT_POLICY_DIR")
-            .unwrap_or_else(|_| "/etc/azureclaw/policies".into());
+        let dir =
+            std::env::var("AGT_POLICY_DIR").unwrap_or_else(|_| "/etc/azureclaw/policies".into());
         let interval_secs: u64 = std::env::var("AGT_POLICY_WATCH_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
