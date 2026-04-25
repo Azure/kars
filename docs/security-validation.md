@@ -240,6 +240,36 @@ Full hex-dump analysis: [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md
 
 ---
 
+## Cross-cutting Hardening ✅
+
+Validated by automated test suites (no live cluster needed):
+
+| Control | Test evidence |
+|---------|---------------|
+| `redactSecrets()` masks Bearer/Basic/JWT/PEM/`azcp_*`/keyword secrets in CLI logs | `cli/src/redact.test.ts` — 9 tests ✅ |
+| `sanitizeForLog()` strips CR/LF/tab from untrusted strings | `cli/src/stepper.test.ts`, `cli/src/commands/mesh.test.ts` ✅ |
+| `escapeHtml()` on OAuth callback page | `cli/src/commands/mesh.test.ts` ✅ |
+| TOCTOU-safe file reads (`openSync`+`fstatSync`+`readSync`) | `cli/src/plugin.test.ts` (offload + workspace transfer paths) ✅ |
+| `execFileSync("find", […])` — no shell, no head pipe | `cli/src/plugin.test.ts` ✅ |
+| Constant-time admin-token compare (`handoff::constant_time_eq`) | `cargo test --package azureclaw-inference-router` (handoff + trust + rate-limit suites) ✅ |
+| `#[serde(deny_unknown_fields)]` rejects typo'd `SpawnRequest` / `HandoffMeta` | `inference-router/src/spawn.rs` unit tests ✅ |
+| Sandbox hardening invariants (UID 1000, RO rootfs, drop ALL caps, seccomp `azureclaw-strict`, NET_ADMIN drop after init, iptables egress-guard, plugin+SDK root-owned RO) | `cli/src/testing/sandbox-hardening.test.ts` + controller-side reconciler regression test ✅ |
+| `cargo audit` (RUSTSEC closure) | `.github/workflows/ci.yml` cargo-audit job ✅ (closed RUSTSEC-2026-0098/-0099/-0104 by bumping `rustls-webpki`) |
+| `npm audit` (vulnerable transitive bumps) | `cli/package.json` overrides → `npm audit` 0 vulnerabilities ✅ |
+| Fuzz / proptest coverage | `cargo +nightly fuzz` targets: handoff blob, blocklist domain, AGT policy, safety-response. `proptest`: chunking, Double-Ratchet, K8s names ✅ |
+
+Reproduce with:
+
+```bash
+cd cli && npm test
+cd mesh-plugin && npm test
+cargo test --all
+cd cli && npm audit --audit-level=moderate
+cargo audit
+```
+
+---
+
 ## Resource Lifecycle: Finalizer ✅
 
 The controller adds a `azureclaw.azure.com/namespace-cleanup` finalizer to every

@@ -150,12 +150,23 @@ export function section(title: string): void {
 }
 
 /**
+ * Strip CR/LF from untrusted strings to prevent log-forging (CWE-117).
+ * Classic pattern recognized by CodeQL js/log-injection as a sanitizer.
+ */
+function sanitizeForLog(s: unknown): string {
+  return String(s ?? "")
+    .replace(/\r/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\t/g, " ");
+}
+
+/**
  * Print a key-value pair in the summary.
  */
 export function kvLine(key: string, value: string, icon?: string): void {
-  const k = key.padEnd(12);
-  const prefix = icon ? `  ${icon} ` : "  ";
-  console.log(`${prefix}${k} ${chalk.bold(value)}`);
+  const k = sanitizeForLog(key).padEnd(12);
+  const prefix = icon ? `  ${sanitizeForLog(icon)} ` : "  ";
+  console.log(`${prefix}${k} ${chalk.bold(sanitizeForLog(value))}`);
 }
 
 /**
@@ -163,5 +174,5 @@ export function kvLine(key: string, value: string, icon?: string): void {
  */
 export function checkLine(ok: boolean, text: string): void {
   const icon = ok ? chalk.green("✓") : chalk.yellow("○");
-  console.log(`  ${icon} ${text}`);
+  console.log(`  ${icon} ${sanitizeForLog(text)}`);
 }
