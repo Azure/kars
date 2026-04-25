@@ -107,6 +107,7 @@ fn denial_kind(d: &Ap2Denial) -> &'static str {
         Ap2Denial::AttemptInFuture { .. } => "AttemptInFuture",
         Ap2Denial::AttemptTooOld { .. } => "AttemptTooOld",
         Ap2Denial::ArithmeticOverflow => "ArithmeticOverflow",
+        Ap2Denial::MandateUnauthentic(_) => "MandateUnauthentic",
     }
 }
 
