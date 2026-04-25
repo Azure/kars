@@ -1,4 +1,4 @@
-//! A2A 1.0.0 agent-card scaffold (Agent2Agent protocol).
+//! A2A 1.0.0 — Agent2Agent protocol implementation.
 //!
 //! Spec: <https://a2a-protocol.org/v1.0.0/specification>
 //!
@@ -12,40 +12,38 @@
 //! `ci/a2a-module-isolation.sh` enforces the import constraint
 //! mechanically.
 //!
-//! ## Status: scaffold (`phase1/a2a-1.0.0-scaffold`)
+//! ## Status: implemented
 //!
-//! This PR lands type-level + signature-envelope primitives only. **No
-//! router routes are wired yet.** Subsequent branches add:
+//! The PR series `phase1/a2a-*` and `phase1/ap2-*` landed the full
+//! card-discovery + JSON-RPC + AP2 mandate pipeline:
 //!
-//! - `phase1/a2a-1.0.0-routes` — `/.well-known/agent.json` discovery
-//!   endpoint serving a per-sandbox card signed via `SigningProvider`.
-//! - `phase1/a2a-1.0.0-verify` — inbound A2A request verification:
-//!   pin the caller card by key thumbprint and reject mismatched JWS
-//!   signatures.
-//! - `phase1/a2a-1.0.0-jsonrpc-binding` — JSON-RPC 2.0 binding
-//!   handlers for `message/send`, `tasks/get`, `tasks/cancel`.
+//! - [`agent_card`] / [`signature`] / [`card_signing`] — RFC 7515 JWS +
+//!   RFC 8037 EdDSA over AgentCards (spec §4.4.7).
+//! - [`card_server`] — `/.well-known/agent.json` builder.
+//! - [`card_verifier`] — inbound caller-card pin-by-thumbprint verifier.
+//! - [`trust_store`] — A2A peer-card public-key store with hot reload.
+//! - [`jsonrpc_dispatch`] — JSON-RPC 2.0 binding for `message/send`,
+//!   `tasks/get`, `tasks/cancel`, with [`InMemoryTaskStore`] and
+//!   [`OsRngTaskIdMinter`].
+//! - [`ap2`] — AP2 IntentMandate / CartMandate / PaymentMandate
+//!   evaluation against a [`MandateLedger`].
+//! - [`mandate_signing`] / [`mandate_trust_store`] — Ed25519 sign +
+//!   verify for AP2 mandates.
+//! - [`message_send_ap2`] — `message/send` glue that consults AP2
+//!   trust + ledger before forwarding to the task store.
+//! - [`agent_projection`] — `A2aAgent` CRD → trust-anchor projection.
+//! - [`snapshot_rebuild`] — trust-store snapshot rebuild orchestrator.
 //!
-//! ## Submodules (this PR)
-//!
-//! - [`agent_card`] — Canonical [`AgentCard`] data model per spec
-//!   §4.4. Serde-derived `serialize` produces the exact wire shape
-//!   required by `/.well-known/agent.json`. All optional fields use
-//!   `skip_serializing_if = "Option::is_none"` to match spec
-//!   "field required: No → omit on absent" semantics.
-//! - [`signature`] — JWS detached-content signature envelope per RFC
-//!   7515. Builds the signing input (`protected || '.' || payload`),
-//!   computes the EdDSA signature using the project's existing
-//!   `ed25519-dalek` workspace dep, and base64url-encodes the result
-//!   per spec §4.4.7. Verification is symmetric.
-//! - [`error`] — A2A-specific error catalogue per spec §3.3.2 with
-//!   structured details (`Code`, `Message`, optional `Details`).
+//! Production routes live in [`crate::routes::a2a`] (`GET
+//! /.well-known/agent.json`, `POST /a2a`).
 //!
 //! ## Security posture
 //!
 //! Per §0.2 #8 (no rolling our own crypto / framing / wire format):
 //!
-//! - Ed25519 signing → `ed25519-dalek` workspace dep (existing).
-//! - Base64url → `base64` crate `URL_SAFE_NO_PAD` engine (existing).
+//! - Ed25519 signing → `ed25519-dalek` workspace dep (existing,
+//!   allow-listed in `ci/no-custom-crypto.sh`).
+//! - Base64url → `base64` crate `URL_SAFE_NO_PAD` engine.
 //! - JSON serialisation → `serde_json` (no hand-rolled tokenizer).
 //! - JWS framing → done by hand against RFC 7515, but the only
 //!   bytes-level work is `protected || '.' || payload` concatenation.
@@ -55,10 +53,11 @@
 //! is reused: structured construction is fallible, raw bytes never bypass
 //! validation.
 //!
-//! ## Spec citation
+//! ## Spec citations
 //!
 //! - A2A 1.0.0 specification:
 //!   <https://a2a-protocol.org/v1.0.0/specification>
+//! - AP2 specification: <https://a2a-protocol.org/ap2/v1.0.0>
 //! - RFC 7515 (JWS): <https://www.rfc-editor.org/rfc/rfc7515>
 //! - RFC 8037 (JOSE EdDSA): <https://www.rfc-editor.org/rfc/rfc8037>
 
@@ -83,19 +82,16 @@ pub use agent_card::{
     A2A_PROTOCOL_VERSION, AgentCapabilities, AgentCard, AgentCardSignature, AgentExtension,
     AgentInterface, AgentProvider, AgentSkill, ProtocolBinding,
 };
-pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
-pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
 pub use agent_projection::{
     A2aAgentSigningKeySpec, A2aAgentSpec, ProjectionError, project_anchors,
-};
-pub use mandate_signing::{
-    MandateSignError, TrustedKeys as MandateTrustedKeys, sign_mandate, verify_mandate,
 };
 pub use ap2::{
     Ap2Denial, COUNTERPARTY_WILDCARD, DAILY_WINDOW_SECS, InMemoryMandateLedger, IntentMandate,
     MONTHLY_WINDOW_SECS, MandateLedger, MandateLedgerMut, PaymentAttempt, PaymentRecord,
     validate_payment_attempt, validate_payment_attempt_signed,
 };
+pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
+pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
 pub use card_verifier::{
     CardVerifierConfig, CardVerifyError, VerifiedCallerIdentity, verify_inbound_card,
 };
@@ -105,14 +101,17 @@ pub use jsonrpc_dispatch::{
     StoreError, Task, TaskIdMinter, TaskState, TaskStore, TasksCancelParams, TasksGetParams,
     handle_message_send, handle_tasks_cancel, handle_tasks_get,
 };
-pub use trust_store::{
-    AnchorSource, TrustAnchor, TrustStore, TrustStoreBuildError, TrustStoreBuilder,
-    TrustStoreSnapshot,
+pub use mandate_signing::{
+    MandateSignError, TrustedKeys as MandateTrustedKeys, sign_mandate, verify_mandate,
 };
-pub use snapshot_rebuild::{RebuildIssue, RebuildOutcome, rebuild_snapshot};
 pub use mandate_trust_store::{
     MandateTrustStore, MandateTrustStoreSnapshot, MandateTrustStoreSnapshotView,
 };
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
+};
+pub use snapshot_rebuild::{RebuildIssue, RebuildOutcome, rebuild_snapshot};
+pub use trust_store::{
+    AnchorSource, TrustAnchor, TrustStore, TrustStoreBuildError, TrustStoreBuilder,
+    TrustStoreSnapshot,
 };

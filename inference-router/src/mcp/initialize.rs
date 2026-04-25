@@ -331,11 +331,7 @@ mod tests {
     #[test]
     fn rejects_non_initialize_method() {
         let r = req("ping", Some(ok_init_params()));
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("ignored"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("ignored"));
         assert!(out.session_id.is_none());
         let err = out.response.error.unwrap();
         assert_eq!(err.code, ErrorCode::MethodNotFound.code());
@@ -345,11 +341,7 @@ mod tests {
     #[test]
     fn rejects_missing_params() {
         let r = req("initialize", None);
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("ignored"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("ignored"));
         assert!(out.session_id.is_none());
         let err = out.response.error.unwrap();
         assert_eq!(err.code, ErrorCode::InvalidParams.code());
@@ -358,11 +350,7 @@ mod tests {
     #[test]
     fn rejects_garbage_params_shape() {
         let r = req("initialize", Some(json!("not-an-object")));
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("ignored"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("ignored"));
         assert!(out.session_id.is_none());
         let err = out.response.error.unwrap();
         assert_eq!(err.code, ErrorCode::InvalidParams.code());
@@ -373,11 +361,7 @@ mod tests {
         let mut p = ok_init_params();
         p["protocolVersion"] = json!("");
         let r = req("initialize", Some(p));
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("ignored"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("ignored"));
         assert!(out.session_id.is_none());
         let err = out.response.error.unwrap();
         assert_eq!(err.code, ErrorCode::InvalidParams.code());
@@ -430,11 +414,7 @@ mod tests {
     #[test]
     fn instructions_omitted_when_unset() {
         let r = req("initialize", Some(ok_init_params()));
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("s"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("s"));
         let result = out.response.result.unwrap();
         assert!(result.get("instructions").is_none());
     }
@@ -461,11 +441,7 @@ mod tests {
     fn id_preserved_across_response() {
         let mut r = req("initialize", Some(ok_init_params()));
         r.id = Id::String("abc-123".into());
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("s"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("s"));
         assert_eq!(out.response.id, Id::String("abc-123".into()));
     }
 
@@ -488,7 +464,9 @@ mod tests {
         let id = m.mint();
         assert_eq!(id.as_str().len(), 64);
         assert!(
-            id.as_str().chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            id.as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "expected lowercase hex, got: {}",
             id.as_str()
         );
@@ -509,11 +487,7 @@ mod tests {
         let mut p = ok_init_params();
         p["futureField"] = json!({"some": "value"});
         let r = req("initialize", Some(p));
-        let out = handle_initialize(
-            &r,
-            &InitializeConfig::default(),
-            &FixedMinter("s"),
-        );
+        let out = handle_initialize(&r, &InitializeConfig::default(), &FixedMinter("s"));
         assert!(out.response.error.is_none());
     }
 }

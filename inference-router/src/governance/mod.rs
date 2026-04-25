@@ -549,7 +549,6 @@ impl Governance {
         }
     }
 
-
     // ── Status ───────────────────────────────────────────────────────────
 
     /// Build the full `/agt/status` JSON response.

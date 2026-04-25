@@ -34,7 +34,6 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 mod offload;
 mod pair;
 
-
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -929,7 +928,6 @@ async fn handle_peer_message(
 
     Ok(())
 }
-
 
 fn hex_sha256(input: &str) -> String {
     let hash = Sha256::digest(input.as_bytes());

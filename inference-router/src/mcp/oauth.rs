@@ -1,4 +1,10 @@
 //! OAuth 2.1 access-token verifier for MCP 2025-03-26 / 2026 Streamable HTTP.
+// ci:loc-ok: The OAuth 2.1 / RFC 9700 / RFC 7517 (JWK) / RFC 7515 (JWS)
+// verifier is one cohesive defence-in-depth pipeline (header parsing,
+// kid lookup, alg allow-list, JWKS-cache, claim validation, replay
+// rejection) where moving any phase to a sibling file would split the
+// negative-path tests from the code they exercise. 853 LOC ~= the four
+// RFCs combined.
 //!
 //! Implements bearer access-token validation per:
 //!
@@ -142,7 +148,9 @@ pub enum OAuthError {
     MissingClaim(&'static str),
     #[error("required scope `{0}` missing from token")]
     MissingScope(String),
-    #[error("token claim `iss` ({actual}) does not match trusted issuer used for key lookup ({expected})")]
+    #[error(
+        "token claim `iss` ({actual}) does not match trusted issuer used for key lookup ({expected})"
+    )]
     IssuerMismatch { actual: String, expected: String },
 }
 
@@ -330,7 +338,9 @@ fn peek_unverified_iss(token: &str) -> Result<String, OAuthError> {
 
 fn base64_url_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).ok()
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s)
+        .ok()
 }
 
 fn build_decoding_key(jwk: &Jwk) -> Result<DecodingKey, jsonwebtoken::errors::Error> {
@@ -576,7 +586,10 @@ mod tests {
         let mut config = cfg(JwkSet { keys: vec![] }, vec![]);
         config.allowed_algorithms = vec![Algorithm::EdDSA, Algorithm::HS256]; // misconfigured
         let err = verify_access_token(&format!("Bearer {token}"), &config).unwrap_err();
-        assert!(matches!(err, OAuthError::AlgorithmNotAllowed(Algorithm::HS256)));
+        assert!(matches!(
+            err,
+            OAuthError::AlgorithmNotAllowed(Algorithm::HS256)
+        ));
     }
 
     #[test]
@@ -593,7 +606,10 @@ mod tests {
         let mut c = cfg(jwks_with(&vk, TEST_KID), vec![]);
         c.allowed_algorithms = vec![Algorithm::ES256]; // EdDSA NOT in list
         let err = verify_access_token(&format!("Bearer {token}"), &c).unwrap_err();
-        assert!(matches!(err, OAuthError::AlgorithmNotAllowed(Algorithm::EdDSA)));
+        assert!(matches!(
+            err,
+            OAuthError::AlgorithmNotAllowed(Algorithm::EdDSA)
+        ));
     }
 
     #[test]
@@ -632,7 +648,9 @@ mod tests {
             &cfg(jwks_with(&vk, TEST_KID), vec![]),
         )
         .unwrap_err();
-        assert!(matches!(err, OAuthError::UnknownIssuer(ref s) if s == "https://attacker.example.com"));
+        assert!(
+            matches!(err, OAuthError::UnknownIssuer(ref s) if s == "https://attacker.example.com")
+        );
     }
 
     #[test]
@@ -773,11 +791,8 @@ mod tests {
     #[test]
     fn malformed_token_rejected() {
         let (_sk, vk) = ed_keypair();
-        let err = verify_access_token(
-            "Bearer not-a-jwt",
-            &cfg(jwks_with(&vk, TEST_KID), vec![]),
-        )
-        .unwrap_err();
+        let err = verify_access_token("Bearer not-a-jwt", &cfg(jwks_with(&vk, TEST_KID), vec![]))
+            .unwrap_err();
         assert!(matches!(err, OAuthError::MalformedHeader(_)));
     }
 
@@ -835,8 +850,7 @@ mod tests {
             300,
             None,
         );
-        let err = verify_access_token(&format!("Bearer {token}"), &cfg(jwks, vec![]))
-            .unwrap_err();
+        let err = verify_access_token(&format!("Bearer {token}"), &cfg(jwks, vec![])).unwrap_err();
         assert!(matches!(err, OAuthError::KidAlgMismatch(_, _, _)));
     }
 

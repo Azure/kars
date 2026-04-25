@@ -230,7 +230,11 @@ mod tests {
         assert_eq!(out.issues.len(), 1, "exactly one duplicate-kid issue");
         match &out.issues[0] {
             RebuildIssue::DuplicateKid {
-                kid, existing, namespace, name, ..
+                kid,
+                existing,
+                namespace,
+                name,
+                ..
             } => {
                 assert_eq!(kid, "kid-x");
                 assert_eq!(existing, "ns-a/agent-1");
@@ -241,8 +245,7 @@ mod tests {
         }
         // Retained anchor is the seed=1 one (ns-a/agent-1).
         let anchor = out.snapshot.lookup("kid-x", 0).expect("kid-x present");
-        let expected_seed_1 =
-            SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let expected_seed_1 = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
         assert_eq!(anchor.key.as_bytes(), expected_seed_1.as_bytes());
     }
 

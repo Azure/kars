@@ -61,27 +61,22 @@ use crate::tool_policy::ToolPolicy;
 pub fn mcp_server_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)"
-                .into(),
-            message: Some(
-                "productionMode requires spec.oauth.issuer to be set".into(),
-            ),
+            rule:
+                "self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)"
+                    .into(),
+            message: Some("productionMode requires spec.oauth.issuer to be set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
             rule: "self.productionMode == false || self.url.startsWith('https://')".into(),
-            message: Some(
-                "productionMode requires spec.url to begin with https://".into(),
-            ),
+            message: Some("productionMode requires spec.url to begin with https://".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
             rule: "!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == 'S256'".into(),
-            message: Some(
-                "spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)".into(),
-            ),
+            message: Some("spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -234,7 +229,9 @@ mod tests {
             .map(|r| r.rule)
             .collect();
         assert!(
-            rules.iter().any(|r| r.contains("productionMode") && r.contains("oauth")),
+            rules
+                .iter()
+                .any(|r| r.contains("productionMode") && r.contains("oauth")),
             "must enforce productionMode -> oauth invariant; got rules: {rules:?}"
         );
     }
@@ -279,7 +276,8 @@ mod tests {
         // gracefully returns None instead of panicking. We construct a
         // minimal CustomResourceDefinition by hand.
         use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
-            CustomResourceDefinitionNames, CustomResourceDefinitionSpec, CustomResourceDefinitionVersion,
+            CustomResourceDefinitionNames, CustomResourceDefinitionSpec,
+            CustomResourceDefinitionVersion,
         };
         let crd = CustomResourceDefinition {
             metadata: Default::default(),

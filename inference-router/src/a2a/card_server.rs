@@ -277,7 +277,10 @@ mod tests {
         let key = rand_key();
         let bytes = build_signed_card(&cfg(), &key).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
-        assert!(s.contains("\"supportedInterfaces\""), "camelCase missing: {s}");
+        assert!(
+            s.contains("\"supportedInterfaces\""),
+            "camelCase missing: {s}"
+        );
         assert!(s.contains("\"defaultInputModes\""));
         assert!(s.contains("\"defaultOutputModes\""));
         assert!(s.contains("\"protocolVersion\""));
@@ -397,10 +400,7 @@ mod tests {
         // Trust only A.
         let mut trust_a: TrustedKeys = HashMap::new();
         trust_a.insert("tenant-1-2026-04-25", &vk_a);
-        assert_eq!(
-            verify_card(&card, &trust_a).unwrap(),
-            "tenant-1-2026-04-25"
-        );
+        assert_eq!(verify_card(&card, &trust_a).unwrap(), "tenant-1-2026-04-25");
 
         // Trust only B.
         let mut trust_b: TrustedKeys = HashMap::new();

@@ -110,10 +110,7 @@ pub enum CardVerifyError {
 
     /// Card carried `validFrom` and the supplied `now` was earlier.
     #[error("card not yet valid: validFrom={valid_from}, now={now}")]
-    NotYetValid {
-        valid_from: i64,
-        now: i64,
-    },
+    NotYetValid { valid_from: i64, now: i64 },
 
     /// Card carried `validUntil` and the supplied `now` was after.
     #[error("card expired: validUntil={valid_until}, now={now}")]
@@ -121,10 +118,7 @@ pub enum CardVerifyError {
 
     /// Card claimed a freshness field but it didn't parse as RFC 3339.
     #[error("malformed freshness field `{field}`: {reason}")]
-    MalformedFreshness {
-        field: &'static str,
-        reason: String,
-    },
+    MalformedFreshness { field: &'static str, reason: String },
 }
 
 /// Configuration for the inbound verifier. Each field carries a doc-
@@ -211,12 +205,11 @@ pub fn verify_inbound_card(
             .as_secs() as i64;
 
         if let Some(vf) = peek.valid_from.as_deref() {
-            let parsed = parse_rfc3339_secs(vf).map_err(|e| {
-                CardVerifyError::MalformedFreshness {
+            let parsed =
+                parse_rfc3339_secs(vf).map_err(|e| CardVerifyError::MalformedFreshness {
                     field: "validFrom",
                     reason: e,
-                }
-            })?;
+                })?;
             if now_secs < parsed {
                 return Err(CardVerifyError::NotYetValid {
                     valid_from: parsed,
@@ -225,12 +218,11 @@ pub fn verify_inbound_card(
             }
         }
         if let Some(vu) = peek.valid_until.as_deref() {
-            let parsed = parse_rfc3339_secs(vu).map_err(|e| {
-                CardVerifyError::MalformedFreshness {
+            let parsed =
+                parse_rfc3339_secs(vu).map_err(|e| CardVerifyError::MalformedFreshness {
                     field: "validUntil",
                     reason: e,
-                }
-            })?;
+                })?;
             if now_secs > parsed {
                 return Err(CardVerifyError::Expired {
                     valid_until: parsed,
@@ -303,7 +295,11 @@ fn parse_rfc3339_secs(s: &str) -> Result<i64, String> {
         if off.len() != 6 || (off.as_bytes()[0] != b'+' && off.as_bytes()[0] != b'-') {
             return Err(format!("malformed offset `{off}`"));
         }
-        let sign = if off.as_bytes()[0] == b'+' { 1i64 } else { -1i64 };
+        let sign = if off.as_bytes()[0] == b'+' {
+            1i64
+        } else {
+            -1i64
+        };
         let hh: i64 = off[1..3]
             .parse()
             .map_err(|e| format!("offset hours: {e}"))?;
@@ -497,7 +493,10 @@ mod tests {
         let mut keys = HashMap::new();
         keys.insert("k1", &vk);
         let err = verify_inbound_card(&raw2, &cfg(keys, None, SystemTime::now())).unwrap_err();
-        assert!(matches!(err, CardVerifyError::ProtocolVersionMismatch { .. }));
+        assert!(matches!(
+            err,
+            CardVerifyError::ProtocolVersionMismatch { .. }
+        ));
     }
 
     #[test]
@@ -545,7 +544,10 @@ mod tests {
         let mut keys = HashMap::new();
         keys.insert("k1", &vk);
         let err = verify_inbound_card(&raw, &cfg(keys, None, SystemTime::now())).unwrap_err();
-        assert!(matches!(err, CardVerifyError::EmptyRequiredField("version")));
+        assert!(matches!(
+            err,
+            CardVerifyError::EmptyRequiredField("version")
+        ));
     }
 
     #[test]
@@ -605,7 +607,10 @@ mod tests {
     #[test]
     fn rfc3339_parser_handles_z_suffix() {
         // 2026-01-01T00:00:00Z = 1767225600.
-        assert_eq!(parse_rfc3339_secs("2026-01-01T00:00:00Z").unwrap(), 1767225600);
+        assert_eq!(
+            parse_rfc3339_secs("2026-01-01T00:00:00Z").unwrap(),
+            1767225600
+        );
     }
 
     #[test]

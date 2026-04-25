@@ -109,8 +109,8 @@ pub fn sign_card(
         kid: Some(kid.to_string()),
         typ: Some("JWS".to_string()),
     };
-    let header_json =
-        serde_json::to_vec(&header).map_err(|e| CardSignError::ProtectedSerialise(e.to_string()))?;
+    let header_json = serde_json::to_vec(&header)
+        .map_err(|e| CardSignError::ProtectedSerialise(e.to_string()))?;
 
     let signing_input = build_signing_input(&header_json, &payload_bytes)?;
     let sig: Ed25519Signature = signing_key.sign(&signing_input.signing_input);
@@ -146,7 +146,10 @@ pub type TrustedKeys<'a> = HashMap<&'a str, &'a VerifyingKey>;
 /// raised as errors. This matches the multi-signer semantics in RFC
 /// 7515 and the A2A reference implementations.
 pub fn verify_card(card: &AgentCard, trusted: &TrustedKeys<'_>) -> Result<String, CardSignError> {
-    let signatures = card.signatures.as_ref().ok_or(CardSignError::NoSignatures)?;
+    let signatures = card
+        .signatures
+        .as_ref()
+        .ok_or(CardSignError::NoSignatures)?;
 
     // Strip signatures and re-serialise as the canonical payload.
     let payload_bytes = canonicalise_payload(card)?;
