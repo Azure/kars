@@ -47,12 +47,12 @@ files:
     phase2_cap: 800
     notes: "Move logic into controller/src/reconcilers/{sandbox,mcp_server,...}.rs."
 
-  - path: controller/src/mesh_peer.rs
+  - path: controller/src/mesh_peer/mod.rs
     baseline_2026_04_24: 1970
     phase0_cap: 1950
     phase1_cap: 1200
     phase2_cap: 800
-    notes: "Pull MeshProvider out; keep mesh_peer.rs as the Vendored impl."
+    notes: "Pull MeshProvider out; keep mesh_peer as the Vendored impl. Split into offload.rs + pair.rs in PR 48."
 
   - path: inference-router/src/routes/inference.rs
     baseline_2026_04_24: 1866
