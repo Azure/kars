@@ -65,6 +65,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_card;
+pub mod agent_projection;
 pub mod ap2;
 pub mod card_server;
 pub mod card_signing;
@@ -81,6 +82,9 @@ pub use agent_card::{
 };
 pub use card_server::{AgentCardConfig, CardServerError, build_card, build_signed_card};
 pub use card_signing::{CardSignError, TrustedKeys, sign_card, verify_card};
+pub use agent_projection::{
+    A2aAgentSigningKeySpec, A2aAgentSpec, ProjectionError, project_anchors,
+};
 pub use mandate_signing::{
     MandateSignError, TrustedKeys as MandateTrustedKeys, sign_mandate, verify_mandate,
 };
