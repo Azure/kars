@@ -69,6 +69,7 @@ pub mod card_server;
 pub mod card_signing;
 pub mod card_verifier;
 pub mod error;
+pub mod jsonrpc_dispatch;
 pub mod signature;
 
 pub use agent_card::{
@@ -81,6 +82,11 @@ pub use card_verifier::{
     CardVerifierConfig, CardVerifyError, VerifiedCallerIdentity, verify_inbound_card,
 };
 pub use error::{A2aError, A2aErrorCode};
+pub use jsonrpc_dispatch::{
+    CounterTaskIdMinter, InMemoryTaskStore, Message, MessageSendParams, OsRngTaskIdMinter,
+    StoreError, Task, TaskIdMinter, TaskState, TaskStore, TasksCancelParams, TasksGetParams,
+    handle_message_send, handle_tasks_cancel, handle_tasks_get,
+};
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
 };
