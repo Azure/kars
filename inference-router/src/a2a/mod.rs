@@ -72,6 +72,7 @@ pub mod card_verifier;
 pub mod error;
 pub mod jsonrpc_dispatch;
 pub mod signature;
+pub mod trust_store;
 
 pub use agent_card::{
     A2A_PROTOCOL_VERSION, AgentCapabilities, AgentCard, AgentCardSignature, AgentExtension,
@@ -92,6 +93,10 @@ pub use jsonrpc_dispatch::{
     CounterTaskIdMinter, InMemoryTaskStore, Message, MessageSendParams, OsRngTaskIdMinter,
     StoreError, Task, TaskIdMinter, TaskState, TaskStore, TasksCancelParams, TasksGetParams,
     handle_message_send, handle_tasks_cancel, handle_tasks_get,
+};
+pub use trust_store::{
+    AnchorSource, TrustAnchor, TrustStore, TrustStoreBuildError, TrustStoreBuilder,
+    TrustStoreSnapshot,
 };
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
