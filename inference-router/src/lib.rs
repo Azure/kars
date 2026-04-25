@@ -12,6 +12,7 @@
 
 pub mod a2a;
 pub mod auth;
+pub mod behavior_monitor;
 pub mod blocklist;
 pub mod budget;
 pub mod config;
