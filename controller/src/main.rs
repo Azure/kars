@@ -12,6 +12,8 @@
 //! Built with kube-rs (CNCF Sandbox).
 
 mod crd;
+#[allow(dead_code)] // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
+mod crd_validations;
 mod fedcred;
 #[allow(dead_code)] // scaffold-only; reconciler lands in phase1/mcp-2026-streamable-http-routes
 mod mcp_server;
