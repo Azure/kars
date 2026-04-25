@@ -61,6 +61,7 @@ pub mod jsonrpc;
 pub mod oauth;
 pub mod pipeline;
 pub mod streamable_http;
+pub mod tools;
 
 pub use error::{ErrorCode, JsonRpcError};
 pub use initialize::{
@@ -72,4 +73,8 @@ pub use oauth::{OAuthError, OAuthVerifierConfig, VerifiedToken, verify_access_to
 pub use pipeline::{ProcessOutcome, process_request};
 pub use streamable_http::{
     AcceptNegotiation, MAX_FRAME_BYTES, MCP_PROTOCOL_VERSION, SessionId, validate_accept_header,
+};
+pub use tools::{
+    CatalogError, DispatchError, EchoDispatcher, ToolCallOutput, ToolCatalog, ToolContent,
+    ToolDefinition, ToolDispatcher, handle_tools_call, handle_tools_list,
 };

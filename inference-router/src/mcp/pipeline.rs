@@ -49,6 +49,7 @@ use super::jsonrpc::{Frame, Id, Notification, ParseError, Request, Response, par
 use super::streamable_http::{
     AcceptNegotiation, MAX_FRAME_BYTES, SessionId, validate_accept_header,
 };
+use super::tools::{ToolDispatcher, handle_tools_call, handle_tools_list};
 
 /// Outcome of `process_request`. Maps directly to an HTTP response.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +80,7 @@ pub fn process_request(
     accept_header: Option<&str>,
     config: &InitializeConfig,
     minter: &dyn SessionMinter,
+    tools: Option<&dyn ToolDispatcher>,
 ) -> ProcessOutcome {
     // 1. Body size gate.
     if body.len() > MAX_FRAME_BYTES {
@@ -117,17 +119,18 @@ pub fn process_request(
     };
 
     // 4. Dispatch.
-    dispatch(frame, config, minter)
+    dispatch(frame, config, minter, tools)
 }
 
 fn dispatch(
     frame: Frame,
     config: &InitializeConfig,
     minter: &dyn SessionMinter,
+    tools: Option<&dyn ToolDispatcher>,
 ) -> ProcessOutcome {
     match frame {
         Frame::Request(req) => {
-            let (resp, sid) = handle_request(&req, config, minter);
+            let (resp, sid) = handle_request(&req, config, minter, tools);
             json_rpc_response(vec![resp], sid)
         }
         Frame::Notification(notif) => {
@@ -150,7 +153,7 @@ fn dispatch(
             for item in items {
                 match item {
                     Frame::Request(req) => {
-                        let (resp, sid) = handle_request(&req, config, minter);
+                        let (resp, sid) = handle_request(&req, config, minter, tools);
                         // First session id wins — multiple `initialize`
                         // calls in one batch is malformed but we
                         // surface a deterministic answer.
@@ -201,6 +204,7 @@ fn handle_request(
     req: &Request,
     config: &InitializeConfig,
     minter: &dyn SessionMinter,
+    tools: Option<&dyn ToolDispatcher>,
 ) -> (Response, Option<SessionId>) {
     match req.method.as_str() {
         "initialize" => {
@@ -208,6 +212,34 @@ fn handle_request(
             (outcome.response, outcome.session_id)
         }
         "ping" => (handle_ping(req), None),
+        "tools/list" => match tools {
+            Some(d) => (handle_tools_list(req, d), None),
+            None => (
+                error_response(
+                    &req.id,
+                    ErrorCode::MethodNotFound,
+                    Some(serde_json::json!({
+                        "method": req.method,
+                        "reason": "tools dispatcher not configured on this server",
+                    })),
+                ),
+                None,
+            ),
+        },
+        "tools/call" => match tools {
+            Some(d) => (handle_tools_call(req, d), None),
+            None => (
+                error_response(
+                    &req.id,
+                    ErrorCode::MethodNotFound,
+                    Some(serde_json::json!({
+                        "method": req.method,
+                        "reason": "tools dispatcher not configured on this server",
+                    })),
+                ),
+                None,
+            ),
+        },
         _ => (
             error_response(
                 &req.id,
@@ -366,6 +398,7 @@ mod tests {
             ok_accept(),
             &cfg(),
             &FixedMinter("session-001"),
+            None,
         );
         match out {
             ProcessOutcome::JsonRpcResponse { body, session_id } => {
@@ -386,7 +419,7 @@ mod tests {
             "id": 42,
         }))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, session_id } => {
                 assert!(session_id.is_none());
@@ -402,13 +435,13 @@ mod tests {
     #[test]
     fn payload_too_large_short_circuits() {
         let body = vec![0u8; MAX_FRAME_BYTES + 1];
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         assert_eq!(out, ProcessOutcome::PayloadTooLarge);
     }
 
     #[test]
     fn missing_accept_header_is_406() {
-        let out = process_request(&init_body(), None, &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&init_body(), None, &cfg(), &FixedMinter("ignored"), None);
         assert!(matches!(out, ProcessOutcome::NotAcceptable(_)));
     }
 
@@ -419,6 +452,7 @@ mod tests {
             Some("application/json"),
             &cfg(),
             &FixedMinter("ignored"),
+            None,
         );
         assert!(matches!(out, ProcessOutcome::NotAcceptable(_)));
     }
@@ -430,6 +464,7 @@ mod tests {
             Some("text/event-stream"),
             &cfg(),
             &FixedMinter("ignored"),
+            None,
         );
         assert!(matches!(out, ProcessOutcome::NotAcceptable(_)));
     }
@@ -441,6 +476,7 @@ mod tests {
             ok_accept(),
             &cfg(),
             &FixedMinter("ignored"),
+            None,
         );
         match out {
             ProcessOutcome::JsonRpcResponse { body, session_id } => {
@@ -460,7 +496,7 @@ mod tests {
             "id": 1,
         }))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, .. } => {
                 let resp: Value = serde_json::from_slice(&body).unwrap();
@@ -481,7 +517,7 @@ mod tests {
             "method": "notifications/initialized",
         }))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         assert_eq!(out, ProcessOutcome::Accepted);
     }
 
@@ -492,7 +528,7 @@ mod tests {
             {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}
         ]))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         assert_eq!(out, ProcessOutcome::Accepted);
     }
 
@@ -504,7 +540,7 @@ mod tests {
             {"jsonrpc": "2.0", "method": "ping", "id": 2}
         ]))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, .. } => {
                 let arr: Vec<Value> = serde_json::from_slice(&body).unwrap();
@@ -519,7 +555,7 @@ mod tests {
     #[test]
     fn empty_batch_returns_invalid_request() {
         let body = b"[]";
-        let out = process_request(body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, .. } => {
                 let resp: Value = serde_json::from_slice(&body).unwrap();
@@ -540,7 +576,7 @@ mod tests {
             "id": 1,
         }))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, .. } => {
                 let resp: Value = serde_json::from_slice(&body).unwrap();
@@ -567,7 +603,7 @@ mod tests {
             body.push(b'}');
         }
         assert_eq!(body.len(), MAX_FRAME_BYTES);
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("s"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("s"), None);
         // At-cap is allowed; only > cap rejects.
         assert!(matches!(out, ProcessOutcome::JsonRpcResponse { .. }));
     }
@@ -575,7 +611,7 @@ mod tests {
     #[test]
     fn nested_batch_is_rejected_at_parse() {
         let body = b"[[{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}]]";
-        let out = process_request(body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, .. } => {
                 let resp: Value = serde_json::from_slice(&body).unwrap();
@@ -596,7 +632,7 @@ mod tests {
             "id": "my-correlation-id",
         }))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { body, .. } => {
                 let resp: Value = serde_json::from_slice(&body).unwrap();
@@ -613,6 +649,7 @@ mod tests {
             ok_accept(),
             &cfg(),
             &OsRngSessionMinter,
+            None,
         );
         match out {
             ProcessOutcome::JsonRpcResponse { session_id, .. } => {
@@ -639,10 +676,116 @@ mod tests {
             }
         ]))
         .unwrap();
-        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("batch-session"));
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("batch-session"), None);
         match out {
             ProcessOutcome::JsonRpcResponse { session_id, .. } => {
                 assert_eq!(session_id.unwrap().as_str(), "batch-session");
+            }
+            other => panic!("expected JsonRpcResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tools_list_method_unsupported_when_no_dispatcher() {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 1,
+        }))
+        .unwrap();
+        let out = process_request(&body, ok_accept(), &cfg(), &FixedMinter("ignored"), None);
+        match out {
+            ProcessOutcome::JsonRpcResponse { body, .. } => {
+                let resp: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(resp["error"]["code"], json!(-32601));
+            }
+            other => panic!("expected JsonRpcResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tools_list_returns_catalog_when_dispatcher_provided() {
+        use super::super::tools::EchoDispatcher;
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 1,
+        }))
+        .unwrap();
+        let dispatcher = EchoDispatcher::standard();
+        let out = process_request(
+            &body,
+            ok_accept(),
+            &cfg(),
+            &FixedMinter("ignored"),
+            Some(&dispatcher),
+        );
+        match out {
+            ProcessOutcome::JsonRpcResponse { body, .. } => {
+                let resp: Value = serde_json::from_slice(&body).unwrap();
+                let tools = &resp["result"]["tools"];
+                assert!(tools.is_array());
+                assert_eq!(tools[0]["name"], json!("echo"));
+                // Verify camelCase wire format leak-test
+                let raw = std::str::from_utf8(&body).unwrap();
+                assert!(raw.contains("inputSchema"), "must use camelCase");
+                assert!(!raw.contains("input_schema"), "must not leak snake_case");
+            }
+            other => panic!("expected JsonRpcResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tools_call_invokes_dispatcher_via_pipeline() {
+        use super::super::tools::EchoDispatcher;
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "echo", "arguments": { "text": "hi" } },
+            "id": 7,
+        }))
+        .unwrap();
+        let dispatcher = EchoDispatcher::standard();
+        let out = process_request(
+            &body,
+            ok_accept(),
+            &cfg(),
+            &FixedMinter("ignored"),
+            Some(&dispatcher),
+        );
+        match out {
+            ProcessOutcome::JsonRpcResponse { body, .. } => {
+                let resp: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(resp["id"], json!(7));
+                assert_eq!(resp["result"]["content"][0]["text"], json!("hi"));
+                assert_eq!(resp["result"]["isError"], json!(false));
+            }
+            other => panic!("expected JsonRpcResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_jsonrpc_error() {
+        use super::super::tools::EchoDispatcher;
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "nope", "arguments": {} },
+            "id": 8,
+        }))
+        .unwrap();
+        let dispatcher = EchoDispatcher::standard();
+        let out = process_request(
+            &body,
+            ok_accept(),
+            &cfg(),
+            &FixedMinter("ignored"),
+            Some(&dispatcher),
+        );
+        match out {
+            ProcessOutcome::JsonRpcResponse { body, .. } => {
+                let resp: Value = serde_json::from_slice(&body).unwrap();
+                assert!(resp["error"].is_object());
             }
             other => panic!("expected JsonRpcResponse, got {other:?}"),
         }
