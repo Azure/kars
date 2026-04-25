@@ -355,6 +355,17 @@ const LEASE_NAME: &str = "azureclaw-mesh-peer-leader";
 const LEASE_DURATION_SECS: i32 = 30;
 const LEASE_RENEW_SECS: u64 = 10;
 
+// Reconnect backoff parameters. Reconnect storms (observed in AKS during
+// reconcile pressure: 30 cycles in 5 min, ~5s cadence) consume relay
+// resources, hammer the K8s API for Lease renewal, and starve real work.
+// Exponential backoff with jitter is the canonical fix.
+const RECONNECT_BACKOFF_MIN_SECS: u64 = 5;
+const RECONNECT_BACKOFF_MAX_SECS: u64 = 60;
+// Reset backoff once the connection has been stably "Connected" for this long.
+// Below this threshold we treat the connection as flapping and escalate the
+// next sleep; above it we reset to MIN.
+const RECONNECT_BACKOFF_RESET_AFTER_SECS: u64 = 120;
+
 // ---------------------------------------------------------------------------
 // Leader election via Kubernetes Lease
 // ---------------------------------------------------------------------------
@@ -502,6 +513,11 @@ pub async fn run(client: Client) -> Result<()> {
         leader_epoch: AtomicU64::new(0),
     });
 
+    // Reconnect-backoff state — preserved across iterations so successive
+    // failures escalate the sleep, and successful long-lived connections reset
+    // it to the floor.
+    let mut backoff_secs: u64 = RECONNECT_BACKOFF_MIN_SECS;
+
     loop {
         // Leader election — wait until we hold the lease
         if !try_acquire_lease(&state.client, &namespace).await {
@@ -548,6 +564,7 @@ pub async fn run(client: Client) -> Result<()> {
         let state_inner = state.clone();
         let lease_ns = namespace.clone();
         let lease_client = state.client.clone();
+        let connect_started_at = std::time::Instant::now();
         let result = tokio::select! {
             res = connect_and_listen(state_inner, &mut outbox_rx, new_epoch) => res,
             _ = async {
@@ -562,17 +579,55 @@ pub async fn run(client: Client) -> Result<()> {
             } => Err(anyhow::anyhow!("Lost leader lease")),
         };
 
+        // Reset the backoff if we held the connection long enough that the
+        // failure looks like a fresh upstream event rather than connect-flap.
+        let connection_lifetime = connect_started_at.elapsed();
+        if connection_lifetime >= Duration::from_secs(RECONNECT_BACKOFF_RESET_AFTER_SECS) {
+            if backoff_secs > RECONNECT_BACKOFF_MIN_SECS {
+                tracing::info!(
+                    prior_backoff_secs = backoff_secs,
+                    connection_lifetime_secs = connection_lifetime.as_secs(),
+                    "Resetting reconnect backoff after stable connection"
+                );
+            }
+            backoff_secs = RECONNECT_BACKOFF_MIN_SECS;
+        } else {
+            // Flap — escalate the backoff (cap at MAX). Worst-case 5→10→20→40→60.
+            backoff_secs = std::cmp::min(backoff_secs.saturating_mul(2), RECONNECT_BACKOFF_MAX_SECS);
+        }
+        // ±25% jitter to break thundering-herd when many controllers see the
+        // relay/registry blip simultaneously. SystemTime nanos give a coarse
+        // but adequate per-process seed without pulling in `rand`'s thread RNG
+        // (rand is already a transitive dep but `RngCore` is the only trait
+        // imported here for identity bytes; sticking to std avoids a wider
+        // ergonomic change).
+        let jitter_pct: i64 = {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as i64)
+                .unwrap_or(0);
+            (nanos % 51) - 25 // -25..=+25
+        };
+        let jittered = (backoff_secs as i64 * (100 + jitter_pct) / 100).max(1) as u64;
+
         match result {
             Ok(()) => {
-                tracing::info!("Relay connection closed gracefully — reconnecting in 5s");
+                tracing::info!(
+                    sleep_secs = jittered,
+                    connection_lifetime_secs = connection_lifetime.as_secs(),
+                    "Relay connection closed gracefully — reconnecting after backoff"
+                );
+                tokio::time::sleep(Duration::from_secs(jittered)).await;
             }
             Err(e) => {
-                tracing::warn!("Relay connection error: {e:#} — reconnecting in 10s");
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                continue;
+                tracing::warn!(
+                    sleep_secs = jittered,
+                    connection_lifetime_secs = connection_lifetime.as_secs(),
+                    "Relay connection error: {e:#} — reconnecting after backoff"
+                );
+                tokio::time::sleep(Duration::from_secs(jittered)).await;
             }
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
