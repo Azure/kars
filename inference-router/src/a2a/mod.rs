@@ -74,6 +74,7 @@ pub mod error;
 pub mod jsonrpc_dispatch;
 pub mod mandate_signing;
 pub mod signature;
+pub mod snapshot_rebuild;
 pub mod trust_store;
 
 pub use agent_card::{
@@ -106,6 +107,7 @@ pub use trust_store::{
     AnchorSource, TrustAnchor, TrustStore, TrustStoreBuildError, TrustStoreBuilder,
     TrustStoreSnapshot,
 };
+pub use snapshot_rebuild::{RebuildIssue, RebuildOutcome, rebuild_snapshot};
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
 };
