@@ -26,6 +26,12 @@ pub enum A2aErrorCode {
     ExtendedAgentCardNotConfigured,
     ExtensionSupportRequired,
     VersionNotSupported,
+    /// AP2 commerce extension denial — set when an inbound message
+    /// carrying a `metadata.ap2` extension is rejected by the
+    /// signed-mandate verifier or the policy validator (see
+    /// [`crate::a2a::ap2::Ap2Denial`]). The `data.reason` field of
+    /// the JSON-RPC error envelope carries the rendered denial.
+    Ap2Denied,
     /// Catch-all for forward compatibility — preserves unknown codes
     /// without dropping them.
     Other(i32),
@@ -43,6 +49,7 @@ impl From<A2aErrorCode> for i32 {
             A2aErrorCode::ExtendedAgentCardNotConfigured => -32007,
             A2aErrorCode::ExtensionSupportRequired => -32008,
             A2aErrorCode::VersionNotSupported => -32009,
+            A2aErrorCode::Ap2Denied => -32011,
             A2aErrorCode::Other(n) => n,
         }
     }
@@ -60,6 +67,7 @@ impl From<i32> for A2aErrorCode {
             -32007 => A2aErrorCode::ExtendedAgentCardNotConfigured,
             -32008 => A2aErrorCode::ExtensionSupportRequired,
             -32009 => A2aErrorCode::VersionNotSupported,
+            -32011 => A2aErrorCode::Ap2Denied,
             other => A2aErrorCode::Other(other),
         }
     }
@@ -77,6 +85,7 @@ impl A2aErrorCode {
             A2aErrorCode::ExtendedAgentCardNotConfigured => "Extended agent card not configured",
             A2aErrorCode::ExtensionSupportRequired => "Extension support required",
             A2aErrorCode::VersionNotSupported => "A2A version not supported",
+            A2aErrorCode::Ap2Denied => "AP2 commerce extension denied",
             A2aErrorCode::Other(_) => "A2A error",
         }
     }

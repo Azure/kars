@@ -74,6 +74,7 @@ pub mod error;
 pub mod jsonrpc_dispatch;
 pub mod mandate_signing;
 pub mod mandate_trust_store;
+pub mod message_send_ap2;
 pub mod signature;
 pub mod snapshot_rebuild;
 pub mod trust_store;
