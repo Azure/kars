@@ -1,0 +1,25 @@
+{
+  "name": "mandate-id-mismatch-is-first-check",
+  "now": 1700000000,
+  "mandate": {
+    "mandateId": "mandate-A",
+    "principal": "agent-1",
+    "currency": "USD",
+    "dailyCap": 10000,
+    "monthlyCap": 100000,
+    "perTransferCap": 5000,
+    "counterpartyAllowlist": ["acme-corp"],
+    "exp": 2000000000,
+    "signature": "fixture-sig"
+  },
+  "ledger": [],
+  "attempt": {
+    "mandateId": "mandate-B",
+    "counterparty": "acme-corp",
+    "amount": 100,
+    "currency": "USD",
+    "transferNonce": "n-014",
+    "timestamp": 1700000000
+  },
+  "expected": {"verdict": "deny", "kind": "MandateIdMismatch"}
+}
