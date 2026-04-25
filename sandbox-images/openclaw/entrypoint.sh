@@ -664,6 +664,13 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ -d /opt/azureclaw-plugin/commands ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   fi
+  # Copy ./core/ subdirectory (Phase 1 hotspot decomposition: foundry-discovery
+  # and future extracted modules live under core/). plugin.js requires
+  # './core/foundry-discovery.js' (commit a33165b) — without this copy the
+  # whole plugin fails to load with "Cannot find module './core/...'".
+  if [ -d /opt/azureclaw-plugin/core ]; then
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/core "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  fi
   # Copy Foundry skills (SKILL.md files)
   if [ -d /opt/azureclaw-plugin/skills ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
