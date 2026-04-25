@@ -17,10 +17,10 @@ use agentmesh::types::PolicyDecision;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::behavior_monitor::BehaviorMonitor;
 use crate::metrics;
 use crate::rate_limiter::RateLimiter;
 
@@ -75,144 +75,6 @@ impl GovernanceMetrics {
             return 0;
         }
         self.eval_latency_sum_us.load(Ordering::Relaxed) / total
-    }
-}
-
-// ── Behavior monitor ─────────────────────────────────────────────────────────
-
-/// Simple anomaly detector matching the original AgentBehaviorMonitor.
-pub struct BehaviorMonitor {
-    burst_threshold: u32,
-    consecutive_failure_threshold: u32,
-    capability_denial_threshold: u32,
-    state: Mutex<HashMap<String, BehaviorState>>,
-}
-
-struct BehaviorState {
-    recent_calls: u32,
-    window_start: Instant,
-    consecutive_failures: u32,
-    capability_denials: u32,
-}
-
-impl Default for BehaviorState {
-    fn default() -> Self {
-        Self {
-            recent_calls: 0,
-            window_start: Instant::now(),
-            consecutive_failures: 0,
-            capability_denials: 0,
-        }
-    }
-}
-
-impl BehaviorState {
-    /// Which thresholds this state exceeds, if any.
-    fn triggered_reasons(&self, burst_t: u32, fail_t: u32, denial_t: u32) -> Vec<String> {
-        let mut reasons = Vec::new();
-        if self.recent_calls > burst_t {
-            reasons.push(format!(
-                "burst: {} calls/60s (threshold {})",
-                self.recent_calls, burst_t
-            ));
-        }
-        if self.consecutive_failures > fail_t {
-            reasons.push(format!(
-                "consecutive failures: {} (threshold {})",
-                self.consecutive_failures, fail_t
-            ));
-        }
-        if self.capability_denials > denial_t {
-            reasons.push(format!(
-                "capability denials: {} (threshold {})",
-                self.capability_denials, denial_t
-            ));
-        }
-        reasons
-    }
-}
-
-impl BehaviorMonitor {
-    pub fn new(
-        burst_threshold: u32,
-        consecutive_failure_threshold: u32,
-        capability_denial_threshold: u32,
-    ) -> Self {
-        Self {
-            burst_threshold,
-            consecutive_failure_threshold,
-            capability_denial_threshold,
-            state: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn record(&self, agent_id: &str, success: bool) -> bool {
-        let mut state = self.state.lock().unwrap();
-        let entry = state.entry(agent_id.to_string()).or_default();
-
-        // Reset window every 60 seconds
-        if entry.window_start.elapsed() > Duration::from_secs(60) {
-            entry.recent_calls = 0;
-            entry.window_start = Instant::now();
-        }
-
-        entry.recent_calls += 1;
-        if success {
-            entry.consecutive_failures = 0;
-        } else {
-            entry.consecutive_failures += 1;
-            entry.capability_denials += 1;
-        }
-
-        // Return true if anomaly detected
-        !entry
-            .triggered_reasons(
-                self.burst_threshold,
-                self.consecutive_failure_threshold,
-                self.capability_denial_threshold,
-            )
-            .is_empty()
-    }
-
-    pub fn alert_count(&self) -> u64 {
-        let state = self.state.lock().unwrap();
-        state
-            .values()
-            .filter(|s| {
-                !s.triggered_reasons(
-                    self.burst_threshold,
-                    self.consecutive_failure_threshold,
-                    self.capability_denial_threshold,
-                )
-                .is_empty()
-            })
-            .count() as u64
-    }
-
-    /// Per-agent alert details: which agents are flagged and why.
-    pub fn alerts_detail(&self) -> Vec<serde_json::Value> {
-        let state = self.state.lock().unwrap();
-        state
-            .iter()
-            .filter_map(|(agent, s)| {
-                let reasons = s.triggered_reasons(
-                    self.burst_threshold,
-                    self.consecutive_failure_threshold,
-                    self.capability_denial_threshold,
-                );
-                if reasons.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::json!({
-                        "agent": agent,
-                        "reasons": reasons,
-                        "calls_in_window": s.recent_calls,
-                        "consecutive_failures": s.consecutive_failures,
-                        "capability_denials": s.capability_denials,
-                    }))
-                }
-            })
-            .collect()
     }
 }
 
