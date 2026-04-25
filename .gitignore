@@ -472,4 +472,5 @@ cli/*.test.*
 SECURITY-HARDENING-PLAN.md
 .DS_Store
 docs/demo-script.md
+docs/competitive.md
 nohup.out

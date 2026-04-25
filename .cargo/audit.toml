@@ -1,0 +1,22 @@
+# cargo-audit configuration
+# See: https://docs.rs/cargo-audit/latest/cargo_audit/#configuration
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0097 — `rand` is unsound with a custom logger using `rand::rng()`
+    # https://rustsec.org/advisories/RUSTSEC-2026-0097
+    #
+    # Severity: informational ("unsound"), NOT a vulnerability.
+    # Source: transitive dependency — `agentmesh 3.1.0` pins `rand = "=0.8.5"` exactly.
+    #   Our own direct deps are already on `rand = "0.9"` (patched).
+    # Exploitation requires ALL of:
+    #   1. A custom `log::Log` implementation is installed.
+    #   2. That logger calls `rand::rng()` (or `rand::thread_rng()`).
+    #   3. Trace-level logging is enabled AND a `TryRng`/`RngCore` method is invoked
+    #      from inside the logger during a `ThreadRng` reseed (every 64 KiB).
+    # Our inference-router uses `tracing-subscriber` (not `log::Log`) and no logger
+    # implementation accesses `rand`. The upstream `agentmesh` crate uses `rand` only
+    # for nonce/key generation, none of it from inside a logger.
+    # TODO: remove once `agentmesh` ships a release with `rand >= 0.8.6`.
+    "RUSTSEC-2026-0097",
+]

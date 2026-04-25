@@ -625,13 +625,22 @@ export class MeshConnection {
     const fsMod = await import("node:fs");
     const pathMod = await import("node:path");
 
-    const stat = fsMod.statSync(filePath);
-    if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
-    if (stat.size > MAX_FILE_SIZE) {
-      throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`);
+    // Open file once and read via fd to avoid stat→read TOCTOU race.
+    const fd = fsMod.openSync(filePath, "r");
+    let fileData: Buffer;
+    let fileSize: number;
+    try {
+      const stat = fsMod.fstatSync(fd);
+      if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
+      if (stat.size > MAX_FILE_SIZE) {
+        throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (max 30MB)`);
+      }
+      fileSize = stat.size;
+      fileData = Buffer.alloc(fileSize);
+      fsMod.readSync(fd, fileData, 0, fileSize, 0);
+    } finally {
+      fsMod.closeSync(fd);
     }
-
-    const fileData = fsMod.readFileSync(filePath);
     const b64Data = fileData.toString("base64");
     const fileName = pathMod.basename(filePath);
     const displayName = this.config.displayName || this.config.identity.amid.slice(0, 12);
@@ -641,7 +650,7 @@ export class MeshConnection {
       file_name: fileName,
       file_path: filePath,
       file_data: b64Data,
-      size_bytes: stat.size,
+      size_bytes: fileSize,
       description: opts?.description || "",
       from_agent: displayName,
       timestamp: new Date().toISOString(),
