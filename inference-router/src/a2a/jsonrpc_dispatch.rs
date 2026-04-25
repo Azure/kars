@@ -65,10 +65,7 @@ impl TaskState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            TaskState::Completed
-                | TaskState::Canceled
-                | TaskState::Failed
-                | TaskState::Rejected
+            TaskState::Completed | TaskState::Canceled | TaskState::Failed | TaskState::Rejected
         )
     }
 }
@@ -176,9 +173,7 @@ pub fn handle_message_send(
 
     match store.create(task) {
         Ok(t) => ok_response(req, serde_json::to_value(&t).unwrap_or_default()),
-        Err(StoreError::Duplicate(id)) => {
-            internal_error(req, &format!("task id collision: {id}"))
-        }
+        Err(StoreError::Duplicate(id)) => internal_error(req, &format!("task id collision: {id}")),
         Err(e) => internal_error(req, &e.to_string()),
     }
 }
@@ -587,10 +582,7 @@ mod tests {
             metadata: None,
         };
         store.create(task.clone()).unwrap();
-        assert!(matches!(
-            store.create(task),
-            Err(StoreError::Duplicate(_))
-        ));
+        assert!(matches!(store.create(task), Err(StoreError::Duplicate(_))));
     }
 
     #[test]

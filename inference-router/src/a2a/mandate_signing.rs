@@ -43,9 +43,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::ap2::IntentMandate;
-use super::signature::{
-    SignatureError, base64url_decode, base64url_encode, build_signing_input,
-};
+use super::signature::{SignatureError, base64url_decode, base64url_encode, build_signing_input};
 
 /// Errors raised by [`sign_mandate`] and [`verify_mandate`].
 #[derive(Debug, thiserror::Error)]
@@ -186,8 +184,8 @@ pub fn verify_mandate(
     let payload_bytes = canonicalise_payload(mandate)?;
     let signing_input = build_signing_input(&header_bytes, &payload_bytes)?;
 
-    let sig_bytes = base64url_decode(sig_b64u)
-        .map_err(|e| MandateSignError::MalformedHeader(e.to_string()))?;
+    let sig_bytes =
+        base64url_decode(sig_b64u).map_err(|e| MandateSignError::MalformedHeader(e.to_string()))?;
     if sig_bytes.len() != 64 {
         return Err(MandateSignError::SignatureLength(sig_bytes.len()));
     }

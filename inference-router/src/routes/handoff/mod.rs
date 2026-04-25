@@ -21,7 +21,6 @@ use crate::spawn;
 
 mod payload;
 
-
 pub fn spawn_routes() -> Router<AppState> {
     Router::new()
         .route("/sandbox/spawn", post(sandbox_spawn))
@@ -235,7 +234,6 @@ async fn handoff_init_handler(
     )
         .into_response()
 }
-
 
 /// POST /agt/handoff/drain — enter drain mode (stop new work, complete in-flight).
 async fn handoff_drain(State(state): State<AppState>) -> impl IntoResponse {

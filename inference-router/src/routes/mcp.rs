@@ -105,13 +105,8 @@ pub fn mcp_route() -> Router<McpRouteState> {
 /// `request.extensions_mut()`, available to downstream handlers via an
 /// `axum::Extension<VerifiedToken>` extractor (consumed by the
 /// upcoming per-tool scope check in `pipeline::process_request`).
-pub fn protected_mcp_route(
-    state: McpRouteState,
-    oauth: Arc<OAuthVerifierConfig>,
-) -> Router {
-    mcp_route()
-        .with_state(state)
-        .layer(OAuthLayer::new(oauth))
+pub fn protected_mcp_route(state: McpRouteState, oauth: Arc<OAuthVerifierConfig>) -> Router {
+    mcp_route().with_state(state).layer(OAuthLayer::new(oauth))
 }
 
 async fn method_not_allowed() -> impl IntoResponse {
@@ -122,14 +117,8 @@ async fn method_not_allowed() -> impl IntoResponse {
     )
 }
 
-async fn post_mcp(
-    State(state): State<McpRouteState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok());
+async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: Bytes) -> Response {
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
 
     let outcome = process_request(
         &body,
@@ -238,10 +227,7 @@ mod tests {
         let (status, headers, text) = body_text(resp).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            headers.get(MCP_SESSION_HEADER).unwrap(),
-            "test-session-001"
-        );
+        assert_eq!(headers.get(MCP_SESSION_HEADER).unwrap(), "test-session-001");
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["id"], 1);
@@ -273,10 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_mcp_malformed_json_returns_200_with_parse_error() {
-        let req = post_body(
-            b"{not json",
-            Some("application/json, text/event-stream"),
-        );
+        let req = post_body(b"{not json", Some("application/json, text/event-stream"));
         let (status, _, text) = body_text(app().oneshot(req).await.unwrap()).await;
         assert_eq!(status, StatusCode::OK); // JSON-RPC convention
         let v: Value = serde_json::from_str(&text).unwrap();

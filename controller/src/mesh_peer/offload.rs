@@ -21,12 +21,11 @@ use std::sync::atomic::Ordering;
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::pairing::{ClawPairing, phase};
 use super::{
     FederationMessage, FileContent, IDENTITY_NAMESPACE, MeshPeerState, OffloadPreferences,
     enqueue_outbound, send_to_peer,
 };
-
+use crate::pairing::{ClawPairing, phase};
 
 // ---------------------------------------------------------------------------
 // Offload orchestration
@@ -715,4 +714,3 @@ pub(super) async fn validate_pairing_for_offload(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-

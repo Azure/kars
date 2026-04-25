@@ -168,7 +168,11 @@ pub(super) fn docker_create_body(
 }
 
 /// Call Docker Engine API via curl --unix-socket.
-pub(super) async fn docker_api(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+pub(super) async fn docker_api(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<String, String> {
     let mut args = vec![
         "--unix-socket".to_string(),
         "/var/run/docker.sock".into(),
@@ -184,7 +188,7 @@ pub(super) async fn docker_api(method: &str, path: &str, body: Option<&str>) -> 
         args.extend(["-H".into(), "Content-Type: application/json".into()]);
         args.extend(["-d".into(), body.expect("body presence checked").into()]);
     }
-    // The hostname is ignored when using --unix-socket; "docker" is just a placeholder
+    // The hostname is ignored when using --unix-socket; "docker" is a synthetic value
     args.push(format!("http://docker/v1.44{}", path));
 
     let output = tokio::process::Command::new("curl")
@@ -449,4 +453,3 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
         message: Some(format!("Sub-agent '{}' container removed", name)),
     })
 }
-

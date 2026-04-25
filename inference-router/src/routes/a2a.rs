@@ -45,12 +45,13 @@ use ed25519_dalek::SigningKey;
 use std::sync::Arc;
 
 use crate::a2a::{
-    AgentCardConfig, build_signed_card, handle_message_send, handle_tasks_cancel,
-    handle_tasks_get,
+    AgentCardConfig, build_signed_card, handle_message_send, handle_tasks_cancel, handle_tasks_get,
 };
 use crate::a2a::{InMemoryTaskStore, OsRngTaskIdMinter, TaskIdMinter, TaskStore};
 use crate::mcp::error::{ErrorCode, JsonRpcError};
-use crate::mcp::jsonrpc::{Frame, Id, Notification, ParseError, Request, Response as JRpcResponse, parse_frame};
+use crate::mcp::jsonrpc::{
+    Frame, Id, Notification, ParseError, Request, Response as JRpcResponse, parse_frame,
+};
 use crate::mcp::streamable_http::MAX_FRAME_BYTES;
 
 /// Per-router A2A state. Cheap to clone (everything inside is `Arc`).
@@ -104,20 +105,12 @@ async fn get_agent_card(State(state): State<A2aRouteState>) -> Response {
             .into_response(),
         Err(e) => {
             tracing::error!(error = %e, "build_signed_card failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "agent card unavailable",
-            )
-                .into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, "agent card unavailable").into_response()
         }
     }
 }
 
-async fn post_a2a(
-    State(state): State<A2aRouteState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn post_a2a(State(state): State<A2aRouteState>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > MAX_FRAME_BYTES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -191,16 +184,16 @@ fn handle_batch(items: Vec<Frame>, state: &A2aRouteState) -> Response {
         match item {
             Frame::Request(req) => responses.push(dispatch_request(req, state)),
             Frame::Notification(_) => { /* no response per JSON-RPC §6 */ }
-            Frame::Response(_) => responses.push(JRpcResponse {
-                jsonrpc: "2.0".into(),
-                result: None,
-                error: Some(
-                    JsonRpcError::new(ErrorCode::InvalidRequest).with_data(
+            Frame::Response(_) => {
+                responses.push(JRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    result: None,
+                    error: Some(JsonRpcError::new(ErrorCode::InvalidRequest).with_data(
                         serde_json::json!({"detail": "batch contained a response frame"}),
-                    ),
-                ),
-                id: Id::Null,
-            }),
+                    )),
+                    id: Id::Null,
+                })
+            }
             Frame::Batch(_) => {
                 responses.push(JRpcResponse {
                     jsonrpc: "2.0".into(),
@@ -508,7 +501,10 @@ mod tests {
         let v: Value = serde_json::from_str(&text).unwrap();
         let arr = v.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["error"]["code"], i32::from(A2aErrorCode::TaskNotFound));
+        assert_eq!(
+            arr[0]["error"]["code"],
+            i32::from(A2aErrorCode::TaskNotFound)
+        );
         assert_eq!(arr[1]["error"]["code"], -32601);
     }
 
@@ -567,7 +563,10 @@ mod tests {
         // Decode the protected b64u and look for "kid":"test-kid-1".
         let raw = base64_decode(&sigs[0].protected);
         let header_str = std::str::from_utf8(&raw).unwrap();
-        assert!(header_str.contains("\"kid\":\"test-kid-1\""), "{header_str}");
+        assert!(
+            header_str.contains("\"kid\":\"test-kid-1\""),
+            "{header_str}"
+        );
     }
 
     fn base64_decode(s: &str) -> Vec<u8> {

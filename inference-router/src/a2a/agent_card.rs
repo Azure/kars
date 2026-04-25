@@ -195,27 +195,20 @@ mod tests {
     fn required_fields_always_present() {
         let card = minimal_card();
         let s = serde_json::to_string(&card).unwrap();
-        for required in [
-            "name",
-            "description",
-            "version",
-            "capabilities",
-            "skills",
-        ] {
+        for required in ["name", "description", "version", "capabilities", "skills"] {
             assert!(s.contains(required), "missing required field: {required}");
         }
     }
 
     #[test]
     fn known_protocol_binding_serialises_as_string() {
-        let s = serde_json::to_string(&ProtocolBinding::Known(KnownProtocolBinding::JsonRpc))
-            .unwrap();
+        let s =
+            serde_json::to_string(&ProtocolBinding::Known(KnownProtocolBinding::JsonRpc)).unwrap();
         assert_eq!(s, "\"JSONRPC\"");
-        let s = serde_json::to_string(&ProtocolBinding::Known(KnownProtocolBinding::Grpc))
-            .unwrap();
+        let s = serde_json::to_string(&ProtocolBinding::Known(KnownProtocolBinding::Grpc)).unwrap();
         assert_eq!(s, "\"GRPC\"");
-        let s = serde_json::to_string(&ProtocolBinding::Known(KnownProtocolBinding::HttpJson))
-            .unwrap();
+        let s =
+            serde_json::to_string(&ProtocolBinding::Known(KnownProtocolBinding::HttpJson)).unwrap();
         assert_eq!(s, "\"HTTP+JSON\"");
     }
 
