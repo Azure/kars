@@ -20,17 +20,21 @@
 //! ```ignore
 //! let mcp_state = routes::McpRouteState::standard();
 //! let app = Router::new()
-//!     .merge(routes::mcp_route().with_state(mcp_state))
+//!     // unauthenticated dev/test surface:
+//!     .merge(routes::mcp_route().with_state(mcp_state.clone()))
+//!     // production surface, OAuth 2.1 gated:
+//!     .merge(routes::protected_mcp_route(mcp_state, oauth_cfg))
 //!     .merge(other_routes.with_state(app_state));
 //! ```
 //!
-//! ## What this module does NOT do
+//! ## OAuth wiring
 //!
-//! - OAuth 2.1 verification — `mcp::oauth` is the pure verifier;
-//!   binding it as a tower layer is the next PR.
-//! - SSE streaming responses — pipeline returns single JSON-RPC
-//!   bodies today. Accept negotiation already requires
-//!   `text/event-stream` in the client list per spec.
+//! [`protected_mcp_route`] applies [`crate::mcp::OAuthLayer`] in front
+//! of [`mcp_route`]. Production deployments select the protected
+//! variant; `azureclaw dev` and the test suite use the bare variant.
+//! Selection is a deployment-time decision: when an `McpServer` CR has
+//! `spec.productionMode == true` the controller routes traffic through
+//! the protected mount; otherwise through the bare mount.
 
 use axum::{
     Router,
@@ -43,6 +47,8 @@ use axum::{
 use std::sync::Arc;
 
 use crate::mcp::initialize::{InitializeConfig, OsRngSessionMinter, SessionMinter};
+use crate::mcp::oauth::OAuthVerifierConfig;
+use crate::mcp::oauth_layer::OAuthLayer;
 use crate::mcp::pipeline::{ProcessOutcome, process_request};
 use crate::mcp::tools::{EchoDispatcher, ToolDispatcher};
 
@@ -85,6 +91,27 @@ impl std::fmt::Debug for McpRouteState {
 /// Axum router exposing `POST /mcp` (and `GET /mcp` → 405 + `Allow: POST`).
 pub fn mcp_route() -> Router<McpRouteState> {
     Router::new().route("/mcp", post(post_mcp).get(method_not_allowed))
+}
+
+/// Production-mode router: same MCP surface as [`mcp_route`], but every
+/// request is OAuth 2.1 verified by [`OAuthLayer`] *before* it reaches
+/// the JSON-RPC pipeline.
+///
+/// On verification failure the layer short-circuits with `401
+/// Unauthorized` and an RFC 6750 §3 `WWW-Authenticate: Bearer ...`
+/// challenge; the inner MCP handler is never invoked.
+///
+/// On success a [`crate::mcp::oauth::VerifiedToken`] is attached to
+/// `request.extensions_mut()`, available to downstream handlers via an
+/// `axum::Extension<VerifiedToken>` extractor (consumed by the
+/// upcoming per-tool scope check in `pipeline::process_request`).
+pub fn protected_mcp_route(
+    state: McpRouteState,
+    oauth: Arc<OAuthVerifierConfig>,
+) -> Router {
+    mcp_route()
+        .with_state(state)
+        .layer(OAuthLayer::new(oauth))
 }
 
 async fn method_not_allowed() -> impl IntoResponse {
@@ -346,5 +373,220 @@ mod tests {
     async fn standard_state_builds_without_panic() {
         let s = McpRouteState::standard();
         assert!(!s.config.supported_protocol_versions.is_empty());
+    }
+
+    // ----------------------------------------------------------------
+    // protected_mcp_route — OAuth 2.1 wiring tests
+    // ----------------------------------------------------------------
+
+    use crate::mcp::oauth::OAuthVerifierConfig;
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+    use jsonwebtoken::jwk::{
+        AlgorithmParameters as JwkAlg, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm,
+        OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
+    };
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use std::collections::HashMap;
+
+    const ROUTE_TEST_KID: &str = "route-kid-1";
+    const ROUTE_TEST_ISS: &str = "https://route.example/iss";
+    const ROUTE_TEST_AUD: &str = "https://route.example/aud";
+
+    fn route_keypair_seeded(seed: u8) -> (SigningKey, ed25519_dalek::VerifyingKey) {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key();
+        (sk, vk)
+    }
+
+    fn route_jwks_with(vk: &ed25519_dalek::VerifyingKey, kid: &str) -> JwkSet {
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vk.as_bytes());
+        JwkSet {
+            keys: vec![Jwk {
+                common: CommonParameters {
+                    public_key_use: Some(PublicKeyUse::Signature),
+                    key_operations: None,
+                    key_algorithm: Some(KeyAlgorithm::EdDSA),
+                    key_id: Some(kid.into()),
+                    x509_url: None,
+                    x509_chain: None,
+                    x509_sha1_fingerprint: None,
+                    x509_sha256_fingerprint: None,
+                },
+                algorithm: JwkAlg::OctetKeyPair(OctetKeyPairParameters {
+                    key_type: OctetKeyPairType::OctetKeyPair,
+                    curve: EllipticCurve::Ed25519,
+                    x,
+                }),
+            }],
+        }
+    }
+
+    /// Build a PKCS#8 v1 PEM Ed25519 private key (RFC 8410 §7) without
+    /// enabling the `pkcs8` feature on ed25519-dalek.
+    fn route_signing_pem(sk: &SigningKey) -> EncodingKey {
+        let prefix: [u8; 16] = [
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ];
+        let mut der = Vec::with_capacity(48);
+        der.extend_from_slice(&prefix);
+        der.extend_from_slice(&sk.to_bytes());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n");
+        EncodingKey::from_ed_pem(pem.as_bytes()).unwrap()
+    }
+
+    fn route_oauth_cfg(jwks: JwkSet) -> Arc<OAuthVerifierConfig> {
+        let mut trusted = HashMap::new();
+        trusted.insert(ROUTE_TEST_ISS.to_string(), jwks);
+        Arc::new(OAuthVerifierConfig {
+            trusted_issuers: trusted,
+            expected_audience: ROUTE_TEST_AUD.into(),
+            allowed_algorithms: vec![Algorithm::EdDSA],
+            leeway_seconds: 30,
+            required_scopes: vec![],
+        })
+    }
+
+    fn route_issue_token(sk: &SigningKey, kid: &str) -> String {
+        let now = jsonwebtoken::get_current_timestamp() as i64;
+        let claims = json!({
+            "iss": ROUTE_TEST_ISS,
+            "sub": "route-sub",
+            "aud": ROUTE_TEST_AUD,
+            "iat": now - 1,
+            "nbf": now - 1,
+            "exp": now + 600,
+            "scope": "mcp.read"
+        });
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(kid.into());
+        encode(&header, &claims, &route_signing_pem(sk)).unwrap()
+    }
+
+    fn protected_app() -> (Router, Arc<OAuthVerifierConfig>, SigningKey) {
+        let (sk, vk) = route_keypair_seeded(11);
+        let jwks = route_jwks_with(&vk, ROUTE_TEST_KID);
+        let cfg = route_oauth_cfg(jwks);
+        let app = protected_mcp_route(test_state(), Arc::clone(&cfg));
+        (app, cfg, sk)
+    }
+
+    fn initialize_request_body() -> Vec<u8> {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0.0.0"}
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_missing_bearer_with_401_and_challenge() {
+        let (app, _cfg, _sk) = protected_app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .body(Body::from(initialize_request_body()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .expect("RFC 6750 §3 challenge required")
+            .to_str()
+            .unwrap();
+        assert!(challenge.starts_with("Bearer error=\"invalid_token\""));
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_malformed_bearer_with_401() {
+        let (app, _cfg, _sk) = protected_app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header(header::AUTHORIZATION, "Bearer not-a-jwt")
+            .body(Body::from(initialize_request_body()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            resp.headers()
+                .get(header::WWW_AUTHENTICATE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("error=\"invalid_token\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_token_signed_by_untrusted_key_with_401() {
+        // Trust kid `ROUTE_TEST_KID` bound to vk(seed=11); sign with seed=42.
+        let (sk, _vk_unused) = route_keypair_seeded(42);
+        let (_sk_trusted, vk_trusted) = route_keypair_seeded(11);
+        let cfg = route_oauth_cfg(route_jwks_with(&vk_trusted, ROUTE_TEST_KID));
+        let app = protected_mcp_route(test_state(), cfg);
+
+        let token = route_issue_token(&sk, ROUTE_TEST_KID);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(initialize_request_body()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn protected_route_accepts_valid_bearer_and_returns_initialize_result() {
+        let (app, _cfg, sk) = protected_app();
+        let token = route_issue_token(&sk, ROUTE_TEST_KID);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(initialize_request_body()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, headers, text) = body_text(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(MCP_SESSION_HEADER).unwrap(),
+            "test-session-001",
+            "MCP session header survives the OAuth layer"
+        );
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 1);
+        assert!(v["result"]["protocolVersion"].is_string());
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_get_with_401_before_method_check() {
+        // The OAuth layer runs before the per-route method matcher;
+        // an unauthenticated GET must fail closed with 401, not leak
+        // the 405 + Allow header that bare `mcp_route` would return.
+        let (app, _cfg, _sk) = protected_app();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
