@@ -106,9 +106,7 @@ pub enum ProjectionError {
     InvalidBase64 { index: usize, reason: String },
 
     /// Decoded public key was not 32 bytes (Ed25519 size).
-    #[error(
-        "signingKeys[{index}].publicKeyB64u decoded to {got} bytes (expected 32 for Ed25519)"
-    )]
+    #[error("signingKeys[{index}].publicKeyB64u decoded to {got} bytes (expected 32 for Ed25519)")]
     WrongKeyLength { index: usize, got: usize },
 
     /// `ed25519-dalek` rejected the bytes (e.g. small-order point).
@@ -153,30 +151,30 @@ pub fn project_anchors(
             });
         }
 
-        let bytes = base64url_decode(&key.public_key_b64u).map_err(|e| {
-            ProjectionError::InvalidBase64 {
+        let bytes =
+            base64url_decode(&key.public_key_b64u).map_err(|e| ProjectionError::InvalidBase64 {
                 index,
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         if bytes.len() != 32 {
             return Err(ProjectionError::WrongKeyLength {
                 index,
                 got: bytes.len(),
             });
         }
-        let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            ProjectionError::WrongKeyLength {
-                index,
-                got: bytes.len(),
-            }
-        })?;
-        let vk = VerifyingKey::from_bytes(&arr).map_err(|e| {
-            ProjectionError::InvalidEd25519Point {
+        let arr: [u8; 32] =
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ProjectionError::WrongKeyLength {
+                    index,
+                    got: bytes.len(),
+                })?;
+        let vk =
+            VerifyingKey::from_bytes(&arr).map_err(|e| ProjectionError::InvalidEd25519Point {
                 index,
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
 
         out.push(TrustAnchor {
             kid: key.kid.clone(),
@@ -269,7 +267,10 @@ mod tests {
     fn unsupported_alg_rejected() {
         let spec = spec_with_keys(vec![key("k1", "ES256", vk_b64u(1), None)]);
         let err = project_anchors(&spec, "src").unwrap_err();
-        assert!(matches!(err, ProjectionError::UnsupportedAlg { index: 0, .. }));
+        assert!(matches!(
+            err,
+            ProjectionError::UnsupportedAlg { index: 0, .. }
+        ));
     }
 
     #[test]
@@ -290,7 +291,10 @@ mod tests {
     fn invalid_base64_rejected() {
         let spec = spec_with_keys(vec![key("k1", "EdDSA", "not!valid!base64".into(), None)]);
         let err = project_anchors(&spec, "src").unwrap_err();
-        assert!(matches!(err, ProjectionError::InvalidBase64 { index: 0, .. }));
+        assert!(matches!(
+            err,
+            ProjectionError::InvalidBase64 { index: 0, .. }
+        ));
     }
 
     #[test]
@@ -357,7 +361,9 @@ mod tests {
             builder.add(a).unwrap();
         }
         let conflict = project_anchors(&cr_b_spec, "a2a-agent-cr").unwrap();
-        let err = builder.add(conflict.into_iter().next().unwrap()).unwrap_err();
+        let err = builder
+            .add(conflict.into_iter().next().unwrap())
+            .unwrap_err();
         assert!(matches!(err, TrustStoreBuildError::DuplicateKid { .. }));
     }
 }

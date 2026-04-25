@@ -116,5 +116,5 @@ None. No new crates added. No vendored patch touched. Same
 Per Phase 0 carry-over policy (single-reviewer permitted for pure structural
 moves with zero behaviour delta and zero new attack surface).
 
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

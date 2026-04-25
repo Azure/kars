@@ -94,3 +94,6 @@ None. No new crates, no version bumps.
 - Independent reviewer: Pal Lakatos-Toth (single-reviewer carry-over per
   Phase 1 hotspot-pass2 governance; full second-reviewer roster is a
   Phase 0 §6 deliverable still in progress) — `Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>`
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

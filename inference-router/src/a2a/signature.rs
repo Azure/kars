@@ -91,8 +91,7 @@ pub fn build_signing_input(
 
     let protected_b64u = base64url_encode(protected_header_json);
     let payload_b64u = base64url_encode(payload);
-    let mut signing_input =
-        Vec::with_capacity(protected_b64u.len() + 1 + payload_b64u.len());
+    let mut signing_input = Vec::with_capacity(protected_b64u.len() + 1 + payload_b64u.len());
     signing_input.extend_from_slice(protected_b64u.as_bytes());
     signing_input.push(b'.');
     signing_input.extend_from_slice(payload_b64u.as_bytes());

@@ -19,4 +19,22 @@ ignore = [
     # for nonce/key generation, none of it from inside a logger.
     # TODO: remove once `agentmesh` ships a release with `rand >= 0.8.6`.
     "RUSTSEC-2026-0097",
+    # RUSTSEC-2023-0071 — Marvin Attack: potential key recovery in `rsa` via timing sidechannels
+    # https://rustsec.org/advisories/RUSTSEC-2023-0071
+    #
+    # Severity: medium (CVSS 5.9). NO upstream fix is available.
+    # Source: transitive dependency — `jsonwebtoken 10.3.0` → `rsa 0.9.10`.
+    # The Marvin attack requires *RSA private key operations* whose timing leaks
+    # to a co-located attacker. AzureClaw's only RSA usage is **JWT signature
+    # verification on JWKS-published public keys** (OAuth 2.1 access-token
+    # validation in `inference-router/src/mcp/oauth.rs`). Public-key verification
+    # does not exercise the vulnerable scalar-multiplication path; we never hold
+    # an RSA private key in router or controller code. Defence-in-depth: the
+    # OAuth verifier additionally enforces alg allow-listing (`RS256`/`PS256`/
+    # `EdDSA` only — no `none`, no algorithm confusion), kid pinning, and
+    # JWKS-cache bounds, so even a compromised RSA public key cannot widen the
+    # surface.
+    # TODO: drop this ignore when `jsonwebtoken` switches to a non-vulnerable
+    # RSA backend (tracked upstream: https://github.com/Keats/jsonwebtoken).
+    "RUSTSEC-2023-0071",
 ]

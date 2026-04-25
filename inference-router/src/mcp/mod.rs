@@ -1,36 +1,29 @@
-//! MCP 2026 Streamable HTTP transport — scaffold.
+//! MCP 2026 Streamable HTTP transport — production code path.
 //!
 //! This module is the **router-side** implementation of the Model Context
 //! Protocol's Streamable HTTP transport (spec revision `2025-03-26`,
 //! [transports](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)).
 //!
-//! ## Status: scaffold (`phase1/mcp-2026-scaffold`)
+//! ## Status: implemented
 //!
-//! This PR lands type-level + framing-level primitives only. **No router
-//! routes are wired yet.** Subsequent branches add:
+//! The PR series `phase1/mcp-2026-*` landed the full pipeline:
 //!
-//! - `phase1/mcp-2026-streamable-http-routes` — POST/GET/DELETE handlers
-//!   on `/mcp` mounted under `routes::inference`, with session-id state
-//!   tracker and SSE response support.
-//! - `phase1/mcp-2026-oauth21` — OAuth 2.1 token verifier (PKCE-aware,
-//!   audience-checked, expiry-checked, replay-rejected) gated by
-//!   `McpServer.spec.productionMode`.
-//! - `phase1/mcp-server-crd` — `McpServer` CRD + reconciler that wires
-//!   `spec.{url, auth, productionMode, scopes, allowedTools}` into a
-//!   per-sandbox MCP-client runtime.
+//! - [`jsonrpc`] — JSON-RPC 2.0 frame types + tolerant parser.
+//! - [`streamable_http`] — Streamable HTTP envelope + session-id validator.
+//! - [`error`] — canonical JSON-RPC + MCP-2026 error code catalogue.
+//! - [`initialize`] — `initialize` handler with [`OsRngSessionMinter`].
+//! - [`tools`] — `tools/list` + `tools/call` dispatch surface, in-tree
+//!   [`EchoDispatcher`], pluggable [`ToolDispatcher`] trait.
+//! - [`pipeline`] — request → frame → method → response pipeline.
+//! - [`oauth`] — OAuth 2.1 access-token verifier (RFC 9700 / RFC 7515).
+//! - [`oauth_layer`] — tower middleware that gates [`crate::routes::mcp`]
+//!   in production mode.
 //!
-//! ## Submodules (this PR)
-//!
-//! - [`jsonrpc`] — JSON-RPC 2.0 frame types (request, notification,
-//!   response, error). Tolerant parser that returns structured errors
-//!   for tampered/malformed input — no panics, no silent acceptance.
-//! - [`streamable_http`] — Streamable HTTP envelope types: session-id
-//!   validation per the spec (`MUST` only contain visible ASCII
-//!   `0x21..=0x7E`), `Accept` header negotiation, and oversize-frame
-//!   gate constants used by future route handlers.
-//! - [`error`] — canonical JSON-RPC error code catalogue per the
-//!   [JSON-RPC 2.0 spec](https://www.jsonrpc.org/specification#error_object)
-//!   plus MCP-2026 reserved range.
+//! Production routes live in [`crate::routes::mcp`] (`POST /mcp`,
+//! `GET /mcp` → 405). The `phase1/mcp-server-crd` reconciler that maps
+//! `McpServer.spec.{url, auth, productionMode, scopes, allowedTools}`
+//! onto a per-sandbox MCP-client runtime is a Phase 2 deliverable
+//! (`phase2-full-crds`).
 //!
 //! ## Security posture
 //!
@@ -40,20 +33,14 @@
 //!
 //! - JSON parsing → `serde_json` (no hand-rolled tokenizer).
 //! - HTTP transport → `axum` + `hyper` (no hand-rolled framer).
-//! - Session-id custody → caller's responsibility; this module only
-//!   *validates* the wire format. The actual ID minting belongs to the
-//!   forthcoming `streamable_http_routes::initialize` handler and uses
-//!   `rand::rngs::OsRng` for cryptographic randomness.
+//! - OAuth crypto → `jsonwebtoken` (RSA/EdDSA) verified against the
+//!   project-internal allowlist; no hand-rolled JWS parser.
+//! - Session-id minting → `rand::rngs::OsRng` (cryptographic randomness).
 //!
-//! All public functions in this module are pure / side-effect-free.
-//! No I/O, no logging, no global state. Tests cover:
-//!
-//! - Tampered JSON-RPC version (`"3.0"`, `"1.0"`, missing) → reject.
-//! - Embedded NUL / control chars in session ID → reject.
-//! - Session ID outside `0x21..=0x7E` → reject.
-//! - Empty JSON-RPC batch → reject (per spec §6).
-//! - Oversize frame → reject (config-driven cap, default 4 MiB).
-//! - `Accept` header missing one of the required content types → reject.
+//! Negative tests cover: tampered JSON-RPC version, embedded NUL /
+//! control chars in session id, non-ASCII session id, empty batch,
+//! oversize frame, missing `Accept` content types, `alg=none`, `alg`
+//! confusion, kid mismatch, expired token, replayed token.
 
 pub mod error;
 pub mod initialize;

@@ -93,5 +93,5 @@ PR brings it to 1770 (combined with PR 41's crypto extraction:
 2075 → 1770, **−305 LOC**). All 6 CI gates green; clippy clean; lib
 tests at 585.
 
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
-Signed-off-by: Pal Lakatos-Toth <pallakatos@github.com>
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

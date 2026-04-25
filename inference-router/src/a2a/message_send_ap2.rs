@@ -68,13 +68,10 @@ use serde_json::Value;
 use crate::mcp::jsonrpc::{Request, Response};
 
 use super::ap2::{
-    Ap2Denial, IntentMandate, MandateLedgerMut, PaymentAttempt,
-    validate_payment_attempt_signed,
+    Ap2Denial, IntentMandate, MandateLedgerMut, PaymentAttempt, validate_payment_attempt_signed,
 };
 use super::error::A2aErrorCode;
-use super::jsonrpc_dispatch::{
-    MessageSendParams, TaskIdMinter, TaskStore, handle_message_send,
-};
+use super::jsonrpc_dispatch::{MessageSendParams, TaskIdMinter, TaskStore, handle_message_send};
 use super::mandate_trust_store::MandateTrustStore;
 
 /// Wire shape of `params.message.metadata.ap2`. Mirrors the AP2 spec
@@ -149,13 +146,8 @@ pub fn handle_message_send_with_ap2(
             // run the signed-and-policy-checked validator.
             let trust_view = mandate_trust.snapshot();
             let trusted = trust_view.as_verifier_keys(now);
-            match validate_payment_attempt_signed(
-                &ext.mandate,
-                &ext.attempt,
-                ledger,
-                now,
-                &trusted,
-            ) {
+            match validate_payment_attempt_signed(&ext.mandate, &ext.attempt, ledger, now, &trusted)
+            {
                 Ok(record) => {
                     ledger.record(record);
                     handle_message_send(req, store, minter)
@@ -257,7 +249,7 @@ mod tests {
                 s
             },
             exp: 2_000_000_000,
-            // Will be overwritten by sign_mandate; placeholder kid only
+            // Will be overwritten by sign_mandate; synthetic kid only
             // used to seed `signature` header in unsigned tests.
             signature: format!("kid={kid}"),
         }
@@ -327,14 +319,8 @@ mod tests {
         let (store, minter) = store_and_minter();
 
         let r = req_with_metadata(None);
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         assert!(resp.error.is_none(), "expected ok, got {:?}", resp.error);
         let result = resp.result.expect("result");
         assert_eq!(result["state"], "submitted");
@@ -349,14 +335,8 @@ mod tests {
         let (store, minter) = store_and_minter();
 
         let r = req_with_metadata(Some(json!({"unrelated": "value"})));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         assert!(resp.error.is_none());
         assert!(ledger.snapshot().is_empty());
     }
@@ -375,14 +355,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         assert!(resp.error.is_none(), "denial: {:?}", resp.error);
         assert_eq!(ledger.snapshot().len(), 1, "ledger appended");
         assert_eq!(ledger.snapshot()[0].transfer_nonce, "n1");
@@ -402,14 +376,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.code, i32::from(A2aErrorCode::Ap2Denied));
         assert_eq!(err.data.unwrap()["kind"], "mandateUnauthentic");
@@ -429,14 +397,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.data.unwrap()["kind"], "mandateUnauthentic");
         assert!(ledger.snapshot().is_empty());
@@ -457,14 +419,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.data.unwrap()["kind"], "mandateUnauthentic");
     }
@@ -482,14 +438,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.data.unwrap()["kind"], "mandateUnauthentic");
     }
@@ -518,14 +468,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.data.unwrap()["kind"], "mandateUnauthentic");
     }
@@ -547,14 +491,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.code, i32::from(A2aErrorCode::Ap2Denied));
         assert_eq!(err.data.unwrap()["kind"], "perTransferCapExceeded");
@@ -587,14 +525,8 @@ mod tests {
         let r = req_with_metadata(Some(json!({
             "ap2": {"mandate": mandate, "attempt": attempt}
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("denied");
         assert_eq!(err.data.unwrap()["kind"], "replayDetected");
     }
@@ -610,20 +542,16 @@ mod tests {
 
         // ap2 present but wrong shape
         let r = req_with_metadata(Some(json!({"ap2": {"mandate": "not-an-object"}})));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("invalid");
         assert_eq!(err.code, crate::mcp::error::ErrorCode::InvalidParams.code());
-        assert!(err.data.unwrap()["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("metadata.ap2:"));
+        assert!(
+            err.data.unwrap()["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("metadata.ap2:")
+        );
     }
 
     #[test]
@@ -642,14 +570,8 @@ mod tests {
                 "rogue": "field",
             }
         })));
-        let resp = handle_message_send_with_ap2(
-            &r,
-            &store,
-            &minter,
-            &trust,
-            &mut ledger,
-            1_700_000_000,
-        );
+        let resp =
+            handle_message_send_with_ap2(&r, &store, &minter, &trust, &mut ledger, 1_700_000_000);
         let err = resp.error.expect("invalid");
         assert_eq!(err.code, crate::mcp::error::ErrorCode::InvalidParams.code());
     }
@@ -665,7 +587,9 @@ mod tests {
         let cases = [
             Ap2Denial::MandateUnauthentic("x".into()),
             Ap2Denial::AmountZero,
-            Ap2Denial::CounterpartyNotAllowed { counterparty: "c".into() },
+            Ap2Denial::CounterpartyNotAllowed {
+                counterparty: "c".into(),
+            },
         ];
         for d in &cases {
             assert!(!denial_kind_for_test(d).is_empty());

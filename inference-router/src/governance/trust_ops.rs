@@ -14,8 +14,8 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use crate::metrics;
 use super::{Governance, tier_label};
+use crate::metrics;
 
 impl Governance {
     // ── Trust ────────────────────────────────────────────────────────────

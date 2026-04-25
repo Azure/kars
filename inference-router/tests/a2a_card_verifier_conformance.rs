@@ -88,20 +88,62 @@ enum Expected {
 /// metadata feeds the coverage-floor check.
 fn covered() -> &'static [Scenario] {
     &[
-        Scenario { name: "happy_path", expected: Expected::Allow },
-        Scenario { name: "tampered_name", expected: Expected::Reject("Signature") },
-        Scenario { name: "tampered_url", expected: Expected::Reject("Signature") },
-        Scenario { name: "unknown_kid", expected: Expected::Reject("Signature") },
-        Scenario { name: "no_signatures_field", expected: Expected::Reject("Unsigned") },
-        Scenario { name: "empty_trust_anchors", expected: Expected::Reject("Signature") },
-        Scenario { name: "url_prefix_mismatch", expected: Expected::Reject("UrlPrefixMismatch") },
-        Scenario { name: "url_prefix_match", expected: Expected::Allow },
-        Scenario { name: "expired_card", expected: Expected::Reject("Expired") },
-        Scenario { name: "not_yet_valid_card", expected: Expected::Reject("NotYetValid") },
-        Scenario { name: "wrong_protocol_version", expected: Expected::Reject("ProtocolVersionMismatch") },
-        Scenario { name: "malformed_envelope", expected: Expected::Reject("Parse") },
-        Scenario { name: "empty_required_field", expected: Expected::Reject("EmptyRequiredField") },
-        Scenario { name: "malformed_freshness", expected: Expected::Reject("MalformedFreshness") },
+        Scenario {
+            name: "happy_path",
+            expected: Expected::Allow,
+        },
+        Scenario {
+            name: "tampered_name",
+            expected: Expected::Reject("Signature"),
+        },
+        Scenario {
+            name: "tampered_url",
+            expected: Expected::Reject("Signature"),
+        },
+        Scenario {
+            name: "unknown_kid",
+            expected: Expected::Reject("Signature"),
+        },
+        Scenario {
+            name: "no_signatures_field",
+            expected: Expected::Reject("Unsigned"),
+        },
+        Scenario {
+            name: "empty_trust_anchors",
+            expected: Expected::Reject("Signature"),
+        },
+        Scenario {
+            name: "url_prefix_mismatch",
+            expected: Expected::Reject("UrlPrefixMismatch"),
+        },
+        Scenario {
+            name: "url_prefix_match",
+            expected: Expected::Allow,
+        },
+        Scenario {
+            name: "expired_card",
+            expected: Expected::Reject("Expired"),
+        },
+        Scenario {
+            name: "not_yet_valid_card",
+            expected: Expected::Reject("NotYetValid"),
+        },
+        Scenario {
+            name: "wrong_protocol_version",
+            expected: Expected::Reject("ProtocolVersionMismatch"),
+        },
+        Scenario {
+            name: "malformed_envelope",
+            expected: Expected::Reject("Parse"),
+        },
+        Scenario {
+            name: "empty_required_field",
+            expected: Expected::Reject("EmptyRequiredField"),
+        },
+        Scenario {
+            name: "malformed_freshness",
+            expected: Expected::Reject("MalformedFreshness"),
+        },
     ]
 }
 
@@ -117,10 +159,7 @@ fn assert_reject(err: &CardVerifyError, kind: &str) {
         CardVerifyError::Expired { .. } => "Expired",
         CardVerifyError::MalformedFreshness { .. } => "MalformedFreshness",
     };
-    assert_eq!(
-        actual, kind,
-        "expected {kind}, got {actual}: {err:?}",
-    );
+    assert_eq!(actual, kind, "expected {kind}, got {actual}: {err:?}",);
 }
 
 #[test]
@@ -149,7 +188,11 @@ fn tampered_name() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "Signature");
 }
@@ -165,7 +208,11 @@ fn tampered_url() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "Signature");
 }
@@ -180,7 +227,11 @@ fn unknown_kid() {
     let (_other_sk, other_vk) = keypair(99);
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("kX", &other_vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "Signature");
 }
@@ -194,7 +245,11 @@ fn no_signatures_field() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "Unsigned");
 }
@@ -277,7 +332,11 @@ fn expired_card() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "Expired");
 }
@@ -291,7 +350,11 @@ fn not_yet_valid_card() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "NotYetValid");
 }
@@ -305,7 +368,11 @@ fn wrong_protocol_version() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "ProtocolVersionMismatch");
 }
@@ -331,7 +398,11 @@ fn empty_required_field() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "EmptyRequiredField");
 }
@@ -345,7 +416,11 @@ fn malformed_freshness() {
     let bytes = serde_json::to_vec(&json).unwrap();
     let mut keys: HashMap<&str, &VerifyingKey> = HashMap::new();
     keys.insert("k1", &vk);
-    let cfg = CardVerifierConfig { trusted_keys: keys, expected_url_prefix: None, now: now_secs() };
+    let cfg = CardVerifierConfig {
+        trusted_keys: keys,
+        expected_url_prefix: None,
+        now: now_secs(),
+    };
     let err = verify_inbound_card(&bytes, &cfg).unwrap_err();
     assert_reject(&err, "MalformedFreshness");
 }
