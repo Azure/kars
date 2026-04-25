@@ -44,6 +44,9 @@ pub use egress::egress_routes;
 mod inference;
 pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
 
+mod mcp;
+pub use mcp::{MCP_SESSION_HEADER, McpRouteState, mcp_route};
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
