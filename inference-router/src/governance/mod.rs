@@ -232,22 +232,31 @@ impl Governance {
         }
 
         let mut total_rules = 0;
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().is_some_and(|e| e == "yaml" || e == "yml") {
-                    match self.policy.load_from_file(p.to_str().unwrap_or_default()) {
-                        Ok(()) => {
-                            // Count actual rules inside the file, not just files
-                            let rules_in_file = Self::count_rules_in_file(&p);
-                            tracing::info!(file = %p.display(), rules = rules_in_file, "Loaded policy file");
-                            total_rules += rules_in_file;
-                        }
-                        Err(e) => {
-                            tracing::warn!(file = %p.display(), error = %e, "Failed to load policy");
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().is_some_and(|e| e == "yaml" || e == "yml") {
+                        match self.policy.load_from_file(p.to_str().unwrap_or_default()) {
+                            Ok(()) => {
+                                // Count actual rules inside the file, not just files
+                                let rules_in_file = Self::count_rules_in_file(&p);
+                                tracing::info!(file = %p.display(), rules = rules_in_file, "Loaded policy file");
+                                total_rules += rules_in_file;
+                            }
+                            Err(e) => {
+                                tracing::warn!(file = %p.display(), error = %e, "Failed to load policy");
+                            }
                         }
                     }
                 }
+            }
+            Err(e) => {
+                // Surface silent permission/IO failures — without this, a
+                // hot-reload that hits EACCES looks indistinguishable from a
+                // legitimately-empty policy directory and silently disables
+                // governance enforcement.
+                tracing::warn!(dir, error = %e, "Policy reload: read_dir failed (perms?)");
             }
         }
         self.policy_rule_count
@@ -273,7 +282,7 @@ impl Governance {
     /// Reload policies from disk (for hot-reload).
     pub fn reload_policies(&self) {
         let dir = std::env::var("AGT_POLICY_DIR")
-            .unwrap_or_else(|_| "/sandbox/.openclaw/policies".into());
+            .unwrap_or_else(|_| "/etc/azureclaw/policies".into());
         match self.load_policies_from_dir(&dir) {
             Ok(count) => tracing::info!(rules = count, "Policy hot-reloaded"),
             Err(e) => tracing::warn!(error = %e, "Policy hot-reload failed"),
@@ -284,7 +293,7 @@ impl Governance {
     /// and reloads policies when file mtimes change.
     pub fn spawn_policy_watcher(governance: std::sync::Arc<Self>) {
         let dir = std::env::var("AGT_POLICY_DIR")
-            .unwrap_or_else(|_| "/sandbox/.openclaw/policies".into());
+            .unwrap_or_else(|_| "/etc/azureclaw/policies".into());
         let interval_secs: u64 = std::env::var("AGT_POLICY_WATCH_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
