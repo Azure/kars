@@ -9,6 +9,17 @@
 
 set -e
 
+# Make pre-staged OpenClaw bundled-runtime-deps discoverable. The base image
+# stages all bundled channel/plugin deps into /opt/openclaw-stage at build time
+# (full network); at runtime UID 1000 cannot reach npm registry directly because
+# of egress-guard, so we point OpenClaw's `installBundledRuntimeDeps` resolver at
+# the pre-populated tree. Set BEFORE any `openclaw …` invocation in this script
+# (parent gateway, sub-agent `openclaw agent --local`, doctor checks, etc.) so
+# they all hit the cached deps instead of attempting a 403-prone npm install.
+if [ -z "${OPENCLAW_PLUGIN_STAGE_DIR:-}" ] && [ -d /opt/openclaw-stage ]; then
+  export OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
+fi
+
 # Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)
 if [ -z "$SANDBOX_NAME" ]; then
   # K8s pod names: <deployment>-<replicaset-hash>-<pod-hash>
