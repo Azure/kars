@@ -25,6 +25,7 @@ pub mod metrics;
 pub mod policy_envelope;
 pub mod providers;
 pub mod proxy;
+pub mod rate_limiter;
 pub mod routes;
 pub mod safety;
 pub mod spawn;
