@@ -119,6 +119,7 @@ fn build_namespace_json(sandbox_name: &str) -> serde_json::Value {
                 "app.kubernetes.io/component": "sandbox",
                 "azureclaw.azure.com/sandbox": sandbox_name,
                 "azureclaw.azure.com/role": "sandbox",
+                "azureclaw.azure.com/isolated": "strict",
                 "pod-security.kubernetes.io/enforce": "privileged",
                 "pod-security.kubernetes.io/audit": "baseline",
                 "pod-security.kubernetes.io/warn": "baseline"
@@ -343,6 +344,7 @@ fn namespace_labels_include_app_and_role() {
     assert_eq!(labels["app.kubernetes.io/component"], "sandbox");
     assert_eq!(labels["azureclaw.azure.com/sandbox"], "test-agent");
     assert_eq!(labels["azureclaw.azure.com/role"], "sandbox");
+    assert_eq!(labels["azureclaw.azure.com/isolated"], "strict");
 }
 
 #[test]

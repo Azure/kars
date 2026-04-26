@@ -49,11 +49,9 @@ spec:
         apiVersions: ["v1"]
         operations:  ["UPDATE"]
         resources:   ["pods"]
-  matchConditions:
-    - name: in-sandbox-namespace
-      expression: |
-        has(namespaceObject.metadata.labels) &&
-        namespaceObject.metadata.labels[?'azureclaw.azure.com/isolated'].orValue('') == 'strict'
+    namespaceSelector:
+      matchLabels:
+        azureclaw.azure.com/isolated: strict
   variables:
     - name: allContainersNew
       expression: |

@@ -110,18 +110,24 @@ export function connectCommand(): Command {
           isKata = rc.trim().includes("kata");
         } catch {}
 
-        // Extract gateway token
+        // Extract gateway token from the K8s Secret created by the controller.
+        // The Secret is the source of truth — the openclaw container reads it
+        // via env var OPENCLAW_GATEWAY_TOKEN. Reading the Secret here (instead
+        // of `kubectl exec cat /sandbox/.bashrc`) is required by the
+        // sandbox-exec-ban VAP and is also strictly better security: token
+        // access is gated by namespaced RBAC on the Secret, no code-execution
+        // path through the operator's cluster role.
         let gatewayToken = "";
         try {
-          const { stdout: bashrc } = await execa("kubectl", [
-            "exec", "-n", namespace, `deploy/${name}`,
-            "-c", "openclaw", "--",
-            "cat", "/sandbox/.bashrc",
+          const { stdout: tokenB64 } = await execa("kubectl", [
+            "get", "secret", "-n", namespace, "gateway-token",
+            "-o", "jsonpath={.data.token}",
           ], { stdio: "pipe" });
-          const match = bashrc.match(/OPENCLAW_GATEWAY_TOKEN="([^"]+)"/);
-          if (match) gatewayToken = match[1];
+          if (tokenB64.trim()) {
+            gatewayToken = Buffer.from(tokenB64.trim(), "base64").toString("utf-8").trim();
+          }
         } catch {
-          console.log(chalk.yellow("  Could not extract gateway token."));
+          console.log(chalk.yellow("  Could not read gateway-token Secret."));
         }
 
         if (!gatewayToken) {
