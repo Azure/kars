@@ -4958,6 +4958,12 @@ const azureClawPlugin = definePluginEntry({
             }
 
             log.info(`AGT relay: sent to ${agentName} (${targetAmid!.slice(0, 12)}...) via E2E encrypted relay`);
+            // Surface this peer in the parent's operator-panel trust view immediately
+            // on first successful send — the operator dashboard reads /agt/status which
+            // ultimately exposes the router's trust_states. Without this, the parent
+            // would show "no peer agents yet" until a reply arrives (and never at all
+            // for fire-and-forget sends).
+            try { await pushTrustToRouter(agentName, 0.0); } catch { /* best-effort */ }
             const messageId = crypto.randomUUID();
             const sendStart = new Date().toISOString();
 
