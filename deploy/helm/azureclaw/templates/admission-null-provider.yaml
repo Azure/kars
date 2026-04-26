@@ -52,7 +52,7 @@ spec:
               object.spec.agt.providers.?signing.orValue('')
             ]
           : [])
-          + (has(object.spec.?provider) ? [object.spec.provider] : [])
+          + (has(object.spec.provider) ? [object.spec.provider] : [])
   validations:
     - expression: |
         variables.devOnly ||
