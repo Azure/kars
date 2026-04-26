@@ -1117,15 +1117,18 @@ async function processTaskWithTools(
                 }
                 try {
                   const lookupResult = await new Promise<string>((resolve, reject) => {
-                    const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(toAgent)}`, { timeout: 5000 }, (res) => {
+                    const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(toAgent)}`, { timeout: 5000 }, (res) => {
                       let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
                     });
                     req.on("error", reject);
                     req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
                   });
-                  const agents = JSON.parse(lookupResult);
-                  const target = Array.isArray(agents) ? agents[0] : agents;
-                  const amid = target?.amid || target?.id;
+                  const parsed = JSON.parse(lookupResult);
+                  const agents: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
+                  const match = agents.find((a: any) =>
+                    a?.display_name === toAgent || a?.capabilities?.includes(toAgent)
+                  ) || agents[0];
+                  const amid = match?.amid || match?.id;
                   if (amid) {
                     targetAmid = amid;
                     nameToAmid.set(toAgent, amid);
@@ -1177,7 +1180,7 @@ async function processTaskWithTools(
             try {
               const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
               const discoverResult = await new Promise<string>((resolve, reject) => {
-                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
+                const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
                   let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
                 });
                 req.on("error", reject);
