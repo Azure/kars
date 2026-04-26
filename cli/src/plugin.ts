@@ -1664,16 +1664,17 @@ async function runOffloadTask(
     String(task),
   ].join("\n");
 
-  // Execute — try native agent first, fall back to tool-based processing.
+  // Execute via in-process tool-calling loop. We deliberately skip
+  // `delegateToNativeAgent` because the sandbox openclaw.json denies
+  // `sessions_spawn`/`sessions_send` (entrypoint.sh), so a child
+  // `openclaw agent --local` invocation can't actually drive a session and
+  // ends up looping inside plugin/skill init (also blocked on the geo-
+  // restricted qqbot npm fetch), well past SIGTERM. The in-process loop
+  // calls Foundry through the router with the same AGT gating per tool.
   let taskResult: string;
   let taskSuccess = true;
   try {
-    try {
-      taskResult = await delegateToNativeAgent(guardedTask, parentName, log);
-    } catch (nativeErr: any) {
-      log.warn(`Native agent failed for offload task (${nativeErr.message}), falling back to processTaskWithTools`);
-      taskResult = await processTaskWithTools(guardedTask, log);
-    }
+    taskResult = await processTaskWithTools(guardedTask, log);
   } catch (taskErr: any) {
     taskResult = `Task execution failed: ${taskErr.message}`;
     taskSuccess = false;
@@ -2329,13 +2330,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         if (!taskAllowed) return;
 
         try {
-          let llmResponse: string;
-          try {
-            llmResponse = await delegateToNativeAgent(taskContent, fromName, log);
-          } catch (nativeErr: any) {
-            log.warn(`Native agent failed (${nativeErr.message}), falling back to processTaskWithTools`);
-            llmResponse = await processTaskWithTools(taskContent, log);
-          }
+          // In-process tool-calling loop only. See offload path above for why
+          // we deliberately skip `delegateToNativeAgent` here.
+          const llmResponse: string = await processTaskWithTools(taskContent, log);
 
           // Send the response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
