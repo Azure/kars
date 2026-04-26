@@ -593,7 +593,8 @@ pub async fn run(client: Client) -> Result<()> {
             backoff_secs = RECONNECT_BACKOFF_MIN_SECS;
         } else {
             // Flap — escalate the backoff (cap at MAX). Worst-case 5→10→20→40→60.
-            backoff_secs = std::cmp::min(backoff_secs.saturating_mul(2), RECONNECT_BACKOFF_MAX_SECS);
+            backoff_secs =
+                std::cmp::min(backoff_secs.saturating_mul(2), RECONNECT_BACKOFF_MAX_SECS);
         }
         // ±25% jitter to break thundering-herd when many controllers see the
         // relay/registry blip simultaneously. SystemTime nanos give a coarse
