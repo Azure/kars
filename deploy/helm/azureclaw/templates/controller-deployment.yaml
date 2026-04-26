@@ -73,6 +73,13 @@ spec:
             - name: CLUSTER_NAME
               value: {{ .Values.meshPeer.clusterName | quote }}
             {{- end }}
+            # Entra Agent ID kill switch — see values.yaml `azure.entraAuth`.
+            # Controller passes this through to every sandbox as
+            # AGT_SKIP_ENTRA so doomed token-exchange retries don't
+            # delay sub-agent startup on clusters without the Entra app
+            # registration provisioned.
+            - name: AZURECLAW_DISABLE_ENTRA_AUTH
+              value: {{ if .Values.azure.entraAuth.enabled }}"0"{{ else }}"1"{{ end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

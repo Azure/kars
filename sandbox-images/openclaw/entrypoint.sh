@@ -118,7 +118,19 @@ fi
 # AKS WI webhook), exchange the Kubernetes service account token for an
 # Entra ID access token and set AGT_OAUTH_TOKEN for registry verification.
 # This upgrades the agent from anonymous to verified tier.
-if [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
+#
+# Operator-level kill switch: when the cluster operator knows the
+# `api://agentmesh` Entra app registration is not provisioned in the
+# tenant (e.g. dev clusters, brand-new deployments, or any subscription
+# without the Entra Agent ID setup), the controller injects
+# AGT_SKIP_ENTRA=1 to short-circuit the entire token-exchange block.
+# Without this, every sandbox would burn ~123s on doomed retries before
+# falling back to anonymous tier — long enough to break parent→sub-agent
+# spawn-and-message workflows because the parent's tool-call timeout
+# fires before the sub-agent finishes booting.
+if [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
+elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
    [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
    [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
   echo "[entrypoint] Exchanging Workload Identity token for Entra ID access token..."

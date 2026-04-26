@@ -616,6 +616,31 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // AGT governance env vars (opt-in) — injected into BOTH openclaw and router containers
     let governance_config = spec.governance.unwrap_or_default();
     let mut router_agt_env: Vec<serde_json::Value> = Vec::new();
+
+    // Operator-level Entra-auth kill switch.
+    //
+    // When the cluster operator sets `AZURECLAW_DISABLE_ENTRA_AUTH=1` on
+    // the controller (e.g. dev clusters, or any subscription where the
+    // `api://agentmesh` Entra app registration is not yet provisioned),
+    // tell every sandbox to skip the Entra token-exchange step at startup.
+    //
+    // Without this, sub-agents burn ~123s on doomed AAD retries before
+    // falling back to anonymous tier — long enough that parent→sub-agent
+    // spawn-and-message workflows fail because the parent's tool-call
+    // timeout fires before the sub-agent finishes booting. See
+    // docs/security-audits/2026-04-26-entra-auth-toggle.md for the full
+    // analysis.
+    //
+    // Default is "skip" until the operator explicitly opts in by unsetting
+    // the env var or setting it to "0". Phase 2 will replace this with
+    // controller-side tenant feature detection once Entra Agent ID
+    // provisioning is automated.
+    let skip_entra =
+        std::env::var("AZURECLAW_DISABLE_ENTRA_AUTH").unwrap_or_else(|_| "1".to_string());
+    if skip_entra == "1" || skip_entra.eq_ignore_ascii_case("true") {
+        openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
+    }
+
     if governance_config.enabled {
         openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
         openclaw_env
