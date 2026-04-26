@@ -175,6 +175,15 @@ azure:
   osconfig:
     enabled: false      # TODO: enable when azure-osconfig integration is ready
     benchmark: "CIS_AKS_Optimized_Azure_Linux_3"
+  # Entra Agent ID auth for AGT mesh (api://agentmesh).
+  # When `enabled: false` (default), sandboxes skip the Workload Identity
+  # → Entra token exchange entirely and register with the AGT registry as
+  # anonymous tier. This avoids a ~123-second startup timeout on clusters
+  # where the `api://agentmesh` Entra app registration is not provisioned.
+  # Flip to `enabled: true` once Entra Agent ID provisioning has been
+  # completed end-to-end (see docs/security-audits/2026-04-26-entra-auth-toggle.md).
+  entraAuth:
+    enabled: false
 
 # Cilium-related toggles. AKS clusters with Azure CNI Powered by Cilium
 # get this for free; vanilla Azure CNI does not. Default off so the
