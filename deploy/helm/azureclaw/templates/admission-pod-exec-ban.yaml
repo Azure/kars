@@ -1,24 +1,30 @@
 {{- /*
   Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
 
-  ValidatingAdmissionPolicy that rejects kubectl exec / attach against
-  pods in sandbox namespaces (namespaces labelled
-  azureclaw.azure.com/isolated=strict).
+  ValidatingAdmissionPolicy that rejects kubectl exec / attach into
+  the **agent runtime container** (`openclaw`) of pods in sandbox
+  namespaces (namespaces labelled azureclaw.azure.com/isolated=strict).
 
   Rationale
   ---------
   A compromised operator or unscoped cluster-admin token is the single
   largest blast-radius for an agent sandbox: exec gives arbitrary code
-  execution inside the sandbox pod, bypassing every in-pod hardening
+  execution inside the agent process, bypassing every in-pod hardening
   layer (seccomp, egress-guard, Landlock, Entra token scope). MCP02
   "tool poisoning" becomes irrelevant if an operator can just
   `kubectl exec` and pull the bearer token out of /proc.
 
-  This VAP is a cluster-wide deny on exec/attach subresources for pods
-  whose *namespace* carries the sandbox label. We do NOT block
-  pods/portforward — it does not grant code execution, only TCP access
-  to in-pod ports (already gated by the application's own auth, e.g.
-  the OpenClaw gateway token). Port-forward is required for the
+  Scope: this VAP denies exec/attach only into the `openclaw` container
+  (the agent runtime). Sibling containers in the same pod —
+  `inference-router`, `egress-guard` — remain reachable so the operator
+  dashboard can curl router admin endpoints (egress allowlist, AGT
+  status, handoff state) without disabling defense-in-depth on the
+  agent. The router container is operator-trusted (it already holds
+  the upstream Foundry keys); the agent runtime is the actual asset.
+
+  We do NOT block pods/portforward — it does not grant code execution,
+  only TCP access to in-pod ports gated by the application's own auth
+  (gateway token, admin token). Port-forward is required for the
   legitimate `azureclaw connect` operator flow.
 
   Break-glass
@@ -67,9 +73,19 @@ spec:
         - key: azureclaw.azure.com/break-glass
           operator: NotIn
           values: ["true"]
+  matchConditions:
+    # Only the agent runtime container is protected. Operator tooling
+    # (e.g. the dashboard's egress/AGT polls) reaches the inference
+    # router via `kubectl exec -c inference-router -- curl localhost:8443/...`,
+    # which must remain available. Default container (when -c is
+    # omitted) is also denied — kubectl picks the first container,
+    # which is `openclaw` in our pod spec.
+    - name: target-is-agent-runtime
+      expression: |
+        !has(object.container) || object.container == '' || object.container == 'openclaw'
   validations:
     - expression: "false"
-      message: "exec/attach denied on azureclaw sandbox namespace. Use 'azureclaw connect' for the legitimate operator flow (token via Secret + port-forward). Emergency override: label the namespace azureclaw.azure.com/break-glass=true; bypasses are audited."
+      message: "exec/attach into the openclaw (agent runtime) container is denied. Use 'azureclaw connect' for the legitimate operator flow (token via Secret + port-forward). Sibling containers (inference-router, egress-guard) remain reachable for ops. Emergency override: label the namespace azureclaw.azure.com/break-glass=true; bypasses are audited."
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
