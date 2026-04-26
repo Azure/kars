@@ -181,3 +181,7 @@ of the existing image-build pipeline.
 * `/usr/local/lib/node_modules/openclaw/dist/doctor-bundled-plugin-runtime-deps-*.js`
   (read-only inside container) — `maybeRepairBundledPluginRuntimeDeps`
   invoked by `openclaw doctor --fix`.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
