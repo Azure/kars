@@ -58,6 +58,52 @@ pub fn build_running_status_patch(sandbox: &ClawSandbox, sandbox_ns: &str) -> Va
     status_obj
 }
 
+/// Returns `true` when the existing CR status already encodes the same
+/// "Running" reconciliation outcome that [`build_running_status_patch`]
+/// would produce — meaning a `patch_status` call would be a no-op
+/// semantically but would still bump `metadata.resourceVersion` and
+/// re-trigger the watch.
+///
+/// **Why this matters:** kube-apiserver bumps `resourceVersion` on every
+/// PATCH against the `.status` subresource regardless of whether the
+/// patch changes any bytes. Without an idempotency guard the reconciler
+/// observes its own status writes, re-runs reconcile, patches status
+/// again, and so on. We have observed 7 reconciles in 12 seconds at
+/// startup with concomitant Graph API throttling on the federated
+/// credential creation path. Skipping the write when the desired status
+/// already matches reality breaks that loop.
+///
+/// We intentionally only check the fields that
+/// [`build_running_status_patch`] writes (plus the `Ready` condition
+/// status), and accept that fields owned by other writers (e.g. a future
+/// `tokensUsed` updater) may differ — those would not be touched by our
+/// merge patch anyway.
+pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str) -> bool {
+    use crate::status::conditions::{TYPE_READY, status::TRUE as STATUS_TRUE};
+
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    if status.phase.as_deref() != Some("Running") {
+        return false;
+    }
+    if status.namespace.as_deref() != Some(sandbox_ns) {
+        return false;
+    }
+    if status.observed_generation != sandbox.metadata.generation {
+        return false;
+    }
+    let ready_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_READY)
+        .is_some_and(|c| c.status == STATUS_TRUE);
+    if !ready_ok {
+        return false;
+    }
+    true
+}
+
 /// Build the `status` patch for a `ClawSandbox` that has failed spec
 /// validation or an early reconcile check. Stamps `observedGeneration`
 /// and a `Degraded=True` / `Ready=False` condition pair so `kubectl wait
@@ -207,6 +253,107 @@ mod tests {
         let sb = new_sandbox(None, None);
         let patch = build_running_status_patch(&sb, "azureclaw-demo");
         assert!(patch["status"]["observedGeneration"].is_null());
+    }
+
+    #[test]
+    fn running_status_matches_returns_false_when_status_missing() {
+        let sb = new_sandbox(Some(1), None);
+        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+    }
+
+    #[test]
+    fn running_status_matches_returns_false_when_phase_differs() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Pending".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::RECONCILED,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+    }
+
+    #[test]
+    fn running_status_matches_returns_false_when_namespace_differs() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Running".into()),
+            namespace: Some("azureclaw-other".into()),
+            observed_generation: Some(1),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::RECONCILED,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+    }
+
+    #[test]
+    fn running_status_matches_returns_false_when_generation_stale() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Running".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::RECONCILED,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(2), Some(prior));
+        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+    }
+
+    #[test]
+    fn running_status_matches_returns_false_when_ready_false() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Running".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::FALSE,
+                conditions::reason::FAILED,
+                "boom",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+    }
+
+    #[test]
+    fn running_status_matches_returns_true_for_settled_status() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Running".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::RECONCILED,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(running_status_matches(&sb, "azureclaw-demo"));
     }
 
     #[test]

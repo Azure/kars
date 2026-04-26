@@ -84,6 +84,25 @@ impl MeshIdentity {
     pub fn public_key_b64(&self) -> String {
         BASE64.encode(self.verifying_key.to_bytes())
     }
+
+    /// Get base64-encoded X25519 (Curve25519) public key, derived from the
+    /// Ed25519 verifying key via the canonical twisted-Edwards →
+    /// Montgomery conversion.
+    ///
+    /// **Why this is safe even though we don't derive the matching X25519
+    /// secret key:** the controller's mesh peer channel does not perform
+    /// Signal-protocol E2E encryption — federation messages are carried
+    /// inside `encrypted_payload` as plain base64 JSON. The registry
+    /// stores `exchange_public_key` for peers who *would* X3DH against
+    /// us; since no peer does so on this channel today, the matching
+    /// secret is unused. Registering the conversion of the Ed25519
+    /// public key gives the registry a well-formed Curve25519 point
+    /// without committing the controller to a key custody it doesn't
+    /// need.
+    pub fn x25519_public_key_b64(&self) -> String {
+        let mont = self.verifying_key.to_montgomery();
+        BASE64.encode(mont.to_bytes())
+    }
 }
 
 /// Derive AMID from Ed25519 public key: base58(sha256(pubkey)[:20])
@@ -151,6 +170,109 @@ pub async fn load_or_create_identity(client: &Client) -> Result<MeshIdentity> {
         .context("Failed to create mesh identity Secret")?;
 
     Ok(identity)
+}
+
+// ---------------------------------------------------------------------------
+// Registry self-registration
+// ---------------------------------------------------------------------------
+
+/// Default registry endpoint. Overridable via `MESH_REGISTRY_URL` to mirror
+/// the relay-URL knob used elsewhere in this module.
+const DEFAULT_REGISTRY_URL: &str = "http://agentmesh-registry.agentmesh.svc.cluster.local:8080";
+
+/// Register the controller's mesh identity with the AgentMesh registry.
+///
+/// **Why we have to do this.** The vendored registry-verify patch
+/// (`vendor/agentmesh-relay`) makes the relay reject any WebSocket
+/// `connect` whose AMID is not registered. Sandbox sub-agents register
+/// themselves on boot via the JS SDK; the Rust controller mesh peer was
+/// never updated to match, which produced a flap loop in production:
+///
+/// ```text
+/// connect → relay rejects ("Agent not registered") →
+/// reconnect_backoff → connect → ...
+/// ```
+///
+/// Re-registration is idempotent on the registry side (it upserts by
+/// AMID and re-verifies the signature each time). We call this once
+/// per leader-tenure, before opening the relay WebSocket.
+async fn register_with_registry(identity: &MeshIdentity) -> Result<()> {
+    let base =
+        std::env::var("MESH_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string());
+    let url = format!("{}/v1/registry/register", base.trim_end_matches('/'));
+
+    // The registry verifies the timestamp signature and a 5-minute window;
+    // generate the timestamp here so retries always send a fresh one.
+    let timestamp = Utc::now().to_rfc3339();
+    let signature = identity.sign_timestamp(&timestamp);
+
+    let body = json!({
+        "amid": identity.amid,
+        "signing_public_key": identity.public_key_b64(),
+        "exchange_public_key": identity.x25519_public_key_b64(),
+        "display_name": "azureclaw-controller",
+        "capabilities": ["offload", "pairing"],
+        "timestamp": timestamp,
+        "signature": signature,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("Failed to build reqwest client")?;
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url} failed"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Registry rejected registration ({status}): {text}");
+    }
+    Ok(())
+}
+
+/// Register, retrying with bounded backoff if the registry is briefly
+/// unavailable. Failure after the budget is logged but does not abort
+/// the mesh peer — the relay-side rejection will keep us in the existing
+/// reconnect loop until the registry recovers, at which point a future
+/// re-registration attempt (next leader tenure) will succeed.
+async fn register_with_registry_with_retry(identity: &MeshIdentity) {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut sleep_secs: u64 = 2;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match register_with_registry(identity).await {
+            Ok(()) => {
+                tracing::info!(
+                    amid = %identity.amid,
+                    attempt,
+                    "Registered controller mesh identity with registry"
+                );
+                return;
+            }
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                tracing::warn!(
+                    attempt,
+                    sleep_secs,
+                    error = %e,
+                    "Registry registration failed — will retry"
+                );
+                tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                sleep_secs = (sleep_secs * 2).min(30);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt,
+                    error = %e,
+                    "Registry registration exhausted retries — relay connect will fail until registry recovers"
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +681,15 @@ pub async fn run(client: Client) -> Result<()> {
         if let Err(e) = offload::resume_pending_offload_watchers(&state).await {
             tracing::warn!("Failed to resume pending offload watchers: {e:#}");
         }
+
+        // Register with the AgentMesh registry before opening the relay
+        // socket. The vendored relay rejects connects whose AMID is not in
+        // the registry; without this call the relay loops in a flap of
+        // "Agent not registered" rejects. Registration is idempotent; we
+        // attempt it on every leader tenure so a registry restart that
+        // wipes its cache (or a stale-Secret-only-known-here race) is
+        // self-healing.
+        register_with_registry_with_retry(&state.identity).await;
 
         // Connect and listen, renewing the lease periodically
         let state_inner = state.clone();
@@ -1043,6 +1174,30 @@ mod tests {
                 "AMID contains non-base58 char: {c}"
             );
         }
+    }
+
+    #[test]
+    fn x25519_public_key_is_32_bytes_base64() {
+        let identity = MeshIdentity::from_bytes(&[7u8; 32]);
+        let encoded = identity.x25519_public_key_b64();
+        let decoded = BASE64.decode(&encoded).expect("valid base64");
+        assert_eq!(decoded.len(), 32, "X25519 public key must be 32 bytes");
+    }
+
+    #[test]
+    fn x25519_public_key_is_deterministic_for_same_signing_key() {
+        let a = MeshIdentity::from_bytes(&[9u8; 32]);
+        let b = MeshIdentity::from_bytes(&[9u8; 32]);
+        assert_eq!(a.x25519_public_key_b64(), b.x25519_public_key_b64());
+    }
+
+    #[test]
+    fn x25519_public_key_differs_from_ed25519_public_key() {
+        // The Montgomery conversion produces a different bit pattern than
+        // the Ed25519 verifying key, so the two registry fields cannot be
+        // accidentally equated.
+        let identity = MeshIdentity::from_bytes(&[1u8; 32]);
+        assert_ne!(identity.public_key_b64(), identity.x25519_public_key_b64());
     }
 
     #[test]

@@ -1360,12 +1360,20 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     // ── Step 5: Update status ────────────────────────────────────────────
-    let sandbox_api: Api<ClawSandbox> =
-        Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-    let status_obj = crate::status::build_running_status_patch(&sandbox, &sandbox_ns);
-    let _ = sandbox_api
-        .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
-        .await;
+    // Idempotency guard: skip the patch when the desired status already
+    // matches reality. Without this, every reconcile bumps
+    // `metadata.resourceVersion` (kube-apiserver bumps RV on every PATCH
+    // against `.status` regardless of byte-equality), which retriggers
+    // our own watch and produces a hot reconcile loop. See
+    // `crate::status::running_status_matches` for the rationale.
+    if !crate::status::running_status_matches(&sandbox, &sandbox_ns) {
+        let sandbox_api: Api<ClawSandbox> =
+            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+        let status_obj = crate::status::build_running_status_patch(&sandbox, &sandbox_ns);
+        let _ = sandbox_api
+            .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
+            .await;
+    }
 
     tracing::info!("ClawSandbox {name} reconciled successfully");
     Ok(Action::requeue(Duration::from_secs(300)))
