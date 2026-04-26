@@ -291,10 +291,12 @@ function pickFreshestRegistryMatch(
 //   scopeFilter — optional capability/identity guard (see pickFreshestRegistryMatch).
 async function resolveAmidByName(
   agentName: string,
-  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean } = {},
+  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean; bypassCache?: boolean } = {},
 ): Promise<string | undefined> {
-  const cached = getCachedAmid(agentName);
-  if (cached) return cached;
+  if (!opts.bypassCache) {
+    const cached = getCachedAmid(agentName);
+    if (cached) return cached;
+  }
 
   const base = opts.registryBase ?? routerUrl("/agt/registry");
   const timeoutMs = opts.timeoutMs ?? 5000;
@@ -317,8 +319,10 @@ async function resolveAmidByName(
     const match = pickFreshestRegistryMatch(results, agentName, opts.scopeFilter);
     const amid: string | undefined = match?.amid || match?.id;
     if (amid) {
-      setCachedAmid(agentName, amid);
-      amidToName.set(amid, agentName);
+      if (!opts.bypassCache) {
+        setCachedAmid(agentName, amid);
+        amidToName.set(amid, agentName);
+      }
       return amid;
     }
   } catch { /* transient — caller decides whether to retry */ }
@@ -4729,13 +4733,16 @@ const azureClawPlugin = definePluginEntry({
             }
 
             // Registry check (start early — sub-agent may register before status reports Running).
-            // resolveAmidByName picks the freshest live match so we don't pin to a stale
-            // AMID from a previous pod incarnation; identities rotate on every restart.
+            // Use bypassCache: pre-discovery only confirms availability; it must NOT pin
+            // an AMID into the cache, because the sub-agent's pod may still be rolling
+            // and a fresh AMID could replace it before the parent's first send. The
+            // actual send path resolves through resolveAmidByName which will hit the
+            // registry once status flips Running, picking the freshest live entry.
             if (!amid && agtMeshClient) {
-              const resolved = await resolveAmidByName(agentName);
+              const resolved = await resolveAmidByName(agentName, { bypassCache: true });
               if (resolved) {
                 amid = resolved;
-                log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${resolved.slice(0, 12)}...)`);
+                log.info(`AGT pre-discovery: '${agentName}' registered (${resolved.slice(0, 12)}..., not cached — send will re-resolve)`);
               }
             }
 
