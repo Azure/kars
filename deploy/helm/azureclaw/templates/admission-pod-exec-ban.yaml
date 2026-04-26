@@ -1,9 +1,9 @@
 {{- /*
   Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
 
-  ValidatingAdmissionPolicy that rejects kubectl exec / attach /
-  portforward / console against pods in sandbox namespaces (namespaces
-  labelled azureclaw.azure.com/isolated=strict).
+  ValidatingAdmissionPolicy that rejects kubectl exec / attach against
+  pods in sandbox namespaces (namespaces labelled
+  azureclaw.azure.com/isolated=strict).
 
   Rationale
   ---------
@@ -14,8 +14,12 @@
   "tool poisoning" becomes irrelevant if an operator can just
   `kubectl exec` and pull the bearer token out of /proc.
 
-  This VAP is a cluster-wide deny on exec-class subresources for pods
-  whose *namespace* carries the sandbox label.
+  This VAP is a cluster-wide deny on exec/attach subresources for pods
+  whose *namespace* carries the sandbox label. We do NOT block
+  pods/portforward — it does not grant code execution, only TCP access
+  to in-pod ports (already gated by the application's own auth, e.g.
+  the OpenClaw gateway token). Port-forward is required for the
+  legitimate `azureclaw connect` operator flow.
 
   Break-glass
   -----------
@@ -55,22 +59,17 @@ spec:
       - apiGroups:   [""]
         apiVersions: ["v1"]
         operations:  ["CONNECT"]
-        resources:   ["pods/exec", "pods/attach", "pods/portforward"]
-  matchConditions:
-    - name: in-sandbox-namespace
-      expression: |
-        has(namespaceObject.metadata.labels) &&
-        namespaceObject.metadata.labels[?'azureclaw.azure.com/isolated'].orValue('') == 'strict'
-    - name: not-break-glass
-      expression: |
-        namespaceObject.metadata.labels[?'azureclaw.azure.com/break-glass'].orValue('') != 'true'
+        resources:   ["pods/exec", "pods/attach"]
+    namespaceSelector:
+      matchLabels:
+        azureclaw.azure.com/isolated: strict
+      matchExpressions:
+        - key: azureclaw.azure.com/break-glass
+          operator: NotIn
+          values: ["true"]
   validations:
     - expression: "false"
-      messageExpression: |
-        'exec/attach/portforward denied on azureclaw sandbox namespace ' +
-        namespaceObject.metadata.name +
-        '. If this is an emergency, label the namespace ' +
-        'azureclaw.azure.com/break-glass=true; bypasses are audited.'
+      message: "exec/attach denied on azureclaw sandbox namespace. Use 'azureclaw connect' for the legitimate operator flow (token via Secret + port-forward). Emergency override: label the namespace azureclaw.azure.com/break-glass=true; bypasses are audited."
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

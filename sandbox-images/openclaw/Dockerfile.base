@@ -97,9 +97,13 @@ RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
 ENV OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
 RUN mkdir -p /opt/openclaw-stage && \
     openclaw doctor --fix --non-interactive --yes 2>&1 | tail -20 || true && \
-    test -d /opt/openclaw-stage/openclaw-*/node_modules && \
+    staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules | wc -l) && \
+    if [ "$staged_count" -lt 1 ]; then \
+      echo "ERROR: openclaw doctor did not stage any node_modules under /opt/openclaw-stage" >&2; \
+      ls -la /opt/openclaw-stage >&2; exit 1; \
+    fi && \
     chmod -R a+rX /opt/openclaw-stage && \
-    echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1)"
+    echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
