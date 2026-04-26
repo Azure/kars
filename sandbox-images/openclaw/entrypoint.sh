@@ -16,8 +16,19 @@ set -e
 # the pre-populated tree. Set BEFORE any `openclaw …` invocation in this script
 # (parent gateway, sub-agent `openclaw agent --local`, doctor checks, etc.) so
 # they all hit the cached deps instead of attempting a 403-prone npm install.
+#
+# The image rootfs is read-only, but OpenClaw 2026.4.x writes a
+# `.openclaw-runtime-deps.lock` sentinel inside the version-hash dir on first
+# resolve, so we mirror the staged tree onto the writable /tmp tmpfs and point
+# the env var there. /tmp is a 1GiB tmpfs (see pod spec); the staged tree is
+# ~500MiB so it fits with room to spare. cp -r is ~3-5s on tmpfs and only runs
+# once at container start.
 if [ -z "${OPENCLAW_PLUGIN_STAGE_DIR:-}" ] && [ -d /opt/openclaw-stage ]; then
-  export OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
+  if [ ! -d /tmp/openclaw-stage ]; then
+    cp -r /opt/openclaw-stage /tmp/openclaw-stage
+    chmod -R u+w /tmp/openclaw-stage 2>/dev/null || true
+  fi
+  export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-stage
 fi
 
 # Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)
