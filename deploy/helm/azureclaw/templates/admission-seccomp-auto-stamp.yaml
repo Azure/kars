@@ -12,9 +12,30 @@
   guarantees the strict seccomp profile lands, even if the controller
   gets it wrong, even if a future adapter forgets.
 
-  Note: Kubernetes 1.34+. Earlier versions need a mutating webhook
-  shim. For now we ship as MAP and require K8s 1.34+ on AKS.
+  Confidential isolation is handled differently
+  ---------------------------------------------
+  Confidential sandboxes (Phase 4) run on Kata + SEV-SNP nodepools and
+  rely on the Kata-VM boundary plus the runtime's built-in profile, NOT
+  the host-side `azureclaw-strict.json`. Their namespaces carry
+  `azureclaw.azure.com/isolated: confidential` (NOT `strict`), so they
+  are excluded by `namespaceSelector` below. We additionally guard with
+  a `matchConditions` clause that skips any pod requesting
+  `runtimeClassName: kata*` — defensive, in case a confidential pod
+  ever lands in a strict-labelled namespace by mistake.
+
+  Cluster requirements
+  --------------------
+  MutatingAdmissionPolicy is K8s 1.34+ AND requires the
+  `MutatingAdmissionPolicy` feature gate enabled. The gate is still beta
+  and OFF by default in upstream K8s 1.34, and AKS does not expose it
+  yet — so we default `admission.seccompAutoStamp.enabled` to false. Set
+  it to true once the cluster has the API surface.
+
+  When disabled, defense-in-depth is preserved: the controller still
+  stamps seccompProfile on every Pod template it owns, and
+  sandboxPostureLock VAP rejects UPDATE attempts that strip it.
 */ -}}
+{{- if .Values.admission.seccompAutoStamp.enabled -}}
 apiVersion: admissionregistration.k8s.io/v1alpha1
 kind: MutatingAdmissionPolicy
 metadata:
@@ -32,6 +53,10 @@ spec:
         azureclaw.azure.com/isolated: strict
   reinvocationPolicy: Never
   matchConditions:
+    - name: not-confidential-runtime
+      expression: |
+        !has(object.spec.runtimeClassName) ||
+        !object.spec.runtimeClassName.startsWith("kata")
     - name: missing-seccomp
       expression: |
         !has(object.spec.securityContext) ||
@@ -51,3 +76,4 @@ spec:
               }
             }
           }
+{{- end }}

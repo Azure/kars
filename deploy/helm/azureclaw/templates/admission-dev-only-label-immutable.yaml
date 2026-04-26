@@ -55,10 +55,7 @@ spec:
           object.metadata.?labels["azureclaw.azure.com/dev-only"].orValue("") != "true" &&
           object.metadata.?annotations["azureclaw.azure.com/dev-only-removal-reason"].orValue("") == ""
         )
-      message: |
-        Removing the azureclaw.azure.com/dev-only=true label requires
-        an azureclaw.azure.com/dev-only-removal-reason annotation on
-        the new object (audit trail).
+      message: "Removing the azureclaw.azure.com/dev-only=true label requires an azureclaw.azure.com/dev-only-removal-reason annotation on the new object (audit trail)."
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
