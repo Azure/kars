@@ -215,6 +215,115 @@ let _log: { info: (m: string) => void; warn: (m: string) => void } = {
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
+// Per-name cache age for nameToAmid. Used to invalidate stale entries when a
+// sub-agent crashes and re-registers with a fresh AMID (sandbox identities are
+// ephemeral by design — keys regenerate on every pod boot, so an AMID cached
+// before a restart points at a dead identity in the registry).
+const nameToAmidTs: Map<string, number> = new Map();
+// 60s — long enough to amortize registry lookups across normal sends, short
+// enough that a crashed-and-restarted sub-agent is re-resolved within one
+// follow-up send cycle. The stable 'parent' alias bypasses TTL (see
+// getCachedAmid below) because it's seeded by the operator at spawn and never
+// changes for the lifetime of this pod.
+const AMID_CACHE_TTL_MS = 60_000;
+
+function getCachedAmid(name: string): string | undefined {
+  if (name === "parent") return nameToAmid.get(name);
+  const ts = nameToAmidTs.get(name);
+  if (ts === undefined) return nameToAmid.get(name);
+  if (Date.now() - ts > AMID_CACHE_TTL_MS) {
+    nameToAmid.delete(name);
+    nameToAmidTs.delete(name);
+    return undefined;
+  }
+  return nameToAmid.get(name);
+}
+
+function setCachedAmid(name: string, amid: string): void {
+  nameToAmid.set(name, amid);
+  nameToAmidTs.set(name, Date.now());
+}
+
+// Pick the freshest live entry from a registry /search response. Filters to
+// matches on display_name or capability, prefers online agents, then newest
+// last_seen.
+//
+// **Trust scope (important):** within a single cluster the AgentMesh registry
+// is cluster-local (NetworkPolicy-gated) and ClawSandbox names are unique by
+// K8s admission, so display_name uniquely identifies one sandbox and the
+// duplicates we see in the registry are always different AMIDs of the same
+// logical sandbox across pod restarts (sandbox identities are ephemeral by
+// design). When this assumption breaks — federated/multi-cluster registry, or
+// a compromised sandbox squatting another agent's name — pass a `scopeFilter`
+// that requires a known capability (e.g. `parent:<parent-amid>` or
+// `cluster:<cluster-id>`) emitted by trusted peers at registration. A
+// signed-spawn attestation from the controller is the longer-term fix.
+function pickFreshestRegistryMatch(
+  results: any[],
+  agentName: string,
+  scopeFilter?: (a: any) => boolean,
+): any | undefined {
+  if (!Array.isArray(results) || results.length === 0) return undefined;
+  const nameMatch = (a: any) =>
+    a?.display_name === agentName || (Array.isArray(a?.capabilities) && a.capabilities.includes(agentName));
+  const filtered = results.filter((a: any) => nameMatch(a) && (scopeFilter ? scopeFilter(a) : true));
+  // Fall back to results without the name filter only if no name match exists,
+  // never widen past the scope filter — that's the trust boundary.
+  const candidates = filtered.length > 0
+    ? filtered
+    : results.filter((a: any) => (scopeFilter ? scopeFilter(a) : true));
+  if (candidates.length === 0) return undefined;
+  return [...candidates].sort((a: any, b: any) => {
+    if (a?.status === "online" && b?.status !== "online") return -1;
+    if (b?.status === "online" && a?.status !== "online") return 1;
+    return (b?.last_seen || "").localeCompare(a?.last_seen || "");
+  })[0];
+}
+
+// Single source of truth for "name → live AMID" resolution. Honors the TTL'd
+// cache, and on miss queries the registry and picks the freshest live match.
+// Used by every send/discovery path so cache + freshness behaviour is uniform
+// — there is no other place where this lookup logic should be duplicated.
+//
+// Options:
+//   timeoutMs   — request timeout for the registry call (default 5s).
+//   registryBase — override base URL (sub-agents use AGT_REGISTRY_URL when set).
+//   scopeFilter — optional capability/identity guard (see pickFreshestRegistryMatch).
+async function resolveAmidByName(
+  agentName: string,
+  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean } = {},
+): Promise<string | undefined> {
+  const cached = getCachedAmid(agentName);
+  if (cached) return cached;
+
+  const base = opts.registryBase ?? routerUrl("/agt/registry");
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  try {
+    const http = await import("node:http");
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.get(
+        `${base}/registry/search?capability=${encodeURIComponent(agentName)}`,
+        (res: any) => {
+          let d = "";
+          res.on("data", (c: Buffer) => { d += c.toString(); });
+          res.on("end", () => resolve(d));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    });
+    const parsed = JSON.parse(body);
+    const results: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
+    const match = pickFreshestRegistryMatch(results, agentName, opts.scopeFilter);
+    const amid: string | undefined = match?.amid || match?.id;
+    if (amid) {
+      setCachedAmid(agentName, amid);
+      amidToName.set(amid, agentName);
+      return amid;
+    }
+  } catch { /* transient — caller decides whether to retry */ }
+  return undefined;
+}
 // Parent-verified trusted peer AMIDs — pre-seeded at spawn via AGT_TRUSTED_PEERS env var.
 // Separate from amidToName to prevent trust escalation via arbitrary registry lookups.
 const parentTrustedAmids: Set<string> = new Set();
@@ -1102,41 +1211,22 @@ async function processTaskWithTools(
             const meshMsg = args.message as string;
             log.info(`AGT sub-agent mesh_send: to=${toAgent} msg=${(meshMsg || "").slice(0, 100)}`);
             try {
-              // Check pre-seeded cache first (populated from AGT_TRUSTED_PEERS at startup)
-              let targetAmid = nameToAmid.get(toAgent);
+              // Single helper handles cache (with TTL) + freshest-match registry
+              // resolution. Retries kept here because sub-agent boots may race
+              // ahead of the peer's registration.
+              let targetAmid = await resolveAmidByName(toAgent, {
+                registryBase: process.env.AGT_REGISTRY_URL,
+              });
               if (targetAmid) {
-                log.info(`AGT sub-agent mesh_send: using cached AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
+                log.info(`AGT sub-agent mesh_send: resolved AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
               }
 
-              // Auto-discover with retry (match parent's reliability)
-              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
-              for (let attempt = 0; attempt < 8 && !targetAmid; attempt++) {
-                if (attempt > 0) {
-                  log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
-                  await new Promise(r => setTimeout(r, 2000));
-                }
-                try {
-                  const lookupResult = await new Promise<string>((resolve, reject) => {
-                    const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(toAgent)}`, { timeout: 5000 }, (res) => {
-                      let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
-                    });
-                    req.on("error", reject);
-                    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-                  });
-                  const parsed = JSON.parse(lookupResult);
-                  const agents: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
-                  const match = agents.find((a: any) =>
-                    a?.display_name === toAgent || a?.capabilities?.includes(toAgent)
-                  ) || agents[0];
-                  const amid = match?.amid || match?.id;
-                  if (amid) {
-                    targetAmid = amid;
-                    nameToAmid.set(toAgent, amid);
-                    amidToName.set(amid, toAgent);
-                  }
-                } catch (lookupErr: any) {
-                  if (attempt === 0) log.warn(`AGT sub-agent registry lookup: ${lookupErr.message}`);
-                }
+              for (let attempt = 1; attempt < 8 && !targetAmid; attempt++) {
+                log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
+                await new Promise(r => setTimeout(r, 2000));
+                targetAmid = await resolveAmidByName(toAgent, {
+                  registryBase: process.env.AGT_REGISTRY_URL,
+                });
               }
 
               if (!targetAmid) {
@@ -4638,22 +4728,15 @@ const azureClawPlugin = definePluginEntry({
               } catch { /* not ready yet */ }
             }
 
-            // Registry check (start early — sub-agent may register before status reports Running)
+            // Registry check (start early — sub-agent may register before status reports Running).
+            // resolveAmidByName picks the freshest live match so we don't pin to a stale
+            // AMID from a previous pod incarnation; identities rotate on every restart.
             if (!amid && agtMeshClient) {
-              try {
-                const searchResult = await routerCall("GET",
-                  `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
-                const agents = searchResult?.results || [];
-                const match = agents.find((a: any) =>
-                  a.display_name === agentName || a.capabilities?.includes(agentName)
-                );
-                if (match?.amid) {
-                  amid = match.amid;
-                  nameToAmid.set(agentName, match.amid);
-                  amidToName.set(match.amid, agentName);
-                  log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
-                }
-              } catch { /* registry not ready yet */ }
+              const resolved = await resolveAmidByName(agentName);
+              if (resolved) {
+                amid = resolved;
+                log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${resolved.slice(0, 12)}...)`);
+              }
             }
 
             // Both ready — exit early
@@ -4778,8 +4861,10 @@ const azureClawPlugin = definePluginEntry({
             //   • meshSend returns a non-transient error (not a prekey / stale-AMID case)
             // This removes the old hand-rolled 12-attempt discovery + 15-attempt prekey
             // windows that were too short on AKS (router-to-relay connect alone is ~60–70s).
-            // Check cache first — AMIDs are stable once established.
-            let targetAmid: string | undefined = nameToAmid.get(agentName);
+            // Check cache first — getCachedAmid invalidates entries older than
+            // AMID_CACHE_TTL_MS so a peer pod restart (which rotates identity) is
+            // recovered on the next send rather than persisting forever.
+            let targetAmid: string | undefined = getCachedAmid(agentName);
             if (targetAmid) {
               log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
             }
@@ -4805,37 +4890,7 @@ const azureClawPlugin = definePluginEntry({
 
               // (b) Discover AMID via registry search if we don't have one yet.
               if (!targetAmid) {
-                try {
-                  const http = await import("node:http");
-                  const regResult: any = await new Promise((resolve, reject) => {
-                    const req = http.get(
-                      routerUrl(`/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`),
-                      (res: any) => {
-                        let data = "";
-                        res.on("data", (c: Buffer) => { data += c.toString(); });
-                        res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
-                      },
-                    );
-                    req.on("error", reject);
-                    req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-                  });
-                  if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
-                    // Prefer online agents, then most recently seen.
-                    const sorted = regResult.results
-                      .filter((a: any) => a.display_name === agentName || a.capabilities?.includes(agentName))
-                      .sort((a: any, b: any) => {
-                        if (a.status === "online" && b.status !== "online") return -1;
-                        if (b.status === "online" && a.status !== "online") return 1;
-                        return (b.last_seen || "").localeCompare(a.last_seen || "");
-                      });
-                    const match = sorted[0] || regResult.results[0];
-                    if (match?.amid) {
-                      targetAmid = match.amid;
-                      nameToAmid.set(agentName, targetAmid!);
-                      amidToName.set(targetAmid!, agentName);
-                    }
-                  }
-                } catch { /* transient registry error — keep retrying */ }
+                targetAmid = await resolveAmidByName(agentName);
               }
 
               if (!targetAmid) {
@@ -5165,20 +5220,9 @@ const azureClawPlugin = definePluginEntry({
           const b64Data = fileData.toString("base64");
           const fileName = path.basename(resolvedPath);
 
-          // Look up target AMID
-          let targetAmid = nameToAmid.get(agentName);
-          if (!targetAmid) {
-            const regResult = await routerCall("GET",
-              `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
-            const match = (regResult?.results || []).find(
-              (a: any) => a.display_name === agentName || a.capabilities?.includes(agentName)
-            );
-            if (match?.amid) {
-              targetAmid = match.amid;
-              nameToAmid.set(agentName, match.amid);
-              amidToName.set(match.amid, agentName);
-            }
-          }
+          // Look up target AMID — TTL'd cache + freshest-match registry resolution
+          // protects against stale entries from a previous peer pod incarnation.
+          const targetAmid = await resolveAmidByName(agentName);
 
           if (!targetAmid) {
             return { content: [{ type: "text", text: JSON.stringify({
