@@ -160,6 +160,17 @@ admission:
     # handled by the controller's own pod template).
     # Requires Kubernetes >= 1.30 (VAP GA).
     enabled: true
+  seccompAutoStamp:
+    # Deploy MutatingAdmissionPolicy that auto-stamps the
+    # azureclaw-strict seccomp profile onto sandbox-namespace pods that
+    # are missing it. Defense-in-depth on top of the controller's own
+    # pod-template stamping and the sandboxPostureLock VAP.
+    #
+    # Requires Kubernetes >= 1.34 AND the `MutatingAdmissionPolicy`
+    # feature gate enabled. The gate is still beta and OFF by default in
+    # upstream K8s 1.34, and AKS does not expose it yet — so we default
+    # to false. Flip to true once the API surface is available.
+    enabled: false
 
 # Azure-specific configuration
 azure:
