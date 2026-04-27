@@ -46,6 +46,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
 use kube::CustomResourceExt;
 
 use crate::a2a_agent::A2AAgent;
+use crate::claw_eval::ClawEval;
 use crate::claw_memory::ClawMemory;
 use crate::inference_policy::InferencePolicy;
 use crate::mcp_server::McpServer;
@@ -361,6 +362,95 @@ pub fn claw_memory_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on ClawMemory")
 }
 
+/// `ClawEval.spec` CEL rules. Phase 2 §8 entry 6 (S6).
+///
+/// `ClawEval` is a binding/provisioning resource over Azure AI
+/// Foundry Evals (per `docs/implementation-plan.md` §10.5 #6). The CRD
+/// is shape-only — Foundry availability and runtime trigger semantics
+/// are out of admission scope. Rules:
+///
+/// - `sandboxRef.name` non-empty (1-253 chars; same length cap as
+///   K8s object names).
+/// - `evaluators`: each entry 1-256 chars; required (`size >= 1`)
+///   when `suite == "foundry-evals"`. Other suites accept empty.
+/// - `schedule`, when set, looks like a 5-or-6-token cron line. We do
+///   not parse cron at admission (defer to runtime), but we reject
+///   empty strings and impossible token counts.
+/// - `threshold.score`, when set, in `[0.0, 1.0]`.
+/// - `dataset`: at most one of `configMapRef` / `inline` (mutually
+///   exclusive). `inline` capped at 64 entries to keep the CR small.
+/// - `displayName`, when set, 1-256 chars.
+#[must_use]
+pub fn claw_eval_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253".into(),
+            message: Some("spec.sandboxRef.name must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.suite != 'foundry-evals' || (has(self.evaluators) && size(self.evaluators) >= 1)".into(),
+            message: Some(
+                "spec.evaluators must contain at least one entry when spec.suite is 'foundry-evals'".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.evaluators) || self.evaluators.all(e, size(e) > 0 && size(e) <= 256)".into(),
+            message: Some("each spec.evaluators entry must be 1-256 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.schedule) || (size(self.schedule) > 0 && size(self.schedule) <= 256 && (size(self.schedule.split(' ')) == 5 || size(self.schedule.split(' ')) == 6))".into(),
+            message: Some(
+                "spec.schedule, when set, must be a 5-or-6-field cron expression (1-256 chars)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.threshold) || (self.threshold.score >= 0.0 && self.threshold.score <= 1.0)".into(),
+            message: Some("spec.threshold.score must be in [0.0, 1.0] when set".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.dataset) || !(has(self.dataset.configMapRef) && has(self.dataset.inline) && size(self.dataset.inline) > 0)".into(),
+            message: Some(
+                "spec.dataset.configMapRef and spec.dataset.inline are mutually exclusive".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.dataset) || !has(self.dataset.inline) || size(self.dataset.inline) <= 64".into(),
+            message: Some(
+                "spec.dataset.inline is capped at 64 entries; use a ConfigMap for larger datasets".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 256)".into(),
+            message: Some("spec.displayName, when set, must be 1-256 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `ClawEval` CRD with [`claw_eval_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn claw_eval_crd() -> CustomResourceDefinition {
+    inject_spec_validations(ClawEval::crd(), claw_eval_validations())
+        .expect("kube-rs derive must produce a spec property on ClawEval")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +721,75 @@ mod tests {
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("storeName"));
         assert!(y.contains("scope"));
+    }
+
+    // ---- ClawEval (S6) --------------------------------------------------
+
+    #[test]
+    fn claw_eval_validations_are_non_empty() {
+        assert!(!claw_eval_validations().is_empty());
+    }
+
+    #[test]
+    fn every_claw_eval_rule_has_message_and_rule() {
+        for rule in claw_eval_validations() {
+            assert!(!rule.rule.is_empty(), "rule body must not be empty");
+            let msg = rule.message.as_deref().unwrap_or("");
+            assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
+        }
+    }
+
+    #[test]
+    fn claw_eval_crd_has_spec_validations_after_injection() {
+        let crd = claw_eval_crd();
+        let v = spec_validations(&crd);
+        assert_eq!(v.len(), claw_eval_validations().len());
+    }
+
+    #[test]
+    fn claw_eval_rules_cover_core_invariants() {
+        let rules: Vec<String> = claw_eval_validations()
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        assert!(
+            rules.iter().any(|r| r.contains("sandboxRef.name")),
+            "must validate sandboxRef.name; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("foundry-evals") && r.contains("evaluators")),
+            "must require evaluators for foundry-evals suite; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("schedule") && r.contains("split")),
+            "must validate schedule cron shape; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("threshold.score") && r.contains("1.0")),
+            "must bound threshold.score to [0,1]; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("configMapRef") && r.contains("inline")),
+            "must enforce dataset configMapRef/inline mutual exclusion; got rules: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn claw_eval_crd_is_serde_round_trippable() {
+        let crd = claw_eval_crd();
+        let y = serde_yaml::to_string(&crd).expect("serializes");
+        assert!(y.contains("x-kubernetes-validations"));
+        assert!(y.contains("sandboxRef"));
+        assert!(y.contains("evaluators"));
+        assert!(y.contains("threshold"));
     }
 
     #[test]
