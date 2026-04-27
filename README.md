@@ -24,7 +24,25 @@ Zero-credential inference through Azure AI Foundry. Optional Kata VM isolation. 
 
 ## What is AzureClaw?
 
-AzureClaw is a production runtime for AI agents on Azure. It solves the core problem: **how do you give an AI agent real tools without giving it the keys to the kingdom?** Each agent runs inside a hardened sandbox on AKS — with a Rust inference router that mediates all external access. Agents never see Azure credentials (the router authenticates via Workload Identity), every inference call passes through Content Safety + Prompt Shields, and all inter-agent messaging is E2E encrypted via Signal Protocol. AGT governance (policy, trust, audit) runs natively inside the router — no sidecar needed. For maximum isolation, upgrade to Kata Confidential VMs — per-pod dedicated kernels where container escapes hit a hardware boundary. One CLI command (`azureclaw up`) takes you from zero to a fully secured, governed agent runtime.
+AzureClaw is a **secure runtime for AI agents on Azure Kubernetes Service**. It answers a single question: *how do you give an AI agent real tools without giving it the keys to the kingdom?*
+
+Every agent runs inside a hardened sandbox pod. A Rust inference router sits in front of every external call — Azure model inference, web fetches, peer messaging — and applies **defense-in-depth controls** at the network, kernel, identity, content-safety, and governance layers. Agents never see Azure credentials. All inter-agent messaging is end-to-end encrypted with the Signal Protocol. One CLI command (`azureclaw up`) takes you from zero to a fully provisioned, secured runtime.
+
+AzureClaw is **not a fork of OpenClaw** — it extends OpenClaw via its native plugin API and `tools.deny` config, so any upstream OpenClaw release is drop-in compatible. See [Upstream Alignment](docs/upstream-alignment.md).
+
+### Who is this for?
+
+- **Platform teams** who need to host LLM agents on AKS with the same operational rigour as the rest of their workloads — namespace isolation, RBAC, NetworkPolicies, audit, signed admission.
+- **Security teams** who want a single, opinionated, layered control plane (egress, content safety, governance, mesh trust) instead of stitching point products together.
+- **Agent builders** who want to ship without writing the boring-but-load-bearing infrastructure: identity, secret rotation, policy, trust, audit, multi-tenant isolation.
+
+### What problems does it solve?
+
+1. **Credential blast radius** — agents talk to Azure via Workload Identity through the router, not via API keys. Compromise of an agent does not compromise the cloud account.
+2. **Tool-call governance** — every shell exec / HTTP fetch / sub-agent spawn passes through a policy decision point with audit. No invisible side effects.
+3. **Inter-agent trust** — agents talk over a Signal-Protocol mesh with explicit KNOCK trust handshake, trust scoring, and tamper-evident audit chain. No plaintext fallback.
+4. **Operational footprint** — `azureclaw up` provisions AKS + ACR + Foundry + Foundry-side Content Safety + sandbox in one go; `azureclaw operator` gives a live TUI for running fleets.
+5. **Multi-runtime future** — see [Roadmap](#roadmap-extending-beyond-openclaw) below: protocol scaffolding (MCP, A2A, AP2) is in place so the same sandbox can host non-OpenClaw agents over the wire.
 
 ---
 
@@ -77,15 +95,41 @@ AzureClaw is a production runtime for AI agents on Azure. It solves the core pro
 
 > 📐 **[Architecture & Flow Diagrams](docs/architecture-diagrams.md)** — Mermaid diagrams for all core flows: pod architecture, agent creation, sub-agent spawning, E2E encrypted communication, inference routing, egress control, bidirectional handoff with sub-agents, and defense-in-depth layers.
 
-### Docker Images
+---
+
+## 🚀 Get started in 60 seconds
+
+```bash
+# Clone, install CLI
+git clone https://github.com/Azure/azureclaw.git && cd azureclaw/cli
+npm install && npm run build && npm link
+
+# Local dev (Docker, no Azure needed)
+azureclaw dev
+
+# Or deploy to AKS (provisions AKS + ACR + Foundry end-to-end)
+azureclaw up
+```
+
+Full instructions, prerequisites, and the **Path A (local Docker)** vs **Path B (production AKS)** breakdown are in the [Quick Start](#quick-start) section below.
+
+---
+
+## Docker Images
 
 | Image | Language | Purpose |
 |-------|----------|---------|
-| `azureclaw-controller` | Rust | K8s operator — reconciles ClawSandbox CRDs into pods |
-| `azureclaw-inference-router` | Rust | Inference proxy — Content Safety, native AGT governance, egress filtering |
-| `azureclaw-sandbox` / `openclaw-sandbox` | Node.js | Main agent container (OpenClaw + AGT SDK + Python tools) |
-| `agentmesh-relay` | Rust | WebSocket relay for E2E encrypted inter-agent messaging |
-| `agentmesh-registry` | Rust + PostgreSQL | Agent discovery, prekey storage, React admin UI |
+| `azureclaw-controller` | Rust | K8s operator — reconciles `ClawSandbox` + `ClawPairing` CRDs into pods; periodic federated-credential reaper GCs orphan credentials against the Azure 20-fedcred-per-MI cap |
+| `azureclaw-inference-router` | Rust | Inference proxy — Workload Identity auth, Content Safety, AGT governance, egress filtering |
+| `azureclaw-sandbox` (built from `sandbox-images/openclaw`) | Node.js | Main agent container (OpenClaw + AGT SDK + Python tools) |
+| `agentmesh-relay` | Rust | WebSocket relay for E2E encrypted inter-agent messaging — see *AgentMesh & vendoring* below |
+| `agentmesh-registry` | Rust + PostgreSQL | Agent discovery, prekey storage, React admin UI — see *AgentMesh & vendoring* below |
+
+`azureclaw push` builds the 5 images above by default. The shared
+`sandbox-base` image is built only when `--include-base` is passed. A separate
+`sandbox-images/nemoclaw/` image exists for any-OpenClaw-host clients (laptop,
+NemoClaw, etc.) that want to offload to AzureClaw — see
+[`docs/any-openclaw-cloud-offload.md`](docs/any-openclaw-cloud-offload.md).
 
 All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`).
 
@@ -144,12 +188,53 @@ All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`)
 
 ### ⚙️ Operations
 
-- **One-command deploy** — `azureclaw up` provisions AKS + ACR + Foundry + sandbox end-to-end
+- **One-command deploy** — `azureclaw up` provisions AKS + ACR + Foundry + sandbox end-to-end, with a preflight RBAC check that fails fast (~30 s) if your Azure permissions are insufficient
 - **Live handoff** — `azureclaw handoff <name> --to cloud|local` migrates agents between local Docker and AKS with sub-agent state, E2E encrypted workspace transfer, and task resumption
 - **Operator dashboard** — `azureclaw operator` launches a live TUI for managing all agents
-- **Credential management** — `azureclaw credentials update` rotates tokens for running sandboxes
+- **Credential management** — `azureclaw credentials update` rotates tokens for running sandboxes; gateway tokens are mounted via `secretKeyRef`, never in plain pod env
 - **Image pipeline** — `azureclaw push` builds and pushes images to ACR with optional rollout
-- **Monitoring** — Prometheus metrics, Log Analytics, eBPF tracing via `azureclaw trace`
+- **Monitoring** — Prometheus metrics, OpenTelemetry GenAI semantic conventions on every router span, Log Analytics, eBPF tracing via `azureclaw trace`
+- **Federated-credential reaper** — controller periodically GCs orphan federated credentials so sandbox managed identities never hit the Azure 20-fedcred-per-MI cap
+
+---
+
+## Roadmap — extending beyond OpenClaw
+
+AzureClaw was built first as the secure runtime for OpenClaw agents. The next chapter is making it the secure runtime for **any** agent framework that speaks open protocols — so platform teams can host SDK-native agents (Foundry, OpenAI Agents SDK, Anthropic Agent SDK, Google ADK, Strands) on the same AKS substrate, with the same governance and isolation guarantees.
+
+The protocol scaffolding for that future is being landed now in tightly scoped, well-audited modules. **Most of it is not yet wired into a default-on user-facing flow** — it is intentionally opt-in and gated, so existing OpenClaw deployments are unaffected:
+
+| Surface | Status | What it enables |
+|---|---|---|
+| **MCP 2026 Streamable HTTP** | Scaffolded in `inference-router/src/mcp/`; off by default | A future `McpServer` CRD lets cluster operators publish private/internal MCP tools to agents over OAuth 2.1 |
+| **A2A 1.0.0 (Agent-to-Agent)** | Scaffolded in `inference-router/src/a2a/`; ingress is gateway-only and opt-in via `ClawSandbox.spec.a2a.expose: true` ([ADR-0001](docs/adr/0001-a2a-ingress-front-edge.md)) | Future cross-vendor agent interop with signed Agent Cards |
+| **AP2 commerce mandates** | Scaffolded alongside A2A | Future signed-mandate trust boundary for agentic commerce |
+| **Pluggable governance providers** | `PolicyDecisionProvider`, `AuditSink`, `SigningProvider` traits live; in-tree implementations are the production path today | Future swap-in of AGT's Rust SDK alternates without rewriting call sites; multi-tenant per-capability provider selection |
+| **`McpServer` / `ToolPolicy` CRDs** | Schema-only in this branch; reconcilers planned for the next phase | Declarative tool-server publication and per-tool policy (rate limits, commerce caps, allowlists) |
+
+The full plan for these surfaces — what is implemented today, what is wiring-pending, and what is deferred — is captured in [`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md). For three end-to-end scenarios spanning today's runtime and these in-flight extensions, see [`docs/use-cases.md`](docs/use-cases.md).
+
+---
+
+## AgentMesh & vendoring (transitional)
+
+Inter-agent messaging today runs on a vendored fork of [AgentMesh](https://github.com/amitayks/agentmesh) (relay + registry + SDK). AgentMesh is pre-release; while integrating it we contributed bug fixes and protocol corrections that are tracked in this tree until they land upstream. Each fix is documented in `vendor/<component>/README.md`, and an index lives at [`docs/agt-vendored-patch-audit.md`](docs/agt-vendored-patch-audit.md).
+
+**Direction of travel:** Microsoft's Agent Governance Toolkit (AGT) is shipping a first-party AgentMesh transport. Once it stabilises, AzureClaw's `MeshProvider` seam (defined plugin-side, see [`docs/agt-boundary.md`](docs/agt-boundary.md)) will allow operators to switch to the AGT mesh per-tenant without breaking existing deployments. Until then, the vendored stack is the supported production path.
+
+---
+
+## Engineering & quality posture
+
+We treat security and code health as product-grade concerns:
+
+- **Six blocking CI gates** — LOC budget, anti-stub (no `TODO`/`unimplemented!` on production paths), no custom crypto outside provider seams, no `Null*` providers in production, mandatory security-audit document per capability-introducing PR, vendored-patch re-audit on every AGT SDK bump.
+- **Per-capability security audits** — every PR that introduces a new CRD, router route, admission policy, or sandbox-image change ships a `docs/security-audits/<date>-<slug>.md` with threat-model delta, OWASP mapping, AuthN/Z path, secret custody, audit events, failure mode, and two engineer sign-offs.
+- **Behavioral conformance corpus** — `tests/conformance/` covers Signal Protocol (X3DH / KNOCK / negative cases), sandbox isolation, and the protocol scaffolding above with mandatory negative tests (tampered ciphertext, replayed message, expired mandate).
+- **Compat suite** — `tests/compat/` regression-tests user-visible flows (today: the operator TUI; growing per phase).
+- **Fuzz targets** — cargo-fuzz coverage for handoff state deserialization, chat sanitisation, JWS parsing, base64url decoding, streaming response parsing.
+
+A complete inventory of these controls is in [`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md).
 
 ---
 
@@ -306,6 +391,9 @@ azureclaw credentials update my-agent \
 
 ## CLI Reference
 
+`azureclaw` ships **21 commands** (`cli/src/commands/`):
+`a2a · add · connect · convert · credentials · destroy · dev · egress · eval · handoff · list · logs · mesh · model · operator · pair · policy · push · status · trace · up`.
+
 | Command | Description |
 |---|---|
 | **Lifecycle** | |
@@ -314,10 +402,11 @@ azureclaw credentials update my-agent \
 | `azureclaw dev` | Local Docker sandbox with same security controls |
 | `azureclaw add <name>` | Add sandbox to existing cluster |
 | `azureclaw destroy [name]` | Tear down sandbox or entire resource group (`--all`) |
-| `azureclaw push` | Build and push all 5 images to ACR (`--apply` restarts deployments, `--only <image>` for single image) |
+| `azureclaw push` | Build and push 5 images to ACR (`--apply` restarts deployments, `--only <image>` for single image, `--include-base` to also build the shared base) |
+| `azureclaw convert` | Skeleton (Phase 0) — translate between Native and `sigs/agent-sandbox` shapes; full converter in Phase 2 |
 | **Operations** | |
 | `azureclaw operator` | Live TUI dashboard — agents, egress, security, cluster health |
-| `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) |
+| `azureclaw connect <name>` | TUI, shell (`--shell`), or Web UI (`--web`) — surfaces `kubectl` stderr on port-forward failure |
 | `azureclaw handoff <name> --to cloud` | Live-migrate agent + sub-agents from local Docker to AKS |
 | `azureclaw handoff <name> --to local` | Live-migrate agent + sub-agents from AKS back to local Docker |
 | `azureclaw handoff <name> --status` | Show current handoff progress |
@@ -341,6 +430,9 @@ azureclaw credentials update my-agent \
 | `azureclaw mesh auth` | Authenticate with global AgentMesh registry (OAuth) |
 | `azureclaw mesh status` | Show mesh connectivity and registered agents |
 | `azureclaw mesh send <amid>` | Send E2E encrypted message to another agent |
+| `azureclaw pair <a> <b>` | Pair two existing sandboxes via `ClawPairing` CR |
+| `azureclaw a2a list-exposed` | List sandboxes that expose A2A 1.0.0 (Phase 1 scaffold) |
+| `azureclaw a2a schema` | Print the local A2A schema (Phase 1 scaffold) |
 
 ### Common Flags
 
@@ -356,47 +448,6 @@ These flags are shared across `dev`, `add`, and `credentials update`:
 | `--learn-egress` | Enable egress learn mode |
 | `--isolation standard\|enhanced\|confidential` | Pod isolation level |
 | `--model <model>` | AI model (default: `gpt-4.1`) |
-
----
-
-## Security Model
-
-Every sandbox runs in its own namespace with defense layers stacked in depth. Some layers are always active; others depend on the isolation level you choose.
-
-### Always Active
-
-| Layer | Control |
-|---|---|
-| **Container hardening** | Read-only rootfs, non-root, drop ALL capabilities, no privilege escalation |
-| **iptables egress guard** | Agent process restricted to localhost + DNS; all internet traffic goes through router |
-| **NetworkPolicy** | Default-deny egress at the Kubernetes level (Cilium-enforced) |
-| **Domain blocklist** | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus every 6h |
-| **Inference safety** | Content Safety + Prompt Shields on every request + per-agent token budgets |
-| **Content Safety** | Foundry-side guardrails (`DefaultV2`) — content filter annotations parsed from model responses; no separate API call needed |
-| **Zero Azure credentials** | Agent never sees Azure auth tokens — router authenticates via IMDS/Workload Identity |
-| **Admin token** | From K8s Secret mounted at `/etc/azureclaw/secrets/` — never hardcoded; required for trust mutation. Canonical header is `Authorization: Bearer <token>`; the legacy `x-azureclaw-admin` header is still accepted but emits a one-shot `warn!` on first use and will be removed in a future release. Compared in constant time (`handoff::constant_time_eq`). Optional `ROUTER_ADMIN_ALLOW_IPS` IP allowlist + `ADMIN_ALLOWED_ORIGINS` browser-origin gate add defence-in-depth on top of the token. |
-| **AGT policy evaluation** | Per-request governance on inference, spawn, mesh receive, and response actions |
-| **Audit chain** | SHA-256 Merkle tree with integrity verification (validated on AKS: `integrity=valid`) |
-
-### Per Isolation Level
-
-| Level | Runtime | Security posture |
-|---|---|---|
-| `standard` | runc | Kernel-default seccomp, shared node pool |
-| `enhanced` (**default**) | runc | Custom strict seccomp (~219 syscalls), shared node pool |
-| `confidential` | Kata VM | Per-pod dedicated kernel on AMD SEV-SNP hardware; container escapes hit a VM boundary; dedicated node pool; isolation inherited by sub-agents |
-
-### Credential Compartmentalization
-
-| Credential type | Where it lives | Agent can see it? |
-|---|---|---|
-| Azure auth tokens (IMDS, WI) | Router only (projected file) | ❌ No — iptables blocks IMDS, file permissions enforce separation |
-| Azure OpenAI API key | Router only (`/run/secrets/`) | ❌ No — mounted only in router container |
-| Admin token | K8s Secret (`/etc/azureclaw/secrets/`) | ❌ No — mounted only in router; required for trust mutation |
-| Plugin API keys (Brave, Tavily, etc.) | Agent env vars | ✅ Yes — plugins need them. Agent cannot exfiltrate: egress blocked by iptables |
-| Channel tokens (Telegram, Slack) | Agent env vars | ✅ Yes — channels need them. Same egress protection applies |
-
-See [docs/security.md](docs/security.md) for full details and OWASP LLM Top 10 coverage.
 
 ---
 
@@ -438,33 +489,25 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 
 | Document | Description |
 |---|---|
-| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, operator dashboard, auth flow |
+| [Use Cases](docs/use-cases.md) | Three canonical scenarios: AzureClaw-native, any-OpenClaw → AzureClaw offload, AzureClaw ↔ AzureClaw mesh |
+| [Phase 0 + 1 Capability Index](docs/phase-0-1-capabilities.md) | Evidence-based manifest for PR #44; every claim cites code + audit doc |
+| [Architecture](docs/architecture.md) | Component design, CRD schema, API routes, four-seam providers, MCP/A2A modules, operator dashboard, auth flow |
 | [Architecture Diagrams](docs/architecture-diagrams.md) | Mermaid flow diagrams: pod layout, agent creation, spawn, mesh, egress, inference |
-| [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations |
+| [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations, CI gates, security-audit framework |
+| [Threat Model — Routes](docs/threat-model.md) | Per-route auth tier, input validation, blast-radius analysis |
+| [AGT Boundary](docs/agt-boundary.md) | What AGT owns vs. what AzureClaw owns; the four contracts |
+| [AGT Vendored-Patch Audit](docs/agt-vendored-patch-audit.md) | 26 vendor patches indexed; re-audited on every AGT SDK bump |
+| [Internal MSFT Boundaries](docs/internal/internal-boundaries.md) | Per-product consume / be-consumed / orthogonal posture *(internal)* |
+| [`sigs/agent-sandbox` Compat](docs/sigs-agent-sandbox-compat.md) | Translate / Overlay mode design; opt-in, no upstream dependency |
+| [OWASP MCP Top 10 (2025)](docs/security-mcp-top10.md) | Controls matrix for the new MCP 2026 surface |
+| [ADR-0001 — A2A ingress front-edge](docs/adr/0001-a2a-ingress-front-edge.md) | Gateway-only, surgical opt-in posture for inbound A2A |
 | [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
 | [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode, approval flow |
 | [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
 | [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation, credential and channel separation |
 | [Security Validation](docs/security-validation.md) | Live cluster evidence for every security layer |
+| [Permissions](docs/permissions.md) | Required Azure RBAC for `azureclaw up` |
 | [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
-
----
-
-## Egress Proxy
-
-All agent network traffic is mediated by the inference router:
-
-| Mode | Behavior |
-|---|---|
-| **Blocklist** (always on) | 51k+ known-bad domains blocked; auto-refreshes from OISD + URLhaus |
-| **Allowlist** | Only pre-approved domains permitted |
-| **Learn mode** | Unknown domains allowed + recorded; promote to allowlist when ready |
-
-```bash
-azureclaw add my-agent --model gpt-4.1 --learn-egress  # deploy with learn mode
-azureclaw egress my-agent --learned                      # review discovered domains
-azureclaw egress my-agent --enforce                      # lock down to learned set
-```
 
 ---
 
@@ -472,21 +515,25 @@ azureclaw egress my-agent --enforce                      # lock down to learned 
 
 ```
 azureclaw/
-├── cli/                  # TypeScript CLI (azureclaw command)
-│   ├── skills/           # Foundry skill definitions (10 skills)
+├── ci/                   # 6 blocking CI gates + LOC budget
+├── cli/                  # TypeScript CLI (azureclaw — 21 commands)
+│   ├── skills/           # Foundry skill definitions (10 skills: 8 Foundry + agt-governance + azureclaw-spawn)
 │   └── policies/         # AGT governance policy YAML (default rules)
-├── controller/           # Rust K8s operator (ClawSandbox CRDs)
-├── inference-router/     # Rust inference proxy (axum) — includes native AGT governance
-├── sandbox-images/       # OpenClaw container images
+├── controller/           # Rust K8s operator
+│   └── src/{crd,reconciler,mesh_peer,status,providers,fedcred,fedcred_reaper}.rs
+├── inference-router/     # Rust inference proxy (axum)
+│   └── src/{a2a,mcp,providers,routes,handoff,governance,...}/
+│   └── fuzz/             # 5 cargo-fuzz targets
+├── sandbox-images/       # OpenClaw + nemoclaw container images
 ├── policy-engine/        # Seccomp profiles & security policies
-├── deploy/               # Bicep IaC, Helm charts, AgentMesh K8s manifests
-├── docs/                 # Architecture, security, E2E encryption, demo guides
+├── deploy/               # Bicep IaC, Helm charts (incl. VAP/MAP set), AgentMesh K8s manifests
+├── docs/                 # Architecture, security, threat model, AGT boundary, ADR, security-audits/
 ├── examples/             # Sample agents (basic, confidential, telegram, demo)
-├── tests/                # E2E tests (Docker + Kind)
-└── vendor/               # AgentMesh SDK, relay, registry (patched forks)
+├── tests/                # compat/, conformance/, e2e/
+└── vendor/               # AgentMesh SDK (21 patches), relay (4), registry (1)
 ```
 
-> **📦 Why `vendor/`?** AgentMesh is pre-release — we found and fixed 8 bugs in the relay, registry, and SDK (see `vendor/*/README.md` for each patch). These are carried as patched forks until fixes land upstream. Once AgentMesh ships a stable release, `vendor/` goes away entirely.
+> **About `vendor/`:** AzureClaw is *not* a fork of OpenClaw. The `vendor/` directory only carries our patched copies of the pre-release AgentMesh stack (relay, registry, SDK) — see *AgentMesh & vendoring* above. Each patch is documented in `vendor/<component>/README.md`, indexed in [`docs/agt-vendored-patch-audit.md`](docs/agt-vendored-patch-audit.md), and re-validated on every AGT SDK version bump.
 
 ---
 

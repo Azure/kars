@@ -517,3 +517,132 @@ Pressing `Enter` on an agent uses `spawnSync` to launch `openclaw tui` with `std
 4. Restores raw mode, alternate buffer, and cursor position on return
 
 SIGINT (Ctrl+C) is trapped during the child process so it only terminates the TUI session, not the operator itself.
+
+---
+
+## Phase 1 architectural additions (PR #44)
+
+### Four-seam provider architecture
+
+Every cross-AGT-boundary call goes through one of four trait contracts. The
+router-side three (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`)
+have in-tree implementations on `Governance`. The fourth (`MeshProvider`) is
+plugin-side by design — see [`docs/agt-boundary.md`](agt-boundary.md).
+
+```
++-------------------------------------------------+
+|             inference-router/src/               |
+|                                                 |
+|   AppState                                      |
+|     ├── Arc<dyn PolicyDecisionProvider>  ──┐    |
+|     ├── Arc<dyn AuditSink>                ─┤    |
+|     ├── Arc<dyn SigningProvider>          ─┤    |
+|     └── Arc<Governance>  ←─────────────────┘    |
+|         (single instance; impls live in         |
+|          providers/{policy,audit,signing}_impl) |
+|                                                 |
+|   Outage dispatch:  providers/outage.rs         |
+|     Strict / CachedRead / DegradedDev           |
+|     per ClawSandbox.spec.agt.outageMode         |
++-------------------------------------------------+
+```
+
+### MCP 2026 module
+
+`inference-router/src/mcp/` (8 files): `streamable_http.rs`, `jsonrpc.rs`,
+`oauth.rs`, `oauth_layer.rs` (mounted as `tower::Layer`), `initialize.rs`,
+`pipeline.rs`, `tools.rs`, `error.rs`. Mounted at `POST /mcp`. OAuth 2.1 BCP
+gated by `McpServer.spec.productionMode: true`.
+
+### A2A 1.0.0 module
+
+`inference-router/src/a2a/` (14 files) — `agent_card.rs`, `agent_projection.rs`,
+`card_server.rs` (`/.well-known/agent.json`), `card_signing.rs`,
+`card_verifier.rs`, `error.rs`, `jsonrpc_dispatch.rs`, `signature.rs`,
+`snapshot_rebuild.rs`, `trust_store.rs`, plus AP2: `ap2.rs`,
+`mandate_signing.rs`, `mandate_trust_store.rs`, `message_send_ap2.rs`. Schema:
+<https://a2a-protocol.org/v1.0.0/specification>. Default ingress is no public
+exposure; surgical opt-in via `ClawSandbox.spec.a2a.expose: true` — see
+[ADR-0001](adr/0001-a2a-ingress-front-edge.md).
+
+### CRD reconciliation status
+
+| CRD | Reconciled | File | Notes |
+|---|---|---|---|
+| `ClawSandbox` | ✅ | `controller/src/reconciler/mod.rs` (1464 LOC) | Status subresource (KEP-1623 conditions + `observedGeneration`) |
+| `ClawPairing` | ✅ | `controller/src/{pairing,pairing_reconciler}.rs` | Operator-assisted pairing as a K8s op |
+| `McpServer` | schema-only (Phase 1) | `controller/src/mcp_server.rs` | Reconciliation in Phase 2; CEL via `crd_validations.rs` |
+| `ToolPolicy` | schema-only (Phase 1) | `controller/src/tool_policy.rs` | Carries AP2 `commerce.{dailyCap,monthlyCap,counterpartyAllowlist}`; reconciliation in Phase 2 |
+
+**Note on CEL.** kube-rs `CustomResource` derive does not emit the
+`x-kubernetes-validations` field (kube-rs#1557), so CEL is post-processed in
+`controller/src/crd_validations.rs` after schema generation.
+
+### VAP / MAP set
+
+Shipped in the controller Helm chart (`deploy/helm/azureclaw/templates/`):
+
+- **VAP:** `pods/exec|attach|portforward` denied on sandbox namespaces;
+  posture-downgrades blocked (isolation step-down, seccomp removal,
+  `readOnlyRootFilesystem: false`); `azureclaw.azure.com/dev-only` label
+  cannot be removed once applied; `provider: null/noop/disabled` requires
+  `dev-only` label (mirror of `ci/no-null-provider-prod.sh`).
+- **MAP:** auto-inject router sidecar on `azureclaw.azure.com/inject-router=true`
+  pods; auto-set seccomp to `azureclaw-strict` if missing.
+
+### Status subresource (KEP-1623)
+
+`ClawSandbox.status` carries `conditions[]` (`Ready`, `Degraded`,
+`Reconciling`, `Available`) and `observedGeneration`. Controller stamps
+`Degraded=True` / `Ready=False` on the three validation-failure exits.
+Code: `controller/src/status/{mod,conditions}.rs`.
+
+### Identity provider seam — Microsoft Graph agent identity
+
+`controller/src/providers/identity_*.rs` ships a production Graph client
+calling:
+
+- `POST /beta/servicePrincipals/microsoft.graph.agentIdentity` — provision
+  agent identity SP
+- `POST /beta/servicePrincipals/{id}/federatedIdentityCredentials` — bind
+  fedcred for sandbox SA
+- `DELETE /beta/servicePrincipals/{id}` — teardown on `ClawSandbox` deletion
+
+Endpoints verified against `learn.microsoft.com` (commit `2114bf2`).
+
+### Policy hot-reload
+
+The router subscribes to `ToolPolicy` / `InferencePolicy` via K8s informers +
+AGT SSE; new policy applies in-process without pod rollout. Flipping
+`spec.agt.providers.{policy,audit,signing}` between `vendored` and `agt` also
+hot-reloads (no rollout). Policy-change propagation is asserted within 5 s by
+the conformance corpus.
+
+### OTel GenAI SemConv 1.x
+
+Every router span emits OTel GenAI SemConv 1.x attributes
+(`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.{input,output}_tokens`,
+…). Enabled by default; export via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### Federated-credential reaper
+
+`controller/src/fedcred_reaper.rs` is the 4th `tokio::select!` arm of the
+controller event loop (232 LOC, 5 unit tests). It periodically lists Azure
+managed-identity federated credentials owned by the controller, cross-checks
+against live `ClawSandbox` resources, and deletes orphans. Default cadence is
+600 s; override via `FEDCRED_REAPER_INTERVAL_SECS`. This guards against the
+**20-fedcred-per-MI Azure cap** that would otherwise block sandbox creation
+once enough churn has accumulated.
+
+### Gateway token via `secretKeyRef`
+
+`OPENCLAW_GATEWAY_TOKEN` is mounted from a K8s `Secret` rather than plain env,
+so a pod-spec leak no longer surfaces the token. A one-shot `warn!` is
+emitted if a legacy plain-env path is exercised, so operators can migrate
+in-flight tenants without breaking them.
+
+### `registrationMode == full` gating
+
+Mesh-side registration runs in `full` mode only when both relay and registry
+are reachable; if registry is degraded, the controller falls back to relay-only
+mode and stamps `Degraded=True` on `ClawSandbox.status.conditions`.

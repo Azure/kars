@@ -1,6 +1,6 @@
 # AzureClaw Security
 
-AzureClaw implements defense-in-depth: nine security layers covering infrastructure, governance, and encrypted communications.
+AzureClaw implements defense-in-depth: layered controls covering infrastructure (Layers 0–6), behavioural governance + protocol-layer controls (Layer 7), E2E encrypted communications (Layer 8), and engineering controls — CI gates, security-audit framework, conformance corpus, fedcred reaper — that gate every PR (Layer 9). PR #44 ships **26 vendored AgentMesh patches**, **75 security-audit docs**, **6 blocking CI gates**, **8 conformance specs**, and **5 cargo-fuzz targets**. See [`docs/threat-model.md`](threat-model.md) for the per-route auth-tier walkthrough and [`docs/security-mcp-top10.md`](security-mcp-top10.md) for the OWASP MCP Top 10 controls matrix.
 
 ---
 
@@ -148,7 +148,37 @@ The init container (egress-guard) runs as root with NET_ADMIN to install iptable
 
 ---
 
-## Layer 7: Behavioral Governance — AGT
+## Layer 7: Behavioral Governance — AGT (with Phase 1 protocol-layer controls)
+
+When `spec.governance.enabled: true`, AGT governance runs **natively inside the Rust inference router** — no sidecar, no external process. The router implements PolicyEngine, TrustManager, AuditLogger, RateLimiter, and BehaviorMonitor as compiled-in Rust modules with <1µs evaluation latency. The OpenClaw plugin connects to the AGT relay (via `@agentmesh/sdk`) for E2E encrypted inter-agent messaging only — governance evaluation always goes through the router.
+
+### Phase 1 protocol-layer controls
+
+In addition to the legacy `/agt/evaluate` tool gate, the router enforces protocol-aware controls on the new MCP 2026 + A2A 1.0.0 ingress paths:
+
+| Control | Implementation | Source |
+|---|---|---|
+| **OAuth 2.1 bearer verifier (RFC 8725 BCP)** | `tower::Layer` mounted on `/mcp`; PKCE / audience / expiry / `resource` indicator / scope checks. Gated by `McpServer.spec.productionMode: true`. | `inference-router/src/mcp/{oauth,oauth_layer}.rs` |
+| **MCP Streamable HTTP framing** | JSON-RPC 2.0 strict mode; `Mcp-Session-Id` semantics; oversized-frame reject; batch validation. | `inference-router/src/mcp/{streamable_http,jsonrpc}.rs` |
+| **A2A AgentCard signing** | Per-sandbox `/.well-known/agent.json` signed Ed25519 detached JWS via `SigningProvider`; inbound calls have signature, issuer, expiry verified. | `inference-router/src/a2a/{card_signing,card_verifier,trust_store}.rs` |
+| **AP2 IntentMandate verify** | Detached-JWS mandate signature; `commerce.dailyCap` / `monthlyCap` / `counterpartyAllowlist` enforcement at `message/send`. | `inference-router/src/a2a/{ap2,mandate_signing,mandate_trust_store,message_send_ap2}.rs` |
+| **Per-route fuzz coverage** | A2A JWS, A2A base64url, handoff state deserialize, chat sanitiser, streaming-PF parser. | `inference-router/fuzz/fuzz_targets/` |
+| **OWASP MCP Top 10 (2025) controls matrix** | Per-control mapping to AzureClaw enforcement point. | [`docs/security-mcp-top10.md`](security-mcp-top10.md) |
+
+### Four-seam provider architecture
+
+Three of the four AGT contracts have in-tree implementations on the router-side `Governance` struct, each reachable via `Arc<dyn Trait>` views of the same `Arc<Governance>`:
+
+| Contract | Trait file | In-tree impl | Migrated call sites |
+|---|---|---|---|
+| `PolicyDecisionProvider` | `providers/policy.rs` | `policy_impl.rs` (`impl … for Governance`) | `routes/inference.rs` (3 sites) |
+| `AuditSink` | `providers/audit.rs` | `audit_impl.rs` | `handoff/mod.rs` (13 sites) |
+| `SigningProvider` | `providers/signing.rs` | `signing_impl.rs` | A2A AgentCard + AP2 mandate signing |
+| `MeshProvider` | `providers/mesh.rs` (doc-only) | **none — plugin-side by design** | See `docs/agt-boundary.md` |
+
+`providers/outage.rs` selects between `Strict` (prod default), `CachedRead`, `DegradedDev` per-`ClawSandbox` via `spec.agt.outageMode`.
+
+### Layer 7 (legacy) — Behavioral Governance — AGT
 
 When `spec.governance.enabled: true`, AGT governance runs **natively inside the Rust inference router** — no sidecar, no external process. The router implements PolicyEngine, TrustManager, AuditLogger, RateLimiter, and BehaviorMonitor as compiled-in Rust modules with <1µs evaluation latency. The OpenClaw plugin connects to the AGT relay (via `@agentmesh/sdk`) for E2E encrypted inter-agent messaging only — governance evaluation always goes through the router.
 
@@ -379,3 +409,35 @@ The operator-facing TypeScript CLI and the OpenClaw plugin run *outside* the san
 | **Sandbox Go toolchain** | `sandbox-images/openclaw/Dockerfile.base` | `golang:1.23-alpine` → `1.24-alpine` to pick up Go stdlib patches for the bundled CLIs. |
 | **Vendored AgentMesh `Cargo.lock` bumps** | `vendor/agentmesh-{relay,registry}/Cargo.lock` | `openssl` 0.10.76 → 0.10.78 (GHSA-hppc-g8h3-xhp3), `tokio` 1.50 → 1.52.1, `mio` 1.1.1 → 1.2.0. |
 | **Fuzz + proptest coverage** | `cargo +nightly fuzz` | Targets: handoff blob parser, blocklist domain parser, AGT policy evaluator, safety-response parser. `proptest`: handoff-chunking, Double-Ratchet state transitions, K8s name validation. |
+| **Vendored AgentMesh patch index** | `docs/agt-vendored-patch-audit.md` + `ci/vendored-patch-audit.sh` | **26 patches** (SDK 21 + relay 4 + registry 1) tracked with reasons; CI gate forces re-audit on every AGT SDK pin bump (catches "patch quietly absorbed upstream — drop ours"). |
+
+---
+
+## Layer 9: Engineering controls (PR #44)
+
+The following controls live above any individual layer — they apply to **every PR** and gate the merge.
+
+### Six blocking CI gates
+
+| Gate | Path | Enforces |
+|---|---|---|
+| LOC budget | `ci/check-loc.sh` + `ci/loc-budget.yaml` | 800-line hard cap on new files; monotonic-decrease budget on hotspots |
+| Anti-stub | `ci/no-stubs.sh` | No `TODO/FIXME/unimplemented!/todo!/panic!("not impl")` on production paths |
+| No custom crypto | `ci/no-custom-crypto.sh` | Forbids hand-rolled crypto (`sha2::`, `hmac::`, `curve25519_dalek::`, …) outside `providers/signing.rs` + `providers/mesh.rs` (vendored path only) + `vendor/agentmesh-sdk/` |
+| No `Null*` provider in prod | `ci/no-null-provider-prod.sh` | Static + admission mirror — `provider: null/noop/disabled` requires `azureclaw.azure.com/dev-only: "true"` label |
+| Security audit required | `ci/security-audit-required.sh` | If PR touches CRDs / reconcilers / admission / router providers / MCP / A2A / CLI commands / sandbox image — requires a matching `docs/security-audits/<date>-<slug>.md` with two distinct sign-offs |
+| Vendored patch audit | `ci/vendored-patch-audit.sh` | If AGT SDK pin bumped — requires `docs/agt-vendored-patch-audit.md` re-confirmation row per patch |
+| A2A module isolation | `ci/a2a-module-isolation.sh` | Keeps the A2A 1.0.0 module surface from leaking back into `routes/` |
+
+### Security-audit framework
+
+Every capability-introducing PR carries `docs/security-audits/YYYY-MM-DD-<slug>.md` from the `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z path, secret + key custody, egress-surface delta, audit events emitted, failure mode (fail-closed default), negative-test coverage, vendored / 3rd-party dependency delta, two sign-offs from `docs/security-reviewers.md`. **75 docs** are present in `docs/security-audits/` as of PR #44.
+
+### Conformance corpus
+
+`tests/conformance/` ships **8 specs** with mandatory negative cases:
+`signal-x3dh`, `signal-knock`, `signal-negative` (tampered ciphertext, replayed message, missing prekey signature), `oauth21-bcp`, `mcp-streamable-http`, `a2a-agent-card` (wrong-issuer, expired-exp, missing-fields), `ap2-commerce` (cap exceeded, counterparty not in allowlist), `sandbox-isolation`.
+
+### Federated-credential reaper
+
+The controller's 4th `tokio::select!` arm (`controller/src/fedcred_reaper.rs`, 232 LOC, 5 unit tests) periodically GCs orphan federated credentials so a sandbox WI MI never hits the **20-fedcred-per-MI Azure cap**. Default 600 s; `FEDCRED_REAPER_INTERVAL_SECS` env override.
