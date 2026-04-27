@@ -5,6 +5,65 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Phase 2
+
+### S1 `phase2/mcp-reconciler` — full McpServer reconciler + JWKS pattern
+
+#### Added
+- **`controller/src/mcp_server_reconciler.rs`** — full reconciler for the
+  `McpServer` CRD (Phase 1 shipped schema-only). Generates an Ed25519 signing
+  keypair (raw 32-byte form, mirroring `mesh_peer/mod.rs::MeshIdentity::generate`
+  to avoid pulling the `pkcs8` feature on `ed25519-dalek`), persists it in a
+  Secret of type `azureclaw.azure.com/mcp-signing-key` with a `kid` annotation,
+  fetches the issuer's JWKS via OpenID Discovery (`/.well-known/openid-configuration`
+  → `jwks_uri`, https-only, 10s timeout), and caches the JWKS as a ConfigMap
+  named `mcp-{name}-jwks`. Pluggable `JwksFetcher` trait keeps tests
+  network-free.
+- **Finalizer `azureclaw.azure.com/mcpserver-cleanup`** — cascades Secret +
+  ConfigMap deletion before the CR is removed.
+- **Status surface extended** — new `signing_key_ref` and `jwks_config_map_ref`
+  `LocalObjectRef` fields on `McpServerStatus`; reuses the
+  `status/conditions.rs` vocabulary (`Ready` / `Progressing` / `Degraded`)
+  shipped in Phase 1.
+- **Server-Side Apply throughout** — reconciler uses field manager
+  `azureclaw-controller/mcp` per §10.4 #1; lays the SSA pattern S2 (ToolPolicy)
+  and S3 (A2AAgent) reuse.
+- **Helm CRD mirror** — `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`.
+  `controller/src/helm_drift.rs` enforces no drift between the Rust
+  `mcp_server_crd()` definition and the helm template via a unit test that
+  fails the build on divergence; a one-shot `DUMP_MCP_CRD_YAML=1` test is
+  used to regenerate the helm template on intentional schema changes.
+- **Inference-router `/mcp` mount** — `inference-router/src/main.rs` now
+  selects between the dev `routes::mcp_route()` and OAuth-2.1-gated
+  `routes::protected_mcp_route()` based on `MCP_PRODUCTION_MODE` +
+  `MCP_JWKS_PATH` + `MCP_OAUTH_AUDIENCE` env vars (set by the controller when
+  it mounts the JWKS ConfigMap into the router pod). On a malformed
+  production-mode configuration the router refuses to mount `/mcp` rather
+  than silently falling back to the unauthenticated dev route — operators
+  see a startup-time error instead of a quietly unauthenticated MCP route.
+- **`OAuthVerifierConfig::from_jwks_file`** — new constructor on the Phase 1
+  OAuth 2.1 verifier so the router can load a JWKS from a controller-mounted
+  file instead of a remote URL.
+- **Audit doc** — `docs/security-audits/2026-04-27-phase2-mcp-reconciler.md`,
+  covering threat-model delta, OWASP MCP Top 10 mapping (MCP-01/04/08),
+  auth/authz path, key custody, egress surface, audit events, failure modes,
+  negative-test coverage, out-of-scope items, and a §10 verification table.
+  Mandatory "§0 Existing implementation surveyed" section enumerates the 17
+  Phase 0/1 seams reused — the no-duplication rule added to the Phase 2 plan.
+
+#### Tests
+- **+9 unit tests** in `mcp_server_reconciler::tests` covering keypair
+  generation, kid derivation, Secret/ConfigMap shape, JWKS fetch happy path,
+  DNS-failure fault injection, finalizer add/remove, and condition matrix
+  emission.
+- **+2 helm-drift tests** in `helm_drift::tests`.
+- Controller bins suite: **74 → 162 tests** (rest are previously dormant
+  Phase 1 tests now compiled).
+
+#### §14.6 impact
+- **Closes column 3** (MCP 2026 server CRD) — schema → full reconciler +
+  route mount.
+
 ## [Unreleased] — PR #44 `dev → main` uplift
 
 This entry covers **186 commits** on `dev` since `main`, structured as Phase 0

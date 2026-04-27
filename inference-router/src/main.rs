@@ -226,6 +226,7 @@ async fn main() -> Result<()> {
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
+            .merge(build_mcp_router())
             .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
                 std::env::var("ROUTER_CONCURRENCY_LIMIT")
@@ -306,18 +307,84 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Derive the graceful-shutdown deadline.
+/// Build the `/mcp` axum sub-router.
 ///
-/// Resolution order (first that yields a positive duration wins):
-/// 1. `SHUTDOWN_TIMEOUT_SECS` — explicit operator override.
-/// 2. `TERMINATION_GRACE_PERIOD_SECS` − 5s, floored at 10s — matches the K8s
-///    `terminationGracePeriodSeconds` so we self-abort a few seconds before
-///    the kubelet escalates to SIGKILL.
-/// 3. 25s — sensible default for the K8s 30s pod-termination convention.
+/// Selection rule (Phase 2 §8 entry 1, S1):
+///
+/// - When all three env vars are set:
+///   - `MCP_PRODUCTION_MODE=true`
+///   - `MCP_JWKS_PATH` (path to a file containing a raw RFC 7517 JWKSet)
+///   - `MCP_OAUTH_AUDIENCE` (expected `aud` claim)
+///
+///   then mount [`routes::protected_mcp_route`] gated by OAuth 2.1.
+///
+///   Optional: `MCP_OAUTH_ISSUER` (defaults to a placeholder if unset
+///   — controllers always set it) and `MCP_OAUTH_REQUIRED_SCOPES`
+///   (space-separated).
+///
+/// - Otherwise mount the bare [`routes::mcp_route`] for dev/test.
+///   Admission CEL on the `McpServer` CRD plus the
+///   `admission-dev-only-label-immutable` policy block any tenant from
+///   pointing a `productionMode=false` `McpServer` at this dev mount in
+///   a non-dev namespace.
+///
+/// On a malformed production-mode configuration (e.g. JWKS path is
+/// unreadable) the router refuses to mount `/mcp` rather than silently
+/// falling back to the unauthenticated dev route. Operators see a clear
+/// startup-time error instead of a route that quietly serves
+/// unauthenticated MCP traffic.
+fn build_mcp_router() -> Router {
+    use azureclaw_inference_router::mcp::oauth::OAuthVerifierConfig;
+
+    let production = std::env::var("MCP_PRODUCTION_MODE")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let jwks_path = std::env::var("MCP_JWKS_PATH").ok();
+    let audience = std::env::var("MCP_OAUTH_AUDIENCE").ok();
+
+    let state = routes::McpRouteState::standard();
+
+    if production && jwks_path.is_some() && audience.is_some() {
+        let path = std::path::PathBuf::from(jwks_path.unwrap());
+        let aud = audience.unwrap();
+        let issuer = std::env::var("MCP_OAUTH_ISSUER").unwrap_or_default();
+        let required_scopes = std::env::var("MCP_OAUTH_REQUIRED_SCOPES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+        match OAuthVerifierConfig::from_jwks_file(&path, &issuer, &aud, required_scopes) {
+            Ok(cfg) => {
+                tracing::info!(
+                    jwks = %path.display(),
+                    issuer = %issuer,
+                    audience = %aud,
+                    "Mounting /mcp with OAuth 2.1 verification (productionMode)"
+                );
+                return routes::protected_mcp_route(state, Arc::new(cfg));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "MCP_PRODUCTION_MODE=true but JWKS load failed; refusing to mount /mcp");
+                return Router::new();
+            }
+        }
+    }
+
+    if production {
+        tracing::warn!(
+            "MCP_PRODUCTION_MODE=true but MCP_JWKS_PATH or MCP_OAUTH_AUDIENCE missing; \
+             refusing to mount /mcp (would otherwise be unauthenticated)"
+        );
+        return Router::new();
+    }
+
+    tracing::info!("Mounting /mcp in dev mode (no OAuth — productionMode=false)");
+    routes::mcp_route().with_state(state)
+}
+
 fn resolve_shutdown_timeout() -> std::time::Duration {
     const FLOOR_SECS: u64 = 10;
     const DEFAULT_SECS: u64 = 25;
-
     if let Some(v) = std::env::var("SHUTDOWN_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
