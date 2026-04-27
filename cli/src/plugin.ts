@@ -4964,46 +4964,99 @@ const azureClawPlugin = definePluginEntry({
             const messageId = crypto.randomUUID();
             const sendStart = new Date().toISOString();
 
-            // Auto-wait for reply: poll agtInbox for a response from this agent
+            // Auto-wait for reply: poll agtInbox for a response from this agent.
+            // The relay layer does NOT surface "agent identity is dead" — it happily
+            // queues messages for any AMID, including ones whose pod was recycled.
+            // To recover from rolling deploys (parent's cached/registered AMID is for
+            // the previous pod incarnation), we retry ONCE on reply timeout: clear
+            // the cache, re-resolve, and if the AMID actually changed, resend.
             const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
             const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
-            const replyWaitStart = Date.now();
             let replyContent: string | null = null;
-            log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+            let retriedAfterTimeout = false;
 
-            while (Date.now() - replyWaitStart < waitMaxMs) {
-              // Check inbox for a reply from this target, skipping protocol messages
-              const replyIdx = agtInbox.findIndex((m) => {
-                if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
-                // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
-                const mt = m.message_type || "";
-                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
-                // Also check content for JSON protocol messages
-                if (typeof m.content === "string") {
-                  try {
-                    const parsed = JSON.parse(m.content);
-                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
-                  } catch { /* not JSON, treat as real content */ }
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              const replyWaitStart = Date.now();
+              log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+
+              while (Date.now() - replyWaitStart < waitMaxMs) {
+                // Check inbox for a reply from this target, skipping protocol messages
+                const replyIdx = agtInbox.findIndex((m) => {
+                  if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
+                  // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                  const mt = m.message_type || "";
+                  if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                  // Also check content for JSON protocol messages
+                  if (typeof m.content === "string") {
+                    try {
+                      const parsed = JSON.parse(m.content);
+                      if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                    } catch { /* not JSON, treat as real content */ }
+                  }
+                  return true;
+                });
+                if (replyIdx >= 0) {
+                  const reply = agtInbox.splice(replyIdx, 1)[0];
+                  replyContent = typeof reply.content === "string"
+                    ? reply.content
+                    : JSON.stringify(reply.content);
+                  log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                  break;
                 }
-                return true;
-              });
-              if (replyIdx >= 0) {
-                const reply = agtInbox.splice(replyIdx, 1)[0];
-                replyContent = typeof reply.content === "string"
-                  ? reply.content
-                  : JSON.stringify(reply.content);
-                log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                // Drain protocol messages to keep inbox clean
+                for (let i = agtInbox.length - 1; i >= 0; i--) {
+                  const m = agtInbox[i];
+                  if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
+                      (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                    agtInbox.splice(i, 1);
+                  }
+                }
+                await new Promise((r) => setTimeout(r, pollIntervalMs));
+              }
+
+              if (replyContent !== null) break;
+              if (retriedAfterTimeout) break;
+              retriedAfterTimeout = true;
+
+              // Reply timed out — the registered AMID may belong to a recycled pod.
+              // Force-invalidate cache, re-resolve via registry, and if the AMID
+              // changed, resend exactly once. This recovers from the rolling-deploy
+              // race where parent's discovery happened during the gap between old
+              // pod terminating and new pod re-registering its identity.
+              const previousAmid = targetAmid!;
+              log.warn(`AGT relay: no reply from '${agentName}' within ${waitMaxMs / 1000}s — clearing cache and re-discovering (target may have been recycled during a rollout)`);
+              nameToAmid.delete(agentName);
+              amidToName.delete(previousAmid);
+              let freshAmid: string | undefined;
+              try {
+                freshAmid = await resolveAmidByName(agentName);
+              } catch (e: any) {
+                log.warn(`AGT relay: re-discover failed: ${e?.message || e}`);
+              }
+              if (!freshAmid) {
+                log.info(`AGT relay: re-discovery returned no AMID — giving up retry`);
                 break;
               }
-              // Drain protocol messages to keep inbox clean
-              for (let i = agtInbox.length - 1; i >= 0; i--) {
-                const m = agtInbox[i];
-                if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
-                    (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
-                  agtInbox.splice(i, 1);
-                }
+              if (freshAmid === previousAmid) {
+                log.info(`AGT relay: re-discovery returned same AMID — peer is genuinely silent, giving up retry`);
+                break;
               }
-              await new Promise((r) => setTimeout(r, pollIntervalMs));
+              log.info(`AGT relay: target AMID changed ${previousAmid.slice(0, 12)}... → ${freshAmid.slice(0, 12)}..., resending after rollout race`);
+              targetAmid = freshAmid;
+              try {
+                await meshSend(agtMeshClient, targetAmid, {
+                  type: "task_request",
+                  content: msgContent,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                }, log);
+                log.info(`AGT relay: resent to '${agentName}' (${targetAmid.slice(0, 12)}...) after rollout-aware re-discover`);
+              } catch (e: any) {
+                log.warn(`AGT relay: resend after timeout failed: ${e?.message || e}`);
+                break;
+              }
+              // Loop back to wait for reply on the fresh identity.
             }
 
             const result: any = {
