@@ -46,7 +46,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Azure identity (via REST — no SDK dependency)
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 
 # Observability
 tracing = "0.1"
@@ -57,6 +57,7 @@ prometheus = "0.14"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

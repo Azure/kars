@@ -474,3 +474,6 @@ SECURITY-HARDENING-PLAN.md
 docs/demo-script.md
 docs/competitive.md
 nohup.out
+docs/implementation-plan.md
+*.code-workspace
+docs/internal/

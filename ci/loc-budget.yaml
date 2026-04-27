@@ -1,0 +1,96 @@
+# LOC budget — per internal Phase 1 plan §4.2.
+#
+# `ci/check-loc.sh` enforces:
+#   - Every file listed below has a `phase0_cap`; the file must not exceed it.
+#   - Every not-listed file added in this PR is capped at `new_file_cap`.
+#   - `touched_must_shrink: true` — a listed file touched by the PR must
+#     not GROW (line count of new version must be ≤ base-ref line count).
+#
+# Phase-by-phase caps track the implementation-plan.md §4.2 schedule.
+# Baseline captured 2026-04-24 against main (commit d4165da).
+
+global:
+  new_file_cap_rust: 800
+  new_file_cap_ts: 800
+  warn_file_cap_ts: 600
+  touched_must_shrink: true
+  override_comment: "// ci:loc-ok"
+
+files:
+  - path: cli/src/plugin.ts
+    baseline_2026_04_24: 7455
+    phase0_cap: 7200
+    phase1_cap: 6000
+    phase2_cap: 3000
+    phase3_cap: 800
+    notes: "Split into cli/src/core/{session,handoff,offload,mesh,signal,restore}.ts modules."
+
+  - path: cli/src/commands/operator.ts
+    baseline_2026_04_24: 2932
+    phase0_cap: 2900
+    phase1_cap: 2000
+    phase2_cap: 1200
+    phase3_cap: 800
+    notes: "Split into cli/src/commands/operator/{tui,input,data,overlays,keymap}.ts."
+
+  - path: inference-router/src/handoff/mod.rs
+    baseline_2026_04_24: 2626
+    phase0_cap: 2600
+    phase1_cap: 1800
+    phase2_cap: 800
+    notes: "Split client/server/crypto submodules under inference-router/src/handoff/."
+
+  - path: controller/src/reconciler/mod.rs
+    baseline_2026_04_24: 2383
+    phase0_cap: 2350
+    phase1_cap: 1500
+    phase2_cap: 800
+    notes: "Move logic into controller/src/reconcilers/{sandbox,mcp_server,...}.rs. Tests extracted to reconciler/tests.rs in PR 49."
+
+  - path: controller/src/mesh_peer/mod.rs
+    baseline_2026_04_24: 1970
+    phase0_cap: 1950
+    phase1_cap: 1200
+    phase2_cap: 800
+    notes: "Pull MeshProvider out; keep mesh_peer as the Vendored impl. Split into offload.rs + pair.rs in PR 48."
+
+  - path: inference-router/src/routes/inference.rs
+    baseline_2026_04_24: 1866
+    phase1_cap: 1500
+    phase2_cap: 800
+    notes: "Split MCP/A2A handlers into inference-router/src/{mcp,a2a}/."
+
+  - path: cli/src/commands/up.ts
+    baseline_2026_04_24: 1846
+    phase1_cap: 1500
+    phase2_cap: 800
+    notes: "Preflight / provision / helm modules under cli/src/commands/up/."
+
+  - path: cli/src/commands/mesh.ts
+    baseline_2026_04_24: 1583
+    phase1_cap: 1200
+    phase2_cap: 800
+
+  - path: inference-router/src/routes/handoff/mod.rs
+    baseline_2026_04_24: 1593
+    phase1_cap: 1200
+    phase2_cap: 800
+
+  - path: inference-router/src/governance/mod.rs
+    baseline_2026_04_24: 1252
+    phase1_cap: 900
+    phase2_cap: 700
+    notes: "Becomes pure provider dispatch after full AGT provider landings."
+
+  - path: inference-router/src/spawn/mod.rs
+    baseline_2026_04_24: 1199
+    phase1_cap: 900
+    phase2_cap: 800
+    notes: "Path was inference-router/src/spawn.rs; converted to module after extracting docker dev-mode submodule (PR 43)."
+
+  - path: cli/src/commands/handoff.ts
+    baseline_2026_04_24: 1119
+    phase2_cap: 800
+
+# Active phase for the cap lookup. Updated at phase transitions.
+active_phase: phase0

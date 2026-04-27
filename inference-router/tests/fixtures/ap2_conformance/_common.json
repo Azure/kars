@@ -1,0 +1,14 @@
+{
+  "mandate_template": {
+    "mandateId": "mandate-1",
+    "principal": "agent-1",
+    "currency": "USD",
+    "dailyCap": 10000,
+    "monthlyCap": 100000,
+    "perTransferCap": 5000,
+    "counterpartyAllowlist": ["acme-corp", "globex"],
+    "exp": 2000000000,
+    "signature": "fixture-sig"
+  },
+  "now_default": 1700000000
+}

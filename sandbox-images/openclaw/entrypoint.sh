@@ -9,6 +9,28 @@
 
 set -e
 
+# Make pre-staged OpenClaw bundled-runtime-deps discoverable. The base image
+# stages all bundled channel/plugin deps into /opt/openclaw-stage at build time
+# (full network); at runtime UID 1000 cannot reach npm registry directly because
+# of egress-guard, so we point OpenClaw's `installBundledRuntimeDeps` resolver at
+# the pre-populated tree. Set BEFORE any `openclaw …` invocation in this script
+# (parent gateway, sub-agent `openclaw agent --local`, doctor checks, etc.) so
+# they all hit the cached deps instead of attempting a 403-prone npm install.
+#
+# The image rootfs is read-only, but OpenClaw 2026.4.x writes a
+# `.openclaw-runtime-deps.lock` sentinel inside the version-hash dir on first
+# resolve, so we mirror the staged tree onto the writable /tmp tmpfs and point
+# the env var there. /tmp is a 1GiB tmpfs (see pod spec); the staged tree is
+# ~500MiB so it fits with room to spare. cp -r is ~3-5s on tmpfs and only runs
+# once at container start.
+if [ -z "${OPENCLAW_PLUGIN_STAGE_DIR:-}" ] && [ -d /opt/openclaw-stage ]; then
+  if [ ! -d /tmp/openclaw-stage ]; then
+    cp -r /opt/openclaw-stage /tmp/openclaw-stage
+    chmod -R u+w /tmp/openclaw-stage 2>/dev/null || true
+  fi
+  export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-stage
+fi
+
 # Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)
 if [ -z "$SANDBOX_NAME" ]; then
   # K8s pod names: <deployment>-<replicaset-hash>-<pod-hash>
@@ -107,7 +129,19 @@ fi
 # AKS WI webhook), exchange the Kubernetes service account token for an
 # Entra ID access token and set AGT_OAUTH_TOKEN for registry verification.
 # This upgrades the agent from anonymous to verified tier.
-if [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
+#
+# Operator-level kill switch: when the cluster operator knows the
+# `api://agentmesh` Entra app registration is not provisioned in the
+# tenant (e.g. dev clusters, brand-new deployments, or any subscription
+# without the Entra Agent ID setup), the controller injects
+# AGT_SKIP_ENTRA=1 to short-circuit the entire token-exchange block.
+# Without this, every sandbox would burn ~123s on doomed retries before
+# falling back to anonymous tier — long enough to break parent→sub-agent
+# spawn-and-message workflows because the parent's tool-call timeout
+# fires before the sub-agent finishes booting.
+if [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
+elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
    [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
    [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
   echo "[entrypoint] Exchanging Workload Identity token for Entra ID access token..."
@@ -192,6 +226,18 @@ else
   GATEWAY_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
   export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
 fi
+
+# Allow OpenClaw 2026.4.x's built-in image generation provider to reach the
+# inference router on 127.0.0.1:8443. Upstream added an SSRF preflight that
+# rejects loopback / private / special-use IPs by default to mitigate SSRF in
+# desktop deployments. In this sandbox, 127.0.0.1 is the *only* valid path —
+# the inference router is the proxy that mediates all egress; iptables blocks
+# every other destination for UID 1000. The narrow opt-in env var below is
+# upstream's documented escape hatch (extensions/openai/image-generation-
+# provider.ts:shouldAllowPrivateImageEndpoint), gated to baseUrls that already
+# point at http://127.0.0.1: or http://localhost:, so it can't be abused to
+# reach arbitrary RFC 1918 hosts.
+export OPENCLAW_QA_ALLOW_LOCAL_IMAGE_PROVIDER=1
 
 # Only configure if not already done (idempotent)
 if [ ! -f "$OPENCLAW_CONFIG" ]; then
@@ -653,6 +699,13 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ -d /opt/azureclaw-plugin/commands ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   fi
+  # Copy ./core/ subdirectory (Phase 1 hotspot decomposition: foundry-discovery
+  # and future extracted modules live under core/). plugin.js requires
+  # './core/foundry-discovery.js' (commit a33165b) — without this copy the
+  # whole plugin fails to load with "Cannot find module './core/...'".
+  if [ -d /opt/azureclaw-plugin/core ]; then
+    cp -r --no-preserve=mode /opt/azureclaw-plugin/core "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  fi
   # Copy Foundry skills (SKILL.md files)
   if [ -d /opt/azureclaw-plugin/skills ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
@@ -687,15 +740,19 @@ if [ -d /opt/azureclaw-plugin ]; then
       echo "[azureclaw] WARN: policy profile '${POLICY_PROFILE}' not found, falling back to default"
       POLICY_SRC="/opt/azureclaw-plugin/policies/azureclaw-default.yaml"
     fi
-    # Remove any stale profile YAMLs from previous runs before copying.
-    rm -f "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-    cp --no-preserve=mode "$POLICY_SRC" "$OPENCLAW_DIR/policies/" 2>/dev/null || true
-    # AGT governance runs as UID 1001 (dev) or 1002 (AKS) — needs read access.
-    # Policy file hardening (chown root, chmod 444) happens AFTER the blanket
-    # chown -R sandbox:sandbox /sandbox — see below.
-    chmod o+x "$OPENCLAW_DIR" 2>/dev/null || true
-    chmod 755 "$OPENCLAW_DIR/policies" 2>/dev/null || true
-    export AGT_POLICY_DIR="$OPENCLAW_DIR/policies"
+    # Policies live in /etc/azureclaw/policies/ — outside OpenClaw's data dir.
+    # OpenClaw 2026.4.x re-locks ~/.openclaw/ to mode 0700 (UID 1000 only) at
+    # config-write time, which silently breaks the inference router (UID 1001)
+    # policy hot-reload because read_dir on the policies subdir returns EACCES.
+    # /etc/azureclaw/ is root-owned and world-readable — same pattern already
+    # used for the egress blocklist (/etc/azureclaw/blocklist/).
+    mkdir -p /etc/azureclaw/policies 2>/dev/null || true
+    rm -f /etc/azureclaw/policies/*.yaml 2>/dev/null || true
+    cp --no-preserve=mode "$POLICY_SRC" /etc/azureclaw/policies/ 2>/dev/null || true
+    chown -R root:root /etc/azureclaw/policies 2>/dev/null || true
+    chmod 755 /etc/azureclaw/policies 2>/dev/null || true
+    chmod 444 /etc/azureclaw/policies/*.yaml 2>/dev/null || true
+    export AGT_POLICY_DIR=/etc/azureclaw/policies
     echo "[azureclaw] AGT governance enabled (policy: ${POLICY_PROFILE}, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
   fi
   cd /sandbox
@@ -736,11 +793,8 @@ if [ "$IS_ROOT" = "true" ]; then
     echo "[azureclaw] Plugin code hardened (root-owned, read-only for sandbox)"
   fi
 
-  # AGT policy files
-  if [ -d "$OPENCLAW_DIR/policies" ]; then
-    chown root:root "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-    chmod 444 "$OPENCLAW_DIR/policies"/*.yaml 2>/dev/null || true
-  fi
+  # AGT policy files now live in /etc/azureclaw/policies/ — hardened above
+  # at copy time (root:root, 0444). No further hardening needed here.
 
   # Curated skills installed into workspace (SKILL.md files)
   if [ -d "$WORKSPACE_DIR/skills" ]; then

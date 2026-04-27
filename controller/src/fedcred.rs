@@ -55,6 +55,33 @@ struct TokenResponse {
     access_token: String,
 }
 
+/// One entry returned by `FedCredManager::list_federated_credentials`.
+#[derive(Debug, Clone)]
+pub struct FedCredEntry {
+    /// ARM resource name of the federated credential
+    /// (e.g. `azureclaw-akstest`).
+    pub name: String,
+    /// Kubernetes ServiceAccount subject claim
+    /// (e.g. `system:serviceaccount:azureclaw-akstest:sandbox`).
+    pub subject: String,
+}
+
+#[derive(Deserialize)]
+struct FedCredListResponse {
+    value: Vec<FedCredItem>,
+}
+
+#[derive(Deserialize)]
+struct FedCredItem {
+    name: String,
+    properties: FedCredItemProperties,
+}
+
+#[derive(Deserialize)]
+struct FedCredItemProperties {
+    subject: String,
+}
+
 /// Cached ARM token with expiry tracking.
 struct CachedToken {
     token: String,
@@ -250,6 +277,51 @@ impl FedCredManager {
                 &body[..body.len().min(300)]
             ))
         }
+    }
+
+    /// List all federated identity credentials on the managed identity.
+    ///
+    /// Returns each entry's ARM `name` and the OIDC `subject` claim. Used by the
+    /// fedcred reaper to find orphans.
+    pub async fn list_federated_credentials(&self) -> Result<Vec<FedCredEntry>, String> {
+        let token = self.get_arm_token().await?;
+        let url = format!(
+            "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{}/federatedIdentityCredentials?api-version=2023-01-31",
+            self.config.subscription_id,
+            self.config.identity_resource_group,
+            self.config.identity_name,
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| format!("ARM LIST fedcred failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Failed to list federated credentials ({status}): {}",
+                &body[..body.len().min(300)]
+            ));
+        }
+
+        let parsed: FedCredListResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("ARM LIST fedcred parse failed: {e}"))?;
+
+        Ok(parsed
+            .value
+            .into_iter()
+            .map(|i| FedCredEntry {
+                name: i.name,
+                subject: i.properties.subject,
+            })
+            .collect())
     }
 
     /// Delete a federated identity credential (cleanup on sandbox deletion).

@@ -30,6 +30,12 @@ metadata:
   namespace: agentmesh
 spec:
   replicas: 1
+  # ReadWriteOnce PVC + single replica deadlocks under RollingUpdate
+  # because maxSurge=25% rounds up to 1 (so K8s spawns a second pod that
+  # cannot attach the volume until the old pod releases it). `Recreate`
+  # tears down the old pod first, then schedules the new one.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: postgres

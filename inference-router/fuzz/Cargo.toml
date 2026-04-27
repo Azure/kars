@@ -48,5 +48,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_a2a_jws"
+path = "fuzz_targets/fuzz_a2a_jws.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_a2a_base64url"
+path = "fuzz_targets/fuzz_a2a_base64url.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1

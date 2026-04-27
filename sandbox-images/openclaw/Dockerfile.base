@@ -6,7 +6,7 @@
 # Build:  docker build -f sandbox-images/openclaw/Dockerfile.base .
 # Tag:    azureclaw-sandbox-base:dev (local) or ${ACR}/azureclaw-sandbox-base:latest (prod)
 
-ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:a452d39c91576f5a2c983c7d3b62521fabd08e16b4a7237e24bf2be3b06e1651
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
 
 # ─── Node Builder (OpenClaw) ─────────────────────────────────────────────────
 
@@ -76,6 +76,34 @@ RUN openclaw skills install summarize 2>/dev/null || true && \
 
 # Install npm CLIs that unlock built-in OpenClaw skills
 RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
+
+# Pre-stage OpenClaw bundled-runtime-deps (channels: telegram/discord/slack/feishu/qqbot,
+# plus model-provider channels). OpenClaw 2026.4+ lazily npm-installs these at first
+# plugin load, which fails inside the sandbox where UID 1000 has no direct egress
+# (egress-guard) and npm doesn't honour our HTTP forward-proxy. Solution: stage the
+# whole tree at build time (full network) into a stable path that we mount read-only
+# at runtime via `OPENCLAW_PLUGIN_STAGE_DIR`.
+#
+# `openclaw doctor --fix --non-interactive --yes` invokes `installBundledRuntimeDeps`
+# from `dist/bundled-runtime-deps-*.js`, which honours `OPENCLAW_PLUGIN_STAGE_DIR`
+# (or `STATE_DIRECTORY`) by writing to `<dir>/openclaw-<version>-<hash>/`.
+# `<hash>` = `createPathHash(packageRoot)` and is deterministic for the fixed
+# `/usr/local/lib/node_modules/openclaw` install path → cache hits at runtime.
+#
+# `@tencent-connect/qqbot-connector` is geo-restricted upstream and may 403 even
+# from open networks. We tolerate that single failure (|| true) — qqbot is the
+# only currently-shipped channel we don't expose; staging still succeeds for
+# every other channel.
+ENV OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
+RUN mkdir -p /opt/openclaw-stage && \
+    openclaw doctor --fix --non-interactive --yes 2>&1 | tail -20 || true && \
+    staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules | wc -l) && \
+    if [ "$staged_count" -lt 1 ]; then \
+      echo "ERROR: openclaw doctor did not stage any node_modules under /opt/openclaw-stage" >&2; \
+      ls -la /opt/openclaw-stage >&2; exit 1; \
+    fi && \
+    chmod -R a+rX /opt/openclaw-stage && \
+    echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
@@ -181,6 +209,14 @@ RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/open
 
 # Copy pre-installed ClawHub skills from builder (installed via openclaw skills install)
 COPY --from=builder /root/.openclaw/workspace/skills/ /opt/clawhub-skills/
+
+# Copy pre-staged OpenClaw bundled-runtime-deps from builder.
+# Runtime resolution: entrypoint exports `OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage`
+# so both the parent gateway and `openclaw agent --local` sub-agent invocations find
+# the deps without invoking npm. Read-only + world-readable; agent UID 1000 can read
+# but not modify, satisfying the agent self-modification prevention rule.
+COPY --from=builder /opt/openclaw-stage /opt/openclaw-stage
+RUN chmod -R a+rX /opt/openclaw-stage
 
 # Symlink Control UI assets (the gateway expects dist/control-ui/)
 RUN ln -s /usr/local/lib/node_modules/openclaw/dist/canvas-host/a2ui \

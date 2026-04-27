@@ -3,6 +3,7 @@
 //! This is the Rust representation of the ClawSandbox CRD.
 //! kube-rs derives the CRD schema, API bindings, and JSON schema automatically.
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,156 @@ pub struct ClawSandboxSpec {
 
     /// Resource limits
     pub resources: Option<ResourceConfig>,
+
+    /// A2A 1.0.0 inbound exposure (default: not exposed).
+    ///
+    /// **Default OFF.** When `Some`, the controller emits a Service +
+    /// CiliumNetworkPolicy + a routing entry in the gateway ConfigMap.
+    /// When `None` or set to a struct with `enabled: false`, no inbound
+    /// A2A path exists for this sandbox.
+    ///
+    /// See ADR-0001 §D6 for the surgical-exposure design (allowedCallers
+    /// pinning, expiresAt, advertisedSkills, minimumTrustScore, rate
+    /// limit, body cap, session length, streaming flag, revoke-now).
+    ///
+    /// Reconciler-side enforcement lands in
+    /// `phase1/a2a-controller-revocation`; this branch is schema-only.
+    pub a2a: Option<A2aIngressConfig>,
+
+    /// Upstream-protocol compatibility opt-in (Phase 1 schema-only scaffold).
+    ///
+    /// When `Some`, the controller will (in a future reconciler branch) accept
+    /// inbound traffic in upstream wire formats (e.g. `sigs.k8s.io/agent-sandbox`
+    /// SandboxClaim semantics) and translate them into the canonical
+    /// AzureClaw runtime contracts before they reach the agent. The translation
+    /// path is **read-only at the boundary**: AzureClaw never mutates upstream
+    /// objects in cluster, only mirrors observed state and emits canonical
+    /// status conditions.
+    ///
+    /// **Default OFF.** Schema lands now so future reconciler branches are
+    /// pure wiring. No code path consumes this field yet.
+    pub upstream_compatibility: Option<UpstreamCompatibilityConfig>,
+}
+
+/// Upstream-protocol compatibility (Phase 1 scaffold).
+///
+/// Codifies §2 (TranslateMode) of the implementation plan as a CRD field.
+/// All values default to OFF — opt-in per sandbox.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamCompatibilityConfig {
+    /// `sigs.k8s.io/agent-sandbox` SandboxClaim translation mode.
+    /// Values: `"off"` (default), `"observe"` (mirror status only),
+    /// `"translate"` (accept SandboxClaim semantics on inbound).
+    /// Reconciler refuses unknown strings.
+    pub sigs_agent_sandbox: Option<String>,
+
+    /// CNCF AI Conformance reference-mode toggle. When `true`, the
+    /// reconciler emits the canonical conformance status block on the
+    /// ClawSandbox object regardless of other settings. **Schema-only**;
+    /// no code path consumes this yet.
+    #[serde(default)]
+    pub ai_conformance_reference: bool,
+}
+
+/// `ClawSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.
+/// All sub-fields are admission-validated via CEL (Phase 1 §7 entry 12).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aIngressConfig {
+    /// Master switch. `false` (or block absent) ⇒ no inbound A2A.
+    /// Setting this back to `false` triggers immediate (target < 30s)
+    /// teardown of the Service + CNP + ConfigMap entry.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Required when `enabled: true`. Empty list ⇒ admission deny.
+    /// Each entry pins a remote AgentCard signing key by its JWS
+    /// thumbprint (RFC 7638). The router rejects calls whose card
+    /// signature does not chain to one of these thumbprints.
+    #[serde(default)]
+    pub allowed_callers: Vec<AllowedCaller>,
+
+    /// Required when `enabled: true`. RFC 3339 timestamp; max 30 days
+    /// in the future (admission CEL). Reconciler tears down the
+    /// exposure on expiry.
+    pub expires_at: Option<String>,
+
+    /// Skills advertised on this sandbox's `/.well-known/agent.json`.
+    /// Anything not in this list is *not* served, even if the agent
+    /// implements it. Empty ⇒ admission deny.
+    #[serde(default)]
+    pub advertised_skills: Vec<AdvertisedSkill>,
+
+    /// Trust floor for inbound callers (AGT TrustManager score).
+    /// Default 700. Below this, the gateway refuses the call before
+    /// it touches the router.
+    #[serde(default = "default_min_trust")]
+    pub minimum_trust_score: u32,
+
+    /// Per-caller rate limits enforced at the gateway layer.
+    pub rate_limit: Option<A2aRateLimit>,
+
+    /// Body cap in bytes (default 1 MiB; hard ceiling 4 MiB enforced
+    /// by admission CEL).
+    #[serde(default = "default_body_cap")]
+    pub body_cap_bytes: u32,
+
+    /// Session length cap (seconds; default 60). Hard ceiling 600.
+    #[serde(default = "default_session_max")]
+    pub session_max_seconds: u32,
+
+    /// Allow A2A streaming responses. Default `false` (fail-closed
+    /// per ADR-0001 D8).
+    #[serde(default)]
+    pub allow_streaming: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowedCaller {
+    /// Human-readable name for ops dashboards.
+    pub display_name: Option<String>,
+
+    /// JWS thumbprint of the caller's AgentCard signing key
+    /// (RFC 7638 — JSON Web Key Thumbprint, base64url-encoded SHA-256).
+    pub jws_thumbprint: String,
+
+    /// Optional issuer URI for the caller's identity provider. When set,
+    /// the gateway requires the inbound JWS `iss` claim to match.
+    pub issuer: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvertisedSkill {
+    /// Skill name (matches the skills[].name field in the AgentCard).
+    pub name: String,
+
+    /// Optional human-readable description.
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aRateLimit {
+    /// Requests per minute, per allowed caller.
+    pub rpm: Option<u32>,
+
+    /// Burst (token bucket).
+    pub burst: Option<u32>,
+}
+
+fn default_min_trust() -> u32 {
+    700
+}
+
+fn default_body_cap() -> u32 {
+    1_048_576 // 1 MiB
+}
+
+fn default_session_max() -> u32 {
+    60
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -250,6 +401,17 @@ pub struct ClawSandboxStatus {
     pub pending_approvals: Option<i32>,
     /// Foundry Agent ID created by the controller.
     pub foundry_agent_id: Option<String>,
+    /// The `metadata.generation` that produced this status. Consumers
+    /// compare against `metadata.generation` to detect stale observations.
+    /// See `controller/src/status/conditions.rs` for semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// Standard K8s Condition list. Per convention, at most one entry per
+    /// `type`. Helpers in `controller::status::conditions` maintain this
+    /// list (upsert by type; preserve `lastTransitionTime` across same-
+    /// status reconciles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -401,6 +563,22 @@ mod tests {
         assert!(status.tokens_used.is_none());
         assert!(status.pending_approvals.is_none());
         assert!(status.foundry_agent_id.is_none());
+        assert!(status.observed_generation.is_none());
+        assert!(status.conditions.is_empty());
+    }
+
+    #[test]
+    fn sandbox_status_omits_empty_conditions_and_absent_generation_in_json() {
+        let status = ClawSandboxStatus::default();
+        let v = serde_json::to_value(&status).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("conditions"),
+            "empty conditions must not be emitted (would reset a populated status)"
+        );
+        assert!(
+            !v.as_object().unwrap().contains_key("observedGeneration"),
+            "None observedGeneration must be absent (would wipe a real value)"
+        );
     }
 
     #[test]
