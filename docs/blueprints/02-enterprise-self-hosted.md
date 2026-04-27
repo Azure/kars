@@ -11,6 +11,7 @@
 ## Topology
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
   subgraph Corp["🏢 Your organisation (single Entra tenant)"]
     direction TB
@@ -73,6 +74,7 @@ flowchart TB
 ## Trust boundary
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
   subgraph TB1["🏢 Corp Entra tenant + VNet"]
     direction TB
@@ -86,7 +88,7 @@ flowchart LR
   AKS -->|"Workload Identity"| FND
   AKS -->|"audit"| LAW
 
-  classDef boundary stroke:#0078d4,stroke-width:3px,fill:#f0f7ff;
+  classDef boundary stroke:#1e40af,stroke-width:3px,fill:#dbeafe;
   class TB1 boundary;
 ```
 
@@ -97,6 +99,7 @@ flowchart LR
 ## Primary flow — onboarding a new employee laptop
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 sequenceDiagram
     autonumber
     participant Eng as 👤 Engineer

@@ -30,6 +30,8 @@ Every agent runs inside a hardened sandbox pod. A Rust inference router sits in 
 
 AzureClaw is **not a fork of OpenClaw** — it extends OpenClaw via its native plugin API and `tools.deny` config, so any upstream OpenClaw release is drop-in compatible. See [Upstream Alignment](docs/upstream-alignment.md).
 
+> **Today: OpenClaw. Tomorrow: any agentic runtime.** The guardrails — Workload-Identity-fronted inference, Confidential-Container sandboxing, Signal-Protocol mesh, AGT governance, tamper-evident audit — are runtime-agnostic by design. The plugin/`tools.deny` approach only happens to be how we hook OpenClaw; the protocol scaffolding for **MCP**, **A2A**, and **AP2** is already in the codebase so the same sandbox can host LangGraph, AutoGen, CrewAI, Semantic Kernel, or anything else that speaks one of those wire formats. See the [Roadmap](#roadmap-extending-beyond-openclaw) and [Scenario 4 in `docs/use-cases.md`](docs/use-cases.md).
+
 ### Who is this for?
 
 - **Platform teams** who need to host LLM agents on AKS with the same operational rigour as the rest of their workloads — namespace isolation, RBAC, NetworkPolicies, audit, signed admission.
@@ -43,6 +45,7 @@ AzureClaw is **not a fork of OpenClaw** — it extends OpenClaw via its native p
 3. **Inter-agent trust** — agents talk over a Signal-Protocol mesh with explicit KNOCK trust handshake, trust scoring, and tamper-evident audit chain. No plaintext fallback.
 4. **Operational footprint** — `azureclaw up` provisions AKS + ACR + Foundry + Foundry-side Content Safety + sandbox in one go; `azureclaw operator` gives a live TUI for running fleets.
 5. **Multi-runtime future** — see [Roadmap](#roadmap-extending-beyond-openclaw) below: protocol scaffolding (MCP, A2A, AP2) is in place so the same sandbox can host non-OpenClaw agents over the wire.
+6. **Hardware-isolated cloud offload** — run customer agents in Kata + AMD SEV-SNP confidential containers so even a compromised cluster-admin cannot read prompts in flight. See [Blueprint 03 — Managed public offload](docs/blueprints/03-managed-public-offload.md): not just for enterprises, but for **any managed provider** — small MSPs, indie SaaS, hobbyist co-ops — letting end users offload tasks that don't fit a home setup (heavier models, longer runs, parallel fan-out, jobs requiring premium quota) to a sandbox they don't have to operate themselves.
 
 > 📖 **See [`docs/use-cases.md`](docs/use-cases.md)** for the four end-to-end scenarios — AzureClaw-native agents, **any-OpenClaw → AzureClaw cloud offload** (no AzureClaw CLI on the laptop), AzureClaw ↔ AzureClaw mesh, and the roadmap for non-OpenClaw runtimes via MCP / A2A / AP2. For deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) with topology + trust-boundary + flow diagrams, see [`docs/blueprints/`](docs/blueprints/00-index.md).
 

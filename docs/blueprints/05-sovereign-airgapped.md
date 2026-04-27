@@ -13,6 +13,7 @@
 ## Topology
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
   subgraph AirGap["🔒 Air-gapped network island"]
     direction TB
@@ -65,6 +66,7 @@ flowchart TB
 ## Trust boundary
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
   subgraph Inside["🔒 Air-gapped trust domain"]
     direction LR
@@ -87,6 +89,7 @@ The trust boundary is the **network island**. Nothing inside it talks to anythin
 ## Primary flow — bundle build, transfer, install
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 sequenceDiagram
     autonumber
     participant Build as build host (online)

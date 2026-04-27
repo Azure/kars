@@ -1,12 +1,14 @@
 # Blueprint 03 — Managed public offload service
 
-> "I'm a SaaS provider. I want to run AzureClaw as a managed offload service for many external customers — each one a different Entra tenant, none of them with kubectl access, all of them onboarded by token, all of them isolated from each other and from me at every layer, including the host kernel."
+> "I run a managed AzureClaw offering. Maybe I'm a hyperscale SaaS, maybe I'm a 3-person MSP, maybe I'm a community co-op renting capacity to hobbyists. My customers want to offload heavier or sensitive agent tasks — bigger models, longer runs, parallel fan-out — that don't fit on their laptops. I want to host them all on one cluster, in different Entra tenants, none with kubectl access, all onboarded by token, all isolated from each other and from me at every layer including the host kernel."
 
 > **Status: ✅ Runtime shipping. 🚧 SaaS productization in progress.** The hardware-isolated sandbox runtime, the pairing protocol, the per-tenant namespace + Workload Identity scoping, the confidential-mode Kata VM + AMD SEV-SNP nodepool, the audit chain, and the Foundry-side Content Safety are all validated end-to-end on live AKS today (see [`docs/security-validation.md`](../security-validation.md)). What's "🚧" is the *SaaS wrapper* around it: portal + billing + automated onboarding + per-tenant Foundry-quota sharding. The scary parts (isolation + crypto) are not the parts that need productizing.
 
 ## Why this blueprint matters
 
 This is the use case where AzureClaw's threat model earns its complexity. In every other blueprint, you (the operator) and the agent user are in the same trust domain — you'd both lose if a sandbox escaped. Here, **the provider is one of the parties the customer is defending against**: a malicious or compromised provider operator could otherwise tail a customer's prompts, exfiltrate their files, or impersonate them to upstream services.
+
+The customers don't have to be enterprises either. The same primitives that let a Fortune-500 trust a hyperscaler also let a hobbyist trust a 3-person MSP, or a researcher trust a community co-op renting GPU time. The economic shape changes (one tenant per customer, not one tenant per business unit); the security shape doesn't.
 
 AzureClaw makes that attack mathematically infeasible by stacking three independent isolation primitives:
 
@@ -18,13 +20,15 @@ Net effect: the customer's cleartext exists for ~milliseconds, only inside an SE
 
 ## Persona & intent
 
-- **You are:** the SaaS provider running an AzureClaw cloud. Your customers run OpenClaw / NemoClaw / any-OpenClaw on their laptops, in their offices, in their own clusters — anywhere — and offload heavy or sensitive tasks to your AKS.
-- **You want:** a single AKS cluster (or a few regional clusters) hosting many tenants. Self-service onboarding via your portal. Per-tenant token budgets, slot caps, capability scopes. Provider-side observability without ever decrypting customer mesh traffic.
+- **You are:** a managed-AzureClaw provider — at any scale. A hyperscaler running a public offering. A regional MSP white-labelling agentic compute. A 3-person team renting GPU minutes. A community co-op pooling capacity for hobbyists. Your customers run OpenClaw / NemoClaw / any-OpenClaw on their laptops, in their offices, in their own clusters — anywhere — and offload tasks they can't (or don't want to) run locally to your AKS.
+- **Who your customers are:** anyone whose home setup doesn't fit the job. Indie devs who need a 70B model their MacBook can't host. Researchers parallelising 1,000 prompts overnight. Field engineers offloading a long-running agent so their laptop can sleep. Privacy-sensitive users who'd rather rent a confidential sandbox than send prompts to an LLM proxy that logs everything. Enterprises picking a smaller specialist provider over a hyperscaler for compliance or cost reasons.
+- **You want:** a single AKS cluster (or a few regional clusters) hosting many tenants. Self-service onboarding via your portal (or a Telegram bot, or a CLI sub-command — pairing is just a one-time token). Per-tenant token budgets, slot caps, capability scopes. Provider-side observability without ever decrypting customer mesh traffic.
 - **You do not want:** to ever hold customer-side LLM context in cleartext on a host you control. To require customers to install your CLI. To leak one tenant's audit chain to another. To have a cluster-admin compromise read customer prompts in flight.
 
 ## Topology
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
   subgraph Provider["☁️ Provider AKS (multi-tenant)"]
     direction TB
@@ -95,6 +99,7 @@ flowchart TB
 ## The hardware-isolated sandbox (where the magic is)
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
   subgraph Host["AKS host node (Standard_DCa_v6 — AMD EPYC w/ SEV-SNP)"]
     direction TB
@@ -156,6 +161,7 @@ flowchart TB
 ## Trust boundary
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
   subgraph Cust["Customer trust domain"]
     UserCtx["agent context, prompts,<br/>files (cleartext)"]
@@ -196,6 +202,7 @@ The crucial property: **the provider's trust domain (the AKS cluster, the relay,
 ## Primary flow — customer signs up + offloads a confidential task
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 sequenceDiagram
     autonumber
     participant Cust as 👤 Customer dev
