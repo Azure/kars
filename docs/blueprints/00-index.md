@@ -10,7 +10,7 @@ The four [use cases in `docs/use-cases.md`](../use-cases.md) describe *what* Azu
 |---|---|---|---|---|
 | **01** | [Developer inner-loop](01-developer-inner-loop.md) | Individual contributor on a laptop | Local Docker / kind, single-node | ✅ Shipping |
 | **02** | [Enterprise self-hosted cluster](02-enterprise-self-hosted.md) | Platform team inside a single org | Customer-owned AKS, single tenant | ✅ Shipping |
-| **03** | [Managed public offload service](03-managed-public-offload.md) | SaaS provider serving many external tenants | Provider-owned AKS, multi-tenant | 🚧 Roadmap (token + plugin protocol shipping today) |
+| **03** | [Managed public offload service](03-managed-public-offload.md) | SaaS provider serving many external tenants | Provider-owned AKS, multi-tenant, Kata + AMD SEV-SNP | ✅ Runtime shipping · 🚧 SaaS productization in progress |
 | **04** | [Cross-org federation](04-cross-org-federation.md) | Two or more orgs collaborating | Two AKS clusters meshed E2E | ✅ Shipping |
 | **05** | [Sovereign / air-gapped](05-sovereign-airgapped.md) | Regulated, classified, disconnected, or sovereign-cloud workloads | Customer-owned AKS in an isolated network island | 🚧 Patterns documented; reproducible bundle on roadmap |
 
