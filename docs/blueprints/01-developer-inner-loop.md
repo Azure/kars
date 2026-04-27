@@ -11,6 +11,7 @@
 ## Topology
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
   subgraph Laptop["💻 Laptop (your machine)"]
     direction TB
@@ -58,6 +59,7 @@ The only thing that's *not* like production is the host: `kind` instead of AKS, 
 ## Primary flow
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 sequenceDiagram
     autonumber
     participant Dev as 👤 You
