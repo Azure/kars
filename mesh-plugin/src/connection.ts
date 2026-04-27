@@ -102,9 +102,11 @@ export interface FileTransferAck {
 
 // ---------------------------------------------------------------------------
 // Connection class
+import { IMeshTransport } from "./transport-interface.js";
+
 // ---------------------------------------------------------------------------
 
-export class MeshConnection {
+export class MeshConnection implements IMeshTransport {
   private config: ConnectionConfig;
   private inbox: InboxMessage[] = [];
   private maxInboxSize: number;
