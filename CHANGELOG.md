@@ -64,6 +64,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Closes column 3** (MCP 2026 server CRD) — schema → full reconciler +
   route mount.
 
+### S2 `phase2/toolpolicy-reconciler` — full ToolPolicy reconciler + AGT profile compile
+
+#### Added
+- **`controller/src/tool_policy_compile.rs`** — pure-function compiler from
+  the Phase-1-complete `ToolPolicySpec` schema (commerce + rateLimit +
+  approval + appliesTo) to the JSON shape consumed by `policy_envelope.rs`.
+  Uses `serde_json::Value::Object` (`BTreeMap`-backed → deterministic key
+  order on serialise) for canonicalisation; `version_hash(profile)` is a
+  16-byte (32 hex char) sha256 prefix used as the ConfigMap annotation key
+  for change detection without a full diff.
+- **`controller/src/tool_policy_reconciler.rs`** — full reconciler modelled
+  on `mcp_server_reconciler.rs` (S1). Watches `ToolPolicy` CRs, compiles
+  spec → AGT profile JSON, persists it as a ConfigMap
+  `toolpolicy-{name}-profile` with key `profile.json`, annotates with
+  `azureclaw.azure.com/toolpolicy-version-hash`, and labels with
+  `azureclaw.azure.com/artifact=compiled-profile` so the S7 router-side
+  informer can select on them. Adds finalizer
+  `azureclaw.azure.com/toolpolicy-cleanup` and deletes the ConfigMap before
+  releasing the CR.
+- **Status surface uses the Phase 1 `status/conditions.rs` vocabulary** —
+  emits `Progressing` / `Ready` / `Degraded` with the same code constants
+  as S1; preserves `last_transition_time` when condition status is
+  unchanged (verified by unit test `conditions_preserve_last_transition_time`).
+- **Server-Side Apply with field manager `azureclaw-controller/toolpolicy`** —
+  distinct from the S1 `…/mcp` and the legacy `…/reconciler` (ClawSandbox)
+  managers per §10.4 #1; the unit test `field_manager_is_per_reconciler`
+  is the tripwire.
+- **Helm CRD mirror** — `deploy/helm/azureclaw/templates/crd-toolpolicy.yaml`,
+  generated from `tool_policy_crd()` via the same dumper-test +
+  `helm_drift.rs` drift-detector pattern S1 introduced. `helm_drift.rs`
+  generalised in this slice to handle multiple CRDs (per-CRD constants
+  `MCP_HELM_CRD_PATH` + `TOOLPOLICY_HELM_CRD_PATH`, shared
+  `assert_helm_matches_rust()` helper).
+- **`main.rs` wire-up** — spawns `tool_policy_reconciler::run` in the
+  controller `select!` alongside the existing reconcilers; fatal exit on
+  any reconciler termination preserved.
+- **Audit doc** — `docs/security-audits/2026-04-27-phase2-toolpolicy-reconciler.md`,
+  with §0 enumerating **13 reused Phase 0/1/S1 seams** (schema, CEL
+  validations, conditions vocabulary, finalizer pattern, SSA-manager
+  naming convention, `LocalObjectRef`, helm-drift harness, RFC-3339
+  formatter, error-class taxonomy, currency-string parser, CRD admission
+  CEL, `PolicyDecisionProvider` consumer contract, `PolicyEnvelope`
+  payload shape) and the no-duplication rationale for the one new
+  module created (`tool_policy_compile.rs`).
+
+#### Tests
+- **+12 unit tests** — 6 in `tool_policy_compile::tests` (compile shape,
+  determinism, version-hash stability under field re-order, currency
+  parsing, rateLimit + approval emission, empty-spec edge case) and 6 in
+  `tool_policy_reconciler::tests` (rfc3339 shape, error class closed-set,
+  conditions success path, conditions failure path, conditions preserve
+  `last_transition_time`, field-manager-per-reconciler tripwire).
+- **+2 helm-drift tests** for the new ToolPolicy CRD (dumper +
+  drift-detector).
+- Controller bins suite: **165 → 177 tests**, 0 failures.
+
+#### §14.6 impact
+- **Strengthens column 4** (A2A 1.2 + AP2) — AP2 commerce caps + approval
+  + rateLimit now compile end-to-end into a hot-reloadable artifact
+  consumed by the Phase 1 router substrate.
+- **Strengthens column 12** (Governance as K8s primitives) — second of
+  the five differentiator CRDs goes from schema-only to fully reconciled.
+
 ## [Unreleased] — PR #44 `dev → main` uplift
 
 This entry covers **186 commits** on `dev` since `main`, structured as Phase 0
