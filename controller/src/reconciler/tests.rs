@@ -219,7 +219,7 @@ fn build_openclaw_container(image: &str, cfg: &SandboxConfig, model: &str) -> se
             {"name": "OPENCLAW_MODEL", "value": model},
             {"name": "AZURE_OPENAI_ENDPOINT", "value": "https://test.openai.azure.com"},
             {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
-            {"name": "OPENCLAW_GATEWAY_TOKEN", "value": "test-token"},
+            {"name": "OPENCLAW_GATEWAY_TOKEN", "valueFrom": {"secretKeyRef": {"name": "gateway-token", "key": "token"}}},
         ],
         "securityContext": {
             "runAsUser": 1000,
