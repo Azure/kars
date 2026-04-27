@@ -215,6 +215,19 @@ the three validation-failure exits. Code: `controller/src/status/conditions.rs`.
 | Router-sidecar inject | MAP | Auto-inject the router sidecar into pods labelled `azureclaw.azure.com/inject-router=true` |
 | Seccomp auto-stamp | MAP | Auto-set seccomp to `azureclaw-strict` on sandbox pods that lack it |
 
+**Kubernetes version & feature-gate caveat.** VAP is GA in Kubernetes
+≥ 1.30 and ships unconditionally. CRD CEL validations are GA in ≥ 1.29.
+**MAP is beta in Kubernetes ≥ 1.32** and requires the kube-apiserver
+flags `--feature-gates=MutatingAdmissionPolicy=true` and
+`--runtime-config=admissionregistration.k8s.io/v1beta1=true`. On AKS this
+is currently only available on preview channels. The two MAP policies
+(router-sidecar inject, seccomp auto-stamp) are therefore gated behind
+the Helm flag `controller.mutatingAdmissionPolicy.enabled` (default
+`false`); when disabled, the controller's reconciler performs the
+equivalent injection/stamping deterministically before pod creation, so
+the end-state is identical on stable AKS channels. MAP becomes the
+default once it is GA on the AKS stable channel.
+
 ### Hot reload
 
 | What | Code | Notes |
