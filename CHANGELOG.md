@@ -292,6 +292,94 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S6 `phase2-claweval` — ClawEval CRD + binding ConfigMap + helm CRD
+
+This slice ships the controller side of the Azure AI Foundry Evals
+binding K8s primitive only. Per §3 non-compete, `ClawEval` is a
+**binding/provisioning resource over Foundry Evals** — it *configures*
+eval runs; it is **not** an in-cluster eval engine. The runtime
+enforcement substrate stays on Phase 1 (`cli/src/commands/eval.ts` →
+`/openai/evals` + `/evaluators` proxies in
+`inference-router/src/routes/inference.rs`, executed under the
+sandbox router's Workload Identity). The compiled JSON ConfigMap
+(`claweval-{name}-binding`) is the hand-off contract; the sandbox-side
+cron actuator / on-demand trigger that consumes it is deferred to S7.
+
+#### Added
+
+- **`ClawEval` CRD** — `controller/src/claw_eval.rs`, group
+  `azureclaw.azure.com`, version `v1alpha1`, namespaced, shortname
+  `ceval`. Spec fields: `sandboxRef.name`, `suite`
+  (`foundry-evals` | `promptfoo` | `inspect-ai`, default
+  `foundry-evals`), `evaluators?` (required + non-empty when
+  `foundry-evals`), `model?`, `schedule?` (cron line),
+  `dataset?` (mutually-exclusive `configMapRef` | `inline`),
+  `threshold?` (`score` ∈ `[0,1]`, `op` ∈ `Gte`/`Gt`),
+  `regressionAction?` (default `Suspend`), `displayName?`. Status:
+  `phase`, `observedGeneration`, `conditions`,
+  `bindingConfigMapRef`, `versionHash`, `lastReconciledAt`, plus
+  three **runtime-owned** fields (`lastRunAt`, `lastScore`,
+  `lastPass`) declared in the schema for SSA preservation by the
+  S7 runtime writer. Six print columns surface sandbox, suite,
+  schedule, score, pass, age.
+- **Pure compile module** — `controller/src/claw_eval_compile.rs`
+  with `compile_to_binding()` + `version_hash()` (sha256 first 16
+  bytes hex). 9 unit tests cover deterministic compile, all suite
+  serialisations, both threshold ops, default `regressionAction`
+  always materialising, hash sensitivity, hash stability across
+  serde round-trip. Mirrors S5 `claw_memory_compile.rs` shape.
+- **Reconciler** — `controller/src/claw_eval_reconciler.rs`:
+  finalizer `azureclaw.azure.com/claweval-cleanup`, field manager
+  `azureclaw-controller/claweval`, SSA throughout. Compiles the
+  spec, persists as ConfigMap (`claweval-{name}-binding`, key
+  `binding.json`, standard labels). Status patch sets all six
+  controller-owned fields and explicit `None` for the three
+  runtime-owned fields so SSA leaves them untouched once the
+  S7-side writer (`azureclaw-router/claweval`) applies them. Seven
+  unit tests including `field_manager_distinct_from_runtime_writer`
+  which documents and asserts the S7 forward contract.
+- **CEL admission rules** — `controller/src/crd_validations.rs`
+  `claw_eval_validations()` ships eight rules: `sandboxRef.name`
+  shape, `evaluators` required+bounded for `foundry-evals` suite,
+  per-evaluator length cap, `schedule` 5-or-6 token cron shape,
+  `threshold.score` ∈ `[0,1]`, `dataset.configMapRef`/`inline`
+  mutual exclusion, `dataset.inline` capped at 64 entries,
+  `displayName` length cap. Five unit tests assert non-emptiness,
+  message presence, post-injection rule count, core invariants
+  coverage, and serde round-trip.
+- **Helm CRD mirror** — `deploy/helm/azureclaw/templates/crd-claweval.yaml`
+  generated via `DUMP_CLAWEVAL_CRD_YAML=1` dumper.
+  `helm_claweval_crd_matches_rust_schema` drift test enforces
+  Rust ↔ helm parity on every CI run.
+- **Controller wiring** — `controller/src/main.rs` registers the
+  three new modules and spawns `claw_eval_reconciler::run` in
+  the existing `tokio::select!` (REQUEUE_OK 300s, REQUEUE_FAIL 60s).
+- **Audit doc** —
+  `docs/security-audits/2026-04-27-phase2-claweval-reconciler.md`
+  with two sign-offs, full STRIDE coverage, AGT boundary
+  verification (AGT 3.3.0 has no eval module — confirmed), 12-seam
+  reuse map, explicit out-of-scope list (runtime trigger,
+  pass/fail computation, regression actuator, runtime status
+  fields).
+
+#### Notes
+
+- Test count delta (controller): 238 → 264 (+26).
+- Single new struct: none beyond the spec/status/sub-types.
+  `LocalObjectRef` semantically extended (6 clients now:
+  signing/jwks, profile, agent-card, guardrail-profile,
+  memory-binding, eval-dataset).
+- Controller never calls Foundry. The runtime path
+  (`cli/src/commands/eval.ts`) is **not modified in this slice**.
+- This slice closes the §14.6 column-12 destination: five full
+  CRDs (`McpServer`, `ToolPolicy`, `InferencePolicy`, `A2AAgent`,
+  `ClawEval`) + the `ClawMemory` binding now ship as K8s
+  primitives. Governance-as-K8s-primitives → ✓.
+- Hard-deferred to S7+: runtime trigger (cron actuator), threshold
+  pass/fail computation, regression actuator (mutating
+  `ClawSandbox.spec.suspend`), AGT chain emission of eval
+  outcomes.
+
 ### S5 `phase2/clawmemory-reconciler` — ClawMemory CRD + binding ConfigMap + helm CRD
 
 This slice ships the controller side of the Foundry Memory Store
