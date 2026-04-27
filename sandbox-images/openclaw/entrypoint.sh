@@ -227,6 +227,18 @@ else
   export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
 fi
 
+# Allow OpenClaw 2026.4.x's built-in image generation provider to reach the
+# inference router on 127.0.0.1:8443. Upstream added an SSRF preflight that
+# rejects loopback / private / special-use IPs by default to mitigate SSRF in
+# desktop deployments. In this sandbox, 127.0.0.1 is the *only* valid path —
+# the inference router is the proxy that mediates all egress; iptables blocks
+# every other destination for UID 1000. The narrow opt-in env var below is
+# upstream's documented escape hatch (extensions/openai/image-generation-
+# provider.ts:shouldAllowPrivateImageEndpoint), gated to baseUrls that already
+# point at http://127.0.0.1: or http://localhost:, so it can't be abused to
+# reach arbitrary RFC 1918 hosts.
+export OPENCLAW_QA_ALLOW_LOCAL_IMAGE_PROVIDER=1
+
 # Only configure if not already done (idempotent)
 if [ ! -f "$OPENCLAW_CONFIG" ]; then
   # Create OpenClaw directories (owned by sandbox user)
