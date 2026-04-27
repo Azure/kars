@@ -169,3 +169,9 @@ Node.js 22's built-in `fetch()` ignores `HTTPS_PROXY`. The sandbox uses `proxy-b
 | Old image served despite `:latest` push | AKS node cache | Use `imagePullPolicy: Always` or restart pods |
 | "Invalid character" in base64 | `x25519:`/`ed25519:` key prefix | Apply vendored base64Decode fix |
 | Node.js 22 fetch ignores HTTPS_PROXY | Built-in fetch doesn't use proxy env | Load `proxy-bootstrap.js` via `NODE_OPTIONS` |
+
+## Implementation Quality
+
+- **No mocks or stubs in production code.** Always provide real, working implementations. If a dependency is unavailable, build the real integration or defer the feature — never ship a mock.
+- **No TODO/FIXME/HACK comments as placeholders.** If something needs to be done, do it now or track it as a GitHub issue. Code with TODO comments will not be merged.
+- **No placeholder or skeleton implementations.** Every function, class, and module must be fully implemented and tested. Empty methods, `throw new Error("not implemented")`, or `// TODO` stubs are not acceptable.
