@@ -1,9 +1,6 @@
 # AGT Boundary — what AzureClaw consumes vs. what AzureClaw builds
 
-**Status:** internal draft, shared with AGT team for confirmation.
-**Companion:** `docs/implementation-plan.md` §1 ("AGT boundary (operational,
-not rhetorical)") is the canonical version; this file is the standalone
-reference that non-plan readers need.
+> Defines the operational seam between [Microsoft AGT](https://github.com/microsoft/agent-governance-toolkit) and AzureClaw: what AzureClaw imports, what it builds in-tree, and the four contracts that keep them aligned.
 
 AGT ships the governance engine. AzureClaw is the AKS operator and data plane
 that feeds AGT and surfaces AGT decisions as K8s primitives. Any overlap is a

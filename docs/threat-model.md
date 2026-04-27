@@ -241,6 +241,44 @@ When adding a new route group to `routes.rs`, answer these in the PR:
 2. **Same-pod bypass?** If admin-gated, does localhost bypass make sense, or do you need `no_localhost_bypass` (like handoff)?
 3. **Input DTO has `deny_unknown_fields`?** (S1) If you introduce a new typed struct body, yes. Handlers that forward opaque JSON are exempt by design.
 4. **Body size?** Explicit `DefaultBodyLimit` or relying on axum's 2MB default? Justify.
-5. **AGT policy hook?** If the action is agent-initiated and may be policy-relevant, call `state.governance.evaluate(...)` before the side-effecting code.
-6. **Audit logging?** Mutations should record to the audit chain.
+5. **AGT policy hook?** If the action is agent-initiated and may be policy-relevant, call `policy_provider.decide(...)` before the side-effecting code (or for legacy paths, `state.governance.evaluate(...)`).
+6. **Audit logging?** Mutations should record via `audit_sink.append(...)`.
 7. **Trace-id?** You get this for free via the outermost middleware — just don't strip headers.
+
+---
+
+## Phase 1 additions — protocol-aware route groups
+
+### Group 12: MCP 2026 Streamable HTTP — `POST /mcp`
+
+| Field | Value |
+|---|---|
+| Code | `inference-router/src/mcp/{streamable_http,jsonrpc,oauth,oauth_layer,initialize,pipeline,tools,error}.rs` |
+| Auth tier | OAuth 2.1 bearer token (RFC 8725 BCP) when `McpServer.spec.productionMode: true`; PKCE + audience + expiry + `resource` indicator + scope all enforced as a `tower::Layer` |
+| Input validation | JSON-RPC 2.0 strict framing; `Mcp-Session-Id` header semantics; oversized-frame reject; batch validation; `tools/call` payload checked against AGT policy via `PolicyDecisionProvider` |
+| Blast radius if bypassed | Tool execution under agent identity — same blast radius as `/agt/evaluate` legacy path. Mitigated by `ToolPolicy` CRD + `commerce` caps. |
+| Negative-test corpus | `tests/conformance/specs/oauth21-bcp.test.ts`, `mcp-streamable-http.test.ts` (tampered scope, replayed token, expired token, oversized frame) |
+| Fuzz coverage | `inference-router/fuzz/fuzz_targets/parse-streaming-pf.rs`, `sanitize-chat.rs` |
+
+### Group 13: A2A 1.0.0 — `GET /.well-known/agent.json`, `POST /a2a`
+
+| Field | Value |
+|---|---|
+| Code | `inference-router/src/a2a/{card_server,card_signing,card_verifier,jsonrpc_dispatch,signature,trust_store,agent_card,agent_projection,snapshot_rebuild}.rs` |
+| Auth tier | Inbound: AgentCard signature (Ed25519 detached JWS) verified against hot-reloading `MandateTrustStore`; issuer + `exp` + `kid` checked. Optional OAuth bearer for federation lanes. |
+| Input validation | JSON-RPC `message/send`, `tasks/get`, `tasks/cancel`; AP2 IntentMandate detached-JWS + cap + counterparty allowlist via `mandate_trust_store.rs` + `message_send_ap2.rs` |
+| Ingress posture | **Not exposed by default.** Gateway-only, surgical opt-in via `ClawSandbox.spec.a2a.expose: true` — see [ADR-0001](adr/0001-a2a-ingress-front-edge.md). VAP set + Cilium L7 CCNP enforce. |
+| Blast radius if bypassed | Agent message ingress under signed identity; counterfeit card → reject (verifier returns 401). AP2 mandate forgery → reject (signature + cap + allowlist all checked). |
+| Negative-test corpus | `tests/conformance/specs/a2a-agent-card.test.ts` (tampered card, wrong issuer, expired exp), `ap2-commerce.test.ts` (cap exceeded, counterparty not in allowlist, replayed transfer) |
+| Fuzz coverage | `inference-router/fuzz/fuzz_targets/a2a-jws.rs`, `a2a-base64url.rs` |
+
+### Cross-cutting controls (Phase 1)
+
+| Control | Where | What it gates |
+|---|---|---|
+| **`OPENCLAW_GATEWAY_TOKEN` via `secretKeyRef`** | Sandbox Deployment manifest | Token is mounted from a K8s `Secret` instead of plain env. Pod-spec leakage no longer leaks the token. One-shot `warn!` when legacy plain-env path is exercised. |
+| **VAP set** (Phase 1 Helm chart) | `deploy/helm/azureclaw/templates/vap*.yaml` | Denies `pods/exec\|attach\|portforward` on sandbox namespaces; denies posture downgrades (isolation step-down, seccomp removal, `readOnlyRootFilesystem: false`); denies removal of `azureclaw.azure.com/dev-only` label once applied; denies `provider: null/noop/disabled` on non-dev tenants (admission mirror of `ci/no-null-provider-prod.sh`). |
+| **MAP set** | Same chart | Auto-injects router sidecar on `azureclaw.azure.com/inject-router=true` pods; auto-sets seccomp to `azureclaw-strict` if missing. |
+| **Outage modes** | `inference-router/src/providers/outage.rs` | Strict (prod default, fail-closed), CachedRead (cached decision < TTL), DegradedDev (fail-open with warning label, dev only). |
+| **KEP-1623 status conditions** | `controller/src/status/{mod,conditions}.rs` | `ClawSandbox.status.conditions[]` + `observedGeneration` — `Degraded=True` / `Ready=False` stamped on the three validation-failure exits. |
+| **Federated-credential reaper** | `controller/src/fedcred_reaper.rs` | Periodic GC of orphan FedCreds (default 600s) so a sandbox WI MI never hits the 20-fedcred-per-MI Azure cap. |
