@@ -198,6 +198,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in S3 (CRD `spec.signingKeys[]` REQUIRED, CEL-gated non-empty);
   controller-side auto-mint deferred to S7.
 
+### S4 `phase2/inferencepolicy-reconciler` — full InferencePolicy reconciler + compile + helm CRD
+
+This slice ships the controller side of the K8s primitive only. Per §3
+non-compete, `InferencePolicy` is **not** a model-router — model
+selection sits in Foundry; this is a sandbox-side budget / guardrail /
+safety policy CR. Per user direction 2026-04-27, the runtime enforcement
+substrate stays on Phase 1 (`inference-router::budget` env-fed token
+tracker, Foundry-side Content Safety with flags reported to AGT
+`BehaviorMonitor` via `safety::report_content_flags_to_agt`); the
+informer that loads the compiled profile into `PolicyEnvelope` and the
+optional upstream `BudgetTracker` port to AGT-Rust are both deferred to
+S7. The compiled JSON ConfigMap is the hand-off contract.
+
+#### Added
+
+- **`InferencePolicy` CRD** — `controller/src/inference_policy.rs`,
+  group `azureclaw.azure.com`, version `v1alpha1`, namespaced,
+  shortname `ip`. Sub-types: `InferenceAppliesTo` (sandboxName,
+  sandboxMatchLabels, action), `TokenBudget` (perRequestTokens,
+  dailyTokens, monthlyTokens), `ContentSafetyFloor` (hate, selfHarm,
+  sexual, violence, requirePromptShields), `ModelPreference` (primary +
+  ordered fallback `Vec<ModelRef>`), `ModelRef` (provider, deployment).
+  Reuses `mcp_server::LocalObjectRef` for status pointer
+  (4th semantic client of that struct).
+- **Pure compile module** — `controller/src/inference_policy_compile.rs`,
+  `compile_to_profile(&InferencePolicySpec) -> serde_json::Value` +
+  `version_hash(&Value) -> String` (sha256, first 16 bytes hex).
+  Deterministic; key-canonical via `serde_json::Value::Object`. Output
+  shape slots into `inference-router::policy_envelope::PolicyEntry::payload` —
+  no parallel hot-reload core.
+- **Reconciler** — `controller/src/inference_policy_reconciler.rs`,
+  modeled directly on `a2a_agent_reconciler.rs` (S3). Field manager
+  `azureclaw-controller/inferencepolicy` (distinct per §10.4 #1);
+  finalizer `azureclaw.azure.com/inferencepolicy-cleanup`. Emits
+  `Ready`/`Progressing`/`Degraded` Conditions reusing
+  `status::conditions` helpers; preserves `lastTransitionTime` when
+  status doesn't flip. Closed-set `error_class`
+  (`kube_api`/`serde`) per §15.3.
+- **Profile ConfigMap** — name `inferencepolicy-{name}-profile`, key
+  `profile.json`, annotated with version hash, labelled
+  `azureclaw.azure.com/artifact=inference-policy-profile` for the S7
+  router-side informer label selector.
+- **CEL admission rules** (6) — `inference_policy_validations`:
+  `monthlyTokens >= dailyTokens`,
+  `monthlyTokens >= perRequestTokens`,
+  `contentSafety.{hate,selfHarm,sexual,violence}` ∈
+  `{Safe,Low,Medium,High}`,
+  `modelPreference.primary` non-empty provider+deployment,
+  `modelPreference.fallback[*]` non-empty provider+deployment,
+  `appliesTo.action` ∈ `{chat,responses,image,embeddings,*}`.
+- **Helm CRD** — `deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml`,
+  emitted by `helm_drift::tests::dump_inferencepolicy_crd_yaml` (env-gated)
+  and drift-checked by `helm_inferencepolicy_crd_matches_rust_schema`.
+- **Audit doc** — `docs/security-audits/2026-04-27-phase2-inferencepolicy-reconciler.md`,
+  documenting the AGT boundary verification against
+  `agent-governance-toolkit` 3.3.0 on disk: AGT-Python has
+  `BudgetTracker`, AGT-Rust does not (yet); `cedar-policy` + `regorus`
+  available in AGT-Rust for future Content Safety floor encoding.
+  STRIDE coverage, OWASP A2A coverage, explicit out-of-scope list,
+  two sign-offs.
+
+#### Tests
+
+- `inference_policy_compile::tests` — 6 unit tests (empty/full
+  round-trip, determinism, version-hash change/stability, hex shape).
+- `inference_policy_reconciler::tests` — 7 unit tests (rfc3339 shape,
+  error-class closed set, conditions on success/failure,
+  transition-time preservation, finalizer dns-subdomain, field-manager
+  distinctness from S1/S2/S3).
+- `crd_validations::tests` — 5 new `inference_policy_*` tests
+  (non-empty rules, every-rule-has-message, after-injection count,
+  rule-mention invariants, serde round-trip).
+- `helm_drift::tests` — 2 new (`dump_inferencepolicy_crd_yaml` env-gated
+  + `helm_inferencepolicy_crd_matches_rust_schema`).
+- Full controller suite: **218 passing** (was 193 after S3). Workspace
+  `cargo test`, `cargo fmt --all`, `cargo clippy --all-targets -D
+  warnings` — all green.
+
+#### §14.6 impact
+
+Strengthens column 7 (Foundry / M365 integration) of the competitive
+matrix — the *primitive* lands in this slice; column-7 credibility
+moves further when S7 wires the runtime consumers (token-budget swap,
+floor compare-and-block, model-preference selection).
+
+#### Notes
+
+- AGT crate pin remains `agentmesh = "3.3.0"` from crates.io,
+  unmodified. `vendor/` directory untouched.
+- Single new struct: none. `LocalObjectRef` semantically extended (4
+  clients now: signing/jwks, profile, agent-card, guardrail-profile).
+- The runtime gate `inference-router::routes::inference_policy::check`
+  (Phase 1) is **not modified in this slice**.
+
 ## [Unreleased] — PR #44 `dev → main` uplift
 
 This entry covers **186 commits** on `dev` since `main`, structured as Phase 0
