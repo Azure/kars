@@ -11,6 +11,7 @@
 ## Topology
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
   subgraph OrgA["🏢 Org A — Entra tenant A, AKS A"]
     direction TB
@@ -52,6 +53,7 @@ flowchart TB
 ## Trust boundary
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
   subgraph A["Org A trust domain"]
     PA["AGT policy A<br/>(ingress + egress)"]
@@ -90,6 +92,7 @@ Neither side relies on the other's audit chain. Both sides write their own.
 ## Primary flow — pairing two clusters, then a handoff
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 sequenceDiagram
     autonumber
     participant OpsA as Ops A
