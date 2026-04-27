@@ -100,7 +100,8 @@ async fn reap_once(client: &Client, fedcred: &FedCredManager) -> Result<(), Stri
         .list(&ListParams::default())
         .await
         .map_err(|e| format!("list ClawSandbox failed: {e}"))?;
-    let mut keep: HashSet<String> = HashSet::with_capacity(live.items.len() + SYSTEM_KEEPLIST.len());
+    let mut keep: HashSet<String> =
+        HashSet::with_capacity(live.items.len() + SYSTEM_KEEPLIST.len());
     for s in live.items.iter() {
         keep.insert(format!("{NAME_PREFIX}{}", s.name_any()));
     }

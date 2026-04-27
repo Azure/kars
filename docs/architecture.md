@@ -590,6 +590,21 @@ Shipped in the controller Helm chart (`deploy/helm/azureclaw/templates/`):
 - **MAP:** auto-inject router sidecar on `azureclaw.azure.com/inject-router=true`
   pods; auto-set seccomp to `azureclaw-strict` if missing.
 
+**Kubernetes version requirements.**
+
+| Mechanism | Status | Required cluster version | Notes |
+|---|---|---|---|
+| `ValidatingAdmissionPolicy` (VAP) | GA | Kubernetes ≥ 1.30 | Available on AKS stable channels; no feature gate needed. |
+| CRD `x-kubernetes-validations` (CEL) | GA | Kubernetes ≥ 1.29 | No feature gate needed. |
+| `MutatingAdmissionPolicy` (MAP) | Beta | Kubernetes ≥ 1.32 | Requires `--feature-gates=MutatingAdmissionPolicy=true` and `--runtime-config=admissionregistration.k8s.io/v1beta1=true` on the kube-apiserver. On AKS this is currently only reachable on preview channels. |
+
+The MAP-driven sidecar inject and seccomp auto-stamp are therefore shipped
+behind a Helm flag (`controller.mutatingAdmissionPolicy.enabled`, default
+`false`). When the flag is `false`, the controller's reconciler performs the
+same injection/stamping deterministically before pod creation, so the
+end-state is identical regardless of admission path. This is the supported
+production posture until MAP is GA on the AKS stable channel.
+
 ### Status subresource (KEP-1623)
 
 `ClawSandbox.status` carries `conditions[]` (`Ready`, `Degraded`,
