@@ -29,7 +29,8 @@
 
 #[cfg(test)]
 use crate::crd_validations::{
-    a2a_agent_crd, claw_memory_crd, inference_policy_crd, mcp_server_crd, tool_policy_crd,
+    a2a_agent_crd, claw_eval_crd, claw_memory_crd, inference_policy_crd, mcp_server_crd,
+    tool_policy_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
@@ -55,6 +56,11 @@ const INFERENCEPOLICY_HELM_CRD_PATH: &str = concat!(
 const CLAWMEMORY_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/azureclaw/templates/crd-clawmemory.yaml"
+);
+
+const CLAWEVAL_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/azureclaw/templates/crd-claweval.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -215,5 +221,26 @@ mod tests {
         let rust_crd_value =
             serde_json::to_value(claw_memory_crd()).expect("rust crd serializes to JSON");
         assert_helm_matches_rust(CLAWMEMORY_HELM_CRD_PATH, rust_crd_value, "clawmemory");
+    }
+
+    /// One-shot dumper for the claweval CRD. Run via:
+    ///
+    ///   DUMP_CLAWEVAL_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///       helm_drift::tests::dump_claweval_crd_yaml -- --nocapture
+    #[test]
+    fn dump_claweval_crd_yaml() {
+        if std::env::var("DUMP_CLAWEVAL_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = claw_eval_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_claweval_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(claw_eval_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(CLAWEVAL_HELM_CRD_PATH, rust_crd_value, "claweval");
     }
 }

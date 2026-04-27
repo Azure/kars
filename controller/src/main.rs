@@ -14,6 +14,9 @@
 mod a2a_agent;
 mod a2a_agent_compile;
 mod a2a_agent_reconciler;
+mod claw_eval;
+mod claw_eval_compile;
+mod claw_eval_reconciler;
 mod claw_memory;
 mod claw_memory_compile;
 mod claw_memory_reconciler;
@@ -91,6 +94,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { claw_memory_reconciler::run(client).await })
     };
+    let claw_eval_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { claw_eval_reconciler::run(client).await })
+    };
     let mesh_peer_handle = {
         let client = client.clone();
         tokio::spawn(async move {
@@ -156,6 +163,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = claw_memory_handle => {
+            res??;
+        }
+        res = claw_eval_handle => {
             res??;
         }
         res = mesh_peer_handle => {
