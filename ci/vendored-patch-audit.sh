@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/vendored-patch-audit.sh — enforces docs/implementation-plan.md §0.2 #8, #9.
+# ci/vendored-patch-audit.sh — enforces internal Phase 1 plan §0.2 #8, #9.
 #
 # If the PR changes vendor/** or bumps the AGT SDK pin (Cargo.toml /
 # package.json), require a new "Re-audit history" row in
@@ -32,7 +32,7 @@ fi
 # Require the audit doc itself to appear in the diff with a new row.
 if ! printf '%s\n' "$changed" | grep -qx "$AUDIT_DOC"; then
   echo "fail: vendor/** or AGT SDK pin changed but $AUDIT_DOC not updated." >&2
-  echo "      Add a new 'Re-audit history' row per docs/implementation-plan.md §0.2 principle 8." >&2
+  echo "      Add a new 'Re-audit history' row per internal Phase 1 plan §0.2 principle 8." >&2
   exit 1
 fi
 

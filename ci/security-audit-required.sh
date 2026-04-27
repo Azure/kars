@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/security-audit-required.sh — enforces docs/implementation-plan.md §0.2 #9.
+# ci/security-audit-required.sh — enforces internal Phase 1 plan §0.2 #9.
 #
 # If the PR touches a capability-introducing file, require a matching
 # docs/security-audits/<YYYY-MM-DD>-<slug>.md with two distinct sign-off

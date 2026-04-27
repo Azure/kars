@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/no-custom-crypto.sh — enforces docs/implementation-plan.md §0.2 principle #8.
+# ci/no-custom-crypto.sh — enforces internal Phase 1 plan §0.2 principle #8.
 #
 # No hand-rolled Signal/X3DH/Double-Ratchet, no hand-rolled OAuth/JWT signing,
 # no hand-rolled Merkle chaining, no hand-rolled HMAC/KDF, no hand-rolled base64,

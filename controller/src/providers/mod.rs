@@ -7,7 +7,7 @@
 //!
 //! **Phase 0 status:** contracts only. No implementations and no
 //! reconciler migrations land here. Provider construction and wiring are
-//! Phase 1 scope per `docs/implementation-plan.md` §7.
+//! Phase 1 scope per internal Phase 1 plan §7.
 //!
 //! **Server-Side Apply** (plan §6 #4): each controller-side write that
 //! touches provider-owned fields uses SSA with a stable field manager:
@@ -19,7 +19,7 @@
 //!
 //! See [`field_managers`].
 
-// Scaffolding for Phase 1 — see docs/implementation-plan.md §7. Dead-code
+// Scaffolding for Phase 1 — see internal Phase 1 plan §7. Dead-code
 // lints are silenced at the module level until call-sites land.
 #![allow(dead_code)]
 
@@ -36,7 +36,7 @@ pub mod field_managers {
 }
 
 /// Selects which implementation of a contract a tenant uses.
-/// See `docs/implementation-plan.md` §1.4.
+/// See internal Phase 1 plan §1.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Vendored,
@@ -66,7 +66,7 @@ impl ProviderKind {
 }
 
 /// Outage mode selected per `ClawSandbox` via `spec.agt.outageMode`.
-/// See `docs/implementation-plan.md` §1.3.
+/// See internal Phase 1 plan §1.3.
 ///
 /// The router-side enforcement, pure decision function, and serde wire
 /// format live in `inference-router/src/providers/outage.rs`. The

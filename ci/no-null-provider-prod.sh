@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/no-null-provider-prod.sh — enforces docs/implementation-plan.md §0.2 #9.
+# ci/no-null-provider-prod.sh — enforces internal Phase 1 plan §0.2 #9.
 #
 # Static mirror of the ValidatingAdmissionPolicy shipped in Phase 0:
 #   A YAML manifest with spec.*.provider: null|noop|disabled must carry

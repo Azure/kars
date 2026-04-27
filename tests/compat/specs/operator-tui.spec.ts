@@ -1,7 +1,7 @@
 /**
  * Compat spec: `azureclaw operator` (headless TUI).
  *
- * Flow: docs/implementation-plan.md §5.1 #6.
+ * Flow: internal Phase 1 plan §5.1 #6.
  *
  * Phase 0 scope (this file): harness self-tests + protected-flow catalogue
  * assertions. These verify the compat harness itself is wired correctly,

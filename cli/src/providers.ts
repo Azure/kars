@@ -8,7 +8,7 @@
  *
  * **Phase 0 status:** type + helper definitions only. No plugin.ts
  * call-site migrations land here. Wiring happens in Phase 1 per
- * `docs/implementation-plan.md` §7.
+ * internal Phase 1 plan §7.
  *
  * Runtime-side implementations live in Rust (router + controller). The TS
  * side only needs to:
@@ -87,7 +87,7 @@ export function selectionToEnv(sel: ProviderSelection): Record<string, string> {
 
 /**
  * Outage mode selected per `ClawSandbox.spec.agt.outageMode`.
- * See `docs/implementation-plan.md` §1.3.
+ * See internal Phase 1 plan §1.3.
  */
 export type OutageMode = "strict" | "cached-read" | "degraded-dev";
 

@@ -10,7 +10,7 @@
 //! - `AgtAuditSink` — shipped AGT Rust SDK.
 //! - `NullAuditSink` — dev-only; admission rejects in prod.
 //!
-//! See `docs/implementation-plan.md` §1.2.
+//! See internal Phase 1 plan §1.2.
 
 /// Opaque receipt. `ReceiptId` is the only thing the router persists to CR
 /// status — it's treated as a black box outside this module.

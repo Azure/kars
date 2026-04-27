@@ -2,7 +2,7 @@
 //!
 //! Extracted from `governance.rs` per §4.2 hotspot decomposition.
 //! Authoritative behavioral anomaly detection lives in AGT
-//! (`BehaviorMonitor` per `docs/agt-boundary.md` §1.1); this module
+//! (`BehaviorMonitor` per internal Phase 1 plan §1 §1.1); this module
 //! is the in-process fallback used when the AGT-side monitor is not
 //! configured / has degraded. Behaviour change: **none**.
 

@@ -26,7 +26,7 @@
 //!    must satisfy. This is the surface a future native-Rust agent (if
 //!    one ever lands) would have to implement; it is also the surface
 //!    that the current TypeScript SDK satisfies in spirit.
-//! 2. **Conformance corpus shape** (`docs/implementation-plan.md`
+//! 2. **Conformance corpus shape** (internal Phase 1 plan
 //!    §Conformance) — the libsignal-derived test vectors that exercise
 //!    KNOCK / X3DH / Double-Ratchet are organised against this trait so
 //!    the same fixtures can be re-run against a future Rust impl.

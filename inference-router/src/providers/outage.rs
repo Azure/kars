@@ -1,6 +1,6 @@
 //! Outage semantics for AGT / mesh provider calls.
 //!
-//! Reference: `docs/implementation-plan.md` §1.3.
+//! Reference: internal Phase 1 plan §1.3.
 //!
 //! When a provider (AGT or vendored mesh) is unreachable / slow / erroring,
 //! the per-tenant outage policy decides what the router does with the

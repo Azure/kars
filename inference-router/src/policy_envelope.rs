@@ -2,7 +2,7 @@
 //!
 //! ## What this module is
 //!
-//! Phase 1 close-out (`docs/implementation-plan.md` §7 entry 14)
+//! Phase 1 close-out (internal Phase 1 plan §7 entry 14)
 //! requires that `ToolPolicy` / `InferencePolicy` changes propagate
 //! into the running router **without a pod rollout**. The full
 //! plumbing (K8s informer + AGT SSE subscription) is a Phase 2

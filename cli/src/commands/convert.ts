@@ -4,7 +4,7 @@
  *
  * Phase 0: command surface only. No conversion logic yet. Real
  * translation arrives in Phase 2 alongside `azureclaw migrate`
- * (see docs/implementation-plan.md §2.2 + §8 item 4).
+ * (see internal Phase 1 plan §2.2 + §8 item 4).
  *
  * Exit codes:
  *   0 — conversion would succeed (dry-run) or succeeded

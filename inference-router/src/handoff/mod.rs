@@ -1,6 +1,6 @@
 //! Agent handoff — live migration (local ↔ cloud).
 //!
-//! Implements the handoff protocol from `docs/internal/global-agentmesh-plan.md` §9.4.
+//! Implements the handoff protocol per the AzureClaw inter-agent handoff design.
 //!
 //! **Security model** (three-layer auth for handoff endpoints):
 //! 1. Handoff token — one-time, TTL-based, in-memory only

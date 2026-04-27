@@ -14,7 +14,7 @@
 //! - New denial scenarios can be added by dropping a JSON file and
 //!   re-running — no Rust recompile of the test harness.
 //! - The corpus is the conformance-corpus contribution called out in
-//!   `docs/implementation-plan.md` §5.4 row "AP2 commerce" (positive +
+//!   internal Phase 1 plan §5.4 row "AP2 commerce" (positive +
 //!   negative cases).
 //!
 //! Add a fixture by:

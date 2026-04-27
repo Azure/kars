@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · OTel GenAI SemConv constants
 
 Audit ID: `2026-04-24-phase1-otel-genai-semconv`  
-Scope reference: `docs/implementation-plan.md` §7 item 9
+Scope reference: internal Phase 1 plan §7 item 9
 (OTel GenAI SemConv 1.x emission on every router span).
 
 ## What landed

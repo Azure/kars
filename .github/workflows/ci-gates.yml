@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   gates:
-    # Per docs/implementation-plan.md §4.4 — all gates fail-hard, no continue-on-error.
+    # Per internal Phase 1 plan §4.4 — all gates fail-hard, no continue-on-error.
     name: ${{ matrix.gate }}
     runs-on: ubuntu-latest
     strategy:

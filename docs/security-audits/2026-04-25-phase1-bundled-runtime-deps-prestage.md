@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · OpenClaw bundled-runtime-deps pre-staging
 
 Audit ID: `2026-04-25-phase1-bundled-runtime-deps-prestage`
-Scope reference: `docs/implementation-plan.md` §7 (Phase 1 runtime-compat
+Scope reference: internal Phase 1 plan §7 (Phase 1 runtime-compat
 follow-ups); user-reported regression: sub-agent delegation returned an
 "npm 403 Forbidden" / `PluginLoadFailureError` dump instead of a usable reply
 from analyst → confidential-writer.

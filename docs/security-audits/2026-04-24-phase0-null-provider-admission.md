@@ -3,7 +3,7 @@
 **Date:** 2026-04-24
 **Capability:** ValidatingAdmissionPolicy + Binding rejecting provider values of `null`, `noop`, `disabled`, or `none` on non-dev tenants
 **Branch:** `phase0/null-provider-admission`
-**Plan section:** `docs/implementation-plan.md` §6 item 6 + §0.2 principle 9
+**Plan section:** internal Phase 1 plan §6 item 6 + §0.2 principle 9
 
 ## 1. Summary
 

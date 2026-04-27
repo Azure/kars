@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · Core VAP set: pod exec ban + sandbox posture lock
 
 Audit ID: `2026-04-24-phase1-vap-pod-exec-ban`
-Scope reference: `docs/implementation-plan.md` §7 item 13 ("core
+Scope reference: internal Phase 1 plan §7 item 13 ("core
 VAP/MAP admission set") and `docs/security.md` §3.3 (runtime
 enforcement vs static gates).
 

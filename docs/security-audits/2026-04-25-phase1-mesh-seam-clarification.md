@@ -12,7 +12,7 @@ are added, removed, or modified.**
 ## 1. Summary
 
 Prior to this PR, `inference-router/src/providers/mesh.rs` and
-`docs/implementation-plan.md` described `MeshProvider` as one of "four
+internal Phase 1 plan described `MeshProvider` as one of "four
 contracts" the router would implement, alongside `PolicyDecisionProvider`,
 `AuditSink`, and `SigningProvider`. That framing was a category error.
 
@@ -34,7 +34,7 @@ This PR re-anchors the documentation:
 - `providers/mod.rs` four-seam header now states: three router-side
   contracts (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) +
   one plugin-side contract (`MeshProvider`).
-- `docs/implementation-plan.md` §1.2 rewrites the "four contracts"
+- internal Phase 1 plan §1.2 rewrites the "four contracts"
   section, adding §1.2.1 explaining why `MeshProvider` is plugin-side.
   §1.4 adjusts the `spec.agt.providers` schema to drop the misleading
   `mesh: vendored|agt` row (mesh provider selection is plugin-side).

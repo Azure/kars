@@ -1,7 +1,7 @@
 # Security Audit: `phase1/session-checkpoint`
 
 **Capability:** docs-only. Replaces the prior session checkpoint
-(`audit-sink-migrate-handoff`) at the end of `docs/implementation-plan.md`
+(`audit-sink-migrate-handoff`) at the end of internal Phase 1 plan
 with a comprehensive checkpoint covering all twelve Phase 1 scaffolds
 landed in the 2026-04-25 a2a session.
 

@@ -15,10 +15,10 @@
 //!
 //! **No hand-rolled crypto.** `ci/no-custom-crypto.sh` enforces this file,
 //! `providers/mesh.rs`, `vendor/`, and a short allowlist are the only places
-//! where crypto primitives may be imported. See `docs/implementation-plan.md`
+//! where crypto primitives may be imported. See internal Phase 1 plan
 //! §0.2 #8.
 //!
-//! See `docs/implementation-plan.md` §1.2.
+//! See internal Phase 1 plan §1.2.
 
 /// Opaque reference to a signing key. The interpretation is
 /// provider-specific. Examples:

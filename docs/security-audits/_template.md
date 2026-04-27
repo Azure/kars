@@ -126,7 +126,7 @@ used. -->
 
 ### Author sign-off
 
-- [ ] I have read principles §0.2 #8, #9, #10 of `docs/implementation-plan.md`.
+- [ ] I have read principles §0.2 #8, #9, #10 of internal Phase 1 plan.
 - [ ] The capability contains no pseudo-implementations. Every claimed
       control actually runs on the production code path.
 - [ ] No custom crypto was added (verified by `ci/no-custom-crypto.sh`).

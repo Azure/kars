@@ -1,7 +1,7 @@
 /**
  * Sandbox isolation invariants — seccomp / Landlock / egress-guard.
  *
- * See docs/implementation-plan.md §5.4. These are e2e-class tests:
+ * See internal Phase 1 plan §5.4. These are e2e-class tests:
  * they need a running Kind cluster with the AzureClaw Helm chart
  * installed so the real sandbox image and NetworkPolicy / seccomp
  * / Landlock surface can be exercised.

@@ -21,7 +21,7 @@ New files:
   module isolation; D5 sidecar process isolation deferred; D6
   surgical opt-in / revocation; D7 outbound unchanged; D8 AgentCard
   custody).
-- Update `docs/implementation-plan.md` §7 entry 2 with the gateway
+- Update internal Phase 1 plan §7 entry 2 with the gateway
   posture, opt-in surface, and pod layout reminder.
 
 No code is added or modified. The merged scaffold

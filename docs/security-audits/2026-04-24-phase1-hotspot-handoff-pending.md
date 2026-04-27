@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · handoff/pending submodule extraction
 
 Audit ID: `2026-04-24-phase1-hotspot-handoff-pending`
-Scope reference: `docs/implementation-plan.md` §4.1 target module
+Scope reference: internal Phase 1 plan §4.1 target module
 layout, §9.9.9 (confirmation gate security model).
 
 ## What landed

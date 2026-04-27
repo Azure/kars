@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/check-loc.sh — enforces docs/implementation-plan.md §4.2 LOC budget.
+# ci/check-loc.sh — enforces internal Phase 1 plan §4.2 LOC budget.
 #
 # Fails if:
 #   - A budgeted file exceeds its active-phase cap.

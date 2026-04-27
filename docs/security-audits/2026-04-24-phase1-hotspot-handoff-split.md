@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · handoff.rs hotspot split (drain submodule)
 
 Audit ID: `2026-04-24-phase1-hotspot-handoff-split`
-Scope reference: `docs/implementation-plan.md` §4.1 target module layout,
+Scope reference: internal Phase 1 plan §4.1 target module layout,
 §4.2 LOC budget, §4.3 "touched code pays its decomposition debt".
 
 ## What landed
@@ -67,7 +67,7 @@ No other files touched. `DrainState` is re-exported from
   `providers/mesh.rs` only). The plan's correct destination for that
   code is a `SigningProvider` wrapper, not a peer submodule — so we
   defer until the provider seam work wraps. This is called out in
-  `docs/implementation-plan.md` §4.1 (handoff split target: client /
+  internal Phase 1 plan §4.1 (handoff split target: client /
   server / crypto).
 * The stores (`HandoffTokenStore` + `PendingHandoffStore`) and their
   tests were not extracted in this PR; they will be part of the next

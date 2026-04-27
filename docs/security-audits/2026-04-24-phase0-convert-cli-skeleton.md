@@ -3,7 +3,7 @@
 **Date:** 2026-04-24
 **Capability:** new CLI subcommand `azureclaw convert` (surface only; no conversion logic).
 **Branch:** `phase0/kubectl-convert-skeleton`
-**Plan section:** `docs/implementation-plan.md` §2.2 + §6 item 13
+**Plan section:** internal Phase 1 plan §2.2 + §6 item 13
 
 ## 1. Summary
 
@@ -75,9 +75,8 @@ None. Uses existing `commander` and `chalk` deps.
 
 ## 10. Internal-boundary posture
 
-Consume-only: the command does not ship conversion logic, so it cannot
-conflict with any MSFT product surface. Phase 2 real-conversion audit
-will re-evaluate against `docs/internal-boundaries.md`.
+Skeleton-only: the command does not ship conversion logic. Phase 2
+real-conversion audit will re-evaluate scope.
 
 ## 11. Sign-offs
 

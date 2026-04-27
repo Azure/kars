@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · Outage-semantics pure-decision module
 
 Audit ID: `2026-04-24-phase1-outage-semantics`  
-Scope reference: `docs/implementation-plan.md` §1.3, §0.2 #8 (fail-closed defaults).
+Scope reference: internal Phase 1 plan §1.3, §0.2 #8 (fail-closed defaults).
 
 ## What landed
 

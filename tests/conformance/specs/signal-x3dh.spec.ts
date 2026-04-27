@@ -1,7 +1,7 @@
 /**
  * Signal / X3DH / Double-Ratchet invariants — Phase 0 scaffold.
  *
- * See docs/implementation-plan.md §5.4.
+ * See internal Phase 1 plan §5.4.
  *
  * These invariants MUST hold across every MeshProvider implementation
  * (VendoredAgentMeshProvider, AgtMeshProvider, NullMeshProvider-dev).

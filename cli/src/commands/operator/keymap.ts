@@ -2,7 +2,7 @@
  * Operator TUI keyboard bindings + status-bar help strings.
  *
  * Extracted from `cli/src/commands/operator.ts` per
- * `docs/implementation-plan.md` §4.2 (monotonic-decrease LOC budget) and
+ * internal Phase 1 plan §4.2 (monotonic-decrease LOC budget) and
  * §6 item 12 (Phase 0 decomposition slice). Pure data — no `blessed` or
  * `commander` imports, no I/O, easily unit-testable.
  *

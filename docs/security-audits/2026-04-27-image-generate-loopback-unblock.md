@@ -1,7 +1,7 @@
 # Security audit — Image-generate loopback unblock
 
 Audit ID: `2026-04-27-image-generate-loopback-unblock`
-Scope reference: `docs/implementation-plan.md` §0.2 #9 (security-audit
+Scope reference: internal Phase 1 plan §0.2 #9 (security-audit
 sign-off required for any `sandbox-images/*/entrypoint.sh` change). Pairs
 commit `97ef710` (`fix(sandbox): unblock built-in image_generate provider
 on loopback router`). Audited retroactively as part of the PR #44 readiness

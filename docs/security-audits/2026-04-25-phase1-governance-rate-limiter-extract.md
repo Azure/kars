@@ -26,7 +26,7 @@ runtime-update behaviour, and the same introspection accessors
 
 The authoritative cross-mesh rate-limit enforcement still lives in
 AGT (`AgtPolicyProvider` / `AgtRateLimiter`) — see
-`docs/agt-boundary.md`. This in-process limiter is a local DoS
+internal Phase 1 plan §1. This in-process limiter is a local DoS
 guard, not a mesh-wide governance primitive.
 
 ## OWASP mapping

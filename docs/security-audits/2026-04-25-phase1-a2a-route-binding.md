@@ -67,7 +67,7 @@ OWASP MCP/A2A-adjacent controls:
 - **Today:** none at the route layer. Anonymous callers can hit both
   endpoints. This is acceptable because the route is **not yet wired into
   `main.rs`** — wiring is gated on the OAuth 2.1 / mTLS layer and on
-  resolving §6 of `docs/implementation-plan.md` (per-tenant outage mode).
+  resolving §6 of internal Phase 1 plan (per-tenant outage mode).
 - The card itself is meant to be served unauthenticated (it's a discovery
   document); the `POST /a2a` endpoint will sit behind OAuth 2.1 + card
   verification when wired.

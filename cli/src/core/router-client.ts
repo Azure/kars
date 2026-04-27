@@ -1,7 +1,7 @@
 /**
  * Router-client helpers — small, pure I/O wrappers around the in-pod
  * inference-router. Extracted from `plugin.ts` to satisfy the LOC budget
- * (`docs/implementation-plan.md` §4.2) and to give the conformance corpus a
+ * (internal Phase 1 plan §4.2) and to give the conformance corpus a
  * stable seam to mock against.
  *
  * Intentionally narrow:

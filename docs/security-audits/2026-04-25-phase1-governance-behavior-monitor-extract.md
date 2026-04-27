@@ -19,7 +19,7 @@ provider dispatch after full AGT provider landings").
 None. No behaviour change. The fallback monitor has the same
 threshold semantics, the same per-agent isolation, the same alert
 data shape. Authoritative cross-mesh anomaly detection still lives
-in AGT (`BehaviorMonitor` per `docs/agt-boundary.md` §1.1); this
+in AGT (`BehaviorMonitor` per internal Phase 1 plan §1 §1.1); this
 in-process detector is the local fallback.
 
 ## OWASP mapping

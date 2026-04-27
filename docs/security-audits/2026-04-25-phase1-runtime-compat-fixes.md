@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · Runtime-compat fixes (plugin ESM, preflight, policy dir, admin-token migration)
 
 Audit ID: `2026-04-25-phase1-runtime-compat-fixes`  
-Scope reference: `docs/implementation-plan.md` §7 (Phase 1 hotspot decomposition + AGT provider production-parity); follow-up to live `azureclaw dev --build` validation against OpenClaw 2026.4.24.
+Scope reference: internal Phase 1 plan §7 (Phase 1 hotspot decomposition + AGT provider production-parity); follow-up to live `azureclaw dev --build` validation against OpenClaw 2026.4.24.
 
 ## What landed
 

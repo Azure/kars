@@ -1,7 +1,7 @@
 # Security audit — Phase 1 · ClawSandbox Conditions + observedGeneration
 
 Audit ID: `2026-04-24-phase1-minimal-conditions`
-Scope reference: `docs/implementation-plan.md` §7 item 7
+Scope reference: internal Phase 1 plan §7 item 7
 (minimum §9 controller craftsmanship for migration UX) and §4.1 target
 module layout (`controller/src/status/`).
 

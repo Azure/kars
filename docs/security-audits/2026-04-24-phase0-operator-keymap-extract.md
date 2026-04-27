@@ -3,7 +3,7 @@
 **Date:** 2026-04-24
 **Capability:** pure-data extraction of operator-TUI key bindings + status-bar copy into `cli/src/commands/operator/keymap.ts`.
 **Branch:** `phase0/operator-tui-keymap-extract`
-**Plan section:** `docs/implementation-plan.md` §4.2 (monotonic-decrease LOC budget) + §6 item 12 (Phase 0 decomposition slice #2 — first operator.ts shrink).
+**Plan section:** internal Phase 1 plan §4.2 (monotonic-decrease LOC budget) + §6 item 12 (Phase 0 decomposition slice #2 — first operator.ts shrink).
 
 ## 1. Summary
 

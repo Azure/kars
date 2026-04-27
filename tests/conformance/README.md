@@ -2,7 +2,7 @@
 
 Protocol invariants beyond happy-path — the net that catches
 "endpoint returns 200 but never called the crypto step" bugs.
-See `docs/implementation-plan.md` §5.4 for the principle statement and
+See internal Phase 1 plan §5.4 for the principle statement and
 the per-phase corpus coverage table.
 
 ## Corpora (per phase)

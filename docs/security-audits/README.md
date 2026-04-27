@@ -1,8 +1,7 @@
 # Security Audit Records
 
 Every capability-introducing PR ships with a security-audit record in this
-directory — enforced by `ci/security-audit-required.sh` and principle §0.2 #9
-of `docs/implementation-plan.md`.
+directory — enforced by `ci/security-audit-required.sh`.
 
 ## What is a "capability" for audit purposes?
 
@@ -49,7 +48,5 @@ more thought before code is written.
 
 - `docs/security-audits/_template.md` — the template
 - `docs/security-reviewers.md` — the roster
-- `docs/agt-boundary.md` — AGT responsibilities (don't duplicate)
-- `docs/internal-boundaries.md` — MSFT product non-compete posture
 - `docs/agt-vendored-patch-audit.md` — vendored AgentMesh patch status
 - `ci/security-audit-required.sh` — the enforcing script

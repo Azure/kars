@@ -86,7 +86,7 @@ audit-doc enumerates each defence.
   network calls. An empty trust store (e.g. during a Phase 2
   reconciler restart before snapshot rebuild) fails closed —
   consistent with `Strict` outage mode default per
-  `docs/implementation-plan.md` §1.3.
+  internal Phase 1 plan §1.3.
 
 ## Secret + key custody
 

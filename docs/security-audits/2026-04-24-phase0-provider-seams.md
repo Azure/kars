@@ -3,7 +3,7 @@
 **Date:** 2026-04-24
 **Capability:** provider trait/interface scaffolds (Rust router, Rust controller, TS CLI)
 **Branch:** `phase0/provider-trait-scaffolds`
-**Companion plan section:** `docs/implementation-plan.md` §6 items 4 + §1.2 + §1.4
+**Companion plan section:** internal Phase 1 plan §6 items 4 + §1.2 + §1.4
 
 ## 1. Summary
 
@@ -94,9 +94,8 @@ Added one workspace-level crate, one crate-level adoption, zero TS deps:
 
 ## 10. Internal-boundary posture
 
-N/A — scaffolding only. No new surface vs. MSFT products. When
-`AgtPolicyProvider`/`AgtAuditSink`/`AgtSigningProvider` land in Phase 1
-they'll be `Consume` against AGT per `docs/internal-boundaries.md`.
+N/A — scaffolding only. When `AgtPolicyProvider`/`AgtAuditSink`/`AgtSigningProvider`
+land in Phase 1 they'll consume AGT.
 
 ## 11. Sign-offs
 

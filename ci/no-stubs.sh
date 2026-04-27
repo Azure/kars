@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/no-stubs.sh — enforces docs/implementation-plan.md §0.2 principle #8.
+# ci/no-stubs.sh — enforces internal Phase 1 plan §0.2 principle #8.
 #
 # Rejects *newly added* stub/placeholder markers on production code paths.
 # Existing matches are baselined (see ci/no-stubs.allowlist); this script
