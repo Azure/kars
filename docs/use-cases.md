@@ -2,6 +2,8 @@
 
 Three canonical scenarios shipping today, plus a roadmap track for future agentic runtimes. Each shipping scenario is implemented end-to-end on `main` and exercised by the compat / conformance / e2e harness before any merge.
 
+> **Looking for "how do I run AzureClaw for *audience X*?"** see [`docs/blueprints/`](blueprints/00-index.md) for the five end-to-end deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) — each with topology + trust-boundary + flow Mermaid diagrams.
+
 | # | Scenario | Where the user runs | Network shape | Status | Reference |
 |---|---|---|---|---|---|
 | 1 | **AzureClaw-native agent** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |

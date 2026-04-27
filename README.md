@@ -44,7 +44,7 @@ AzureClaw is **not a fork of OpenClaw** — it extends OpenClaw via its native p
 4. **Operational footprint** — `azureclaw up` provisions AKS + ACR + Foundry + Foundry-side Content Safety + sandbox in one go; `azureclaw operator` gives a live TUI for running fleets.
 5. **Multi-runtime future** — see [Roadmap](#roadmap-extending-beyond-openclaw) below: protocol scaffolding (MCP, A2A, AP2) is in place so the same sandbox can host non-OpenClaw agents over the wire.
 
-> 📖 **See [`docs/use-cases.md`](docs/use-cases.md)** for the four end-to-end scenarios — AzureClaw-native agents, **any-OpenClaw → AzureClaw cloud offload** (no AzureClaw CLI on the laptop), AzureClaw ↔ AzureClaw mesh, and the roadmap for non-OpenClaw runtimes via MCP / A2A / AP2.
+> 📖 **See [`docs/use-cases.md`](docs/use-cases.md)** for the four end-to-end scenarios — AzureClaw-native agents, **any-OpenClaw → AzureClaw cloud offload** (no AzureClaw CLI on the laptop), AzureClaw ↔ AzureClaw mesh, and the roadmap for non-OpenClaw runtimes via MCP / A2A / AP2. For deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) with topology + trust-boundary + flow diagrams, see [`docs/blueprints/`](docs/blueprints/00-index.md).
 
 ---
 
