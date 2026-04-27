@@ -581,12 +581,31 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         .and_then(|b| b.per_request)
         .unwrap_or(0);
 
-    // Build OpenClaw container env vars
+    // Build OpenClaw container env vars.
+    //
+    // OPENCLAW_GATEWAY_TOKEN is plumbed via secretKeyRef rather than a static
+    // value so that:
+    //   1. Rotating the Secret + restarting the pod reliably picks up the new
+    //      token without requiring a controller reconcile to re-render the
+    //      Deployment env.
+    //   2. The pod env is, by construction, equal to the Secret value at pod
+    //      start. `azureclaw connect` reads the Secret to find the gateway
+    //      token; if env and Secret ever drift, the operator gets 401s on a
+    //      rolled pod even though the Secret looks correct. valueFrom closes
+    //      that drift window.
     let mut openclaw_env = vec![
         json!({"name": "OPENCLAW_MODEL", "value": inference_config.model}),
         json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
         json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
-        json!({"name": "OPENCLAW_GATEWAY_TOKEN", "value": &gateway_token}),
+        json!({
+            "name": "OPENCLAW_GATEWAY_TOKEN",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": "gateway-token",
+                    "key": "token"
+                }
+            }
+        }),
     ];
     // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
     if !ctx.foundry_project_endpoint.is_empty() {
