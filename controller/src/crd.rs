@@ -3,6 +3,7 @@
 //! This is the Rust representation of the ClawSandbox CRD.
 //! kube-rs derives the CRD schema, API bindings, and JSON schema automatically.
 
+use crate::mcp_server::LocalObjectRef;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -85,18 +86,44 @@ pub struct ClawSandboxSpec {
     pub upstream_compatibility: Option<UpstreamCompatibilityConfig>,
 }
 
-/// Upstream-protocol compatibility (Phase 1 scaffold).
+/// Upstream-protocol compatibility (Phase 1 scaffold extended in Phase 2 S8).
 ///
-/// Codifies §2 (TranslateMode) of the implementation plan as a CRD field.
-/// All values default to OFF — opt-in per sandbox.
+/// Codifies §2 (Native | Translate | Overlay) of the implementation plan
+/// as CRD fields. All values default to OFF — opt-in per sandbox.
+///
+/// **`OverlayMode` (Phase 2 S8).** When `sigs_agent_sandbox == "overlay"`,
+/// the operator already manages an upstream `Sandbox` CR in the same
+/// namespace; AzureClaw provides only the *overlay* (namespace + sandbox
+/// ServiceAccount + Workload-Identity binding + NetworkPolicy + governance
+/// ConfigMaps). The controller **skips Deployment/Service/CronJob
+/// creation**: those are owned by the upstream reconciler. The
+/// `upstream_sandbox_ref` field names that upstream CR. Implementation
+/// plan §2 lines 269-271 + §8 entry "S8 phase2-overlaymode".
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamCompatibilityConfig {
     /// `sigs.k8s.io/agent-sandbox` SandboxClaim translation mode.
-    /// Values: `"off"` (default), `"observe"` (mirror status only),
-    /// `"translate"` (accept SandboxClaim semantics on inbound).
+    /// Values:
+    /// - `"off"` (default) — no upstream interaction; pure Native mode.
+    /// - `"observe"` — mirror status only.
+    /// - `"translate"` — accept SandboxClaim semantics on inbound (P1
+    ///   schema-only, runtime path deferred).
+    /// - `"overlay"` — operator's upstream `Sandbox` CR owns the Pod;
+    ///   AzureClaw provides governance overlay only. Requires
+    ///   [`upstream_sandbox_ref`] (admission-enforced).
+    ///
     /// Reconciler refuses unknown strings.
     pub sigs_agent_sandbox: Option<String>,
+
+    /// Reference to an upstream `Sandbox` CR in the same namespace.
+    /// **Required when `sigs_agent_sandbox == "overlay"`.** Ignored
+    /// otherwise. The controller does not watch the upstream object's
+    /// status today (deferred to a future slice that adds an upstream
+    /// CRD discovery / informer); operators read overlay state from
+    /// the upstream CR directly. AzureClaw never mutates the upstream
+    /// object — the relationship is read-only at the boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_sandbox_ref: Option<LocalObjectRef>,
 
     /// CNCF AI Conformance reference-mode toggle. When `true`, the
     /// reconciler emits the canonical conformance status block on the
@@ -104,6 +131,95 @@ pub struct UpstreamCompatibilityConfig {
     /// no code path consumes this yet.
     #[serde(default)]
     pub ai_conformance_reference: bool,
+}
+
+impl UpstreamCompatibilityConfig {
+    /// Returns `true` if this configuration selects `OverlayMode`.
+    /// Pure helper — no I/O, no logging.
+    #[must_use]
+    pub fn is_overlay_mode(&self) -> bool {
+        self.sigs_agent_sandbox.as_deref() == Some("overlay")
+    }
+
+    /// Returns the upstream `Sandbox` CR name when in overlay mode,
+    /// otherwise `None`. Centralises the "extract overlay target"
+    /// logic so the reconciler does not duplicate the match.
+    #[must_use]
+    pub fn overlay_target_name(&self) -> Option<&str> {
+        if self.is_overlay_mode() {
+            self.upstream_sandbox_ref.as_ref().map(|r| r.name.as_str())
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod upstream_compat_tests {
+    use super::*;
+
+    fn cfg(mode: Option<&str>, name: Option<&str>) -> UpstreamCompatibilityConfig {
+        UpstreamCompatibilityConfig {
+            sigs_agent_sandbox: mode.map(str::to_owned),
+            upstream_sandbox_ref: name.map(|n| LocalObjectRef { name: n.into() }),
+            ai_conformance_reference: false,
+        }
+    }
+
+    #[test]
+    fn is_overlay_mode_true_only_for_overlay_string() {
+        assert!(cfg(Some("overlay"), Some("up")).is_overlay_mode());
+        assert!(!cfg(Some("off"), None).is_overlay_mode());
+        assert!(!cfg(Some("observe"), None).is_overlay_mode());
+        assert!(!cfg(Some("translate"), None).is_overlay_mode());
+        assert!(!cfg(None, None).is_overlay_mode());
+        assert!(!cfg(Some("OVERLAY"), None).is_overlay_mode());
+        assert!(!cfg(Some(""), None).is_overlay_mode());
+    }
+
+    #[test]
+    fn overlay_target_name_extracts_only_in_overlay_mode() {
+        assert_eq!(
+            cfg(Some("overlay"), Some("upstream-1")).overlay_target_name(),
+            Some("upstream-1")
+        );
+        assert_eq!(
+            cfg(Some("translate"), Some("upstream-1")).overlay_target_name(),
+            None
+        );
+        assert_eq!(cfg(Some("overlay"), None).overlay_target_name(), None);
+    }
+
+    #[test]
+    fn defaults_are_native_mode() {
+        let c = UpstreamCompatibilityConfig::default();
+        assert!(!c.is_overlay_mode());
+        assert!(c.overlay_target_name().is_none());
+        assert!(c.sigs_agent_sandbox.is_none());
+        assert!(c.upstream_sandbox_ref.is_none());
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_overlay_fields() {
+        let c = cfg(Some("overlay"), Some("my-upstream"));
+        let j = serde_json::to_string(&c).expect("serialise");
+        let back: UpstreamCompatibilityConfig = serde_json::from_str(&j).expect("deserialise");
+        assert_eq!(back.sigs_agent_sandbox.as_deref(), Some("overlay"));
+        assert_eq!(
+            back.upstream_sandbox_ref.as_ref().map(|r| r.name.as_str()),
+            Some("my-upstream")
+        );
+    }
+
+    #[test]
+    fn serde_omits_upstream_ref_when_none() {
+        let c = cfg(Some("off"), None);
+        let j = serde_json::to_string(&c).expect("serialise");
+        assert!(
+            !j.contains("upstreamSandboxRef"),
+            "off-mode should not serialise upstreamSandboxRef field, got {j}"
+        );
+    }
 }
 
 /// `ClawSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.

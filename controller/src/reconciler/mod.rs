@@ -254,6 +254,67 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         );
     }
 
+    // ── Overlay-mode pre-flight (Phase 2 S8) ─────────────────────────────
+    // When `spec.upstreamCompatibility.sigsAgentSandbox == "overlay"`,
+    // an upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) owns the Pod.
+    // We still create the overlay (namespace, SA, NetworkPolicy,
+    // governance ConfigMaps) but skip Deployment/Service/CronJob.
+    //
+    // Field-level invariant (no ClawSandbox CEL today): overlay mode
+    // requires `upstreamSandboxRef.name`. Without it we can't surface
+    // *which* upstream CR the operator meant, so we Degrade rather than
+    // silently no-op.
+    let upstream_compat = spec.upstream_compatibility.clone().unwrap_or_default();
+    let overlay_mode = upstream_compat.is_overlay_mode();
+    let overlay_target: Option<String> = if overlay_mode {
+        match upstream_compat.overlay_target_name() {
+            Some(n) if !n.is_empty() => Some(n.to_owned()),
+            _ => {
+                tracing::error!(
+                    sandbox = %name,
+                    "OverlayMode selected but upstreamSandboxRef.name is missing/empty"
+                );
+                degrade!(
+                    SPEC_INVALID,
+                    "upstreamCompatibility.sigsAgentSandbox=\"overlay\" requires \
+                     upstreamCompatibility.upstreamSandboxRef.name"
+                );
+            }
+        }
+    } else {
+        // Reject unknown values eagerly so misspellings ("Overlay",
+        // "overaly") don't silently fall through to Native mode.
+        if let Some(v) = upstream_compat.sigs_agent_sandbox.as_deref()
+            && !matches!(v, "" | "off" | "observe" | "translate" | "overlay")
+        {
+            tracing::error!(sandbox = %name, value = v,
+                "Unknown upstreamCompatibility.sigsAgentSandbox value");
+            degrade!(
+                SPEC_INVALID,
+                format!(
+                    "upstreamCompatibility.sigsAgentSandbox: unknown value `{v}` \
+                     (expected off|observe|translate|overlay)"
+                )
+            );
+        }
+        None
+    };
+    if overlay_mode {
+        tracing::info!(
+            sandbox = %name,
+            upstream = %overlay_target.as_deref().unwrap_or("?"),
+            "OverlayMode active — skipping Deployment/Service/blocklist-CronJob \
+             (upstream Sandbox CR owns the Pod)"
+        );
+    }
+
+    // Hoisted out of the deployment block so Step 4c (governance
+    // ConfigMap) and the blocklist CronJob (Step 4d) can reach them.
+    // In overlay mode the Pod is upstream-owned, but the governance
+    // overlay still relies on these.
+    let governance_config = spec.governance.clone().unwrap_or_default();
+    let blocklist_cm_name = format!("{}-blocklist", &name);
+
     // ── Step 1: Create namespace ─────────────────────────────────────────
     let ns_api: Api<Namespace> = Api::all(client.clone());
     let ns: Namespace = serde_json::from_value(json!({
@@ -555,429 +616,490 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         .await?;
 
     // ── Step 4: Deploy sandbox pod ───────────────────────────────────────
-    let image = openclaw_config
-        .image
-        .unwrap_or_else(|| ctx.sandbox_image.clone());
-
-    let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
-
-    let pull_policy = if image.ends_with(":latest") {
-        "Always"
-    } else {
-        "IfNotPresent"
-    };
-
-    let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
-
-    // Token budget values from CRD (0 = unlimited)
-    let token_budget_daily = inference_config
-        .token_budget
-        .as_ref()
-        .and_then(|b| b.daily)
-        .unwrap_or(0);
-    let token_budget_per_request = inference_config
-        .token_budget
-        .as_ref()
-        .and_then(|b| b.per_request)
-        .unwrap_or(0);
-
-    // Build OpenClaw container env vars.
-    //
-    // OPENCLAW_GATEWAY_TOKEN is plumbed via secretKeyRef rather than a static
-    // value so that:
-    //   1. Rotating the Secret + restarting the pod reliably picks up the new
-    //      token without requiring a controller reconcile to re-render the
-    //      Deployment env.
-    //   2. The pod env is, by construction, equal to the Secret value at pod
-    //      start. `azureclaw connect` reads the Secret to find the gateway
-    //      token; if env and Secret ever drift, the operator gets 401s on a
-    //      rolled pod even though the Secret looks correct. valueFrom closes
-    //      that drift window.
-    let mut openclaw_env = vec![
-        json!({"name": "OPENCLAW_MODEL", "value": inference_config.model}),
-        json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
-        json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
-        json!({
-            "name": "OPENCLAW_GATEWAY_TOKEN",
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": "gateway-token",
-                    "key": "token"
-                }
-            }
-        }),
-    ];
-    // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
-    if !ctx.foundry_project_endpoint.is_empty() {
-        openclaw_env.push(
-            json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
-        );
-    }
-    // Foundry deployments list (so plugin shows only deployed models, not full catalog)
-    if !ctx.foundry_deployments.is_empty() {
-        openclaw_env
-            .push(json!({"name": "FOUNDRY_DEPLOYMENTS", "value": &ctx.foundry_deployments}));
-    }
-    // Inject Foundry Agent ID if set in status (for tools needing agent runs)
-    if let Some(ref agent_id) = sandbox
-        .status
-        .as_ref()
-        .and_then(|s| s.foundry_agent_id.clone())
-        && !agent_id.is_empty()
-    {
-        openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
-    }
-    // Signal configured Foundry agent tools
-    if let Some(ref tools) = agent_config.tools
-        && !tools.is_empty()
-    {
-        openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
-    }
-    // AGT governance env vars (opt-in) — injected into BOTH openclaw and router containers
-    let governance_config = spec.governance.unwrap_or_default();
-    let mut router_agt_env: Vec<serde_json::Value> = Vec::new();
-
-    // Operator-level Entra-auth kill switch.
-    //
-    // When the cluster operator sets `AZURECLAW_DISABLE_ENTRA_AUTH=1` on
-    // the controller (e.g. dev clusters, or any subscription where the
-    // `api://agentmesh` Entra app registration is not yet provisioned),
-    // tell every sandbox to skip the Entra token-exchange step at startup.
-    //
-    // Without this, sub-agents burn ~123s on doomed AAD retries before
-    // falling back to anonymous tier — long enough that parent→sub-agent
-    // spawn-and-message workflows fail because the parent's tool-call
-    // timeout fires before the sub-agent finishes booting. See
-    // docs/security-audits/2026-04-26-entra-auth-toggle.md for the full
-    // analysis.
-    //
-    // Default is "skip" until the operator explicitly opts in by unsetting
-    // the env var or setting it to "0". Phase 2 will replace this with
-    // controller-side tenant feature detection once Entra Agent ID
-    // provisioning is automated.
-    let skip_entra =
-        std::env::var("AZURECLAW_DISABLE_ENTRA_AUTH").unwrap_or_else(|_| "1".to_string());
-    if skip_entra == "1" || skip_entra.eq_ignore_ascii_case("true") {
-        openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
-    }
-
-    if governance_config.enabled {
-        openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-        openclaw_env
-            .push(json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}));
-        openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
-        // Validate and propagate trusted peers (format: "name:AMID,name:AMID,...")
-        let valid_peers = governance_config.trusted_peers.as_deref().filter(|p| {
-            let ok = !p.contains('\n') && !p.contains('\r') && !p.contains('\0');
-            if !ok {
-                tracing::warn!("Ignoring trusted_peers: contains control characters");
-            }
-            ok
-        });
-        if let Some(peers) = valid_peers {
-            openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+    // Skipped wholesale in OverlayMode (Phase 2 S8): the operator's
+    // upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) owns the Pod
+    // lifecycle. Step 4b (SA annotations for Azure RBAC) and Step 4c
+    // (governance ConfigMap + mesh ingress NetworkPolicy) intentionally
+    // still run — they form the *overlay* that AzureClaw layers on top
+    // of the upstream Pod.
+    'deployment_block: {
+        if overlay_mode {
+            break 'deployment_block;
         }
-        // Validate registry mode: must be "local" or "global"
-        let reg_mode = match governance_config.registry_mode.as_deref() {
-            Some("local") => "local",
-            Some("global") | None => "global",
-            Some(other) => {
-                tracing::warn!(mode = other, "Invalid registry_mode, defaulting to global");
-                "global"
-            }
+        let image = openclaw_config
+            .image
+            .unwrap_or_else(|| ctx.sandbox_image.clone());
+
+        let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
+
+        let pull_policy = if image.ends_with(":latest") {
+            "Always"
+        } else {
+            "IfNotPresent"
         };
-        openclaw_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
-        // Plugin also needs relay/registry URLs for direct AgentMesh SDK connections
-        openclaw_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
-        openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
-        // Router needs governance vars too (handoff auth, policy enforcement)
-        router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-        router_agt_env
-            .push(json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}));
-        router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
-        // Behavior-monitor burst threshold: offload workers run long
-        // research loops that make many tool/inference calls in short
-        // bursts. Bump the burst limit well above the interactive default
-        // (100/60s) so legitimate research bursts aren't flagged as
-        // "abuse" by the self-burst detector. Non-offload profiles keep
-        // the router's built-in default.
-        if governance_config.tool_policy == "offload" {
-            router_agt_env.push(json!({"name": "AGT_BEHAVIOR_BURST_THRESHOLD", "value": "1000"}));
-        }
-        if let Some(peers) = valid_peers {
-            router_agt_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
-        }
-        router_agt_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
-        // Mesh namespace for K8s DNS routing between agents
-        router_agt_env.push(json!({"name": "AGT_MESH_NAMESPACE", "value": &sandbox_ns}));
-        // Self-hosted AGT relay + registry (for E2E encrypted inter-agent comms)
-        router_agt_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
-        router_agt_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
-    }
 
-    // ── extraEnv: user/controller-provided env vars on spec.openclaw.extraEnv ──
-    // Used by the controller to propagate offload parameters (OFFLOAD_REQUEST_ID,
-    // OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES) into offload
-    // sandboxes. Keys are validated to avoid clobbering reserved prefixes.
-    if let Some(extra) = openclaw_config.extra_env.as_ref() {
-        // Reserved prefixes that must come from the reconciler itself, not user input.
-        const RESERVED_PREFIXES: &[&str] =
-            &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "AZURECLAW_"];
-        // Names already set above — skip silently if caller provided a duplicate.
-        let mut existing: std::collections::HashSet<String> = openclaw_env
-            .iter()
-            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
-            .collect();
-        for (k, v) in extra {
-            if k.is_empty()
-                || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                || k.chars().next().is_some_and(|c| c.is_ascii_digit())
-            {
-                tracing::warn!(key = %k, "extraEnv: invalid env var name, skipping");
-                continue;
-            }
-            if RESERVED_PREFIXES.iter().any(|p| k.starts_with(p)) {
-                tracing::warn!(key = %k, "extraEnv: key uses reserved prefix, skipping");
-                continue;
-            }
-            if v.contains('\0') {
-                tracing::warn!(key = %k, "extraEnv: value contains NUL byte, skipping");
-                continue;
-            }
-            if existing.contains(k) {
-                tracing::debug!(key = %k, "extraEnv: overridden by reconciler, skipping");
-                continue;
-            }
-            openclaw_env.push(json!({"name": k, "value": v}));
-            existing.insert(k.clone());
-        }
-    }
+        let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
-    // Build the inference-router env array
-    let mut router_env = vec![
-        json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
-        json!({"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint}),
-        json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
-        json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
-        json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model}),
-        json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
-        json!({"name": "CONTENT_SAFETY_ENABLED", "value": inference_config.content_safety.to_string()}),
-        json!({"name": "PROMPT_SHIELDS_ENABLED", "value": inference_config.prompt_shields.to_string()}),
-        json!({"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint}),
-        json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
-        json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
-        json!({"name": "SANDBOX_NAME", "value": &name}),
-        json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
-        json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
-    ];
-    router_env.extend(router_agt_env);
+        // Token budget values from CRD (0 = unlimited)
+        let token_budget_daily = inference_config
+            .token_budget
+            .as_ref()
+            .and_then(|b| b.daily)
+            .unwrap_or(0);
+        let token_budget_per_request = inference_config
+            .token_budget
+            .as_ref()
+            .and_then(|b| b.per_request)
+            .unwrap_or(0);
 
-    // ── Blocklist ConfigMap + env vars ──
-    // The blocklist is always-on: router loads a seed file at startup, then
-    // auto-refreshes from OISD + URLhaus feeds every 6 hours.
-    let blocklist_cm_name = format!("{}-blocklist", &name);
-    router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
-    router_env.push(
-        json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}),
-    );
-
-    // Egress learn mode — enabled by default so operators can discover required domains.
-    // Blocklist (threat intelligence) is still enforced. Disable with network_policy.learn_egress=false.
-    let learn_egress = spec
-        .network_policy
-        .as_ref()
-        .is_none_or(|np| np.learn_egress);
-    if learn_egress {
-        router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
-    }
-
-    // Build the pod spec — runtimeClassName only set for Kata (confidential)
-    let mut pod_spec = json!({
-        "serviceAccountName": "sandbox",
-        "securityContext": build_pod_security_context(&sandbox_config),
-        // ── Init container: iptables-based per-container egress control ──
-        // Since K8s NetworkPolicy operates at pod level (not container level),
-        // we use iptables UID-based rules to restrict the openclaw agent
-        // container (UID 1000) to localhost + DNS only, with a transparent
-        // forward proxy for HTTP/HTTPS egress enforcement and learn mode.
+        // Build OpenClaw container env vars.
         //
-        // Filter chain (OUTPUT):
-        //   UID 1000 → allow loopback, DNS, established → DROP everything else
-        //
-        // NAT chain (OUTPUT):
-        //   UID 1000 port 80/443 (not loopback) → REDIRECT to :8444
-        //   The transparent proxy on port 8444 (inference-router, UID 1001):
-        //   - Records every domain for learn mode
-        //   - Enforces blocklist/allowlist per domain
-        //   - Tunnels allowed traffic to the real destination
-        //
-        // This blocks:
-        //  - IMDS credential theft (169.254.169.254)
-        //  - Data exfiltration to any external host
-        //  - Lateral movement to other pods
-        //
-        // The agent can only reach the inference-router on localhost:8443.
-        // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
-        "initContainers": [{
-            "name": "egress-guard",
-            "image": &ctx.inference_router_image,
-            "command": ["sh", "-c", concat!(
-                // Filter chain: allow localhost, DNS, established — drop everything else
-                "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
-                "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
-                "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
-                // Allow reply packets (SYN-ACK etc.) for inbound connections to the
-                // gateway — without this, the WebUX and Telegram channel can't respond.
-                "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
-                "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
-                // forward proxy (port 8444) in the inference-router. This
-                // enables learn mode (domain discovery) and per-domain enforcement.
-                // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
-                // rule above. The proxy (UID 1001) then connects to the real destination.
-                "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
-                "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
-                "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
-            )],
-            "securityContext": {
-                "runAsUser": 0,
-                "runAsNonRoot": false,
-                "seccompProfile": { "type": "Unconfined" },
-                "capabilities": {
-                    "add": ["NET_ADMIN", "NET_RAW"],
-                    "drop": ["ALL"]
-                }
-            },
-            "resources": {
-                "requests": {"cpu": "10m", "memory": "32Mi"},
-                "limits": {"cpu": "200m", "memory": "256Mi"}
-            }
-        }],
-        "containers": [
-                        {
-                            "name": "openclaw",
-                            "image": image,
-                            "imagePullPolicy": pull_policy,
-                            "ports": [{"containerPort": 18789, "name": "gateway"}],
-                            "env": openclaw_env,
-                            "envFrom": [
-                                {"secretRef": {"name": format!("{}-credentials", name), "optional": true}}
-                            ],
-                            "securityContext": {
-                                "runAsUser": 1000,
-                                "allowPrivilegeEscalation": sandbox_config.allow_privilege_escalation,
-                                "readOnlyRootFilesystem": sandbox_config.read_only_root_filesystem,
-                                "capabilities": {"drop": ["ALL"]}
-                            },
-                            "volumeMounts": [
-                                {"name": "sandbox-data", "mountPath": "/sandbox"},
-                                {"name": "tmp", "mountPath": "/tmp"},
-                                // Plugin needs admin token to authenticate trust
-                                // mutations after KNOCK handshakes (pushTrustToRouter).
-                                {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
-                            ],
-                            "resources": spec.resources.as_ref().map(|r| json!({
-                                "requests": r.requests,
-                                "limits": r.limits
-                            })).unwrap_or(json!({
-                                "requests": {"cpu": "500m", "memory": "1Gi"},
-                                "limits": {"cpu": "2", "memory": "4Gi"}
-                            })),
-                            "livenessProbe": {
-                                "exec": {
-                                    "command": ["sh", "-c", "test -f /proc/1/status"]
-                                },
-                                "initialDelaySeconds": 15,
-                                "periodSeconds": 30
-                            },
-                            "readinessProbe": {
-                                "exec": {
-                                    "command": ["sh", "-c", "test -f /proc/1/status"]
-                                },
-                                "initialDelaySeconds": 5,
-                                "periodSeconds": 10
-                            }
-                        },
-                        {
-                            "name": "inference-router",
-                            "image": &ctx.inference_router_image,
-                            "ports": [
-                                {"containerPort": 8443, "name": "inference"},
-                                {"containerPort": 9090, "name": "metrics"}
-                            ],
-                            "env": router_env,
-                            "securityContext": {
-                                "runAsUser": 1001,
-                                "allowPrivilegeEscalation": false,
-                                "readOnlyRootFilesystem": true,
-                                "capabilities": {"drop": ["ALL"]}
-                            },
-                            "resources": {
-                                "requests": {"cpu": "100m", "memory": "64Mi"},
-                                "limits": {"cpu": "500m", "memory": "256Mi"}
-                            },
-                            "livenessProbe": {
-                                "httpGet": {"path": "/healthz", "port": "inference"},
-                                "initialDelaySeconds": 5,
-                                "periodSeconds": 15
-                            },
-                            "readinessProbe": {
-                                "httpGet": {"path": "/healthz", "port": "inference"},
-                                "initialDelaySeconds": 3,
-                                "periodSeconds": 5
-                            },
-                            "volumeMounts": [
-                                {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
-                            ]
-                        }
-                    ],
-                    "volumes": [
-                        {"name": "sandbox-data", "emptyDir": {}},
-                        {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}},
-                        {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
-                    ],
-                    "tolerations": [{
-                        "key": "azureclaw.azure.com/sandbox",
-                        "operator": "Equal",
-                        "value": "true",
-                        "effect": "NoSchedule"
-                    }],
-                    "nodeSelector": {
-                        "azureclaw.azure.com/pool": pool_label
+        // OPENCLAW_GATEWAY_TOKEN is plumbed via secretKeyRef rather than a static
+        // value so that:
+        //   1. Rotating the Secret + restarting the pod reliably picks up the new
+        //      token without requiring a controller reconcile to re-render the
+        //      Deployment env.
+        //   2. The pod env is, by construction, equal to the Secret value at pod
+        //      start. `azureclaw connect` reads the Secret to find the gateway
+        //      token; if env and Secret ever drift, the operator gets 401s on a
+        //      rolled pod even though the Secret looks correct. valueFrom closes
+        //      that drift window.
+        let mut openclaw_env = vec![
+            json!({"name": "OPENCLAW_MODEL", "value": inference_config.model}),
+            json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
+            json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
+            json!({
+                "name": "OPENCLAW_GATEWAY_TOKEN",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": "gateway-token",
+                        "key": "token"
                     }
-    });
+                }
+            }),
+        ];
+        // Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
+        if !ctx.foundry_project_endpoint.is_empty() {
+            openclaw_env.push(
+                json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
+            );
+        }
+        // Foundry deployments list (so plugin shows only deployed models, not full catalog)
+        if !ctx.foundry_deployments.is_empty() {
+            openclaw_env
+                .push(json!({"name": "FOUNDRY_DEPLOYMENTS", "value": &ctx.foundry_deployments}));
+        }
+        // Inject Foundry Agent ID if set in status (for tools needing agent runs)
+        if let Some(ref agent_id) = sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.foundry_agent_id.clone())
+            && !agent_id.is_empty()
+        {
+            openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
+        }
+        // Signal configured Foundry agent tools
+        if let Some(ref tools) = agent_config.tools
+            && !tools.is_empty()
+        {
+            openclaw_env.push(json!({"name": "FOUNDRY_AGENT_TOOLS", "value": tools.join(",")}));
+        }
+        // AGT governance env vars (opt-in) — injected into BOTH openclaw and router containers
+        // (`governance_config` is hoisted above the deployment block so Step 4c can use it.)
+        let mut router_agt_env: Vec<serde_json::Value> = Vec::new();
 
-    // Set runtimeClassName for Kata (confidential) isolation
-    if let Some(rc) = runtime_class {
-        pod_spec
-            .as_object_mut()
-            .unwrap()
-            .insert("runtimeClassName".into(), json!(rc));
-    }
+        // Operator-level Entra-auth kill switch.
+        //
+        // When the cluster operator sets `AZURECLAW_DISABLE_ENTRA_AUTH=1` on
+        // the controller (e.g. dev clusters, or any subscription where the
+        // `api://agentmesh` Entra app registration is not yet provisioned),
+        // tell every sandbox to skip the Entra token-exchange step at startup.
+        //
+        // Without this, sub-agents burn ~123s on doomed AAD retries before
+        // falling back to anonymous tier — long enough that parent→sub-agent
+        // spawn-and-message workflows fail because the parent's tool-call
+        // timeout fires before the sub-agent finishes booting. See
+        // docs/security-audits/2026-04-26-entra-auth-toggle.md for the full
+        // analysis.
+        //
+        // Default is "skip" until the operator explicitly opts in by unsetting
+        // the env var or setting it to "0". Phase 2 will replace this with
+        // controller-side tenant feature detection once Entra Agent ID
+        // provisioning is automated.
+        let skip_entra =
+            std::env::var("AZURECLAW_DISABLE_ENTRA_AUTH").unwrap_or_else(|_| "1".to_string());
+        if skip_entra == "1" || skip_entra.eq_ignore_ascii_case("true") {
+            openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
+        }
 
-    // If AGT governance is enabled, mount the policy ConfigMap into the router
-    if governance_config.enabled {
-        let policy_profile = &governance_config.tool_policy;
-        let cm_name = format!("agt-policy-{}", policy_profile);
+        if governance_config.enabled {
+            openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
+            openclaw_env.push(
+                json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}),
+            );
+            openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+            // Validate and propagate trusted peers (format: "name:AMID,name:AMID,...")
+            let valid_peers = governance_config.trusted_peers.as_deref().filter(|p| {
+                let ok = !p.contains('\n') && !p.contains('\r') && !p.contains('\0');
+                if !ok {
+                    tracing::warn!("Ignoring trusted_peers: contains control characters");
+                }
+                ok
+            });
+            if let Some(peers) = valid_peers {
+                openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+            }
+            // Validate registry mode: must be "local" or "global"
+            let reg_mode = match governance_config.registry_mode.as_deref() {
+                Some("local") => "local",
+                Some("global") | None => "global",
+                Some(other) => {
+                    tracing::warn!(mode = other, "Invalid registry_mode, defaulting to global");
+                    "global"
+                }
+            };
+            openclaw_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
+            // Plugin also needs relay/registry URLs for direct AgentMesh SDK connections
+            openclaw_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
+            openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
+            // Router needs governance vars too (handoff auth, policy enforcement)
+            router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
+            router_agt_env.push(
+                json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}),
+            );
+            router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
+            // Behavior-monitor burst threshold: offload workers run long
+            // research loops that make many tool/inference calls in short
+            // bursts. Bump the burst limit well above the interactive default
+            // (100/60s) so legitimate research bursts aren't flagged as
+            // "abuse" by the self-burst detector. Non-offload profiles keep
+            // the router's built-in default.
+            if governance_config.tool_policy == "offload" {
+                router_agt_env
+                    .push(json!({"name": "AGT_BEHAVIOR_BURST_THRESHOLD", "value": "1000"}));
+            }
+            if let Some(peers) = valid_peers {
+                router_agt_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+            }
+            router_agt_env.push(json!({"name": "AGT_REGISTRY_MODE", "value": reg_mode}));
+            // Mesh namespace for K8s DNS routing between agents
+            router_agt_env.push(json!({"name": "AGT_MESH_NAMESPACE", "value": &sandbox_ns}));
+            // Self-hosted AGT relay + registry (for E2E encrypted inter-agent comms)
+            router_agt_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
+            router_agt_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
+        }
 
-        // Add policy volume
+        // ── extraEnv: user/controller-provided env vars on spec.openclaw.extraEnv ──
+        // Used by the controller to propagate offload parameters (OFFLOAD_REQUEST_ID,
+        // OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES) into offload
+        // sandboxes. Keys are validated to avoid clobbering reserved prefixes.
+        if let Some(extra) = openclaw_config.extra_env.as_ref() {
+            // Reserved prefixes that must come from the reconciler itself, not user input.
+            const RESERVED_PREFIXES: &[&str] =
+                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "AZURECLAW_"];
+            // Names already set above — skip silently if caller provided a duplicate.
+            let mut existing: std::collections::HashSet<String> = openclaw_env
+                .iter()
+                .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect();
+            for (k, v) in extra {
+                if k.is_empty()
+                    || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    || k.chars().next().is_some_and(|c| c.is_ascii_digit())
+                {
+                    tracing::warn!(key = %k, "extraEnv: invalid env var name, skipping");
+                    continue;
+                }
+                if RESERVED_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                    tracing::warn!(key = %k, "extraEnv: key uses reserved prefix, skipping");
+                    continue;
+                }
+                if v.contains('\0') {
+                    tracing::warn!(key = %k, "extraEnv: value contains NUL byte, skipping");
+                    continue;
+                }
+                if existing.contains(k) {
+                    tracing::debug!(key = %k, "extraEnv: overridden by reconciler, skipping");
+                    continue;
+                }
+                openclaw_env.push(json!({"name": k, "value": v}));
+                existing.insert(k.clone());
+            }
+        }
+
+        // Build the inference-router env array
+        let mut router_env = vec![
+            json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
+            json!({"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint}),
+            json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
+            json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
+            json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model}),
+            json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
+            json!({"name": "CONTENT_SAFETY_ENABLED", "value": inference_config.content_safety.to_string()}),
+            json!({"name": "PROMPT_SHIELDS_ENABLED", "value": inference_config.prompt_shields.to_string()}),
+            json!({"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint}),
+            json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
+            json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
+            json!({"name": "SANDBOX_NAME", "value": &name}),
+            json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
+            json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
+        ];
+        router_env.extend(router_agt_env);
+
+        // ── Blocklist ConfigMap + env vars ──
+        // The blocklist is always-on: router loads a seed file at startup, then
+        // auto-refreshes from OISD + URLhaus feeds every 6 hours.
+        // (`blocklist_cm_name` is hoisted above the deployment block so the
+        // CronJob (Step 4d) can reach it in overlay mode.)
+        router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
+        router_env.push(
+            json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}),
+        );
+
+        // Egress learn mode — enabled by default so operators can discover required domains.
+        // Blocklist (threat intelligence) is still enforced. Disable with network_policy.learn_egress=false.
+        let learn_egress = spec
+            .network_policy
+            .as_ref()
+            .is_none_or(|np| np.learn_egress);
+        if learn_egress {
+            router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
+        }
+
+        // Build the pod spec — runtimeClassName only set for Kata (confidential)
+        let mut pod_spec = json!({
+            "serviceAccountName": "sandbox",
+            "securityContext": build_pod_security_context(&sandbox_config),
+            // ── Init container: iptables-based per-container egress control ──
+            // Since K8s NetworkPolicy operates at pod level (not container level),
+            // we use iptables UID-based rules to restrict the openclaw agent
+            // container (UID 1000) to localhost + DNS only, with a transparent
+            // forward proxy for HTTP/HTTPS egress enforcement and learn mode.
+            //
+            // Filter chain (OUTPUT):
+            //   UID 1000 → allow loopback, DNS, established → DROP everything else
+            //
+            // NAT chain (OUTPUT):
+            //   UID 1000 port 80/443 (not loopback) → REDIRECT to :8444
+            //   The transparent proxy on port 8444 (inference-router, UID 1001):
+            //   - Records every domain for learn mode
+            //   - Enforces blocklist/allowlist per domain
+            //   - Tunnels allowed traffic to the real destination
+            //
+            // This blocks:
+            //  - IMDS credential theft (169.254.169.254)
+            //  - Data exfiltration to any external host
+            //  - Lateral movement to other pods
+            //
+            // The agent can only reach the inference-router on localhost:8443.
+            // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
+            "initContainers": [{
+                "name": "egress-guard",
+                "image": &ctx.inference_router_image,
+                "command": ["sh", "-c", concat!(
+                    // Filter chain: allow localhost, DNS, established — drop everything else
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
+                    // Allow reply packets (SYN-ACK etc.) for inbound connections to the
+                    // gateway — without this, the WebUX and Telegram channel can't respond.
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
+                    // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
+                    // forward proxy (port 8444) in the inference-router. This
+                    // enables learn mode (domain discovery) and per-domain enforcement.
+                    // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
+                    // rule above. The proxy (UID 1001) then connects to the real destination.
+                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
+                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
+                    "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
+                )],
+                "securityContext": {
+                    "runAsUser": 0,
+                    "runAsNonRoot": false,
+                    "seccompProfile": { "type": "Unconfined" },
+                    "capabilities": {
+                        "add": ["NET_ADMIN", "NET_RAW"],
+                        "drop": ["ALL"]
+                    }
+                },
+                "resources": {
+                    "requests": {"cpu": "10m", "memory": "32Mi"},
+                    "limits": {"cpu": "200m", "memory": "256Mi"}
+                }
+            }],
+            "containers": [
+                            {
+                                "name": "openclaw",
+                                "image": image,
+                                "imagePullPolicy": pull_policy,
+                                "ports": [{"containerPort": 18789, "name": "gateway"}],
+                                "env": openclaw_env,
+                                "envFrom": [
+                                    {"secretRef": {"name": format!("{}-credentials", name), "optional": true}}
+                                ],
+                                "securityContext": {
+                                    "runAsUser": 1000,
+                                    "allowPrivilegeEscalation": sandbox_config.allow_privilege_escalation,
+                                    "readOnlyRootFilesystem": sandbox_config.read_only_root_filesystem,
+                                    "capabilities": {"drop": ["ALL"]}
+                                },
+                                "volumeMounts": [
+                                    {"name": "sandbox-data", "mountPath": "/sandbox"},
+                                    {"name": "tmp", "mountPath": "/tmp"},
+                                    // Plugin needs admin token to authenticate trust
+                                    // mutations after KNOCK handshakes (pushTrustToRouter).
+                                    {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
+                                ],
+                                "resources": spec.resources.as_ref().map(|r| json!({
+                                    "requests": r.requests,
+                                    "limits": r.limits
+                                })).unwrap_or(json!({
+                                    "requests": {"cpu": "500m", "memory": "1Gi"},
+                                    "limits": {"cpu": "2", "memory": "4Gi"}
+                                })),
+                                "livenessProbe": {
+                                    "exec": {
+                                        "command": ["sh", "-c", "test -f /proc/1/status"]
+                                    },
+                                    "initialDelaySeconds": 15,
+                                    "periodSeconds": 30
+                                },
+                                "readinessProbe": {
+                                    "exec": {
+                                        "command": ["sh", "-c", "test -f /proc/1/status"]
+                                    },
+                                    "initialDelaySeconds": 5,
+                                    "periodSeconds": 10
+                                }
+                            },
+                            {
+                                "name": "inference-router",
+                                "image": &ctx.inference_router_image,
+                                "ports": [
+                                    {"containerPort": 8443, "name": "inference"},
+                                    {"containerPort": 9090, "name": "metrics"}
+                                ],
+                                "env": router_env,
+                                "securityContext": {
+                                    "runAsUser": 1001,
+                                    "allowPrivilegeEscalation": false,
+                                    "readOnlyRootFilesystem": true,
+                                    "capabilities": {"drop": ["ALL"]}
+                                },
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "64Mi"},
+                                    "limits": {"cpu": "500m", "memory": "256Mi"}
+                                },
+                                "livenessProbe": {
+                                    "httpGet": {"path": "/healthz", "port": "inference"},
+                                    "initialDelaySeconds": 5,
+                                    "periodSeconds": 15
+                                },
+                                "readinessProbe": {
+                                    "httpGet": {"path": "/healthz", "port": "inference"},
+                                    "initialDelaySeconds": 3,
+                                    "periodSeconds": 5
+                                },
+                                "volumeMounts": [
+                                    {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
+                                ]
+                            }
+                        ],
+                        "volumes": [
+                            {"name": "sandbox-data", "emptyDir": {}},
+                            {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}},
+                            {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
+                        ],
+                        "tolerations": [{
+                            "key": "azureclaw.azure.com/sandbox",
+                            "operator": "Equal",
+                            "value": "true",
+                            "effect": "NoSchedule"
+                        }],
+                        "nodeSelector": {
+                            "azureclaw.azure.com/pool": pool_label
+                        }
+        });
+
+        // Set runtimeClassName for Kata (confidential) isolation
+        if let Some(rc) = runtime_class {
+            pod_spec
+                .as_object_mut()
+                .unwrap()
+                .insert("runtimeClassName".into(), json!(rc));
+        }
+
+        // If AGT governance is enabled, mount the policy ConfigMap into the router
+        if governance_config.enabled {
+            let policy_profile = &governance_config.tool_policy;
+            let cm_name = format!("agt-policy-{}", policy_profile);
+
+            // Add policy volume
+            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
+                volumes.push(json!({
+                    "name": "agt-policy",
+                    "configMap": {
+                        "name": cm_name
+                    }
+                }));
+            }
+
+            // Add volumeMount + AGT_POLICY_DIR env to the router container
+            if let Some(containers) = pod_spec
+                .get_mut("containers")
+                .and_then(|c| c.as_array_mut())
+            {
+                for container in containers.iter_mut() {
+                    if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
+                        // Add volumeMount
+                        let mounts = container
+                            .as_object_mut()
+                            .unwrap()
+                            .entry("volumeMounts")
+                            .or_insert(json!([]));
+                        if let Some(mounts_arr) = mounts.as_array_mut() {
+                            mounts_arr.push(json!({
+                                "name": "agt-policy",
+                                "mountPath": "/etc/agt/policies",
+                                "readOnly": true
+                            }));
+                        }
+                        // Add AGT_POLICY_DIR env var (router reads policies natively)
+                        if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
+                            env.push(
+                                json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}),
+                            );
+                        }
+                    }
+                }
+
+                // Add writable emptyDir volume for trust store + audit log persistence
+                if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
+                    volumes.push(json!({
+                        "name": "agt-data",
+                        "emptyDir": {"sizeLimit": "10Mi"}
+                    }));
+                }
+            }
+        }
+
+        // Mount blocklist seed ConfigMap into the router container
         if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
             volumes.push(json!({
-                "name": "agt-policy",
+                "name": "blocklist-seed",
                 "configMap": {
-                    "name": cm_name
+                    "name": &blocklist_cm_name,
+                    "optional": true
                 }
             }));
         }
-
-        // Add volumeMount + AGT_POLICY_DIR env to the router container
         if let Some(containers) = pod_spec
             .get_mut("containers")
             .and_then(|c| c.as_array_mut())
         {
             for container in containers.iter_mut() {
                 if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
-                    // Add volumeMount
                     let mounts = container
                         .as_object_mut()
                         .unwrap()
@@ -985,95 +1107,51 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         .or_insert(json!([]));
                     if let Some(mounts_arr) = mounts.as_array_mut() {
                         mounts_arr.push(json!({
-                            "name": "agt-policy",
-                            "mountPath": "/etc/agt/policies",
+                            "name": "blocklist-seed",
+                            "mountPath": "/etc/azureclaw/blocklist",
                             "readOnly": true
                         }));
                     }
-                    // Add AGT_POLICY_DIR env var (router reads policies natively)
-                    if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
-                        env.push(json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}));
-                    }
-                }
-            }
-
-            // Add writable emptyDir volume for trust store + audit log persistence
-            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
-                volumes.push(json!({
-                    "name": "agt-data",
-                    "emptyDir": {"sizeLimit": "10Mi"}
-                }));
-            }
-        }
-    }
-
-    // Mount blocklist seed ConfigMap into the router container
-    if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
-        volumes.push(json!({
-            "name": "blocklist-seed",
-            "configMap": {
-                "name": &blocklist_cm_name,
-                "optional": true
-            }
-        }));
-    }
-    if let Some(containers) = pod_spec
-        .get_mut("containers")
-        .and_then(|c| c.as_array_mut())
-    {
-        for container in containers.iter_mut() {
-            if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
-                let mounts = container
-                    .as_object_mut()
-                    .unwrap()
-                    .entry("volumeMounts")
-                    .or_insert(json!([]));
-                if let Some(mounts_arr) = mounts.as_array_mut() {
-                    mounts_arr.push(json!({
-                        "name": "blocklist-seed",
-                        "mountPath": "/etc/azureclaw/blocklist",
-                        "readOnly": true
-                    }));
                 }
             }
         }
-    }
 
-    let deployment: Deployment = serde_json::from_value(json!({
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": {
-            "name": name,
-            "namespace": sandbox_ns,
-            "labels": {
-                "azureclaw.azure.com/sandbox": name,
-                "azureclaw.azure.com/component": "sandbox"
-            }
-        },
-        "spec": {
-            "replicas": 1,
-            "selector": {
-                "matchLabels": {"azureclaw.azure.com/sandbox": name}
+        let deployment: Deployment = serde_json::from_value(json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": name,
+                "namespace": sandbox_ns,
+                "labels": {
+                    "azureclaw.azure.com/sandbox": name,
+                    "azureclaw.azure.com/component": "sandbox"
+                }
             },
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "azureclaw.azure.com/sandbox": name,
-                        "azureclaw.azure.com/component": "sandbox",
-                        "azure.workload.identity/use": "true"
-                    }
+            "spec": {
+                "replicas": 1,
+                "selector": {
+                    "matchLabels": {"azureclaw.azure.com/sandbox": name}
                 },
-                "spec": pod_spec
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "azureclaw.azure.com/sandbox": name,
+                            "azureclaw.azure.com/component": "sandbox",
+                            "azure.workload.identity/use": "true"
+                        }
+                    },
+                    "spec": pod_spec
+                }
             }
-        }
-    }))?;
-    deploy_api
-        .patch(
-            &name,
-            &PatchParams::apply("azureclaw-controller").force(),
-            &Patch::Apply(deployment),
-        )
-        .await?;
+        }))?;
+        deploy_api
+            .patch(
+                &name,
+                &PatchParams::apply("azureclaw-controller").force(),
+                &Patch::Apply(deployment),
+            )
+            .await?;
+    } // end 'deployment_block
 
     // ── Step 4b: Azure Services RBAC annotations ─────────────────────────
     // If spec.azure_services is configured, annotate the ServiceAccount and
@@ -1248,7 +1326,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // Create CronJob that fetches fresh lists from OISD + URLhaus every 6h
     // and patches the ConfigMap — so even if the router can't reach feeds
     // directly, the mounted file stays fresh.
-    {
+    //
+    // **OverlayMode (S8):** skipped. The blocklist is mounted into the
+    // AzureClaw-managed router container; in overlay mode the upstream
+    // Sandbox CR owns the Pod and there is no AzureClaw router to consume
+    // the ConfigMap. Recreating it would be dead overhead (CronJob would
+    // run every 6h with nothing reading the output).
+    if !overlay_mode {
         let full_seed = include_str!("../../../cli/blocklists/seed-domains.txt");
         // Truncate to stay under 1MB ConfigMap limit (K8s rejects >1048576 bytes)
         let seed_domains = if full_seed.len() > 900_000 {
@@ -1386,7 +1470,21 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // against `.status` regardless of byte-equality), which retriggers
     // our own watch and produces a hot reconcile loop. See
     // `crate::status::running_status_matches` for the rationale.
-    if !crate::status::running_status_matches(&sandbox, &sandbox_ns) {
+    //
+    // OverlayMode emits a distinct `phase: "Overlay"` + Suspended=True
+    // condition so dashboards can surface "this CR is intentionally not
+    // driving a Pod" — see [`crate::status::build_overlay_status_patch`].
+    if let Some(upstream_ref) = overlay_target.as_deref() {
+        if !crate::status::overlay_status_matches(&sandbox, &sandbox_ns, upstream_ref) {
+            let sandbox_api: Api<ClawSandbox> =
+                Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+            let status_obj =
+                crate::status::build_overlay_status_patch(&sandbox, &sandbox_ns, upstream_ref);
+            let _ = sandbox_api
+                .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
+                .await;
+        }
+    } else if !crate::status::running_status_matches(&sandbox, &sandbox_ns) {
         let sandbox_api: Api<ClawSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
         let status_obj = crate::status::build_running_status_patch(&sandbox, &sandbox_ns);

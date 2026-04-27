@@ -53,6 +53,12 @@ pub const TYPE_PROGRESSING: &str = "Progressing";
 /// missing dependency, quota, etc.). `status=True` means degraded.
 pub const TYPE_DEGRADED: &str = "Degraded";
 
+/// Well-known condition type (Phase 2 S8): controller has *intentionally
+/// stopped driving* a sub-resource — e.g. `OverlayMode` skips Pod
+/// creation because an upstream `Sandbox` CR owns the Pod. `status=True`
+/// means suspended; `status=False` means actively reconciling.
+pub const TYPE_SUSPENDED: &str = "Suspended";
+
 /// `status` canonical values.
 pub mod status {
     pub const TRUE: &str = "True";
@@ -70,6 +76,9 @@ pub mod reason {
     pub const SPEC_INVALID: &str = "SpecInvalid";
     pub const DEPENDENCY_MISSING: &str = "DependencyMissing";
     pub const TIMED_OUT: &str = "TimedOut";
+    /// Phase 2 S8 — `OverlayMode`: operator's upstream `Sandbox` CR
+    /// owns the Pod; AzureClaw provides the governance overlay only.
+    pub const OVERLAY_MODE: &str = "OverlayMode";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.

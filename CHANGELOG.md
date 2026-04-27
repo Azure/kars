@@ -292,6 +292,88 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S8 `phase2-overlaymode` — sigs/agent-sandbox OverlayMode
+
+This slice flips `ClawSandbox.spec.upstreamCompatibility.sigsAgentSandbox`
+from a Phase-1 schema-only field into a real reconciler branch, closing
+implementation-plan §2.1's third sandbox mode (Native | Translate |
+**Overlay**) and contributing to §14.6 column 11 (Multi-runtime hosting).
+
+**Behaviour:** when `sigsAgentSandbox: "overlay"`, the operator already
+manages an upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) in the
+namespace and `ClawSandbox.spec.upstreamCompatibility.upstreamSandboxRef.name`
+points at it. The controller still creates the *governance overlay*
+(namespace, sandbox ServiceAccount with Workload-Identity binding,
+egress + ingress NetworkPolicy, governance ConfigMap, Azure RBAC SA
+annotations) but **skips** the AzureClaw Pod Deployment and the
+blocklist seed-ConfigMap + 6h refresh CronJob — those would have nothing
+to mount into.
+
+**Status:** new `phase: "Overlay"` distinct from `"Running"`, with
+`Ready=True / Reason=OverlayMode`, `Progressing=False / Reason=OverlayMode`,
+and a new `Suspended=True / Reason=OverlayMode` condition whose message
+names the upstream CR. `status.sandboxPod` is set to
+`upstream/<name>` so `kubectl get clawsandbox` makes the upstream
+relationship obvious. New `overlay_status_matches` idempotency guard
+mirrors `running_status_matches` to keep `.status` PATCH traffic flat.
+
+**Admission gate:** runtime-only (no ClawSandbox CEL admission rules
+exist yet — schema-only Phase 1). The reconciler stamps `Degraded=True /
+Reason=SpecInvalid` when `sigsAgentSandbox == "overlay"` but
+`upstreamSandboxRef.name` is missing/empty, or when an unknown value
+(typo such as `"Overlay"` or `"overaly"`) is supplied. Future slice can
+hoist into CEL once a `claw_sandbox_validations()` function is added.
+
+**Out of scope (deferred):** watching the upstream `Sandbox` CR's
+status (would require the upstream CRD discovery + informer); mirroring
+its conditions back onto `ClawSandbox.status`; `kubectl claw convert`
+upstream→overlay path (lands in S9). `Translate` mode remains
+schema-only — no runtime path beyond what already lands here.
+
+**Surface:**
+
+- `controller/src/crd.rs` — `UpstreamCompatibilityConfig` gains
+  `upstream_sandbox_ref: Option<LocalObjectRef>`; `is_overlay_mode()`
+  + `overlay_target_name()` pure helpers; field-level docs list all
+  four accepted values (`off|observe|translate|overlay`) and the
+  overlay-requires-ref invariant. 5 unit tests.
+- `controller/src/status/conditions.rs` — new `TYPE_SUSPENDED`
+  condition type + `reason::OVERLAY_MODE` constant.
+- `controller/src/status/mod.rs` — `build_overlay_status_patch`,
+  `overlay_status_matches`. 6 unit tests.
+- `controller/src/reconciler/mod.rs` — overlay-mode pre-flight before
+  Step 1 (Degrades on missing ref / unknown value); Deployment block
+  (Step 4) wrapped in labelled `'deployment_block` with early-`break`
+  on overlay; blocklist CM + CronJob (Step 4d) gated on
+  `!overlay_mode`; Step 5 dispatches to `build_overlay_status_patch`
+  when overlay target is set, else falls through to the existing
+  Running path. `governance_config` and `blocklist_cm_name` hoisted
+  out of the deployment block so Step 4c / Step 4d still see them.
+
+**Reuse map:**
+
+- Existing `LocalObjectRef` (`controller/src/mcp_server.rs:157`)
+  reused — fifth client now (signing/jwks, profile, agent-card,
+  guardrail-profile, **upstream sandbox ref**). No second
+  ObjectReference type.
+- `crate::status::conditions::preserve_transition_time` reused
+  unchanged for the new three-condition matrix.
+- `crate::status::stamp_degraded` reused for both new failure modes.
+- Reconciler's existing `degrade!` macro reused — overlay-validation
+  errors flow through the same Degraded-stamp + 60s requeue path as
+  every other spec-invalid case.
+- No new file managers, no new CRDs, no helm `crd.yaml` change
+  (`upstreamCompatibility` was schema-only in Phase 1 — kube-rs
+  registers the runtime schema; helm template stays admission-only
+  until a `claw_sandbox_validations()` lands).
+
+**Tests:** controller workspace 264 → 276 (+12: 5 CRD helpers + 6 status
+helpers + 1 condition constant exercise via overlay tests). Workspace
+green (router 595, integration 26).
+
+**Audit:** `docs/security-audits/2026-04-27-phase2-overlaymode.md` — 2
+sign-offs.
+
 ### S6 `phase2-claweval` — ClawEval CRD + binding ConfigMap + helm CRD
 
 This slice ships the controller side of the Azure AI Foundry Evals
