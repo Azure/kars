@@ -14,6 +14,9 @@
 mod a2a_agent;
 mod a2a_agent_compile;
 mod a2a_agent_reconciler;
+mod claw_memory;
+mod claw_memory_compile;
+mod claw_memory_reconciler;
 mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
@@ -84,6 +87,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { inference_policy_reconciler::run(client).await })
     };
+    let claw_memory_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { claw_memory_reconciler::run(client).await })
+    };
     let mesh_peer_handle = {
         let client = client.clone();
         tokio::spawn(async move {
@@ -146,6 +153,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = inference_policy_handle => {
+            res??;
+        }
+        res = claw_memory_handle => {
             res??;
         }
         res = mesh_peer_handle => {
