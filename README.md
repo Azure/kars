@@ -44,6 +44,8 @@ AzureClaw is **not a fork of OpenClaw** — it extends OpenClaw via its native p
 4. **Operational footprint** — `azureclaw up` provisions AKS + ACR + Foundry + Foundry-side Content Safety + sandbox in one go; `azureclaw operator` gives a live TUI for running fleets.
 5. **Multi-runtime future** — see [Roadmap](#roadmap-extending-beyond-openclaw) below: protocol scaffolding (MCP, A2A, AP2) is in place so the same sandbox can host non-OpenClaw agents over the wire.
 
+> 📖 **See [`docs/use-cases.md`](docs/use-cases.md)** for the four end-to-end scenarios — AzureClaw-native agents, **any-OpenClaw → AzureClaw cloud offload** (no AzureClaw CLI on the laptop), AzureClaw ↔ AzureClaw mesh, and the roadmap for non-OpenClaw runtimes via MCP / A2A / AP2. For deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) with topology + trust-boundary + flow diagrams, see [`docs/blueprints/`](docs/blueprints/00-index.md).
+
 ---
 
 ## Architecture
@@ -212,7 +214,7 @@ The protocol scaffolding for that future is being landed now in tightly scoped, 
 | **Pluggable governance providers** | `PolicyDecisionProvider`, `AuditSink`, `SigningProvider` traits live; in-tree implementations are the production path today | Future swap-in of AGT's Rust SDK alternates without rewriting call sites; multi-tenant per-capability provider selection |
 | **`McpServer` / `ToolPolicy` CRDs** | Schema-only in this branch; reconcilers planned for the next phase | Declarative tool-server publication and per-tool policy (rate limits, commerce caps, allowlists) |
 
-The full plan for these surfaces — what is implemented today, what is wiring-pending, and what is deferred — is captured in [`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md). For three end-to-end scenarios spanning today's runtime and these in-flight extensions, see [`docs/use-cases.md`](docs/use-cases.md).
+The full plan for these surfaces — what is implemented today, what is wiring-pending, and what is deferred — is captured in [`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md). For the four end-to-end scenarios — three shipping today, plus a roadmap track for non-OpenClaw runtimes — see [`docs/use-cases.md`](docs/use-cases.md).
 
 ---
 
