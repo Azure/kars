@@ -11,6 +11,9 @@
 //!
 //! Built with kube-rs (CNCF Sandbox).
 
+mod a2a_agent;
+mod a2a_agent_compile;
+mod a2a_agent_reconciler;
 mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
@@ -70,6 +73,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { tool_policy_reconciler::run(client).await })
     };
+    let a2a_agent_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { a2a_agent_reconciler::run(client).await })
+    };
     let mesh_peer_handle = {
         let client = client.clone();
         tokio::spawn(async move {
@@ -126,6 +133,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = tool_policy_handle => {
+            res??;
+        }
+        res = a2a_agent_handle => {
             res??;
         }
         res = mesh_peer_handle => {
