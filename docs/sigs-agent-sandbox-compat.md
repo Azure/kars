@@ -2,7 +2,7 @@
 
 **Status:** Phase 0 design doc (no code, no CI dependency).
 **Scope:** Internal; shared with AGT team for boundary confirmation.
-**Plan reference:** `docs/implementation-plan.md` §2 + §6 item 14.
+**Plan reference:** internal Phase 1 plan §2 + §6 item 14.
 **Source of upstream schema pinned in this doc:**
 <https://github.com/kubernetes-sigs/agent-sandbox/blob/main/api/v1alpha1/sandbox_types.go>
 (fetched 2026-04-24; unpinned — we explicitly *do not* track a specific

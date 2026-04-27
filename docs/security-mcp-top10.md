@@ -52,7 +52,7 @@ token reject / expired token reject / audience mismatch reject
 
 **Refs.** `sandbox-images/openclaw/entrypoint.sh` (credential mount),
 `deploy/helm/azureclaw/templates/` (secret shape),
-`docs/implementation-plan.md` §7 item 1.
+internal Phase 1 plan §7 item 1.
 
 ### MCP02 — Privilege escalation via scope creep
 
@@ -94,7 +94,7 @@ dropped patch integrity.
 
 **Today.** `vendor/agentmesh-sdk/`, `vendor/agentmesh-relay/`,
 `vendor/agentmesh-registry/` each carry a `README.md` enumerating the
-8 patches against upstream. `ci/vendored-patch-audit.sh` forces a
+vendored fork. `ci/vendored-patch-audit.sh` forces a
 re-confirmation row in `docs/agt-vendored-patch-audit.md` on every
 AGT SDK version bump — patches that become upstream-absorbed are
 documented as such rather than silently dropped.
@@ -113,8 +113,8 @@ boundary, not input validation. Even a complete code-injection win
 in the agent process gives UID 1000 with seccomp-strict and no direct
 egress; Landlock blocks writes to plugin/SDK directories; hijacked
 code cannot exfiltrate without going through the router's proxy and
-Foundry Content Safety. This is the "defense-in-depth" framing of
-`docs/competitive.md §14.6`.
+Foundry Content Safety. This is the "defense-in-depth" posture summarised
+in `docs/security.md` §9.
 
 **Conformance.** `tests/conformance/seccomp-landlock-egress/` (plan
 §5.4 row 6, Phase 0) asserts that forbidden syscalls return `EPERM`
@@ -211,6 +211,4 @@ confusion attacks fail closed.
   counts, component names).
 * `docs/threat-model.md` — STRIDE per surface.
 * `docs/security-audits/` — per-capability audit docs.
-* `docs/implementation-plan.md` §§0.2, 7 — principles and Phase 1
-  scope.
-* `docs/competitive.md` §14.6 — Composite Verdict end state.
+* Internal Phase 1 plan §§0.2, 7 — principles and Phase 1 scope.

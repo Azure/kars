@@ -5,7 +5,7 @@ Independent reviewers qualified to sign off on security-sensitive changes per
 
 ## Roster governance
 
-- **Maintainer:** TBD (open decision — see `docs/implementation-plan.md` §14.9).
+- **Maintainer:** TBD (governance pending repo maintainer decision).
 - **Review SLA:** TBD.
 - **Fallback when primary reviewer is unavailable:** TBD.
 - **Addition/removal policy:** TBD.

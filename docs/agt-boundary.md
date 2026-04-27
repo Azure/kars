@@ -56,7 +56,7 @@ bug to resolve, not a feature to negotiate.
 
 Four provider traits, each with three impls (`Vendored*`, `Agt*`, `Null*`).
 `Null*` is test-only and blocked in prod by admission (see
-`docs/implementation-plan.md` §6 item 6).
+internal Phase 1 plan §6 item 6).
 
 | Trait | Current impls | Role |
 |---|---|---|
