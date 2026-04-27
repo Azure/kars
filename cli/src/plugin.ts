@@ -1218,9 +1218,14 @@ async function processTaskWithTools(
               // Single helper handles cache (with TTL) + freshest-match registry
               // resolution. Retries kept here because sub-agent boots may race
               // ahead of the peer's registration.
-              let targetAmid = await resolveAmidByName(toAgent, {
-                registryBase: process.env.AGT_REGISTRY_URL,
-              });
+              //
+              // IMPORTANT: do NOT pass `registryBase: AGT_REGISTRY_URL` — that env
+              // var holds the direct cluster URL (e.g. agentmesh-registry...:8080)
+              // which the egress-guard iptables rules block from the openclaw
+              // container (UID 1000, locked to loopback + DNS). resolveAmidByName's
+              // default routes via the inference-router proxy on 127.0.0.1, which
+              // has its own egress allow-list and reaches the registry correctly.
+              let targetAmid = await resolveAmidByName(toAgent);
               if (targetAmid) {
                 log.info(`AGT sub-agent mesh_send: resolved AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
               }
@@ -1228,9 +1233,7 @@ async function processTaskWithTools(
               for (let attempt = 1; attempt < 8 && !targetAmid; attempt++) {
                 log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
                 await new Promise(r => setTimeout(r, 2000));
-                targetAmid = await resolveAmidByName(toAgent, {
-                  registryBase: process.env.AGT_REGISTRY_URL,
-                });
+                targetAmid = await resolveAmidByName(toAgent, { bypassCache: true });
               }
 
               if (!targetAmid) {
@@ -1272,7 +1275,9 @@ async function processTaskWithTools(
             const pattern = (args.pattern as string) || "*";
             log.info(`AGT sub-agent discover: pattern=${pattern}`);
             try {
-              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
+              // Use loopback router proxy — AGT_REGISTRY_URL points at a direct
+              // cluster service that egress-guard blocks for the openclaw container.
+              const registryBase = routerUrl("/agt/registry");
               const discoverResult = await new Promise<string>((resolve, reject) => {
                 const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
                   let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
