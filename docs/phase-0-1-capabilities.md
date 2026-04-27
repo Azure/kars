@@ -17,8 +17,7 @@ column for every capability-introducing PR.
 
 > **Companion docs:**
 > [`architecture.md`](architecture.md) · [`security.md`](security.md) ·
-> [`threat-model.md`](threat-model.md) · [`agt-boundary.md`](agt-boundary.md) ·
-> [`internal-boundaries.md`](internal-boundaries.md) ·
+> [`threat-model.md`](threat-model.md) ·
 > [`agt-vendored-patch-audit.md`](agt-vendored-patch-audit.md) ·
 > [`security-mcp-top10.md`](security-mcp-top10.md) ·
 > [`sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md)
@@ -45,11 +44,13 @@ six CI gates enforce non-negotiables.
 
 ### Provider-seam scaffolds (`inference-router/src/providers/`, `controller/src/providers/`)
 
-Four contracts; everything that crosses the AGT boundary goes through one of them.
+Four trait seams isolate governance, audit, signing, and mesh from the request
+hot path so each can be swapped for an AGT-backed alternate without touching
+call sites.
 
-| Contract | File | Status |
+| Seam | File | Status |
 |---|---|---|
-| `MeshProvider` | `inference-router/src/providers/mesh.rs` | **Trait file is documentation only.** Mesh is plugin-side; router has no impl. See `docs/agt-boundary.md` and the trait doc-comment. |
+| `MeshProvider` | `inference-router/src/providers/mesh.rs` | **Trait file is documentation only.** Mesh is plugin-side; router has no in-tree impl. |
 | `PolicyDecisionProvider` | `providers/policy.rs` (trait) + `providers/policy_impl.rs` (in-tree impl on `Governance`) | Phase 1: in-tree impl wired into `inference.rs`, `mcp/`, `a2a/`, `spawn_policy.rs` |
 | `AuditSink` | `providers/audit.rs` (trait) + `providers/audit_impl.rs` | Phase 1: in-tree impl + 13 handoff sites migrated |
 | `SigningProvider` | `providers/signing.rs` (trait) + `providers/signing_impl.rs` | Phase 1: A2A AgentCard sign + AP2 mandate sign use this |
@@ -71,9 +72,9 @@ Four contracts; everything that crosses the AGT boundary goes through one of the
 
 ### Foundation docs
 
-`agt-boundary.md`, `internal-boundaries.md`, `agt-vendored-patch-audit.md`,
-`security-reviewers.md`, `sigs-agent-sandbox-compat.md`,
-`security-audits/_template.md` + 75 dated audit docs.
+`agt-vendored-patch-audit.md`, `security-reviewers.md`,
+`sigs-agent-sandbox-compat.md`, `security-audits/_template.md` + dated audit
+docs.
 
 ### Hotspot decomposition pass #1
 
@@ -108,7 +109,7 @@ configure the new router capabilities.
 | `SigningProvider` impl on `Governance` | `providers/signing_impl.rs` | `2026-04-24-phase1-signing-provider-in-tree.md` |
 | Migrate `handoff.rs` audit calls (13 sites) → trait | `routes/handoff/`, `handoff/` | `2026-04-25-phase1-audit-sink-migrate-handoff.md` |
 | Migrate `inference.rs` policy calls (3 sites) → trait | `routes/inference.rs` | `2026-04-25-phase1-policy-provider-migrate-inference.md` |
-| `MeshProvider` clarified as plugin-side only | trait file doc-comment, `agt-boundary.md` | `2026-04-25-phase1-mesh-seam-clarification.md` |
+| `MeshProvider` clarified as plugin-side only | trait file doc-comment | `2026-04-25-phase1-mesh-seam-clarification.md` |
 
 ### MCP 2026 (`inference-router/src/mcp/`)
 

@@ -6,7 +6,7 @@ AGT SDK version changed without a matching re-audit row below.
 
 This document tracks the patches applied to the vendored AgentMesh components
 (`vendor/agentmesh-sdk`, `vendor/agentmesh-relay`, `vendor/agentmesh-registry`).
-Per principle §0.2 #8 of the internal AzureClaw Phase 1 plan, every patch is
+Per the vendored-patch principle (`ci/vendored-patch-audit.sh`), every patch is
 re-audited on each AGT SDK / upstream bump: still required, upstream-absorbed,
 or superseded by the `AgtMeshProvider` (once AGT ships AgentMesh).
 

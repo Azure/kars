@@ -1,7 +1,9 @@
 # `sigs/agent-sandbox` compatibility mode — design
 
 **Status:** Phase 0 design doc (no code, no CI dependency).
-**Scope:** Internal; shared with AGT team for boundary confirmation.
+**Scope:** Optional opt-in compatibility layer for clusters running the
+`kubernetes-sigs/agent-sandbox` upstream CRDs. No upstream dependency, no CI
+pin.
 **Plan reference:** internal Phase 1 plan §2 + §6 item 14.
 **Source of upstream schema pinned in this doc:**
 <https://github.com/kubernetes-sigs/agent-sandbox/blob/main/api/v1alpha1/sandbox_types.go>
