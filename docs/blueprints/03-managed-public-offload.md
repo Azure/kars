@@ -29,7 +29,17 @@ Net effect: the customer's cleartext exists for ~milliseconds, only inside an SE
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
-flowchart TB
+flowchart LR
+  subgraph Customers["Customers (no AzureClaw CLI required)"]
+    direction TB
+    subgraph Cust1["🏢 'Acme'"]
+      A1["NemoClaw on laptop"]
+    end
+    subgraph Cust2["🏢 'Globex'"]
+      G1["custom OpenClaw image<br/>+ azureclaw-mesh plugin"]
+    end
+  end
+
   subgraph Provider["☁️ Provider AKS (multi-tenant)"]
     direction TB
     Portal["customer portal<br/>(Entra ID + billing)"]
@@ -60,13 +70,6 @@ flowchart TB
 
     Fnd["Foundry project<br/>(Content Safety + Prompt Shields)"]
     Mon["per-tenant Log Analytics"]
-  end
-
-  subgraph Cust1["🏢 Customer 'Acme' (no AzureClaw CLI)"]
-    A1["NemoClaw on laptop"]
-  end
-  subgraph Cust2["🏢 Customer 'Globex' (no AzureClaw CLI)"]
-    G1["custom OpenClaw image<br/>+ azureclaw-mesh plugin"]
   end
 
   Portal -->|"signup + checkout"| PairAPI
@@ -101,20 +104,27 @@ flowchart TB
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart TB
-  subgraph Host["AKS host node (Standard_DCa_v6 — AMD EPYC w/ SEV-SNP)"]
+  subgraph Threats["⚠️ Adversaries (provider-side & co-tenant)"]
+    direction LR
+    ATK1["provider cluster-admin<br/>kubectl exec / debug"]
+    ATK2["provider node-admin<br/>tcpdump · /proc"]
+    ATK3["malicious co-tenant"]
+  end
+
+  subgraph Host["AKS host node — Standard_DCa_v6 (AMD EPYC w/ SEV-SNP)"]
     direction TB
     HostKernel["host Linux kernel<br/>(node operator can root this)"]
     KataShim["kata-runtime + cloud-hypervisor"]
 
-    subgraph Enclave["🛡 SEV-SNP enclave (per-pod hardware VM)"]
+    subgraph Enclave["🛡 SEV-SNP enclave — per-pod hardware VM"]
       direction TB
       GuestKernel["guest Linux kernel<br/>(dedicated, ephemeral)"]
       subgraph Pod["sandbox pod"]
-        direction LR
-        OC["openclaw<br/>UID 1000<br/>seccomp: RuntimeDefault"]
-        IR["router<br/>UID 1001<br/>Workload Identity client"]
+        direction TB
+        OC["openclaw — UID 1000<br/>seccomp: RuntimeDefault"]
+        IR["router — UID 1001<br/>Workload Identity client"]
       end
-      EncMem["📦 RAM encrypted with<br/>VEK (VM Encryption Key)<br/>derived in SEV-SNP firmware,<br/>NOT held by host"]
+      EncMem["📦 RAM encrypted with VEK<br/>(VM Encryption Key)<br/>derived in SEV-SNP firmware,<br/>NOT held by host"]
     end
 
     HostKernel --> KataShim
@@ -127,15 +137,11 @@ flowchart TB
   end
 
   Enclave -->|"on boot, emits"| Attest
-  Attest -.->|"future: customer can verify<br/>before sending pairing token"| Cust["customer"]
+  Attest -.->|"future: customer verifies<br/>before sending pairing token"| Cust["customer"]
 
-  ATK1["⚠️ provider cluster-admin<br/>kubectl exec, kubectl debug"]
-  ATK2["⚠️ provider node-admin<br/>tcpdump, /proc inspection"]
-  ATK3["⚠️ malicious co-tenant"]
-
-  ATK1 -. "❌ blocked by VAP<br/>(deny pods/exec on sandbox NS)" .- Pod
-  ATK2 -. "❌ host sees only<br/>encrypted memory pages" .- EncMem
-  ATK3 -. "❌ NetworkPolicy default-deny<br/>+ namespace scoping<br/>+ separate enclave" .- Enclave
+  ATK1 -. "❌ blocked by VAP<br/>(deny pods/exec on sandbox NS)" .-> Pod
+  ATK2 -. "❌ host sees only<br/>encrypted memory pages" .-> EncMem
+  ATK3 -. "❌ NetworkPolicy default-deny<br/>+ namespace scoping<br/>+ separate enclave" .-> Enclave
 
   classDef enc fill:#0c0c1f,stroke:#fbbf24,color:#fff;
   classDef host fill:#1f2937,stroke:#9ca3af,color:#fff;
@@ -143,7 +149,7 @@ flowchart TB
   classDef attest fill:#064e3b,stroke:#10b981,color:#fff;
   class Host,HostKernel,KataShim host;
   class Enclave,Pod,GuestKernel,OC,IR,EncMem enc;
-  class ATK1,ATK2,ATK3 attack;
+  class Threats,ATK1,ATK2,ATK3 attack;
   class Attest,Measurement attest;
 ```
 
