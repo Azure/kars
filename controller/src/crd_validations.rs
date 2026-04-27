@@ -45,6 +45,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
 };
 use kube::CustomResourceExt;
 
+use crate::a2a_agent::A2AAgent;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -164,6 +165,62 @@ pub fn tool_policy_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on ToolPolicy")
 }
 
+/// `A2AAgent.spec` CEL rules.
+///
+/// 1. `signingKeys` must be non-empty (an A2A agent without a signing
+///    key cannot be authenticated by peers — the authoring intent of
+///    such a spec is almost always a mistake).
+/// 2. Every `signingKeys[*].alg` must be `"EdDSA"` — the only
+///    algorithm the router-side projection
+///    (`inference-router::a2a::agent_projection`) honours.
+/// 3. `productionMode == true` requires `endpointUrl` to begin with
+///    `https://` (mirrors the `McpServer` rule).
+/// 4. Federation peers must be either in-cluster (`kind == "in-cluster"`,
+///    `agentRef` set) or external (`kind == "external"`,
+///    `endpointUrl` + `pinnedKid` set) — not both, not neither.
+#[must_use]
+pub fn a2a_agent_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.signingKeys) > 0".into(),
+            message: Some("spec.signingKeys must contain at least one entry".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.signingKeys.all(k, k.alg == 'EdDSA')".into(),
+            message: Some("spec.signingKeys[*].alg must be 'EdDSA' (only supported algorithm)".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.productionMode == false || self.endpointUrl.startsWith('https://')".into(),
+            message: Some(
+                "productionMode requires spec.endpointUrl to begin with https://".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.federation.all(p, (p.kind == 'in-cluster' && has(p.agentRef) && !has(p.endpointUrl)) || (p.kind == 'external' && has(p.endpointUrl) && has(p.pinnedKid) && !has(p.agentRef)))".into(),
+            message: Some(
+                "federation peers: kind 'in-cluster' requires agentRef only; kind 'external' requires endpointUrl + pinnedKid".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `A2AAgent` CRD with [`a2a_agent_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn a2a_agent_crd() -> CustomResourceDefinition {
+    inject_spec_validations(A2AAgent::crd(), a2a_agent_validations())
+        .expect("kube-rs derive must produce a spec property on A2AAgent")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +325,57 @@ mod tests {
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("dailyCap"));
+    }
+
+    #[test]
+    fn a2a_agent_validations_are_non_empty() {
+        assert!(!a2a_agent_validations().is_empty());
+    }
+
+    #[test]
+    fn every_a2a_agent_rule_has_message_and_rule() {
+        for rule in a2a_agent_validations() {
+            assert!(!rule.rule.is_empty(), "rule body must not be empty");
+            let msg = rule.message.as_deref().unwrap_or("");
+            assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
+        }
+    }
+
+    #[test]
+    fn a2a_agent_crd_has_spec_validations_after_injection() {
+        let crd = a2a_agent_crd();
+        let v = spec_validations(&crd);
+        assert_eq!(v.len(), a2a_agent_validations().len());
+    }
+
+    #[test]
+    fn a2a_agent_rules_mention_signing_keys_and_eddsa_invariants() {
+        let rules: Vec<String> = a2a_agent_validations()
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        assert!(
+            rules.iter().any(|r| r.contains("signingKeys")),
+            "must enforce signingKeys non-empty; got rules: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("EdDSA")),
+            "must enforce EdDSA-only signing alg; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("productionMode") && r.contains("https://")),
+            "must enforce productionMode -> https endpoint; got rules: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn a2a_agent_crd_is_serde_round_trippable() {
+        let crd = a2a_agent_crd();
+        let y = serde_yaml::to_string(&crd).expect("serializes");
+        assert!(y.contains("x-kubernetes-validations"));
+        assert!(y.contains("signingKeys"));
     }
 
     #[test]

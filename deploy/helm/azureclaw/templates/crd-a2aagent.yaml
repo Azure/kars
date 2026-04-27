@@ -1,0 +1,342 @@
+# AzureClaw A2AAgent CRD
+#
+# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
+# schema in `controller/src/a2a_agent.rs` plus the CEL rules in
+# `controller/src/crd_validations.rs::a2a_agent_validations`.
+#
+# Drift between this file and the Rust schema is caught at `cargo test`
+# time by `controller/src/helm_drift.rs::helm_a2aagent_crd_matches_rust_schema`.
+# To regenerate after schema changes, run:
+#
+#   DUMP_A2AAGENT_CRD_YAML=1 cargo test --bin azureclaw-controller \
+#       helm_drift::tests::dump_a2aagent_crd_yaml -- --nocapture
+#
+# and replace the body below with the captured YAML.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: a2aagents.azureclaw.azure.com
+spec:
+  group: azureclaw.azure.com
+  names:
+    categories: []
+    kind: A2AAgent
+    plural: a2aagents
+    shortNames:
+    - a2a
+    singular: a2aagent
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.endpointUrl
+      name: Endpoint
+      type: string
+    - jsonPath: .spec.productionMode
+      name: Production
+      type: boolean
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for A2AAgentSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              `A2AAgent.spec` — declares an A2A 1.2 agent reachable at
+              `endpointUrl` and the trust anchors peers must use to authenticate
+              inbound signatures.
+
+              One CR yields one cluster-resident AgentCard ConfigMap. The router
+              (S7) projects the union of all `A2AAgent` CRs into its trust store
+              via `inference-router::a2a::snapshot_rebuild::rebuild_snapshot`.
+            properties:
+              capabilities:
+                default: []
+                description: |-
+                  Declared A2A protocol capabilities advertised in the AgentCard
+                  (`tasks`, `streaming`, `cancel`, `mandates`, etc.). Free-form
+                  string list — the spec's vocabulary evolves; keeping it stringly
+                  typed matches the spec's open registry approach.
+                items:
+                  type: string
+                type: array
+              description:
+                description: |-
+                  Optional human-readable description embedded in the AgentCard
+                  `description` field. AgentCard spec §3.1.
+                nullable: true
+                type: string
+              displayName:
+                description: |-
+                  Optional human-readable name shown in operator TUI and embedded
+                  in the AgentCard `name` field.
+                nullable: true
+                type: string
+              endpointUrl:
+                description: |-
+                  HTTPS URL where the agent serves `/.well-known/agent.json` and
+                  the JSON-RPC `message/send` / `tasks/get` / `tasks/cancel`
+                  endpoints. Validated by admission CEL: must be `https://` when
+                  `productionMode == true`.
+                type: string
+              federation:
+                default: []
+                description: |-
+                  Federation — peer A2A agents this agent acknowledges as part of
+                  its trust circle. Renders into the AgentCard's
+                  `federation.peers[]` array. Cross-CR references (resolution and
+                  validity checks) happen in S7.
+                items:
+                  description: |-
+                    One federation peer entry. Same-cluster peers reference an
+                    `A2AAgent` CR by `name`; cross-cluster peers carry the full
+                    `endpointUrl` + key pin so the trust decision is local.
+                  properties:
+                    agentRef:
+                      description: |-
+                        In-cluster peer: name of the `A2AAgent` CR in the same
+                        namespace. Cross-namespace federation is deliberately not
+                        allowed — operators wire that explicitly through `external`
+                        peers with full URL + key pin.
+                      nullable: true
+                      type: string
+                    endpointUrl:
+                      description: |-
+                        External peer: `https://` URL where the peer agent serves
+                        `/.well-known/agent.json`.
+                      nullable: true
+                      type: string
+                    kind:
+                      description: |-
+                        Either `"in-cluster"` (then `agentRef` is consulted) or
+                        `"external"` (then `endpointUrl` + `pinnedKid` are consulted).
+                        CEL ensures exactly one of `agentRef` / `endpointUrl` is set.
+                      type: string
+                    label:
+                      description: |-
+                        Short label rendered in audit logs and the AgentCard
+                        `federation.peers[*].label`.
+                      type: string
+                    pinnedKid:
+                      description: |-
+                        External peer: pinned `kid` the local verifier expects on the
+                        peer's outbound signatures. Defends against peer-side key
+                        rotation breaking the federation silently.
+                      nullable: true
+                      type: string
+                  required:
+                  - kind
+                  - label
+                  type: object
+                type: array
+              policyRefs:
+                description: |-
+                  Soft references to other CRDs that contribute policy. Not
+                  resolved here — the router (S7) joins the AgentCard's
+                  declarations with the referenced `ToolPolicy` to enforce AP2
+                  `commerce` / `approval` / `rateLimit` at request time.
+                nullable: true
+                properties:
+                  toolPolicy:
+                    description: |-
+                      Name of a `ToolPolicy` CR whose `commerce` / `approval` /
+                      `rateLimit` blocks apply to A2A `message/send` requests on this
+                      agent. The router (S7) joins both CRs at request time.
+                    nullable: true
+                    type: string
+                type: object
+              productionMode:
+                default: false
+                description: |-
+                  Production-mode flag. Mirrors `McpServer.spec.productionMode` —
+                  when `true`, the router will reject unauthenticated traffic, and
+                  admission CEL enforces `endpointUrl.startsWith("https://")` plus
+                  non-empty `signingKeys`.
+                type: boolean
+              signingKeys:
+                description: |-
+                  One or more Ed25519 signing keys peer agents use to verify
+                  AgentCard JWS detached signatures and inbound JSON-RPC envelope
+                  signatures (A2A 1.2 §6.3). Must contain at least one entry —
+                  CEL-enforced.
+
+                  **Operator-supplied.** Auto-generation of a controller-managed
+                  keypair is an S7 follow-up (router-side mount required); this
+                  slice deliberately does not write any Secret.
+                items:
+                  description: |-
+                    One signing key entry; mirrors
+                    `inference-router::a2a::agent_projection::A2aAgentSigningKeySpec`
+                    1:1 — same `kid` / `alg` / `publicKeyB64u` / `notAfter`. Reusing
+                    the projected shape verbatim avoids a translation layer between
+                    controller → ConfigMap → router projection.
+                  properties:
+                    alg:
+                      description: |-
+                        Algorithm pin. Currently only `"EdDSA"` is honoured; the
+                        router-side projection rejects any other value at runtime.
+                      type: string
+                    kid:
+                      description: |-
+                        Stable identifier exposed to verifying peers. Must be non-empty
+                        and unique across this CR's `signingKeys[]` (CEL-enforced).
+                      type: string
+                    notAfter:
+                      description: Optional Unix-seconds expiry. `None` ⇒ never expires.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    publicKeyB64u:
+                      description: |-
+                        Ed25519 public key, base64url-encoded with NO padding (RFC
+                        7515 §2). Decoded length is asserted to be 32 bytes by the
+                        router-side projection.
+                      type: string
+                  required:
+                  - alg
+                  - kid
+                  - publicKeyB64u
+                  type: object
+                type: array
+              trust:
+                description: |-
+                  Trust thresholds applied by the router-side verifier (S7) when
+                  processing inbound signed envelopes from peers. None ⇒ fall back
+                  to the cluster-default profile.
+                nullable: true
+                properties:
+                  maxClockSkewSeconds:
+                    description: |-
+                      Maximum tolerated clock skew (seconds) between the signing
+                      peer and this verifier. Default 60s; ranges below 5s make
+                      the verifier brittle to NTP wobble.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  minSignaturesRequired:
+                    description: |-
+                      Minimum number of independent valid signatures required (A2A
+                      1.2 §6.4 multi-sig flow). Default 1; a value > 1 makes sense
+                      only when the inbound envelope is co-signed (e.g., AP2 cart
+                      mandates).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  requireSignedRequests:
+                    default: false
+                    description: |-
+                      When `true`, the router rejects any inbound A2A request that
+                      lacks a valid JWS detached signature from a known peer key.
+                    type: boolean
+                type: object
+            required:
+            - endpointUrl
+            - signingKeys
+            type: object
+            x-kubernetes-validations:
+            - message: spec.signingKeys must contain at least one entry
+              reason: FieldValueInvalid
+              rule: size(self.signingKeys) > 0
+            - message: spec.signingKeys[*].alg must be 'EdDSA' (only supported algorithm)
+              reason: FieldValueInvalid
+              rule: self.signingKeys.all(k, k.alg == 'EdDSA')
+            - message: productionMode requires spec.endpointUrl to begin with https://
+              reason: FieldValueInvalid
+              rule: self.productionMode == false || self.endpointUrl.startsWith('https://')
+            - message: 'federation peers: kind ''in-cluster'' requires agentRef only; kind ''external'' requires endpointUrl + pinnedKid'
+              reason: FieldValueInvalid
+              rule: self.federation.all(p, (p.kind == 'in-cluster' && has(p.agentRef) && !has(p.endpointUrl)) || (p.kind == 'external' && has(p.endpointUrl) && has(p.pinnedKid) && !has(p.agentRef)))
+          status:
+            nullable: true
+            properties:
+              agentCardConfigMapRef:
+                description: |-
+                  Reference to the published AgentCard ConfigMap
+                  (`a2aagent-{name}-card`, key `agent.json`). Field-managed by
+                  `azureclaw-controller/a2aagent`. Reuses the
+                  [`crate::mcp_server::LocalObjectRef`] shape to avoid a
+                  duplicate type — single struct, two semantic names per the
+                  no-duplication rule.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              conditions:
+                description: |-
+                  Standard K8s Conditions (KEP-1623 shape). Populated by
+                  `controller/src/status/conditions.rs::preserve_transition_time`
+                  — the same helper used by S1 (MCP) and S2 (ToolPolicy).
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              lastCompiledAt:
+                description: RFC-3339 timestamp of the last successful compile.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: '`metadata.generation` last successfully reconciled. KEP-1623.'
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: 'Lifecycle phase: `Pending` | `Ready` | `Degraded` | `Unknown`.'
+                nullable: true
+                type: string
+              versionHash:
+                description: |-
+                  SHA-256 prefix (32 hex chars) of the canonicalised compiled
+                  AgentCard. Same shape as `ToolPolicy.status.versionHash` —
+                  router-side hot-reload short-circuits redundant snapshot
+                  rebuilds when this hasn't moved.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: A2AAgent
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+

@@ -28,7 +28,7 @@
 #![allow(dead_code)]
 
 #[cfg(test)]
-use crate::crd_validations::{mcp_server_crd, tool_policy_crd};
+use crate::crd_validations::{a2a_agent_crd, mcp_server_crd, tool_policy_crd};
 
 const MCP_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -38,6 +38,11 @@ const MCP_HELM_CRD_PATH: &str = concat!(
 const TOOLPOLICY_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/azureclaw/templates/crd-toolpolicy.yaml"
+);
+
+const A2AAGENT_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/azureclaw/templates/crd-a2aagent.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -94,6 +99,20 @@ mod tests {
         println!("---\n{yaml}");
     }
 
+    /// One-shot dumper for the a2aagent CRD. Run via:
+    ///
+    ///   DUMP_A2AAGENT_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///       helm_drift::tests::dump_a2aagent_crd_yaml -- --nocapture
+    #[test]
+    fn dump_a2aagent_crd_yaml() {
+        if std::env::var("DUMP_A2AAGENT_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = a2a_agent_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
     fn assert_helm_matches_rust(helm_path: &str, rust_value: serde_json::Value, label: &str) {
         let helm_text = match std::fs::read_to_string(helm_path) {
             Ok(s) => s,
@@ -131,5 +150,12 @@ mod tests {
         let rust_crd_value =
             serde_json::to_value(tool_policy_crd()).expect("rust crd serializes to JSON");
         assert_helm_matches_rust(TOOLPOLICY_HELM_CRD_PATH, rust_crd_value, "toolpolicy");
+    }
+
+    #[test]
+    fn helm_a2aagent_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(a2a_agent_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(A2AAGENT_HELM_CRD_PATH, rust_crd_value, "a2aagent");
     }
 }
