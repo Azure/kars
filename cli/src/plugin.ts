@@ -4348,6 +4348,13 @@ interface OpenClawPluginApi {
   registerProvider: (provider: ProviderPlugin) => void;
   registerTool: (tool: ToolDefinition) => void;
   resolvePath: (input: string) => string;
+  // OpenClaw 2026.4.x registration modes. register() is called once per mode
+  // ("full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata").
+  // Only "full" should trigger live runtime side effects (network clients,
+  // background workers, MEMORY.md writes, etc.). Older OpenClaw versions
+  // omit this field — treat undefined as "full" for back-compat.
+  // See: https://github.com/openclaw/openclaw/blob/main/docs/plugins/sdk-entrypoints.md#registration-mode
+  registrationMode?: "full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata";
 }
 
 // ---------------------------------------------------------------------------
@@ -4407,6 +4414,18 @@ const azureClawPlugin = definePluginEntry({
     const log = api.logger;
     _log = log; // expose to module-level background tasks
 
+    // OpenClaw 2026.4.x calls register() once per registration mode:
+    //   "full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata"
+    // The non-"full" modes build registry snapshots, root help, and setup
+    // surfaces — they MUST NOT trigger network calls, background workers,
+    // memory recall, or other live runtime side effects. Without this gate,
+    // a fresh sandbox boot kicks off Foundry discovery + MEMORY.md writes
+    // + conversation recall up to 5 times, spamming the gateway log and
+    // burning quota before the agent receives its first message.
+    // Treat undefined as "full" for back-compat with older OpenClaw versions.
+    const registrationMode = api.registrationMode ?? "full";
+    const isFullRegistration = registrationMode === "full";
+
     // ── Startup banner ─────────────────────────────────────────────────
     // The gateway may spawn many short-lived `openclaw agent --message`
     // processes (one per incoming mesh message) — each one reloads this
@@ -4435,7 +4454,7 @@ const azureClawPlugin = definePluginEntry({
         /* fs not available — fall through and print */
       }
     }
-    if (!bannerAlreadyPrinted) {
+    if (isFullRegistration && !bannerAlreadyPrinted) {
       log.info([
         "",
         "  ╔══════════════════════════════════════════════════════════╗",
@@ -4461,14 +4480,20 @@ const azureClawPlugin = definePluginEntry({
       }
     }
 
-    // Reset per-session initialization guards so new sessions rediscover state
-    foundryInitialized = false;
+    // Heavy runtime side effects (Foundry discovery + memory recall +
+    // MEMORY.md write, AGT identity/mesh connect, periodic timers) only
+    // run during the "full" registration pass. See the registrationMode
+    // comment at the top of register() for the rationale.
+    if (isFullRegistration) {
+      // Reset per-session initialization guards so new sessions rediscover state
+      foundryInitialized = false;
 
-    // Initialize AGT SDK (identity, policy, trust, audit, mesh)
-    initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
+      // Initialize AGT SDK (identity, policy, trust, audit, mesh)
+      initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
 
-    // Initialize Foundry project discovery (models, connections, indexes)
-    initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
+      // Initialize Foundry project discovery (models, connections, indexes)
+      initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
+    }
 
     // ── Periodic Foundry memory sync + AGT policy gate middleware ────
     // Wraps every tool's execute() to:
