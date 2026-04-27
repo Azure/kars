@@ -585,7 +585,7 @@ Shipped in the controller Helm chart (`deploy/helm/azureclaw/templates/`):
 - **VAP:** `pods/exec|attach|portforward` denied on sandbox namespaces;
   posture-downgrades blocked (isolation step-down, seccomp removal,
   `readOnlyRootFilesystem: false`); `azureclaw.azure.com/dev-only` label
-  cannot be removed once applied; `provider: null/noop/disabled` requires
+  cannot be removed once applied; `provider:` values of `null`, `noop`, or `disabled` require
   `dev-only` label (mirror of `ci/no-null-provider-prod.sh`).
 - **MAP:** auto-inject router sidecar on `azureclaw.azure.com/inject-router=true`
   pods; auto-set seccomp to `azureclaw-strict` if missing.
