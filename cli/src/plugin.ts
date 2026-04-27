@@ -74,24 +74,24 @@ process.on("unhandledRejection", (reason: any) => {
 // Late-binding: the env var is re-read on every call so tests can set it
 // after module load.
 // ---------------------------------------------------------------------------
-const DEFAULT_ROUTER_BASE = "http://127.0.0.1:8443";
+// Router URL + I/O helpers live in cli/src/core/router-client.ts. The URL
+// helpers (`routerBase`/`routerWsBase`/...) are re-exported below to preserve
+// the `import { routerBase, ... } from "./plugin.js"` surface used by tests
+// and downstream CLI commands.
+import {
+  routerBase,
+  routerWsBase,
+  routerUrl,
+  routerWsUrl,
+  routerCall as _routerCall,
+  routerCallStrict as _routerCallStrict,
+  readAdminToken as _readAdminToken,
+  readAdminTokenSync as _readAdminTokenSync,
+  pushTrustToRouter,
+  pushSigningCounter,
+} from "./core/router-client.js";
 
-export function routerBase(): string {
-  return process.env.AZURECLAW_ROUTER_URL || DEFAULT_ROUTER_BASE;
-}
-
-export function routerWsBase(): string {
-  // http → ws, https → wss; preserves host:port and trailing path if any.
-  return routerBase().replace(/^http/, "ws");
-}
-
-export function routerUrl(path: string): string {
-  return new URL(path, routerBase()).toString();
-}
-
-export function routerWsUrl(path: string): string {
-  return new URL(path, routerWsBase()).toString();
-}
+export { routerBase, routerWsBase, routerUrl, routerWsUrl };
 
 // ---------------------------------------------------------------------------
 // AGT SDK — AgentMesh (amitayks/agentmesh)
@@ -398,76 +398,8 @@ async function resolveSigningKey(amid: string): Promise<string> {
 }
 let agtSandboxName: string = "unknown";
 
-// Push trust updates to the router's local TrustStore (POST /agt/trust).
-// This syncs the plugin's reputation observations with the router for /agt/status display.
-// Also writes an audit chain entry on the router side.
-async function pushTrustToRouter(agentId: string, scoreDelta: number) {
-  try {
-    const http = await import("node:http");
-    const fs = await import("node:fs");
-    const body = JSON.stringify({
-      agent_id: agentId,
-      score: Math.round(500 + scoreDelta * 500), // 0.0-1.0 → 0-1000 scale
-      interactions: 1,
-    });
-    // Read admin token for trust mutation auth (prevents sandbox from forging scores)
-    let adminToken = "";
-    try { adminToken = fs.readFileSync("/tmp/.agt-admin-token", "utf-8").trim(); } catch {}
-    if (!adminToken) {
-      try { adminToken = fs.readFileSync("/etc/azureclaw/secrets/admin-token", "utf-8").trim(); } catch {}
-    }
-    if (!adminToken) {
-      try { adminToken = fs.readFileSync("/run/secrets/admin-token", "utf-8").trim(); } catch {}
-    }
-    const headers: Record<string, string | number> = {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(body),
-    };
-    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
-    await new Promise<void>((resolve, reject) => {
-      const req = http.request(routerUrl("/agt/trust"), {
-        method: "POST",
-        headers,
-        timeout: 5000,
-      }, (res: any) => {
-        res.resume();
-        res.on("end", () => {
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode}`));
-          } else {
-            resolve();
-          }
-        });
-      });
-      req.on("error", reject);
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-      req.write(body);
-      req.end();
-    });
-  } catch {
-    // Startup race: router may not be ready on first plugin load (double-load pattern).
-    // Trust will be seeded on the second load — no need to alarm the operator.
-  }
-}
-
-// Push Ed25519 signing counter to router for /agt/status metrics.
-async function pushSigningCounter(action: "signed" | "verified" | "rejected") {
-  try {
-    const http = await import("node:http");
-    const body = JSON.stringify({ action });
-    await new Promise<void>((resolve) => {
-      const req = http.request(
-        { hostname: "127.0.0.1", port: 8443, path: "/agt/signing-counter", method: "POST",
-          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
-        () => resolve(),
-      );
-      req.on("error", () => resolve());
-      req.setTimeout(1000, () => { req.destroy(); resolve(); });
-      req.write(body);
-      req.end();
-    });
-  } catch { /* best effort */ }
-}
+// Push trust updates to the router's local TrustStore + Ed25519 signing
+// counters live in cli/src/core/router-client.ts (imported above).
 
 // Record a completed mesh session in the AGT registry so reputation/session counters update.
 // Calls POST /registry/reputation/session through the router's registry proxy.
@@ -3533,94 +3465,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 }
 
 // ---------------------------------------------------------------------------
-// Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
+// Router HTTP helpers (`_routerCall`, `_routerCallStrict`, `_readAdminToken`,
+// `_readAdminTokenSync`) live in cli/src/core/router-client.ts and are
+// imported at the top of this file.
 // ---------------------------------------------------------------------------
-
-async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
-  const http = await import("node:http");
-  const url = new URL(path, routerBase());
-  return new Promise((resolve, reject) => {
-    const opts: any = {
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname + url.search,
-      method,
-      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
-    };
-    if (body) {
-      opts.headers["content-type"] = "application/json";
-    }
-    const req = http.request(opts, (res: any) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-      res.on("end", () => {
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-// Strict variant that rejects on HTTP >= 400 — used by handoff orchestration
-async function _routerCallStrict(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
-  const http = await import("node:http");
-  const url = new URL(path, routerBase());
-  return new Promise((resolve, reject) => {
-    const opts: any = {
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname + url.search,
-      method,
-      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
-    };
-    if (body) {
-      opts.headers["content-type"] = "application/json";
-    }
-    const req = http.request(opts, (res: any) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-      res.on("end", () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
-          return;
-        }
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-// Read admin token from the filesystem (used by handoff orchestration)
-async function _readAdminToken(): Promise<string> {
-  const fs = await import("node:fs");
-  for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
-    try { const t = fs.readFileSync(p, "utf-8").trim(); if (t) return t; } catch { /* skip */ }
-  }
-  return process.env.ADMIN_TOKEN || "";
-}
-
-// Synchronous variant for use inside `routerCall`. Cached after first hit so we
-// only stat the filesystem once per process. Returns "" if no token is available.
-let _cachedAdminToken: string | null = null;
-function _readAdminTokenSync(): string {
-  if (_cachedAdminToken !== null) return _cachedAdminToken;
-  // Use the createRequire shim (top of file) — `await import` is not usable
-  // inside this synchronous helper and we want zero per-call overhead.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const fsSync = require("node:fs") as typeof import("node:fs");
-  for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
-    try { const t = fsSync.readFileSync(p, "utf-8").trim(); if (t) { _cachedAdminToken = t; return t; } } catch { /* skip */ }
-  }
-  _cachedAdminToken = process.env.ADMIN_TOKEN || "";
-  return _cachedAdminToken;
-}
 
 // Helper: update handoff progress tracker
 function _hp(phase: string, step: string) {
