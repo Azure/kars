@@ -292,6 +292,95 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S11 `phase2-attest-cli` — `azureclaw attest <name>` read surface
+
+This slice ships the **read consumer** half of implementation-plan §15.2
+item 11 and §14.6 column 7 (provenance / attestation). The signed audit
+chain (cosign receipts, AGT AuditLogger receipt IDs, verifiable
+signatures) is intentionally **deferred to Phase 3** — Phase 2 lands
+the CLI command shape, the deterministic spec-hash recipe, and all
+read-side scaffolding so flipping the controller to emit signatures
+later does not require a CLI change.
+
+**What `azureclaw attest <name>` prints today:**
+
+1. **Spec hash** — SHA-256 over a canonicalised JSON of
+   `ClawSandbox.spec` (recursive key-sort, no whitespace). Matches the
+   `versionHash` recipe used by every Phase 2 policy CRD, so a future
+   signed audit chain can compose them without re-hashing.
+2. **Generation lineage** — `metadata.generation` vs
+   `status.observedGeneration` + `status.phase` (Running / Overlay /
+   Degraded), so operators can tell "spec applied" from "spec accepted
+   but not yet reconciled".
+3. **SSA field-owner map** — the unique `manager` names from
+   `metadata.managedFields` plus a per-manager `fields-owned` count.
+   Shows "who edited this object last" without dumping the full SSA
+   tree.
+4. **Referenced policy versions** — for every policy CR referenced by
+   `ClawSandbox.spec` (ToolPolicy, InferencePolicy, A2AAgent, plus the
+   legacy `governance.toolPolicy.ref` shape), resolves the referenced
+   object in `azureclaw-<name>` and prints its `status.versionHash` +
+   binding ConfigMap name (both shipped by S2/S3/S4).
+5. **Reconcile trace ID** — best-effort lookup from the sandbox-
+   namespace Deployment's `azureclaw.azure.com/last-trace-id`
+   annotation. Phase 2 controller does not yet stamp this; the field
+   prints `(Phase 3)` when absent.
+6. **AGT audit-receipt id** + **signature** — `(Phase 3)` today.
+
+**Output formats:** `--format human` (default; pretty TUI table with
+colour-coded phase) and `--format json` (deterministic, machine-grep-
+able; emits a versioned `apiVersion: "azureclaw.azure.com/v1alpha1-attest"`
++ `kind: "Attestation"` envelope so consumers can detect schema breakage).
+
+**Reuse map (§0.2 #11):**
+
+- The `versionHash` recipe (canonical-JSON → SHA-256) is exactly the
+  one shipped by `controller/src/tool_policy_compile.rs`,
+  `controller/src/a2a_agent_compile.rs`,
+  `controller/src/inference_policy_compile.rs`, and
+  `controller/src/claw_eval.rs`. CLI re-implements the recipe in TS
+  (`canonicalJson` + `node:crypto` `createHash("sha256")`) — there is
+  no shared TS↔Rust hashing crate available, but the recipe is
+  documented + asserted-deterministic so the two sides cannot drift
+  without a test breaking.
+- All per-CRD `status.versionHash` and `status.bindingConfigMap`
+  fields are read from existing CRD status surfaces (S2 / S3 / S4).
+  No CRD change required.
+- No new CRD, no new K8s object, no controller change. The command
+  is **read-only** from `kubectl`'s perspective — it never patches a
+  cluster resource.
+
+**Out of scope (Phase 3):**
+
+- Signed reconcile audit chain (cosign keyless on the controller side,
+  receipt IDs, verifiable signatures).
+- AGT AuditLogger receipt-ID emission + retrieval.
+- `metadata.annotations.azureclaw.azure.com/last-trace-id` stamping
+  by the controller (the lookup is in place; the writer is not).
+- A `kubectl claw verify <attestation.json>` companion command — the
+  JSON envelope is versioned now to make this trivially additive.
+
+**Surface:**
+
+- `cli/src/commands/attest.ts` — single 350-line file: pure helpers
+  (`canonicalJson`, `specHash`, `summariseFieldOwners`,
+  `extractPolicyRefs`), a `kubectl get` orchestrator (`buildReport`),
+  two formatters (`formatHuman`, `formatJson`), plus the commander
+  `attestCommand()` factory.
+- `cli/src/commands/attest.test.ts` — 19 vitest cases covering all
+  pure helpers + both formatters + their round-trips. Determinism of
+  the spec-hash recipe asserted directly (re-ordered keys → same
+  hash; one bit changed → different hash).
+- `cli/src/cli.ts` — `attestCommand()` registered in a new
+  "Attestation" section.
+
+**Tests:** CLI workspace 285 → 304 (+19). vitest + tsc --noEmit + oxlint
+all green; ci/no-stubs.sh, ci/no-custom-crypto.sh, ci/check-loc.sh
+all green with `BASE_REF=origin/dev`.
+
+**Audit:** `docs/security-audits/2026-04-27-phase2-attest-cli.md` — 2
+sign-offs.
+
 ### S8 `phase2-overlaymode` — sigs/agent-sandbox OverlayMode
 
 This slice flips `ClawSandbox.spec.upstreamCompatibility.sigsAgentSandbox`
