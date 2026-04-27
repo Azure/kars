@@ -104,8 +104,108 @@ pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str) -> bool {
     true
 }
 
-/// Build the `status` patch for a `ClawSandbox` that has failed spec
-/// validation or an early reconcile check. Stamps `observedGeneration`
+/// Build the `status` patch for a `ClawSandbox` running in
+/// **`OverlayMode`** (Phase 2 S8). In this mode the operator's upstream
+/// `Sandbox` CR owns the Pod lifecycle; AzureClaw skipped Deployment +
+/// Service creation and only laid down the overlay (namespace, SA with
+/// Workload-Identity binding, NetworkPolicy, governance ConfigMaps).
+///
+/// Status shape:
+/// - `phase: "Overlay"` — distinct from `Running` so dashboards can
+///   surface "this CR is intentionally not driving a Pod".
+/// - `Ready=True, Reason=OverlayMode` — overlay reconciled cleanly
+///   from AzureClaw's perspective; `kubectl wait --for=condition=Ready`
+///   still works.
+/// - `Progressing=False, Reason=OverlayMode` — no further AzureClaw work
+///   pending.
+/// - `Suspended=True, Reason=OverlayMode` — explicit signal that we are
+///   not driving a Pod here (operators querying `Suspended` see why).
+///
+/// `sandbox_pod` is set to the upstream CR name (with a `upstream/`
+/// prefix so it's unambiguous in `kubectl get clawsandbox`) so operators
+/// can pivot from `kubectl describe clawsandbox` to the upstream object.
+pub fn build_overlay_status_patch(
+    sandbox: &ClawSandbox,
+    sandbox_ns: &str,
+    upstream_ref: &str,
+) -> Value {
+    let generation = sandbox.metadata.generation;
+    let prior_conditions = sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_READY),
+        conditions::TYPE_READY,
+        conditions::status::TRUE,
+        conditions::reason::OVERLAY_MODE,
+        "overlay reconciled; upstream Sandbox CR owns the Pod",
+        generation,
+    );
+    let progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::FALSE,
+        conditions::reason::OVERLAY_MODE,
+        "no further controller work pending in overlay mode",
+        generation,
+    );
+    let suspended = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_SUSPENDED),
+        conditions::TYPE_SUSPENDED,
+        conditions::status::TRUE,
+        conditions::reason::OVERLAY_MODE,
+        &format!("Pod owned by upstream Sandbox CR `{upstream_ref}`"),
+        generation,
+    );
+    json!({
+        "status": {
+            "phase": "Overlay",
+            "namespace": sandbox_ns,
+            "sandboxPod": format!("upstream/{upstream_ref}"),
+            "pendingApprovals": 0,
+            "observedGeneration": generation,
+            "conditions": [ready, progressing, suspended],
+        }
+    })
+}
+
+/// Returns `true` when the existing CR status already encodes the same
+/// "Overlay" reconciliation outcome that [`build_overlay_status_patch`]
+/// would produce. Same idempotency guard as
+/// [`running_status_matches`].
+#[must_use]
+pub fn overlay_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, upstream_ref: &str) -> bool {
+    use crate::status::conditions::{TYPE_READY, status::TRUE as STATUS_TRUE};
+
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    if status.phase.as_deref() != Some("Overlay") {
+        return false;
+    }
+    if status.namespace.as_deref() != Some(sandbox_ns) {
+        return false;
+    }
+    if status.observed_generation != sandbox.metadata.generation {
+        return false;
+    }
+    let expected_pod = format!("upstream/{upstream_ref}");
+    if status.sandbox_pod.as_deref() != Some(expected_pod.as_str()) {
+        return false;
+    }
+    let ready_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_READY)
+        .is_some_and(|c| c.status == STATUS_TRUE);
+    if !ready_ok {
+        return false;
+    }
+    true
+}
+
 /// and a `Degraded=True` / `Ready=False` condition pair so `kubectl wait
 /// --for=condition=Ready` and `--for=condition=Degraded` both behave
 /// correctly, and so operators see *why* we stopped reconciling.
@@ -424,5 +524,159 @@ mod tests {
         assert!(patch["status"]["observedGeneration"].is_null());
         let degraded = patch["status"]["conditions"][0].clone();
         assert!(degraded["observedGeneration"].is_null());
+    }
+
+    // ── OverlayMode (Phase 2 S8) status helpers ──
+
+    #[test]
+    fn overlay_patch_emits_overlay_phase_and_three_conditions() {
+        let sb = new_sandbox(Some(4), None);
+        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "upstream-1");
+        let st = &patch["status"];
+        assert_eq!(st["phase"], "Overlay");
+        assert_eq!(st["namespace"], "azureclaw-demo");
+        assert_eq!(st["sandboxPod"], "upstream/upstream-1");
+        assert_eq!(st["observedGeneration"], 4);
+        let conds = st["conditions"].as_array().expect("conditions array");
+        assert_eq!(conds.len(), 3, "expected Ready+Progressing+Suspended");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
+        assert_eq!(ready["status"], "True");
+        assert_eq!(ready["reason"], "OverlayMode");
+        let progressing = conds
+            .iter()
+            .find(|c| c["type"] == "Progressing")
+            .expect("Progressing");
+        assert_eq!(progressing["status"], "False");
+        assert_eq!(progressing["reason"], "OverlayMode");
+        let suspended = conds
+            .iter()
+            .find(|c| c["type"] == "Suspended")
+            .expect("Suspended");
+        assert_eq!(suspended["status"], "True");
+        assert_eq!(suspended["reason"], "OverlayMode");
+        assert!(
+            suspended["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("upstream-1"),
+            "Suspended message must reference the upstream CR name"
+        );
+    }
+
+    #[test]
+    fn overlay_status_matches_rejects_when_status_missing() {
+        let sb = new_sandbox(Some(1), None);
+        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+    }
+
+    #[test]
+    fn overlay_status_matches_rejects_when_phase_is_running() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Running".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            sandbox_pod: Some("upstream/u1".into()),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::OVERLAY_MODE,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+    }
+
+    #[test]
+    fn overlay_status_matches_rejects_when_upstream_ref_differs() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Overlay".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            sandbox_pod: Some("upstream/old-name".into()),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::OVERLAY_MODE,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "new-name"));
+    }
+
+    #[test]
+    fn overlay_status_matches_rejects_when_generation_stale() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Overlay".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            sandbox_pod: Some("upstream/u1".into()),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::OVERLAY_MODE,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(2), Some(prior));
+        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+    }
+
+    #[test]
+    fn overlay_status_matches_returns_true_for_settled_overlay_status() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Overlay".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            sandbox_pod: Some("upstream/u1".into()),
+            conditions: vec![conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::TRUE,
+                conditions::reason::OVERLAY_MODE,
+                "ok",
+                Some(1),
+            )],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+    }
+
+    #[test]
+    fn overlay_patch_preserves_ready_transition_time_on_repeat() {
+        let existing_ready = conditions::new_condition(
+            conditions::TYPE_READY,
+            conditions::status::TRUE,
+            conditions::reason::OVERLAY_MODE,
+            "overlay",
+            Some(1),
+        );
+        let prior_ts = existing_ready.last_transition_time.clone();
+        let prior = ClawSandboxStatus {
+            conditions: vec![existing_ready],
+            ..Default::default()
+        };
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let sb = new_sandbox(Some(2), Some(prior));
+        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "u1");
+        let ready = patch["status"]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"] == "Ready")
+            .unwrap()
+            .clone();
+        let prior_ts_str = serde_json::to_value(&prior_ts).unwrap();
+        assert_eq!(
+            ready["lastTransitionTime"].as_str().unwrap(),
+            prior_ts_str.as_str().unwrap()
+        );
     }
 }
