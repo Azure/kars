@@ -28,7 +28,9 @@
 #![allow(dead_code)]
 
 #[cfg(test)]
-use crate::crd_validations::{a2a_agent_crd, mcp_server_crd, tool_policy_crd};
+use crate::crd_validations::{
+    a2a_agent_crd, inference_policy_crd, mcp_server_crd, tool_policy_crd,
+};
 
 const MCP_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -43,6 +45,11 @@ const TOOLPOLICY_HELM_CRD_PATH: &str = concat!(
 const A2AAGENT_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/azureclaw/templates/crd-a2aagent.yaml"
+);
+
+const INFERENCEPOLICY_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -157,5 +164,30 @@ mod tests {
         let rust_crd_value =
             serde_json::to_value(a2a_agent_crd()).expect("rust crd serializes to JSON");
         assert_helm_matches_rust(A2AAGENT_HELM_CRD_PATH, rust_crd_value, "a2aagent");
+    }
+
+    /// One-shot dumper for the inferencepolicy CRD. Run via:
+    ///
+    ///   DUMP_INFERENCEPOLICY_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///       helm_drift::tests::dump_inferencepolicy_crd_yaml -- --nocapture
+    #[test]
+    fn dump_inferencepolicy_crd_yaml() {
+        if std::env::var("DUMP_INFERENCEPOLICY_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = inference_policy_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_inferencepolicy_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(inference_policy_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(
+            INFERENCEPOLICY_HELM_CRD_PATH,
+            rust_crd_value,
+            "inferencepolicy",
+        );
     }
 }

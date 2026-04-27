@@ -21,6 +21,9 @@ mod crd_validations;
 mod fedcred;
 mod fedcred_reaper;
 mod helm_drift;
+mod inference_policy;
+mod inference_policy_compile;
+mod inference_policy_reconciler;
 mod mcp_server;
 mod mcp_server_reconciler;
 mod mesh_peer;
@@ -76,6 +79,10 @@ async fn main() -> Result<()> {
     let a2a_agent_handle = {
         let client = client.clone();
         tokio::spawn(async move { a2a_agent_reconciler::run(client).await })
+    };
+    let inference_policy_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { inference_policy_reconciler::run(client).await })
     };
     let mesh_peer_handle = {
         let client = client.clone();
@@ -136,6 +143,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = a2a_agent_handle => {
+            res??;
+        }
+        res = inference_policy_handle => {
             res??;
         }
         res = mesh_peer_handle => {

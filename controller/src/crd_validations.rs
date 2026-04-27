@@ -46,6 +46,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
 use kube::CustomResourceExt;
 
 use crate::a2a_agent::A2AAgent;
+use crate::inference_policy::InferencePolicy;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -221,6 +222,83 @@ pub fn a2a_agent_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on A2AAgent")
 }
 
+/// `InferencePolicy.spec` CEL rules. Phase 2 §8 entry 4 (S4).
+///
+/// Returns the validations injected on the `spec` schema node:
+///
+/// - `tokenBudget.monthlyTokens >= tokenBudget.dailyTokens` when both
+///   are set (admission CEL — the runtime path also checks but
+///   prevents the half-baked CR from ever landing).
+/// - `tokenBudget.monthlyTokens >= tokenBudget.perRequestTokens` when
+///   both are set (single request can't blow a monthly budget that
+///   wouldn't accept it).
+/// - `contentSafety.{hate,selfHarm,sexual,violence}` ∈ {`Safe`, `Low`,
+///   `Medium`, `High`} when present — matches Microsoft Content Safety
+///   `Microsoft.DefaultV2` severity levels exactly.
+/// - `modelPreference.primary` requires non-empty `provider` and
+///   `deployment` (any fallback entry too).
+/// - `appliesTo.action` ∈ {`chat`, `responses`, `image`, `embeddings`,
+///   `*`} — closed set matching `inference-router/src/routes/inference.rs`
+///   call-site enumeration.
+#[must_use]
+pub fn inference_policy_validations() -> Vec<ValidationRule> {
+    let severities = "['Safe','Low','Medium','High']";
+    vec![
+        ValidationRule {
+            rule: "!has(self.tokenBudget) || !has(self.tokenBudget.monthlyTokens) || !has(self.tokenBudget.dailyTokens) || self.tokenBudget.monthlyTokens >= self.tokenBudget.dailyTokens".into(),
+            message: Some("spec.tokenBudget.monthlyTokens must be >= spec.tokenBudget.dailyTokens".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.tokenBudget) || !has(self.tokenBudget.monthlyTokens) || !has(self.tokenBudget.perRequestTokens) || self.tokenBudget.monthlyTokens >= self.tokenBudget.perRequestTokens".into(),
+            message: Some("spec.tokenBudget.monthlyTokens must be >= spec.tokenBudget.perRequestTokens".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: format!(
+                "!has(self.contentSafety) || (\
+                 (!has(self.contentSafety.hate)      || self.contentSafety.hate      in {sev}) && \
+                 (!has(self.contentSafety.selfHarm)  || self.contentSafety.selfHarm  in {sev}) && \
+                 (!has(self.contentSafety.sexual)    || self.contentSafety.sexual    in {sev}) && \
+                 (!has(self.contentSafety.violence)  || self.contentSafety.violence  in {sev}))",
+                sev = severities
+            ),
+            message: Some("spec.contentSafety severities must be one of: Safe, Low, Medium, High".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.modelPreference) || (size(self.modelPreference.primary.provider) > 0 && size(self.modelPreference.primary.deployment) > 0)".into(),
+            message: Some("spec.modelPreference.primary requires non-empty provider and deployment".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.modelPreference) || self.modelPreference.fallback.all(f, size(f.provider) > 0 && size(f.deployment) > 0)".into(),
+            message: Some("spec.modelPreference.fallback[*] requires non-empty provider and deployment".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.appliesTo.action) || self.appliesTo.action in ['chat','responses','image','embeddings','*']".into(),
+            message: Some("spec.appliesTo.action must be one of: chat, responses, image, embeddings, *".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `InferencePolicy` CRD with [`inference_policy_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn inference_policy_crd() -> CustomResourceDefinition {
+    inject_spec_validations(InferencePolicy::crd(), inference_policy_validations())
+        .expect("kube-rs derive must produce a spec property on InferencePolicy")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +454,61 @@ mod tests {
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("signingKeys"));
+    }
+
+    #[test]
+    fn inference_policy_validations_are_non_empty() {
+        assert!(!inference_policy_validations().is_empty());
+    }
+
+    #[test]
+    fn every_inference_policy_rule_has_message_and_rule() {
+        for rule in inference_policy_validations() {
+            assert!(!rule.rule.is_empty(), "rule body must not be empty");
+            let msg = rule.message.as_deref().unwrap_or("");
+            assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
+        }
+    }
+
+    #[test]
+    fn inference_policy_crd_has_spec_validations_after_injection() {
+        let crd = inference_policy_crd();
+        let v = spec_validations(&crd);
+        assert_eq!(v.len(), inference_policy_validations().len());
+    }
+
+    #[test]
+    fn inference_policy_rules_mention_token_budget_and_severity_invariants() {
+        let rules: Vec<String> = inference_policy_validations()
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("monthlyTokens") && r.contains("dailyTokens")),
+            "must enforce monthlyTokens >= dailyTokens; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("Safe") && r.contains("High")),
+            "must enforce content-safety severity closed set; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("appliesTo.action") && r.contains("chat")),
+            "must enforce appliesTo.action closed set; got rules: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn inference_policy_crd_is_serde_round_trippable() {
+        let crd = inference_policy_crd();
+        let y = serde_yaml::to_string(&crd).expect("serializes");
+        assert!(y.contains("x-kubernetes-validations"));
+        assert!(y.contains("monthlyTokens"));
     }
 
     #[test]
