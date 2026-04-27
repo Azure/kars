@@ -1,0 +1,46 @@
+{
+  "name": "monthly-cap-exceeded",
+  "now": 1700000000,
+  "mandate": {
+    "mandateId": "mandate-1",
+    "principal": "agent-1",
+    "currency": "USD",
+    "dailyCap": 10000,
+    "monthlyCap": 100000,
+    "perTransferCap": 5000,
+    "counterpartyAllowlist": ["acme-corp"],
+    "exp": 2000000000,
+    "signature": "fixture-sig"
+  },
+  "ledger": [
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m01", "timestamp": 1699850000},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m02", "timestamp": 1699850001},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m03", "timestamp": 1699850002},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m04", "timestamp": 1699850003},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m05", "timestamp": 1699850004},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m06", "timestamp": 1699850005},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m07", "timestamp": 1699850006},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m08", "timestamp": 1699850007},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m09", "timestamp": 1699850008},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m10", "timestamp": 1699850009},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m11", "timestamp": 1699850010},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m12", "timestamp": 1699850011},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m13", "timestamp": 1699850012},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m14", "timestamp": 1699850013},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m15", "timestamp": 1699850014},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m16", "timestamp": 1699850015},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m17", "timestamp": 1699850016},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m18", "timestamp": 1699850017},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m19", "timestamp": 1699850018},
+    {"mandateId": "mandate-1", "counterparty": "acme-corp", "amount": 4999, "currency": "USD", "transferNonce": "m20", "timestamp": 1699850019}
+  ],
+  "attempt": {
+    "mandateId": "mandate-1",
+    "counterparty": "acme-corp",
+    "amount": 1000,
+    "currency": "USD",
+    "transferNonce": "n-010",
+    "timestamp": 1700000000
+  },
+  "expected": {"verdict": "deny", "kind": "MonthlyCapExceeded"}
+}

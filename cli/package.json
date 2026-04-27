@@ -26,7 +26,8 @@
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",
-    "test": "vitest",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,0 +1,101 @@
+{{- /*
+  Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
+
+  ValidatingAdmissionPolicy that rejects kubectl exec / attach into
+  the **agent runtime container** (`openclaw`) of pods in sandbox
+  namespaces (namespaces labelled azureclaw.azure.com/isolated=strict).
+
+  Rationale
+  ---------
+  A compromised operator or unscoped cluster-admin token is the single
+  largest blast-radius for an agent sandbox: exec gives arbitrary code
+  execution inside the agent process, bypassing every in-pod hardening
+  layer (seccomp, egress-guard, Landlock, Entra token scope). MCP02
+  "tool poisoning" becomes irrelevant if an operator can just
+  `kubectl exec` and pull the bearer token out of /proc.
+
+  Scope: this VAP denies exec/attach only into the `openclaw` container
+  (the agent runtime). Sibling containers in the same pod —
+  `inference-router`, `egress-guard` — remain reachable so the operator
+  dashboard can curl router admin endpoints (egress allowlist, AGT
+  status, handoff state) without disabling defense-in-depth on the
+  agent. The router container is operator-trusted (it already holds
+  the upstream Foundry keys); the agent runtime is the actual asset.
+
+  We do NOT block pods/portforward — it does not grant code execution,
+  only TCP access to in-pod ports gated by the application's own auth
+  (gateway token, admin token). Port-forward is required for the
+  legitimate `azureclaw connect` operator flow.
+
+  Break-glass
+  -----------
+  Set label azureclaw.azure.com/break-glass=true on the namespace. The
+  bypass is logged at the K8s apiserver audit layer and must be
+  reverted by the responder.
+
+  Why namespace-labelled (not pod-labelled): sandbox pods are
+  controller-managed; labels on them can in principle be mutated. The
+  namespace is created with the label at ClawSandbox reconciliation
+  time and the controller does not re-label. Pinning the deny rule to
+  the namespace label means a compromised controller can't disable the
+  policy by re-labelling a pod.
+
+  CEL notes
+  ---------
+  * `request.subResource` is one of {'exec','attach','portforward'}
+    when invoked via kubectl exec / attach / port-forward. The
+    'console' case (OpenShift / CRC) is defensive.
+  * `namespaceObject.metadata.labels` is populated by the apiserver
+    when matchConstraints includes a namespaceSelector (it doesn't for
+    us — so we read the label off the pod's namespace via a VAP
+    variable that uses the namespaceObject param).
+*/}}
+{{- if .Values.admission.podExecBan.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: azureclaw-sandbox-exec-ban
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["CONNECT"]
+        resources:   ["pods/exec", "pods/attach"]
+    namespaceSelector:
+      matchLabels:
+        azureclaw.azure.com/isolated: strict
+      matchExpressions:
+        - key: azureclaw.azure.com/break-glass
+          operator: NotIn
+          values: ["true"]
+  matchConditions:
+    # Only the agent runtime container is protected. Operator tooling
+    # (e.g. the dashboard's egress/AGT polls) reaches the inference
+    # router via `kubectl exec -c inference-router -- curl localhost:8443/...`,
+    # which must remain available. Default container (when -c is
+    # omitted) is also denied — kubectl picks the first container,
+    # which is `openclaw` in our pod spec.
+    - name: target-is-agent-runtime
+      expression: |
+        !has(object.container) || object.container == '' || object.container == 'openclaw'
+  validations:
+    - expression: "false"
+      message: "exec/attach into the openclaw (agent runtime) container is denied. Use 'azureclaw connect' for the legitimate operator flow (token via Secret + port-forward). Sibling containers (inference-router, egress-guard) remain reachable for ops. Emergency override: label the namespace azureclaw.azure.com/break-glass=true; bypasses are audited."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: azureclaw-sandbox-exec-ban-binding
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: admission
+spec:
+  policyName: azureclaw-sandbox-exec-ban
+  validationActions: [Deny, Audit]
+{{- end }}

@@ -5,7 +5,160 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — PR #44 `dev → main` uplift
+
+This entry covers **186 commits** on `dev` since `main`, structured as Phase 0
+(seams + safety net) and Phase 1 (protocol freshness + minimal schema). Every
+capability cites code; every capability-introducing PR shipped a security-audit
+doc under `docs/security-audits/` (75 docs total). See
+[`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md) for the full
+evidence index.
+
+### Phase 0 — provider seams + compat suite + CI gates
+
+#### Added
+- **Provider seams (Phase 1)** — `PolicyDecisionProvider`, `AuditSink`,
+  `SigningProvider` traits with in-tree `impl … for Governance` (router crate);
+  each contract reachable via `Arc<dyn Trait>` view of the same
+  `Arc<Governance>`. A fourth `MeshProvider` seam is **plugin-side by
+  design** — the router's `providers/mesh.rs` is a documentation-only trait
+  file.
+- **Outage-mode dispatch** (`providers/outage.rs`) — `Strict` (prod default,
+  fail-closed), `CachedRead` (allow if cached decision < TTL), `DegradedDev`
+  (fail-open with warning label, dev only). Configurable per-`ClawSandbox`
+  via `spec.agt.outageMode`.
+- **Six blocking CI gates** under `ci/`: `check-loc.sh` (LOC budget),
+  `no-stubs.sh` (no `TODO/FIXME/unimplemented!`), `no-custom-crypto.sh`
+  (forbids hand-rolled crypto outside provider seams + vendored SDK),
+  `no-null-provider-prod.sh` (Null* providers blocked unless
+  `azureclaw.azure.com/dev-only` label set), `security-audit-required.sh`
+  (per-PR audit-doc enforcement, 2 sign-offs), `vendored-patch-audit.sh`
+  (forces re-audit on AGT SDK bump), plus `a2a-module-isolation.sh`. Budget
+  in `ci/loc-budget.yaml`.
+- **75 security-audit docs** under `docs/security-audits/` from the
+  `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z
+  path, secret + key custody, egress-surface delta, audit events emitted,
+  failure mode (fail-closed default), negative-test coverage, two sign-offs.
+- **Behavioral conformance corpus** (`tests/conformance/`) — 8 specs:
+  `signal-x3dh`, `signal-knock`, `signal-negative`, `oauth21-bcp`,
+  `mcp-streamable-http`, `a2a-agent-card`, `ap2-commerce`,
+  `sandbox-isolation`. Negative cases (tampered ciphertext, replayed message,
+  wrong-issuer card, expired mandate) are mandatory per new endpoint.
+- **Compat suite** (`tests/compat/`) — operator TUI flow with virtual-screen
+  + outgoing-CR-payload assertions via a `blessed` mock harness.
+- **5 cargo-fuzz targets** (`inference-router/fuzz/fuzz_targets/`) —
+  `a2a-jws`, `a2a-base64url`, `deserialize-state`, `sanitize-chat`,
+  `parse-streaming-pf`.
+- **`docs/agt-vendored-patch-audit.md`** — index of fixes applied to the
+  vendored AgentMesh stack (SDK + relay + registry) with re-audit cadence on
+  AGT SDK bumps.
+- **`docs/sigs-agent-sandbox-compat.md`** — `TranslateMode` / `OverlayMode`
+  design for optional compat with `kubernetes-sigs/agent-sandbox`. Opt-in,
+  no upstream dependency, no CI pin.
+- **Hotspot decomposition (Pass 1 + 2)** with byte-equivalence proofs:
+  - `inference-router/src/routes.rs` 4890 → 6 files (`routes/{inference,handoff,governance,mesh,egress,mod}.rs`); 1 allowlisted namespace fix.
+  - `controller/src/reconciler.rs` 2326 → 1464 LOC.
+  - `controller/src/mesh_peer.rs` 1970 → 1170 LOC; split into `mesh_peer/{mod,offload,pair}.rs`.
+  - `inference-router/src/governance.rs` 1252 → 837 LOC.
+  - `inference-router/src/handoff/mod.rs` 2075 → 1770 LOC.
+  - `inference-router/src/spawn/docker.rs` 1199 → 762 LOC.
+  - `cli/src/plugin.ts` 7455 LOC: `foundry-discovery.ts` and
+    `router-client.ts` extracted.
+- Repo tooling for behavioral-equivalence proofs (`tools/item-manifest/` +
+  `tools/drift/drift.py`); baselines + allowlists under `tools/drift/`.
+- **Federated-credential reaper** (`controller/src/fedcred_reaper.rs`, 232
+  LOC, 4th `tokio::select!` arm in the controller event loop) — periodically
+  GCs orphan federated credentials against the 20-fedcred-per-MI Azure cap;
+  default 600 s, env override `FEDCRED_REAPER_INTERVAL_SECS`. 5 unit tests.
+- **KEP-1623 status subresource on `ClawSandbox`** — `Conditions[]` +
+  `observedGeneration`; controller stamps `Degraded=True` / `Ready=False`
+  on the three validation-failure exits.
+- **VAP / MAP set** in the controller Helm chart — `pods/exec|attach|portforward`
+  ban on sandbox namespaces; deny posture-downgrades (isolation step-down,
+  seccomp removal, `readOnlyRootFilesystem: false`); deny removal of
+  `azureclaw.azure.com/dev-only` label once applied; mutating policy auto-
+  injects router sidecar + sets seccomp to `azureclaw-strict`.
+
+### Phase 1 — protocol freshness + minimal schema
+
+#### Added
+- **MCP 2026 Streamable HTTP** (`inference-router/src/mcp/`, 8 modules:
+  `error`, `initialize`, `jsonrpc`, `oauth`, `oauth_layer`, `pipeline`,
+  `streamable_http`, `tools`) — `POST /mcp` with full JSON-RPC 2.0 framing,
+  `Mcp-Session-Id` semantics, batch support, oversized-frame reject;
+  `tools/list` + `tools/call` dispatch; OWASP MCP Top 10 controls matrix at
+  `docs/security-mcp-top10.md`.
+- **OAuth 2.1 (RFC 8725 BCP)** — bearer-token verifier as a `tower::Layer`;
+  PKCE, audience, expiry, resource-indicator, scope checks; gated by
+  `McpServer.spec.productionMode: true`.
+- **A2A 1.0.0** (`inference-router/src/a2a/`, 14 modules including
+  `agent_card`, `agent_projection`, `card_server`, `card_signing`,
+  `card_verifier`, `jsonrpc_dispatch`, `signature`, `snapshot_rebuild`,
+  `trust_store`) — `/.well-known/agent.json` per-sandbox (Ed25519 detached
+  JWS via `SigningProvider`); inbound `POST /a2a` JSON-RPC dispatch
+  (`message/send`, `tasks/get`, `tasks/cancel`); hot-reloading
+  trust-store snapshot for `kid → VerifyingKey`. Schema source:
+  <https://a2a-protocol.org/v1.0.0/specification>. Ingress posture is
+  gateway-only, surgical opt-in via `ClawSandbox.spec.a2a.expose: true` —
+  see [ADR-0001](docs/adr/0001-a2a-ingress-front-edge.md).
+- **AP2 commerce mandates** (`a2a/{ap2,mandate_signing,mandate_trust_store,
+  message_send_ap2}.rs`) — IntentMandate detached-JWS sign/verify; per-tool
+  `commerce.dailyCap` / `monthlyCap` / `counterpartyAllowlist` enforcement;
+  type-safe `MandateTrustStore`.
+- **`McpServer` CRD (schema-only)** + **`ToolPolicy` CRD (schema-only)** —
+  `controller/src/{mcp_server,tool_policy}.rs`; CEL `x-kubernetes-validations`
+  post-processed via `controller/src/crd_validations.rs` because kube-rs
+  `CustomResource` derive does not emit the field (kube-rs#1557). Reconciliation
+  ships in Phase 2.
+- **`ClawPairing` CRD** + reconciler — operator-assisted pairing as a
+  K8s-native operation (`controller/src/{pairing,pairing_reconciler}.rs`);
+  `azureclaw pair <a> <b>`.
+- **Identity provider seam — Microsoft Graph agent identity** — production
+  Graph client at `controller/src/providers/identity_*.rs` calling
+  `POST /beta/servicePrincipals/microsoft.graph.agentIdentity`,
+  `POST /beta/servicePrincipals/{id}/federatedIdentityCredentials`,
+  `DELETE /beta/servicePrincipals/{id}`. Endpoints verified against
+  learn.microsoft.com (commit `2114bf2`). +5 controller tests (147 total).
+- **Policy hot-reload** — router subscribes via K8s informers + AGT SSE;
+  applies new `ToolPolicy` / `InferencePolicy` in-process without pod
+  rollout; provider-flag flip (`vendored ↔ agt`) also hot-reloads.
+- **OTel GenAI SemConv 1.x** emission on every router span.
+- **Gateway token via `secretKeyRef`** — `OPENCLAW_GATEWAY_TOKEN` is mounted
+  from a K8s `Secret` instead of plain env, with a one-shot warning when
+  legacy plain-env paths are exercised.
+- **Three new CLI commands** — `azureclaw a2a` (Phase 1 scaffold:
+  `list-exposed`, `schema`), `azureclaw convert` (Phase 0 skeleton),
+  `azureclaw pair`.
+- **`docs/use-cases.md`** + **`docs/phase-0-1-capabilities.md`** + ADR-0001
+  + OWASP MCP Top-10 controls matrix.
+
+### Phase 0/1 — Recent fixes
+- **Sub-agent re-spawn after handoff** — sub-agent trust + resume signals
+  must use `restoreResp.sub_agent_results` (spawned), not
+  `sub_agent_workspaces` (may be empty). `cli/src/plugin.ts:2164-2270`.
+- **Vendor patch #21 (SDK)** — `SessionManager.initiateSession` returns
+  `{reused: true}` when an incoming KNOCK already established a crypto-layer
+  session (was throwing "Active session already exists").
+- **`azureclaw connect` port-forward error surfacing** — kubectl stderr is
+  now displayed in the human-readable "address already in use" form.
+- **Deduplicated chat replay** — long-standing duplicate-message UI bug
+  triaged across plugin + sandbox image; investigation captured in session
+  checkpoints.
+
+### Engineering metrics (PR #44)
+- **186 commits** on `dev` since `main`.
+- **75 security-audit docs** under `docs/security-audits/`.
+- **26 vendor patches** (SDK 21 + relay 4 + registry 1).
+- **6 blocking CI gates** + a2a-module-isolation + LOC budget.
+- **8 conformance specs**, **1 compat spec**, **5 fuzz targets**.
+- **205 Rust tests** (74 controller + 105 router + 26 integration); **207 CLI
+  tests**.
+- **4 CRDs total** — `ClawSandbox` + `ClawPairing` reconciled; `McpServer` +
+  `ToolPolicy` schema-only.
+- **21 CLI commands**, **10 skills** (8 Foundry + 2 internal), **5 Docker
+  images**.
+
+## [pre-PR-44 baseline]
 
 ### Added
 - **Preflight RBAC checks for `azureclaw up`** — new `cli/src/preflight.ts` queries effective permissions at subscription scope (`Microsoft.Authorization/permissions`), resource-provider registration, and preview-feature flags BEFORE Bicep runs, so operators fail in ≤30s instead of 20 minutes in. Prints copy-pasteable `az role assignment create` remediation commands with the exact missing actions. Escape hatch: `--skip-preflight`. See `docs/permissions.md` for the full role matrix + custom-role JSON.
@@ -41,7 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Router bind address fix for K8s probe accessibility
 - K8s probe host field removal (kubelet defaults to pod IP)
 - Missing transitive Python dependencies (typing_inspection, cryptography) via PyPI fallback
-- 8 vendor patches for AgentMesh relay, registry, and SDK bugs
+- 8 vendor patches for AgentMesh relay, registry, and SDK bugs (this baseline; the active count is **26 patches** as of PR #44 — see `docs/agt-vendored-patch-audit.md`)
 - Foundry Memory Store format — ensureMemoryStore creates full store with chat + embedding models; item format matches Foundry REST API spec
 
 ### Changed

@@ -36,6 +36,7 @@ prometheus.workspace = true
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 
 # AGT governance (policy YAML parsing + native policy/trust/audit)
 serde_yaml = "0.9"
@@ -59,6 +60,11 @@ sha2 = "0.10"
 rand = "0.9"
 base64 = "0.22"
 flate2 = "1"
+# Ed25519 sign/verify for A2A 1.0.0 AgentCard signatures (a2a::card_signing).
+# Public-key crypto only — private key material flows through `SigningProvider`
+# in production paths. Verification is pure (no provider needed) and uses
+# the crate directly per `ci/no-custom-crypto.sh` allowlist.
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
 # Property-based testing (s5) — inline #[cfg(test)] proptest! blocks exercise

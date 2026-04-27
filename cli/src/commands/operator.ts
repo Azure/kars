@@ -1,37 +1,10 @@
 /**
  * AzureClaw Operator TUI — live terminal dashboard for managing sandboxes.
  *
- * Layout:
- *   ┌─────────────────────── Header ───────────────────────────┐
- *   │  🔱 AzureClaw Operator │ cluster │ health │ time         │
- *   ├────────────────── Agent Table ───────────────────────────┤
- *   │  ● name      status    model    isolation  ch   age      │
- *   ├──── Security ──────┬── Egress ──────┬──── Log ──────────┤
- *   │ Isolation  enhanced │ domain  agent  │ ↻ #3 3 agents... │
- *   │ Seccomp    strict   │ ...            │ ✓ Approved foo   │
- *   │ Blocklist  48231    │                │                   │
- *   │ Egress     learning │                │ ▃▅▇▅▃▁ activity  │
- *   ├─────────────────── Status Bar ───────────────────────────┤
- *   │ [Tab] Focus [↑↓] Nav [a] Approve [d] Deny ...           │
- *   └─────────────────────────────────────────────────────────-┘
- *
- * Keyboard:
- *   Tab       — cycle focus: agents → egress → (repeat)
- *   ↑/↓ j/k   — navigate rows in focused table
- *   a         — approve selected egress domain
- *   d         — deny selected egress domain
- *   e         — enforce egress (lock down)
- *   L         — toggle learning ↔ enforcement
- *   g         — open/close full AGT detail overlay
- *   t         — toggle topology view
- *   n         — spawn new agent
- *   m         — switch model for selected agent
- *   l         — tail logs for selected agent
- *   x         — delete selected agent (with confirmation)
- *   Enter     — connect to selected agent (shell session)
- *   c         — toggle cluster health view
- *   r         — refresh now
- *   q / Esc   — quit (or close overlay)
+ * The rendered layout, key bindings, and status-bar copy are documented
+ * alongside their extracted data in `./operator/keymap.ts` (per plan
+ * §4.2 + §6 item 12 Phase 0 decomposition). See `BINDINGS` in that file
+ * for the canonical reference.
  */
 
 import { Command } from "commander";
@@ -39,6 +12,11 @@ import { execa } from "execa";
 import blessed from "blessed";
 import contrib from "blessed-contrib";
 import { listSecretVariants } from "../config.js";
+import {
+  statusBarForAgents,
+  statusBarForTopology,
+  statusBarForCluster,
+} from "./operator/keymap.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -2023,30 +2001,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     renderHeader();
 
     // Status bar
-    const viewTag = viewMode === "cluster"
-      ? "{blue-fg}{bold}[Cluster]{/bold}{/}"
-      : viewMode === "topology"
-        ? "{cyan-fg}{bold}[Topology]{/bold}{/}"
-        : "{gray-fg}Cluster{/}";
-    const topoTag = viewMode === "topology"
-      ? "{cyan-fg}{bold}[Topology]{/bold}{/}"
-      : "{gray-fg}Topology{/}";
     if (viewMode === "agents") {
-      const focusTag = focusedPanel === "agents"
-        ? "{cyan-fg}{bold}[Agents]{/bold}{/}  {gray-fg}Egress{/}"
-        : "{gray-fg}Agents{/}  {yellow-fg}{bold}[Egress]{/bold}{/}";
       statusBar.setContent(
-        ` ${focusTag}  ${viewTag}  ${topoTag}  │  [Tab] Focus  [↑↓] Nav  [Enter] Connect  [c] Cluster  [t] Topology  ` +
-        `[a] Approve  [A] All  [d] Del/Deny  [e] Enforce  [L] Learn/Enforce  [g] AGT  [n] Spawn  [r] Refresh  [q] Quit`,
+        statusBarForAgents({ focusedPanel, viewMode }),
       );
     } else if (viewMode === "topology") {
-      statusBar.setContent(
-        ` ${topoTag}  │  [t] Back to Agents  [c] Cluster  [r] Refresh  [q] Quit`,
-      );
+      statusBar.setContent(statusBarForTopology());
     } else {
-      statusBar.setContent(
-        ` ${viewTag}  │  [c] Back to Agents  [t] Topology  [r] Refresh  [q] Quit`,
-      );
+      statusBar.setContent(statusBarForCluster());
     }
 
     // Focus border color

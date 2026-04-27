@@ -23,6 +23,7 @@ use azureclaw_inference_router::handoff::{
     DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore,
 };
 use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
+use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
 use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_ro
 
 /// Build a minimal AppState suitable for testing (no env vars, no network).
 fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
+    let governance = Arc::new(Governance::new(sandbox));
     AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
         client: reqwest::Client::new(),
@@ -49,7 +51,10 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
             registry_url: None,
         }),
         budget: TokenBudgetTracker::new(1_000_000, 100_000),
-        governance: Arc::new(Governance::new(sandbox)),
+        policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
+        audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
+        signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
+        governance,
         blocklist: Blocklist::disabled(),
         sandbox_name: Arc::new(sandbox.to_string()),
         inbox: Arc::new(MeshInbox::new()),

@@ -127,13 +127,15 @@ export function hasEffectiveAction(perms: PermissionSet[], action: string): bool
 
 async function fetchSubscriptionPermissions(subscriptionId: string): Promise<PermissionSet[]> {
   // az rest auto-uses caller's AAD token and the management.azure.com audience.
+  // NOTE: do NOT pass `--url-parameters ""` — Azure CLI splits each entry on
+  // `=` and an empty string crashes with `ValueError: not enough values to
+  // unpack`. The flag is optional; omit it when there are no extra params.
   const { stdout } = await execa(
     "az",
     [
       "rest",
       "--method", "GET",
       "--url", `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/permissions?api-version=2022-04-01`,
-      "--url-parameters", "",
     ],
     { stdio: "pipe", timeout: 20000 }
   );

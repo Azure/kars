@@ -10,7 +10,9 @@
     clippy::unnecessary_unwrap
 )]
 
+pub mod a2a;
 pub mod auth;
+pub mod behavior_monitor;
 pub mod blocklist;
 pub mod budget;
 pub mod config;
@@ -18,9 +20,14 @@ pub mod errors;
 pub mod forward_proxy;
 pub mod governance;
 pub mod handoff;
+pub mod mcp;
 pub mod mesh;
 pub mod metrics;
+pub mod policy_envelope;
+pub mod providers;
 pub mod proxy;
+pub mod rate_limiter;
 pub mod routes;
 pub mod safety;
 pub mod spawn;
+pub mod telemetry;

@@ -110,18 +110,24 @@ export function connectCommand(): Command {
           isKata = rc.trim().includes("kata");
         } catch {}
 
-        // Extract gateway token
+        // Extract gateway token from the K8s Secret created by the controller.
+        // The Secret is the source of truth — the openclaw container reads it
+        // via env var OPENCLAW_GATEWAY_TOKEN. Reading the Secret here (instead
+        // of `kubectl exec cat /sandbox/.bashrc`) is required by the
+        // sandbox-exec-ban VAP and is also strictly better security: token
+        // access is gated by namespaced RBAC on the Secret, no code-execution
+        // path through the operator's cluster role.
         let gatewayToken = "";
         try {
-          const { stdout: bashrc } = await execa("kubectl", [
-            "exec", "-n", namespace, `deploy/${name}`,
-            "-c", "openclaw", "--",
-            "cat", "/sandbox/.bashrc",
+          const { stdout: tokenB64 } = await execa("kubectl", [
+            "get", "secret", "-n", namespace, "gateway-token",
+            "-o", "jsonpath={.data.token}",
           ], { stdio: "pipe" });
-          const match = bashrc.match(/OPENCLAW_GATEWAY_TOKEN="([^"]+)"/);
-          if (match) gatewayToken = match[1];
+          if (tokenB64.trim()) {
+            gatewayToken = Buffer.from(tokenB64.trim(), "base64").toString("utf-8").trim();
+          }
         } catch {
-          console.log(chalk.yellow("  Could not extract gateway token."));
+          console.log(chalk.yellow("  Could not read gateway-token Secret."));
         }
 
         if (!gatewayToken) {
@@ -146,12 +152,25 @@ export function connectCommand(): Command {
           return;
         }
 
-        // Start port-forward
+        // Start port-forward — pipe stderr so we can surface kubectl errors
+        // when the connection drops. Without this, all the user sees is
+        // "Disconnected." with no diagnostic.
         console.log(chalk.dim(`  Starting port-forward on localhost:${localPort}...`));
         const pf = execa("kubectl", [
           "port-forward", "-n", namespace,
           `deploy/${name}`, `${localPort}:18789`,
-        ], { stdio: "pipe" });
+        ], { stdio: ["ignore", "pipe", "pipe"] });
+
+        let pfStderr = "";
+        pf.stderr?.on("data", (chunk: Buffer) => {
+          const line = chunk.toString();
+          pfStderr += line;
+          // Surface kubectl errors live so the operator can see e.g. auth
+          // failures, deploy-not-found, or LB resets immediately.
+          if (/error|denied|unable|forbidden|refused|reset|EOF|lost connection/i.test(line)) {
+            process.stderr.write(chalk.dim(`    [kubectl] ${line.trim()}\n`));
+          }
+        });
 
         // Wait for port-forward to be ready
         await new Promise(r => setTimeout(r, 2000));
@@ -174,7 +193,11 @@ export function connectCommand(): Command {
           await pf;
         } catch {
           // port-forward exited
-          console.log(chalk.dim("\n  Disconnected.\n"));
+          console.log(chalk.dim("\n  Disconnected."));
+          if (pfStderr.trim()) {
+            console.log(chalk.dim(`  kubectl said:\n${pfStderr.split("\n").map(l => "    " + l).join("\n")}`));
+          }
+          console.log();
         } finally {
           process.removeListener("SIGINT", cleanup);
           process.removeListener("SIGTERM", cleanup);

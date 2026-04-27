@@ -13,6 +13,30 @@
  */
 
 import type { Command } from "commander";
+import { createRequire as __createRequire__ } from "node:module";
+
+// ---------------------------------------------------------------------------
+// CommonJS interop shim — OpenClaw 2026.4.x loads plugin entries as native
+// ESM via jiti. `cli/package.json` declares `"type": "module"`, so the
+// global `require` is undefined inside this file at runtime. We synthesize
+// a CJS-style require bound to *this module's* URL so that the small number
+// of `require(...)` call-sites below (Node built-ins + the OpenClaw plugin
+// SDK that does not yet publish ESM exports) keep working under both
+// CommonJS and ESM loaders. Do NOT add new `require` call-sites — prefer
+// `await import()` for any new dynamic dependency.
+// ---------------------------------------------------------------------------
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const require: NodeRequire = (() => {
+  try {
+    // ESM context: derive a require bound to this module URL.
+    return __createRequire__(import.meta.url);
+  } catch {
+    // CJS context (tsc target=commonjs, jest/vitest, older OpenClaw):
+    // the runtime-provided `require` is already in scope.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, no-undef
+    return (globalThis as any).require ?? __createRequire__(process.cwd() + "/");
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // OpenClaw Plugin SDK — loaded dynamically at runtime from the host OpenClaw
@@ -50,24 +74,24 @@ process.on("unhandledRejection", (reason: any) => {
 // Late-binding: the env var is re-read on every call so tests can set it
 // after module load.
 // ---------------------------------------------------------------------------
-const DEFAULT_ROUTER_BASE = "http://127.0.0.1:8443";
+// Router URL + I/O helpers live in cli/src/core/router-client.ts. The URL
+// helpers (`routerBase`/`routerWsBase`/...) are re-exported below to preserve
+// the `import { routerBase, ... } from "./plugin.js"` surface used by tests
+// and downstream CLI commands.
+import {
+  routerBase,
+  routerWsBase,
+  routerUrl,
+  routerWsUrl,
+  routerCall as _routerCall,
+  routerCallStrict as _routerCallStrict,
+  readAdminToken as _readAdminToken,
+  readAdminTokenSync as _readAdminTokenSync,
+  pushTrustToRouter,
+  pushSigningCounter,
+} from "./core/router-client.js";
 
-export function routerBase(): string {
-  return process.env.AZURECLAW_ROUTER_URL || DEFAULT_ROUTER_BASE;
-}
-
-export function routerWsBase(): string {
-  // http → ws, https → wss; preserves host:port and trailing path if any.
-  return routerBase().replace(/^http/, "ws");
-}
-
-export function routerUrl(path: string): string {
-  return new URL(path, routerBase()).toString();
-}
-
-export function routerWsUrl(path: string): string {
-  return new URL(path, routerWsBase()).toString();
-}
+export { routerBase, routerWsBase, routerUrl, routerWsUrl };
 
 // ---------------------------------------------------------------------------
 // AGT SDK — AgentMesh (amitayks/agentmesh)
@@ -191,6 +215,119 @@ let _log: { info: (m: string) => void; warn: (m: string) => void } = {
 // AMID → agent name mapping (populated during send via registry search)
 const amidToName: Map<string, string> = new Map();
 const nameToAmid: Map<string, string> = new Map();
+// Per-name cache age for nameToAmid. Used to invalidate stale entries when a
+// sub-agent crashes and re-registers with a fresh AMID (sandbox identities are
+// ephemeral by design — keys regenerate on every pod boot, so an AMID cached
+// before a restart points at a dead identity in the registry).
+const nameToAmidTs: Map<string, number> = new Map();
+// 60s — long enough to amortize registry lookups across normal sends, short
+// enough that a crashed-and-restarted sub-agent is re-resolved within one
+// follow-up send cycle. The stable 'parent' alias bypasses TTL (see
+// getCachedAmid below) because it's seeded by the operator at spawn and never
+// changes for the lifetime of this pod.
+const AMID_CACHE_TTL_MS = 60_000;
+
+function getCachedAmid(name: string): string | undefined {
+  if (name === "parent") return nameToAmid.get(name);
+  const ts = nameToAmidTs.get(name);
+  if (ts === undefined) return nameToAmid.get(name);
+  if (Date.now() - ts > AMID_CACHE_TTL_MS) {
+    nameToAmid.delete(name);
+    nameToAmidTs.delete(name);
+    return undefined;
+  }
+  return nameToAmid.get(name);
+}
+
+function setCachedAmid(name: string, amid: string): void {
+  nameToAmid.set(name, amid);
+  nameToAmidTs.set(name, Date.now());
+}
+
+// Pick the freshest live entry from a registry /search response. Filters to
+// matches on display_name or capability, prefers online agents, then newest
+// last_seen.
+//
+// **Trust scope (important):** within a single cluster the AgentMesh registry
+// is cluster-local (NetworkPolicy-gated) and ClawSandbox names are unique by
+// K8s admission, so display_name uniquely identifies one sandbox and the
+// duplicates we see in the registry are always different AMIDs of the same
+// logical sandbox across pod restarts (sandbox identities are ephemeral by
+// design). When this assumption breaks — federated/multi-cluster registry, or
+// a compromised sandbox squatting another agent's name — pass a `scopeFilter`
+// that requires a known capability (e.g. `parent:<parent-amid>` or
+// `cluster:<cluster-id>`) emitted by trusted peers at registration. A
+// signed-spawn attestation from the controller is the longer-term fix.
+function pickFreshestRegistryMatch(
+  results: any[],
+  agentName: string,
+  scopeFilter?: (a: any) => boolean,
+): any | undefined {
+  if (!Array.isArray(results) || results.length === 0) return undefined;
+  const nameMatch = (a: any) =>
+    a?.display_name === agentName || (Array.isArray(a?.capabilities) && a.capabilities.includes(agentName));
+  const filtered = results.filter((a: any) => nameMatch(a) && (scopeFilter ? scopeFilter(a) : true));
+  // Fall back to results without the name filter only if no name match exists,
+  // never widen past the scope filter — that's the trust boundary.
+  const candidates = filtered.length > 0
+    ? filtered
+    : results.filter((a: any) => (scopeFilter ? scopeFilter(a) : true));
+  if (candidates.length === 0) return undefined;
+  return [...candidates].sort((a: any, b: any) => {
+    if (a?.status === "online" && b?.status !== "online") return -1;
+    if (b?.status === "online" && a?.status !== "online") return 1;
+    return (b?.last_seen || "").localeCompare(a?.last_seen || "");
+  })[0];
+}
+
+// Single source of truth for "name → live AMID" resolution. Honors the TTL'd
+// cache, and on miss queries the registry and picks the freshest live match.
+// Used by every send/discovery path so cache + freshness behaviour is uniform
+// — there is no other place where this lookup logic should be duplicated.
+//
+// Options:
+//   timeoutMs   — request timeout for the registry call (default 5s).
+//   registryBase — override base URL (sub-agents use AGT_REGISTRY_URL when set).
+//   scopeFilter — optional capability/identity guard (see pickFreshestRegistryMatch).
+async function resolveAmidByName(
+  agentName: string,
+  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean; bypassCache?: boolean } = {},
+): Promise<string | undefined> {
+  if (!opts.bypassCache) {
+    const cached = getCachedAmid(agentName);
+    if (cached) return cached;
+  }
+
+  const base = opts.registryBase ?? routerUrl("/agt/registry");
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  try {
+    const http = await import("node:http");
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.get(
+        `${base}/registry/search?capability=${encodeURIComponent(agentName)}`,
+        (res: any) => {
+          let d = "";
+          res.on("data", (c: Buffer) => { d += c.toString(); });
+          res.on("end", () => resolve(d));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    });
+    const parsed = JSON.parse(body);
+    const results: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
+    const match = pickFreshestRegistryMatch(results, agentName, opts.scopeFilter);
+    const amid: string | undefined = match?.amid || match?.id;
+    if (amid) {
+      if (!opts.bypassCache) {
+        setCachedAmid(agentName, amid);
+        amidToName.set(amid, agentName);
+      }
+      return amid;
+    }
+  } catch { /* transient — caller decides whether to retry */ }
+  return undefined;
+}
 // Parent-verified trusted peer AMIDs — pre-seeded at spawn via AGT_TRUSTED_PEERS env var.
 // Separate from amidToName to prevent trust escalation via arbitrary registry lookups.
 const parentTrustedAmids: Set<string> = new Set();
@@ -261,76 +398,8 @@ async function resolveSigningKey(amid: string): Promise<string> {
 }
 let agtSandboxName: string = "unknown";
 
-// Push trust updates to the router's local TrustStore (POST /agt/trust).
-// This syncs the plugin's reputation observations with the router for /agt/status display.
-// Also writes an audit chain entry on the router side.
-async function pushTrustToRouter(agentId: string, scoreDelta: number) {
-  try {
-    const http = await import("node:http");
-    const fs = await import("node:fs");
-    const body = JSON.stringify({
-      agent_id: agentId,
-      score: Math.round(500 + scoreDelta * 500), // 0.0-1.0 → 0-1000 scale
-      interactions: 1,
-    });
-    // Read admin token for trust mutation auth (prevents sandbox from forging scores)
-    let adminToken = "";
-    try { adminToken = fs.readFileSync("/tmp/.agt-admin-token", "utf-8").trim(); } catch {}
-    if (!adminToken) {
-      try { adminToken = fs.readFileSync("/etc/azureclaw/secrets/admin-token", "utf-8").trim(); } catch {}
-    }
-    if (!adminToken) {
-      try { adminToken = fs.readFileSync("/run/secrets/admin-token", "utf-8").trim(); } catch {}
-    }
-    const headers: Record<string, string | number> = {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(body),
-    };
-    if (adminToken) headers["x-azureclaw-admin"] = adminToken;
-    await new Promise<void>((resolve, reject) => {
-      const req = http.request(routerUrl("/agt/trust"), {
-        method: "POST",
-        headers,
-        timeout: 5000,
-      }, (res: any) => {
-        res.resume();
-        res.on("end", () => {
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode}`));
-          } else {
-            resolve();
-          }
-        });
-      });
-      req.on("error", reject);
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-      req.write(body);
-      req.end();
-    });
-  } catch {
-    // Startup race: router may not be ready on first plugin load (double-load pattern).
-    // Trust will be seeded on the second load — no need to alarm the operator.
-  }
-}
-
-// Push Ed25519 signing counter to router for /agt/status metrics.
-async function pushSigningCounter(action: "signed" | "verified" | "rejected") {
-  try {
-    const http = await import("node:http");
-    const body = JSON.stringify({ action });
-    await new Promise<void>((resolve) => {
-      const req = http.request(
-        { hostname: "127.0.0.1", port: 8443, path: "/agt/signing-counter", method: "POST",
-          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
-        () => resolve(),
-      );
-      req.on("error", () => resolve());
-      req.setTimeout(1000, () => { req.destroy(); resolve(); });
-      req.write(body);
-      req.end();
-    });
-  } catch { /* best effort */ }
-}
+// Push trust updates to the router's local TrustStore + Ed25519 signing
+// counters live in cli/src/core/router-client.ts (imported above).
 
 // Record a completed mesh session in the AGT registry so reputation/session counters update.
 // Calls POST /registry/reputation/session through the router's registry proxy.
@@ -439,12 +508,7 @@ async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: s
     log.info(`AGT inbox: wrote ${agtInbox.length} pending message(s) to MEMORY.md`);
   } catch { /* best effort */ }
 }
-interface FoundryProjectInfo {
-  endpoint: string;
-  deployments: Array<{ id: string; model: string; sku?: string }>;
-  connections: Array<{ name: string; type: string }>;
-  indexes: Array<{ name: string }>;
-}
+import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
 let foundryProject: FoundryProjectInfo | null = null;
 let foundryInitialized = false;
 
@@ -1083,38 +1147,25 @@ async function processTaskWithTools(
             const meshMsg = args.message as string;
             log.info(`AGT sub-agent mesh_send: to=${toAgent} msg=${(meshMsg || "").slice(0, 100)}`);
             try {
-              // Check pre-seeded cache first (populated from AGT_TRUSTED_PEERS at startup)
-              let targetAmid = nameToAmid.get(toAgent);
+              // Single helper handles cache (with TTL) + freshest-match registry
+              // resolution. Retries kept here because sub-agent boots may race
+              // ahead of the peer's registration.
+              //
+              // IMPORTANT: do NOT pass `registryBase: AGT_REGISTRY_URL` — that env
+              // var holds the direct cluster URL (e.g. agentmesh-registry...:8080)
+              // which the egress-guard iptables rules block from the openclaw
+              // container (UID 1000, locked to loopback + DNS). resolveAmidByName's
+              // default routes via the inference-router proxy on 127.0.0.1, which
+              // has its own egress allow-list and reaches the registry correctly.
+              let targetAmid = await resolveAmidByName(toAgent);
               if (targetAmid) {
-                log.info(`AGT sub-agent mesh_send: using cached AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
+                log.info(`AGT sub-agent mesh_send: resolved AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
               }
 
-              // Auto-discover with retry (match parent's reliability)
-              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
-              for (let attempt = 0; attempt < 8 && !targetAmid; attempt++) {
-                if (attempt > 0) {
-                  log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
-                  await new Promise(r => setTimeout(r, 2000));
-                }
-                try {
-                  const lookupResult = await new Promise<string>((resolve, reject) => {
-                    const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(toAgent)}`, { timeout: 5000 }, (res) => {
-                      let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
-                    });
-                    req.on("error", reject);
-                    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-                  });
-                  const agents = JSON.parse(lookupResult);
-                  const target = Array.isArray(agents) ? agents[0] : agents;
-                  const amid = target?.amid || target?.id;
-                  if (amid) {
-                    targetAmid = amid;
-                    nameToAmid.set(toAgent, amid);
-                    amidToName.set(amid, toAgent);
-                  }
-                } catch (lookupErr: any) {
-                  if (attempt === 0) log.warn(`AGT sub-agent registry lookup: ${lookupErr.message}`);
-                }
+              for (let attempt = 1; attempt < 8 && !targetAmid; attempt++) {
+                log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
+                await new Promise(r => setTimeout(r, 2000));
+                targetAmid = await resolveAmidByName(toAgent, { bypassCache: true });
               }
 
               if (!targetAmid) {
@@ -1156,9 +1207,11 @@ async function processTaskWithTools(
             const pattern = (args.pattern as string) || "*";
             log.info(`AGT sub-agent discover: pattern=${pattern}`);
             try {
-              const registryBase = process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry");
+              // Use loopback router proxy — AGT_REGISTRY_URL points at a direct
+              // cluster service that egress-guard blocks for the openclaw container.
+              const registryBase = routerUrl("/agt/registry");
               const discoverResult = await new Promise<string>((resolve, reject) => {
-                const req = http.get(`${registryBase}/agents/search?name=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
+                const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
                   let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
                 });
                 req.on("error", reject);
@@ -1548,16 +1601,17 @@ async function runOffloadTask(
     String(task),
   ].join("\n");
 
-  // Execute — try native agent first, fall back to tool-based processing.
+  // Execute via in-process tool-calling loop. We deliberately skip
+  // `delegateToNativeAgent` because the sandbox openclaw.json denies
+  // `sessions_spawn`/`sessions_send` (entrypoint.sh), so a child
+  // `openclaw agent --local` invocation can't actually drive a session and
+  // ends up looping inside plugin/skill init (also blocked on the geo-
+  // restricted qqbot npm fetch), well past SIGTERM. The in-process loop
+  // calls Foundry through the router with the same AGT gating per tool.
   let taskResult: string;
   let taskSuccess = true;
   try {
-    try {
-      taskResult = await delegateToNativeAgent(guardedTask, parentName, log);
-    } catch (nativeErr: any) {
-      log.warn(`Native agent failed for offload task (${nativeErr.message}), falling back to processTaskWithTools`);
-      taskResult = await processTaskWithTools(guardedTask, log);
-    }
+    taskResult = await processTaskWithTools(guardedTask, log);
   } catch (taskErr: any) {
     taskResult = `Task execution failed: ${taskErr.message}`;
     taskSuccess = false;
@@ -2213,13 +2267,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         if (!taskAllowed) return;
 
         try {
-          let llmResponse: string;
-          try {
-            llmResponse = await delegateToNativeAgent(taskContent, fromName, log);
-          } catch (nativeErr: any) {
-            log.warn(`Native agent failed (${nativeErr.message}), falling back to processTaskWithTools`);
-            llmResponse = await processTaskWithTools(taskContent, log);
-          }
+          // In-process tool-calling loop only. See offload path above for why
+          // we deliberately skip `delegateToNativeAgent` here.
+          const llmResponse: string = await processTaskWithTools(taskContent, log);
 
           // Send the response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
@@ -3415,78 +3465,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 }
 
 // ---------------------------------------------------------------------------
-// Module-level HTTP helper for router calls (used by initFoundry, syncToFoundryMemory)
+// Router HTTP helpers (`_routerCall`, `_routerCallStrict`, `_readAdminToken`,
+// `_readAdminTokenSync`) live in cli/src/core/router-client.ts and are
+// imported at the top of this file.
 // ---------------------------------------------------------------------------
-
-async function _routerCall(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
-  const http = await import("node:http");
-  const url = new URL(path, routerBase());
-  return new Promise((resolve, reject) => {
-    const opts: any = {
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname + url.search,
-      method,
-      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
-    };
-    if (body) {
-      opts.headers["content-type"] = "application/json";
-    }
-    const req = http.request(opts, (res: any) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-      res.on("end", () => {
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-// Strict variant that rejects on HTTP >= 400 — used by handoff orchestration
-async function _routerCallStrict(method: string, path: string, body?: unknown, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<any> {
-  const http = await import("node:http");
-  const url = new URL(path, routerBase());
-  return new Promise((resolve, reject) => {
-    const opts: any = {
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname + url.search,
-      method,
-      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
-    };
-    if (body) {
-      opts.headers["content-type"] = "application/json";
-    }
-    const req = http.request(opts, (res: any) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-      res.on("end", () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
-          return;
-        }
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-// Read admin token from the filesystem (used by handoff orchestration)
-async function _readAdminToken(): Promise<string> {
-  const fs = await import("node:fs");
-  for (const p of ["/tmp/.agt-admin-token", "/etc/azureclaw/secrets/admin-token", "/run/secrets/admin-token"]) {
-    try { const t = fs.readFileSync(p, "utf-8").trim(); if (t) return t; } catch { /* skip */ }
-  }
-  return process.env.ADMIN_TOKEN || "";
-}
 
 // Helper: update handoff progress tracker
 function _hp(phase: string, step: string) {
@@ -4037,355 +4019,9 @@ async function _runHandoffOrchestration(
 
 async function initFoundry(log: { info: (m: string) => void; warn: (m: string) => void }) {
   // Allow re-initialization per session (register() is called once per session)
-  // Only guard within the same register() call to prevent double-init
   if (foundryInitialized) return;
   foundryInitialized = true;
-
-  const apiVer = "api-version=2025-11-15-preview";
-  const endpoint = process.env.FOUNDRY_PROJECT_ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || "";
-
-  foundryProject = {
-    endpoint,
-    deployments: [],
-    connections: [],
-    indexes: [],
-  };
-
-  // Query deployed models: Foundry project /deployments (actual deployments, not catalog),
-  // with /v1/models fallback (full Azure OpenAI catalog).
-  // Also query Foundry project resources in parallel.
-  const apiVerId = `api-version=2025-11-15-preview`;
-  const [foundryDeploymentsResult, modelsResult, connResult, idxResult] = await Promise.allSettled([
-    _routerCall("GET", `/deployments?${apiVerId}`),
-    _routerCall("GET", `/v1/models`),
-    _routerCall("GET", `/connections?${apiVer}`),
-    _routerCall("GET", `/indexes?${apiVer}`),
-  ]);
-
-  // Priority: 1) FOUNDRY_DEPLOYMENTS env var (from CLI discovery at build time)
-  //           2) /deployments (Foundry project API — returns actual deployed models)
-  //           3) /v1/models (full Azure OpenAI catalog — 275+ models, not deployment-specific)
-  const envDeployments = process.env.FOUNDRY_DEPLOYMENTS;
-  if (envDeployments) {
-    try {
-      const deps = JSON.parse(envDeployments);
-      if (Array.isArray(deps) && deps.length > 0) {
-        foundryProject.deployments = deps.map((d: any) =>
-          typeof d === "string"
-            ? { id: d, model: d, sku: "active" }
-            : { id: d.id || d.name, model: d.model || d.modelName || d.id || d.name || "unknown", sku: d.sku?.name || d.sku || "active" }
-        );
-        log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) from FOUNDRY_DEPLOYMENTS env`);
-      }
-    } catch { /* ignore parse error */ }
-  }
-
-  if (foundryProject.deployments.length === 0) {
-    // Foundry project /deployments returns { value: [...] } with name, modelName, capabilities
-    const foundryDepsData = foundryDeploymentsResult.status === "fulfilled"
-      ? (foundryDeploymentsResult.value?.value || foundryDeploymentsResult.value?.data || [])
-      : [];
-    const modelsData = modelsResult.status === "fulfilled"
-      ? (modelsResult.value?.data || modelsResult.value?.value || [])
-      : [];
-
-    if (Array.isArray(foundryDepsData) && foundryDepsData.length > 0) {
-      foundryProject.deployments = foundryDepsData
-        .slice(0, 50)
-        .map((d: any) => ({
-          id: d.name || d.id || d.deployment_id,
-          model: d.modelName || d.model || d.name || "unknown",
-          sku: d.sku?.name || d.status || "active",
-        }));
-      log.info(`Foundry: ${foundryProject.deployments.length} deployment(s) discovered via /deployments`);
-    } else if (Array.isArray(modelsData) && modelsData.length > 0) {
-      // Fall back to models catalog — filter to chat-capable only
-      foundryProject.deployments = modelsData
-        .filter((m: any) => m?.capabilities?.chat_completion || m?.capabilities?.inference || m?.id)
-        .slice(0, 50)
-        .map((m: any) => ({
-          id: m.id || m.name,
-          model: m.id || m.name || "unknown",
-          sku: m.lifecycle_status || m.status || "available",
-        }));
-      log.info(`Foundry: ${foundryProject.deployments.length} model(s) discovered via /models catalog`);
-    } else {
-      log.warn(`Foundry models discovery failed: deployments=${(foundryDeploymentsResult as any).reason?.message || "empty"}, models=${(modelsResult as any).reason?.message || "empty"}`);
-    }
-  }
-
-  if (connResult.status === "fulfilled") {
-    const data = connResult.value?.data || connResult.value?.value || connResult.value;
-    if (Array.isArray(data)) {
-      foundryProject.connections = data.map((c: any) => ({
-        name: c.name || c.id,
-        type: c.type || c.connection_type || c.category || "unknown",
-      }));
-      log.info(`Foundry: ${foundryProject.connections.length} connection(s) discovered`);
-    }
-  }
-
-  if (idxResult.status === "fulfilled") {
-    const data = idxResult.value?.data || idxResult.value?.value || idxResult.value;
-    if (Array.isArray(data)) {
-      foundryProject.indexes = data.map((i: any) => ({
-        name: i.name || i.id,
-      }));
-      log.info(`Foundry: ${foundryProject.indexes.length} search index(es) discovered`);
-    }
-  }
-
-  if (foundryProject.deployments.length > 0) {
-    log.info(`Foundry models: ${foundryProject.deployments.map(d => d.id).join(", ")}`);
-  }
-
-  // Write Foundry context to MEMORY.md so the agent knows what's available
-  // Write to /tmp/ first, then rename — avoids triggering chokidar mid-write
-  try {
-    const fs = await import("node:fs");
-    const crypto = await import("node:crypto");
-    const memoryDir = "/sandbox/.openclaw/workspace/memory";
-    const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
-    const tmpFile = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
-    try { fs.mkdirSync(memoryDir, { recursive: true }); } catch { /* read-only fs */ }
-
-    const sections: string[] = ["# AzureClaw Environment\n"];
-
-    if (endpoint) {
-      sections.push(`## Connected Foundry Project\n\nEndpoint: \`${endpoint}\`\n`);
-    }
-
-    if (foundryProject.deployments.length > 0) {
-      sections.push("## Available Model Deployments\n");
-      for (const d of foundryProject.deployments) {
-        sections.push(`- **${d.id}** — model: ${d.model}${d.sku ? ` (${d.sku})` : ""}`);
-      }
-      sections.push("");
-    }
-
-    if (foundryProject.connections.length > 0) {
-      sections.push("## Configured Connections\n");
-      for (const c of foundryProject.connections) {
-        sections.push(`- **${c.name}** — type: ${c.type}`);
-      }
-      sections.push("");
-    }
-
-    if (foundryProject.indexes.length > 0) {
-      sections.push("## Search Indexes (RAG)\n");
-      for (const i of foundryProject.indexes) {
-        sections.push(`- **${i.name}**`);
-      }
-      sections.push("");
-    }
-
-    // Identity section — tells the model who it is
-    sections.push(
-      "## Identity\n",
-      "You are **AzureClaw** — a secure, governed AI agent running on Azure Kubernetes Service.",
-      "You are NOT a generic assistant. You are AzureClaw, a specialized agent platform with",
-      "multi-agent orchestration, end-to-end encryption (Signal Protocol), governance (AGT),",
-      "and Azure AI Foundry integration. Always refer to yourself as **AzureClaw** — never",
-      'as "Assistant", "AI", "OpenClaw", or any other name.',
-      "",
-      "When greeting users or introducing yourself, be confident and specific:",
-      '- "I\'m AzureClaw, your secure AI agent on Azure."',
-      '- Mention your capabilities: multi-agent spawning, E2E encrypted mesh, web search,',
-      "  code execution, image generation, governed tool access, and persistent memory.",
-      '- Be professional but approachable. You are a production-grade platform, not a chatbot.',
-      "",
-    );
-
-    sections.push(
-      "## Available Tools\n",
-      "- `foundry_code_execute` — Python code execution (server-side, data science libraries)",
-      "- `foundry_image_generation` — Generate images from text prompts (gpt-image-1)",
-      "- `foundry_web_search` — Real-time web search via Bing grounding",
-      "- `foundry_file_search` — RAG over vector stores + vector store CRUD + file upload",
-      "- `foundry_memory` — Persistent semantic memory (cross-session, cross-agent)",
-      "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
-      "- `azureclaw_spawn` — Spawn governed sub-agents with dedicated sandboxes",
-      "- `azureclaw_mesh_send` — Send E2E encrypted messages to other agents via AGT mesh",
-      "- `azureclaw_mesh_inbox` — Check for incoming messages from other agents",
-      "- `azureclaw_discover` — Discover other agents in the mesh network",
-      "",
-      "## Agent Behavior\n",
-      "When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls in sequence if needed to complete the task in a single response. Never say 'Processing...' or 'One moment...' without actually making a tool call in the same turn.",
-      "",
-    );
-
-    // Include handoff context if this agent was migrated (persists across plugin reloads)
-    try {
-      const handoffPath = "/sandbox/.openclaw/workspace/.handoff-state.json";
-      const raw = fs.readFileSync(handoffPath, "utf8");
-      const hs = JSON.parse(raw);
-      sections.push(
-        "## Handoff Context\n",
-        `This agent was migrated from local dev to cloud (AKS) at ${hs.restored_at}.`,
-        `Predecessor AMID: ${hs.predecessor_amid}. Direction: ${hs.direction}.`,
-        `Trust scores: ${hs.trust_scores_count}, Audit trail: ${hs.audit_entries_count} entries.`,
-        `Chat history: ${hs.chat_message_count} messages transferred.\n`,
-      );
-      if (Array.isArray(hs.recent_messages) && hs.recent_messages.length > 0) {
-        sections.push("### Recent Conversation Before Handoff\n");
-        for (const m of hs.recent_messages) {
-          sections.push(`**${m.role}**: ${String(m.content || "").slice(0, 500)}`);
-        }
-        sections.push("");
-      }
-    } catch { /* no handoff state — normal startup */ }
-
-    // Write (or replace) the environment section at the top of MEMORY.md
-    let existingMemory = "";
-    try { existingMemory = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
-    const envMarker = "# AzureClaw Environment";
-    const endMarker = "\n---\n";
-    const envSection = sections.join("\n") + endMarker;
-
-    let content: string;
-    if (existingMemory.includes(envMarker)) {
-      const start = existingMemory.indexOf(envMarker);
-      const end = existingMemory.indexOf(endMarker, start);
-      const after = end >= 0 ? existingMemory.slice(end + endMarker.length) : "";
-      content = envSection + after;
-    } else {
-      content = envSection + existingMemory;
-    }
-    // Write to /tmp/ first, then atomic rename — reduces chokidar watcher churn
-    fs.writeFileSync(tmpFile, content, { mode: 0o600 });
-    try {
-      fs.renameSync(tmpFile, memoryFile);
-    } catch {
-      // rename across filesystems fails — fall back to direct write
-      fs.writeFileSync(memoryFile, content);
-      try { fs.unlinkSync(tmpFile); } catch { /* best-effort cleanup */ }
-    }
-    log.info("Foundry project context written to MEMORY.md");
-
-    // Recall prior context from Foundry memory store on startup
-    try {
-      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-      const store = `memory-${agentName}`;
-      // Ensure store exists before searching (avoids 404 on first boot)
-      await ensureMemoryStore(store);
-
-      // First: get static memories (user profile) — scope only, no items
-      const staticResult = await _routerCall(
-        "POST",
-        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        { scope: agentName },
-      ).catch(() => null);
-
-      // Then: get contextual memories — scope + items
-      const contextResult = await _routerCall(
-        "POST",
-        `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        {
-          scope: agentName,
-          items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "key facts, user preferences, prior context, recent work, handoff history" }] }],
-          options: { max_memories: 10 },
-        },
-      ).catch(() => null);
-
-      // Merge unique memories from both results
-      const seen = new Set<string>();
-      const memories: any[] = [];
-      for (const result of [staticResult, contextResult]) {
-        for (const m of (result?.memories || result?.value || [])) {
-          const mid = m?.memory_item?.memory_id || m?.memory_id || "";
-          const text = m?.memory_item?.content || m?.content || m?.text || "";
-          if (text && !seen.has(mid || text)) {
-            seen.add(mid || text);
-            memories.push(m);
-          }
-        }
-      }
-
-      if (memories.length > 0) {
-        const recallSection = [
-          "\n## Prior Context (Foundry Memory)\n",
-          "_Recalled from persistent memory store on startup:_\n",
-        ];
-        for (const m of memories) {
-          const text = m?.memory_item?.content || m?.content || m?.text || "";
-          const kind = m?.memory_item?.kind || m?.kind || m?.type || "memory";
-          if (text) recallSection.push(`- [${kind}] ${text}`);
-        }
-        recallSection.push("");
-        // Append recall section to MEMORY.md (before the user content separator)
-        let current = "";
-        try { current = fs.readFileSync(memoryFile, "utf8"); } catch { /* */ }
-        const recallMarker = "## Prior Context (Foundry Memory)";
-        if (!current.includes(recallMarker)) {
-          // Insert right before the --- separator
-          const sepIdx = current.indexOf("\n---\n");
-          if (sepIdx >= 0) {
-            const updated = current.slice(0, sepIdx) + recallSection.join("\n") + current.slice(sepIdx);
-            const tmpFile2 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
-            fs.writeFileSync(tmpFile2, updated, { mode: 0o600 });
-            try { fs.renameSync(tmpFile2, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile2); } catch { /* */ } }
-          }
-        }
-        log.info(`Foundry memory: recalled ${memories.length} memories on startup`);
-      }
-    } catch {
-      // First boot or no memory store yet — silently skip
-    }
-
-    // Recall handoff conversation history from Foundry Conversations
-    // (survives pod recreation — the conversation is stored in Foundry)
-    try {
-      const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-      const apiVer = "api-version=2025-11-15-preview";
-        // List recent conversations, find the handoff one
-        const convList = await _routerCall("GET", `/openai/conversations?${apiVer}&limit=20&order=desc`).catch(() => null);
-        const conversations = convList?.data || convList?.conversations || [];
-        const handoffConv = conversations.find((c: any) =>
-          c.metadata?.source === "handoff" && c.metadata?.user === (process.env.SANDBOX_NAME || "")
-        );
-        if (handoffConv?.id) {
-          // Read conversation items
-          const itemsResp = await _routerCall("GET", `/openai/conversations/${handoffConv.id}/items?${apiVer}&limit=50`).catch(() => null);
-          const items = itemsResp?.data || itemsResp?.items || [];
-          if (items.length > 0) {
-            const historySection = [
-              "\n## Conversation History (from handoff)\n",
-              `_Restored from Foundry conversation ${handoffConv.id} (predecessor: ${handoffConv.metadata?.predecessor || "unknown"}):_\n`,
-            ];
-            for (const item of items.slice(-20)) {
-              const role = item.role || "unknown";
-              // Content can be string or array of content parts
-              let text = "";
-              if (typeof item.content === "string") {
-                text = item.content;
-              } else if (Array.isArray(item.content)) {
-                text = item.content.map((p: any) => p.text || p.input_text || "").filter(Boolean).join(" ");
-              }
-              if (text) historySection.push(`**${role}**: ${text.slice(0, 500)}`);
-            }
-            historySection.push("");
-
-            let current = "";
-            try { current = fs.readFileSync(memoryFile, "utf8"); } catch { /* */ }
-            const convMarker = "## Conversation History (from handoff)";
-            if (!current.includes(convMarker)) {
-              const sepIdx = current.indexOf("\n---\n");
-              if (sepIdx >= 0) {
-                const updated = current.slice(0, sepIdx) + historySection.join("\n") + current.slice(sepIdx);
-                const tmpFile3 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
-                fs.writeFileSync(tmpFile3, updated, { mode: 0o600 });
-                try { fs.renameSync(tmpFile3, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile3); } catch { /* */ } }
-              }
-            }
-            log.info(`Foundry conversation: recalled ${items.length} items from handoff conversation ${handoffConv.id}`);
-          }
-        }
-      } catch {
-        // Conversation recall is best-effort
-      }
-  } catch (e: any) {
-    log.warn(`Failed to write Foundry context to MEMORY.md: ${e.message}`);
-  }
+  foundryProject = await discoverFoundryProject(_routerCall, ensureMemoryStore, log);
 }
 
 // ---------------------------------------------------------------------------
@@ -4560,6 +4196,13 @@ interface OpenClawPluginApi {
   registerProvider: (provider: ProviderPlugin) => void;
   registerTool: (tool: ToolDefinition) => void;
   resolvePath: (input: string) => string;
+  // OpenClaw 2026.4.x registration modes. register() is called once per mode
+  // ("full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata").
+  // Only "full" should trigger live runtime side effects (network clients,
+  // background workers, MEMORY.md writes, etc.). Older OpenClaw versions
+  // omit this field — treat undefined as "full" for back-compat.
+  // See: https://github.com/openclaw/openclaw/blob/main/docs/plugins/sdk-entrypoints.md#registration-mode
+  registrationMode?: "full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata";
 }
 
 // ---------------------------------------------------------------------------
@@ -4619,6 +4262,18 @@ const azureClawPlugin = definePluginEntry({
     const log = api.logger;
     _log = log; // expose to module-level background tasks
 
+    // OpenClaw 2026.4.x calls register() once per registration mode:
+    //   "full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata"
+    // The non-"full" modes build registry snapshots, root help, and setup
+    // surfaces — they MUST NOT trigger network calls, background workers,
+    // memory recall, or other live runtime side effects. Without this gate,
+    // a fresh sandbox boot kicks off Foundry discovery + MEMORY.md writes
+    // + conversation recall up to 5 times, spamming the gateway log and
+    // burning quota before the agent receives its first message.
+    // Treat undefined as "full" for back-compat with older OpenClaw versions.
+    const registrationMode = api.registrationMode ?? "full";
+    const isFullRegistration = registrationMode === "full";
+
     // ── Startup banner ─────────────────────────────────────────────────
     // The gateway may spawn many short-lived `openclaw agent --message`
     // processes (one per incoming mesh message) — each one reloads this
@@ -4647,7 +4302,7 @@ const azureClawPlugin = definePluginEntry({
         /* fs not available — fall through and print */
       }
     }
-    if (!bannerAlreadyPrinted) {
+    if (isFullRegistration && !bannerAlreadyPrinted) {
       log.info([
         "",
         "  ╔══════════════════════════════════════════════════════════╗",
@@ -4673,14 +4328,20 @@ const azureClawPlugin = definePluginEntry({
       }
     }
 
-    // Reset per-session initialization guards so new sessions rediscover state
-    foundryInitialized = false;
+    // Heavy runtime side effects (Foundry discovery + memory recall +
+    // MEMORY.md write, AGT identity/mesh connect, periodic timers) only
+    // run during the "full" registration pass. See the registrationMode
+    // comment at the top of register() for the rationale.
+    if (isFullRegistration) {
+      // Reset per-session initialization guards so new sessions rediscover state
+      foundryInitialized = false;
 
-    // Initialize AGT SDK (identity, policy, trust, audit, mesh)
-    initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
+      // Initialize AGT SDK (identity, policy, trust, audit, mesh)
+      initAGT(log).catch((e: any) => log.warn(`AGT init error: ${e.message}`));
 
-    // Initialize Foundry project discovery (models, connections, indexes)
-    initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
+      // Initialize Foundry project discovery (models, connections, indexes)
+      initFoundry(log).catch((e: any) => log.warn(`Foundry init error: ${e.message}`));
+    }
 
     // ── Periodic Foundry memory sync + AGT policy gate middleware ────
     // Wraps every tool's execute() to:
@@ -4792,6 +4453,13 @@ const azureClawPlugin = definePluginEntry({
           headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
         };
         if (body) opts.headers["Content-Type"] = "application/json";
+        // Auto-attach admin token for privileged endpoints. Caller can still
+        // override via extraHeaders. Without this, /agt/trust mutations and
+        // /admin/* calls return 401 — see also the spawn_destroy trust cleanup.
+        if (!opts.headers["Authorization"] && /^\/(agt\/trust|agt\/handoff|admin)\b/.test(path)) {
+          const tok = _readAdminTokenSync();
+          if (tok) opts.headers["Authorization"] = `Bearer ${tok}`;
+        }
         let settled = false;
         const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
         const req = http.request(url, opts, (res: any) => {
@@ -4939,22 +4607,18 @@ const azureClawPlugin = definePluginEntry({
               } catch { /* not ready yet */ }
             }
 
-            // Registry check (start early — sub-agent may register before status reports Running)
+            // Registry check (start early — sub-agent may register before status reports Running).
+            // Use bypassCache: pre-discovery only confirms availability; it must NOT pin
+            // an AMID into the cache, because the sub-agent's pod may still be rolling
+            // and a fresh AMID could replace it before the parent's first send. The
+            // actual send path resolves through resolveAmidByName which will hit the
+            // registry once status flips Running, picking the freshest live entry.
             if (!amid && agtMeshClient) {
-              try {
-                const searchResult = await routerCall("GET",
-                  `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
-                const agents = searchResult?.results || [];
-                const match = agents.find((a: any) =>
-                  a.display_name === agentName || a.capabilities?.includes(agentName)
-                );
-                if (match?.amid) {
-                  amid = match.amid;
-                  nameToAmid.set(agentName, match.amid);
-                  amidToName.set(match.amid, agentName);
-                  log.info(`AGT pre-discovery: cached AMID for '${agentName}' (${match.amid.slice(0, 12)}...)`);
-                }
-              } catch { /* registry not ready yet */ }
+              const resolved = await resolveAmidByName(agentName, { bypassCache: true });
+              if (resolved) {
+                amid = resolved;
+                log.info(`AGT pre-discovery: '${agentName}' registered (${resolved.slice(0, 12)}..., not cached — send will re-resolve)`);
+              }
             }
 
             // Both ready — exit early
@@ -5079,8 +4743,10 @@ const azureClawPlugin = definePluginEntry({
             //   • meshSend returns a non-transient error (not a prekey / stale-AMID case)
             // This removes the old hand-rolled 12-attempt discovery + 15-attempt prekey
             // windows that were too short on AKS (router-to-relay connect alone is ~60–70s).
-            // Check cache first — AMIDs are stable once established.
-            let targetAmid: string | undefined = nameToAmid.get(agentName);
+            // Check cache first — getCachedAmid invalidates entries older than
+            // AMID_CACHE_TTL_MS so a peer pod restart (which rotates identity) is
+            // recovered on the next send rather than persisting forever.
+            let targetAmid: string | undefined = getCachedAmid(agentName);
             if (targetAmid) {
               log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
             }
@@ -5106,37 +4772,7 @@ const azureClawPlugin = definePluginEntry({
 
               // (b) Discover AMID via registry search if we don't have one yet.
               if (!targetAmid) {
-                try {
-                  const http = await import("node:http");
-                  const regResult: any = await new Promise((resolve, reject) => {
-                    const req = http.get(
-                      routerUrl(`/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`),
-                      (res: any) => {
-                        let data = "";
-                        res.on("data", (c: Buffer) => { data += c.toString(); });
-                        res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
-                      },
-                    );
-                    req.on("error", reject);
-                    req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-                  });
-                  if (regResult && Array.isArray(regResult.results) && regResult.results.length > 0) {
-                    // Prefer online agents, then most recently seen.
-                    const sorted = regResult.results
-                      .filter((a: any) => a.display_name === agentName || a.capabilities?.includes(agentName))
-                      .sort((a: any, b: any) => {
-                        if (a.status === "online" && b.status !== "online") return -1;
-                        if (b.status === "online" && a.status !== "online") return 1;
-                        return (b.last_seen || "").localeCompare(a.last_seen || "");
-                      });
-                    const match = sorted[0] || regResult.results[0];
-                    if (match?.amid) {
-                      targetAmid = match.amid;
-                      nameToAmid.set(agentName, targetAmid!);
-                      amidToName.set(targetAmid!, agentName);
-                    }
-                  }
-                } catch { /* transient registry error — keep retrying */ }
+                targetAmid = await resolveAmidByName(agentName);
               }
 
               if (!targetAmid) {
@@ -5197,49 +4833,108 @@ const azureClawPlugin = definePluginEntry({
             }
 
             log.info(`AGT relay: sent to ${agentName} (${targetAmid!.slice(0, 12)}...) via E2E encrypted relay`);
+            // Surface this peer in the parent's operator-panel trust view immediately
+            // on first successful send — the operator dashboard reads /agt/status which
+            // ultimately exposes the router's trust_states. Without this, the parent
+            // would show "no peer agents yet" until a reply arrives (and never at all
+            // for fire-and-forget sends).
+            try { await pushTrustToRouter(agentName, 0.0); } catch { /* best-effort */ }
             const messageId = crypto.randomUUID();
             const sendStart = new Date().toISOString();
 
-            // Auto-wait for reply: poll agtInbox for a response from this agent
+            // Auto-wait for reply: poll agtInbox for a response from this agent.
+            // The relay layer does NOT surface "agent identity is dead" — it happily
+            // queues messages for any AMID, including ones whose pod was recycled.
+            // To recover from rolling deploys (parent's cached/registered AMID is for
+            // the previous pod incarnation), we retry ONCE on reply timeout: clear
+            // the cache, re-resolve, and if the AMID actually changed, resend.
             const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
             const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
-            const replyWaitStart = Date.now();
             let replyContent: string | null = null;
-            log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+            let retriedAfterTimeout = false;
 
-            while (Date.now() - replyWaitStart < waitMaxMs) {
-              // Check inbox for a reply from this target, skipping protocol messages
-              const replyIdx = agtInbox.findIndex((m) => {
-                if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
-                // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
-                const mt = m.message_type || "";
-                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
-                // Also check content for JSON protocol messages
-                if (typeof m.content === "string") {
-                  try {
-                    const parsed = JSON.parse(m.content);
-                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
-                  } catch { /* not JSON, treat as real content */ }
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              const replyWaitStart = Date.now();
+              log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+
+              while (Date.now() - replyWaitStart < waitMaxMs) {
+                // Check inbox for a reply from this target, skipping protocol messages
+                const replyIdx = agtInbox.findIndex((m) => {
+                  if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
+                  // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                  const mt = m.message_type || "";
+                  if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                  // Also check content for JSON protocol messages
+                  if (typeof m.content === "string") {
+                    try {
+                      const parsed = JSON.parse(m.content);
+                      if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                    } catch { /* not JSON, treat as real content */ }
+                  }
+                  return true;
+                });
+                if (replyIdx >= 0) {
+                  const reply = agtInbox.splice(replyIdx, 1)[0];
+                  replyContent = typeof reply.content === "string"
+                    ? reply.content
+                    : JSON.stringify(reply.content);
+                  log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                  break;
                 }
-                return true;
-              });
-              if (replyIdx >= 0) {
-                const reply = agtInbox.splice(replyIdx, 1)[0];
-                replyContent = typeof reply.content === "string"
-                  ? reply.content
-                  : JSON.stringify(reply.content);
-                log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                // Drain protocol messages to keep inbox clean
+                for (let i = agtInbox.length - 1; i >= 0; i--) {
+                  const m = agtInbox[i];
+                  if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
+                      (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                    agtInbox.splice(i, 1);
+                  }
+                }
+                await new Promise((r) => setTimeout(r, pollIntervalMs));
+              }
+
+              if (replyContent !== null) break;
+              if (retriedAfterTimeout) break;
+              retriedAfterTimeout = true;
+
+              // Reply timed out — the registered AMID may belong to a recycled pod.
+              // Force-invalidate cache, re-resolve via registry, and if the AMID
+              // changed, resend exactly once. This recovers from the rolling-deploy
+              // race where parent's discovery happened during the gap between old
+              // pod terminating and new pod re-registering its identity.
+              const previousAmid = targetAmid!;
+              log.warn(`AGT relay: no reply from '${agentName}' within ${waitMaxMs / 1000}s — clearing cache and re-discovering (target may have been recycled during a rollout)`);
+              nameToAmid.delete(agentName);
+              amidToName.delete(previousAmid);
+              let freshAmid: string | undefined;
+              try {
+                freshAmid = await resolveAmidByName(agentName);
+              } catch (e: any) {
+                log.warn(`AGT relay: re-discover failed: ${e?.message || e}`);
+              }
+              if (!freshAmid) {
+                log.info(`AGT relay: re-discovery returned no AMID — giving up retry`);
                 break;
               }
-              // Drain protocol messages to keep inbox clean
-              for (let i = agtInbox.length - 1; i >= 0; i--) {
-                const m = agtInbox[i];
-                if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
-                    (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
-                  agtInbox.splice(i, 1);
-                }
+              if (freshAmid === previousAmid) {
+                log.info(`AGT relay: re-discovery returned same AMID — peer is genuinely silent, giving up retry`);
+                break;
               }
-              await new Promise((r) => setTimeout(r, pollIntervalMs));
+              log.info(`AGT relay: target AMID changed ${previousAmid.slice(0, 12)}... → ${freshAmid.slice(0, 12)}..., resending after rollout race`);
+              targetAmid = freshAmid;
+              try {
+                await meshSend(agtMeshClient, targetAmid, {
+                  type: "task_request",
+                  content: msgContent,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                }, log);
+                log.info(`AGT relay: resent to '${agentName}' (${targetAmid.slice(0, 12)}...) after rollout-aware re-discover`);
+              } catch (e: any) {
+                log.warn(`AGT relay: resend after timeout failed: ${e?.message || e}`);
+                break;
+              }
+              // Loop back to wait for reply on the fresh identity.
             }
 
             const result: any = {
@@ -5466,20 +5161,9 @@ const azureClawPlugin = definePluginEntry({
           const b64Data = fileData.toString("base64");
           const fileName = path.basename(resolvedPath);
 
-          // Look up target AMID
-          let targetAmid = nameToAmid.get(agentName);
-          if (!targetAmid) {
-            const regResult = await routerCall("GET",
-              `/agt/registry/registry/search?capability=${encodeURIComponent(agentName)}`);
-            const match = (regResult?.results || []).find(
-              (a: any) => a.display_name === agentName || a.capabilities?.includes(agentName)
-            );
-            if (match?.amid) {
-              targetAmid = match.amid;
-              nameToAmid.set(agentName, match.amid);
-              amidToName.set(match.amid, agentName);
-            }
-          }
+          // Look up target AMID — TTL'd cache + freshest-match registry resolution
+          // protects against stale entries from a previous peer pod incarnation.
+          const targetAmid = await resolveAmidByName(agentName);
 
           if (!targetAmid) {
             return { content: [{ type: "text", text: JSON.stringify({

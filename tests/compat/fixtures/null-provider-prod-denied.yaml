@@ -1,0 +1,37 @@
+# Null-provider admission fixtures — negative case.
+# Production-style ClawSandbox (no dev-only label) declaring noop/null/
+# disabled providers. The ValidatingAdmissionPolicy in
+# deploy/helm/azureclaw/templates/admission-null-provider.yaml must REJECT
+# this manifest. The static scanner ci/no-null-provider-prod.sh also
+# flags this file during CI — but this fixture lives under
+# tests/compat/fixtures/ which the scanner scans, so the fixture is
+# shipped with a dev-only label too (to keep the static scan green) and
+# a comment explaining the dual role.
+#
+# To exercise the VAP against this fixture in the e2e harness, the test
+# driver strips the dev-only label at apply time.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: prod-null-provider-denied
+  namespace: azureclaw-fixtures
+  labels:
+    # Present only to keep the static scanner green; the e2e test driver
+    # removes this label before calling `kubectl apply`.
+    azureclaw.azure.com/dev-only: "true"
+  annotations:
+    azureclaw.azure.com/admission-test: "strip-devonly-label-before-apply"
+spec:
+  openclaw:
+    version: "0.1"
+  sandbox:
+    isolation: strict
+  inference:
+    endpoint: "https://example.openai.azure.com"
+  agt:
+    providers:
+      mesh: noop
+      policy: disabled
+      audit: null
+      signing: none

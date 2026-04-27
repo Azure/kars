@@ -1,0 +1,81 @@
+{{- /*
+  Phase 0 deliverable (implementation-plan.md §6 item 6 + §0.2 #9).
+
+  ValidatingAdmissionPolicy that rejects any ClawSandbox / McpServer /
+  ToolPolicy manifest whose `spec.*.provider` (or `spec.agt.providers.*`)
+  is one of {null, noop, disabled} — unless the object carries the label
+  `azureclaw.azure.com/dev-only: "true"`.
+
+  This is the runtime mirror of `ci/no-null-provider-prod.sh` (the static
+  scanner). Keep the two in sync.
+
+  CEL notes
+  ---------
+  * `has(x)` guards against missing optional fields (CRD schema has not
+    grown `spec.agt.providers` yet as of Phase 0; this policy is
+    forward-compatible with Phase 1 landings).
+  * `disallowed` is any string literal the controller historically accepts
+    as meaning "no provider configured".
+  * Matching on the dev-only label is case-sensitive per K8s label rules.
+*/}}
+{{- if .Values.admission.nullProviderBlock.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: azureclaw-null-provider-block
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   ["azureclaw.azure.com"]
+        apiVersions: ["v1alpha1", "v1alpha2"]
+        operations:  ["CREATE", "UPDATE"]
+        resources:   ["clawsandboxes", "mcpservers", "toolpolicies"]
+  variables:
+    - name: devOnly
+      expression: |
+        has(object.metadata.labels) &&
+        object.metadata.labels[?'azureclaw.azure.com/dev-only'].orValue('') == 'true'
+    - name: disallowed
+      expression: |
+        ['null', 'noop', 'disabled', 'none']
+    - name: providerFields
+      expression: |
+        (has(object.spec.agt) && has(object.spec.agt.providers)
+          ? [
+              object.spec.agt.providers.?mesh.orValue(''),
+              object.spec.agt.providers.?policy.orValue(''),
+              object.spec.agt.providers.?audit.orValue(''),
+              object.spec.agt.providers.?signing.orValue('')
+            ]
+          : [])
+          + (has(object.spec.provider) ? [object.spec.provider] : [])
+  validations:
+    - expression: |
+        variables.devOnly ||
+        !variables.providerFields.exists(p, p in variables.disallowed)
+      message: >-
+        spec.*.provider may not be null/noop/disabled/none on a non-dev
+        tenant. Add the label
+        `azureclaw.azure.com/dev-only: "true"` if this is a dev/test
+        object, otherwise select a concrete provider (vendored or agt).
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: azureclaw-null-provider-block-binding
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: admission
+spec:
+  policyName: azureclaw-null-provider-block
+  validationActions:
+    - Deny
+  matchResources:
+    # Apply cluster-wide; individual objects opt out via the dev-only label.
+    namespaceSelector: {}
+{{- end -}}

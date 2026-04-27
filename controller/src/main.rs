@@ -12,14 +12,25 @@
 //! Built with kube-rs (CNCF Sandbox).
 
 mod crd;
+#[allow(dead_code)]
+// CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
+mod crd_validations;
 mod fedcred;
+mod fedcred_reaper;
+#[allow(dead_code)] // scaffold-only; reconciler lands in phase1/mcp-2026-streamable-http-routes
+mod mcp_server;
 mod mesh_peer;
 mod pairing;
 mod pairing_reconciler;
+mod providers;
 mod reconciler;
+mod status;
+#[allow(dead_code)] // scaffold-only; reconciler lands in phase1/tool-policy-reconciler
+mod tool_policy;
 
 use anyhow::Result;
 use kube::Client;
+use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -72,6 +83,27 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Periodic federated-credential garbage collector. Activates only when
+    // FedCredConfig env vars are present (same condition as auto-create).
+    // Idempotent — safe to run on every replica.
+    let fedcred_reaper_handle = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            match fedcred::FedCredConfig::from_env() {
+                Some(cfg) => {
+                    let mgr = Arc::new(fedcred::FedCredManager::new(cfg));
+                    fedcred_reaper::run(client, mgr).await
+                }
+                None => {
+                    tracing::info!(
+                        "Fedcred reaper disabled (FedCred env vars missing — auto-create also off)"
+                    );
+                    std::future::pending::<Result<()>>().await
+                }
+            }
+        })
+    };
+
     tokio::select! {
         res = sandbox_handle => {
             res??;
@@ -80,6 +112,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = mesh_peer_handle => {
+            res??;
+        }
+        res = fedcred_reaper_handle => {
             res??;
         }
     }
