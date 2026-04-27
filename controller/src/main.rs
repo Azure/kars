@@ -26,8 +26,10 @@ mod pairing_reconciler;
 mod providers;
 mod reconciler;
 mod status;
-#[allow(dead_code)] // scaffold-only; reconciler lands in phase2/toolpolicy-reconciler (S2)
+#[allow(dead_code)] // helpers consumed by tool_policy_reconciler + future slices.
 mod tool_policy;
+mod tool_policy_compile;
+mod tool_policy_reconciler;
 
 use anyhow::Result;
 use kube::Client;
@@ -63,6 +65,10 @@ async fn main() -> Result<()> {
     let mcp_server_handle = {
         let client = client.clone();
         tokio::spawn(async move { mcp_server_reconciler::run(client).await })
+    };
+    let tool_policy_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { tool_policy_reconciler::run(client).await })
     };
     let mesh_peer_handle = {
         let client = client.clone();
@@ -117,6 +123,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = mcp_server_handle => {
+            res??;
+        }
+        res = tool_policy_handle => {
             res??;
         }
         res = mesh_peer_handle => {

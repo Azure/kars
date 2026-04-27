@@ -1,0 +1,227 @@
+# AzureClaw ToolPolicy CRD
+#
+# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
+# schema in `controller/src/tool_policy.rs` plus the CEL rules in
+# `controller/src/crd_validations.rs::tool_policy_validations`.
+#
+# Drift between this file and the Rust schema is caught at `cargo test`
+# time by `controller/src/helm_drift.rs::helm_toolpolicy_crd_matches_rust_schema`.
+# To regenerate after schema changes, run:
+#
+#   DUMP_TOOLPOLICY_CRD_YAML=1 cargo test --bin azureclaw-controller \
+#       helm_drift::tests::dump_toolpolicy_crd_yaml -- --nocapture
+#
+# and replace the body below with the captured YAML.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: toolpolicies.azureclaw.azure.com
+spec:
+  group: azureclaw.azure.com
+  names:
+    categories: []
+    kind: ToolPolicy
+    plural: toolpolicies
+    shortNames:
+    - tp
+    singular: toolpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.appliesTo.tool
+      name: Tool
+      type: string
+    - jsonPath: .spec.commerce.dailyCap
+      name: DailyCap
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for ToolPolicySpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              `ToolPolicy.spec` — declares per-tool gating: rate limits, approval,
+              and AP2 commerce caps. Resolves bottom-up (most-specific selector
+              wins). Precedence rules will be documented in `docs/crd-precedence.md`
+              (Phase 2 deliverable §8 entry 10).
+            properties:
+              appliesTo:
+                description: |-
+                  Selector: which tool calls this policy applies to. AND of tool name,
+                  MCP server, and sandbox label-selector.
+                properties:
+                  mcpServer:
+                    description: |-
+                      MCP server name (`McpServer.metadata.name`) the tool must come
+                      from. Empty means any.
+                    nullable: true
+                    type: string
+                  sandboxMatchLabels:
+                    additionalProperties:
+                      type: string
+                    default: {}
+                    description: Sandbox label selector. AND with the other fields.
+                    type: object
+                  tool:
+                    description: Tool name as advertised by the MCP server. `"*"` matches all.
+                    nullable: true
+                    type: string
+                type: object
+              approval:
+                description: 'Approval policy: human-in-the-loop confirmation step.'
+                nullable: true
+                properties:
+                  channel:
+                    description: Approval channel reference, e.g. Telegram bot, email.
+                    nullable: true
+                    type: string
+                  mode:
+                    description: |-
+                      Approval required: `never` | `always` | `aboveThreshold`.
+                      Default `aboveThreshold` when commerce is set.
+                    nullable: true
+                    type: string
+                  threshold:
+                    description: |-
+                      Threshold value (currency string) above which approval is
+                      required. Only meaningful when `mode == "aboveThreshold"`.
+                    nullable: true
+                    type: string
+                type: object
+              commerce:
+                description: |-
+                  AP2 commerce caps. Optional — present only for tools that move
+                  money / commit purchases / sign transfers.
+                nullable: true
+                properties:
+                  counterpartyAllowlist:
+                    default: []
+                    description: |-
+                      Counterparty allowlist. Empty = deny-all (fail-closed).
+                      Format: AP2 counterparty identifier (DID or domain).
+                    items:
+                      type: string
+                    type: array
+                  dailyCap:
+                    description: |-
+                      Daily spend cap as ISO-4217 currency string with 2-decimal-place
+                      integer minor units, e.g. `"USD 100.00"`. Parser is strict;
+                      admission CEL rejects malformed values at apply time
+                      (Phase 1 §7 entry 12).
+                    nullable: true
+                    type: string
+                  monthlyCap:
+                    description: Monthly spend cap. Must be >= dailyCap (admission CEL).
+                    nullable: true
+                    type: string
+                  perTransferCap:
+                    description: |-
+                      Per-transfer hard cap. Even within daily/monthly, a single
+                      transfer above this is refused.
+                    nullable: true
+                    type: string
+                type: object
+              displayName:
+                description: Optional human-readable label.
+                nullable: true
+                type: string
+              rateLimit:
+                description: Rate-limit configuration. Resolved by AGT RateLimiter.
+                nullable: true
+                properties:
+                  burst:
+                    description: Burst (token bucket size).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  rps:
+                    description: Requests per second across all matching invocations.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  window:
+                    description: Window for the counter, e.g. `"1m"`, `"1h"`, `"24h"`.
+                    nullable: true
+                    type: string
+                type: object
+            required:
+            - appliesTo
+            type: object
+            x-kubernetes-validations:
+            - message: spec.commerce.dailyCap must be <= spec.commerce.monthlyCap
+              reason: FieldValueInvalid
+              rule: '!has(self.commerce) || self.commerce.dailyCap <= self.commerce.monthlyCap'
+            - message: spec.commerce.{dailyCap,monthlyCap} must be non-negative
+              reason: FieldValueInvalid
+              rule: '!has(self.commerce) || (self.commerce.dailyCap >= 0 && self.commerce.monthlyCap >= 0)'
+            - message: spec.appliesTo.matchLabels must contain at least one label
+              reason: FieldValueInvalid
+              rule: has(self.appliesTo.matchLabels) && size(self.appliesTo.matchLabels) > 0
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              lastCompiledAt:
+                description: Last time the policy was compiled to an AGT profile and pushed.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: '`metadata.generation` last successfully reconciled. KEP-1623.'
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: ToolPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

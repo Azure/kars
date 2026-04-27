@@ -28,11 +28,16 @@
 #![allow(dead_code)]
 
 #[cfg(test)]
-use crate::crd_validations::mcp_server_crd;
+use crate::crd_validations::{mcp_server_crd, tool_policy_crd};
 
-const HELM_CRD_PATH: &str = concat!(
+const MCP_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/azureclaw/templates/crd-mcpserver.yaml"
+);
+
+const TOOLPOLICY_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/azureclaw/templates/crd-toolpolicy.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -75,35 +80,56 @@ mod tests {
         println!("---\n{yaml}");
     }
 
+    /// One-shot dumper for the toolpolicy CRD. Run via:
+    ///
+    ///   DUMP_TOOLPOLICY_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///       helm_drift::tests::dump_toolpolicy_crd_yaml -- --nocapture
     #[test]
-    fn helm_crd_matches_rust_schema() {
-        let helm_text = match std::fs::read_to_string(HELM_CRD_PATH) {
+    fn dump_toolpolicy_crd_yaml() {
+        if std::env::var("DUMP_TOOLPOLICY_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = tool_policy_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    fn assert_helm_matches_rust(helm_path: &str, rust_value: serde_json::Value, label: &str) {
+        let helm_text = match std::fs::read_to_string(helm_path) {
             Ok(s) => s,
             Err(_) => {
-                // Helm YAML not authored yet — first invocation of S1.
-                // Skip rather than fail; the dumper test above is the
-                // bootstrap.
                 eprintln!(
-                    "helm CRD not present at {HELM_CRD_PATH} — skipping drift check (bootstrap mode)"
+                    "helm CRD not present at {helm_path} — skipping drift check (bootstrap mode for {label})"
                 );
                 return;
             }
         };
         let helm_crd: serde_json::Value =
             serde_yaml::from_str(&helm_text).expect("helm crd YAML must parse as JSON value");
-        let rust_crd_value =
-            serde_json::to_value(mcp_server_crd()).expect("rust crd serializes to JSON");
 
         let helm_canonical = canonical_form(&helm_crd);
-        let rust_canonical = canonical_form(&rust_crd_value);
+        let rust_canonical = canonical_form(&rust_value);
 
         if helm_canonical != rust_canonical {
-            // Pretty-print first divergence for fast triage.
             let helm_pretty = serde_json::to_string_pretty(&helm_canonical).unwrap_or_default();
             let rust_pretty = serde_json::to_string_pretty(&rust_canonical).unwrap_or_default();
             panic!(
-                "helm CRD has drifted from Rust schema.\n\nHELM (canonical):\n{helm_pretty}\n\nRUST (canonical):\n{rust_pretty}"
+                "helm CRD {label} has drifted from Rust schema.\n\nHELM (canonical):\n{helm_pretty}\n\nRUST (canonical):\n{rust_pretty}"
             );
         }
+    }
+
+    #[test]
+    fn helm_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(mcp_server_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(MCP_HELM_CRD_PATH, rust_crd_value, "mcpserver");
+    }
+
+    #[test]
+    fn helm_toolpolicy_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(tool_policy_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(TOOLPOLICY_HELM_CRD_PATH, rust_crd_value, "toolpolicy");
     }
 }
