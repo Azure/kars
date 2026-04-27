@@ -152,12 +152,25 @@ export function connectCommand(): Command {
           return;
         }
 
-        // Start port-forward
+        // Start port-forward — pipe stderr so we can surface kubectl errors
+        // when the connection drops. Without this, all the user sees is
+        // "Disconnected." with no diagnostic.
         console.log(chalk.dim(`  Starting port-forward on localhost:${localPort}...`));
         const pf = execa("kubectl", [
           "port-forward", "-n", namespace,
           `deploy/${name}`, `${localPort}:18789`,
-        ], { stdio: "pipe" });
+        ], { stdio: ["ignore", "pipe", "pipe"] });
+
+        let pfStderr = "";
+        pf.stderr?.on("data", (chunk: Buffer) => {
+          const line = chunk.toString();
+          pfStderr += line;
+          // Surface kubectl errors live so the operator can see e.g. auth
+          // failures, deploy-not-found, or LB resets immediately.
+          if (/error|denied|unable|forbidden|refused|reset|EOF|lost connection/i.test(line)) {
+            process.stderr.write(chalk.dim(`    [kubectl] ${line.trim()}\n`));
+          }
+        });
 
         // Wait for port-forward to be ready
         await new Promise(r => setTimeout(r, 2000));
@@ -180,7 +193,11 @@ export function connectCommand(): Command {
           await pf;
         } catch {
           // port-forward exited
-          console.log(chalk.dim("\n  Disconnected.\n"));
+          console.log(chalk.dim("\n  Disconnected."));
+          if (pfStderr.trim()) {
+            console.log(chalk.dim(`  kubectl said:\n${pfStderr.split("\n").map(l => "    " + l).join("\n")}`));
+          }
+          console.log();
         } finally {
           process.removeListener("SIGINT", cleanup);
           process.removeListener("SIGTERM", cleanup);
