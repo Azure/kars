@@ -17,15 +17,16 @@ mod crd;
 mod crd_validations;
 mod fedcred;
 mod fedcred_reaper;
-#[allow(dead_code)] // scaffold-only; reconciler lands in phase1/mcp-2026-streamable-http-routes
+mod helm_drift;
 mod mcp_server;
+mod mcp_server_reconciler;
 mod mesh_peer;
 mod pairing;
 mod pairing_reconciler;
 mod providers;
 mod reconciler;
 mod status;
-#[allow(dead_code)] // scaffold-only; reconciler lands in phase1/tool-policy-reconciler
+#[allow(dead_code)] // scaffold-only; reconciler lands in phase2/toolpolicy-reconciler (S2)
 mod tool_policy;
 
 use anyhow::Result;
@@ -58,6 +59,10 @@ async fn main() -> Result<()> {
     let pairing_handle = {
         let client = client.clone();
         tokio::spawn(async move { pairing_reconciler::run(client).await })
+    };
+    let mcp_server_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { mcp_server_reconciler::run(client).await })
     };
     let mesh_peer_handle = {
         let client = client.clone();
@@ -109,6 +114,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = pairing_handle => {
+            res??;
+        }
+        res = mcp_server_handle => {
             res??;
         }
         res = mesh_peer_handle => {

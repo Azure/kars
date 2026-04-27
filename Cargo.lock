@@ -221,6 +221,7 @@ name = "azureclaw-controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "bs58",
  "chrono",
