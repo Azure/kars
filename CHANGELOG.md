@@ -17,12 +17,12 @@ evidence index.
 ### Phase 0 — provider seams + compat suite + CI gates
 
 #### Added
-- **Four-seam provider architecture** — `PolicyDecisionProvider`, `AuditSink`,
+- **Provider seams (Phase 1)** — `PolicyDecisionProvider`, `AuditSink`,
   `SigningProvider` traits with in-tree `impl … for Governance` (router crate);
   each contract reachable via `Arc<dyn Trait>` view of the same
-  `Arc<Governance>`. The fourth contract `MeshProvider` is **plugin-side by
+  `Arc<Governance>`. A fourth `MeshProvider` seam is **plugin-side by
   design** — the router's `providers/mesh.rs` is a documentation-only trait
-  file (see [`docs/agt-boundary.md`](docs/agt-boundary.md)).
+  file.
 - **Outage-mode dispatch** (`providers/outage.rs`) — `Strict` (prod default,
   fail-closed), `CachedRead` (allow if cached decision < TTL), `DegradedDev`
   (fail-open with warning label, dev only). Configurable per-`ClawSandbox`
@@ -49,12 +49,9 @@ evidence index.
 - **5 cargo-fuzz targets** (`inference-router/fuzz/fuzz_targets/`) —
   `a2a-jws`, `a2a-base64url`, `deserialize-state`, `sanitize-chat`,
   `parse-streaming-pf`.
-- **`docs/agt-boundary.md`** — operational AGT boundary (the four contracts,
-  what AGT owns, what AzureClaw owns).
-- **`docs/agt-vendored-patch-audit.md`** — full index of **26 vendor patches**
-  (SDK 21 + relay 4 + registry 1) with re-audit cadence on AGT SDK bump.
-- **`docs/internal-boundaries.md`** — per-MSFT-product consume / be-consumed /
-  orthogonal posture; required for every new CRD or router capability.
+- **`docs/agt-vendored-patch-audit.md`** — index of fixes applied to the
+  vendored AgentMesh stack (SDK + relay + registry) with re-audit cadence on
+  AGT SDK bumps.
 - **`docs/sigs-agent-sandbox-compat.md`** — `TranslateMode` / `OverlayMode`
   design for optional compat with `kubernetes-sigs/agent-sandbox`. Opt-in,
   no upstream dependency, no CI pin.

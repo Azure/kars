@@ -9,7 +9,7 @@ listing (<https://owasp.org/www-project-mcp-top-10/>), re-verified on
 > **Scope:** this document covers MCP calls originating *from* sandboxed
 > agents and MCP servers *hosted in AKS* via the forthcoming `McpServer`
 > CRD (plan §7). Managed SaaS MCP servers published by Foundry are out
-> of scope (per `docs/internal-boundaries.md` §3 — Foundry hosts those).
+> of scope (Foundry hosts those).
 
 ## Summary table
 
@@ -70,7 +70,7 @@ and AP2 commerce caps; Phase 2 adds `approval` and `rateLimit`
 precedence. Policy evaluation is an AGT call
 (`PolicyDecisionProvider`) — we surface scopes, AGT decides.
 
-**Refs.** plan §1.1 (AGT boundary), §7 item 4 (minimal ToolPolicy),
+**Refs.** internal Phase 1 plan §§1.1, 7 item 4 (minimal ToolPolicy),
 §8 item 2 (full ToolPolicy).
 
 ### MCP03 — Tool poisoning

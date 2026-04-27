@@ -220,7 +220,7 @@ The full plan for these surfaces — what is implemented today, what is wiring-p
 
 Inter-agent messaging today runs on a vendored fork of [AgentMesh](https://github.com/amitayks/agentmesh) (relay + registry + SDK). AgentMesh is pre-release; while integrating it we contributed bug fixes and protocol corrections that are tracked in this tree until they land upstream. Each fix is documented in `vendor/<component>/README.md`, and an index lives at [`docs/agt-vendored-patch-audit.md`](docs/agt-vendored-patch-audit.md).
 
-**Direction of travel:** Microsoft's Agent Governance Toolkit (AGT) is shipping a first-party AgentMesh transport. Once it stabilises, AzureClaw's `MeshProvider` seam (defined plugin-side, see [`docs/agt-boundary.md`](docs/agt-boundary.md)) will allow operators to switch to the AGT mesh per-tenant without breaking existing deployments. Until then, the vendored stack is the supported production path.
+**Direction of travel:** Microsoft's Agent Governance Toolkit (AGT) is shipping a first-party AgentMesh transport. Once it stabilises, AzureClaw's `MeshProvider` seam (defined plugin-side; the router has no in-tree mesh implementation) will allow operators to switch to the AGT mesh per-tenant without breaking existing deployments. Until then, the vendored stack is the supported production path.
 
 ---
 
@@ -495,9 +495,7 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 | [Architecture Diagrams](docs/architecture-diagrams.md) | Mermaid flow diagrams: pod layout, agent creation, spawn, mesh, egress, inference |
 | [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations, CI gates, security-audit framework |
 | [Threat Model — Routes](docs/threat-model.md) | Per-route auth tier, input validation, blast-radius analysis |
-| [AGT Boundary](docs/agt-boundary.md) | What AGT owns vs. what AzureClaw owns; the four contracts |
-| [AGT Vendored-Patch Audit](docs/agt-vendored-patch-audit.md) | 26 vendor patches indexed; re-audited on every AGT SDK bump |
-| [Internal MSFT Boundaries](docs/internal/internal-boundaries.md) | Per-product consume / be-consumed / orthogonal posture *(internal)* |
+| [AGT Vendored-Patch Audit](docs/agt-vendored-patch-audit.md) | Index of fixes applied to the vendored AgentMesh stack pending AGT mesh shipping |
 | [`sigs/agent-sandbox` Compat](docs/sigs-agent-sandbox-compat.md) | Translate / Overlay mode design; opt-in, no upstream dependency |
 | [OWASP MCP Top 10 (2025)](docs/security-mcp-top10.md) | Controls matrix for the new MCP 2026 surface |
 | [ADR-0001 — A2A ingress front-edge](docs/adr/0001-a2a-ingress-front-edge.md) | Gateway-only, surgical opt-in posture for inbound A2A |
@@ -527,7 +525,7 @@ azureclaw/
 ├── sandbox-images/       # OpenClaw + nemoclaw container images
 ├── policy-engine/        # Seccomp profiles & security policies
 ├── deploy/               # Bicep IaC, Helm charts (incl. VAP/MAP set), AgentMesh K8s manifests
-├── docs/                 # Architecture, security, threat model, AGT boundary, ADR, security-audits/
+├── docs/                 # Architecture, security, threat model, ADRs, security-audits/
 ├── examples/             # Sample agents (basic, confidential, telegram, demo)
 ├── tests/                # compat/, conformance/, e2e/
 └── vendor/               # AgentMesh SDK (21 patches), relay (4), registry (1)

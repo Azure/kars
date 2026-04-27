@@ -166,10 +166,7 @@ In a chat:
 
 ## What's NOT a use case
 
-- AzureClaw is **not** a model router. Model selection sits in Foundry; `InferencePolicy` (Phase 2) is a budget/guardrail CR, not a router. See [`docs/internal-boundaries.md`](internal-boundaries.md).
+- AzureClaw is **not** a model router. Model selection sits in Foundry; `InferencePolicy` (Phase 2) is a budget/guardrail CR, not a router.
 - AzureClaw is **not** a memory backend. `ClawMemory` (Phase 2) is a Foundry Memory Store binding CR, never an in-cluster store.
 - AzureClaw is **not** a managed-MCP host. `McpServer` (schema-only on Phase 1, full reconciler in Phase 2) is for **AKS-hosted private/custom** tool servers; managed MCP stays with Foundry.
 - AzureClaw is **not** a SaaS agent author. Agent authoring lives in Microsoft 365 Agent Framework / Copilot Studio. AzureClaw is the AKS runtime substrate; M365 Copilot Studio agents can invoke AzureClaw-hosted MCP servers as a tool surface.
-
-See [`docs/internal-boundaries.md`](internal-boundaries.md) for the full
-consume / be-consumed / orthogonal matrix against neighbouring MSFT products.

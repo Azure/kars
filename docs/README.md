@@ -12,9 +12,7 @@
 
 - [Security Model](security.md) — Defense-in-depth (infra + AGT governance + E2E mesh + protocol-layer controls)
 - [Threat Model — Routes](threat-model.md) — Per-route auth tier, input validation, blast-radius
-- [AGT Boundary](agt-boundary.md) — What AGT owns vs. AzureClaw; the four contracts
-- [AGT Vendored-Patch Audit](agt-vendored-patch-audit.md) — 26 vendor patches indexed; re-audit on AGT SDK bump
-- [Internal MSFT Boundaries](internal/internal-boundaries.md) — Per-product consume / be-consumed / orthogonal posture *(internal)*
+- [AGT Vendored-Patch Audit](agt-vendored-patch-audit.md) — Vendored AgentMesh fixes pending AGT mesh shipping
 - [`sigs/agent-sandbox` Compat](sigs-agent-sandbox-compat.md) — Optional Translate / Overlay mode design
 - [OWASP MCP Top 10 (2025)](security-mcp-top10.md) — Controls matrix for the new MCP 2026 surface
 - [ADR-0001 — A2A ingress front-edge](adr/0001-a2a-ingress-front-edge.md) — Gateway-only, surgical opt-in

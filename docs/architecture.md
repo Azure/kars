@@ -522,12 +522,12 @@ SIGINT (Ctrl+C) is trapped during the child process so it only terminates the TU
 
 ## Phase 1 architectural additions (PR #44)
 
-### Four-seam provider architecture
+### Provider seam architecture
 
-Every cross-AGT-boundary call goes through one of four trait contracts. The
-router-side three (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`)
-have in-tree implementations on `Governance`. The fourth (`MeshProvider`) is
-plugin-side by design — see [`docs/agt-boundary.md`](agt-boundary.md).
+Cross-component governance calls go through four trait seams. Three router-side
+(`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) have in-tree
+implementations on `Governance`. The fourth (`MeshProvider`) is plugin-side by
+design — the router's `providers/mesh.rs` is documentation only.
 
 ```
 +-------------------------------------------------+

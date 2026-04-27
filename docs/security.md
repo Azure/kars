@@ -174,7 +174,7 @@ Three of the four AGT contracts have in-tree implementations on the router-side 
 | `PolicyDecisionProvider` | `providers/policy.rs` | `policy_impl.rs` (`impl … for Governance`) | `routes/inference.rs` (3 sites) |
 | `AuditSink` | `providers/audit.rs` | `audit_impl.rs` | `handoff/mod.rs` (13 sites) |
 | `SigningProvider` | `providers/signing.rs` | `signing_impl.rs` | A2A AgentCard + AP2 mandate signing |
-| `MeshProvider` | `providers/mesh.rs` (doc-only) | **none — plugin-side by design** | See `docs/agt-boundary.md` |
+| `MeshProvider` | `providers/mesh.rs` (doc-only) | **none — plugin-side by design** | Router has no in-tree mesh impl |
 
 `providers/outage.rs` selects between `Strict` (prod default), `CachedRead`, `DegradedDev` per-`ClawSandbox` via `spec.agt.outageMode`.
 
