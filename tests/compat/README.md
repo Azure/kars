@@ -1,8 +1,8 @@
 # AzureClaw Compatibility Suite (`tests/compat/`)
 
 **Status:** Phase 0 skeleton. Grows with every Phase-0→Phase-4 decomposition.
-**Charter:** `docs/implementation-plan.md` §5.4.
-**Principle:** `docs/implementation-plan.md` §0.2 #1 — "Zero regressions on
+**Charter:** `internal Phase 1 plan` §5.4.
+**Principle:** `internal Phase 1 plan` §0.2 #1 — "Zero regressions on
 existing user-facing behaviour."
 
 ## Purpose

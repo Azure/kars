@@ -1,7 +1,7 @@
 /**
  * Signal tamper / replay / denial-of-service invariants — Phase 0 scaffold.
  *
- * See docs/implementation-plan.md §5.4 + §0.2 principle #8.
+ * See internal Phase 1 plan §5.4 + §0.2 principle #8.
  *
  * Every negative case here maps to a production-history bug or a
  * documented Signal-protocol attack surface:

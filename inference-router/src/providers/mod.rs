@@ -45,7 +45,7 @@
 //! Every new implementation of any contract below MUST land with a
 //! `docs/security-audits/YYYY-MM-DD-<slug>.md` covering the §0.2 #9 scope.
 
-// Scaffolding for Phase 1 — see docs/implementation-plan.md §7. Dead-code
+// Scaffolding for Phase 1 — see internal Phase 1 plan §7. Dead-code
 // lints are silenced at the module level until call-sites land.
 #![allow(dead_code)]
 
@@ -77,7 +77,7 @@ pub(crate) use signing_impl::DEFAULT_KEY_REF;
 // and do carry their own types because they have state of their own.
 
 /// Selects which implementation of a contract a tenant uses.
-/// See `docs/implementation-plan.md` §1.4.
+/// See internal Phase 1 plan §1.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Vendored,

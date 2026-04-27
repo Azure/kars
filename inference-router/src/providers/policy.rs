@@ -11,7 +11,7 @@
 //! - `NullPolicyDecisionProvider` — dev-only; defaults to fail-closed
 //!   (admission-policy rejects in prod).
 //!
-//! See `docs/implementation-plan.md` §1.2 and §1.4.
+//! See internal Phase 1 plan §1.2 and §1.4.
 
 use std::time::Duration;
 

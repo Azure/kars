@@ -133,7 +133,7 @@ monitoring:
       traceMount: true      # Detect mount attempts (should be blocked)
 
 # Admission policies shipped with the chart.
-# See docs/implementation-plan.md §6 item 6 and §0.2 principle 9.
+# See internal Phase 1 plan §6 item 6 and §0.2 principle 9.
 admission:
   nullProviderBlock:
     # Deploy the ValidatingAdmissionPolicy that rejects

@@ -1,7 +1,7 @@
 //! Router drain-state — "stop accepting new work, complete in-flight".
 //!
 //! Extracted from `handoff.rs` as the first step of the Phase 1 split
-//! (`docs/implementation-plan.md` §4.2). The drain machinery is self-contained:
+//! (internal Phase 1 plan §4.2). The drain machinery is self-contained:
 //! no crypto, no auth, no interaction with [`super::HandoffState`]. It guards
 //! the transition from "active" to "quiescent" during a live migration.
 

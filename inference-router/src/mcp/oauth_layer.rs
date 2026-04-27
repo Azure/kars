@@ -5,7 +5,7 @@
 //! [`super::oauth::verify_access_token`] is a pure synchronous function
 //! that does not know about HTTP types. To gate the MCP and A2A
 //! routers on bearer-token verification (per
-//! `docs/implementation-plan.md` §7 and the McpServer CRD's
+//! internal Phase 1 plan §7 and the McpServer CRD's
 //! `spec.productionMode: true` semantics), we need to:
 //!
 //! 1. Inspect the `Authorization` header on every incoming request.

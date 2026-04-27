@@ -6,7 +6,7 @@
  * verified in concert with the JSON-RPC binding.
  *
  * Mirrors the negative class called out in
- * `docs/implementation-plan.md` §5.4 row "AP2 commerce".
+ * internal Phase 1 plan §5.4 row "AP2 commerce".
  */
 import { describe, it } from "vitest";
 

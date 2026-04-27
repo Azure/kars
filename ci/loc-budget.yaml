@@ -1,4 +1,4 @@
-# LOC budget — per docs/implementation-plan.md §4.2.
+# LOC budget — per internal Phase 1 plan §4.2.
 #
 # `ci/check-loc.sh` enforces:
 #   - Every file listed below has a `phase0_cap`; the file must not exceed it.

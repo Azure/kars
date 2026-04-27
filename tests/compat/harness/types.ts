@@ -4,7 +4,7 @@
  */
 
 export interface ProtectedFlow {
-  /** Canonical name per docs/implementation-plan.md §5.1 */
+  /** Canonical name per internal Phase 1 plan §5.1 */
   id:
     | "azureclaw-dev"
     | "azureclaw-up"
