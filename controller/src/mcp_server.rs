@@ -1,9 +1,10 @@
-//! `McpServer` CRD — minimal scaffold per implementation-plan §7 entry 3.
+//! `McpServer` CRD — full reconciler (Phase 2 §8 entry 1).
 //!
-//! Status: **scaffold-only** in this branch. The reconciler is wired in
-//! `controller/src/main.rs` but only updates Conditions; it does not yet
-//! provision a router-side OAuth 2.1 endpoint. That lands in
-//! `phase1/mcp-2026-streamable-http-routes`.
+//! Status: **full** as of `phase2/mcp-reconciler` (S1 of Phase 2).
+//! The reconciler in `controller/src/mcp_server_reconciler.rs` emits an
+//! Ed25519 signing-key Secret and (when `productionMode: true`) caches
+//! the issuer's JWKS into a ConfigMap that the inference-router mounts
+//! to gate `/mcp` with OAuth 2.1.
 //!
 //! Spec: <https://modelcontextprotocol.io/specification/2026-01-15>
 //! OAuth 2.1: <https://www.rfc-editor.org/rfc/rfc9700>
@@ -129,4 +130,30 @@ pub struct McpServerStatus {
     /// Last health-check timestamp (RFC 3339).
     #[serde(default)]
     pub last_probed_at: Option<String>,
+
+    /// Reference to the Secret holding the Ed25519 signing keypair this
+    /// reconciler emits. The Secret has type
+    /// `azureclaw.azure.com/mcp-signing-key` with two keys:
+    /// `signing-key.private` (raw 32-byte Ed25519 seed) and
+    /// `signing-key.public` (raw 32-byte verifying key). Field-managed
+    /// by `azureclaw-controller/mcp`.
+    #[serde(default)]
+    pub signing_key_ref: Option<LocalObjectRef>,
+
+    /// Reference to the ConfigMap caching the issuer's JWKS. Present
+    /// only when `spec.productionMode == true`. Single key `jwks.json`
+    /// holds the raw RFC 7517 JWKSet bytes. Field-managed by
+    /// `azureclaw-controller/mcp`.
+    #[serde(default)]
+    pub jwks_config_map_ref: Option<LocalObjectRef>,
+}
+
+/// Minimal `LocalObjectReference`-shaped struct with `name` only — the
+/// emitted Secret/ConfigMap always lives in the same namespace as the
+/// CR, so namespace plumbing would be redundant. Mirrors the
+/// `corev1.LocalObjectReference` Kubernetes API shape.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalObjectRef {
+    pub name: String,
 }

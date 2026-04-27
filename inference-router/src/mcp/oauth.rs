@@ -105,6 +105,45 @@ impl Default for OAuthVerifierConfig {
     }
 }
 
+impl OAuthVerifierConfig {
+    /// Build a production verifier config by reading:
+    ///
+    /// - the JWKSet from `jwks_path` (raw RFC 7517 JSON; the controller
+    ///   writes this from the issuer's discovery document),
+    /// - the issuer URL from `issuer`,
+    /// - the audience claim from `audience`,
+    /// - optional space-separated `required_scopes`.
+    ///
+    /// Errors are returned as a string for caller-friendly logging at
+    /// the boot path; the router panics out of an unconfigurable state
+    /// rather than silently mounting an unauthenticated route.
+    pub fn from_jwks_file(
+        jwks_path: &std::path::Path,
+        issuer: &str,
+        audience: &str,
+        required_scopes: Vec<String>,
+    ) -> Result<Self, String> {
+        let raw = std::fs::read(jwks_path)
+            .map_err(|e| format!("cannot read JWKS at {}: {e}", jwks_path.display()))?;
+        let jwks: JwkSet = serde_json::from_slice(&raw)
+            .map_err(|e| format!("JWKS at {} is not valid: {e}", jwks_path.display()))?;
+        let mut trusted = HashMap::new();
+        trusted.insert(issuer.to_string(), jwks);
+        Ok(Self {
+            trusted_issuers: trusted,
+            expected_audience: audience.to_string(),
+            allowed_algorithms: vec![
+                Algorithm::EdDSA,
+                Algorithm::ES256,
+                Algorithm::RS256,
+                Algorithm::PS256,
+            ],
+            leeway_seconds: 60,
+            required_scopes,
+        })
+    }
+}
+
 /// Successfully verified access token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedToken {
