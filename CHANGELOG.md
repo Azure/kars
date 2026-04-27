@@ -292,6 +292,126 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S5 `phase2/clawmemory-reconciler` — ClawMemory CRD + binding ConfigMap + helm CRD
+
+This slice ships the controller side of the Foundry Memory Store
+binding K8s primitive only. Per §3 non-compete, `ClawMemory` is a
+**binding/provisioning resource over Azure AI Foundry Memory Store**
+— it *configures* FMS for a sandbox; it is **not** a separate
+in-cluster memory backend. The runtime enforcement substrate stays on
+Phase 1 (`cli/src/plugin.ts::ensureMemoryStore` lazy-create through
+the router's Workload Identity + the existing `/memory_stores/*`
+proxy in `inference-router/src/routes/inference.rs`). The compiled
+JSON ConfigMap (`clawmemory-{name}-binding`) is the hand-off contract;
+the sandbox-side informer that consumes it is deferred to S7.
+
+#### Added
+
+- **`ClawMemory` CRD** — `controller/src/claw_memory.rs`, group
+  `azureclaw.azure.com`, version `v1alpha1`, namespaced, shortname
+  `cmem`. Spec fields: `storeName`, `sandboxRef.name`, `scope`,
+  `retentionDays?`, `deleteOnSandboxDelete` (default `true`),
+  `displayName?`. Status: `phase`, `observedGeneration`,
+  `conditions`, `bindingConfigMapRef`, `versionHash`,
+  `lastReconciledAt`. Print columns surface sandbox, store, scope,
+  phase, age.
+- **Pure compile module** — `controller/src/claw_memory_compile.rs`
+  with `compile_to_binding()` + `version_hash()` (sha256 first 16
+  bytes hex). 6 unit tests cover deterministic compile, full vs
+  minimal spec round-trip, hash sensitivity to spec changes, hash
+  stability across serde round-trip, and hash hex shape. Mirrors S4
+  `inference_policy_compile.rs` shape.
+- **Reconciler** — `controller/src/claw_memory_reconciler.rs`:
+  finalizer `azureclaw.azure.com/clawmemory-cleanup`, field manager
+  `azureclaw-controller/clawmemory`, SSA throughout. Compiles the
+  spec, persists as ConfigMap (`clawmemory-{name}-binding`, key
+  `binding.json`, labels `app.kubernetes.io/managed-by`,
+  `azureclaw.azure.com/clawmemory`,
+  `azureclaw.azure.com/artifact=claw-memory-binding`), sets full
+  status with `Ready`/`Progressing`/`Degraded` conditions reusing
+  `status/conditions.rs` (no condition-vocabulary fork). 7 unit tests.
+- **CEL admission rules** — 4 rules in
+  `controller/src/crd_validations.rs::claw_memory_validations()`:
+  DNS-label `storeName` (1-63 chars, `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`),
+  `sandboxRef.name` 1-253 chars, `scope` 1-256 chars, `retentionDays
+  > 0` when present. Injected via existing `inject_spec_validations`
+  helper. 5 unit tests.
+- **Helm CRD** — `deploy/helm/azureclaw/templates/crd-clawmemory.yaml`
+  (184 lines) generated via the existing
+  `helm_drift::dump_clawmemory_crd_yaml` dumper test (env-gated by
+  `DUMP_CLAWMEMORY_CRD_YAML=1`). New drift-detection test pins
+  helm-side YAML to Rust-derived schema; both round-trip.
+- **`main.rs` wiring** — `claw_memory_reconciler::run` spawned in
+  `tokio::select!` alongside the four prior reconcilers. CRD-missing
+  exit is non-fatal (matches S1–S4 pattern).
+- **Audit doc** — `docs/security-audits/2026-04-27-phase2-clawmemory-reconciler.md`
+  with two sign-offs, full STRIDE coverage, AGT boundary verification
+  (AGT 3.3.0 carries no Memory Store module — confirmed against
+  on-disk source), reuse map, out-of-scope set with explicit S7
+  forward-references, and reproduction of the Memory Store auth
+  caveat (Foundry project MI must hold `Azure AI User` on the
+  resource group; token audience `https://ai.azure.com/`) inside the
+  CRD module docstring so it travels with the schema.
+
+#### Reuse map (no-duplication rule, §0.2 / §0.3)
+
+11 existing seams reused:
+
+1. `controller/src/status::conditions` — vocabulary + transition-time
+   helpers used unchanged.
+2. `controller/src/mcp_server::LocalObjectRef` — 5th semantic client
+   (S1 signing/jwks, S2 profile, S3 agent-card, S4 guardrail-profile,
+   S5 binding-config).
+3. `controller/src/inference_policy_reconciler` (S4) — reconcile
+   shape + finalizer pattern + non-fatal CRD-missing exit, copied
+   verbatim.
+4. `controller/src/inference_policy_compile` (S4) — compile-module
+   shape (pure-fn + version_hash + tests).
+5. `controller/src/crd_validations::inject_spec_validations` — same
+   SSA-friendly CEL injector.
+6. `controller/src/helm_drift::canonical_form` — drift comparison
+   reused verbatim.
+7. `cli/src/plugin.ts::ensureMemoryStore` (Phase 1) — existing
+   GET-then-POST create path against Foundry; **not modified in S5**.
+   S7 wires the consumer that reads our ConfigMap.
+8. `cli/src/core/foundry-discovery.ts::FoundryEnsureMemoryStore`
+   (Phase 1) — discovery + lazy-create signature; not duplicated.
+9. `inference-router/src/routes/inference.rs` `/memory_stores/*`
+   proxy (Phase 1) — the router holds the Workload Identity for
+   Foundry calls; the controller has none. We do not give the
+   controller Foundry credentials.
+10. `inference-router/src/proxy.rs` idempotency map (Phase 1) —
+    PUT/DELETE/PATCH on `/memory-stores/x` already declared
+    non-idempotent; not modified.
+11. RFC-3339 `chrono::Utc::now().to_rfc3339_opts` formatter — copy-pasted
+    across reconcilers (lift to shared module deferred to S7).
+
+#### Out of scope (deferred to S7+)
+
+- **Foundry-side delete on CR delete** — finalizer cleans the binding
+  ConfigMap only; `deleteOnSandboxDelete` is preserved in the
+  compiled binding for the runtime path to act on.
+- **Conflict detection** across multiple `ClawMemory` CRs targeting
+  the same sandbox+scope pair — router-side dedupe at S7.
+- **Retention enforcement** — spec carries `retentionDays`; runtime
+  enforcement (Foundry TTL or scheduled `delete_scope` sweeps) wired
+  in S7 alongside hot-reload (§10.4 #11).
+- **Status `phase` matrix beyond Ready/Degraded** — full S7 matrix
+  cluster-wide.
+- **Cross-namespace `sandboxRef`** — out of scope by design.
+
+#### Test count delta
+
+- Controller: 218 → 238 (+20 tests). Workspace total green.
+
+#### §14.6 impact
+
+Strengthens column 7 (Foundry / M365 integration) — the fifth full
+CRD reconciler in the family lands. Phase 2 §14.6 column 12
+(Governance as K8s primitives) at 4/5 differentiator CRDs; only
+`ClawEval` (S6) outstanding.
+
+
 ## [Unreleased] — PR #44 `dev → main` uplift
 
 This entry covers **186 commits** on `dev` since `main`, structured as Phase 0

@@ -46,6 +46,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
 use kube::CustomResourceExt;
 
 use crate::a2a_agent::A2AAgent;
+use crate::claw_memory::ClawMemory;
 use crate::inference_policy::InferencePolicy;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
@@ -299,6 +300,67 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on InferencePolicy")
 }
 
+/// `ClawMemory.spec` CEL rules. Phase 2 §8 entry 5 (S5).
+///
+/// `ClawMemory` is a binding/provisioning resource over Azure AI
+/// Foundry Memory Store (per `docs/implementation-plan.md` §3
+/// non-compete). The CRD is shape-only — runtime auth and Foundry
+/// availability are out of admission scope. Rules:
+///
+/// - `storeName` non-empty + DNS-label-style (lowercase alnum + `-`,
+///   1-63 chars). Foundry treats store names as case-sensitive
+///   identifiers; pinning to DNS-label form keeps them safe to use
+///   verbatim in URLs and ConfigMap labels.
+/// - `sandboxRef.name` non-empty (1-253 chars; same length cap as
+///   K8s object names).
+/// - `scope` non-empty (1-256 chars). Foundry uses scope as a
+///   partition key — empty scope would cross-contaminate every
+///   sandbox bound to the same store.
+/// - `retentionDays > 0` when present. Zero would request immediate
+///   deletion, which is what `delete_scope` is for.
+#[must_use]
+pub fn claw_memory_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')".into(),
+            message: Some(
+                "spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253".into(),
+            message: Some("spec.sandboxRef.name must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.scope) > 0 && size(self.scope) <= 256".into(),
+            message: Some("spec.scope must be 1-256 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.retentionDays) || self.retentionDays > 0".into(),
+            message: Some(
+                "spec.retentionDays must be > 0 when set (use delete_scope for immediate deletion)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `ClawMemory` CRD with [`claw_memory_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn claw_memory_crd() -> CustomResourceDefinition {
+    inject_spec_validations(ClawMemory::crd(), claw_memory_validations())
+        .expect("kube-rs derive must produce a spec property on ClawMemory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +571,66 @@ mod tests {
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("monthlyTokens"));
+    }
+
+    // ---- ClawMemory (S5) ------------------------------------------------
+
+    #[test]
+    fn claw_memory_validations_are_non_empty() {
+        assert!(!claw_memory_validations().is_empty());
+    }
+
+    #[test]
+    fn every_claw_memory_rule_has_message_and_rule() {
+        for rule in claw_memory_validations() {
+            assert!(!rule.rule.is_empty(), "rule body must not be empty");
+            let msg = rule.message.as_deref().unwrap_or("");
+            assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
+        }
+    }
+
+    #[test]
+    fn claw_memory_crd_has_spec_validations_after_injection() {
+        let crd = claw_memory_crd();
+        let v = spec_validations(&crd);
+        assert_eq!(v.len(), claw_memory_validations().len());
+    }
+
+    #[test]
+    fn claw_memory_rules_mention_store_name_scope_and_retention_invariants() {
+        let rules: Vec<String> = claw_memory_validations()
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("storeName") && r.contains("matches")),
+            "must enforce storeName DNS-label shape; got rules: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("sandboxRef.name")),
+            "must validate sandboxRef.name; got rules: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("scope")),
+            "must validate scope; got rules: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("retentionDays") && r.contains("> 0")),
+            "must enforce retentionDays > 0; got rules: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn claw_memory_crd_is_serde_round_trippable() {
+        let crd = claw_memory_crd();
+        let y = serde_yaml::to_string(&crd).expect("serializes");
+        assert!(y.contains("x-kubernetes-validations"));
+        assert!(y.contains("storeName"));
+        assert!(y.contains("scope"));
     }
 
     #[test]
