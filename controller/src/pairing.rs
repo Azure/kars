@@ -155,7 +155,7 @@ pub async fn release_offload_slot(client: kube::Client, requester: &str, sandbox
     let _ = pairings_api
         .patch_status(
             &pairing_name,
-            &PatchParams::apply("azureclaw-controller"),
+            &PatchParams::apply(crate::field_managers::PAIRING),
             &Patch::Merge(patch),
         )
         .await;

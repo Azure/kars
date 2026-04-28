@@ -48,7 +48,7 @@ use crate::tool_policy_compile::{compile_to_profile, version_hash};
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
 /// detects out-of-band tampering.
-const FIELD_MANAGER: &str = "azureclaw-controller/toolpolicy";
+const FIELD_MANAGER: &str = crate::field_managers::TOOL_POLICY;
 
 /// Finalizer name (DNS subdomain).
 const FINALIZER: &str = "azureclaw.azure.com/toolpolicy-cleanup";

@@ -60,7 +60,7 @@ use crate::status::conditions::{self, reason, status as cond_status};
 /// Field manager for SSA patches emitted by this reconciler. Distinct
 /// from S1 `…/mcp`, S2 `…/toolpolicy`, S3 `…/a2aagent` per §10.4 #1
 /// — surfaces out-of-band tampering.
-const FIELD_MANAGER: &str = "azureclaw-controller/inferencepolicy";
+const FIELD_MANAGER: &str = crate::field_managers::INFERENCE_POLICY;
 
 /// Finalizer name (DNS subdomain).
 const FINALIZER: &str = "azureclaw.azure.com/inferencepolicy-cleanup";
