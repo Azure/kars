@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.A3 `phase2-runtime-openai-agents` — first non-OpenClaw native runtime
+
+#### Added
+
+- **`plan_openai_agents` producer** in
+  `controller::reconciler::runtime` — replaces the `AdapterMissing`
+  short-circuit landed in S10.A2 with a real
+  `RuntimeDeploymentPlan` for `RuntimeKind::OpenAIAgents`. Resolves
+  the adapter image via `DEFAULT_OPENAI_AGENTS_IMAGE` (default
+  `azureclawacr.azurecr.io/azureclaw-runtime-openai-agents:latest`)
+  with `OPENAI_AGENTS_RUNTIME_IMAGE` env override (whitespace
+  treated as unset). Propagates `python_version` →
+  `RUNTIME_PYTHON_VERSION` env (non-reserved prefix so it survives
+  the deployment builder's reserved-prefix filter), merges user
+  `extra_env` on top, passes `entrypoint` through as the container
+  command, round-trips `agent_code` for the eventual
+  `oci`/`git` mount path.
+- **`sandbox-images/openai-agents/` scaffolding** — Dockerfile (Python
+  3.12 + `openai-agents>=0.1,<0.2`) + `entrypoint.sh` exporting
+  `OPENAI_BASE_URL=http://127.0.0.1:8443/openai/v1` (router sidecar
+  is the only LLM endpoint allowed by NetworkPolicy + egress-guard)
+  and `AZURECLAW_PLATFORM_MCP_URL=http://127.0.0.1:8443/platform/mcp`
+  (S10.B platform MCP server: every runtime gets the 9 Foundry shim
+  tools for free). Image declares
+  `LABEL org.azureclaw.runtime.contract="v1"` so the existing BYO
+  contract verifier recognises it.
+- 8 new controller tests (315/315 green): default image, env-override
+  image (set / unset / whitespace-as-unset), `python_version` →
+  `RUNTIME_PYTHON_VERSION`, `extra_env` merge, user-extra-wins on
+  conflict, `entrypoint` → command propagation, `agent_code`
+  round-trip, dispatcher arm wiring.
+
+#### Changed
+
+- **Reconciler `is_byo` flag generalised to `is_openclaw`** (positive
+  polarity). `RuntimeKind::OpenAIAgents` now flows through the same
+  generic-runtime container shape as BYO: container name `agent`
+  (not `openclaw`), no OpenClaw-specific env (`OPENCLAW_MODEL`,
+  `OPENCLAW_GATEWAY_TOKEN`, `FOUNDRY_DEPLOYMENTS`, `FOUNDRY_AGENT_ID`,
+  `FOUNDRY_AGENT_TOOLS`), no admin-token mount. The OpenClaw vs
+  generic split established for BYO in S10.A2.b is the single
+  branching point; adding OpenAIAgents required no parallel flag.
+- **`AdapterMissing` log message updated** — track now reads
+  `BYO=S10.A2.b, OpenAIAgents=S10.A3 (wired), MAF=S10.A4`.
+- **`plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind`**
+  — drops the `OpenAIAgents` case (now wired); four cases remain
+  (`MicrosoftAgentFramework`, `SemanticKernel`, `LangGraph`,
+  `Anthropic`).
+
+#### Deferred
+
+- **In-pod adapter Python package** (`azureclaw-runtime-openai-agents`
+  PyPI) — AAD shim for Azure OpenAI, `AZURE_OPENAI_ENDPOINT`
+  rewriting based on `InferencePolicy`, AGT-init compat, OTel SDK
+  wiring. The Dockerfile + entrypoint scaffolding is contract-labelled
+  but does not yet consume the adapter; immediate follow-up before
+  the slice closes.
+- **Class B mesh / spawn / handoff tools** — blocked on
+  AgentMesh-Python upstream availability
+  (`docs/internal/agt-upstream-asks.md` §3). S10.A3 ships
+  Foundry-shim access only via S10.B; mesh tools deliberately absent
+  rather than reimplemented.
+- **Reference example app + e2e Kind test + negative-egress
+  assertion** — fold into S10.A4 (MAF) where ≥2 native runtimes
+  share the e2e harness investment.
+
+#### Audit doc
+
+- `docs/security-audits/2026-04-28-phase2-runtime-openai-agents.md` —
+  scope, threat model, hard-rule checklist, AGT upstream dependency
+  note, two sign-off slots.
+
 ### S10.B `phase2-platform-mcp-server` — runtime-agnostic Foundry-shim discovery surface
 
 #### Added

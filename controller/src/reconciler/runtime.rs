@@ -29,7 +29,28 @@
 
 use std::collections::BTreeMap;
 
-use crate::crd::{AgentCodeRef, ByoRuntimeConfig, OpenClawConfig, RuntimeKind, RuntimeSpec};
+use crate::crd::{
+    AgentCodeRef, ByoRuntimeConfig, OpenAIAgentsConfig, OpenClawConfig, RuntimeKind, RuntimeSpec,
+};
+
+/// Default container image for the OpenAI Agents Python runtime
+/// (S10.A3). Stays `:latest` per the repo-wide image-tag rule (see
+/// `.github/copilot-instructions.md` and `plan.md` §image-tag-rule).
+/// Operators wanting to pin a specific tag can override at the
+/// controller deployment level via the `OPENAI_AGENTS_RUNTIME_IMAGE`
+/// env var (read by [`openai_agents_default_image`]).
+pub const DEFAULT_OPENAI_AGENTS_IMAGE: &str =
+    "azureclawacr.azurecr.io/azureclaw-runtime-openai-agents:latest";
+
+/// Resolve the OpenAI Agents adapter image, honouring an operator
+/// override via `OPENAI_AGENTS_RUNTIME_IMAGE`. Falls back to
+/// [`DEFAULT_OPENAI_AGENTS_IMAGE`].
+pub fn openai_agents_default_image() -> String {
+    std::env::var("OPENAI_AGENTS_RUNTIME_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_OPENAI_AGENTS_IMAGE.to_string())
+}
 
 /// Concrete deployment intent for a single reconcile pass.
 ///
@@ -202,7 +223,22 @@ pub fn build_runtime_plan(
             let cfg = runtime.byo.as_ref().expect("validated above");
             Ok(plan_byo(cfg))
         }
-        RuntimeKind::OpenAIAgents => Err(RuntimePlanError::AdapterMissing("OpenAIAgents")),
+        RuntimeKind::OpenAIAgents => {
+            // S10.A3: OpenAI Agents Python adapter wired end-to-end at
+            // the controller level. Adapter image bundles Python 3.12
+            // + `openai-agents` + a stock entrypoint that points the
+            // `openai` SDK at the inference router and exposes the
+            // platform MCP server URL via env. User agent code lands
+            // via `agentCode.oci` / `agentCode.git` (mounted to
+            // /sandbox/agent — same convention as BYO).
+            //
+            // **Class B (mesh / spawn / handoff) is NOT yet exposed**
+            // — blocked on AgentMesh-Python availability (see
+            // `docs/internal/agt-upstream-asks.md` §3). Foundry-shim
+            // affordances are reachable via `/platform/mcp` (S10.B).
+            let cfg = runtime.openai_agents.as_ref().expect("validated above");
+            Ok(plan_openai_agents(cfg))
+        }
         RuntimeKind::MicrosoftAgentFramework => {
             Err(RuntimePlanError::AdapterMissing("MicrosoftAgentFramework"))
         }
@@ -262,12 +298,77 @@ fn plan_byo(cfg: &ByoRuntimeConfig) -> RuntimeDeploymentPlan {
     }
 }
 
+/// S10.A3 producer for the OpenAI Agents Python runtime.
+///
+/// The adapter image (`sandbox-images/openai-agents/`) bundles Python
+/// 3.12 + `openai-agents` + an entrypoint that:
+///
+/// 1. Sets `OPENAI_BASE_URL` to the inference router's `/openai/v1`
+///    proxy. The user's agent uses the standard `openai` SDK with no
+///    Azure-specific code; the router handles AAD / IMDS upstream auth
+///    and InferencePolicy enforcement.
+/// 2. Sets `AZURECLAW_PLATFORM_MCP_URL` to the platform MCP server
+///    (S10.B). Adapters / user code that want Foundry-shim affordances
+///    (web search, code execute, memory store, …) point their MCP
+///    client at this URL.
+/// 3. Exec's the user agent code from `/sandbox/agent/` (mounted via
+///    `agentCode.oci` / `agentCode.git`).
+///
+/// Class B mesh / spawn / handoff tools are **not** exposed in this
+/// slice — blocked on AgentMesh-Python availability (see
+/// `docs/internal/agt-upstream-asks.md` §3). The adapter ships the
+/// Foundry-shim discovery surface only.
+fn plan_openai_agents(cfg: &OpenAIAgentsConfig) -> RuntimeDeploymentPlan {
+    // Adapter image is controller-managed. `OpenAIAgentsConfig` does
+    // not expose an `image` field today (deliberate: keeping the
+    // adapter version flat across a controller release reduces blast
+    // radius for AAD / OpenAI-SDK breaking changes). Operators
+    // override at the controller deployment level via env.
+    let image = openai_agents_default_image();
+
+    // Inject **adapter-defaulted** env first; user `extraEnv` merges
+    // on top so a sandbox author can pin a stricter
+    // `OPENAI_AGENTS_LOG_LEVEL`, etc. Reserved-prefix filtering of
+    // user `extraEnv` happens in the deployment builder, not here —
+    // mirroring `plan_openclaw` semantics. NB: we deliberately do NOT
+    // use the `AZURECLAW_*` prefix here — that prefix is reserved and
+    // would be stripped by the deployment builder. `RUNTIME_*` is the
+    // free-to-use convention for runtime-adapter-visible settings.
+    let mut runtime_extra_env = BTreeMap::new();
+    if let Some(v) = cfg.python_version.as_ref() {
+        runtime_extra_env.insert("RUNTIME_PYTHON_VERSION".to_string(), v.clone());
+    }
+    if let Some(user_env) = cfg.extra_env.as_ref() {
+        for (k, v) in user_env {
+            runtime_extra_env.insert(k.clone(), v.clone());
+        }
+    }
+
+    // `entrypoint` lets the user pin a non-default agent launcher
+    // (e.g. `["python", "-m", "myteam.agents.researcher"]`). Default
+    // — `None` — honours the adapter image's stock entrypoint, which
+    // execs `/sandbox/agent/main.py` if present.
+    let command = cfg.entrypoint.clone();
+
+    RuntimeDeploymentPlan {
+        kind_str: "OpenAIAgents",
+        image,
+        command,
+        args: None,
+        runtime_extra_env,
+        raw_env: Vec::new(),
+        agent_code: cfg.agent_code.clone(),
+        byo_contract_version: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::{
-        AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, MicrosoftAgentFrameworkConfig,
-        OpenAIAgentsConfig, OpenClawConfig, SemanticKernelConfig,
+        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig,
+        MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig, OpenClawConfig,
+        SemanticKernelConfig,
     };
 
     fn rt_openclaw(image: Option<&str>) -> RuntimeSpec {
@@ -456,22 +557,12 @@ mod tests {
     // surfaces `AdapterMissing(<kind>)`. BYO is a known short-circuit
     // until A2.b lands the contract-verifier path.
 
-    /// S10.A2.b: BYO is now wired end-to-end (returns Ok). Only the five
-    /// remaining unwired kinds (OpenAIAgents=A3, MAF=A4, +3 Tier-2
+    /// S10.A3: OpenAI Agents is now wired (S10.A2.b: BYO is wired).
+    /// Only the four remaining unwired kinds (MAF=S10.A4 + 3 Tier-2
     /// placeholders) short-circuit through AdapterMissing.
     #[test]
     fn plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind() {
         let cases: Vec<(RuntimeKind, RuntimeSpec, &str)> = vec![
-            (
-                RuntimeKind::OpenAIAgents,
-                RuntimeSpec {
-                    kind: RuntimeKind::OpenAIAgents,
-                    openclaw: None,
-                    openai_agents: Some(OpenAIAgentsConfig::default()),
-                    ..Default::default()
-                },
-                "OpenAIAgents",
-            ),
             (
                 RuntimeKind::MicrosoftAgentFramework,
                 RuntimeSpec {
@@ -633,5 +724,184 @@ mod tests {
             Some("prod")
         );
         assert_eq!(plan.raw_env.len(), 1);
+    }
+
+    // ── plan_openai_agents() — S10.A3 ─────────────────────────────────
+
+    #[test]
+    fn plan_openai_agents_uses_default_adapter_image_when_env_unset() {
+        // Defensive: clear the env var so the test isn't influenced by
+        // an operator-side override leaking from the dev shell.
+        // SAFETY: serial-test is not on this crate; tests in the same
+        // file run on a single thread per Rust's default test harness
+        // when --test-threads=1 isn't set, but this env var is read
+        // exactly once per call, and we reset it inside the test.
+        // Using `unsafe` blocks per Rust 2024.
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let cfg = OpenAIAgentsConfig::default();
+        let plan = plan_openai_agents(&cfg);
+        assert_eq!(plan.kind_str, "OpenAIAgents");
+        assert_eq!(plan.image, DEFAULT_OPENAI_AGENTS_IMAGE);
+        assert!(
+            plan.command.is_none(),
+            "default entrypoint honors image CMD"
+        );
+        assert!(plan.args.is_none());
+        assert!(plan.runtime_extra_env.is_empty());
+        assert!(plan.raw_env.is_empty());
+        assert!(plan.agent_code.is_none());
+        assert!(plan.byo_contract_version.is_none());
+    }
+
+    #[test]
+    fn plan_openai_agents_passes_through_python_version_and_extra_env() {
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let mut extra = BTreeMap::new();
+        extra.insert("LOG_LEVEL".into(), "DEBUG".into());
+        let cfg = OpenAIAgentsConfig {
+            python_version: Some("3.12".into()),
+            extra_env: Some(extra),
+            ..Default::default()
+        };
+        let plan = plan_openai_agents(&cfg);
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_PYTHON_VERSION")
+                .map(|s| s.as_str()),
+            Some("3.12")
+        );
+        assert_eq!(
+            plan.runtime_extra_env.get("LOG_LEVEL").map(|s| s.as_str()),
+            Some("DEBUG")
+        );
+    }
+
+    #[test]
+    fn plan_openai_agents_user_extra_env_overrides_python_version_key_when_explicitly_set() {
+        // Defensive: if a user explicitly puts RUNTIME_PYTHON_VERSION in
+        // extra_env, their value wins over the producer's
+        // python_version-derived default. The merge order
+        // (default-first, user-on-top) is the contract.
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let mut extra = BTreeMap::new();
+        extra.insert("RUNTIME_PYTHON_VERSION".into(), "3.13".into());
+        let cfg = OpenAIAgentsConfig {
+            python_version: Some("3.12".into()),
+            extra_env: Some(extra),
+            ..Default::default()
+        };
+        let plan = plan_openai_agents(&cfg);
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_PYTHON_VERSION")
+                .map(|s| s.as_str()),
+            Some("3.13"),
+            "user extra_env wins over default (merge order: default-first, user-on-top)"
+        );
+    }
+
+    #[test]
+    fn plan_openai_agents_carries_user_entrypoint_into_command() {
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let cfg = OpenAIAgentsConfig {
+            entrypoint: Some(vec!["python".into(), "-m".into(), "team.researcher".into()]),
+            ..Default::default()
+        };
+        let plan = plan_openai_agents(&cfg);
+        assert_eq!(
+            plan.command.as_deref(),
+            Some(
+                &[
+                    "python".to_string(),
+                    "-m".to_string(),
+                    "team.researcher".to_string()
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn plan_openai_agents_propagates_agent_code() {
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let agent_code = AgentCodeRef {
+            oci: Some(OciAgentCode {
+                image: "ghcr.io/team/agent:abc123".into(),
+            }),
+            ..Default::default()
+        };
+        let cfg = OpenAIAgentsConfig {
+            agent_code: Some(agent_code.clone()),
+            ..Default::default()
+        };
+        let plan = plan_openai_agents(&cfg);
+        assert!(
+            plan.agent_code.is_some(),
+            "agent_code must round-trip from CRD to plan"
+        );
+    }
+
+    #[test]
+    fn openai_agents_default_image_honours_env_override() {
+        unsafe {
+            std::env::set_var(
+                "OPENAI_AGENTS_RUNTIME_IMAGE",
+                "myacr.azurecr.io/openai-agents:pinned",
+            );
+        }
+        let img = openai_agents_default_image();
+        assert_eq!(img, "myacr.azurecr.io/openai-agents:pinned");
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let img = openai_agents_default_image();
+        assert_eq!(img, DEFAULT_OPENAI_AGENTS_IMAGE);
+    }
+
+    #[test]
+    fn openai_agents_default_image_treats_blank_env_as_unset() {
+        unsafe {
+            std::env::set_var("OPENAI_AGENTS_RUNTIME_IMAGE", "   ");
+        }
+        let img = openai_agents_default_image();
+        assert_eq!(img, DEFAULT_OPENAI_AGENTS_IMAGE);
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+    }
+
+    #[test]
+    fn build_runtime_plan_dispatches_openai_agents_to_producer() {
+        unsafe {
+            std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
+        }
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::OpenAIAgents,
+            openclaw: None,
+            openai_agents: Some(OpenAIAgentsConfig {
+                python_version: Some("3.12".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored-openclaw-default")
+            .expect("OpenAIAgents must produce a plan");
+        assert_eq!(plan.kind_str, "OpenAIAgents");
+        assert_eq!(plan.image, DEFAULT_OPENAI_AGENTS_IMAGE);
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_PYTHON_VERSION")
+                .map(|s| s.as_str()),
+            Some("3.12")
+        );
     }
 }
