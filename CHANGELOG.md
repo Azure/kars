@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.A2.b `phase2-multi-runtime-byo` — BYO end-to-end deployment + `raw_env`
+
+#### Added
+- **`RuntimeDeploymentPlan.raw_env: Vec<serde_json::Value>`** —
+  captures structural env entries (e.g. `valueFrom: secretKeyRef:`)
+  from BYO `spec.runtime.byo.env`. Static `value:` entries continue
+  to flow via `runtime_extra_env: BTreeMap<String,String>` (S10.A2).
+- **`plan_byo()` populates `raw_env`** from any env entry the static
+  flattener skipped — the existing reserved-prefix / NUL / dup name
+  filter applies to `raw_env` entries' `name` field; the
+  `valueFrom` payload renders verbatim.
+- **`build_runtime_plan_dispatches_byo_to_producer`** unit test
+  asserting `RuntimeKind::BYO` no longer returns `AdapterMissing`.
+
+#### Changed
+- **`RuntimeKind::BYO` now routes through `Ok(plan_byo(cfg))`** in
+  `build_runtime_plan` (was `AdapterMissing`). BYO sandboxes get
+  end-to-end Pod deployment.
+- **Reconciler `mod.rs`** gained `is_byo` flag derived from
+  `runtime_spec.kind`. The following env entries are skipped when
+  `is_byo`: `OPENCLAW_MODEL`, `OPENCLAW_GATEWAY_TOKEN`,
+  `FOUNDRY_DEPLOYMENTS`, `FOUNDRY_AGENT_ID`, `FOUNDRY_AGENT_TOOLS`.
+  Critical: `OPENCLAW_GATEWAY_TOKEN` references Secret
+  `gateway-token` which is OpenClaw-namespace-scoped — BYO
+  referencing it would `CreateContainerConfigError`.
+- **Agent container extracted** into a `let agent_container = json!`
+  binding before the deployment macro. Conditional fields:
+  `name: "agent"` (BYO) vs `"openclaw"` (OpenClaw); port 18789 only
+  when `!is_byo`; admin-token volumeMount only when `!is_byo`;
+  `command` / `args` set from `plan.command` / `plan.args` when
+  `Some(...)`.
+- **`raw_env` consumption block** added in the reconciler after the
+  static `runtime_extra_env` block. Defensive skip on entries
+  missing `name`.
+- Renamed
+  `plan_returns_adapter_missing_for_each_non_openclaw_kind` →
+  `plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind`
+  (BYO removed from cases vec; remaining unwired kinds:
+  `OpenAIAgents`, `MicrosoftAgentFramework`).
+
+#### Tests
+- 307/307 controller tests pass (was 306 in S10.A2; +1 new
+  dispatcher test).
+- `cargo clippy --package azureclaw-controller --all-targets -- -D
+  warnings` clean.
+- `cargo fmt --all -- --check` clean.
+
+#### Audit
+- `docs/security-audits/2026-04-28-phase2-multi-runtime-byo.md`
+  (threat model: gateway-token escape attempt, container-name
+  divergence, raw_env reserved-prefix coverage, post-deploy patch
+  compatibility).
+
+#### Follow-ups not in this slice
+- S10.A3 (`phase2-runtime-openai-agents`) — first runnable
+  non-OpenClaw runtime; will exercise BYO-shaped deployment path
+  with a real Python 3.12 image; first multi-runtime e2e Kind test.
+- S10.A4 (`phase2-runtime-microsoft-agent-framework`) — flips §14.6
+  column 11 fully ✓.
+- S10.B (`phase2-platform-mcp-server`) — Foundry-shim platform MCP
+  server in router. Should ship before S10.A3/A4 so adapters are
+  trivial.
+
 ### S10.A2 `phase2-multi-runtime-dispatch` — `RuntimeDeploymentPlan` dispatch seam
 
 #### Added
