@@ -292,6 +292,83 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S9.1 `phase2-migrate-mode-switch` — `azureclaw migrate` mode-switch CLI
+
+Operator-facing tool to flip a ClawSandbox between the four
+upstream-compatibility modes that S8 (#57) shipped on the controller
+side. The CLI surface that drives day-zero adoption: take an existing
+upstream `sigs.k8s.io/agent-sandbox` Sandbox and bolt AzureClaw
+governance on without rewriting the YAML.
+
+**Real workflow this unlocks:**
+
+```bash
+# operator already has an upstream Sandbox CR called 'legacy-agent';
+# wraps it with AzureClaw governance:
+$ azureclaw migrate to-overlay legacy --upstream-ref legacy-agent
+  legacy: native → overlay (upstream sandbox 'legacy-agent')
+  ✓ patched
+
+# later: drop the upstream, return to native AzureClaw
+$ azureclaw migrate from-overlay legacy
+  legacy: overlay → native
+  ✓ patched
+```
+
+**Subcommands shipped:**
+
+- `azureclaw migrate to-overlay <name> --upstream-ref <upstream>` —
+  flip to OverlayMode (governance overlay only; upstream owns the Pod).
+- `azureclaw migrate from-overlay <name>` — revert to native AzureClaw
+  (controller resumes Pod / Service / NetworkPolicy ownership).
+- `azureclaw migrate to-translate <name>` — SandboxClaim translate mode.
+- `azureclaw migrate to-observe <name>` — status-mirror mode.
+- `azureclaw migrate to-native <name>` — alias for native (`off`).
+
+All five accept `--namespace`, `--dry-run`, `--format human|json`.
+
+**Reuse-first design (§0.2 #11):**
+
+- Single thin wrapper around `kubectl patch --type=merge`. No new
+  CRD field, no controller change, no admission hook. The OverlayMode
+  reconciler logic landed in S8; this is the operator-facing tool that
+  drives it.
+- Pure helpers (`validateMode`, `buildModePatch`, `readCurrentMode`,
+  `summariseTransition`, `modeDisplay`) are unit-testable without a
+  cluster — fully exercised by the 22 new vitest cases.
+- JSON merge patch (RFC 7396) with explicit `null` for
+  `upstreamSandboxRef` removal — guards against the controller's
+  `Option<LocalObjectRef>::skip_serializing_if` semantic stranding a
+  stale ref. Asserted directly in tests.
+- Exit codes: `0` on success / no-op, `1` on kubectl failure, `2`
+  on validation failure (so a CI gate can distinguish "operator typo"
+  from "infrastructure problem").
+
+**Pre-flight + transition summary:** before applying, the orchestrator
+runs `kubectl get clawsandbox <name> -o json`, reads the current mode
++ ref, and prints `current → target` (e.g. `native → overlay (upstream
+sandbox 'legacy-agent')`). If the sandbox is already in the target
+state, the orchestrator skips the patch entirely and reports it as a
+no-op — JSON output sets `noop: true` for scripting.
+
+**Out of scope (S9.2 — separate PR):**
+
+- `azureclaw migrate from-kagent` — Solo.io kagent CR → ClawSandbox
+  translator (heavier; needs upstream kagent shape mapping).
+- Real `azureclaw convert` — YAML translator from upstream
+  agent-sandbox shapes (currently a Phase 0 exit-3 skeleton).
+- `azureclaw migrate verify` — validates that an OverlayMode sandbox
+  is in sync with its upstream Sandbox (needs upstream CRD informer;
+  Phase 3 candidate).
+
+**Surface:** `cli/src/commands/migrate.ts` (~330 LOC), single new
+file. `cli/src/cli.ts` adds one import + one `addCommand`.
+22 vitest cases. CLI workspace 315 → 337 (+22). tsc + lint + vitest +
+ci/no-stubs + ci/no-custom-crypto + ci/check-loc all green with
+`BASE_REF=origin/dev`.
+
+**Audit:** `docs/security-audits/2026-04-28-phase2-migrate-mode-switch.md`.
+
 ### S11.1 `phase2-attest-baseline` — drift-aware `--baseline` diff
 
 Outcome-shaped follow-up to S11. Turns `azureclaw attest` from a
