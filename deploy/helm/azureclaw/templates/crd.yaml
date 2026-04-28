@@ -27,10 +27,15 @@ spec:
                     Agent runtime selector (S10.A1 multi-runtime hosting).
                     The `kind` discriminator selects which sibling struct
                     (`openclaw` / `openaiAgents` / `microsoftAgentFramework`
-                    / `byo`) is required; the others must be absent.
+                    / `semanticKernel` / `langGraph` / `anthropic` / `byo`)
+                    is required; the others must be absent.
                     Replaces the legacy `spec.openclaw` field — the
                     AzureClaw v1alpha1 schema is in-place edited (no
                     conversion webhook; pre-release simplification).
+                    Tier-2 placeholders (`semanticKernel`, `langGraph`,
+                    `anthropic`) parse but the controller stamps
+                    `RuntimeReady=False / AdapterMissing` until the
+                    respective adapter image ships.
                   x-kubernetes-validations:
                     - rule: "(self.kind == 'OpenClaw') == has(self.openclaw)"
                       message: "spec.runtime.openclaw must be set iff kind is OpenClaw"
@@ -38,12 +43,18 @@ spec:
                       message: "spec.runtime.openaiAgents must be set iff kind is OpenAIAgents"
                     - rule: "(self.kind == 'MicrosoftAgentFramework') == has(self.microsoftAgentFramework)"
                       message: "spec.runtime.microsoftAgentFramework must be set iff kind is MicrosoftAgentFramework"
+                    - rule: "(self.kind == 'SemanticKernel') == has(self.semanticKernel)"
+                      message: "spec.runtime.semanticKernel must be set iff kind is SemanticKernel"
+                    - rule: "(self.kind == 'LangGraph') == has(self.langGraph)"
+                      message: "spec.runtime.langGraph must be set iff kind is LangGraph"
+                    - rule: "(self.kind == 'Anthropic') == has(self.anthropic)"
+                      message: "spec.runtime.anthropic must be set iff kind is Anthropic"
                     - rule: "(self.kind == 'BYO') == has(self.byo)"
                       message: "spec.runtime.byo must be set iff kind is BYO"
                   properties:
                     kind:
                       type: string
-                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "BYO"]
+                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "BYO"]
                       description: "Variant discriminator. PascalCase wire values."
                     openclaw:
                       type: object
@@ -116,6 +127,116 @@ spec:
                           x-kubernetes-validations:
                             - rule: "has(self.oci) != has(self.git)"
                               message: "spec.runtime.microsoftAgentFramework.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    semanticKernel:
+                      type: object
+                      description: "Semantic Kernel runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the SK adapter image ships."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "dotnet", "java"]
+                          description: "Adapter image flavour. Defaults to `python`."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.semanticKernel.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    langGraph:
+                      type: object
+                      description: "LangGraph runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the LangGraph adapter image ships."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "typescript"]
+                          description: "Adapter image flavour. Defaults to `python`."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.langGraph.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    anthropic:
+                      type: object
+                      description: "Anthropic Claude Agents SDK runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the Anthropic adapter image ships."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.anthropic.agentCode must set exactly one of `oci` or `git`"
                           properties:
                             oci:
                               type: object
@@ -368,7 +489,7 @@ spec:
                   description: "Foundry Agent Service agent ID (created by controller)"
                 runtimeKind:
                   type: string
-                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "BYO"]
+                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "BYO"]
                   description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
       subresources:
         status: {}

@@ -10,18 +10,21 @@
 ## Scope
 
 In-place `v1alpha1` schema edit migrating `ClawSandbox.spec.openclaw` to
-`ClawSandbox.spec.runtime.{kind, openclaw|openaiAgents|microsoftAgentFramework|byo}`,
+`ClawSandbox.spec.runtime.{kind, openclaw|openaiAgents|microsoftAgentFramework|semanticKernel|langGraph|anthropic|byo}`,
 plus the runtime-aware status surface (`status.runtimeKind` field +
 `RuntimeReady` Condition) and the explicit reconciler dispatch guard that
 **refuses** to create a Pod for a runtime kind whose adapter has not yet
-shipped (S10.A3/A4 territory). No new container image; no new RBAC; no
-new networking. Pure CRD + reconciler-dispatch + status-vocabulary slice.
+shipped (S10.A3/A4 territory). Tier-2 placeholders (`SemanticKernel`,
+`LangGraph`, `Anthropic`) lock the wire shape now so the public CRD
+serves as a roadmap signal and adding the adapter image later is not a
+breaking change. No new container image; no new RBAC; no new networking.
+Pure CRD + reconciler-dispatch + status-vocabulary slice.
 
 ## Threat model addressed
 
 | Threat | Mitigation in this slice |
 |---|---|
-| **Silent runtime fallthrough** — operator declares `runtime.kind: OpenAIAgents`, controller silently runs the `ctx.sandbox_image` (OpenClaw) image while reporting Degraded. The agent's actual code never runs but the cluster appears to host an OpenAI Agents workload. Customer reasoning about the security posture is broken. | Reconciler maps `RuntimeKind` to a static-str discriminator and **explicitly skips** namespace/SA/Deployment creation when the kind is not `OpenClaw`. Stamps `Degraded=True / Ready=False / RuntimeReady=False` all with `Reason=AdapterMissing`, requeues every 5 min, returns before any K8s-resource builder is invoked (`controller/src/reconciler/mod.rs:222-260`). |
+| **Silent runtime fallthrough** — operator declares `runtime.kind: OpenAIAgents` (or any Tier-2 placeholder), controller silently runs the `ctx.sandbox_image` (OpenClaw) image while reporting Degraded. The agent's actual code never runs but the cluster appears to host an OpenAI Agents workload. Customer reasoning about the security posture is broken. | Reconciler maps `RuntimeKind` to a static-str discriminator and **explicitly skips** namespace/SA/Deployment creation when the kind is not `OpenClaw`. Stamps `Degraded=True / Ready=False / RuntimeReady=False` all with `Reason=AdapterMissing`, requeues every 5 min, returns before any K8s-resource builder is invoked (`controller/src/reconciler/mod.rs:222-260`). Same code path covers Tier-1 variants pending adapter (S10.A3/A4) and Tier-2 placeholders (SemanticKernel, LangGraph, Anthropic). |
 | **Status churn / kube-apiserver throttling** — every reconcile bumps `resourceVersion` regardless of byte-equality on the patched object, which re-triggers reconcile, which re-patches → observed Phase 1 storm of 7 reconciles in 12s with concomitant Graph API throttling. Adding a separate `RuntimeReady` stamp call would re-introduce this. | `RuntimeReady` Condition + `runtimeKind` field land **inside** `build_running_status_patch` and `build_overlay_status_patch`, never via a separate `patch_status`. The `*_status_matches` idempotency guards extended to compare `runtime_kind` AND the new Condition; controller short-circuits when settled. Plan §S10.A1 rubber-duck #1. |
 | **CEL-disabled apiservers** | Defended primarily by CEL `XValidation` rules in the helm CRD (4 bidirectional `(self.kind=='X') == has(self.x)` + nested AgentCodeRef exactly-one). A controller-side `validate_runtime_shape` defensive guard is **deferred to S10.A2** — accepted residual risk: a CR with conflicting variants on a CEL-disabled cluster would currently parse as the first variant present and ignore the rest. Acceptable for a pre-release alpha; tracked in plan §S10.A1 rubber-duck #7. |
 | **BYO contract bypass** — operator supplies an arbitrary image as `byo`; controller has no basis to assume UID 1000, no-privileged-ports, etc. | `byo.contractVersion` is a **required** field with no default (plan §S10.A1 rubber-duck #8); `RuntimeReady` Condition surface reserves `RouterBypassRisk` / `UnsupportedSecurityContext` reasons for the strict-mode admission webhook in S10.A2. This slice is warn-only — image is not yet deployed at all in A1 (deferred to A2). |
@@ -45,10 +48,12 @@ following Phase 0/1 seams; nothing is re-implemented:
 ## Wire-format invariants
 
 1. `RuntimeKind` enum values (PascalCase): `OpenClaw`, `OpenAIAgents`,
-   `MicrosoftAgentFramework`, `BYO`. CRD field names (camelCase):
-   `openclaw`, `openaiAgents`, `microsoftAgentFramework`, `byo`. CLI flags
-   (kebab-case): `--runtime openai-agents`, `--runtime microsoft-agent-framework`,
-   `--runtime byo`.
+   `MicrosoftAgentFramework`, `SemanticKernel`, `LangGraph`, `Anthropic`,
+   `BYO`. CRD field names (camelCase): `openclaw`, `openaiAgents`,
+   `microsoftAgentFramework`, `semanticKernel`, `langGraph`, `anthropic`,
+   `byo`. CLI flags (kebab-case): `--runtime openai-agents`,
+   `--runtime microsoft-agent-framework`, `--runtime semantic-kernel`,
+   `--runtime langgraph`, `--runtime anthropic`, `--runtime byo`.
 2. `status.runtimeKind` is `Option<String>`; absent on freshly-created
    CRs; populated on the first successful reconcile for the OpenClaw
    path or the first AdapterMissing stamp for non-OpenClaw kinds.

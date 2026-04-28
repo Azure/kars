@@ -235,13 +235,18 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         crate::crd::RuntimeKind::OpenClaw => "OpenClaw",
         crate::crd::RuntimeKind::OpenAIAgents => "OpenAIAgents",
         crate::crd::RuntimeKind::MicrosoftAgentFramework => "MicrosoftAgentFramework",
+        crate::crd::RuntimeKind::SemanticKernel => "SemanticKernel",
+        crate::crd::RuntimeKind::LangGraph => "LangGraph",
+        crate::crd::RuntimeKind::Anthropic => "Anthropic",
         crate::crd::RuntimeKind::BYO => "BYO",
     };
     if !matches!(runtime_kind, crate::crd::RuntimeKind::OpenClaw) {
         let msg = format!(
             "spec.runtime.kind=`{runtime_kind_str}` has no adapter wired in this controller \
              build (S10.A1); skipping Deployment to avoid silently running the OpenClaw image. \
-             Track adapter rollout: OpenAIAgents=S10.A3, MicrosoftAgentFramework=S10.A4, BYO=S10.A2"
+             Track adapter rollout: OpenAIAgents=S10.A3, MicrosoftAgentFramework=S10.A4, \
+             BYO=S10.A2; SemanticKernel/LangGraph/Anthropic are Tier-2 placeholders pending \
+             roadmap"
         );
         tracing::warn!(sandbox = %name, runtime = %runtime_kind_str, "{msg}");
         crate::status::stamp_runtime_unsupported(client, &sandbox, &name, runtime_kind_str, &msg)

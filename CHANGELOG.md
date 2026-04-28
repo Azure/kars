@@ -11,17 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 - **`controller/src/crd.rs`** — new `RuntimeSpec` block with
-  `kind: OpenClaw|OpenAIAgents|MicrosoftAgentFramework|BYO` discriminator
-  and per-variant config (`openclaw`, `openaiAgents`, `microsoftAgentFramework`,
+  `kind: OpenClaw|OpenAIAgents|MicrosoftAgentFramework|SemanticKernel|LangGraph|Anthropic|BYO`
+  discriminator and per-variant config (`openclaw`, `openaiAgents`,
+  `microsoftAgentFramework`, `semanticKernel`, `langGraph`, `anthropic`,
   `byo` with required `contractVersion` + nested `agentCode` exactly-one
   `oci|git`); `ClawSandboxStatus.runtime_kind` field surfaces the
   reconciled kind for `kubectl get clawsandbox -o wide` (printer column
-  `Runtime`). 8 round-trip tests assert each variant deserialises in
-  isolation and rejects shape conflicts.
-- **`deploy/helm/azureclaw/templates/crd.yaml`** — schema mirror with 4
+  `Runtime`). Tier-1 variants (`OpenClaw` / `OpenAIAgents` /
+  `MicrosoftAgentFramework`) get controller adapters in S10.A3/A4;
+  Tier-2 placeholders (`SemanticKernel` / `LangGraph` / `Anthropic`)
+  parse with full schema (no breaking change later) but the controller
+  stamps `RuntimeReady=False / AdapterMissing` until adapters land.
+  11 round-trip tests assert each variant deserialises in isolation
+  and rejects shape conflicts.
+- **`deploy/helm/azureclaw/templates/crd.yaml`** — schema mirror with 7
   CEL `XValidation` bidirectional rules (`(self.kind=='OpenClaw') ==
-  has(self.openclaw)` etc.) plus nested AgentCodeRef exactly-one CEL.
-  Printer column `Runtime` added; `spec.required` now includes `runtime`.
+  has(self.openclaw)` etc., one per variant) plus nested AgentCodeRef
+  exactly-one CEL on every variant that carries agent code. Printer
+  column `Runtime` added; `spec.required` now includes `runtime`.
 - **`RuntimeReady` Condition + `AdapterMissing` reason** — new well-known
   vocabulary in `controller/src/status/conditions.rs`. `RuntimeReady=True/Reconciled`
   surfaces on the running Pod path; `RuntimeReady=False/AdapterMissing`
