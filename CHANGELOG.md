@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.A5 `phase2-runtime-cli` — operator-facing CLI surface for multi-runtime hosting
+
+#### Added
+
+- **`cli/src/runtime.ts`** — single source of truth for runtime
+  helpers, mirroring the controller's `RuntimeKind` enum and
+  `is_openclaw` polarity. Exports `flagToKind` (kebab-case →
+  PascalCase wire format), `assertRuntimeWired` (rejects Tier-2 +
+  unwired MAF .NET at the CLI boundary), `agentContainerName`
+  (OpenClaw → `openclaw`, everything else → `agent`),
+  `runtimeKindFromCr` (live-CR reader with safe `OpenClaw` fallback
+  for legacy/unknown values), and `buildRuntimeBlock` (emits the
+  variant-correct `spec.runtime` block).
+- **`azureclaw add --runtime <kind>`** — accepts `openclaw` (default),
+  `openai-agents`, `microsoft-agent-framework`, `byo`. Tier-2 kinds
+  rejected with discoverable error listing the wired set. BYO
+  requires `--byo-image`; `--byo-contract-version` defaults to `v1`.
+  MAF defaults `--maf-language python`; `dotnet` rejected client-side
+  with explicit Phase 3 / upstream-blocker message.
+- **`azureclaw connect <name>`** — fetches the live ClawSandbox CR
+  and addresses the correct container with `kubectl exec -c` based
+  on `spec.runtime.kind`. Backward-compatible: legacy CRs without
+  `spec.runtime` fall back to `openclaw`.
+- **`azureclaw list`** — adds a `RUNTIME` column showing each
+  sandbox's `spec.runtime.kind` (defaults to `OpenClaw` for legacy
+  CRs).
+- **`cli/src/runtime.test.ts`** — 19 vitest unit tests covering
+  flag mapping, wired/unwired gates, container-name polarity, CR
+  reader fallbacks, and per-variant block shapes.
+
+#### Tests
+
+- CLI vitest: 435 → 454 passing (+19), 2 skipped (unchanged).
+- `npx tsc --noEmit` clean; `npm run build` clean.
+- No new lint diagnostics (26 pre-existing `plugin.ts` warnings unchanged).
+
+#### Closes
+
+- §14.6 column 11 (Multi-runtime hosting) **operator-accessible** —
+  the value prop now reachable via `azureclaw add --runtime <kind>`
+  rather than hand-edited CRs.
+
+---
+
 ### S10.A4 `phase2-runtime-microsoft-agent-framework` — second native runtime, flips column 11 fully ✓
 
 #### Added
