@@ -292,6 +292,116 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S9.3 `phase2-migrate-from-kagent` — `azureclaw migrate from-kagent` translator
+
+Operator-facing one-shot translator from a kagent.dev/v1alpha2 `Agent` CR
+into an AzureClaw resource bundle:
+
+- **ClawSandbox** (always) — name + namespace + labels + provenance
+  annotations preserved; `spec.openclaw.image` from `spec.byo.deployment.image`
+  for BYO agents (`--image` override required for Declarative agents that
+  use the kagent ADK runtime); `spec.sandbox.network.allowedDomains` →
+  `spec.networkPolicy.allowedEndpoints`; deployment-level `env` projected
+  to `spec.openclaw.extraEnv` (last-literal-wins, `valueFrom` dropped + warned).
+- **InferencePolicy** — emitted only when `spec.declarative.modelConfig`
+  is set; carries the kagent ModelConfig name as a provenance annotation
+  (`azureclaw.azure.com/kagent-model-config`). Inference *enforcement* is
+  not migrated — that needs an equivalent AzureClaw `InferencePolicy`
+  hand-authored separately.
+- **ToolPolicy** — one per `(McpServer, toolName)` pair. `requireApproval`
+  list maps to `spec.approval.mode = "always"`. Empty `toolNames` emits
+  one wildcard ToolPolicy with a warning. `type: Agent` tools are dropped
+  with warning (no agent-as-tool support). `headersFrom` and
+  `allowedHeaders` are dropped with warning.
+
+**Hard-fails on lossy translation by default**; `--allow-lossy` waives.
+Same exit-code grammar as S9.2 (`convert`): 0 ok, 2 invalid input, 4 lossy
+refused. `--dry-run` still applies the lossy gate (silently dropping a
+network allowlist or `requireApproval` list is a governance regression
+even for a "preview").
+
+Lossy fields explicitly catalogued and warned:
+
+- `spec.skills.{refs,gitRefs,initContainer}` — needs S12 `policy-learn-oci`.
+- `spec.declarative.{systemMessage,systemMessageFrom,promptTemplate,runtime,
+  stream,executeCodeBlocks,memory,context,a2aConfig}` — kagent-ADK-specific.
+- `spec.{byo,declarative}.deployment.{tolerations,affinity,nodeSelector,
+  volumes,volumeMounts,imagePullSecrets,imagePullPolicy,securityContext,
+  podSecurityContext,serviceAccountName,serviceAccountConfig,replicas}` —
+  controller-managed in AzureClaw.
+- `spec.allowedNamespaces` — Gateway-API cross-namespace pattern not modeled.
+- `spec.sandbox.network.allowedDomains` wildcards — passed through
+  verbatim with a warning (ClawSandbox `EndpointConfig.host` wildcard
+  semantics are not documented; operators must verify).
+- `spec.byo.deployment.{cmd,args}` — not exposed by ClawSandbox.
+- env entries with `valueFrom`.
+
+Aspirational mappings explicitly **rejected** during pre-implementation
+critique:
+
+- `ClawAgentIdentity` — does not exist as a CRD (Phase 4 per
+  `docs/internal/internal-boundaries.md:28`); the implementation plan
+  line 210 mentioning it is overridden by repo reality per slice rule
+  §0.2#7 (no aspirational emit).
+- `McpServer` auto-emission — we cannot reconstruct MCP server endpoints
+  from a kagent `TypedReference`; ToolPolicies carry the original
+  reference as a provenance annotation
+  (`azureclaw.azure.com/kagent-tool-ref`) and operators are warned that
+  an equivalent AzureClaw `McpServer` must already exist.
+- `InferencePolicy` enforcement from `modelConfig` — kagent ModelConfig
+  is a separate CRD; we preserve only provenance, not behaviour.
+
+**Subcommand:** `azureclaw migrate from-kagent <input-yaml-or-stdin>`
+with `--allow-lossy`, `--namespace`, `--isolation`, `--image`,
+`--out-dir`, `--force`, `--format yaml|json`, `--dry-run`.
+
+**Output:**
+
+- `--format yaml` (default) — multi-doc YAML stream on stdout, deterministic
+  ordering: ClawSandbox, InferencePolicy, ToolPolicies (sorted by name).
+- `--format json` — single Kubernetes `v1.List` object on stdout (pipes
+  cleanly to `kubectl apply -f -`).
+- `--out-dir <dir>` — splits the bundle into `<kind>-<name>.yaml` files;
+  refuses to overwrite existing files unless `--force`.
+
+**Implementation:**
+
+- `cli/src/migrate/from_kagent.ts` — pure translator, ~720 LOC. Helpers
+  (`sanitizeDnsName`, `hashSuffix`, `generateToolPolicyName`,
+  `cleanMetadata`, `envArrayToMap`, `projectDescription`, `translate`)
+  exposed via `__test`. No I/O.
+- `cli/src/commands/migrate.ts` — adds the `from-kagent` subcommand with
+  argparse, stdin support, multi-doc rejection, dry-run, `--out-dir`
+  with collision detection.
+- 53 new vitest cases covering: DNS sanitisation edge cases, hash
+  determinism + collision distinguishability, env projection (last-wins,
+  `valueFrom`, prior-literal-purge), description truncation, input
+  gating (apiVersion / kind / spec.type / metadata.name / BYO image),
+  ClawSandbox label and annotation injection, sandbox-label conflict
+  rejection, namespace override warning, declarative no-image
+  non-runnability, declarative `--image` escape hatch, `InferencePolicy`
+  conditional emit, ToolPolicy fan-out, approval-list mapping, wildcard
+  tool emission, McpServer name validation, agent-as-tool drop, deterministic
+  bundle ordering, toolName dedupe, headersFrom and allowedHeaders warnings,
+  every Declarative-only and deployment-level lossy field, networking
+  projection, wildcard domain warning, BYO clean happy-path, env
+  projection in BYO context.
+
+CLI test count: 382 → **435** (+53).
+
+Upstream kagent CRD shape verified directly against
+`kagent-dev/kagent @ 90212ab go/api/v1alpha2/agent_types.go` via
+GitHub MCP. Target CRD shapes verified directly against
+`controller/src/{crd.rs, inference_policy.rs, tool_policy.rs}`.
+
+Closes §15.2 #8 ("kagent migration tool"). Day-1 use case: an operator
+running kagent declarative agents adopts AzureClaw governance by running
+`azureclaw migrate from-kagent agent.yaml --image my/runtime:v1
+--allow-lossy | kubectl apply -f -`, then hand-edits the emitted
+ClawSandbox to set `spec.inference.{provider,endpoint,model}` per their
+ModelConfig and creates an AzureClaw `McpServer` for each kagent
+McpServer reference.
+
 ### S9.2 `phase2-convert-translator` — real `azureclaw convert` translator
 
 Phase 0 shipped `azureclaw convert` as an exit-3 skeleton to lock in the CLI
