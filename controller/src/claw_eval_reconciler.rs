@@ -43,7 +43,7 @@ use crate::claw_eval_compile::{compile_to_binding, version_hash};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
 
-const FIELD_MANAGER: &str = "azureclaw-controller/claweval";
+const FIELD_MANAGER: &str = crate::field_managers::CLAW_EVAL;
 const FINALIZER: &str = "azureclaw.azure.com/claweval-cleanup";
 
 const REQUEUE_OK: Duration = Duration::from_secs(300);

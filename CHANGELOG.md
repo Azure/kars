@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.A `phase2-conditions-ssa-leader` — stable SSA field managers (first sub-slice)
+
+#### Added
+
+- **`controller/src/field_managers.rs`** — central registry of every
+  Server-Side Apply `fieldManager` the controller emits. Each per-CRD
+  reconciler (MCP / ToolPolicy / A2A / InferencePolicy / ClawMemory /
+  ClawEval) and each subsystem (ClawSandbox / pairing / mesh-peer /
+  provider-bridge) now sources its manager string from this single
+  module. Eliminates the five bare `"azureclaw-controller"` /
+  `"azureclaw-mesh-peer"` literals scattered across `reconciler/mod.rs`,
+  `pairing.rs`, `pairing_reconciler.rs`, `mesh_peer/offload.rs`,
+  `mesh_peer/pair.rs`.
+- **`ALL_FIELD_MANAGERS`** registry slice + uniqueness invariant:
+  `all_field_managers_are_unique`, `field_managers_use_namespaced_format`,
+  `no_bare_azureclaw_controller_string`, `legacy_provider_constants_match`
+  tests (4 new — controller test count 324 → 328).
+- **`providers::field_managers`** preserved as a backwards-compat
+  re-export so legacy import paths keep working.
+
+#### Changed
+
+- `controller/src/reconciler/mod.rs` (13 SSA call sites) now uses
+  `crate::field_managers::CLAWSANDBOX` (`azureclaw-controller/clawsandbox`).
+- `controller/src/pairing.rs` + `pairing_reconciler.rs` (3 sites)
+  use `crate::field_managers::PAIRING`.
+- `controller/src/mesh_peer/offload.rs` + `pair.rs` (3 sites) use
+  `crate::field_managers::MESH_PEER` (legacy string verbatim — no
+  ownership migration on existing clusters).
+- Per-CRD reconcilers (`mcp_server_reconciler`, `tool_policy_reconciler`,
+  `a2a_agent_reconciler`, `inference_policy_reconciler`,
+  `claw_memory_reconciler`, `claw_eval_reconciler`) now declare their
+  `FIELD_MANAGER` const as a re-export of the central constant.
+
+#### Out of scope (subsequent S7 sub-slices)
+
+- S7.B Conditions matrix (Progressing step-wise emission)
+- S7.C Leader election + predicated informers
+- S7.D Backoff with jitter + reconcile-DAG cold-start
+- S7.E Workqueue metrics + reconcile spans on `/metrics`
+- S7.F VAP/MAP expansion (Content-Safety floor, posture-downgrade)
+
+#### Audit
+
+`docs/security-audits/2026-04-28-phase2-conditions-ssa-leader.md`
+
+---
+
 ### S10.A5 `phase2-runtime-cli` — operator-facing CLI surface for multi-runtime hosting
 
 #### Added

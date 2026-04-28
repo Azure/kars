@@ -251,7 +251,7 @@ pub(super) async fn handle_offload_request(
     let _ = pairings_api
         .patch_status(
             &pairing_name,
-            &PatchParams::apply("azureclaw-mesh-peer"),
+            &PatchParams::apply(crate::field_managers::MESH_PEER),
             &Patch::Merge(usage_patch),
         )
         .await;
@@ -576,7 +576,7 @@ pub(super) async fn annotate_ready_sent(state: &MeshPeerState, sandbox_name: &st
     });
     api.patch(
         sandbox_name,
-        &PatchParams::apply("azureclaw-mesh-peer"),
+        &PatchParams::apply(crate::field_managers::MESH_PEER),
         &Patch::Merge(patch),
     )
     .await

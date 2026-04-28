@@ -23,16 +23,15 @@
 // lints are silenced at the module level until call-sites land.
 #![allow(dead_code)]
 
+#[allow(unused_imports)]
 pub mod field_managers {
     //! Stable Server-Side Apply field managers per plan §6 #4.
     //!
-    //! Every write that touches provider-owned fields carries one of these
-    //! as `fieldManager`. The same manager is used across controller
-    //! restarts and versions so conflict resolution converges.
-    pub const RECONCILER: &str = "azureclaw-controller/reconciler";
-    pub const MESH: &str = "azureclaw-controller/mesh";
-    pub const PAIRING: &str = "azureclaw-controller/pairing";
-    pub const PROVIDER_BRIDGE: &str = "azureclaw-controller/provider-bridge";
+    //! Re-export of the top-level `crate::field_managers` constants for
+    //! backwards-compat with the original Phase 1 import path. New code
+    //! should import directly from `crate::field_managers`. See that
+    //! module's docstring for the uniqueness invariant.
+    pub use crate::field_managers::{MESH, PAIRING, PROVIDER_BRIDGE, RECONCILER};
 }
 
 /// Selects which implementation of a contract a tenant uses.

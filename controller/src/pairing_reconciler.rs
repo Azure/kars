@@ -66,7 +66,7 @@ async fn reconcile_pairing(
         });
         api.patch_status(
             &name,
-            &PatchParams::apply("azureclaw-controller"),
+            &PatchParams::apply(crate::field_managers::PAIRING),
             &Patch::Merge(patch),
         )
         .await?;
@@ -98,7 +98,7 @@ async fn reconcile_pairing(
                 });
                 api.patch_status(
                     &name,
-                    &PatchParams::apply("azureclaw-controller"),
+                    &PatchParams::apply(crate::field_managers::PAIRING),
                     &Patch::Merge(patch),
                 )
                 .await?;

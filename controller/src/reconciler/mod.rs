@@ -383,7 +383,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     ns_api
         .patch(
             &sandbox_ns,
-            &PatchParams::apply("azureclaw-controller").force(),
+            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
             &Patch::Apply(ns),
         )
         .await?;
@@ -407,7 +407,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     sa_api
         .patch(
             "sandbox",
-            &PatchParams::apply("azureclaw-controller").force(),
+            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
             &Patch::Apply(sa),
         )
         .await?;
@@ -452,7 +452,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     crb_api
         .patch(
             &crb_name,
-            &PatchParams::apply("azureclaw-controller").force(),
+            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
             &Patch::Apply(crb),
         )
         .await?;
@@ -512,7 +512,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     secret_api
         .patch(
             "gateway-token",
-            &PatchParams::apply("azureclaw-controller").force(),
+            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
             &Patch::Apply(gw_secret),
         )
         .await?;
@@ -570,7 +570,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     secret_api
         .patch(
             "router-admin-token",
-            &PatchParams::apply("azureclaw-controller").force(),
+            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
             &Patch::Apply(admin_secret),
         )
         .await?;
@@ -656,7 +656,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     np_api
         .patch(
             "sandbox-policy",
-            &PatchParams::apply("azureclaw-controller").force(),
+            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
             &Patch::Apply(netpol),
         )
         .await?;
@@ -1297,7 +1297,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         deploy_api
             .patch(
                 &name,
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(deployment),
             )
             .await?;
@@ -1343,7 +1343,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         sa_api
             .patch(
                 &name,
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(serde_json::from_value::<
                     k8s_openapi::api::core::v1::ServiceAccount,
                 >(sa_patch)?),
@@ -1390,7 +1390,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         svc_api
             .patch(
                 &name,
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(svc),
             )
             .await?;
@@ -1424,7 +1424,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         cm_api
             .patch(
                 &cm_name,
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(cm),
             )
             .await?;
@@ -1458,7 +1458,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let _ = np_api
             .patch(
                 "sandbox-policy",
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(serde_json::from_value::<NetworkPolicy>(mesh_ingress_patch)?),
             )
             .await;
@@ -1519,7 +1519,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         cm_api
             .patch(
                 &blocklist_cm_name,
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(cm),
             )
             .await?;
@@ -1600,7 +1600,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let _ = cj_api
             .patch(
                 &cronjob_name,
-                &PatchParams::apply("azureclaw-controller").force(),
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(cj_obj),
             )
             .await;
