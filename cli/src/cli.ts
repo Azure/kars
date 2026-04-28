@@ -21,6 +21,7 @@ import { pairCommand } from "./commands/pair.js";
 import { convertCommand } from "./commands/convert.js";
 import { a2aCommand } from "./commands/a2a.js";
 import { attestCommand } from "./commands/attest.js";
+import { migrateCommand } from "./commands/migrate.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -64,6 +65,7 @@ export function createCli(): Command {
   // Interop
   program.addCommand(convertCommand());
   program.addCommand(a2aCommand());
+  program.addCommand(migrateCommand());
 
   // Attestation (Phase 2 read surface; signing lands in Phase 3)
   program.addCommand(attestCommand());
