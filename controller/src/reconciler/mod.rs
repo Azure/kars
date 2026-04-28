@@ -237,13 +237,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let runtime_plan =
         match crate::reconciler::runtime::build_runtime_plan(&runtime_spec, &ctx.sandbox_image) {
             Ok(plan) => {
-            // Defensive: producer must agree with the dispatcher on the
-            // wire-format kind string — they read the same enum but via
-            // different paths. If they ever drift, that's a bug we want
-            // to surface in tests, not in production status patches.
-            debug_assert_eq!(plan.kind_str, runtime_kind_str);
-            plan
-        }
+                // Defensive: producer must agree with the dispatcher on the
+                // wire-format kind string — they read the same enum but via
+                // different paths. If they ever drift, that's a bug we want
+                // to surface in tests, not in production status patches.
+                debug_assert_eq!(plan.kind_str, runtime_kind_str);
+                plan
+            }
             Err(crate::reconciler::runtime::RuntimePlanError::AdapterMissing(kind)) => {
                 let msg = format!(
                     "spec.runtime.kind=`{kind}` has no adapter wired in this controller \
