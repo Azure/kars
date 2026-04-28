@@ -45,7 +45,9 @@ mod inference;
 pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
 
 mod mcp;
-pub use mcp::{MCP_SESSION_HEADER, McpRouteState, mcp_route, protected_mcp_route};
+pub use mcp::{
+    MCP_SESSION_HEADER, McpRouteState, mcp_route, platform_mcp_route, protected_mcp_route,
+};
 
 mod a2a;
 pub use a2a::{A2aRouteState, a2a_routes};
