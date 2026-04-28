@@ -56,13 +56,14 @@ export function listCommand(): Command {
           if (items.length > 0) {
             console.log(chalk.bold("  AKS Cluster"));
             console.log(chalk.dim("  ─────────────────────────────────────────────────────────────────"));
-            console.log(chalk.dim(`  ${"NAME".padEnd(24)} ${"STATUS".padEnd(14)} ${"MODEL".padEnd(18)} ${"ISOLATION".padEnd(14)} NAMESPACE`));
+            console.log(chalk.dim(`  ${"NAME".padEnd(22)} ${"STATUS".padEnd(12)} ${"RUNTIME".padEnd(22)} ${"MODEL".padEnd(14)} ${"ISO".padEnd(10)} NS`));
 
             for (const sb of items) {
               const name = sb.metadata?.name || "unknown";
               const phase = sb.status?.phase || "Unknown";
               const model = sb.spec?.inference?.model || "gpt-4.1";
               const isolation = sb.spec?.sandbox?.isolation || "enhanced";
+              const runtimeKind = sb.spec?.runtime?.kind || "OpenClaw";
               const ns = `azureclaw-${name}`;
 
               let icon: string;
@@ -70,7 +71,7 @@ export function listCommand(): Command {
               else if (phase === "Pending" || phase === "Creating") icon = chalk.yellow("●");
               else icon = chalk.red("●");
 
-              console.log(`  ${icon} ${chalk.bold(name.padEnd(24))} ${phase.padEnd(14)} ${model.padEnd(18)} ${isolation.padEnd(14)} ${chalk.dim(ns)}`);
+              console.log(`  ${icon} ${chalk.bold(name.padEnd(22))} ${phase.padEnd(12)} ${runtimeKind.padEnd(22)} ${model.padEnd(14)} ${isolation.padEnd(10)} ${chalk.dim(ns)}`);
               found = true;
             }
             console.log();
