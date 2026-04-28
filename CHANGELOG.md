@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.A2 `phase2-multi-runtime-dispatch` — `RuntimeDeploymentPlan` dispatch seam
+
+#### Added
+- **`controller/src/reconciler/runtime.rs`** (NEW, ~520 lines, 12 unit
+  tests) — `RuntimeDeploymentPlan` (kind_str / image / command / args /
+  runtime_extra_env / agent_code / byo_contract_version),
+  `RuntimePlanError::{AdapterMissing, ShapeInvalid}`,
+  `validate_runtime_shape()` defensive guard mirroring the 7 helm CEL
+  rules (covers CEL-disabled apiservers per plan §S10.A1 rubber-duck #7),
+  `build_runtime_plan()` dispatcher, `plan_openclaw()` producer (image
+  fallback to controller default + extra_env carry-through),
+  `plan_byo()` producer (image / command / args / contract version +
+  flattens static `value:` env entries; structural `valueFrom` entries
+  reserved for the A2.b deployment builder). `kind_str()` free helper
+  is the single source of truth for the wire-format runtime kind
+  string used in status patches and log fields.
+- Reconciler `mod.rs` consumes the plan: `runtime::build_runtime_plan`
+  replaces the inline AdapterMissing match, `plan.image` replaces the
+  inline image fallback in the deployment builder, `plan.runtime_extra_env`
+  replaces the direct `openclaw_config.extra_env` consumption (reserved
+  prefix / NUL-byte / duplicate filtering preserved exactly).
+- New `RuntimePlanError::ShapeInvalid` variant routes to a fresh
+  `Degraded / SpecInvalid` status path (300 s requeue) — distinct from
+  AdapterMissing's `RuntimeReady=False / AdapterMissing` so operators
+  can tell "controller doesn't know this runtime yet" apart from
+  "this CR is structurally malformed and CEL admission would have
+  rejected it".
+
+#### Tests
+- **+12 producer/dispatcher tests** in `runtime.rs` covering wire-format
+  stability, defensive shape validation (each Tier-1 + Tier-2 variant,
+  both directions), OpenClaw plan production (image fallback +
+  extra_env carry-through), AdapterMissing for all 6 non-OpenClaw kinds
+  (incl. BYO short-circuit until A2.b), shape rejection before
+  dispatch, BYO producer round-trip, BYO valueFrom env handling.
+- 306 / 306 controller tests green (was 293 after S10.A1 + 1 new ignored
+  cleanup; net +12 from this slice).
+
+#### Behaviour preservation
+- A2 is a **structural seam only**. For OpenClaw the runtime path is
+  byte-for-byte equivalent to A1 (same image resolution, same env
+  ordering, same reserved-prefix filter). For non-OpenClaw kinds the
+  AdapterMissing skip is preserved exactly (same status condition,
+  same 300 s requeue). BYO end-to-end deployment (split container
+  builder + registry-side `org.azureclaw.runtime.contract=v1` label
+  check) is deferred to S10.A2.b.
+
 ### S10.A1 `phase2-multi-runtime-crd` — `spec.openclaw` → `spec.runtime` discriminated union
 
 #### Added
