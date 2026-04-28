@@ -413,7 +413,7 @@ export function migrateCommand(): Command {
     )
     .option(
       "--image <image>",
-      "Override spec.openclaw.image (required to make Declarative agents runnable; ignored for BYO).",
+      "Override spec.runtime.openclaw.image (required to make Declarative agents runnable; ignored for BYO).",
     )
     .option(
       "--allow-lossy",

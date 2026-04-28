@@ -222,7 +222,38 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();
     let inference_config = spec.inference.unwrap_or_default();
-    let openclaw_config = spec.openclaw.unwrap_or_default();
+    // S10.A1: runtime is a discriminated union (`spec.runtime.kind`).
+    // For OpenClaw we continue with the existing reconciler path; for
+    // OpenAIAgents/MicrosoftAgentFramework/BYO no controller-side adapter
+    // is wired in A1, so the controller refuses to create a Deployment
+    // (would silently run the wrong runtime image — see plan §S10.A1
+    // rubber-duck #2). The full per-runtime dispatch (`RuntimeDeploymentPlan`)
+    // lands in S10.A2.
+    let runtime_spec = spec.runtime.clone();
+    let runtime_kind = runtime_spec.kind;
+    let runtime_kind_str: &'static str = match runtime_kind {
+        crate::crd::RuntimeKind::OpenClaw => "OpenClaw",
+        crate::crd::RuntimeKind::OpenAIAgents => "OpenAIAgents",
+        crate::crd::RuntimeKind::MicrosoftAgentFramework => "MicrosoftAgentFramework",
+        crate::crd::RuntimeKind::SemanticKernel => "SemanticKernel",
+        crate::crd::RuntimeKind::LangGraph => "LangGraph",
+        crate::crd::RuntimeKind::Anthropic => "Anthropic",
+        crate::crd::RuntimeKind::BYO => "BYO",
+    };
+    if !matches!(runtime_kind, crate::crd::RuntimeKind::OpenClaw) {
+        let msg = format!(
+            "spec.runtime.kind=`{runtime_kind_str}` has no adapter wired in this controller \
+             build (S10.A1); skipping Deployment to avoid silently running the OpenClaw image. \
+             Track adapter rollout: OpenAIAgents=S10.A3, MicrosoftAgentFramework=S10.A4, \
+             BYO=S10.A2; SemanticKernel/LangGraph/Anthropic are Tier-2 placeholders pending \
+             roadmap"
+        );
+        tracing::warn!(sandbox = %name, runtime = %runtime_kind_str, "{msg}");
+        crate::status::stamp_runtime_unsupported(client, &sandbox, &name, runtime_kind_str, &msg)
+            .await;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+    let openclaw_config = runtime_spec.openclaw.clone().unwrap_or_default();
     let agent_config = spec.agent.unwrap_or_default();
 
     // ── Validate CRD inputs ──────────────────────────────────────────────
@@ -789,7 +820,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             router_agt_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
         }
 
-        // ── extraEnv: user/controller-provided env vars on spec.openclaw.extraEnv ──
+        // ── extraEnv: user/controller-provided env vars on spec.runtime.openclaw.extraEnv ──
         // Used by the controller to propagate offload parameters (OFFLOAD_REQUEST_ID,
         // OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES) into offload
         // sandboxes. Keys are validated to avoid clobbering reserved prefixes.
@@ -1475,19 +1506,29 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // condition so dashboards can surface "this CR is intentionally not
     // driving a Pod" — see [`crate::status::build_overlay_status_patch`].
     if let Some(upstream_ref) = overlay_target.as_deref() {
-        if !crate::status::overlay_status_matches(&sandbox, &sandbox_ns, upstream_ref) {
+        if !crate::status::overlay_status_matches(
+            &sandbox,
+            &sandbox_ns,
+            upstream_ref,
+            runtime_kind_str,
+        ) {
             let sandbox_api: Api<ClawSandbox> =
                 Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-            let status_obj =
-                crate::status::build_overlay_status_patch(&sandbox, &sandbox_ns, upstream_ref);
+            let status_obj = crate::status::build_overlay_status_patch(
+                &sandbox,
+                &sandbox_ns,
+                upstream_ref,
+                runtime_kind_str,
+            );
             let _ = sandbox_api
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
                 .await;
         }
-    } else if !crate::status::running_status_matches(&sandbox, &sandbox_ns) {
+    } else if !crate::status::running_status_matches(&sandbox, &sandbox_ns, runtime_kind_str) {
         let sandbox_api: Api<ClawSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-        let status_obj = crate::status::build_running_status_patch(&sandbox, &sandbox_ns);
+        let status_obj =
+            crate::status::build_running_status_patch(&sandbox, &sandbox_ns, runtime_kind_str);
         let _ = sandbox_api
             .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
             .await;

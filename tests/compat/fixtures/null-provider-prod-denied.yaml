@@ -23,8 +23,10 @@ metadata:
   annotations:
     azureclaw.azure.com/admission-test: "strip-devonly-label-before-apply"
 spec:
-  openclaw:
-    version: "0.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "0.1"
   sandbox:
     isolation: strict
   inference:
