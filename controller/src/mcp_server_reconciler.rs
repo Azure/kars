@@ -52,7 +52,7 @@ use crate::status::conditions::{self, reason, status as cond_status};
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
 /// detects out-of-band tampering.
-const FIELD_MANAGER: &str = "azureclaw-controller/mcp";
+const FIELD_MANAGER: &str = crate::field_managers::MCP_SERVER;
 
 /// Finalizer name (DNS subdomain). Mirrors
 /// `crate::reconciler::FINALIZER` shape.

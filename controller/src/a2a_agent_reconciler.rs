@@ -56,7 +56,7 @@ use crate::status::conditions::{self, reason, status as cond_status};
 /// Field manager for SSA patches emitted by this reconciler. Distinct
 /// from S1 `…/mcp` and S2 `…/toolpolicy` per §10.4 #1 — surfaces
 /// out-of-band tampering.
-const FIELD_MANAGER: &str = "azureclaw-controller/a2aagent";
+const FIELD_MANAGER: &str = crate::field_managers::A2A_AGENT;
 
 /// Finalizer name (DNS subdomain).
 const FINALIZER: &str = "azureclaw.azure.com/a2aagent-cleanup";

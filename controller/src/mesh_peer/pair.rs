@@ -82,7 +82,7 @@ pub(super) async fn handle_pair_request(
     if let Err(e) = pairings
         .patch_status(
             &pairing_name,
-            &PatchParams::apply("azureclaw-mesh-peer"),
+            &PatchParams::apply(crate::field_managers::MESH_PEER),
             &Patch::Merge(patch),
         )
         .await

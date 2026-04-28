@@ -26,6 +26,7 @@ mod crd;
 mod crd_validations;
 mod fedcred;
 mod fedcred_reaper;
+mod field_managers;
 mod helm_drift;
 mod inference_policy;
 mod inference_policy_compile;
