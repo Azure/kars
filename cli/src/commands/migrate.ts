@@ -26,13 +26,25 @@
 // reconciler logic landed in S8 (PR #57); this slice ships the
 // operator-facing command that drives it. Reuse-first by design.
 //
-// Sub-slice S9.2 (separate PR) ships `migrate from-kagent` (kagent CR
-// → ClawSandbox translator) + a real `azureclaw convert` (YAML
-// translator from upstream agent-sandbox shapes). Those are heavier
-// translators; this slice keeps the surface tight on mode-switch.
+// Sub-slice S9.2 (PR #63) shipped a real `azureclaw convert` (YAML
+// translator from upstream agent-sandbox shapes).
+//
+// Sub-slice S9.3 (this file's `from-kagent` subcommand) ships the
+// kagent CR → ClawSandbox translator: pure helpers live in
+// `cli/src/migrate/from_kagent.ts`.
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import * as path from "node:path";
+import yaml from "yaml";
+import {
+  InvalidInputError,
+  type KubeResource,
+  type TranslateOptions,
+  type Warning,
+  translate as translateFromKagent,
+} from "../migrate/from_kagent.js";
 
 /** The four upstream-compatibility modes the controller accepts.
  *  Keep in sync with `controller/src/crd.rs`
@@ -382,7 +394,225 @@ export function migrateCommand(): Command {
     );
   }
 
+  cmd
+    .command("from-kagent <input>")
+    .description(
+      "Translate a kagent.dev/v1alpha2 Agent YAML into an AzureClaw " +
+        "resource bundle (ClawSandbox + InferencePolicy + ToolPolicies). " +
+        "Use '-' to read from stdin. Hard-fails on lossy translation " +
+        "by default; pass --allow-lossy to waive.",
+    )
+    .option(
+      "-n, --namespace <ns>",
+      "Override metadata.namespace on emitted resources (warns on mismatch with input).",
+    )
+    .option(
+      "--isolation <mode>",
+      "ClawSandbox isolation mode: standard | enhanced | confidential (default: enhanced).",
+      "enhanced",
+    )
+    .option(
+      "--image <image>",
+      "Override spec.openclaw.image (required to make Declarative agents runnable; ignored for BYO).",
+    )
+    .option(
+      "--allow-lossy",
+      "Waive the hard-fail on lossy translation. Warnings are still printed to stderr.",
+      false,
+    )
+    .option("--out-dir <dir>", "Write each emitted resource to <dir>/<kind>-<name>.yaml.")
+    .option("--force", "With --out-dir, overwrite existing files.", false)
+    .option(
+      "--format <fmt>",
+      "Output format when writing to stdout: 'yaml' (multi-doc, default) or 'json' (List).",
+      "yaml",
+    )
+    .option("--dry-run", "Print summary + warnings; emit no resources.", false)
+    .action(
+      async (
+        input: string,
+        options: {
+          namespace?: string;
+          isolation: string;
+          image?: string;
+          allowLossy: boolean;
+          outDir?: string;
+          force: boolean;
+          format: string;
+          dryRun: boolean;
+        },
+      ) => {
+        await runFromKagent(input, options);
+      },
+    );
+
   return cmd;
+}
+
+// ---- from-kagent runner ----------------------------------------------------
+
+interface FromKagentOptions {
+  namespace?: string;
+  isolation: string;
+  image?: string;
+  allowLossy: boolean;
+  outDir?: string;
+  force: boolean;
+  format: string;
+  dryRun: boolean;
+}
+
+async function runFromKagent(
+  input: string,
+  options: FromKagentOptions,
+): Promise<void> {
+  const text = await readInput(input);
+  const docs = yaml.parseAllDocuments(text);
+  const nonEmpty = docs.filter((d) => d.contents !== null);
+  if (nonEmpty.length === 0) {
+    process.stderr.write(`error: input contains no YAML documents\n`);
+    process.exit(2);
+  }
+  if (nonEmpty.length > 1) {
+    process.stderr.write(
+      `error: input contains ${nonEmpty.length} YAML documents; from-kagent expects exactly one Agent\n`,
+    );
+    process.exit(2);
+  }
+  const doc = nonEmpty[0]!;
+  if (doc.errors.length > 0) {
+    for (const err of doc.errors) process.stderr.write(`error: ${err.message}\n`);
+    process.exit(2);
+  }
+  const json = doc.toJS();
+
+  const isolation = validateIsolation(options.isolation);
+  const opts: TranslateOptions = {
+    namespace: options.namespace,
+    isolation,
+    image: options.image,
+  };
+
+  let result;
+  try {
+    result = translateFromKagent(json, opts);
+  } catch (e) {
+    if (e instanceof InvalidInputError) {
+      process.stderr.write(`error: ${e.message}\n`);
+      process.exit(2);
+    }
+    throw e;
+  }
+
+  for (const w of result.warnings) printWarning(w);
+
+  const lossy = result.warnings.length > 0;
+  if (lossy && !options.allowLossy) {
+    process.stderr.write(
+      chalk.red(
+        `error: translation is lossy (${result.warnings.length} warnings). Pass --allow-lossy to waive.\n`,
+      ),
+    );
+    process.exit(4);
+  }
+
+  // Summary line for both dry-run and real output.
+  const s = result.summary;
+  process.stderr.write(
+    chalk.gray(
+      `summary: ${s.agentType} agent '${s.namespace}/${s.sandboxName}'; ` +
+        `runnable=${s.runnable}; toolPolicies=${s.toolPolicyCount}; ` +
+        `inferencePolicies=${s.inferencePolicyCount}\n`,
+    ),
+  );
+
+  if (options.dryRun) return;
+
+  if (options.outDir) {
+    await writeBundleToDir(result.resources, options.outDir, options.force);
+    process.stderr.write(
+      chalk.green(`✓ wrote ${result.resources.length} resources to ${options.outDir}\n`),
+    );
+    return;
+  }
+
+  if (options.format === "json") {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          apiVersion: "v1",
+          kind: "List",
+          items: result.resources,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } else {
+    const docs = result.resources
+      .map((r) => yaml.stringify(r, { lineWidth: 0 }))
+      .join("---\n");
+    process.stdout.write(docs);
+  }
+}
+
+async function readInput(target: string): Promise<string> {
+  if (target === "-") {
+    const chunks: Buffer[] = [];
+    for await (const c of process.stdin) chunks.push(c as Buffer);
+    return Buffer.concat(chunks).toString("utf8");
+  }
+  return readFile(target, "utf8");
+}
+
+function validateIsolation(
+  raw: string,
+): "standard" | "enhanced" | "confidential" {
+  if (raw === "standard" || raw === "enhanced" || raw === "confidential") {
+    return raw;
+  }
+  process.stderr.write(
+    `error: --isolation must be one of standard|enhanced|confidential (got '${raw}')\n`,
+  );
+  process.exit(2);
+}
+
+function printWarning(w: Warning): void {
+  const tag = w.severity === "error" ? chalk.red("✗") : chalk.yellow("!");
+  process.stderr.write(`${tag} ${chalk.cyan(w.path)}: ${w.message}\n`);
+}
+
+async function writeBundleToDir(
+  resources: KubeResource[],
+  dir: string,
+  force: boolean,
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const seen = new Set<string>();
+  for (const r of resources) {
+    const fname = `${r.kind.toLowerCase()}-${r.metadata.name}.yaml`;
+    if (seen.has(fname)) {
+      process.stderr.write(
+        `error: duplicate output filename '${fname}' (kind+name collision)\n`,
+      );
+      process.exit(2);
+    }
+    seen.add(fname);
+    const fpath = path.join(dir, fname);
+    const flag = force ? "w" : "wx";
+    try {
+      await writeFile(fpath, yaml.stringify(r, { lineWidth: 0 }), { flag });
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") {
+        process.stderr.write(
+          `error: ${fpath} already exists (use --force to overwrite)\n`,
+        );
+        process.exit(2);
+      }
+      throw e;
+    }
+  }
 }
 
 export const __test = {
