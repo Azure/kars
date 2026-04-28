@@ -292,6 +292,76 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S11.1 `phase2-attest-baseline` — drift-aware `--baseline` diff
+
+Outcome-shaped follow-up to S11. Turns `azureclaw attest` from a
+"print attestation JSON" command into a CI-gate / change-control
+primitive: pass `--baseline <file>` and the command compares the live
+sandbox against a previously-saved attestation, surfaces typed deltas,
+and exits **2 on drift** / **3 on missing-baseline-file** so a
+pipeline step can `set -e` against it.
+
+**Real-world workflow this unlocks:**
+
+```bash
+# Day 0 — capture approved posture
+$ azureclaw attest demo --format json > approved.json
+$ git add approved.json && git commit -m "approved: demo posture"
+
+# Every PR / nightly job — fail the build on drift
+$ azureclaw attest demo --baseline approved.json || exit $?
+✗ ToolPolicy 'tp-prod' versionHash drifted (sha256:abc1234… → sha256:def5678…)
+✗ new SSA manager touched the object: 'kubectl-edit'
+DRIFT: 2 delta(s) — exit code 2
+```
+
+**What deltas are surfaced (one human-meaningful change per delta):**
+
+- `specHash` — the `ClawSandbox.spec` itself changed (the most
+  important signal; all other deltas are downstream of this *or* of
+  a referenced policy).
+- `phase` — sandbox moved between Running / Overlay / Degraded.
+- `policyVersionHash` — a referenced ToolPolicy / InferencePolicy /
+  A2AAgent has a new `status.versionHash` (controller recompiled it).
+- `policyAdded` / `policyRemoved` — the spec now references a
+  different policy CR set.
+- `fieldOwnerAdded` / `fieldOwnerRemoved` — a new (or removed) SSA
+  manager touched the object since the baseline.
+
+**Set-comparison, not count-comparison, on field owners:** SSA bumps
+the per-field count on every controller reconcile (noisy), but the
+*set* of managers is what a CI gate actually wants to flag — "did a
+human or a tool that wasn't here before edit this object?". The diff
+deliberately ignores `fieldsOwned` count fluctuation when the manager
+set is unchanged. Asserted directly in tests.
+
+**Pure-function design:** `diffAttestations(baseline, current)` is the
+only new logic; it has no IO, no time, no kubectl. The CLI orchestrator
+calls it after `buildReport` (which is what shells out). Means the
+diff is unit-testable without a cluster, and a future Phase 3
+`azureclaw verify <bundle>` companion can reuse `diffAttestations`
+unchanged.
+
+**Exit codes (CI-friendly):**
+
+- `0` — match (no deltas, baseline matches current).
+- `2` — drift (one or more deltas; reported in human + JSON output).
+- `3` — baseline file missing (CLI prints to stderr + exits before
+  any `kubectl get`).
+
+**JSON output:** when `--baseline` is set, the report grows a
+`baselineDiff` field with `{ baseline, current, deltas, drift }`.
+The base envelope (`apiVersion`, `kind`, all S11 fields) is unchanged
+so existing consumers continue to parse without modification.
+
+**Surface:** `cli/src/commands/attest.ts` adds `diffAttestations`,
+`loadBaseline`, `describeDelta`, `--baseline` flag, exit-code
+handling; `cli/src/commands/attest.test.ts` adds 11 new cases (no
+drift, every delta variant, set-comparison, missing/invalid baseline
+file). CLI workspace 304 → 315 (+11).
+
+**Audit:** `docs/security-audits/2026-04-28-phase2-attest-baseline.md`.
+
 ### S11 `phase2-attest-cli` — `azureclaw attest <name>` read surface
 
 This slice ships the **read consumer** half of implementation-plan §15.2
