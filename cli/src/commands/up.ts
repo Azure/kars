@@ -1678,8 +1678,11 @@ export function upCommand(): Command {
             namespace: "azureclaw-system",
           },
           spec: {
-            openclaw: {
-              image: `${acrLoginServer}/openclaw-sandbox:latest`,
+            runtime: {
+              kind: "OpenClaw",
+              openclaw: {
+                image: `${acrLoginServer}/openclaw-sandbox:latest`,
+              },
             },
             sandbox: {
               isolation: options.isolation,

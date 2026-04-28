@@ -32,9 +32,12 @@ function clawSandboxFixture(overrides: Record<string, unknown> = {}): string {
     kind: "ClawSandbox",
     metadata: { name: "demo", namespace: "azureclaw-demo" },
     spec: {
-      openclaw: {
-        image: "openclaw:1.2.3",
-        extraEnv: { FOO: "bar", ALPHA: "1" },
+      runtime: {
+        kind: "OpenClaw",
+        openclaw: {
+          image: "openclaw:1.2.3",
+          extraEnv: { FOO: "bar", ALPHA: "1" },
+        },
       },
       sandbox: {
         isolation: "enhanced",
@@ -347,7 +350,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
       apiVersion: "azureclaw.azure.com/v1alpha1",
       kind: "ClawSandbox",
       metadata: { name: "x" },
-      spec: { openclaw: {}, sandbox: { isolation: "enhanced" } },
+      spec: { runtime: { kind: "OpenClaw", openclaw: {} }, sandbox: { isolation: "enhanced" } },
     });
     expect(() => clawsandboxToUpstreamSandbox(parseManifest(yaml))).toThrow(/image required/);
   });
@@ -358,7 +361,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
       kind: "ClawSandbox",
       metadata: { name: "x" },
       spec: {
-        openclaw: { image: "x:1" },
+        runtime: { kind: "OpenClaw", openclaw: { image: "x:1" } },
         sandbox: { isolation: "enhanced", seccompProfile: "azureclaw-strict" },
       },
       status: { phase: "Ready" },
@@ -373,8 +376,11 @@ describe("upstreamSandboxToClawsandbox (inverse)", () => {
     const r = upstreamSandboxToClawsandbox(parseManifest(upstreamSandboxFixture()));
     expect(r.warnings).toEqual([]);
     const spec = (r.manifest as Record<string, unknown>).spec as Record<string, unknown>;
-    expect((spec.openclaw as Record<string, unknown>).image).toBe("openclaw:1.2.3");
-    expect((spec.openclaw as Record<string, unknown>).extraEnv).toEqual({ ALPHA: "1", FOO: "bar" });
+    const runtime = spec.runtime as Record<string, unknown>;
+    expect(runtime.kind).toBe("OpenClaw");
+    const openclaw = runtime.openclaw as Record<string, unknown>;
+    expect(openclaw.image).toBe("openclaw:1.2.3");
+    expect(openclaw.extraEnv).toEqual({ ALPHA: "1", FOO: "bar" });
     const sandbox = spec.sandbox as Record<string, unknown>;
     expect(sandbox.isolation).toBe("enhanced");
     expect(sandbox.seccompProfile).toBe("azureclaw-strict");
@@ -444,7 +450,8 @@ describe("upstreamSandboxToClawsandbox (inverse)", () => {
     const r = upstreamSandboxToClawsandbox(parseManifest(yaml));
     expect(r.warnings.some((w) => w.includes("2 containers"))).toBe(true);
     const openclaw = (
-      (r.manifest as Record<string, unknown>).spec as Record<string, unknown>
+      ((r.manifest as Record<string, unknown>).spec as Record<string, unknown>)
+        .runtime as Record<string, unknown>
     ).openclaw as Record<string, unknown>;
     expect(openclaw.image).toBe("p:1");
   });
@@ -545,7 +552,7 @@ describe("emitOverlay", () => {
     const upc = spec.upstreamCompatibility as Record<string, unknown>;
     expect(upc.sigsAgentSandbox).toBe("overlay");
     expect(upc.upstreamSandboxRef).toEqual({ name: "demo" });
-    expect(spec.openclaw).toBeUndefined();
+    expect(spec.runtime).toBeUndefined();
     expect(spec.sandbox).toBeUndefined();
     expect(spec.resources).toBeUndefined();
     expect(r.warnings.some((w) => w.includes("no governance fields"))).toBe(true);
@@ -607,8 +614,11 @@ describe("round-trip stability", () => {
     const forward = clawsandboxToUpstreamSandbox(parseManifest(original));
     const inverse = upstreamSandboxToClawsandbox(parseManifest(yamlStringify(forward.manifest)));
     const spec = (inverse.manifest as Record<string, unknown>).spec as Record<string, unknown>;
-    expect((spec.openclaw as Record<string, unknown>).image).toBe("openclaw:1.2.3");
-    expect((spec.openclaw as Record<string, unknown>).extraEnv).toEqual({ ALPHA: "1", FOO: "bar" });
+    const runtime = spec.runtime as Record<string, unknown>;
+    expect(runtime.kind).toBe("OpenClaw");
+    const openclaw = runtime.openclaw as Record<string, unknown>;
+    expect(openclaw.image).toBe("openclaw:1.2.3");
+    expect(openclaw.extraEnv).toEqual({ ALPHA: "1", FOO: "bar" });
     const sandbox = spec.sandbox as Record<string, unknown>;
     expect(sandbox.isolation).toBe("enhanced");
     expect(sandbox.seccompProfile).toBe("azureclaw-strict");

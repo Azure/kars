@@ -8,12 +8,14 @@ metadata:
   name: confidential-assistant
   namespace: azureclaw-system
 spec:
-  openclaw:
-    version: "2026.3.13"
-    image: azureclaw.azurecr.io/openclaw-sandbox:latest
-    config:
-      agent:
-        model: "azure/gpt-4.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      config:
+        agent:
+          model: "azure/gpt-4.1"
 
   sandbox:
     isolation: "confidential"        # Kata VM with dedicated kernel

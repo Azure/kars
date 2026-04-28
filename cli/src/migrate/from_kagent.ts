@@ -230,7 +230,7 @@ export function envArrayToMap(
         warnings.push(
           warn(
             `${pathPrefix}[${i}]`,
-            `env '${name}': valueFrom is not supported by ClawSandbox.spec.openclaw.extraEnv (dropped)`,
+            `env '${name}': valueFrom is not supported by ClawSandbox.spec.runtime.openclaw.extraEnv (dropped)`,
           ),
         );
       }
@@ -634,8 +634,17 @@ export function translate(
   const sbSpec: Record<string, unknown> = {
     sandbox: { isolation },
   };
-  if (image) sbSpec.openclaw = { image, ...(extraEnv ? { extraEnv } : {}) };
-  else if (extraEnv) sbSpec.openclaw = { extraEnv };
+  if (image) {
+    sbSpec.runtime = {
+      kind: "OpenClaw",
+      openclaw: { image, ...(extraEnv ? { extraEnv } : {}) },
+    };
+  } else if (extraEnv) {
+    sbSpec.runtime = {
+      kind: "OpenClaw",
+      openclaw: { extraEnv },
+    };
+  }
   if (resources) sbSpec.resources = resources;
   if (networkPolicy) sbSpec.networkPolicy = networkPolicy;
   if (governanceEnabled) sbSpec.governance = { enabled: true };

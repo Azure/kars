@@ -11,8 +11,10 @@ metadata:
   labels:
     azureclaw.azure.com/dev-only: "true"
 spec:
-  openclaw:
-    version: "0.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "0.1"
   sandbox:
     isolation: strict
   inference:

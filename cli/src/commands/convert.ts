@@ -142,13 +142,20 @@ function clawsandboxToUpstreamSandbox(parsed: ParsedManifest): TranslateResult {
     warnings.push("dropped status block (server-managed)");
   }
 
-  const openclaw = (spec.openclaw ?? {}) as Record<string, unknown>;
+  const runtime = (spec.runtime ?? {}) as Record<string, unknown>;
+  const runtimeKind = typeof runtime.kind === "string" ? runtime.kind : "OpenClaw";
+  if (runtimeKind !== "OpenClaw") {
+    throw new Error(
+      `ClawSandbox.spec.runtime.kind="${runtimeKind}" cannot be converted to upstream Sandbox; only OpenClaw runtime is supported by the upstream sigs/agent-sandbox shape`,
+    );
+  }
+  const openclaw = (runtime.openclaw ?? {}) as Record<string, unknown>;
   const sandbox = (spec.sandbox ?? {}) as Record<string, unknown>;
   const resources = spec.resources;
 
   const image = typeof openclaw.image === "string" ? openclaw.image : undefined;
   if (!image) {
-    throw new Error("ClawSandbox.spec.openclaw.image required for upstream-sandbox conversion");
+    throw new Error("ClawSandbox.spec.runtime.openclaw.image required for upstream-sandbox conversion");
   }
 
   const env = mapToEnvArray((openclaw.extraEnv ?? {}) as Record<string, unknown>);
@@ -330,7 +337,10 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
     kind: CLAW_KIND,
     metadata: meta,
     spec: {
-      openclaw,
+      runtime: {
+        kind: "OpenClaw",
+        openclaw,
+      },
       sandbox: sandboxFields,
     },
   };

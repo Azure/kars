@@ -238,7 +238,7 @@ describe("translate: ClawSandbox basics", () => {
     expect(cs.metadata.annotations![`${AZURECLAW_GROUP}/kagent-agent`]).toBe(
       "team-a/alice",
     );
-    expect((cs.spec.openclaw as { image: string }).image).toBe(
+    expect(((cs.spec.runtime as { openclaw: { image: string } }).openclaw).image).toBe(
       "ghcr.io/example/agent:1.2.3",
     );
     expect((cs.spec.sandbox as { isolation: string }).isolation).toBe("enhanced");
@@ -315,7 +315,7 @@ describe("translate: Declarative agent runnability", () => {
   it("emits a non-runnable ClawSandbox when no image is provided", () => {
     const r = translate(decl, {});
     expect(r.summary.runnable).toBe(false);
-    expect(r.resources[0]!.spec.openclaw).toBeUndefined();
+    expect(r.resources[0]!.spec.runtime).toBeUndefined();
     expect(
       r.warnings.some((w) => w.message.includes("--image to override")),
     ).toBe(true);
@@ -324,7 +324,7 @@ describe("translate: Declarative agent runnability", () => {
   it("uses --image override for Declarative", () => {
     const r = translate(decl, { image: "myorg/runtime:v1" });
     expect(r.summary.runnable).toBe(true);
-    expect((r.resources[0]!.spec.openclaw as { image: string }).image).toBe(
+    expect(((r.resources[0]!.spec.runtime as { openclaw: { image: string } }).openclaw).image).toBe(
       "myorg/runtime:v1",
     );
   });
@@ -677,7 +677,7 @@ describe("translate: bundle ordering and JSON shape", () => {
       },
       {},
     );
-    expect((r.resources[0]!.spec.openclaw as { extraEnv: Record<string, string> }).extraEnv).toEqual({
+    expect(((r.resources[0]!.spec.runtime as { openclaw: { extraEnv: Record<string, string> } }).openclaw).extraEnv).toEqual({
       FOO: "1",
       BAR: "two",
     });

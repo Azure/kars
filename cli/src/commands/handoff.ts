@@ -275,7 +275,7 @@ export function handoffCommand(): Command {
           ], { stdio: "pipe" });
           const spec = JSON.parse(stdout);
           return {
-            model: spec.inference?.model || spec.openclaw?.config?.agent?.model?.replace("azure/", "") || defaults.model,
+            model: spec.inference?.model || spec.runtime?.openclaw?.config?.agent?.model?.replace("azure/", "") || defaults.model,
             learnEgress: spec.networkPolicy?.learnEgress ?? defaults.learnEgress,
             isolation: spec.sandbox?.isolation || defaults.isolation,
             trustThreshold: spec.governance?.trustThreshold || defaults.trustThreshold,

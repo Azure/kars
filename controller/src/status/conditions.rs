@@ -59,6 +59,17 @@ pub const TYPE_DEGRADED: &str = "Degraded";
 /// means suspended; `status=False` means actively reconciling.
 pub const TYPE_SUSPENDED: &str = "Suspended";
 
+/// Well-known condition type (Phase 2 S10): the runtime declared in
+/// `spec.runtime.kind` is implemented by the controller and its adapter
+/// is wired up. `status=True/Reconciled` means the runtime adapter is
+/// present and the Pod was templated for that runtime. `status=False`
+/// with reason `AdapterMissing` means the controller parsed the
+/// runtime kind but no adapter is wired (e.g. `OpenAIAgents` /
+/// `MicrosoftAgentFramework` before S10.A3/A4 land); the controller
+/// will *not* create a Deployment in that case to avoid silently
+/// running the wrong runtime image.
+pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
+
 /// `status` canonical values.
 pub mod status {
     pub const TRUE: &str = "True";
@@ -79,6 +90,13 @@ pub mod reason {
     /// Phase 2 S8 — `OverlayMode`: operator's upstream `Sandbox` CR
     /// owns the Pod; AzureClaw provides the governance overlay only.
     pub const OVERLAY_MODE: &str = "OverlayMode";
+    /// Phase 2 S10 — `AdapterMissing`: the runtime declared in
+    /// `spec.runtime.kind` is recognised by the CRD but the controller
+    /// has no adapter wired (e.g. `OpenAIAgents` before S10.A3,
+    /// `MicrosoftAgentFramework` before S10.A4). The controller refuses
+    /// to create a Deployment rather than silently fall through to the
+    /// OpenClaw image.
+    pub const ADAPTER_MISSING: &str = "AdapterMissing";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.

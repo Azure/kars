@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.A1 `phase2-multi-runtime-crd` — `spec.openclaw` → `spec.runtime` discriminated union
+
+#### Added
+- **`controller/src/crd.rs`** — new `RuntimeSpec` block with
+  `kind: OpenClaw|OpenAIAgents|MicrosoftAgentFramework|SemanticKernel|LangGraph|Anthropic|BYO`
+  discriminator and per-variant config (`openclaw`, `openaiAgents`,
+  `microsoftAgentFramework`, `semanticKernel`, `langGraph`, `anthropic`,
+  `byo` with required `contractVersion` + nested `agentCode` exactly-one
+  `oci|git`); `ClawSandboxStatus.runtime_kind` field surfaces the
+  reconciled kind for `kubectl get clawsandbox -o wide` (printer column
+  `Runtime`). Tier-1 variants (`OpenClaw` / `OpenAIAgents` /
+  `MicrosoftAgentFramework`) get controller adapters in S10.A3/A4;
+  Tier-2 placeholders (`SemanticKernel` / `LangGraph` / `Anthropic`)
+  parse with full schema (no breaking change later) but the controller
+  stamps `RuntimeReady=False / AdapterMissing` until adapters land.
+  11 round-trip tests assert each variant deserialises in isolation
+  and rejects shape conflicts.
+- **`deploy/helm/azureclaw/templates/crd.yaml`** — schema mirror with 7
+  CEL `XValidation` bidirectional rules (`(self.kind=='OpenClaw') ==
+  has(self.openclaw)` etc., one per variant) plus nested AgentCodeRef
+  exactly-one CEL on every variant that carries agent code. Printer
+  column `Runtime` added; `spec.required` now includes `runtime`.
+- **`RuntimeReady` Condition + `AdapterMissing` reason** — new well-known
+  vocabulary in `controller/src/status/conditions.rs`. `RuntimeReady=True/Reconciled`
+  surfaces on the running Pod path; `RuntimeReady=False/AdapterMissing`
+  surfaces when a CR declares a runtime kind whose adapter is not yet
+  wired (S10.A3/A4 territory).
+- **`build_runtime_unsupported_status_patch` + `runtime_unsupported_status_matches`
+  + `stamp_runtime_unsupported`** — new status-helper trio in
+  `controller/src/status/mod.rs`. The reconciler refuses to create a
+  Deployment when `spec.runtime.kind ∈ {OpenAIAgents, MicrosoftAgentFramework, BYO}`
+  in this build (no fall-through to `ctx.sandbox_image` per plan §S10.A1
+  rubber-duck #2), stamps `Degraded` + `Ready=False` + `RuntimeReady=False`
+  all with `Reason=AdapterMissing`, and requeues every 5 min. 5 new
+  unit tests cover stamp/idempotency/timestamp-preservation.
+
+#### Changed (BREAKING — no installed base; in-place v1alpha1 edit, no v1alpha2 cut)
+- **`spec.openclaw` → `spec.runtime.openclaw`** across every CRD-emitting
+  and CRD-reading site:
+  - Controller: `mesh_peer/offload.rs` (cloud offload spawn path,
+    including `OFFLOAD_*` extraEnv injection now writes
+    `spec.runtime.openclaw.extraEnv`); `reconciler/mod.rs` (reads
+    `spec.runtime.openclaw`).
+  - CLI emitters: `cli/src/commands/{add.ts,up.ts}`,
+    `cli/src/commands/convert.ts` (bidirectional, with hard-fail on
+    `runtime.kind != "OpenClaw"` for the `→ upstream Sandbox` direction —
+    no upstream shape exists for non-OpenClaw runtimes),
+    `cli/src/migrate/from_kagent.ts`, `cli/src/commands/migrate.ts`
+    `--image` help text.
+  - CLI readers: `cli/src/commands/handoff.ts` (model inheritance).
+  - Examples (6 yamls): `examples/{basic,confidential,telegram}-agent/clawsandbox.yaml`
+    and `examples/demo-clawshield/{fabrikam-legal,contoso-bank,northwind-trade}-agent.yaml`.
+  - Compat fixtures (2 yamls): `tests/compat/fixtures/null-provider-{prod-denied,devonly-ok}.yaml`.
+- **`build_running_status_patch` / `running_status_matches` /
+  `build_overlay_status_patch` / `overlay_status_matches`** signatures
+  now take `runtime_kind: &str` as the trailing argument. The patches
+  emit `status.runtimeKind` and append a `RuntimeReady` Condition
+  (`True/Reconciled` for running, `False/OverlayMode` for overlay).
+  Stamping `runtimeKind` and the new Condition *inside* the existing
+  patch (rather than via a separate `patch_status` call) avoids a
+  merge-patch array overwrite that would erase the new Condition — see
+  plan §S10.A1 rubber-duck #1.
+
+#### Deferred to S10.A2
+- `RuntimeDeploymentPlan` per-variant dispatch struct in
+  `controller/src/reconciler/runtime.rs` (single seam consuming one plan
+  per kind so we don't grow N parallel small helpers).
+- Per-variant image / entrypoint / env / `agentCode` mount resolution.
+- BYO contract verifier (`org.azureclaw.runtime.contract=v1` label
+  check; `RuntimeReady` Condition reflects compliance).
+- `validate_runtime_shape` defensive guard mirroring the CEL rules in
+  case of CRD downgrade.
+
 ### S1 `phase2/mcp-reconciler` — full McpServer reconciler + JWKS pattern
 
 #### Added

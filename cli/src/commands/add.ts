@@ -46,12 +46,15 @@ export function addCommand(): Command {
           namespace: "azureclaw-system",
         },
         spec: {
-          openclaw: {
-            version: "2026.3.13",
-            ...(options.image ? { image: options.image } : {}),
-            config: {
-              agent: {
-                model: `azure/${options.model}`,
+          runtime: {
+            kind: "OpenClaw",
+            openclaw: {
+              version: "2026.3.13",
+              ...(options.image ? { image: options.image } : {}),
+              config: {
+                agent: {
+                  model: `azure/${options.model}`,
+                },
               },
             },
           },

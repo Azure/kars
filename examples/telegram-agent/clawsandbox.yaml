@@ -23,12 +23,14 @@ metadata:
   labels:
     azureclaw.azure.com/channels: telegram
 spec:
-  openclaw:
-    version: "2026.3.13"
-    image: azureclaw.azurecr.io/openclaw-sandbox:latest
-    config:
-      agent:
-        model: "azure/gpt-4.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      config:
+        agent:
+          model: "azure/gpt-4.1"
 
   sandbox:
     isolation: "enhanced"

@@ -17,12 +17,26 @@ use serde_json::{Value, json};
 /// semantics) and a Ready=True condition whose `lastTransitionTime` is
 /// preserved across same-status reconciles.
 ///
+/// `runtime_kind` is the value of `spec.runtime.kind` that was successfully
+/// reconciled (e.g. `"OpenClaw"`); it is mirrored to `status.runtimeKind`
+/// (printer-column source of truth) and is the `RuntimeReady` Condition's
+/// implicit subject. Stamping `runtimeKind` and the `RuntimeReady`
+/// Condition *inside* this patch (rather than via a separate
+/// `patch_status` call) is deliberate: a follow-up patch with
+/// `conditions: [Ready]` would *replace* the `conditions` array under
+/// merge semantics and erase a freshly-stamped `RuntimeReady`. See plan
+/// §S10.A1 rubber-duck #1.
+///
 /// **Why here, not inline in the reconciler:** status construction has
 /// rules (condition timestamps, observedGeneration propagation,
 /// foundryAgentId preservation) that are easy to get subtly wrong.
 /// Centralising the logic keeps reconcile bodies focused on side-effects
 /// and gives us one place to unit-test the wire shape.
-pub fn build_running_status_patch(sandbox: &ClawSandbox, sandbox_ns: &str) -> Value {
+pub fn build_running_status_patch(
+    sandbox: &ClawSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+) -> Value {
     let name = sandbox.name_any();
     let generation = sandbox.metadata.generation;
     let prior_conditions = sandbox
@@ -38,6 +52,14 @@ pub fn build_running_status_patch(sandbox: &ClawSandbox, sandbox_ns: &str) -> Va
         "sandbox reconciled",
         generation,
     );
+    let runtime_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_RUNTIME_READY),
+        conditions::TYPE_RUNTIME_READY,
+        conditions::status::TRUE,
+        conditions::reason::RECONCILED,
+        &format!("runtime adapter `{runtime_kind}` reconciled"),
+        generation,
+    );
 
     let mut status_obj = json!({
         "status": {
@@ -47,7 +69,8 @@ pub fn build_running_status_patch(sandbox: &ClawSandbox, sandbox_ns: &str) -> Va
             "inferenceEndpoint": "https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8443",
             "pendingApprovals": 0,
             "observedGeneration": generation,
-            "conditions": [ready],
+            "runtimeKind": runtime_kind,
+            "conditions": [ready, runtime_ready],
         }
     });
     if let Some(existing) = sandbox.status.as_ref()
@@ -78,8 +101,8 @@ pub fn build_running_status_patch(sandbox: &ClawSandbox, sandbox_ns: &str) -> Va
 /// status), and accept that fields owned by other writers (e.g. a future
 /// `tokensUsed` updater) may differ — those would not be touched by our
 /// merge patch anyway.
-pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str) -> bool {
-    use crate::status::conditions::{TYPE_READY, status::TRUE as STATUS_TRUE};
+pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_kind: &str) -> bool {
+    use crate::status::conditions::{TYPE_READY, TYPE_RUNTIME_READY, status::TRUE as STATUS_TRUE};
 
     let Some(status) = sandbox.status.as_ref() else {
         return false;
@@ -93,12 +116,23 @@ pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str) -> bool {
     if status.observed_generation != sandbox.metadata.generation {
         return false;
     }
+    if status.runtime_kind.as_deref() != Some(runtime_kind) {
+        return false;
+    }
     let ready_ok = status
         .conditions
         .iter()
         .find(|c| c.type_ == TYPE_READY)
         .is_some_and(|c| c.status == STATUS_TRUE);
     if !ready_ok {
+        return false;
+    }
+    let runtime_ready_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_RUNTIME_READY)
+        .is_some_and(|c| c.status == STATUS_TRUE);
+    if !runtime_ready_ok {
         return false;
     }
     true
@@ -128,6 +162,7 @@ pub fn build_overlay_status_patch(
     sandbox: &ClawSandbox,
     sandbox_ns: &str,
     upstream_ref: &str,
+    runtime_kind: &str,
 ) -> Value {
     let generation = sandbox.metadata.generation;
     let prior_conditions = sandbox
@@ -159,6 +194,20 @@ pub fn build_overlay_status_patch(
         &format!("Pod owned by upstream Sandbox CR `{upstream_ref}`"),
         generation,
     );
+    // In overlay mode, AzureClaw doesn't drive the Pod; the runtime
+    // adapter is therefore not stamped True (we have not deployed it),
+    // but we still record `runtimeKind` so the printer column matches the
+    // user's intent and we surface a `RuntimeReady=False/OverlayMode`
+    // Condition so consumers can distinguish "no Pod because overlay"
+    // from "no Pod because adapter missing".
+    let runtime_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_RUNTIME_READY),
+        conditions::TYPE_RUNTIME_READY,
+        conditions::status::FALSE,
+        conditions::reason::OVERLAY_MODE,
+        &format!("runtime `{runtime_kind}` not driven by AzureClaw in overlay mode"),
+        generation,
+    );
     json!({
         "status": {
             "phase": "Overlay",
@@ -166,7 +215,8 @@ pub fn build_overlay_status_patch(
             "sandboxPod": format!("upstream/{upstream_ref}"),
             "pendingApprovals": 0,
             "observedGeneration": generation,
-            "conditions": [ready, progressing, suspended],
+            "runtimeKind": runtime_kind,
+            "conditions": [ready, progressing, suspended, runtime_ready],
         }
     })
 }
@@ -176,7 +226,12 @@ pub fn build_overlay_status_patch(
 /// would produce. Same idempotency guard as
 /// [`running_status_matches`].
 #[must_use]
-pub fn overlay_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, upstream_ref: &str) -> bool {
+pub fn overlay_status_matches(
+    sandbox: &ClawSandbox,
+    sandbox_ns: &str,
+    upstream_ref: &str,
+    runtime_kind: &str,
+) -> bool {
     use crate::status::conditions::{TYPE_READY, status::TRUE as STATUS_TRUE};
 
     let Some(status) = sandbox.status.as_ref() else {
@@ -189,6 +244,9 @@ pub fn overlay_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, upstream_
         return false;
     }
     if status.observed_generation != sandbox.metadata.generation {
+        return false;
+    }
+    if status.runtime_kind.as_deref() != Some(runtime_kind) {
         return false;
     }
     let expected_pod = format!("upstream/{upstream_ref}");
@@ -278,6 +336,130 @@ pub async fn stamp_degraded(
     }
 }
 
+/// Build the `status` patch for a `ClawSandbox` whose `spec.runtime.kind`
+/// has no controller-side adapter wired (S10.A1: `OpenAIAgents` /
+/// `MicrosoftAgentFramework` / `BYO`). Stamps:
+/// - `phase: Degraded`
+/// - `runtimeKind: <kind>` so the printer column reflects user intent
+/// - `Ready=False / Reason=AdapterMissing`
+/// - `Degraded=True / Reason=AdapterMissing`
+/// - `RuntimeReady=False / Reason=AdapterMissing`
+///
+/// Per plan §S10.A1 rubber-duck #2, falling through to
+/// `ctx.sandbox_image` (the OpenClaw image) for these kinds would
+/// silently run the wrong runtime; the controller refuses instead.
+pub fn build_runtime_unsupported_status_patch(
+    sandbox: &ClawSandbox,
+    runtime_kind: &str,
+    message: &str,
+) -> Value {
+    let generation = sandbox.metadata.generation;
+    let prior_conditions = sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let degraded = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_DEGRADED),
+        conditions::TYPE_DEGRADED,
+        conditions::status::TRUE,
+        conditions::reason::ADAPTER_MISSING,
+        message,
+        generation,
+    );
+    let not_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_READY),
+        conditions::TYPE_READY,
+        conditions::status::FALSE,
+        conditions::reason::ADAPTER_MISSING,
+        message,
+        generation,
+    );
+    let runtime_not_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_RUNTIME_READY),
+        conditions::TYPE_RUNTIME_READY,
+        conditions::status::FALSE,
+        conditions::reason::ADAPTER_MISSING,
+        message,
+        generation,
+    );
+    json!({
+        "status": {
+            "phase": "Degraded",
+            "observedGeneration": generation,
+            "runtimeKind": runtime_kind,
+            "conditions": [degraded, not_ready, runtime_not_ready],
+        }
+    })
+}
+
+/// Idempotency guard for [`build_runtime_unsupported_status_patch`].
+#[must_use]
+pub fn runtime_unsupported_status_matches(sandbox: &ClawSandbox, runtime_kind: &str) -> bool {
+    use crate::status::conditions::{
+        TYPE_DEGRADED, TYPE_READY, TYPE_RUNTIME_READY,
+        reason::ADAPTER_MISSING,
+        status::{FALSE as STATUS_FALSE, TRUE as STATUS_TRUE},
+    };
+
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    if status.phase.as_deref() != Some("Degraded") {
+        return false;
+    }
+    if status.observed_generation != sandbox.metadata.generation {
+        return false;
+    }
+    if status.runtime_kind.as_deref() != Some(runtime_kind) {
+        return false;
+    }
+    let degraded_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_DEGRADED)
+        .is_some_and(|c| c.status == STATUS_TRUE && c.reason == ADAPTER_MISSING);
+    let ready_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_READY)
+        .is_some_and(|c| c.status == STATUS_FALSE && c.reason == ADAPTER_MISSING);
+    let runtime_ready_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_RUNTIME_READY)
+        .is_some_and(|c| c.status == STATUS_FALSE && c.reason == ADAPTER_MISSING);
+    degraded_ok && ready_ok && runtime_ready_ok
+}
+
+/// Patch `.status` with the `AdapterMissing` Degraded shape (see
+/// [`build_runtime_unsupported_status_patch`]). Patch errors are logged
+/// but non-fatal so the reconciler can still return the requeue action.
+pub async fn stamp_runtime_unsupported(
+    client: &kube::Client,
+    sandbox: &ClawSandbox,
+    name: &str,
+    runtime_kind: &str,
+    message: &str,
+) {
+    use kube::{
+        Api, ResourceExt,
+        api::{Patch, PatchParams},
+    };
+    if runtime_unsupported_status_matches(sandbox, runtime_kind) {
+        return;
+    }
+    let sandbox_api: Api<ClawSandbox> =
+        Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+    let patch = build_runtime_unsupported_status_patch(sandbox, runtime_kind, message);
+    if let Err(e) = sandbox_api
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+    {
+        tracing::warn!(sandbox = %name, error = %e, "failed to stamp AdapterMissing status");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,16 +482,30 @@ mod tests {
     #[test]
     fn running_patch_emits_generation_and_ready_condition() {
         let sb = new_sandbox(Some(7), None);
-        let patch = build_running_status_patch(&sb, "azureclaw-demo");
+        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
         let st = &patch["status"];
         assert_eq!(st["phase"], "Running");
         assert_eq!(st["observedGeneration"], 7);
+        assert_eq!(st["runtimeKind"], "OpenClaw");
         let conds = st["conditions"].as_array().expect("conditions array");
-        assert_eq!(conds.len(), 1);
-        assert_eq!(conds[0]["type"], "Ready");
-        assert_eq!(conds[0]["status"], "True");
-        assert_eq!(conds[0]["reason"], "Reconciled");
-        assert_eq!(conds[0]["observedGeneration"], 7);
+        assert_eq!(conds.len(), 2, "expected Ready + RuntimeReady");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
+        assert_eq!(ready["status"], "True");
+        assert_eq!(ready["reason"], "Reconciled");
+        assert_eq!(ready["observedGeneration"], 7);
+        let runtime_ready = conds
+            .iter()
+            .find(|c| c["type"] == "RuntimeReady")
+            .expect("RuntimeReady");
+        assert_eq!(runtime_ready["status"], "True");
+        assert_eq!(runtime_ready["reason"], "Reconciled");
+        assert!(
+            runtime_ready["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("OpenClaw"),
+            "RuntimeReady message must reference the runtime kind"
+        );
     }
 
     #[test]
@@ -319,7 +515,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(3), Some(prior));
-        let patch = build_running_status_patch(&sb, "azureclaw-demo");
+        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
         assert_eq!(patch["status"]["foundryAgentId"], "asst-abc");
     }
 
@@ -339,7 +535,7 @@ mod tests {
         };
         std::thread::sleep(std::time::Duration::from_millis(5));
         let sb = new_sandbox(Some(2), Some(prior));
-        let patch = build_running_status_patch(&sb, "azureclaw-demo");
+        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
         let emitted_ts = patch["status"]["conditions"][0]["lastTransitionTime"]
             .as_str()
             .expect("timestamp must be stringified");
@@ -351,14 +547,14 @@ mod tests {
     #[test]
     fn running_patch_emits_null_observed_generation_when_metadata_missing() {
         let sb = new_sandbox(None, None);
-        let patch = build_running_status_patch(&sb, "azureclaw-demo");
+        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
         assert!(patch["status"]["observedGeneration"].is_null());
     }
 
     #[test]
     fn running_status_matches_returns_false_when_status_missing() {
         let sb = new_sandbox(Some(1), None);
-        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
     }
 
     #[test]
@@ -377,7 +573,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
     }
 
     #[test]
@@ -396,7 +592,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
     }
 
     #[test]
@@ -415,7 +611,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(2), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
     }
 
     #[test]
@@ -434,7 +630,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo"));
+        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
     }
 
     #[test]
@@ -443,17 +639,27 @@ mod tests {
             phase: Some("Running".into()),
             namespace: Some("azureclaw-demo".into()),
             observed_generation: Some(1),
-            conditions: vec![conditions::new_condition(
-                conditions::TYPE_READY,
-                conditions::status::TRUE,
-                conditions::reason::RECONCILED,
-                "ok",
-                Some(1),
-            )],
+            runtime_kind: Some("OpenClaw".into()),
+            conditions: vec![
+                conditions::new_condition(
+                    conditions::TYPE_READY,
+                    conditions::status::TRUE,
+                    conditions::reason::RECONCILED,
+                    "ok",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_RUNTIME_READY,
+                    conditions::status::TRUE,
+                    conditions::reason::RECONCILED,
+                    "ok",
+                    Some(1),
+                ),
+            ],
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(running_status_matches(&sb, "azureclaw-demo"));
+        assert!(running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
     }
 
     #[test]
@@ -531,14 +737,19 @@ mod tests {
     #[test]
     fn overlay_patch_emits_overlay_phase_and_three_conditions() {
         let sb = new_sandbox(Some(4), None);
-        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "upstream-1");
+        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "upstream-1", "OpenClaw");
         let st = &patch["status"];
         assert_eq!(st["phase"], "Overlay");
         assert_eq!(st["namespace"], "azureclaw-demo");
         assert_eq!(st["sandboxPod"], "upstream/upstream-1");
         assert_eq!(st["observedGeneration"], 4);
+        assert_eq!(st["runtimeKind"], "OpenClaw");
         let conds = st["conditions"].as_array().expect("conditions array");
-        assert_eq!(conds.len(), 3, "expected Ready+Progressing+Suspended");
+        assert_eq!(
+            conds.len(),
+            4,
+            "expected Ready+Progressing+Suspended+RuntimeReady"
+        );
         let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
         assert_eq!(ready["status"], "True");
         assert_eq!(ready["reason"], "OverlayMode");
@@ -561,12 +772,23 @@ mod tests {
                 .contains("upstream-1"),
             "Suspended message must reference the upstream CR name"
         );
+        let runtime_ready = conds
+            .iter()
+            .find(|c| c["type"] == "RuntimeReady")
+            .expect("RuntimeReady");
+        assert_eq!(runtime_ready["status"], "False");
+        assert_eq!(runtime_ready["reason"], "OverlayMode");
     }
 
     #[test]
     fn overlay_status_matches_rejects_when_status_missing() {
         let sb = new_sandbox(Some(1), None);
-        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+        assert!(!overlay_status_matches(
+            &sb,
+            "azureclaw-demo",
+            "u1",
+            "OpenClaw"
+        ));
     }
 
     #[test]
@@ -586,7 +808,12 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+        assert!(!overlay_status_matches(
+            &sb,
+            "azureclaw-demo",
+            "u1",
+            "OpenClaw"
+        ));
     }
 
     #[test]
@@ -606,7 +833,12 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "new-name"));
+        assert!(!overlay_status_matches(
+            &sb,
+            "azureclaw-demo",
+            "new-name",
+            "OpenClaw"
+        ));
     }
 
     #[test]
@@ -626,7 +858,12 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(2), Some(prior));
-        assert!(!overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+        assert!(!overlay_status_matches(
+            &sb,
+            "azureclaw-demo",
+            "u1",
+            "OpenClaw"
+        ));
     }
 
     #[test]
@@ -636,6 +873,7 @@ mod tests {
             namespace: Some("azureclaw-demo".into()),
             observed_generation: Some(1),
             sandbox_pod: Some("upstream/u1".into()),
+            runtime_kind: Some("OpenClaw".into()),
             conditions: vec![conditions::new_condition(
                 conditions::TYPE_READY,
                 conditions::status::TRUE,
@@ -646,7 +884,12 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(overlay_status_matches(&sb, "azureclaw-demo", "u1"));
+        assert!(overlay_status_matches(
+            &sb,
+            "azureclaw-demo",
+            "u1",
+            "OpenClaw"
+        ));
     }
 
     #[test]
@@ -665,7 +908,7 @@ mod tests {
         };
         std::thread::sleep(std::time::Duration::from_millis(5));
         let sb = new_sandbox(Some(2), Some(prior));
-        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "u1");
+        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "u1", "OpenClaw");
         let ready = patch["status"]["conditions"]
             .as_array()
             .unwrap()
@@ -678,5 +921,144 @@ mod tests {
             ready["lastTransitionTime"].as_str().unwrap(),
             prior_ts_str.as_str().unwrap()
         );
+    }
+
+    // ── S10.A1: AdapterMissing (runtime unsupported) status helpers ──
+
+    #[test]
+    fn runtime_unsupported_patch_stamps_three_conditions_and_runtime_kind() {
+        let sb = new_sandbox(Some(5), None);
+        let patch = build_runtime_unsupported_status_patch(
+            &sb,
+            "OpenAIAgents",
+            "no adapter wired in this build",
+        );
+        let st = &patch["status"];
+        assert_eq!(st["phase"], "Degraded");
+        assert_eq!(st["observedGeneration"], 5);
+        assert_eq!(st["runtimeKind"], "OpenAIAgents");
+        let conds = st["conditions"].as_array().expect("conditions array");
+        assert_eq!(conds.len(), 3, "expected Degraded+Ready+RuntimeReady");
+        let degraded = conds
+            .iter()
+            .find(|c| c["type"] == "Degraded")
+            .expect("Degraded");
+        assert_eq!(degraded["status"], "True");
+        assert_eq!(degraded["reason"], "AdapterMissing");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
+        assert_eq!(ready["status"], "False");
+        assert_eq!(ready["reason"], "AdapterMissing");
+        let runtime_ready = conds
+            .iter()
+            .find(|c| c["type"] == "RuntimeReady")
+            .expect("RuntimeReady");
+        assert_eq!(runtime_ready["status"], "False");
+        assert_eq!(runtime_ready["reason"], "AdapterMissing");
+    }
+
+    #[test]
+    fn runtime_unsupported_status_matches_rejects_when_status_missing() {
+        let sb = new_sandbox(Some(1), None);
+        assert!(!runtime_unsupported_status_matches(&sb, "OpenAIAgents"));
+    }
+
+    #[test]
+    fn runtime_unsupported_status_matches_rejects_when_runtime_kind_differs() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Degraded".into()),
+            observed_generation: Some(1),
+            runtime_kind: Some("MicrosoftAgentFramework".into()),
+            conditions: vec![
+                conditions::new_condition(
+                    conditions::TYPE_DEGRADED,
+                    conditions::status::TRUE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_READY,
+                    conditions::status::FALSE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_RUNTIME_READY,
+                    conditions::status::FALSE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+            ],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!runtime_unsupported_status_matches(&sb, "OpenAIAgents"));
+    }
+
+    #[test]
+    fn runtime_unsupported_status_matches_returns_true_for_settled_status() {
+        let prior = ClawSandboxStatus {
+            phase: Some("Degraded".into()),
+            observed_generation: Some(1),
+            runtime_kind: Some("OpenAIAgents".into()),
+            conditions: vec![
+                conditions::new_condition(
+                    conditions::TYPE_DEGRADED,
+                    conditions::status::TRUE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_READY,
+                    conditions::status::FALSE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_RUNTIME_READY,
+                    conditions::status::FALSE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+            ],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(runtime_unsupported_status_matches(&sb, "OpenAIAgents"));
+    }
+
+    #[test]
+    fn runtime_unsupported_patch_preserves_transition_time_on_repeat() {
+        let prior_degraded = conditions::new_condition(
+            conditions::TYPE_DEGRADED,
+            conditions::status::TRUE,
+            conditions::reason::ADAPTER_MISSING,
+            "no adapter",
+            Some(1),
+        );
+        let prior_ts = prior_degraded.last_transition_time.clone();
+        let prior = ClawSandboxStatus {
+            conditions: vec![prior_degraded],
+            ..Default::default()
+        };
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let sb = new_sandbox(Some(2), Some(prior));
+        let patch = build_runtime_unsupported_status_patch(&sb, "OpenAIAgents", "still no adapter");
+        let degraded_ts = patch["status"]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"] == "Degraded")
+            .unwrap()["lastTransitionTime"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let prior_ts_str = serde_json::to_value(&prior_ts).unwrap();
+        assert_eq!(degraded_ts, prior_ts_str.as_str().unwrap());
     }
 }
