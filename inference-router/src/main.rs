@@ -227,6 +227,7 @@ async fn main() -> Result<()> {
             .merge(handoff_status)
             .with_state(state)
             .merge(build_mcp_router())
+            .merge(build_platform_mcp_router())
             .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
                 std::env::var("ROUTER_CONCURRENCY_LIMIT")
@@ -380,6 +381,32 @@ fn build_mcp_router() -> Router {
 
     tracing::info!("Mounting /mcp in dev mode (no OAuth — productionMode=false)");
     routes::mcp_route().with_state(state)
+}
+
+/// Mount the **platform MCP server** at `POST /platform/mcp`.
+///
+/// Unconditionally mounted — it has no production-mode toggle because:
+///
+/// 1. It is loopback-only by virtue of the router's bind address. The
+///    egress-guard init container restricts UID 1000 to `127.0.0.1`
+///    plus DNS, so the only process that can reach `/platform/mcp` is
+///    the agent in the same pod.
+/// 2. It is single-tenant by construction (one agent per pod). There
+///    is no cross-tenant trust boundary inside the router process for
+///    OAuth to enforce.
+/// 3. It exposes only Foundry-shim affordances that already flow
+///    through governance gates (InferencePolicy, Content Safety,
+///    token budget, audit chain) at their respective downstream
+///    routes — adding an OAuth layer here would gate discovery
+///    without changing the actual exposure surface.
+///
+/// See `mcp/platform.rs` and `plan.md` S10.B for the full rationale.
+fn build_platform_mcp_router() -> Router {
+    let state = routes::McpRouteState::platform();
+    tracing::info!(
+        "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"
+    );
+    routes::platform_mcp_route().with_state(state)
 }
 
 fn resolve_shutdown_timeout() -> std::time::Duration {

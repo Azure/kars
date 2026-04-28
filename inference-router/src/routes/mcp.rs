@@ -76,6 +76,22 @@ impl McpRouteState {
             tools: Arc::new(EchoDispatcher::standard()),
         }
     }
+
+    /// State for the **platform MCP server** mounted at `/platform/mcp`.
+    ///
+    /// Publishes the runtime-agnostic Foundry-shim catalog
+    /// ([`crate::mcp::PlatformDispatcher`]) — the 9 Class-A tools from
+    /// the OpenClaw plugin survey, lifted into the router so every
+    /// runtime adapter (OpenClaw, OpenAI Agents Python, Microsoft
+    /// Agent Framework, BYO) discovers them through one MCP endpoint.
+    /// See `mcp/platform.rs` and `plan.md` S10.B.
+    pub fn platform() -> Self {
+        Self {
+            config: Arc::new(InitializeConfig::default()),
+            minter: Arc::new(OsRngSessionMinter),
+            tools: Arc::new(crate::mcp::PlatformDispatcher::standard()),
+        }
+    }
 }
 
 impl std::fmt::Debug for McpRouteState {
@@ -91,6 +107,27 @@ impl std::fmt::Debug for McpRouteState {
 /// Axum router exposing `POST /mcp` (and `GET /mcp` → 405 + `Allow: POST`).
 pub fn mcp_route() -> Router<McpRouteState> {
     Router::new().route("/mcp", post(post_mcp).get(method_not_allowed))
+}
+
+/// Axum router exposing the **platform MCP server** at `POST /platform/mcp`
+/// (with `GET /platform/mcp` → 405 + `Allow: POST`, mirroring `/mcp`).
+///
+/// Reuses the same JSON-RPC pipeline as [`mcp_route`]; only the path
+/// and the injected [`ToolDispatcher`] differ. Caller is expected to
+/// bind state via [`McpRouteState::platform`].
+///
+/// # Security posture
+///
+/// Loopback-only (`127.0.0.1:8443`) by virtue of the router bind
+/// address; the egress-guard init container keeps any other UID off
+/// the loopback interface; the agent container (UID 1000) is the only
+/// process that can reach this endpoint. Single-tenant by construction
+/// — no OAuth gate is added because the platform MCP server has no
+/// cross-tenant trust boundary inside the router process. Customer-
+/// facing MCP servers (provisioned via the `McpServer` CRD) wear the
+/// OAuth 2.1 layer through [`protected_mcp_route`] instead.
+pub fn platform_mcp_route() -> Router<McpRouteState> {
+    Router::new().route("/platform/mcp", post(post_mcp).get(method_not_allowed))
 }
 
 /// Production-mode router: same MCP surface as [`mcp_route`], but every
@@ -356,6 +393,172 @@ mod tests {
     async fn standard_state_builds_without_panic() {
         let s = McpRouteState::standard();
         assert!(!s.config.supported_protocol_versions.is_empty());
+    }
+
+    // ----------------------------------------------------------------
+    // platform_mcp_route — Foundry-shim discovery surface
+    // ----------------------------------------------------------------
+
+    fn platform_test_state() -> McpRouteState {
+        McpRouteState {
+            config: Arc::new(InitializeConfig::default()),
+            minter: Arc::new(FixedMinter("platform-session-001")),
+            tools: Arc::new(crate::mcp::PlatformDispatcher::standard()),
+        }
+    }
+
+    fn platform_app() -> Router {
+        platform_mcp_route().with_state(platform_test_state())
+    }
+
+    fn platform_post_body(body: &[u8], accept: Option<&str>) -> Request<Body> {
+        let mut req = Request::builder().method("POST").uri("/platform/mcp");
+        if let Some(a) = accept {
+            req = req.header("accept", a);
+        }
+        req.body(Body::from(body.to_vec())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn platform_state_publishes_nine_foundry_tools() {
+        let s = McpRouteState::platform();
+        assert_eq!(
+            s.tools.catalog().tools().len(),
+            9,
+            "platform state must publish exactly the 9 Foundry shims"
+        );
+    }
+
+    #[tokio::test]
+    async fn platform_post_initialize_returns_session_header() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0.0.0"}
+            }
+        });
+        let req = platform_post_body(
+            req_body.to_string().as_bytes(),
+            Some("application/json, text/event-stream"),
+        );
+        let resp = platform_app().oneshot(req).await.unwrap();
+        let (status, headers, text) = body_text(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(MCP_SESSION_HEADER).unwrap(),
+            "platform-session-001"
+        );
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn platform_tools_list_returns_all_nine_foundry_shims() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/list",
+            "params": {}
+        });
+        let req = platform_post_body(
+            req_body.to_string().as_bytes(),
+            Some("application/json, text/event-stream"),
+        );
+        let resp = platform_app().oneshot(req).await.unwrap();
+        let (status, _, text) = body_text(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let tools = v["result"]["tools"].as_array().expect("tools array");
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for expected in [
+            "foundry.web_search",
+            "foundry.code_execute",
+            "foundry.file_search",
+            "foundry.memory",
+            "foundry.image_generation",
+            "foundry.conversations",
+            "foundry.evaluations",
+            "foundry.deployments",
+            "foundry.agents",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} in tools/list, got {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn platform_tools_call_returns_deferred_wiring_is_error() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "foundry.web_search",
+                "arguments": { "query": "anything" }
+            }
+        });
+        let req = platform_post_body(
+            req_body.to_string().as_bytes(),
+            Some("application/json, text/event-stream"),
+        );
+        let resp = platform_app().oneshot(req).await.unwrap();
+        let (status, _, text) = body_text(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        // Per MCP spec, a tool that "ran but errored" returns a normal
+        // JSON-RPC 200 result with isError:true on the content payload —
+        // distinct from a JSON-RPC error envelope.
+        assert!(v["error"].is_null(), "no JSON-RPC envelope error: {v}");
+        assert_eq!(v["result"]["isError"], true);
+        let content_text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            content_text.contains("S10.B"),
+            "content text mentions slice id, got: {content_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn platform_get_returns_405() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/platform/mcp")
+            .body(Body::empty())
+            .unwrap();
+        let (status, headers, _) = body_text(platform_app().oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "POST");
+    }
+
+    #[tokio::test]
+    async fn platform_unknown_tool_returns_jsonrpc_error() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "foundry.does_not_exist",
+                "arguments": {}
+            }
+        });
+        let req = platform_post_body(
+            req_body.to_string().as_bytes(),
+            Some("application/json, text/event-stream"),
+        );
+        let resp = platform_app().oneshot(req).await.unwrap();
+        let (status, _, text) = body_text(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            !v["error"].is_null(),
+            "unknown tool surfaces a JSON-RPC error envelope, got: {v}"
+        );
     }
 
     // ----------------------------------------------------------------

@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.B `phase2-platform-mcp-server` — runtime-agnostic Foundry-shim discovery surface
+
+#### Added
+
+- **New `POST /platform/mcp` endpoint** — runtime-agnostic Foundry-shim
+  discovery surface, mounted unconditionally on the inference router.
+  MCP 2025-03-26 Streamable HTTP envelope, same JSON-RPC pipeline as
+  `/mcp`. Loopback-only by virtue of the router's `127.0.0.1:8443`
+  bind; single-tenant by construction (one agent per pod); no OAuth
+  layer (rationale in the audit doc §5).
+- **`mcp::PlatformDispatcher`** — implementation of `ToolDispatcher`
+  publishing the canonical 9-tool Foundry catalog: `foundry.web_search`,
+  `foundry.code_execute`, `foundry.file_search`, `foundry.memory`,
+  `foundry.image_generation`, `foundry.conversations`,
+  `foundry.evaluations`, `foundry.deployments`, `foundry.agents`.
+  Schemas mirror `cli/src/plugin.ts` lines 662–735 + 6104–6347 verbatim
+  so OpenClaw plugin authors migrating to platform MCP keep the same
+  input shapes.
+- **`McpRouteState::platform()`** + **`platform_mcp_route()`** —
+  associated constructor and route function alongside the existing
+  `standard()` + `mcp_route()` pair. Reuses the same handler, same
+  pipeline, same session-id minter; only the path and the injected
+  dispatcher differ.
+- **`build_platform_mcp_router()`** in `main.rs` — mounts
+  `/platform/mcp` next to `build_mcp_router()` in the axum tree.
+
+#### Changed
+
+- `inference-router/src/mcp/mod.rs` — re-exports `PlatformDispatcher`
+  and `foundry_tool_catalog`.
+- `inference-router/src/routes/mod.rs` — re-exports `platform_mcp_route`
+  alongside `mcp_route` and `protected_mcp_route`.
+
+#### Status: discovery surface only
+
+This slice ships the **catalog + dispatch seam**. Every `tools/call`
+for a catalogued tool returns a structured JSON-RPC `result` with
+`isError: true` and a deferred-wiring marker (`"S10.B"` + tool name).
+Per-tool upstream wiring to Azure AI Foundry lands in follow-up slices
+`S10.B.1..S10.B.9`. The shape mirrors S10.A2's "controller dispatch
+seam without runtime wiring" — runtime adapters (S10.A3 OpenAI Agents
+Python, S10.A4 Microsoft Agent Framework) can validate discovery
+against this surface immediately while we sequence the per-tool work.
+
+The current synchronous `ToolDispatcher::invoke` trait makes per-tool
+async upstream calls a separate decision (async-trait conversion vs
+parallel `AsyncToolDispatcher`); deferring that decision to the
+follow-up slices keeps this slice strictly additive.
+
+#### Tests added
+
+- **`mcp::platform`**: 7 tests (catalog identity, schema validity,
+  deferred-wiring shape, unknown-tool path, argument-agnosticism,
+  trait-object safety, default-matches-standard).
+- **`routes::mcp::tests::platform_*`**: 6 tests (state-builds,
+  initialize round-trip, `tools/list` returns all 9, `tools/call`
+  returns `result.isError:true` with slice id, `GET` returns 405 +
+  `Allow: POST`, unknown-tool returns JSON-RPC error envelope).
+- 608/608 router lib tests pass (was 595 before this slice). Clippy
+  clean (`-D warnings`). `cargo fmt --check` clean.
+
+#### Why this slice
+
+`cli/src/plugin.ts` (7,140 LOC) is a Node.js OpenClaw plugin and
+cannot serve OpenAI Agents Python (S10.A3) or Microsoft Agent
+Framework (S10.A4) runtimes — those agents speak Python and load
+tools through their own runtime-native mechanisms. The runtime-agnostic
+way to expose the same affordances is **MCP**: every modern agent
+runtime ships an MCP client out of the box. By mounting these tools
+at `/platform/mcp` and pointing each adapter's MCP client at
+`127.0.0.1:8443/platform/mcp`, every runtime gets the same Foundry
+affordances with zero adapter code.
+
+This is **Class A** of the OpenClaw-plugin three-class survey
+(see `docs/internal/agt-upstream-asks.md` §4 and the
+S10-runtime-agnostic-rule note in `plan.md` S10): pure HTTP shims
+with no E2E concern, no AGT crypto, no per-runtime crypto state.
+**Class B (mesh / spawn / handoff) and Class C (OpenClaw slash
+commands) are explicitly out of scope** — Class B stays per-runtime
+riding upstream AgentMesh SDK in each language; Class C stays
+OpenClaw-only.
+
+#### Audit doc
+
+- `docs/security-audits/2026-04-28-phase2-platform-mcp-server.md`
+  (existing-implementation survey, threat model, OAuth-rationale,
+  test inventory, §0.2 hard-rule checklist).
+
 ### S10.A2.b `phase2-multi-runtime-byo` — BYO end-to-end deployment + `raw_env`
 
 #### Added
