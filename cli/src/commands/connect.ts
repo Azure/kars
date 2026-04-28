@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import chalk from "chalk";
+import { agentContainerName, runtimeKindFromCr, type RuntimeKind } from "../runtime.js";
 
 export function connectCommand(): Command {
   const cmd = new Command("connect");
@@ -41,6 +42,23 @@ export function connectCommand(): Command {
           aksExists = true;
         } catch { /* no AKS deployment */ }
       }
+
+      // S10.A5: resolve container name from the live ClawSandbox CR
+      // so non-OpenClaw runtimes (OpenAIAgents, MAF, BYO) hit the
+      // generic `agent` container rather than the legacy `openclaw`
+      // container name. Falls back to OpenClaw if the CR can't be
+      // read (e.g. local-only flow or AKS not configured) — which is
+      // the safe default since legacy CRs imply OpenClaw.
+      let runtimeKind: RuntimeKind = "OpenClaw";
+      if (aksExists) {
+        try {
+          const { stdout: crJson } = await execa("kubectl", [
+            "get", "clawsandbox", name, "-n", "azureclaw-system", "-o", "json",
+          ], { stdio: "pipe" });
+          runtimeKind = runtimeKindFromCr(JSON.parse(crJson));
+        } catch { /* fall back to OpenClaw default */ }
+      }
+      const podContainer = agentContainerName(runtimeKind);
 
       // Ambiguity: both exist, no explicit flag
       if (localExists && aksExists && !options.local && !options.cloud) {
@@ -146,7 +164,7 @@ export function connectCommand(): Command {
           console.log(chalk.dim("  Falling back to shell mode...\n"));
           await execa("kubectl", [
             "exec", "-it", "-n", namespace,
-            `deploy/${name}`, "-c", "openclaw",
+            `deploy/${name}`, "-c", podContainer,
             "--", "/bin/bash", "--login",
           ], { stdio: "inherit" });
           return;
@@ -209,7 +227,7 @@ export function connectCommand(): Command {
         console.log(chalk.dim(`  Exit:    type "exit"\n`));
         await execa("kubectl", [
           "exec", "-it", "-n", namespace,
-          `deploy/${name}`, "-c", "openclaw",
+          `deploy/${name}`, "-c", podContainer,
           "--", "/bin/bash", "--login",
         ], { stdio: "inherit" });
       }

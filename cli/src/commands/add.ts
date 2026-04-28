@@ -2,6 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
 import { loadContext, resolveSecret } from "../config.js";
+import { assertRuntimeWired, buildRuntimeBlock, flagToKind } from "../runtime.js";
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -34,9 +35,25 @@ export function addCommand(): Command {
     .option("--perplexity-api-key <key>", "Perplexity API key")
     .option("--openai-api-key <key>", "OpenAI API key (for dual-provider setups)")
     .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
+    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | byo", "openclaw")
+    .option("--byo-image <image>", "Container image for --runtime byo (must declare org.azureclaw.runtime.contract=v1)")
+    .option("--byo-contract-version <version>", "BYO contract version", "v1")
+    .option("--maf-language <lang>", "Microsoft Agent Framework language: python (dotnet is Phase 3)", "python")
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
+
+      const runtimeKind = flagToKind(options.runtime);
+      assertRuntimeWired(runtimeKind);
+      const runtimeBlock = buildRuntimeBlock({
+        kind: runtimeKind,
+        openclawVersion: "2026.3.13",
+        model: options.model,
+        image: options.image,
+        byoImage: options.byoImage,
+        byoContractVersion: options.byoContractVersion,
+        mafLanguage: options.mafLanguage as "python" | "dotnet",
+      });
 
       const sandbox: Record<string, unknown> = {
         apiVersion: "azureclaw.azure.com/v1alpha1",
@@ -46,18 +63,7 @@ export function addCommand(): Command {
           namespace: "azureclaw-system",
         },
         spec: {
-          runtime: {
-            kind: "OpenClaw",
-            openclaw: {
-              version: "2026.3.13",
-              ...(options.image ? { image: options.image } : {}),
-              config: {
-                agent: {
-                  model: `azure/${options.model}`,
-                },
-              },
-            },
-          },
+          runtime: runtimeBlock,
           sandbox: {
             isolation: options.isolation,
             seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "azureclaw-strict",
