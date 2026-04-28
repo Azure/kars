@@ -72,6 +72,13 @@ pub struct RuntimeDeploymentPlan {
     /// declared map.
     pub runtime_extra_env: BTreeMap<String, String>,
 
+    /// Raw EnvVar entries that must be rendered verbatim (used by BYO
+    /// when `byo.env[*].valueFrom` carries `secretKeyRef` /
+    /// `configMapKeyRef` / `fieldRef` — flattening would lose semantics).
+    /// Reserved-prefix / NUL / dup filtering is the deployment builder's
+    /// responsibility, applied to the `name` field. Empty for OpenClaw.
+    pub raw_env: Vec<serde_json::Value>,
+
     /// Where the user's agent code comes from (OCI / git). `None` for
     /// `OpenClaw` (the container image *is* the agent) and `BYO` (same).
     /// Reserved for the OpenAI Agents (S10.A3) and Microsoft Agent
@@ -186,14 +193,14 @@ pub fn build_runtime_plan(
             Ok(plan_openclaw(cfg, default_openclaw_image))
         }
         RuntimeKind::BYO => {
-            // BYO end-to-end deployment is S10.A2.b. A2 produces the plan
-            // (proves the seam works) but the reconciler still
-            // short-circuits to `AdapterMissing` in the call site so we
-            // don't ship a half-wired BYO deployment that lacks the
-            // contract verifier. Returning `AdapterMissing` here keeps
-            // behavior identical to S10.A1; the producer below is exercised
-            // only by unit tests in this module.
-            Err(RuntimePlanError::AdapterMissing("BYO"))
+            // S10.A2.b: BYO is wired end-to-end. The producer emits
+            // `image` / `command` / `args` / `runtime_extra_env` /
+            // `raw_env` / `byo_contract_version`; the deployment builder
+            // branches the agent container shape on `kind == BYO`
+            // (different container name, no port assumption, no
+            // OpenClaw-specific env, no admin-token mount).
+            let cfg = runtime.byo.as_ref().expect("validated above");
+            Ok(plan_byo(cfg))
         }
         RuntimeKind::OpenAIAgents => Err(RuntimePlanError::AdapterMissing("OpenAIAgents")),
         RuntimeKind::MicrosoftAgentFramework => {
@@ -215,16 +222,15 @@ fn plan_openclaw(cfg: &OpenClawConfig, default_image: &str) -> RuntimeDeployment
         command: None,
         args: None,
         runtime_extra_env: cfg.extra_env.clone().unwrap_or_default(),
+        raw_env: Vec::new(),
         agent_code: None,
         byo_contract_version: None,
     }
 }
 
-/// Reserved for S10.A2.b. Exercised by unit tests only; not yet plumbed
-/// into the reconciler call site.
-#[allow(dead_code)]
 fn plan_byo(cfg: &ByoRuntimeConfig) -> RuntimeDeploymentPlan {
     let mut runtime_extra_env = BTreeMap::new();
+    let mut raw_env: Vec<serde_json::Value> = Vec::new();
     if let Some(env) = cfg.env.as_ref() {
         for entry in env {
             if let (Some(name), Some(value)) = (
@@ -232,11 +238,16 @@ fn plan_byo(cfg: &ByoRuntimeConfig) -> RuntimeDeploymentPlan {
                 entry.get("value").and_then(|v| v.as_str()),
             ) {
                 runtime_extra_env.insert(name.to_string(), value.to_string());
+            } else if entry.get("name").and_then(|v| v.as_str()).is_some() {
+                // Structural entry (e.g. `valueFrom`). Pass through to
+                // the deployment builder verbatim — flattening would
+                // lose the secretKeyRef / configMapKeyRef / fieldRef
+                // semantic. Reserved-prefix / dup filtering is applied
+                // by the builder against the `name` field.
+                raw_env.push(entry.clone());
             }
-            // valueFrom entries are passed through to the Pod env
-            // verbatim by the deployment builder; they're not flattened
-            // into runtime_extra_env (would lose the secretKeyRef
-            // semantic).
+            // Drop entries with no `name`: malformed input. (Helm CEL
+            // already rejects these at admission; this is defensive.)
         }
     }
     RuntimeDeploymentPlan {
@@ -245,6 +256,7 @@ fn plan_byo(cfg: &ByoRuntimeConfig) -> RuntimeDeploymentPlan {
         command: cfg.command.clone(),
         args: cfg.args.clone(),
         runtime_extra_env,
+        raw_env,
         agent_code: None,
         byo_contract_version: Some(cfg.contract_version.clone()),
     }
@@ -444,8 +456,11 @@ mod tests {
     // surfaces `AdapterMissing(<kind>)`. BYO is a known short-circuit
     // until A2.b lands the contract-verifier path.
 
+    /// S10.A2.b: BYO is now wired end-to-end (returns Ok). Only the five
+    /// remaining unwired kinds (OpenAIAgents=A3, MAF=A4, +3 Tier-2
+    /// placeholders) short-circuit through AdapterMissing.
     #[test]
-    fn plan_returns_adapter_missing_for_each_non_openclaw_kind() {
+    fn plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind() {
         let cases: Vec<(RuntimeKind, RuntimeSpec, &str)> = vec![
             (
                 RuntimeKind::OpenAIAgents,
@@ -496,20 +511,6 @@ mod tests {
                     ..Default::default()
                 },
                 "Anthropic",
-            ),
-            (
-                RuntimeKind::BYO,
-                RuntimeSpec {
-                    kind: RuntimeKind::BYO,
-                    openclaw: None,
-                    byo: Some(ByoRuntimeConfig {
-                        image: "myregistry.azurecr.io/agent:1.0".into(),
-                        contract_version: "v1".into(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                "BYO",
             ),
         ];
         for (kind, rt, expected_label) in cases {
@@ -588,5 +589,49 @@ mod tests {
         assert_eq!(plan.runtime_extra_env.len(), 1);
         assert!(plan.runtime_extra_env.contains_key("STATIC"));
         assert!(!plan.runtime_extra_env.contains_key("FROM_SECRET"));
+        // S10.A2.b: structural entries are now passed through verbatim
+        // in raw_env so the deployment builder can render them as raw
+        // K8s EnvVar JSON.
+        assert_eq!(plan.raw_env.len(), 1);
+        assert_eq!(
+            plan.raw_env[0].get("name").and_then(|v| v.as_str()),
+            Some("FROM_SECRET")
+        );
+        assert!(plan.raw_env[0].get("valueFrom").is_some());
+    }
+
+    /// S10.A2.b: BYO with a well-formed config produces a plan, not
+    /// AdapterMissing. Image / command / args / contract_version /
+    /// raw_env must all flow through to the plan.
+    #[test]
+    fn build_runtime_plan_dispatches_byo_to_producer() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::BYO,
+            openclaw: None,
+            byo: Some(ByoRuntimeConfig {
+                image: "myregistry.azurecr.io/agent:1.0".into(),
+                command: Some(vec!["python".into()]),
+                args: Some(vec!["-m".into(), "agent".into()]),
+                env: Some(vec![
+                    serde_json::json!({"name": "MODE", "value": "prod"}),
+                    serde_json::json!({
+                        "name": "API_KEY",
+                        "valueFrom": {"secretKeyRef": {"name": "creds", "key": "key"}}
+                    }),
+                ]),
+                contract_version: "v1".into(),
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "default-image").expect("BYO must produce a plan");
+        assert_eq!(plan.kind_str, "BYO");
+        assert_eq!(plan.image, "myregistry.azurecr.io/agent:1.0");
+        assert_eq!(plan.command.as_deref(), Some(&["python".to_string()][..]));
+        assert_eq!(plan.byo_contract_version.as_deref(), Some("v1"));
+        assert_eq!(
+            plan.runtime_extra_env.get("MODE").map(|s| s.as_str()),
+            Some("prod")
+        );
+        assert_eq!(plan.raw_env.len(), 1);
     }
 }
