@@ -222,7 +222,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();
     let inference_config = spec.inference.unwrap_or_default();
-    let openclaw_config = spec.openclaw.unwrap_or_default();
+    // S10.A1: runtime is now a discriminated union (`spec.runtime.kind`).
+    // For now the reconciler still consumes the `openclaw` variant directly;
+    // S10.A2 will introduce `RuntimeDeploymentPlan` to dispatch per kind.
+    let runtime_spec = spec.runtime.clone();
+    let openclaw_config = runtime_spec.openclaw.clone().unwrap_or_default();
     let agent_config = spec.agent.unwrap_or_default();
 
     // ── Validate CRD inputs ──────────────────────────────────────────────
