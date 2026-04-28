@@ -248,8 +248,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 let msg = format!(
                     "spec.runtime.kind=`{kind}` has no adapter wired in this controller \
                  build (S10.A1+A2 spine); skipping Deployment to avoid silently running \
-                 the OpenClaw image. Track adapter rollout: OpenAIAgents=S10.A3, \
-                 MicrosoftAgentFramework=S10.A4, BYO=S10.A2.b; \
+                 the OpenClaw image. Track adapter rollout: BYO=S10.A2.b, \
+                 OpenAIAgents=S10.A3 (wired), MicrosoftAgentFramework=S10.A4; \
                  SemanticKernel/LangGraph/Anthropic are Tier-2 placeholders pending roadmap"
                 );
                 tracing::warn!(sandbox = %name, runtime = %kind, "{msg}");
@@ -700,11 +700,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .and_then(|b| b.per_request)
             .unwrap_or(0);
 
-        // S10.A2.b: OpenClaw vs BYO branch the *agent container shape*.
-        // The router sidecar, init container, NetworkPolicy, SA, seccomp,
-        // volumes, and security context are runtime-agnostic. Only the
-        // agent container itself differs.
-        let is_byo = matches!(runtime_spec.kind, crate::crd::RuntimeKind::BYO);
+        // S10.A2.b / S10.A3: OpenClaw vs non-OpenClaw branch the *agent
+        // container shape*. The router sidecar, init container,
+        // NetworkPolicy, SA, seccomp, volumes, and security context are
+        // runtime-agnostic. Only the agent container itself differs.
+        // BYO (S10.A2.b) and OpenAIAgents (S10.A3) both follow the
+        // generic-runtime shape (different container name, no
+        // OpenClaw-specific env, no admin-token mount).
+        let is_openclaw = matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw);
 
         // Build OpenClaw container env vars.
         //
@@ -724,13 +727,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // and a BYO pod referencing it without `optional: true` would
         // ImagePullBackOff-style fail to start.
         let mut openclaw_env: Vec<serde_json::Value> = Vec::new();
-        if !is_byo {
+        if is_openclaw {
             openclaw_env
                 .push(json!({"name": "OPENCLAW_MODEL", "value": inference_config.model.clone()}));
         }
         openclaw_env.push(json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}));
         openclaw_env.push(json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}));
-        if !is_byo {
+        if is_openclaw {
             openclaw_env.push(json!({
                 "name": "OPENCLAW_GATEWAY_TOKEN",
                 "valueFrom": {
@@ -750,13 +753,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Foundry deployments list (so plugin shows only deployed models, not full catalog).
         // BYO agents bring their own Foundry client (or none); skipped to avoid leaking
         // the deployment list into a runtime that doesn't need it.
-        if !is_byo && !ctx.foundry_deployments.is_empty() {
+        if is_openclaw && !ctx.foundry_deployments.is_empty() {
             openclaw_env
                 .push(json!({"name": "FOUNDRY_DEPLOYMENTS", "value": &ctx.foundry_deployments}));
         }
         // Inject Foundry Agent ID if set in status (for tools needing agent runs).
         // BYO doesn't go through the OpenClaw plugin path; skipped.
-        if !is_byo
+        if is_openclaw
             && let Some(ref agent_id) = sandbox
                 .status
                 .as_ref()
@@ -766,7 +769,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "FOUNDRY_AGENT_ID", "value": agent_id}));
         }
         // Signal configured Foundry agent tools (OpenClaw plugin reads this).
-        if !is_byo
+        if is_openclaw
             && let Some(ref tools) = agent_config.tools
             && !tools.is_empty()
         {
@@ -984,7 +987,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // (env, security context, volumes, probes, resources) is
         // identical across runtimes — they're platform contract,
         // controller-enforced.
-        let agent_container_name = if is_byo { "agent" } else { "openclaw" };
+        let agent_container_name = if is_openclaw { "openclaw" } else { "agent" };
         let agent_resources = spec
             .resources
             .as_ref()
@@ -1002,7 +1005,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "sandbox-data", "mountPath": "/sandbox"}),
             json!({"name": "tmp", "mountPath": "/tmp"}),
         ];
-        if !is_byo {
+        if is_openclaw {
             // OpenClaw plugin needs admin token to authenticate trust
             // mutations after KNOCK handshakes (pushTrustToRouter).
             // BYO does not run the plugin — mount is omitted to keep the
@@ -1045,7 +1048,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "periodSeconds": 10
             }
         });
-        if !is_byo {
+        if is_openclaw {
             // OpenClaw gateway port (used by `azureclaw connect` port-forward).
             agent_container["ports"] = json!([{"containerPort": 18789, "name": "gateway"}]);
         }
