@@ -30,7 +30,8 @@
 use std::collections::BTreeMap;
 
 use crate::crd::{
-    AgentCodeRef, ByoRuntimeConfig, OpenAIAgentsConfig, OpenClawConfig, RuntimeKind, RuntimeSpec,
+    AgentCodeRef, ByoRuntimeConfig, MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig,
+    OpenClawConfig, RuntimeKind, RuntimeSpec,
 };
 
 /// Default container image for the OpenAI Agents Python runtime
@@ -50,6 +51,30 @@ pub fn openai_agents_default_image() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_OPENAI_AGENTS_IMAGE.to_string())
+}
+
+/// Default container image for the Microsoft Agent Framework Python
+/// runtime (S10.A4). MAF is the strategically prioritized
+/// Microsoft-aligned runtime — it integrates natively with AGT and is
+/// the unified successor to AutoGen v0.4. Stays `:latest`; operators
+/// pin via the `MAF_RUNTIME_IMAGE` env var.
+///
+/// MAF .NET path is **deferred to Phase 3** (blocked on
+/// AgentMesh.Sdk .NET availability — see
+/// `docs/internal/agt-upstream-asks.md` §3). Until then, requesting
+/// `language: dotnet` falls through to a `ShapeInvalid` error stamped
+/// as `Degraded / SpecInvalid` in the Conditions chain.
+pub const DEFAULT_MAF_PYTHON_IMAGE: &str =
+    "azureclawacr.azurecr.io/azureclaw-runtime-maf-python:latest";
+
+/// Resolve the MAF Python adapter image, honouring an operator
+/// override via `MAF_RUNTIME_IMAGE`. Falls back to
+/// [`DEFAULT_MAF_PYTHON_IMAGE`].
+pub fn maf_python_default_image() -> String {
+    std::env::var("MAF_RUNTIME_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MAF_PYTHON_IMAGE.to_string())
 }
 
 /// Concrete deployment intent for a single reconcile pass.
@@ -240,7 +265,24 @@ pub fn build_runtime_plan(
             Ok(plan_openai_agents(cfg))
         }
         RuntimeKind::MicrosoftAgentFramework => {
-            Err(RuntimePlanError::AdapterMissing("MicrosoftAgentFramework"))
+            // S10.A4: MAF is the strategically prioritized Microsoft-aligned
+            // runtime (unified successor to AutoGen v0.4; first-party
+            // AGT integration). MAF .NET is **deferred to Phase 3**
+            // pending AgentMesh.Sdk .NET availability — see
+            // `docs/internal/agt-upstream-asks.md` §3. Until then,
+            // `language: dotnet` triggers `ShapeInvalid` so the
+            // operator gets a clear error rather than a silently
+            // mis-imaged pod.
+            //
+            // **Class B (mesh / spawn / handoff) is NOT yet exposed**
+            // — same blocker as S10.A3 (AgentMesh-Python). Foundry-
+            // shim affordances are reachable via `/platform/mcp`
+            // (S10.B).
+            let cfg = runtime
+                .microsoft_agent_framework
+                .as_ref()
+                .expect("validated above");
+            plan_microsoft_agent_framework(cfg)
         }
         RuntimeKind::SemanticKernel => Err(RuntimePlanError::AdapterMissing("SemanticKernel")),
         RuntimeKind::LangGraph => Err(RuntimePlanError::AdapterMissing("LangGraph")),
@@ -362,11 +404,63 @@ fn plan_openai_agents(cfg: &OpenAIAgentsConfig) -> RuntimeDeploymentPlan {
     }
 }
 
+/// Producer for [`RuntimeKind::MicrosoftAgentFramework`] (S10.A4).
+///
+/// MAF Python is wired in this build; MAF .NET is deferred to Phase 3
+/// (AgentMesh.Sdk .NET upstream gap). When `language: dotnet` is
+/// requested we surface a [`RuntimePlanError::ShapeInvalid`] so the
+/// reconciler stamps `Degraded / SpecInvalid` rather than silently
+/// running a Python image against a .NET agent.
+fn plan_microsoft_agent_framework(
+    cfg: &MicrosoftAgentFrameworkConfig,
+) -> Result<RuntimeDeploymentPlan, RuntimePlanError> {
+    // Language gate: only Python is wired this slice.
+    let lang = cfg.language.clone().unwrap_or_default();
+    if !matches!(lang, MafLanguage::Python) {
+        return Err(RuntimePlanError::ShapeInvalid(
+            "spec.runtime.microsoftAgentFramework.language=dotnet is not yet wired \
+             (blocked on AgentMesh.Sdk .NET upstream availability — see \
+             docs/internal/agt-upstream-asks.md §3); use `language: python` \
+             or wait for Phase 3"
+                .to_string(),
+        ));
+    }
+
+    let image = maf_python_default_image();
+
+    // Same merge contract as `plan_openai_agents`: producer-supplied
+    // defaults first, user `extra_env` on top. Reserved-prefix
+    // filtering (which would strip `AZURECLAW_*`) happens in the
+    // deployment builder; the producer must use non-reserved keys for
+    // its defaults. None for MAF today (no python_version pin in the
+    // CRD); reserved here as a hook.
+    let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
+    runtime_extra_env.insert("RUNTIME_MAF_LANGUAGE".to_string(), "python".to_string());
+    if let Some(user_env) = cfg.extra_env.as_ref() {
+        for (k, v) in user_env {
+            runtime_extra_env.insert(k.clone(), v.clone());
+        }
+    }
+
+    let command = cfg.entrypoint.clone();
+
+    Ok(RuntimeDeploymentPlan {
+        kind_str: "MicrosoftAgentFramework",
+        image,
+        command,
+        args: None,
+        runtime_extra_env,
+        raw_env: Vec::new(),
+        agent_code: cfg.agent_code.clone(),
+        byo_contract_version: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::{
-        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig,
+        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, MafLanguage,
         MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig, OpenClawConfig,
         SemanticKernelConfig,
     };
@@ -557,22 +651,12 @@ mod tests {
     // surfaces `AdapterMissing(<kind>)`. BYO is a known short-circuit
     // until A2.b lands the contract-verifier path.
 
-    /// S10.A3: OpenAI Agents is now wired (S10.A2.b: BYO is wired).
-    /// Only the four remaining unwired kinds (MAF=S10.A4 + 3 Tier-2
-    /// placeholders) short-circuit through AdapterMissing.
+    /// S10.A4: MAF is now wired (S10.A3: OpenAIAgents, S10.A2.b: BYO).
+    /// Only the three Tier-2 placeholders short-circuit through
+    /// AdapterMissing.
     #[test]
     fn plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind() {
         let cases: Vec<(RuntimeKind, RuntimeSpec, &str)> = vec![
-            (
-                RuntimeKind::MicrosoftAgentFramework,
-                RuntimeSpec {
-                    kind: RuntimeKind::MicrosoftAgentFramework,
-                    openclaw: None,
-                    microsoft_agent_framework: Some(MicrosoftAgentFrameworkConfig::default()),
-                    ..Default::default()
-                },
-                "MicrosoftAgentFramework",
-            ),
             (
                 RuntimeKind::SemanticKernel,
                 RuntimeSpec {
@@ -903,5 +987,187 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("3.12")
         );
+    }
+
+    // ── plan_microsoft_agent_framework() — S10.A4 ─────────────────────
+
+    #[test]
+    fn plan_maf_uses_default_python_image_when_env_unset() {
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+        let cfg = MicrosoftAgentFrameworkConfig::default();
+        let plan =
+            plan_microsoft_agent_framework(&cfg).expect("default (Python) must produce a plan");
+        assert_eq!(plan.kind_str, "MicrosoftAgentFramework");
+        assert_eq!(plan.image, DEFAULT_MAF_PYTHON_IMAGE);
+        assert!(plan.command.is_none());
+        assert!(plan.args.is_none());
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_MAF_LANGUAGE")
+                .map(|s| s.as_str()),
+            Some("python")
+        );
+        assert!(plan.raw_env.is_empty());
+        assert!(plan.byo_contract_version.is_none());
+    }
+
+    #[test]
+    fn plan_maf_explicit_python_language_succeeds() {
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+        let cfg = MicrosoftAgentFrameworkConfig {
+            language: Some(MafLanguage::Python),
+            ..Default::default()
+        };
+        let plan = plan_microsoft_agent_framework(&cfg).expect("explicit Python must succeed");
+        assert_eq!(plan.image, DEFAULT_MAF_PYTHON_IMAGE);
+    }
+
+    #[test]
+    fn plan_maf_dotnet_returns_shape_invalid_pending_phase3() {
+        let cfg = MicrosoftAgentFrameworkConfig {
+            language: Some(MafLanguage::Dotnet),
+            ..Default::default()
+        };
+        let err = plan_microsoft_agent_framework(&cfg).expect_err("dotnet must short-circuit");
+        match err {
+            RuntimePlanError::ShapeInvalid(msg) => {
+                assert!(
+                    msg.contains("dotnet"),
+                    "ShapeInvalid msg should name the offending language: {msg}"
+                );
+                assert!(
+                    msg.contains("Phase 3") || msg.contains("AgentMesh.Sdk .NET"),
+                    "ShapeInvalid msg should cite the upstream blocker / phase: {msg}"
+                );
+            }
+            other => panic!("expected ShapeInvalid for dotnet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_maf_passes_entrypoint_and_extra_env() {
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+        let mut extra = BTreeMap::new();
+        extra.insert("LOG_LEVEL".into(), "DEBUG".into());
+        let cfg = MicrosoftAgentFrameworkConfig {
+            language: Some(MafLanguage::Python),
+            entrypoint: Some(vec!["python".into(), "-m".into(), "team.maf_agent".into()]),
+            extra_env: Some(extra),
+            ..Default::default()
+        };
+        let plan = plan_microsoft_agent_framework(&cfg).expect("must succeed");
+        assert_eq!(
+            plan.command.as_deref(),
+            Some(
+                &[
+                    "python".to_string(),
+                    "-m".to_string(),
+                    "team.maf_agent".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(
+            plan.runtime_extra_env.get("LOG_LEVEL").map(|s| s.as_str()),
+            Some("DEBUG")
+        );
+        // RUNTIME_MAF_LANGUAGE controller-default still present alongside user env.
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_MAF_LANGUAGE")
+                .map(|s| s.as_str()),
+            Some("python")
+        );
+    }
+
+    #[test]
+    fn plan_maf_user_extra_env_overrides_controller_default() {
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+        let mut extra = BTreeMap::new();
+        // Pathological: user pins RUNTIME_MAF_LANGUAGE to a different
+        // value. The merge-order contract (default-first, user-on-top)
+        // means the user value wins. This is a *feature*, not a bug —
+        // it gives the same predictable override semantics across all
+        // producers.
+        extra.insert("RUNTIME_MAF_LANGUAGE".into(), "experimental".into());
+        let cfg = MicrosoftAgentFrameworkConfig {
+            language: Some(MafLanguage::Python),
+            extra_env: Some(extra),
+            ..Default::default()
+        };
+        let plan = plan_microsoft_agent_framework(&cfg).expect("must succeed");
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_MAF_LANGUAGE")
+                .map(|s| s.as_str()),
+            Some("experimental")
+        );
+    }
+
+    #[test]
+    fn maf_python_default_image_honours_env_override() {
+        unsafe {
+            std::env::set_var("MAF_RUNTIME_IMAGE", "myacr.azurecr.io/maf-python:pinned");
+        }
+        let img = maf_python_default_image();
+        assert_eq!(img, "myacr.azurecr.io/maf-python:pinned");
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+        assert_eq!(maf_python_default_image(), DEFAULT_MAF_PYTHON_IMAGE);
+    }
+
+    #[test]
+    fn maf_python_default_image_treats_blank_env_as_unset() {
+        unsafe {
+            std::env::set_var("MAF_RUNTIME_IMAGE", "  ");
+        }
+        let img = maf_python_default_image();
+        assert_eq!(img, DEFAULT_MAF_PYTHON_IMAGE);
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+    }
+
+    #[test]
+    fn build_runtime_plan_dispatches_maf_python_to_producer() {
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
+        }
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::MicrosoftAgentFramework,
+            openclaw: None,
+            microsoft_agent_framework: Some(MicrosoftAgentFrameworkConfig {
+                language: Some(MafLanguage::Python),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored-openclaw-default")
+            .expect("MAF Python must produce a plan");
+        assert_eq!(plan.kind_str, "MicrosoftAgentFramework");
+        assert_eq!(plan.image, DEFAULT_MAF_PYTHON_IMAGE);
+    }
+
+    #[test]
+    fn build_runtime_plan_surfaces_shape_invalid_for_maf_dotnet() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::MicrosoftAgentFramework,
+            openclaw: None,
+            microsoft_agent_framework: Some(MicrosoftAgentFrameworkConfig {
+                language: Some(MafLanguage::Dotnet),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = build_runtime_plan(&rt, "x").expect_err("dotnet must short-circuit");
+        assert!(matches!(err, RuntimePlanError::ShapeInvalid(_)));
     }
 }

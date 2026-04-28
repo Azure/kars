@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S10.A4 `phase2-runtime-microsoft-agent-framework` — second native runtime, flips column 11 fully ✓
+
+#### Added
+
+- **`plan_microsoft_agent_framework` producer** in
+  `controller::reconciler::runtime` — replaces the
+  `AdapterMissing("MicrosoftAgentFramework")` short-circuit landed in
+  S10.A2. First producer to return `Result` (not `Ok` direct):
+  language gate refuses `language: dotnet` via
+  `RuntimePlanError::ShapeInvalid` with an upstream-blocker citation
+  (AgentMesh.Sdk .NET, Phase 3). Reconciler dispatch surfaces this as
+  the existing `Degraded / SpecInvalid` Conditions path.
+- **`DEFAULT_MAF_PYTHON_IMAGE` constant** + `maf_python_default_image()`
+  helper reading `MAF_RUNTIME_IMAGE` env override (whitespace-as-unset,
+  same convention as S10.A3).
+- **`RUNTIME_MAF_LANGUAGE` controller-default env** (non-reserved
+  prefix — survives the deployment builder's reserved-prefix filter).
+- **`sandbox-images/maf-python/`** — Dockerfile (Python 3.12 +
+  `agent-framework>=0.1,<0.2` + `azure-identity` for the eventual AAD
+  shim) + `entrypoint.sh` exporting `OPENAI_BASE_URL`,
+  `AZURE_OPENAI_ENDPOINT`, `AZURECLAW_PLATFORM_MCP_URL` — all pointed
+  at the router sidecar. Image declares
+  `LABEL org.azureclaw.runtime.contract="v1"` and
+  `LABEL org.azureclaw.runtime.kind="MicrosoftAgentFramework"`.
+- 9 new controller tests (315 → 324, all green): default Python
+  image, explicit Python success, dotnet → ShapeInvalid (with msg
+  assertions for upstream-blocker + Phase 3), entrypoint propagation,
+  controller-default + user `extra_env` merge, user-extra-wins on
+  conflict, env-override image (set + whitespace-as-unset), dispatcher
+  arm wiring (Python success + dotnet rejection).
+
+#### Changed
+
+- **`plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind`**
+  — drops the `MicrosoftAgentFramework` case (now wired); only 3
+  Tier-2 placeholders remain (`SemanticKernel`, `LangGraph`,
+  `Anthropic`).
+
+#### §14.6 column 11 — Multi-runtime hosting → fully ✓
+
+S10.A4 closes the column-11 bar:
+
+- ✓ OpenAI Agents Python adapter (S10.A3)
+- ✓ MAF Python adapter (this slice)
+- ✓ BYO end-to-end (S10.A2.b)
+- ✓ OverlayMode for sigs/agent-sandbox (S8)
+- ✓ kagent migration via `azureclaw migrate from-kagent` (S9.3)
+
+#### Deferred
+
+- **In-pod adapter Python package** (`azureclaw-runtime-maf-python`
+  PyPI) — AAD shim (`DefaultAzureCredential` → bearer-on-router),
+  `AZURE_OPENAI_ENDPOINT` rewriting, AGT-init compat, MAF-specific
+  MCP client glue, OTel SDK wiring. Immediate follow-up.
+- **MAF .NET path** — Phase 3, blocked on AgentMesh.Sdk .NET upstream
+  availability. Refused at producer time with `ShapeInvalid` rather
+  than mis-imaged.
+- **Class B mesh / spawn / handoff** — upstream-blocked
+  (AgentMesh-Python). Foundry-shim access via S10.B platform MCP
+  unaffected.
+
+#### Audit doc
+
+- `docs/security-audits/2026-04-28-phase2-runtime-microsoft-agent-framework.md` —
+  scope, threat model, hard-rule checklist, column-11 closure proof,
+  AGT upstream-dependency note, two sign-off slots.
+
 ### S10.A3 `phase2-runtime-openai-agents` — first non-OpenClaw native runtime
 
 #### Added
