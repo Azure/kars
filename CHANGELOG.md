@@ -292,6 +292,103 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
+### S9.2 `phase2-convert-translator` — real `azureclaw convert` translator
+
+Phase 0 shipped `azureclaw convert` as an exit-3 skeleton to lock in the CLI
+surface; this slice ships the translator. Operators can now move manifests
+between AzureClaw's `ClawSandbox` and upstream
+`agents.x-k8s.io/v1alpha1 Sandbox` (kubernetes-sigs/agent-sandbox) without
+hand-editing YAML, and bootstrap a fresh `ClawSandbox` overlay against an
+existing upstream Sandbox.
+
+#### Added
+
+- **`cli/src/commands/convert.ts` — pure translator** with three target modes:
+  `--to clawsandbox` (upstream → ClawSandbox, lossy inverse),
+  `--to upstream-sandbox` (ClawSandbox → upstream, lossy forward),
+  `--to overlay --sandbox-ref=<name|ns/name>` (upstream → fresh ClawSandbox
+  skeleton with `spec.upstreamCompatibility.sigsAgentSandbox=overlay` +
+  `upstreamSandboxRef`). All translation logic is in pure helpers exposed via
+  `__test` — no filesystem, no kubectl IO inside the translator. Phase 3
+  `kubectl claw attest` and any future `verify-bundle` flow can reuse the
+  same helpers unchanged.
+- **Hard-fail on lossy translation by default** — the translator emits
+  warnings for every dropped field that has no analog (governance,
+  inference, a2a, agent, azureServices, networkPolicy, upstreamCompatibility
+  on forward; shutdownTime, shutdownPolicy, volumes, volumeClaimTemplates,
+  multi-container, hostNetwork/PID/IPC, nodeSelector, affinity, tolerations,
+  imagePullSecrets, podTemplate.metadata.{labels,annotations}, env
+  `valueFrom`, replicas≠1 on inverse). If any warning is produced and
+  `--allow-lossy` is **not** set, the CLI prints all warnings to stderr and
+  exits 4. This rule applies to `--dry-run` as well — a dry-run never
+  reports success when the real run would refuse. Rationale: silently
+  dropping a TokenBudget or a ContentSafety floor on conversion is a
+  governance regression dressed as a UX win.
+- **Seccomp + runtimeClass mapping mirrors the controller exactly** — verified
+  against `controller/src/reconciler/mod.rs:34-78`:
+  - `isolation: confidential` → `runtimeClassName: kata-vm-isolation` +
+    `seccompProfile: { type: RuntimeDefault }` (Kata VM provides isolation;
+    Localhost seccomp is suppressed by the controller too).
+  - `isolation: enhanced` + `seccompProfile: <name>` →
+    `Localhost { localhostProfile: profiles/<name>.json }`.
+  - `seccompProfile: RuntimeDefault` (or empty) → `RuntimeDefault`.
+  Inverse `canonicaliseSeccomp` accepts the canonical
+  `profiles/<name>.json` form (no warning), tolerates `<name>.json` and
+  bare `<name>` with explicit warnings, and warns when `RuntimeDefault`
+  appears on a non-confidential pod (controller would have emitted
+  Localhost).
+- **`extraEnv` projection is order-aware** — env arrays walked in order;
+  duplicate literal names warn ("last literal wins"); `valueFrom` entries
+  drop any prior literal for the same name (no stale-data resurrection)
+  and warn; a later literal that overrides a prior `valueFrom` produces a
+  second warning. `mapToEnvArray` sorts keys alphabetically for
+  deterministic output.
+- **Multi-document YAML rejected** — `parseAllDocuments` filtered for
+  non-null contents; >1 surviving document → exit 2. Server-managed metadata
+  (`status`, `uid`, `resourceVersion`, `managedFields`, `creationTimestamp`)
+  is stripped from output and surfaces a "dropped status block" warning when
+  present.
+- **Overlay namespace pin** — `--sandbox-ref` accepts bare `name` or
+  `ns/name`. When `ns/` is supplied and disagrees with input
+  `metadata.namespace`, the CLI rejects with exit 2 — the controller's
+  `LocalObjectRef` is same-namespace only and silently changing namespaces
+  on convert would be a footgun.
+- **48 new vitest cases** in `cli/src/commands/convert.test.ts` covering
+  parser, target dispatch, forward/inverse happy path, every
+  AzureClaw-only and upstream-only lossy field, multi-doc rejection,
+  malformed input, env collisions and `valueFrom` edge cases, all four
+  seccomp canonicalisation paths, kata isolation round-trip, overlay
+  namespace pin, multi-container, missing image, and a forward→inverse
+  round-trip stability assertion. CLI workspace test count: 337 → 382.
+- **End-to-end smoke**: `node dist/index.js convert -f sandbox.yaml --to
+  clawsandbox` exits 0 on a clean confidential-mode upstream Sandbox and
+  emits a valid `ClawSandbox` with `isolation: confidential`. Overlay
+  emit on the same input produces a governance-skeleton ClawSandbox with
+  the warning that no governance fields are bound.
+
+#### Verified upstream
+
+- `apiVersion: agents.x-k8s.io/v1alpha1`, `kind: Sandbox`,
+  `spec.podTemplate.spec` (corev1.PodSpec), inlined `Lifecycle`
+  (`shutdownTime` + `shutdownPolicy`), `replicas` 0..1 verified against
+  `kubernetes-sigs/agent-sandbox @ c8c85f5`
+  (`api/v1alpha1/sandbox_types.go`). No `v1alpha2` yet — `api/` directory
+  contains `v1alpha1/` only.
+
+#### Not in this slice
+
+- **`azureclaw migrate from-kagent`** — separate slice (S9.3); kagent CRDs
+  have a fundamentally different shape (Agent / ToolServer / Identity rather
+  than a single Sandbox primitive) and warrant their own translator path.
+- **Round-trip lossless mode** — there is no canonical lossless round-trip
+  because AzureClaw and upstream are deliberately different governance
+  scopes. The forward `lossy-by-default` posture is the right safety
+  contract; future work can add `--strict` for CI lint use cases.
+- **Live-cluster import** — `convert` reads YAML from `--file`. Pulling a
+  manifest from a live cluster (`kubectl get … -o yaml | azureclaw
+  convert`) works today via shell pipe + `--file=/dev/stdin`; an
+  `--from-cluster ns/name` shortcut may land in a later UX-polish slice.
+
 ### S9.1 `phase2-migrate-mode-switch` — `azureclaw migrate` mode-switch CLI
 
 Operator-facing tool to flip a ClawSandbox between the four
