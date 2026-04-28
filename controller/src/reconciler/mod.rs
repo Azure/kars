@@ -222,38 +222,53 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();
     let inference_config = spec.inference.unwrap_or_default();
-    // S10.A1: runtime is a discriminated union (`spec.runtime.kind`).
-    // For OpenClaw we continue with the existing reconciler path; for
-    // OpenAIAgents/MicrosoftAgentFramework/BYO no controller-side adapter
-    // is wired in A1, so the controller refuses to create a Deployment
-    // (would silently run the wrong runtime image — see plan §S10.A1
-    // rubber-duck #2). The full per-runtime dispatch (`RuntimeDeploymentPlan`)
-    // lands in S10.A2.
+    // S10.A2: runtime dispatch flows through `reconciler::runtime` —
+    // a `RuntimeDeploymentPlan` flattens the `spec.runtime` discriminated
+    // union to the concrete image / command / args / runtime-specific env
+    // that the deployment builder consumes. Adding a new runtime kind
+    // means adding a producer in `runtime.rs`, not editing this fn.
+    //
+    // Behavior is strictly equivalent to S10.A1 for OpenClaw; non-OpenClaw
+    // kinds short-circuit through the same `AdapterMissing` path
+    // (refusing to silently run the OpenClaw image — see plan §S10.A1
+    // rubber-duck #2 + audit doc 2026-04-28-phase2-multi-runtime-crd.md).
     let runtime_spec = spec.runtime.clone();
-    let runtime_kind = runtime_spec.kind;
-    let runtime_kind_str: &'static str = match runtime_kind {
-        crate::crd::RuntimeKind::OpenClaw => "OpenClaw",
-        crate::crd::RuntimeKind::OpenAIAgents => "OpenAIAgents",
-        crate::crd::RuntimeKind::MicrosoftAgentFramework => "MicrosoftAgentFramework",
-        crate::crd::RuntimeKind::SemanticKernel => "SemanticKernel",
-        crate::crd::RuntimeKind::LangGraph => "LangGraph",
-        crate::crd::RuntimeKind::Anthropic => "Anthropic",
-        crate::crd::RuntimeKind::BYO => "BYO",
-    };
-    if !matches!(runtime_kind, crate::crd::RuntimeKind::OpenClaw) {
-        let msg = format!(
-            "spec.runtime.kind=`{runtime_kind_str}` has no adapter wired in this controller \
-             build (S10.A1); skipping Deployment to avoid silently running the OpenClaw image. \
-             Track adapter rollout: OpenAIAgents=S10.A3, MicrosoftAgentFramework=S10.A4, \
-             BYO=S10.A2; SemanticKernel/LangGraph/Anthropic are Tier-2 placeholders pending \
-             roadmap"
-        );
-        tracing::warn!(sandbox = %name, runtime = %runtime_kind_str, "{msg}");
-        crate::status::stamp_runtime_unsupported(client, &sandbox, &name, runtime_kind_str, &msg)
-            .await;
-        return Ok(Action::requeue(Duration::from_secs(300)));
-    }
-    let openclaw_config = runtime_spec.openclaw.clone().unwrap_or_default();
+    let runtime_kind_str = crate::reconciler::runtime::kind_str(&runtime_spec.kind);
+    let runtime_plan =
+        match crate::reconciler::runtime::build_runtime_plan(&runtime_spec, &ctx.sandbox_image) {
+            Ok(plan) => {
+                // Defensive: producer must agree with the dispatcher on the
+                // wire-format kind string — they read the same enum but via
+                // different paths. If they ever drift, that's a bug we want
+                // to surface in tests, not in production status patches.
+                debug_assert_eq!(plan.kind_str, runtime_kind_str);
+                plan
+            }
+            Err(crate::reconciler::runtime::RuntimePlanError::AdapterMissing(kind)) => {
+                let msg = format!(
+                    "spec.runtime.kind=`{kind}` has no adapter wired in this controller \
+                 build (S10.A1+A2 spine); skipping Deployment to avoid silently running \
+                 the OpenClaw image. Track adapter rollout: OpenAIAgents=S10.A3, \
+                 MicrosoftAgentFramework=S10.A4, BYO=S10.A2.b; \
+                 SemanticKernel/LangGraph/Anthropic are Tier-2 placeholders pending roadmap"
+                );
+                tracing::warn!(sandbox = %name, runtime = %kind, "{msg}");
+                crate::status::stamp_runtime_unsupported(client, &sandbox, &name, kind, &msg).await;
+                return Ok(Action::requeue(Duration::from_secs(300)));
+            }
+            Err(crate::reconciler::runtime::RuntimePlanError::ShapeInvalid(msg)) => {
+                tracing::error!(sandbox = %name, "runtime spec shape invalid: {msg}");
+                crate::status::stamp_degraded(
+                    client,
+                    &sandbox,
+                    &name,
+                    crate::status::conditions::reason::SPEC_INVALID,
+                    &msg,
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(300)));
+            }
+        };
     let agent_config = spec.agent.unwrap_or_default();
 
     // ── Validate CRD inputs ──────────────────────────────────────────────
@@ -657,9 +672,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         if overlay_mode {
             break 'deployment_block;
         }
-        let image = openclaw_config
-            .image
-            .unwrap_or_else(|| ctx.sandbox_image.clone());
+        // S10.A2: image now comes from the runtime plan (already
+        // resolved against the controller default fallback). The
+        // deployment builder must not re-derive the image from
+        // `openclaw_config` — see plan §S10.A1 rubber-duck #2.
+        let image = runtime_plan.image.clone();
 
         let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
 
@@ -820,11 +837,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             router_agt_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
         }
 
-        // ── extraEnv: user/controller-provided env vars on spec.runtime.openclaw.extraEnv ──
-        // Used by the controller to propagate offload parameters (OFFLOAD_REQUEST_ID,
-        // OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES) into offload
-        // sandboxes. Keys are validated to avoid clobbering reserved prefixes.
-        if let Some(extra) = openclaw_config.extra_env.as_ref() {
+        // ── extraEnv: runtime-specific env vars from the runtime plan ──
+        // For OpenClaw this comes from `spec.runtime.openclaw.extraEnv`
+        // and is used by the controller to propagate offload parameters
+        // (OFFLOAD_REQUEST_ID, OFFLOAD_PARENT_AMID, OFFLOAD_TASK,
+        // OFFLOAD_TIMEOUT_MINUTES) into offload sandboxes. For other
+        // runtime kinds (S10.A2.b BYO, A3 OpenAIAgents, A4 MAF) the same
+        // map is sourced from the matching variant struct via
+        // `runtime::build_runtime_plan`. Keys are validated against
+        // reserved prefixes regardless of source.
+        if !runtime_plan.runtime_extra_env.is_empty() {
             // Reserved prefixes that must come from the reconciler itself, not user input.
             const RESERVED_PREFIXES: &[&str] =
                 &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "AZURECLAW_"];
@@ -833,7 +855,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .iter()
                 .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
                 .collect();
-            for (k, v) in extra {
+            for (k, v) in &runtime_plan.runtime_extra_env {
                 if k.is_empty()
                     || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     || k.chars().next().is_some_and(|c| c.is_ascii_digit())
@@ -1653,3 +1675,5 @@ pub async fn run(client: Client) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+pub mod runtime;
