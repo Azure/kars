@@ -793,7 +793,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             router_agt_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
         }
 
-        // ── extraEnv: user/controller-provided env vars on spec.openclaw.extraEnv ──
+        // ── extraEnv: user/controller-provided env vars on spec.runtime.openclaw.extraEnv ──
         // Used by the controller to propagate offload parameters (OFFLOAD_REQUEST_ID,
         // OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES) into offload
         // sandboxes. Keys are validated to avoid clobbering reserved prefixes.

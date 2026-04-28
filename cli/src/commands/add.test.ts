@@ -56,10 +56,13 @@ function buildSandboxManifest(name: string, options: AddOptions) {
     kind: "ClawSandbox",
     metadata: { name, namespace: "azureclaw-system" },
     spec: {
-      openclaw: {
-        version: "2026.3.13",
-        ...(options.image ? { image: options.image } : {}),
-        config: { agent: { model: `azure/${options.model}` } },
+      runtime: {
+        kind: "OpenClaw",
+        openclaw: {
+          version: "2026.3.13",
+          ...(options.image ? { image: options.image } : {}),
+          config: { agent: { model: `azure/${options.model}` } },
+        },
       },
       sandbox: {
         isolation: options.isolation,
@@ -185,14 +188,15 @@ describe("ClawSandbox manifest generation", () => {
   it("uses default model gpt-4.1 with azure/ prefix", () => {
     const manifest = buildSandboxManifest("a", defaultOptions());
     const spec = manifest.spec as any;
-    expect(spec.openclaw.config.agent.model).toBe("azure/gpt-4.1");
+    expect(spec.runtime.kind).toBe("OpenClaw");
+    expect(spec.runtime.openclaw.config.agent.model).toBe("azure/gpt-4.1");
     expect(spec.inference.model).toBe("gpt-4.1");
   });
 
   it("uses custom model when specified", () => {
     const manifest = buildSandboxManifest("a", defaultOptions({ model: "o4-mini" }));
     const spec = manifest.spec as any;
-    expect(spec.openclaw.config.agent.model).toBe("azure/o4-mini");
+    expect(spec.runtime.openclaw.config.agent.model).toBe("azure/o4-mini");
     expect(spec.inference.model).toBe("o4-mini");
   });
 
@@ -240,13 +244,13 @@ describe("ClawSandbox manifest generation", () => {
       defaultOptions({ image: "myregistry.azurecr.io/custom:v1" }),
     );
     const spec = manifest.spec as any;
-    expect(spec.openclaw.image).toBe("myregistry.azurecr.io/custom:v1");
+    expect(spec.runtime.openclaw.image).toBe("myregistry.azurecr.io/custom:v1");
   });
 
   it("omits image field when not specified", () => {
     const manifest = buildSandboxManifest("a", defaultOptions());
     const spec = manifest.spec as any;
-    expect(spec.openclaw.image).toBeUndefined();
+    expect(spec.runtime.openclaw.image).toBeUndefined();
   });
 
   it("includes default network policy with github endpoints", () => {
