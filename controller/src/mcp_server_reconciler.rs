@@ -614,6 +614,11 @@ async fn finalize(
 }
 
 fn error_policy(mcp: Arc<McpServer>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
+    let class = match error {
+        ReconcileError::Kube(_) => "kube_api",
+        ReconcileError::SerdeJson(_) => "serde",
+    };
+    crate::metrics::record_reconcile_error("McpServer", class);
     tracing::warn!(
         mcp = %mcp.name_any(),
         error = %error,

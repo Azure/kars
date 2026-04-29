@@ -351,6 +351,7 @@ async fn finalize(
 }
 
 fn error_policy(agent: Arc<A2AAgent>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
+    crate::metrics::record_reconcile_error("A2AAgent", error.class());
     tracing::warn!(
         a2aagent = %agent.name_any(),
         error_class = error.class(),

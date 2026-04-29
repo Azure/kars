@@ -80,6 +80,10 @@ spec:
             # registration provisioned.
             - name: AZURECLAW_DISABLE_ENTRA_AUTH
               value: {{ if .Values.azure.entraAuth.enabled }}"0"{{ else }}"1"{{ end }}
+          ports:
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

@@ -349,6 +349,7 @@ async fn finalize(
 }
 
 fn error_policy(policy: Arc<InferencePolicy>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
+    crate::metrics::record_reconcile_error("InferencePolicy", error.class());
     tracing::warn!(
         inferencepolicy = %policy.name_any(),
         error_class = error.class(),

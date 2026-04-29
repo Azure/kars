@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.E `phase2-controller-metrics` — controller workqueue metrics
+
+#### Added
+
+- **`controller/src/metrics.rs`** — Prometheus counter registration:
+  `azureclaw_controller_reconcile_errors_total{crd_kind, error_class}`
+  and `azureclaw_controller_reconcile_retries_total{crd_kind}`. Helper
+  `record_reconcile_error(...)` increments both. Bounded-cardinality
+  labels (no CR names / namespaces in labels).
+- **`controller/src/metrics_server.rs`** — minimal axum HTTP server
+  exposing `/metrics` (Prometheus text format) and `/healthz`. Bind
+  address overridable via `CONTROLLER_METRICS_ADDR` (default
+  `0.0.0.0:9091`); opt out with empty string or `disabled`.
+- Helm `controller-deployment.yaml` declares
+  `containerPort: 9091, name: metrics`.
+
+#### Changed
+
+- All eight `error_policy` functions call
+  `metrics::record_reconcile_error(...)` so a single Prometheus
+  query can answer "are any reconcilers in failure loops right
+  now?" without scraping logs.
+- Controller `Cargo.toml` adds `axum = "0.8"`.
+
+#### Tests
+
+- 4 new unit tests; controller bin 345 → 349. Clippy + fmt + helm
+  lint clean.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-controller-metrics.md`.
+
 ### S7.D `phase2-requeue-jitter` — bounded jitter on reconcile-error requeues
 
 #### Added

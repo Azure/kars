@@ -1676,6 +1676,11 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
 
 /// Error policy — what to do when reconciliation fails.
 fn error_policy(sandbox: Arc<ClawSandbox>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
+    let class = match error {
+        ReconcileError::Kube(_) => "kube_api",
+        ReconcileError::SerdeJson(_) => "serde",
+    };
+    crate::metrics::record_reconcile_error("ClawSandbox", class);
     tracing::error!(
         "Reconciliation error for {}: {:?}",
         sandbox.name_any(),

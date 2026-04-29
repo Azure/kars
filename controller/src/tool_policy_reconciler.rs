@@ -342,6 +342,7 @@ async fn finalize(
 }
 
 fn error_policy(tp: Arc<ToolPolicy>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
+    crate::metrics::record_reconcile_error("ToolPolicy", error.class());
     tracing::warn!(
         toolpolicy = %tp.name_any(),
         error_class = error.class(),

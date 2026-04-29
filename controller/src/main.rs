@@ -36,6 +36,8 @@ mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
 mod mesh_peer;
+mod metrics;
+mod metrics_server;
 mod pairing;
 mod pairing_reconciler;
 mod providers;
@@ -211,6 +213,26 @@ async fn main() -> Result<()> {
         })
     };
 
+    // S7.E: optional Prometheus metrics server. Default ON; opt out
+    // via `CONTROLLER_METRICS_ADDR=disabled` (or empty). Failures
+    // here are non-fatal — the controller's reconcile loops are the
+    // primary product; metrics are observability sugar on top.
+    let metrics_handle = {
+        match metrics_server::bind_addr_from_env() {
+            Some(addr) => Some(tokio::spawn(async move {
+                if let Err(e) = metrics_server::run(addr).await {
+                    tracing::error!(error = %e, "controller metrics server exited");
+                }
+            })),
+            None => {
+                tracing::info!(
+                    "controller metrics server disabled (CONTROLLER_METRICS_ADDR=disabled)"
+                );
+                None
+            }
+        }
+    };
+
     // Convert Option<JoinHandle> to a future that pends forever when
     // leader election is disabled. This keeps the `tokio::select!`
     // arms uniform regardless of mode.
@@ -224,6 +246,10 @@ async fn main() -> Result<()> {
         }
     };
     tokio::pin!(leader_future);
+
+    // Metrics server is fire-and-forget: failures shouldn't kill the
+    // controller's reconcile loops. Drop the handle to detach.
+    let _ = metrics_handle;
 
     tokio::select! {
         res = &mut leader_future => {
