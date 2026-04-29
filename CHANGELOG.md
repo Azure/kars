@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.4 `phase2-hotspot-operator-cli-e4` — operator.ts action helpers extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 1960 → **1880 LOC** (cumulative
+  S15.e: 2894 → 1880, **−1014**). Four egress action helpers extracted:
+  `approveDomain`, `denyDomain`, `enforceEgress`, `learnEgress` →
+  `cli/src/commands/operator/actions.ts` (116 LOC) via
+  `createActions(ctx)` factory.
+- Closure-captured `sandboxes` (reassigned per refresh) is now
+  injected as a `getSandboxes()` getter; `activityLog` and
+  `kubeContext` are passed by reference. No behavior change; bodies
+  byte-identical.
+
 ### S15.e.3 `phase2-hotspot-operator-cli-e3` — operator.ts security + cluster fetcher extraction
 
 #### Refactored

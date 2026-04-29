@@ -36,6 +36,7 @@ import {
   fetchMeshHealth,
   fetchClusterHealth,
 } from "./operator/fetchers/cluster.js";
+import { createActions } from "./operator/actions.js";
 
 // ── Command ─────────────────────────────────────────────────────────
 
@@ -281,93 +282,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
   }
 
-  // ── Actions ───────────────────────────────────────────────────────
-
-  async function approveDomain(domain: EgressDomain) {
-    const sb = sandboxes.find((s) => s.name === domain.sandbox);
-    if (!sb?.podName) {
-      activityLog.log(`{red-fg}✗ No pod for{/} ${domain.sandbox}`);
-      return;
-    }
-    try {
-      await execa("kubectl", kctl([
-        "exec", "-n", domain.namespace, sb.podName,
-        "-c", "inference-router", "--",
-        "curl", "-s", "-X", "POST",
-        "-H", "Content-Type: application/json",
-        "-d", JSON.stringify({ domain: domain.domain }),
-        "http://localhost:8443/egress/approve",
-      ], kubeContext), { stdio: "pipe" });
-      activityLog.log(`{green-fg}✓ Approved{/} ${domain.domain}`);
-    } catch (e: any) {
-      activityLog.log(`{red-fg}✗ Approve fail:{/} ${e.message?.substring(0, 50)}`);
-    }
-  }
-
-  async function denyDomain(domain: EgressDomain) {
-    const sb = sandboxes.find((s) => s.name === domain.sandbox);
-    if (!sb?.podName) {
-      activityLog.log(`{red-fg}✗ No pod for{/} ${domain.sandbox}`);
-      return;
-    }
-    try {
-      await execa("kubectl", kctl([
-        "exec", "-n", domain.namespace, sb.podName,
-        "-c", "inference-router", "--",
-        "curl", "-s", "-X", "POST",
-        "-H", "Content-Type: application/json",
-        "-d", JSON.stringify({ domain: domain.domain }),
-        "http://localhost:8443/egress/deny",
-      ], kubeContext), { stdio: "pipe" });
-      activityLog.log(`{yellow-fg}✗ Denied{/} ${domain.domain}`);
-    } catch (e: any) {
-      activityLog.log(`{red-fg}✗ Deny fail:{/} ${e.message?.substring(0, 50)}`);
-    }
-  }
-
-  async function enforceEgress(sb: SandboxInfo) {
-    if (!sb.podName) return;
-    try {
-      await execa("kubectl", kctl([
-        "exec", "-n", sb.namespace, sb.podName,
-        "-c", "inference-router", "--",
-        "curl", "-s", "-X", "POST",
-        "http://localhost:8443/egress/enforce",
-      ], kubeContext), { stdio: "pipe" });
-      // Persist to CRD so the controller preserves the mode across restarts
-      await execa("kubectl", kctl([
-        "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
-        "--type", "merge", "-p",
-        JSON.stringify({ spec: { networkPolicy: { learnEgress: false } } }),
-      ], kubeContext), { stdio: "pipe" }).catch(() => {});
-      activityLog.log(`{green-fg}🔒 Enforced{/} ${sb.name}`);
-      activityLog.log(`{gray-fg}   ↳ saved to CRD — may trigger pod restart{/}`);
-    } catch (e: any) {
-      activityLog.log(`{red-fg}✗ Enforce fail:{/} ${e.message?.substring(0, 50)}`);
-    }
-  }
-
-  async function learnEgress(sb: SandboxInfo) {
-    if (!sb.podName) return;
-    try {
-      await execa("kubectl", kctl([
-        "exec", "-n", sb.namespace, sb.podName,
-        "-c", "inference-router", "--",
-        "curl", "-s", "-X", "POST",
-        "http://localhost:8443/egress/learn",
-      ], kubeContext), { stdio: "pipe" });
-      // Persist to CRD so the controller preserves the mode across restarts
-      await execa("kubectl", kctl([
-        "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
-        "--type", "merge", "-p",
-        JSON.stringify({ spec: { networkPolicy: { learnEgress: true } } }),
-      ], kubeContext), { stdio: "pipe" }).catch(() => {});
-      activityLog.log(`{yellow-fg}📖 Learning{/} ${sb.name}`);
-      activityLog.log(`{gray-fg}   ↳ saved to CRD — may trigger pod restart{/}`);
-    } catch (e: any) {
-      activityLog.log(`{red-fg}✗ Learn fail:{/} ${e.message?.substring(0, 50)}`);
-    }
-  }
+  // ── Actions (extracted to operator/actions.ts) ────────────────────
+  const { approveDomain, denyDomain, enforceEgress, learnEgress } = createActions({
+    getSandboxes: () => sandboxes,
+    activityLog,
+    kubeContext,
+  });
 
   // ── Rendering ─────────────────────────────────────────────────────
 
