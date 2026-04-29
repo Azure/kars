@@ -1,6 +1,16 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { getAdminToken, withAdminAuth } from "../router-admin.js";
+import {
+  EGRESS_ALLOWLIST_MEDIA_TYPE,
+  autoDetectSignMode,
+  buildCanonicalAllowlist,
+  ensureSigningTools,
+  patchClawSandbox,
+  pushArtifact,
+  readClawSandboxState,
+  signArtifact,
+} from "./egress/sign.js";
 
 export function egressCommand(): Command {
   const cmd = new Command("egress");
@@ -18,8 +28,21 @@ export function egressCommand(): Command {
     .option("--allowlist", "Show currently approved domains")
     .option("--enforce", "Graduate: promote all learned domains to allowlist, switch to enforcement mode")
     .option("--status", "Show blocklist and learn mode status")
+    .option("--sign", "Build canonical allowlist artifact, push to ACR, sign with cosign, patch allowlistRef (S12.c, opt-in; non-authoritative)")
+    .option("--no-sign", "Disable signing even if a future default flips it on (forward-compat placeholder)")
+    .option("--sign-mode <mode>", "Cosign mode: keyless | identity-token | keyed (default: auto-detect)")
+    .option("--sign-key <ref>", "Cosign key reference (path or KMS URI like azurekms://...) — required for --sign-mode keyed")
+    .option("--registry <fqdn>", "Override target ACR for the artifact push (default: auto-discover)")
+    .option("--repository <repo>", "Repository path within the registry (default: policy/egress-allowlist/<sandbox>)")
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
+
+      // Validate --sign requires --enforce or --approve.
+      if (options.sign && !options.enforce && !options.approve) {
+        console.log(chalk.red(`\n  --sign requires --enforce or --approve.\n`));
+        process.exitCode = 1;
+        return;
+      }
 
       const containerName = `azureclaw-${name}`;
       const ns = options.namespace || containerName;
@@ -88,6 +111,10 @@ export function egressCommand(): Command {
           console.log(chalk.dim(`     Domain added to egress allowlist. The agent can now reach it.\n`));
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to approve: ${e.message}\n`));
+          return;
+        }
+        if (options.sign) {
+          await runSignFlow(name, ns, options);
         }
         return;
       }
@@ -129,6 +156,10 @@ export function egressCommand(): Command {
           }
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to enforce: ${e.message}\n`));
+          return;
+        }
+        if (options.sign) {
+          await runSignFlow(name, ns, options);
         }
         return;
       }
@@ -267,4 +298,117 @@ export function egressCommand(): Command {
     });
 
   return cmd;
+}
+
+/**
+ * S12.c — orchestrate the canonical-build → oras push → cosign sign →
+ * kubectl patch flow. Fails closed: any error before patch aborts;
+ * patch only happens after signing succeeds.
+ */
+async function runSignFlow(
+  name: string,
+  ns: string,
+  options: any,
+): Promise<void> {
+  console.log(chalk.hex("#0078D4")(`\n  Signing egress allowlist artifact for '${name}' (S12.c)`));
+  try {
+    const { orasPath, cosignPath } = await ensureSigningTools();
+
+    // Resolve registry: explicit flag wins; otherwise auto-discover via
+    // existing context (kubectl current-context's ACR is recorded by
+    // `azureclaw context`). For the CLI we read it from azd / config
+    // by shelling out — but to keep this slice tight, we require
+    // either --registry or AZURECLAW_REGISTRY.
+    const registry =
+      options.registry ||
+      process.env.AZURECLAW_REGISTRY ||
+      (await discoverRegistry());
+    if (!registry) {
+      throw new Error(
+        `--registry not set and could not auto-discover. Pass --registry <acr.azurecr.io> or set AZURECLAW_REGISTRY.`,
+      );
+    }
+    const repository = options.repository || `policy/egress-allowlist/${name}`;
+
+    // Read live ClawSandbox state — generation + endpoints.
+    const state = await readClawSandboxState({
+      kubectlPath: "kubectl",
+      namespace: ns,
+      name,
+    });
+    if (state.endpoints.length === 0) {
+      throw new Error(
+        `ClawSandbox ${ns}/${name} has no spec.networkPolicy.allowedEndpoints — refusing to sign empty allowlist.`,
+      );
+    }
+
+    const canonical = buildCanonicalAllowlist({
+      generation: state.generation,
+      endpoints: state.endpoints,
+    });
+
+    const mode = autoDetectSignMode({
+      signModeFlag: options.signMode,
+      signKey: options.signKey,
+      isTTY: Boolean(process.stdout.isTTY),
+      env: process.env,
+    });
+
+    console.log(chalk.dim(`     Registry:   ${registry}/${repository}`));
+    console.log(chalk.dim(`     Generation: ${state.generation}`));
+    console.log(chalk.dim(`     Endpoints:  ${canonical.endpoints.length}`));
+    console.log(chalk.dim(`     Sign mode:  ${mode}`));
+
+    const digest = await pushArtifact({
+      orasPath,
+      registry,
+      repository,
+      yaml: canonical.yaml,
+      artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
+    });
+    console.log(chalk.green(`     ✅ Pushed   ${digest}`));
+
+    try {
+      await signArtifact({
+        cosignPath,
+        registry,
+        repository,
+        digest,
+        mode,
+        keyRef: options.signKey,
+      });
+    } catch (e: any) {
+      // Fail-closed: do NOT patch the CR if signing failed.
+      throw new Error(`cosign sign failed (CR not patched): ${e.message}`);
+    }
+    console.log(chalk.green(`     ✅ Signed   (mode=${mode})`));
+
+    await patchClawSandbox({
+      kubectlPath: "kubectl",
+      namespace: ns,
+      name,
+      registry,
+      repository,
+      digest,
+      artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
+    });
+    console.log(chalk.green(`     ✅ Patched  spec.networkPolicy.allowlistRef`));
+    console.log(chalk.dim(`\n  Note: this slice is non-authoritative — inline allowedEndpoints remains the source of truth (see plan §S12.e).\n`));
+  } catch (e: any) {
+    console.log(chalk.red(`\n  Signing aborted: ${e.message}\n`));
+    process.exitCode = 1;
+  }
+}
+
+async function discoverRegistry(): Promise<string | null> {
+  // Best-effort lookup from the CLI's config file. Keeping this thin
+  // — the explicit --registry flag is the documented path.
+  try {
+    const { loadContext } = await import("../config.js");
+    const ctx = loadContext();
+    const reg = (ctx as any)?.acrLoginServer || (ctx as any)?.registry || null;
+    return typeof reg === "string" && reg.length > 0 ? reg : null;
+  } catch {
+    return null;
+  }
 }
