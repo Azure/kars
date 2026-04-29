@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.b `phase2-s12-bd-policy-fetcher` — controller policy fetcher (status-only, feature-gated)
+
+- New `controller/src/policy_fetcher.rs` — pulls signed OCI egress-allowlist
+  artifacts via `oci-client`, verifies cosign signature + signer identity via
+  `sigstore-rs`, re-validates canonical-form rules from
+  `docs/policy-canonical-format.md`. Result cached by digest with 1h TTL.
+- `AllowlistVerified` condition surfaced on `ClawSandbox` status when
+  `spec.networkPolicy.allowlistRef` is set and
+  `AZURECLAW_FEATURE_SIGNED_ALLOWLIST=1`. Reasons: `Verified`,
+  `SignerPolicyMissing`, `SignatureVerifyFailed`, `IdentityMismatch`,
+  `CanonicalFormViolation`, `DigestMismatch`, `Unauthorized`, `NotFound`,
+  `InvalidRef`. `Transient` errors preserve the prior condition (no flap).
+- Status-only: `NetworkPolicy` continues to derive from inline
+  `allowedEndpoints`. Authoritative-mode flip ships in S12.e.
+- SignerPolicy still configured via env in S12.b
+  (`AZURECLAW_SIGNER_FULCIO_ISSUERS`, `AZURECLAW_SIGNER_SAN_PATTERNS`);
+  ConfigMap watcher ships in S12.d. With no SignerPolicy configured, the
+  fetcher returns `SignerPolicyMissing` (intended fail-closed behavior).
+- ACR auth via Workload Identity → ACR token-exchange flow implemented
+  end-to-end in `acr_token_for_pull` (federated token → AAD → ACR refresh
+  → ACR access). Falls back to `Anonymous` for non-ACR registries.
+- New deps in `controller/Cargo.toml`: `sigstore = "0.13"` (cosign+verify+
+  rustls-tls), `oci-client = "0.16"`, `idna = "1"`.
+- New status helpers `build_running_status_patch_with_extras` /
+  `running_status_matches_with_extras` lift the existing patch builder
+  to accept additive Conditions while preserving idempotency.
+- 29 new unit tests in `controller/src/policy_fetcher.rs`; controller
+  test count 354 → 383. Workspace green; clippy clean; `cargo fmt` clean.
+
 ### S12.c — CLI `--sign` flag (egress allowlist artifact producer)
 
 - New `cli/src/commands/egress/sign.ts` — canonical YAML serializer (matches `docs/policy-canonical-format.md` byte-for-byte), `oras push` artifact uploader, `cosign sign` orchestrator (keyless / identity-token / keyed), `kubectl patch` of `ClawSandbox.spec.networkPolicy.allowlistRef`.

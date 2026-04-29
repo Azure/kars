@@ -70,6 +70,22 @@ pub const TYPE_SUSPENDED: &str = "Suspended";
 /// running the wrong runtime image.
 pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
 
+/// Phase 2 S12.b — `AllowlistVerified`: the controller fetched the
+/// signed OCI artifact referenced by
+/// `spec.networkPolicy.allowlistRef`, verified its cosign signature
+/// against the cluster `SignerPolicy` (S12.d), and re-validated the
+/// canonical-form rules from `docs/policy-canonical-format.md`.
+///
+/// Only emitted when both `allowlistRef` is set on the CR *and* the
+/// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST=1` env gate is on. Status-only in
+/// S12.b — the live `NetworkPolicy` continues to derive from inline
+/// `allowedEndpoints` until S12.e flips authoritative mode.
+///
+/// `status=True/Verified` means the artifact is current and trusted.
+/// `status=False/<reason>` carries the failure category — see
+/// [`super::super::policy_fetcher::reason_for_error`] for the mapping.
+pub const TYPE_ALLOWLIST_VERIFIED: &str = "AllowlistVerified";
+
 /// `status` canonical values.
 pub mod status {
     pub const TRUE: &str = "True";
@@ -97,6 +113,10 @@ pub mod reason {
     /// to create a Deployment rather than silently fall through to the
     /// OpenClaw image.
     pub const ADAPTER_MISSING: &str = "AdapterMissing";
+    /// Phase 2 S12.b — `Verified`: signed allowlist artifact fetched,
+    /// cosign signature passed, signer identity matched cluster
+    /// SignerPolicy, canonical form re-validated.
+    pub const VERIFIED: &str = "Verified";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
