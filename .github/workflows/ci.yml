@@ -57,6 +57,13 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      # S17.A: SCA gate — fail on `high` or `critical` advisories in
+      # CLI dependencies. Lower severities don't fail the build but
+      # are visible in CI logs. Matches the cargo-audit job's posture
+      # of denying warnings (cargo's default warning bar is roughly
+      # equivalent to RUSTSEC `high`).
+      - name: npm audit (CLI dependencies)
+        run: npm audit --audit-level=high
 
   mesh-plugin-build:
     name: Mesh Plugin Build & Test
@@ -74,6 +81,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - name: npm audit (Mesh Plugin dependencies)
+        working-directory: mesh-plugin
+        run: npm audit --audit-level=high
 
   python-sidecar:
     name: Python Lint & Test (AGT Sidecar)

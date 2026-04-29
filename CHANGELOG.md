@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S17.A `phase2-sca-permanent-rows` — npm audit as permanent CI gate
+
+#### Added
+
+- `.github/workflows/ci.yml` `cli-build` and `mesh-plugin-build`
+  jobs now append `npm audit --audit-level=high` after the test
+  step. JavaScript-side SCA now matches the Rust side's existing
+  `cargo audit --deny warnings` posture.
+
+#### Tests
+
+- Pre-commit verification: both `cd cli && npm audit
+  --audit-level=high` and `cd mesh-plugin && npm audit
+  --audit-level=high` reported `found 0 vulnerabilities` against
+  the current `package-lock.json` files.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-sca-permanent-rows.md` —
+  partial closure of §11.1 ("trivy + cosign-verify + SCA →
+  permanent CI rows"). Cosign-verify deferred to S17.B once a
+  direct dep starts publishing Sigstore signatures.
+
 ### S7.F `phase2-content-safety-floor` — Content-Safety floor admission
 
 #### Added
