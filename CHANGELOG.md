@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.6 `phase2-hotspot-operator-cli-e6` — operator.ts spawn-dialog extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 1279 → **1027 LOC** (cumulative
+  S15.e: 2894 → 1027, **−1867**). The `n`-key spawn-agent dialog
+  (`draw`/`close`/`startEdit`/`launch`/`onKey`) extracted to
+  `operator/dialogs/spawn.ts` (~295 LOC) via `SpawnDialogContext`.
+  Modal flag passes through a `setDialogOpen(open)` callback.
+- No behavior change.
+
 ### S15.e.5c `phase2-hotspot-operator-cli-e5c` — operator.ts header render extraction
 
 #### Refactored
