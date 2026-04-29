@@ -60,6 +60,21 @@ pub fn build_running_status_patch(
         &format!("runtime adapter `{runtime_kind}` reconciled"),
         generation,
     );
+    // Phase 2 S7.B: complete the Conditions matrix. Pre-S7.B the
+    // Running status patch only stamped Ready + RuntimeReady, leaving
+    // `Progressing` to be inferred from `Ready=True`. KEP-1623 §C and
+    // operator UX expect every Condition type the controller writes
+    // to be present on every reconcile so dashboards / kubectl wait
+    // queries (`--for=condition=Progressing=False`) work consistently
+    // across success / overlay / degraded / adapter-missing paths.
+    let progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::FALSE,
+        conditions::reason::RECONCILED,
+        "sandbox reconciled; no further controller work pending",
+        generation,
+    );
 
     let mut status_obj = json!({
         "status": {
@@ -70,7 +85,7 @@ pub fn build_running_status_patch(
             "pendingApprovals": 0,
             "observedGeneration": generation,
             "runtimeKind": runtime_kind,
-            "conditions": [ready, runtime_ready],
+            "conditions": [ready, progressing, runtime_ready],
         }
     });
     if let Some(existing) = sandbox.status.as_ref()
@@ -102,7 +117,10 @@ pub fn build_running_status_patch(
 /// `tokensUsed` updater) may differ — those would not be touched by our
 /// merge patch anyway.
 pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_kind: &str) -> bool {
-    use crate::status::conditions::{TYPE_READY, TYPE_RUNTIME_READY, status::TRUE as STATUS_TRUE};
+    use crate::status::conditions::{
+        TYPE_PROGRESSING, TYPE_READY, TYPE_RUNTIME_READY,
+        status::{FALSE as STATUS_FALSE, TRUE as STATUS_TRUE},
+    };
 
     let Some(status) = sandbox.status.as_ref() else {
         return false;
@@ -125,6 +143,19 @@ pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_k
         .find(|c| c.type_ == TYPE_READY)
         .is_some_and(|c| c.status == STATUS_TRUE);
     if !ready_ok {
+        return false;
+    }
+    // Phase 2 S7.B: the running shape now stamps Progressing=False
+    // alongside Ready=True; verifying it here prevents an upgrade-time
+    // status flap where a pre-S7.B controller's Ready-only status would
+    // otherwise be considered a no-op match and the Progressing field
+    // would never get back-filled.
+    let progressing_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_PROGRESSING)
+        .is_some_and(|c| c.status == STATUS_FALSE);
+    if !progressing_ok {
         return false;
     }
     let runtime_ready_ok = status
@@ -300,11 +331,24 @@ pub fn build_degraded_status_patch(
         message,
         generation,
     );
+    // Phase 2 S7.B: Degraded path stamps `Progressing=False` so
+    // `kubectl wait --for=condition=Progressing=False` resolves
+    // identically across the success / overlay / degraded / adapter-
+    // missing paths. The reason mirrors the degraded reason so
+    // operators see the same "why" on both conditions.
+    let not_progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::FALSE,
+        reason_value,
+        message,
+        generation,
+    );
     json!({
         "status": {
             "phase": "Degraded",
             "observedGeneration": generation,
-            "conditions": [degraded, not_ready],
+            "conditions": [degraded, not_ready, not_progressing],
         }
     })
 }
@@ -383,12 +427,22 @@ pub fn build_runtime_unsupported_status_patch(
         message,
         generation,
     );
+    // Phase 2 S7.B: complete the Conditions matrix on the adapter-
+    // missing path too — see `build_running_status_patch` rationale.
+    let not_progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::FALSE,
+        conditions::reason::ADAPTER_MISSING,
+        message,
+        generation,
+    );
     json!({
         "status": {
             "phase": "Degraded",
             "observedGeneration": generation,
             "runtimeKind": runtime_kind,
-            "conditions": [degraded, not_ready, runtime_not_ready],
+            "conditions": [degraded, not_ready, runtime_not_ready, not_progressing],
         }
     })
 }
@@ -397,7 +451,7 @@ pub fn build_runtime_unsupported_status_patch(
 #[must_use]
 pub fn runtime_unsupported_status_matches(sandbox: &ClawSandbox, runtime_kind: &str) -> bool {
     use crate::status::conditions::{
-        TYPE_DEGRADED, TYPE_READY, TYPE_RUNTIME_READY,
+        TYPE_DEGRADED, TYPE_PROGRESSING, TYPE_READY, TYPE_RUNTIME_READY,
         reason::ADAPTER_MISSING,
         status::{FALSE as STATUS_FALSE, TRUE as STATUS_TRUE},
     };
@@ -429,7 +483,15 @@ pub fn runtime_unsupported_status_matches(sandbox: &ClawSandbox, runtime_kind: &
         .iter()
         .find(|c| c.type_ == TYPE_RUNTIME_READY)
         .is_some_and(|c| c.status == STATUS_FALSE && c.reason == ADAPTER_MISSING);
-    degraded_ok && ready_ok && runtime_ready_ok
+    // Phase 2 S7.B: also verify Progressing=False so a pre-S7.B
+    // status (no Progressing field) is treated as stale and gets
+    // back-filled on the next reconcile rather than masked.
+    let progressing_ok = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_PROGRESSING)
+        .is_some_and(|c| c.status == STATUS_FALSE && c.reason == ADAPTER_MISSING);
+    degraded_ok && ready_ok && runtime_ready_ok && progressing_ok
 }
 
 /// Patch `.status` with the `AdapterMissing` Degraded shape (see
@@ -488,11 +550,22 @@ mod tests {
         assert_eq!(st["observedGeneration"], 7);
         assert_eq!(st["runtimeKind"], "OpenClaw");
         let conds = st["conditions"].as_array().expect("conditions array");
-        assert_eq!(conds.len(), 2, "expected Ready + RuntimeReady");
+        assert_eq!(
+            conds.len(),
+            3,
+            "expected Ready + Progressing + RuntimeReady"
+        );
         let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
         assert_eq!(ready["status"], "True");
         assert_eq!(ready["reason"], "Reconciled");
         assert_eq!(ready["observedGeneration"], 7);
+        let progressing = conds
+            .iter()
+            .find(|c| c["type"] == "Progressing")
+            .expect("Progressing");
+        assert_eq!(progressing["status"], "False");
+        assert_eq!(progressing["reason"], "Reconciled");
+        assert_eq!(progressing["observedGeneration"], 7);
         let runtime_ready = conds
             .iter()
             .find(|c| c["type"] == "RuntimeReady")
@@ -649,6 +722,13 @@ mod tests {
                     Some(1),
                 ),
                 conditions::new_condition(
+                    conditions::TYPE_PROGRESSING,
+                    conditions::status::FALSE,
+                    conditions::reason::RECONCILED,
+                    "ok",
+                    Some(1),
+                ),
+                conditions::new_condition(
                     conditions::TYPE_RUNTIME_READY,
                     conditions::status::TRUE,
                     conditions::reason::RECONCILED,
@@ -663,6 +743,40 @@ mod tests {
     }
 
     #[test]
+    fn running_status_matches_returns_false_when_progressing_missing() {
+        // Phase 2 S7.B regression: pre-S7.B controllers wrote
+        // [Ready=True, RuntimeReady=True] without Progressing. After
+        // upgrade, that prior shape must be considered stale so the
+        // first reconcile back-fills the new Progressing condition
+        // instead of being short-circuited as a no-op.
+        let prior = ClawSandboxStatus {
+            phase: Some("Running".into()),
+            namespace: Some("azureclaw-demo".into()),
+            observed_generation: Some(1),
+            runtime_kind: Some("OpenClaw".into()),
+            conditions: vec![
+                conditions::new_condition(
+                    conditions::TYPE_READY,
+                    conditions::status::TRUE,
+                    conditions::reason::RECONCILED,
+                    "ok",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_RUNTIME_READY,
+                    conditions::status::TRUE,
+                    conditions::reason::RECONCILED,
+                    "ok",
+                    Some(1),
+                ),
+            ],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+    }
+
+    #[test]
     fn degraded_patch_stamps_degraded_true_and_ready_false() {
         let sb = new_sandbox(Some(9), None);
         let patch = build_degraded_status_patch(
@@ -674,7 +788,7 @@ mod tests {
         assert_eq!(st["phase"], "Degraded");
         assert_eq!(st["observedGeneration"], 9);
         let conds = st["conditions"].as_array().expect("conditions array");
-        assert_eq!(conds.len(), 2);
+        assert_eq!(conds.len(), 3);
         let degraded = conds
             .iter()
             .find(|c| c["type"] == "Degraded")
@@ -689,6 +803,13 @@ mod tests {
         assert_eq!(ready["status"], "False");
         assert_eq!(ready["reason"], "SpecInvalid");
         assert_eq!(ready["observedGeneration"], 9);
+        let progressing = conds
+            .iter()
+            .find(|c| c["type"] == "Progressing")
+            .expect("Progressing cond");
+        assert_eq!(progressing["status"], "False");
+        assert_eq!(progressing["reason"], "SpecInvalid");
+        assert_eq!(progressing["observedGeneration"], 9);
     }
 
     #[test]
@@ -938,7 +1059,11 @@ mod tests {
         assert_eq!(st["observedGeneration"], 5);
         assert_eq!(st["runtimeKind"], "OpenAIAgents");
         let conds = st["conditions"].as_array().expect("conditions array");
-        assert_eq!(conds.len(), 3, "expected Degraded+Ready+RuntimeReady");
+        assert_eq!(
+            conds.len(),
+            4,
+            "expected Degraded+Ready+RuntimeReady+Progressing"
+        );
         let degraded = conds
             .iter()
             .find(|c| c["type"] == "Degraded")
@@ -954,6 +1079,12 @@ mod tests {
             .expect("RuntimeReady");
         assert_eq!(runtime_ready["status"], "False");
         assert_eq!(runtime_ready["reason"], "AdapterMissing");
+        let progressing = conds
+            .iter()
+            .find(|c| c["type"] == "Progressing")
+            .expect("Progressing");
+        assert_eq!(progressing["status"], "False");
+        assert_eq!(progressing["reason"], "AdapterMissing");
     }
 
     #[test]
@@ -1020,6 +1151,13 @@ mod tests {
                 ),
                 conditions::new_condition(
                     conditions::TYPE_RUNTIME_READY,
+                    conditions::status::FALSE,
+                    conditions::reason::ADAPTER_MISSING,
+                    "x",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_PROGRESSING,
                     conditions::status::FALSE,
                     conditions::reason::ADAPTER_MISSING,
                     "x",
