@@ -19,16 +19,17 @@ ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:la
 
 FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 
-# ─── CLI Plugin Builder (TypeScript → JavaScript) ────────────────────────────
+# ─── Runtime Adapter Builder (TypeScript → JavaScript) ───────────────────────
+# Builds runtimes/openclaw/ — the AzureClaw runtime adapter for OpenClaw,
+# loaded as a non-bundled OpenClaw plugin inside the sandbox pod.
 # Uses the base image (has Node.js) to avoid a separate Node.js download.
 
 FROM ${SANDBOX_BASE_IMAGE} AS cli-builder
 
 WORKDIR /build
-COPY cli/package.json cli/package-lock.json cli/tsconfig.json ./cli/
-COPY cli/src/ ./cli/src/
-COPY policy-engine/profiles/ ./policy-engine/profiles/
-RUN cd cli && npm ci --ignore-scripts && npm run build
+COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/tsconfig.json ./runtimes/openclaw/
+COPY runtimes/openclaw/src/ ./runtimes/openclaw/src/
+RUN cd runtimes/openclaw && npm ci --ignore-scripts && npm run build
 
 # ─── Runtime Stage (overlay on base) ─────────────────────────────────────────
 
@@ -40,9 +41,9 @@ COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.j
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
 
-# Copy AzureClaw OpenClaw plugin (built from source in cli-builder stage)
-COPY --from=cli-builder /build/cli/dist/ /opt/azureclaw-plugin/
-COPY cli/package.json cli/package-lock.json cli/openclaw.plugin.json /opt/azureclaw-plugin/
+# Copy AzureClaw OpenClaw runtime adapter (built from source in cli-builder stage)
+COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/azureclaw-plugin/
+COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY cli/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 

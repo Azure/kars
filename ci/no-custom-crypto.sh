@@ -44,8 +44,9 @@ PROD_PATHS=(
   'controller/src/'
   'inference-router/src/'
   'cli/src/'
+  'runtimes/openclaw/src/'
   'sandbox-images/'
-  'policy-engine/'
+  'cli/profiles/'
 )
 
 # Patterns — each is a canonical import / invocation we never want written by us.

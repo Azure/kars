@@ -58,7 +58,7 @@ describe("azureClawPlugin object", () => {
     // Set env vars to prevent real AGT/Foundry init
     process.env.AGT_SKIP_INIT = "1";
     // Dynamic import to get the default export
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     plugin = mod.default;
   });
 
@@ -100,7 +100,7 @@ describe("plugin.register() — tool definitions", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     plugin = mod.default;
     const mock = createMockApi();
     tools = mock.tools;
@@ -195,7 +195,7 @@ describe("azureclaw_mesh_inbox — empty inbox", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     plugin = mod.default;
     const mock = createMockApi();
     tools = mock.tools;
@@ -230,7 +230,7 @@ describe("azureclaw_mesh_send — no AGT client", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     plugin = mod.default;
     const mock = createMockApi();
     tools = mock.tools;
@@ -265,7 +265,7 @@ describe("plugin config — getPluginConfig", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     plugin = mod.default;
   });
 
@@ -307,7 +307,7 @@ describe("configSchema structure", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     plugin = mod.default;
   });
 
@@ -345,7 +345,7 @@ describe("tool parameter schemas", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -402,7 +402,7 @@ describe("tool execute — error handling", () => {
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -459,7 +459,7 @@ describe("AGT_SKIP_INIT env guard", () => {
   it("skips AGT initialization when AGT_SKIP_INIT=1", async () => {
     process.env.AGT_SKIP_INIT = "1";
     const mock = createMockApi();
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 200));
 
@@ -481,7 +481,7 @@ describe("startup banner", () => {
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.SANDBOX_NAME = "test-sandbox";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi({ model: "gpt-4.1" });
     logMessages = mock.logMessages;
     mod.default.register(mock.api);
@@ -518,7 +518,7 @@ describe("tool descriptions mention security", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -556,7 +556,7 @@ describe("tool output format consistency", () => {
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -606,7 +606,7 @@ describe("tool output format consistency", () => {
 describe("register() idempotency", () => {
   it("re-registers tools on second register() call", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
 
     const mock1 = createMockApi();
     mod.default.register(mock1.api);
@@ -632,7 +632,7 @@ describe("register() idempotency", () => {
 describe("provider registration", () => {
   it("registers an Azure OpenAI provider", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
@@ -657,7 +657,7 @@ describe("command registration", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     commands = mock.commands;
     mod.default.register(mock.api);
@@ -699,7 +699,7 @@ describe("Foundry tool registration", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -741,7 +741,7 @@ describe("azureclaw_mesh_inbox — output structure", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -780,7 +780,7 @@ describe("azureclaw_mesh_send — error includes hint", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -813,7 +813,7 @@ describe("azureclaw_mesh_send — error includes hint", () => {
 describe("DEFAULT_CONFIG values", () => {
   it("default model is gpt-4.1", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi({}); // empty pluginConfig → defaults
     mod.default.register(mock.api);
     // The spawn tool defaults to gpt-4.1 in its body
@@ -838,7 +838,7 @@ describe("sandbox name resolution", () => {
   it("uses SANDBOX_NAME env var in banner", async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.SANDBOX_NAME = "custom-sandbox";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     const hasName = mock.logMessages.some((m) => m.includes("custom-sandbox"));
@@ -849,7 +849,7 @@ describe("sandbox name resolution", () => {
     process.env.AGT_SKIP_INIT = "1";
     delete process.env.SANDBOX_NAME;
     process.env.HOSTNAME = "my-host";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     const hasHost = mock.logMessages.some((m) => m.includes("my-host"));
@@ -860,7 +860,7 @@ describe("sandbox name resolution", () => {
     process.env.AGT_SKIP_INIT = "1";
     delete process.env.SANDBOX_NAME;
     delete process.env.HOSTNAME;
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     const hasLocal = mock.logMessages.some((m) => m.includes("local"));
@@ -875,7 +875,7 @@ describe("sandbox name resolution", () => {
 describe("all registered tools have labels", () => {
   it("every tool has a non-empty label", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
@@ -896,7 +896,7 @@ describe("all registered tools have labels", () => {
 describe("all registered tools have execute functions", () => {
   it("every tool has an execute function", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
@@ -917,7 +917,7 @@ describe("mesh transport constants", () => {
   it("MESH_CHUNK_THRESHOLD is 512KB", async () => {
     // Verify the exported tool descriptions mention chunking
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
@@ -941,7 +941,7 @@ describe("azureclaw_mesh_transfer_file tool", () => {
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -1005,7 +1005,7 @@ describe("azureclaw_mesh_send — auto-chunking", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -1044,7 +1044,7 @@ describe("handoff tool registration", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
     mod.default.register(mock.api);
@@ -1093,7 +1093,7 @@ describe("AZURECLAW_ROUTER_URL configuration", () => {
   it("spawn tools use configurable router URL", async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
@@ -1109,7 +1109,7 @@ describe("AZURECLAW_ROUTER_URL configuration", () => {
   it("spawn_status uses configurable router URL", async () => {
     process.env.AGT_SKIP_INIT = "1";
     process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
-    const mod = await import("./plugin.js");
+    const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
