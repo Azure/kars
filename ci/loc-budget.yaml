@@ -17,13 +17,13 @@ global:
   override_comment: "// ci:loc-ok"
 
 files:
-  - path: cli/src/plugin.ts
+  - path: runtimes/openclaw/src/index.ts
     baseline_2026_04_24: 7455
     phase0_cap: 7200
     phase1_cap: 6000
     phase2_cap: 3000
     phase3_cap: 800
-    notes: "Split into cli/src/core/{session,handoff,offload,mesh,signal,restore}.ts modules."
+    notes: "Moved from cli/src/plugin.ts in S15.g.1. Decomposed into runtimes/openclaw/src/core/{session,handoff,offload,mesh,signal,restore}.ts modules."
 
   - path: cli/src/commands/operator.ts
     baseline_2026_04_24: 2932

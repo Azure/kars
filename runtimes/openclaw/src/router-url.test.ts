@@ -1,6 +1,6 @@
 // Tests for plan item q7 — centralized router URL helpers.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { routerBase, routerUrl, routerWsBase, routerWsUrl } from "./plugin.js";
+import { routerBase, routerUrl, routerWsBase, routerWsUrl } from "./index.js";
 
 const ENV_KEY = "AZURECLAW_ROUTER_URL";
 
