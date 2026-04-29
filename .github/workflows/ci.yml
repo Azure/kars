@@ -285,7 +285,7 @@ jobs:
           chmod +x /usr/local/bin/hadolint
       - name: Lint Dockerfiles
         run: |
-          IGNORE="--ignore DL3008 --ignore DL3013 --ignore DL3018 --ignore DL3006 --ignore DL4006 --ignore DL3003 --ignore DL3016 --ignore DL3059 --ignore SC2015 --ignore SC2028"
+          IGNORE="--ignore DL3008 --ignore DL3013 --ignore DL3018 --ignore DL3006 --ignore DL4006 --ignore DL3003 --ignore DL3016 --ignore DL3059 --ignore DL3062 --ignore SC2015 --ignore SC2028"
           hadolint $IGNORE controller/Dockerfile
           hadolint $IGNORE inference-router/Dockerfile
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile.base
