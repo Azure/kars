@@ -7,7 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
-### S15.f.8 `phase2-hotspot-plugin-cli-f8` — Foundry + http_fetch tool registrations
+### S15.f.9 `phase2-hotspot-plugin-cli-f9` — stateful AGT tool registrations
+
+#### Refactored
+
+- `cli/src/plugin.ts` 4323 → **3233 LOC** (−1090, cumulative S15.f
+  −3906, **§4.2 cap of 3000 only 233 LOC away**). The cluster of 11
+  stateful AGT `api.registerTool` blocks (spawn lifecycle, mesh
+  send/inbox/transfer, agent discovery, and live handoff) extracted
+  to `cli/src/core/agt-tools/agt.ts` (~1130 LOC). Tool bodies are
+  byte-identical; only closure capture is replaced.
+- The `handoffProgress` mutable was promoted from a `let` declaration
+  in `plugin.ts` to a shared holder object
+  (`const handoffState: { current: HandoffProgress | null }`) so that
+  the new module mutates it through a stable reference. Three
+  former call sites in `plugin.ts` (the declaration and the
+  `_runHandoffOrchestration` wrapper) updated accordingly.
+- The local `safeJson` (already lifted to `core/safe-json.ts` in
+  S15.f.8), `POD_DEAD_PHASES` constant, and `probeSubAgentAlive`
+  helper that lived inside `register()` are now defined inside
+  `core/agt-tools/agt.ts`. They were unreferenced anywhere else.
+- The duplicate `interface HandoffProgress` block in `plugin.ts`
+  was removed; the type is now imported once from
+  `core/agt-handoff.ts`.
+
+#### Tools moved (registered via `registerAgtTools(api, deps)`)
+
+- `azureclaw_spawn` / `azureclaw_spawn_status` /
+  `azureclaw_spawn_destroy` / `azureclaw_spawn_list`
+- `azureclaw_mesh_send` / `azureclaw_mesh_inbox` /
+  `azureclaw_mesh_transfer_file` / `azureclaw_discover`
+- `azureclaw_handoff_status` (always registered)
+- `azureclaw_handoff_request` / `azureclaw_handoff_confirm`
+  (gated on `AGT_REGISTRY_MODE === "global"`, same as before)
+
+#### Deps surface (`AgtToolsDeps`)
+
+`{ log, bannerAlreadyPrinted, inbox, meshClient, identity,
+sandboxName, meshSend, handoffState, runHandoffOrchestration,
+recordMeshSession }`. The three accessor callbacks (`meshClient`,
+`identity`, `sandboxName`) are late-bound so tool execution always
+observes the current value of `agtMeshClient` / `agtIdentity` /
+`agtSandboxName` (these may rotate over the lifetime of a
+session — e.g. on re-init or reconnect).
+
+#### Operational invariants
+
+- Tool surface unchanged (names, descriptions, parameter schemas,
+  execute return shapes byte-identical).
+- Sandbox image build path unchanged — `sandbox-images/openclaw/Dockerfile`
+  COPYs `cli/src/` and `cli/dist/` as whole trees, so the new
+  `core/agt-tools/agt.ts` ships into the sandbox automatically.
+- AGT mesh wire format, KNOCK protocol, X3DH session establishment,
+  trust scoring, audit logging — all unchanged.
+
+#### Tests
+
+- 454 pass / 2 skipped (unchanged); 32 lint warnings (was 30; +2 for
+  the new module's `any` annotations, in line with previous slice
+  growth). `tsc --noEmit`, `npm run lint`, `npm test`, `npm run build`
+  all green on `dev` and on the new branch.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-plugin-cli-f9.md`
+  documents the tool-by-tool extraction, the holder-object pattern
+  for `handoffProgress`, and confirms zero attack surface change.
+
+
 
 #### Refactored
 
