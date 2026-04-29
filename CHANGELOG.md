@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.d.1 `phase2-hotspot-up-cli` — up.ts fast-upgrade extraction
+
+#### Refactored
+
+- `cli/src/commands/up.ts` 1849 → 1660 LOC (sub-slice d.1 of the
+  S15.d up.ts multi-PR sub-train; further sub-slices d.2-d.4 will
+  continue toward the §15 800-LOC cap). Self-contained
+  `--upgrade` fast-path (cached-context Helm rerun + sandbox
+  fed-cred sync) extracted to `cli/src/commands/up/fast_upgrade.ts`.
+  Caller invokes via `await import("./up/fast_upgrade.js")` and
+  returns immediately afterwards.
+
+#### Tests
+
+- All 454 existing CLI tests pass; 2 skipped. `tsc --noEmit`,
+  `lint` (27 warnings, baseline-matched), `build` clean. No
+  behavioral change — body moved verbatim.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli.md`
+  (sign-offs: Core ✅, Security ✅).
+
 ### S15.c `phase2-hotspot-inference-router-routes` — inference.rs hotspot decomposition
 
 #### Refactored
