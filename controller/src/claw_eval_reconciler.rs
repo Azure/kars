@@ -330,9 +330,9 @@ fn error_policy(eval: Arc<ClawEval>, error: &ReconcileError, _ctx: Arc<Ctx>) -> 
         claweval = %eval.name_any(),
         error_class = error.class(),
         error = %error,
-        "ClawEval reconcile error — requeuing in 30s"
+        "ClawEval reconcile error — requeuing in ~30s (±20% jitter)"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 pub async fn run(client: Client) -> Result<()> {

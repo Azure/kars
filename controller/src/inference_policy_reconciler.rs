@@ -353,9 +353,9 @@ fn error_policy(policy: Arc<InferencePolicy>, error: &ReconcileError, _ctx: Arc<
         inferencepolicy = %policy.name_any(),
         error_class = error.class(),
         error = %error,
-        "InferencePolicy reconcile error — requeuing in 30s"
+        "InferencePolicy reconcile error — requeuing in ~30s (±20% jitter)"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 /// Start the controller loop. Non-fatal CRD-missing exit mirrors

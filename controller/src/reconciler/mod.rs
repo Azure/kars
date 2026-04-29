@@ -1658,16 +1658,20 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
+/// S7.D: ±20% jitter applied so retries spread across the interval and
+/// don't thundering-herd the API server when many CRs hit the same
+/// transient error in lockstep.
 fn error_requeue_duration(error: &ReconcileError) -> Duration {
-    match error {
+    let base = match error {
         // Transient kube API errors (throttling, connection reset, 5xx):
         // retry soon so we don't starve legitimate work.
-        ReconcileError::Kube(_) => Duration::from_secs(30),
+        ReconcileError::Kube(_) => 30,
         // Serde errors are deterministic — the same body will fail again.
         // Back off longer so we don't spam logs while a human fixes the
         // bad CR.
-        ReconcileError::SerdeJson(_) => Duration::from_secs(300),
-    }
+        ReconcileError::SerdeJson(_) => 300,
+    };
+    crate::backoff::requeue_secs_with_jitter(base)
 }
 
 /// Error policy — what to do when reconciliation fails.
