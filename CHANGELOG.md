@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.2 `phase2-hotspot-plugin-cli-f2` — plugin.ts native-agent delegate extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 6974 → **6890 LOC** (−84, cumulative S15.f
+  −249). `delegateToNativeAgent` (the AGT task-request → native
+  OpenClaw agent dispatcher) extracted to
+  `core/agt-task-delegate.ts`. Pure stdlib helper; zero plugin-internal
+  dependencies.
+- No behavior change.
+
 ### S15.f.1 `phase2-hotspot-plugin-cli-f1` — plugin.ts redact + AMID-cache extraction
 
 #### Refactored
