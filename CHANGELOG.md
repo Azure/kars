@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S19 `phase2-container-image-scan-fix` — sandbox base image build/pull resilience
+
+#### Fixed
+
+- **Container Image Scan** CI job (and any local rebuild of `sandbox-images/openclaw/Dockerfile.base`)
+  no longer fails on `ERROR: openclaw doctor did not stage any node_modules under /opt/openclaw-stage`.
+
+  Root cause: `openclaw` 2026.4.26+ now resolves all bundled-plugin runtime deps
+  (telegram → grammy, discord → @discordjs/opus, slack → @slack/bolt, feishu →
+  @larksuiteoapi/node-sdk, etc.) directly under `/usr/local/lib/node_modules/openclaw/node_modules/`
+  via the global `npm install -g openclaw` step. As a consequence,
+  `openclaw doctor --fix` reports `missing.length === 0` and exits successfully
+  without creating a `<OPENCLAW_PLUGIN_STAGE_DIR>/openclaw-<version>-<hash>/`
+  version directory. The previous strict count check (≥1 staged version dir)
+  treated this success path as a failure.
+
+  Fix in `sandbox-images/openclaw/Dockerfile.base`:
+  - drop the `|| true` mask on `openclaw doctor` so real failures surface;
+  - replace the "≥1 staged version dir" check with a positive sanity check
+    that the four channel deps we ship resolve in the global openclaw tree;
+  - treat 0 staged dirs as a non-failure (logged informationally).
+
+#### CI
+
+- New workflow `.github/workflows/sandbox-base-publish.yml` publishes the
+  sandbox base image to GHCR (`ghcr.io/<owner>/<repo>-sandbox-base:latest`,
+  `:<branch>`, `:sha-<short>`) on every push to `dev`/`main` that touches
+  `sandbox-images/openclaw/Dockerfile.base` or `vendor/sandbox-wheels/`.
+  Uses the auto-provided `GITHUB_TOKEN`; package should be marked **private**
+  in GHCR settings to preserve current exposure surface.
+- `container-scan` in `.github/workflows/ci.yml` now logs into GHCR with
+  `GITHUB_TOKEN` and pulls the cached base image from there first, falling
+  back to ACR, then to a local rebuild only as last resort. PRs no longer
+  rebuild the entire base image from scratch (which transitively depended on
+  upstream npm/network availability).
+
 ### S15.g.1 `phase2-runtime-package-split` — runtime adapter moved out of `cli/`
 
 #### Refactored

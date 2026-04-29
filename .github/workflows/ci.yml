@@ -179,6 +179,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
+      packages: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -196,6 +197,14 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Log in to GHCR (for cached base image pull)
+        if: steps.base-check.outputs.changed != 'true'
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build sandbox base image (only when Dockerfile.base changed)
         if: steps.base-check.outputs.changed == 'true'
         run: docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
@@ -203,11 +212,20 @@ jobs:
       - name: Pull cached base image (when Dockerfile.base unchanged)
         if: steps.base-check.outputs.changed != 'true'
         run: |
-          # Use the ACR base image if available, otherwise build locally
-          if docker pull azureclawacr.azurecr.io/azureclaw-sandbox-base:latest 2>/dev/null; then
-            docker tag azureclawacr.azurecr.io/azureclaw-sandbox-base:latest azureclaw-sandbox-base:test
+          # Pull from GHCR (published by sandbox-base-publish.yml on dev/main).
+          # Falls back to local build only if the image isn't available yet
+          # (e.g. before the first publish run, or for forks without access).
+          REPO_LOWER="${GITHUB_REPOSITORY,,}"
+          GHCR_IMG="ghcr.io/${REPO_LOWER}-sandbox-base:latest"
+          ACR_IMG="azureclawacr.azurecr.io/azureclaw-sandbox-base:latest"
+          if docker pull "$GHCR_IMG" 2>/dev/null; then
+            echo "Pulled cached base image from GHCR: $GHCR_IMG"
+            docker tag "$GHCR_IMG" azureclaw-sandbox-base:test
+          elif docker pull "$ACR_IMG" 2>/dev/null; then
+            echo "Pulled cached base image from ACR: $ACR_IMG"
+            docker tag "$ACR_IMG" azureclaw-sandbox-base:test
           else
-            echo "::warning::ACR base image unavailable — building locally (slow)"
+            echo "::warning::No cached base image available (GHCR or ACR) — building locally (slow)"
             docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
           fi
 
