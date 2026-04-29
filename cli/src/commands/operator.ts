@@ -17,126 +17,16 @@ import {
   statusBarForTopology,
   statusBarForCluster,
 } from "./operator/keymap.js";
-
-// ── Types ───────────────────────────────────────────────────────────
-
-type HealthState = "healthy" | "degraded" | "down" | "pending" | "unknown" | "dormant";
-
-interface SandboxInfo {
-  name: string;
-  namespace: string;
-  status: string;
-  health: HealthState;
-  model: string;
-  isolation: string;
-  channels: string;
-  age: string;
-  podName: string;
-  restarts: number;
-  role: "controller" | "sub-agent";
-  parent: string;  // parent agent name (empty if controller)
-  handoffState?: "dormant" | "active-successor" | "returning";
-  runtime: "docker" | "aks";
-}
-
-interface EgressDomain {
-  domain: string;
-  sandbox: string;
-  namespace: string;
-  state: "learned" | "approved";
-}
-
-/** Security state polled from a single sandbox's router + k8s objects. */
-interface SecurityState {
-  sandbox: string;
-  isolation: string;
-  runtime: string;         // "runc" | "kata-vm-isolation"
-  seccomp: string;         // "azureclaw-strict" | "RuntimeDefault"
-  networkPolicy: boolean;
-  adminAuth: boolean;
-  readyz: boolean;
-  readyzDetail: string;    // "ok" | "not ready — ..." | "content safety unreachable"
-  egressMode: string;      // "learning" | "enforcing" | "unknown"
-  learnedDomains: number;
-  allowlistDomains: number;
-  blocklistDomains: number;
-  blocklistLearnMode: boolean;
-  agtEnabled: boolean;
-  agtAuditEntries: number;
-  agtAuditIntegrity: boolean;
-  agtKnownAgents: number;
-  agtTrustThreshold: number;
-  // AGT detail — populated from /agt/audit, /agt/trust, relay/registry logs
-  agtRecentAudit: string[];     // last few audit entries
-  agtTrustScores: { agent: string; score: number; tier: string; interactions: number; lastSeen: string }[];
-  agtRelayConnected: boolean;
-  agtRegistryAgents: number;
-  agtAmid: string;  // cryptographic identity from registry
-  // Mesh counters (from router MeshMetrics)
-  agtMeshSessions: number;
-  agtMeshSent: number;
-  agtMeshReceived: number;
-  agtTrustUpdates: number;
-  agtTotalInteractions: number;
-  // Native governance stats (from /agt/status when governance_mode === "native")
-  agtGovernanceMode: string;     // "native" | ""
-  agtPolicyEvaluations: number;
-  agtPolicyDenials: number;
-  agtPolicyRateLimits: number;
-  agtEvalLatencyUs: number;      // average eval latency in microseconds
-  agtBehaviorAlerts: number;
-  agtBehaviorDetail: Array<{ agent: string; reasons: string[] }>;
-  agtContentFlags: number;
-  agtPolicyRules: number;
-  // Registry reputation (from agentmesh-registry)
-  agtReputation: {
-    score: number;       // 0.0–1.0 composite
-    tier: string;
-    completionRate: number;
-    totalSessions: number;
-    feedbackCount: number;
-    avgFeedback: number;
-    tags: { tag: string; count: number }[];
-  } | null;
-  // AGT relay/registry URLs
-  agtRelayUrl: string;
-  agtRegistryUrl: string;
-  // Prometheus metrics
-  totalRequests: number;
-  errorRequests: number;
-  inputTokens: number;
-  outputTokens: number;
-  avgLatencyMs: number;
-}
-
-interface NodeInfo {
-  name: string;
-  pool: string;
-  status: string;
-  version: string;
-  cpuCores: string;
-  cpuPct: string;
-  memBytes: string;
-  memPct: string;
-  os: string;
-  runtime: string;
-}
-
-interface ClusterHealth {
-  apiLatencyMs: number;
-  apiReachable: boolean;
-  nodes: NodeInfo[];
-  quotas: { namespace: string; cpuUsed: string; cpuHard: string; memUsed: string; memHard: string }[];
-  pvcs: { namespace: string; name: string; phase: string; size: string }[];
-  warnings: { time: string; reason: string; object: string; message: string }[];
-}
-
-interface MeshHealth {
-  relayReady: boolean;
-  registryReady: boolean;
-  registryPods: number;
-  registryReadyPods: number;
-}
+import type {
+  HealthState,
+  SandboxInfo,
+  EgressDomain,
+  SecurityState,
+  NodeInfo,
+  ClusterHealth,
+  MeshHealth,
+} from "./operator/types.js";
+import { timeSince, sumPrometheusCounter } from "./operator/helpers.js";
 
 // ── Command ─────────────────────────────────────────────────────────
 
@@ -2846,49 +2736,4 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   refreshTimer = setInterval(async () => { await refresh(); }, refreshInterval);
   screen.on("destroy", () => { if (refreshTimer) clearInterval(refreshTimer); stopSpinner(); });
-}
-
-function timeSince(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 0) return "0s";
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
-}
-
-/**
- * Parse Prometheus text format and sum values for a given metric name.
- * Optionally filter by label key=value pairs.
- *
- * Example line: `azureclaw_tokens_total{direction="input",model="gpt-4",sandbox="s1"} 8500`
- */
-function sumPrometheusCounter(
-  text: string,
-  metricName: string,
-  labelFilter?: Record<string, string>,
-): number {
-  let total = 0;
-  for (const line of text.split("\n")) {
-    if (line.startsWith("#") || !line.startsWith(metricName)) continue;
-
-    // Check label filter
-    if (labelFilter) {
-      let match = true;
-      for (const [k, v] of Object.entries(labelFilter)) {
-        if (!line.includes(`${k}="${v}"`)) { match = false; break; }
-      }
-      if (!match) continue;
-    }
-
-    // Extract numeric value after the closing brace (or after metric name if no labels)
-    const valMatch = line.match(/\}\s+([0-9eE.+-]+)$/) || line.match(/^[^\s{]+\s+([0-9eE.+-]+)$/);
-    if (valMatch) {
-      total += parseFloat(valMatch[1]) || 0;
-    }
-  }
-  return total;
 }

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.1 `phase2-hotspot-operator-cli-e1` — operator.ts type + helper extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 2894 → **2739 LOC** — first
+  sub-slice of the S15.e operator.ts decomposition train.
+  Module-level types (`HealthState`, `SandboxInfo`, `EgressDomain`,
+  `SecurityState`, `NodeInfo`, `ClusterHealth`, `MeshHealth`)
+  extracted to `cli/src/commands/operator/types.ts` (128 LOC);
+  module-level pure helpers (`timeSince`, `sumPrometheusCounter`)
+  extracted to `cli/src/commands/operator/helpers.ts` (65 LOC).
+- No behavior change; all declarations are byte-identical to the
+  originals. §4.2 cap (800) not yet met — multi-PR sub-train.
+
+#### Tests
+
+- All 454 CLI tests pass; tsc / lint (27 baseline) / build clean.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-operator-cli-e1.md`
+
 ### S15.d.4 `phase2-hotspot-up-cli-d4` — up.ts sandbox bring-up extraction (caps S15.d at 766 ✅)
 
 #### Refactored
