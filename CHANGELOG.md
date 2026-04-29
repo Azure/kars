@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.a `phase2-hotspot-handoff-cli` — handoff CLI hotspot decomposition
+
+#### Refactored
+
+- `cli/src/commands/handoff.ts` 1119 → 798 LOC (under §15 800-LOC
+  cap). Closure-captured helper bundle (router exec, AKS
+  port-forward, admin-token resolution, Docker wake, CRD-read,
+  credential rehydrate) and the `--status` / `--abort` branches
+  extracted to `cli/src/commands/handoff/helpers.ts`. No
+  behavioral change; closure captures simply migrate from
+  action-scope to factory-scope.
+
+#### Tests
+
+- All 454 existing CLI tests still pass; 2 skipped. Build + lint
+  clean. New module has no public test surface (its functions
+  wrap shell side effects exercised by the existing handoff
+  integration story).
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-handoff-cli.md`.
+
 ### S7.E.2 `phase2-reconcile-duration-histograms` — reconcile latency + outcome counter
 
 #### Added
