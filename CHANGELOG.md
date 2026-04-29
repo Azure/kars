@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.D `phase2-requeue-jitter` — bounded jitter on reconcile-error requeues
+
+#### Added
+
+- **`controller/src/backoff.rs`** — pure jitter math
+  `apply_jitter_factor(base, factor, sample) -> Duration` plus
+  `with_jitter(Duration)` and `requeue_secs_with_jitter(u64)` helpers
+  using `rand::rng()`. Default ±20% factor matches the
+  `k8s.io/apimachinery/pkg/util/wait` convention. 9 unit tests.
+
+#### Changed
+
+- All seven controller `error_policy` functions now route requeue
+  durations through `backoff::requeue_secs_with_jitter(...)` so two
+  hundred CRs that hit the same transient API error don't retry on
+  the same 30-second tick. Touched: `reconciler/mod.rs`,
+  `pairing_reconciler.rs`, `mcp_server_reconciler.rs`,
+  `tool_policy_reconciler.rs`, `a2a_agent_reconciler.rs`,
+  `inference_policy_reconciler.rs`, `claw_memory_reconciler.rs`,
+  `claw_eval_reconciler.rs`. Sandbox's
+  `error_requeue_duration(error)` keeps its kind-based base (30s for
+  `Kube`, 300s for `SerdeJson`); jitter applies after.
+
+#### Tests
+
+- Controller bin tests 336 → 345 (+9). Clippy `-D warnings` clean.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-requeue-jitter.md` — single
+  sub-slice in S7 craftsmanship train.
+
 ### S7.C `phase2-leader-election` — controller-wide leader election
 
 #### Added
