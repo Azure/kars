@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.C `phase2-leader-election` — controller-wide leader election
+
+#### Added
+
+- **`controller/src/leader_election.rs`** — Kubernetes Lease
+  (`coordination.k8s.io/v1`) gate so exactly one of the controller
+  Deployment's `replicas: 2` pods reconciles at a time. Closes the
+  doubled-write / doubled-event / doubled-Foundry-agent-create gap that
+  the SSA `fieldManager` registry from S7.A left open. New module
+  exposes the pure decision function `evaluate_lease(spec, identity,
+  now) -> {Acquire, Renew, Yield(holder)}` plus the async I/O loop
+  `acquire_and_hold(client, cfg, ready_tx)` that creates / patches the
+  Lease and signals readiness on first acquisition. On renew failure
+  the function returns an error so `main.rs` exits — standard
+  fail-stop pattern; the pod restarts and a healthy replica re-elects.
+- **Default-on, opt-out via `LEADER_ELECTION_ENABLED=false`** so dev /
+  kind clusters running a single replica can skip the lease overhead.
+  RBAC already in place from Phase 1 (mesh-peer's existing lease) so
+  no manifest changes are required.
+
+#### Changed
+
+- `controller/src/main.rs` blocks reconciler spawn on a
+  `oneshot::channel` until the lease is acquired; if the leader task
+  exits before signalling readiness its `ready_tx` drops and the await
+  observes `RecvError`, propagating the underlying error. The leader
+  handle is added to the final `tokio::select!` so leadership loss
+  terminates the process.
+
+#### Tests
+
+- 7 new unit tests on `evaluate_lease` covering all branches: missing
+  spec, we-hold (fresh & expired), other-holder (fresh & expired),
+  missing `renewTime`, defensive empty-holder.
+- Controller bin tests: 329 → 336 (+7).
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-leader-election.md`.
+
 ### S7.B `phase2-conditions-ssa-leader-b` — Conditions matrix `Progressing` emission
 
 #### Added
