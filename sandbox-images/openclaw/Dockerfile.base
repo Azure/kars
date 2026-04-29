@@ -84,26 +84,38 @@ RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
 # whole tree at build time (full network) into a stable path that we mount read-only
 # at runtime via `OPENCLAW_PLUGIN_STAGE_DIR`.
 #
-# `openclaw doctor --fix --non-interactive --yes` invokes `installBundledRuntimeDeps`
-# from `dist/bundled-runtime-deps-*.js`, which honours `OPENCLAW_PLUGIN_STAGE_DIR`
-# (or `STATE_DIRECTORY`) by writing to `<dir>/openclaw-<version>-<hash>/`.
-# `<hash>` = `createPathHash(packageRoot)` and is deterministic for the fixed
-# `/usr/local/lib/node_modules/openclaw` install path → cache hits at runtime.
+# `openclaw doctor --fix --non-interactive --yes` invokes
+# `maybeRepairBundledPluginRuntimeDeps`. When *missing* deps are detected it
+# stages them under `<OPENCLAW_PLUGIN_STAGE_DIR>/openclaw-<version>-<hash>/`.
+# In OpenClaw 2026.4.26+ the global `npm install -g openclaw` already resolves
+# every bundled-plugin runtime dep (channels included), so doctor's
+# `missing.length === 0` early-returns and no version dir is created. That is
+# expected and not a failure — at runtime the same deps resolve directly from
+# `/usr/local/lib/node_modules/openclaw/node_modules/`.
 #
-# `@tencent-connect/qqbot-connector` is geo-restricted upstream and may 403 even
-# from open networks. We tolerate that single failure (|| true) — qqbot is the
-# only currently-shipped channel we don't expose; staging still succeeds for
-# every other channel.
+# We sanity-check by asserting that the channel deps we care about actually
+# resolve in the global openclaw tree (telegram → grammy, discord →
+# @discordjs/opus, slack → @slack/bolt, feishu → @larksuiteoapi/node-sdk).
+# qqbot is geo-restricted upstream and not in our shipping set.
 ENV OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
 RUN mkdir -p /opt/openclaw-stage && \
-    openclaw doctor --fix --non-interactive --yes 2>&1 | tail -20 || true && \
-    staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules | wc -l) && \
-    if [ "$staged_count" -lt 1 ]; then \
-      echo "ERROR: openclaw doctor did not stage any node_modules under /opt/openclaw-stage" >&2; \
-      ls -la /opt/openclaw-stage >&2; exit 1; \
-    fi && \
+    openclaw doctor --fix --non-interactive --yes 2>&1 | tail -20 && \
+    OC_NM="/usr/local/lib/node_modules/openclaw/node_modules" && \
+    missing=0 && \
+    for dep in grammy @discordjs/opus @slack/bolt @larksuiteoapi/node-sdk; do \
+      if [ ! -e "$OC_NM/$dep" ]; then \
+        echo "ERROR: openclaw doctor finished but channel dep '$dep' is not resolvable under $OC_NM" >&2; \
+        missing=1; \
+      fi; \
+    done && \
+    [ "$missing" -eq 0 ] && \
+    staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules 2>/dev/null | wc -l) && \
     chmod -R a+rX /opt/openclaw-stage && \
-    echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"
+    if [ "$staged_count" -gt 0 ]; then \
+      echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"; \
+    else \
+      echo "OpenClaw bundled-runtime-deps already resolved in global tree — no staging needed"; \
+    fi
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
