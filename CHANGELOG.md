@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
-### S15.f.10 `phase2-hotspot-plugin-cli-f10` — OpenClaw command/provider/CLI registrations (cap reached)
+### S15.h `phase2-hotspot-handoff-router` — extract `handoff_succession` (mod.rs 870 → 658 LOC)
+
+#### Refactored
+
+- `inference-router/src/routes/handoff/mod.rs` 870 → **658 LOC**
+  (−212; under §4.2 cap of 800). The 209-LOC
+  `handoff_succession` route handler — the `POST /agt/handoff/
+  succession` body that signs the canonical succession message with
+  the router's Ed25519 key and forwards it to the registry — extracted
+  to sibling `inference-router/src/routes/handoff/succession.rs`
+  (~232 LOC including imports + docstring). Function body
+  byte-identical to the previous inline version; only `pub(super)`
+  visibility added so the routes table in `mod.rs` can still reference
+  it.
+
+#### Verification
+
+- `cargo build -p azureclaw-inference-router` clean.
+- `cargo clippy -p azureclaw-inference-router --all-targets -- -D warnings` clean.
+- `cargo test -p azureclaw-inference-router --lib` 608 passed / 0 failed.
+
+
 
 #### Refactored
 
