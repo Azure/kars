@@ -617,9 +617,9 @@ fn error_policy(mcp: Arc<McpServer>, error: &ReconcileError, _ctx: Arc<Ctx>) -> 
     tracing::warn!(
         mcp = %mcp.name_any(),
         error = %error,
-        "McpServer reconcile error — requeuing in 30s"
+        "McpServer reconcile error — requeuing in ~30s (±20% jitter)"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 /// Start the controller loop. Non-fatal CRD-missing exit mirrors

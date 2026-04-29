@@ -322,9 +322,9 @@ fn error_policy(memory: Arc<ClawMemory>, error: &ReconcileError, _ctx: Arc<Ctx>)
         clawmemory = %memory.name_any(),
         error_class = error.class(),
         error = %error,
-        "ClawMemory reconcile error — requeuing in 30s"
+        "ClawMemory reconcile error — requeuing in ~30s (±20% jitter)"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 pub async fn run(client: Client) -> Result<()> {

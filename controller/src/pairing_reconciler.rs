@@ -124,9 +124,9 @@ fn pairing_error_policy(
     tracing::warn!(
         pairing = %pairing.name_any(),
         error = %error,
-        "ClawPairing reconcile error — requeuing in 30s"
+        "ClawPairing reconcile error — requeuing in ~30s (±20% jitter)"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 /// Start the pairing reconciler controller loop.
