@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.a `phase2-s12-a-policyref-schema` — supply-chain policy foundations
+
+**Pure schema PR.** Foundation for the S12 signed-egress-allowlist work. No
+runtime/CLI/controller behavior change yet; existing CRs round-trip unchanged.
+
+#### Added
+
+- New `OciArtifactRef` struct in `controller/src/crd.rs` (`camelCase`,
+  `JsonSchema`-derived, `PartialEq + Eq`) — generic shape for referencing a
+  signed, content-addressed OCI artifact: `{ registry, repository, digest,
+  artifactType }`. Sized to be reusable by future supply-chain-grade
+  references (not just egress allowlists).
+- New optional `ClawSandbox.spec.networkPolicy.allowlistRef: OciArtifactRef`
+  field. Audit-only in S12.a — no consumer reads it yet. Becomes
+  status-surfaced in S12.b behind `AZURECLAW_FEATURE_SIGNED_ALLOWLIST`,
+  authoritative in S12.e.
+- `docs/policy-canonical-format.md` — byte-stable canonicalization rules
+  for the v1 egress allowlist artifact (artifactType
+  `application/vnd.azureclaw.egress-allowlist.v1+yaml`). Locks down: IDNA
+  2008 host normalization, explicit ports, `(host, port)` deduplication,
+  lexicographic sort, `metadata.generation` for replay protection,
+  forward-compat path for v2.
+- Helm CRD schema for `allowlistRef` with required-field validation +
+  digest regex (`^sha(256|384|512):[a-f0-9]+$`).
+
+#### Tests
+
+- `allowlist_ref_round_trips_through_camel_case_json` — locks in
+  `artifactType` camelCase wire format.
+- `allowlist_ref_omitted_when_none` — confirms backwards-compat: default
+  `NetworkPolicyConfig` does not emit `allowlistRef`.
+
+#### Decomposition note
+
+S12 was re-scoped 2026-04-30 after rubber-duck critique. The original
+single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
+
 ### S19.c `phase2-dockerfile-lint-fix` — restore Dockerfile Lint job to green
 
 #### Fixed

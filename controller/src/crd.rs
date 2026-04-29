@@ -711,6 +711,15 @@ pub struct NetworkPolicyConfig {
     /// Use `azureclaw policy learn <name>` to export the learned allowlist.
     #[serde(default)]
     pub learn_egress: bool,
+    /// Reference to a signed OCI artifact containing the canonical egress
+    /// allowlist. Populated by `azureclaw egress … --sign` (S12.c). Audit-only
+    /// in S12.a — controller still derives `NetworkPolicy` from
+    /// `allowed_endpoints`. Becomes authoritative in S12.e behind the
+    /// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate (S12.b).
+    ///
+    /// Canonical format documented at `docs/policy-canonical-format.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist_ref: Option<OciArtifactRef>,
 }
 
 impl Default for NetworkPolicyConfig {
@@ -720,6 +729,7 @@ impl Default for NetworkPolicyConfig {
             approval_required: true,
             allowed_endpoints: None,
             learn_egress: false,
+            allowlist_ref: None,
         }
     }
 }
@@ -730,6 +740,36 @@ pub struct EndpointConfig {
     pub port: Option<u16>,
     pub methods: Option<Vec<String>>,
     pub paths: Option<Vec<String>>,
+}
+
+/// Reference to a signed OCI artifact (e.g., a sealed policy document).
+///
+/// Generic shape: any consumer that needs to point at a content-addressed,
+/// cosign-signed OCI blob uses this struct. Keep registry-agnostic — works
+/// against ACR, GHCR, or any OCI-1.1 distribution endpoint.
+///
+/// Verification (consumer-side) requires:
+/// 1. Cryptographic validity (cosign sig present, chain valid).
+/// 2. Signer identity match against a cluster `SignerPolicy` (S12.d):
+///    Fulcio issuer + SAN/subject pattern.
+///
+/// Both checks must pass; "valid sig" alone is not authority.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OciArtifactRef {
+    /// Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+    pub registry: String,
+    /// Repository path (e.g. `azureclaw/policies/sandbox-foo`).
+    pub repository: String,
+    /// Content-addressed digest, including the algorithm prefix
+    /// (`sha256:abc…`). The digest covers the canonical artifact bytes —
+    /// see `docs/policy-canonical-format.md` for the egress-allowlist
+    /// canonicalization rules.
+    pub digest: String,
+    /// OCI artifactType media-type, e.g.
+    /// `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+    /// reject artifacts whose pulled `artifactType` doesn't match.
+    pub artifact_type: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -909,6 +949,42 @@ mod tests {
         assert!(cfg.approval_required);
         assert!(cfg.allowed_endpoints.is_none());
         assert!(!cfg.learn_egress);
+        assert!(cfg.allowlist_ref.is_none());
+    }
+
+    #[test]
+    fn allowlist_ref_round_trips_through_camel_case_json() {
+        // Wire-format hygiene: K8s uses camelCase, so `allowlistRef` /
+        // `artifactType` must serialize as such (S12.a contract).
+        let r = OciArtifactRef {
+            registry: "myacr.azurecr.io".into(),
+            repository: "azureclaw/policies/sandbox-foo".into(),
+            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+            artifact_type: "application/vnd.azureclaw.egress-allowlist.v1+yaml".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("registry").is_some());
+        assert!(v.get("repository").is_some());
+        assert!(v.get("digest").is_some());
+        assert!(
+            v.get("artifactType").is_some(),
+            "must use camelCase artifactType"
+        );
+        let back: OciArtifactRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn allowlist_ref_omitted_when_none() {
+        // S12.a: existing CRs without `allowlistRef` must round-trip
+        // unchanged. `skip_serializing_if = "Option::is_none"` enforces this.
+        let cfg = NetworkPolicyConfig::default();
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            v.get("allowlistRef").is_none(),
+            "default NetworkPolicyConfig must not emit allowlistRef field"
+        );
     }
 
     #[test]
