@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.7 `phase2-hotspot-plugin-cli-f7` — plugin.ts handoff orchestration extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 5598 → **5071 LOC** (−527, cumulative S15.f
+  −2068, **69% to §4.2 cap**). The 531-LOC `_runHandoffOrchestration`
+  background routine + its 7-LOC `_hp` progress-tracker helper
+  extracted to `cli/src/core/agt-handoff.ts` (609 LOC).
+- `HandoffDeps` bag threads the four pieces of plugin.ts state the
+  function touches (`handoffProgress`, `agtInbox`, mesh client +
+  identity accessors, the `meshSend` wrapper). `progress` and
+  `inbox` pass by reference so mutations propagate identically to
+  the original closure-captured behaviour.
+- `_hp` becomes a closure inside `runHandoffOrchestration` that
+  captures `progress` + `log` from `deps`; plugin.ts no longer needs
+  its own `_hp`.
+- No behavior change. Function body byte-identical apart from
+  `agtMeshClient`/`agtIdentity` accessor calls and direct
+  `nameToAmid`/`amidToName` imports from `core/amid-cache.ts`.
+
 ### S15.f.6 `phase2-hotspot-plugin-cli-f6` — plugin.ts in-process tool-loop extraction
 
 #### Refactored
