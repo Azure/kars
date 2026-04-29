@@ -31,6 +31,7 @@ mod helm_drift;
 mod inference_policy;
 mod inference_policy_compile;
 mod inference_policy_reconciler;
+mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
 mod mesh_peer;
@@ -47,6 +48,7 @@ mod tool_policy_reconciler;
 use anyhow::Result;
 use kube::Client;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -62,6 +64,70 @@ async fn main() -> Result<()> {
     tracing::info!("AzureClaw Controller starting");
 
     let client = Client::try_default().await?;
+
+    // S7.C: controller-wide leader election. With `replicas: 2` shipped
+    // in the Helm chart, both pods would otherwise reconcile in
+    // parallel and double-emit Foundry agent creates / status patches /
+    // events. Default-on; opt out with `LEADER_ELECTION_ENABLED=false`
+    // for dev/kind clusters where holding a Lease is unnecessary.
+    let leader_election_enabled = !matches!(
+        std::env::var("LEADER_ELECTION_ENABLED")
+            .unwrap_or_else(|_| "true".into())
+            .to_ascii_lowercase()
+            .as_str(),
+        "false" | "0" | "no" | "off"
+    );
+
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    let leader_handle = if leader_election_enabled {
+        let cfg = leader_election::LeaderElectionConfig::from_env();
+        tracing::info!(
+            lease = %cfg.lease_name,
+            namespace = %cfg.namespace,
+            identity = %cfg.identity,
+            "leader-election: enabled; waiting to acquire controller lease before spawning reconcilers"
+        );
+        let client = client.clone();
+        Some(tokio::spawn(async move {
+            leader_election::acquire_and_hold(client, cfg, ready_tx).await
+        }))
+    } else {
+        tracing::warn!(
+            "leader-election: disabled via LEADER_ELECTION_ENABLED=false. \
+             Running both replicas in parallel will double-write status \
+             and emit duplicate events. Only safe for single-replica deployments."
+        );
+        // Fire ready immediately so the reconciler bundle starts.
+        let _ = ready_tx.send(());
+        None
+    };
+
+    // Block reconciler spawn until either we acquire the lease or the
+    // leader-election task fails. If acquire_and_hold returns before
+    // signalling readiness, its `ready_tx` is dropped and our await
+    // here observes RecvError — we propagate the leader task's error.
+    match ready_rx.await {
+        Ok(()) => {
+            if leader_handle.is_some() {
+                tracing::info!("leader-election: ready; proceeding to spawn reconcilers");
+            }
+        }
+        Err(_) => {
+            // Sender was dropped — leader task exited (or, if leader
+            // election was disabled, the ready_tx was sent + dropped
+            // and we got Ok above; this branch only applies to the
+            // leader-task-crashed-before-signalling case).
+            if let Some(h) = leader_handle {
+                return match h.await {
+                    Ok(inner) => inner,
+                    Err(e) => Err(e.into()),
+                };
+            }
+            return Err(anyhow::anyhow!(
+                "leader-election: ready channel closed without signal and no leader handle"
+            ));
+        }
+    }
 
     // Run sandbox and pairing controllers concurrently.
     // Pairing controller is non-fatal — if CRD is missing, it exits gracefully.
@@ -144,7 +210,27 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Convert Option<JoinHandle> to a future that pends forever when
+    // leader election is disabled. This keeps the `tokio::select!`
+    // arms uniform regardless of mode.
+    let leader_future = async move {
+        match leader_handle {
+            Some(h) => match h.await {
+                Ok(inner) => inner,
+                Err(e) => Err(e.into()),
+            },
+            None => std::future::pending::<Result<()>>().await,
+        }
+    };
+    tokio::pin!(leader_future);
+
     tokio::select! {
+        res = &mut leader_future => {
+            // Lost leadership (renewal failed) -> propagate so the pod
+            // restarts and re-enters the election. Standard fail-stop
+            // pattern for K8s controllers.
+            res?;
+        }
         res = sandbox_handle => {
             res??;
         }
