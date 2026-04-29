@@ -1,0 +1,63 @@
+name: Sandbox Base Image Publish
+
+# Publishes the OpenClaw sandbox base image to GHCR so the Container Image Scan
+# job in ci.yml can pull a known-good prebuilt image instead of rebuilding the
+# entire base from scratch on every PR (which is slow and brittle — it transitively
+# depends on upstream npm/network availability for openclaw + bundled-plugin
+# runtime deps).
+#
+# Visibility: package should be marked PRIVATE in the GitHub UI under
+# Packages → azureclaw-sandbox-base → Package settings → Change visibility →
+# Private. CI in this repo can still pull private GHCR images using the
+# auto-provided GITHUB_TOKEN (no extra secrets needed).
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'sandbox-images/openclaw/Dockerfile.base'
+      - 'vendor/sandbox-wheels/**'
+      - '.github/workflows/sandbox-base-publish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build and publish sandbox base image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          REPO_LOWER="${GITHUB_REPOSITORY,,}"
+          IMG="ghcr.io/${REPO_LOWER}-sandbox-base"
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=$IMG:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=$IMG:${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_NAME" = "main" ] || [ "$GITHUB_REF_NAME" = "dev" ]; then
+            echo "latest_tag=$IMG:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push base image
+        run: |
+          TAGS=( -t "${{ steps.tags.outputs.sha_tag }}" -t "${{ steps.tags.outputs.branch_tag }}" )
+          if [ -n "${{ steps.tags.outputs.latest_tag }}" ]; then
+            TAGS+=( -t "${{ steps.tags.outputs.latest_tag }}" )
+          fi
+          docker build "${TAGS[@]}" -f sandbox-images/openclaw/Dockerfile.base .
+          for tag in "${{ steps.tags.outputs.sha_tag }}" "${{ steps.tags.outputs.branch_tag }}" "${{ steps.tags.outputs.latest_tag }}"; do
+            [ -n "$tag" ] && docker push "$tag"
+          done
