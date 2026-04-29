@@ -185,25 +185,47 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Build inference router image
-        run: docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
-
-      - name: Check if base image needs rebuild
-        id: base-check
-        run: |
-          if git diff --name-only HEAD~1 HEAD -- sandbox-images/openclaw/Dockerfile.base | grep -q .; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Log in to GHCR (for cached base image pull)
-        if: steps.base-check.outputs.changed != 'true'
+      - name: Log in to GHCR (for cached image pulls)
         uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if inference router image needs rebuild
+        id: router-check
+        run: |
+          if git diff --name-only HEAD~1 HEAD -- inference-router/ Cargo.toml Cargo.lock | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build inference router image (only when source changed)
+        if: steps.router-check.outputs.changed == 'true'
+        run: docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
+
+      - name: Pull cached inference router image (when source unchanged)
+        if: steps.router-check.outputs.changed != 'true'
+        run: |
+          REPO_LOWER="${GITHUB_REPOSITORY,,}"
+          GHCR_IMG="ghcr.io/${REPO_LOWER}-inference-router:latest"
+          if docker pull "$GHCR_IMG" 2>/dev/null; then
+            echo "Pulled cached inference router from GHCR: $GHCR_IMG"
+            docker tag "$GHCR_IMG" azureclaw-inference-router:test
+          else
+            echo "::warning::No cached inference router image in GHCR — building locally"
+            docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
+          fi
+
+      - name: Check if base image needs rebuild
+        id: base-check
+        run: |
+          if git diff --name-only HEAD~1 HEAD -- sandbox-images/openclaw/Dockerfile.base vendor/sandbox-wheels/ | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build sandbox base image (only when Dockerfile.base changed)
         if: steps.base-check.outputs.changed == 'true'
@@ -212,7 +234,7 @@ jobs:
       - name: Pull cached base image (when Dockerfile.base unchanged)
         if: steps.base-check.outputs.changed != 'true'
         run: |
-          # Pull from GHCR (published by sandbox-base-publish.yml on dev/main).
+          # Pull from GHCR (published by image-cache-publish.yml on dev/main).
           # Falls back to local build only if the image isn't available yet
           # (e.g. before the first publish run, or for forks without access).
           REPO_LOWER="${GITHUB_REPOSITORY,,}"

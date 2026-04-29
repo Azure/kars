@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S19.b `phase2-ci-image-cache-router-controller` — extend GHCR cache to router + controller
+
+#### Refactored
+
+- `.github/workflows/sandbox-base-publish.yml` → `.github/workflows/image-cache-publish.yml`.
+  Generalised from a single-image publish to a 3-image matrix covering
+  `sandbox-base`, `inference-router`, and `controller`. Each matrix branch
+  conditionally runs only when its own paths changed (sandbox-base on
+  `Dockerfile.base` + `vendor/sandbox-wheels/`; inference-router on
+  `inference-router/` + `Cargo.{toml,lock}`; controller on `controller/` +
+  `Cargo.{toml,lock}`). Workflow-dispatch ignores the path filter.
+
+#### Fixed
+
+- `container-scan` job in `.github/workflows/ci.yml` now also pulls the
+  inference router image from GHCR when `inference-router/` and
+  `Cargo.{toml,lock}` are unchanged, falling back to local build only as
+  last resort. Matches the pattern already in place for the sandbox base
+  image. Cuts PR-time Rust rebuild waste significantly (router compile is
+  the longest individual step in the job).
+- `sandbox-images/openclaw/Dockerfile.base` channel-dep sanity check
+  removed. The previous attempt to assert that
+  `/usr/local/lib/node_modules/openclaw/node_modules/{grammy,@discordjs/opus,
+  @slack/bolt,@larksuiteoapi/node-sdk}` exists was incorrect: in OpenClaw
+  2026.4.26 channel deps are *not* hoisted into the global tree at install
+  time — they live under per-extension `dist/extensions/<channel>/node_modules/`
+  and are surfaced via the `link_pkg` symlink block earlier in the same
+  Dockerfile. The build-time assertion produced false negatives. Replaced
+  with a simpler "trust openclaw doctor's exit code" approach: run
+  `set -o pipefail`, run `openclaw doctor --fix` without `|| true` mask,
+  log staging stats. Doctor's own success is the source of truth.
+
 ### S15.g.3 `phase2-cli-rename` — `@azure/azureclaw` → `@azureclaw/cli`
 
 #### Refactored
