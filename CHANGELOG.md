@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S19.c `phase2-dockerfile-lint-fix` — restore Dockerfile Lint job to green
+
+#### Fixed
+
+- `sandbox-images/openclaw/Dockerfile.base`: the `set -o pipefail` shell
+  builtin used to surface `openclaw doctor … | tail -40` failures is not
+  POSIX (only bash/ksh), and Docker's default `RUN` shell is `/bin/sh`.
+  hadolint's SC3040 fired on the previous S19.b commit. Replaced with a
+  scoped `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` directive around
+  the doctor RUN, then restored `SHELL ["/bin/sh", "-c"]` so subsequent
+  RUNs in the builder stage keep the default shell.
+- `.github/workflows/ci.yml` Dockerfile Lint job: added `DL3062` to the
+  hadolint ignore list. The Go builder stage installs blu/eightctl/gifgrep
+  via `go install …@latest` intentionally (per inline comment — small
+  static binaries that we want fresh on every base rebuild). The DL3062
+  warning is new in the latest hadolint release; matches the team's
+  existing convention of ignoring "pin versions" warnings for the
+  intentionally-unpinned tools.
+
 ### S19.b `phase2-ci-image-cache-router-controller` — extend GHCR cache to router + controller
 
 #### Refactored
