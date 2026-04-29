@@ -436,6 +436,41 @@ spec:
                             type: array
                             items:
                               type: string
+                    allowlistRef:
+                      type: object
+                      description: |
+                        Reference to a signed OCI artifact containing the
+                        canonical egress allowlist. Populated by
+                        `azureclaw egress … --sign` (S12.c). Audit-only
+                        in S12.a — controller still derives NetworkPolicy
+                        from `allowedEndpoints`. Becomes authoritative in
+                        S12.e behind the AZURECLAW_FEATURE_SIGNED_ALLOWLIST
+                        env gate. See docs/policy-canonical-format.md.
+                      required:
+                        - registry
+                        - repository
+                        - digest
+                        - artifactType
+                      properties:
+                        registry:
+                          type: string
+                          description: "Registry hostname (e.g. myacr.azurecr.io, ghcr.io)."
+                        repository:
+                          type: string
+                          description: "Repository path (e.g. azureclaw/policies/sandbox-foo)."
+                        digest:
+                          type: string
+                          pattern: "^sha(256|384|512):[a-f0-9]+$"
+                          description: |
+                            Content-addressed digest including algorithm
+                            prefix. Covers the canonical artifact bytes
+                            per docs/policy-canonical-format.md.
+                        artifactType:
+                          type: string
+                          description: |
+                            OCI artifactType media-type, e.g.
+                            application/vnd.azureclaw.egress-allowlist.v1+yaml.
+                            Consumers MUST reject mismatched artifactTypes.
                 resources:
                   type: object
                   properties:
