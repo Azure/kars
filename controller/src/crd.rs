@@ -959,14 +959,18 @@ mod tests {
         let r = OciArtifactRef {
             registry: "myacr.azurecr.io".into(),
             repository: "azureclaw/policies/sandbox-foo".into(),
-            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
             artifact_type: "application/vnd.azureclaw.egress-allowlist.v1+yaml".into(),
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("registry").is_some());
         assert!(v.get("repository").is_some());
         assert!(v.get("digest").is_some());
-        assert!(v.get("artifactType").is_some(), "must use camelCase artifactType");
+        assert!(
+            v.get("artifactType").is_some(),
+            "must use camelCase artifactType"
+        );
         let back: OciArtifactRef = serde_json::from_value(v).unwrap();
         assert_eq!(back, r);
     }
@@ -977,8 +981,10 @@ mod tests {
         // unchanged. `skip_serializing_if = "Option::is_none"` enforces this.
         let cfg = NetworkPolicyConfig::default();
         let v = serde_json::to_value(&cfg).unwrap();
-        assert!(v.get("allowlistRef").is_none(),
-            "default NetworkPolicyConfig must not emit allowlistRef field");
+        assert!(
+            v.get("allowlistRef").is_none(),
+            "default NetworkPolicyConfig must not emit allowlistRef field"
+        );
     }
 
     #[test]
