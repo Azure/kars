@@ -326,6 +326,7 @@ async fn finalize(
 }
 
 fn error_policy(eval: Arc<ClawEval>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
+    crate::metrics::record_reconcile_error("ClawEval", error.class());
     tracing::warn!(
         claweval = %eval.name_any(),
         error_class = error.class(),
