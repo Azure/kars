@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.5b `phase2-hotspot-operator-cli-e5b` — operator.ts security + AGT render extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 1586 → **1318 LOC** (cumulative
+  S15.e: 2894 → 1318, **−1576**). `renderSecurity`, `renderAGTFull`,
+  `renderAGT` and the `ok(v)` color-dot helper extracted to
+  `operator/render/security.ts` (~287 LOC) via `SecurityRenderContext`.
+- `renderAGTFull` is pure (no widget side-effects) so it takes
+  positional args rather than a context.
+- No behavior change.
+
 ### S15.e.5 `phase2-hotspot-operator-cli-e5` — operator.ts cluster + topology render extraction
 
 #### Refactored
