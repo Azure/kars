@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.c `phase2-hotspot-inference-router-routes` — inference.rs hotspot decomposition
+
+#### Refactored
+
+- `inference-router/src/routes/inference.rs` 1359 → 776 LOC (under
+  §15 800-LOC cap). The 582-line `chat_completions` handler body
+  (`POST /v1/chat/completions`) extracted to a new sibling module
+  `inference-router/src/routes/chat_completions.rs` (604 LOC),
+  registered as a private `mod` under `routes/mod.rs`. Retained
+  in `inference.rs`: route-builders (`inference_routes`,
+  `foundry_agent_routes`, `foundry_standalone_routes`) plus the
+  smaller handlers (`completions`, `responses`, `embeddings`,
+  `images_generations`, `images_generations_v1`, `list_models`,
+  `list_deployments`, `foundry_proxy`).
+
+#### Tests
+
+- `cargo test --package azureclaw-inference-router --lib`: **608
+  passed; 0 failed**. `cargo build`, `cargo clippy --all-targets
+  -- -D warnings`, `cargo fmt --all -- --check` all clean. No
+  behavioral change — handler body moved verbatim, visibility
+  raised from `async fn` to `pub(super) async fn`.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-inference-router-routes.md`
+  (sign-offs: Core ✅, Security ✅).
+
 ### S15.b `phase2-hotspot-mesh-cli` — mesh CLI hotspot decomposition
 
 #### Refactored
