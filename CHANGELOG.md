@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.3 `phase2-hotspot-operator-cli-e3` — operator.ts security + cluster fetcher extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 2483 → **1960 LOC** (cumulative
+  S15.e: 2894 → 1960, **−934**). Five remaining fetchers extracted:
+  `fetchEgressDomains`, `fetchSecurityState`, `fetchAgtQuick` →
+  `cli/src/commands/operator/fetchers/security.ts` (351 LOC);
+  `fetchMeshHealth`, `fetchClusterHealth` →
+  `cli/src/commands/operator/fetchers/cluster.ts` (188 LOC).
+- Closure-captured `kubeContext`, `devMode`, and (for `fetchAgtQuick`)
+  the cached `SecurityState` are now explicit parameters; call sites
+  in `refresh()` updated. Mutation semantics preserved.
+- No behavior change.
+- Lint warnings dropped from 27 → 21.
+
+#### Tests
+
+- All 454 CLI tests pass; tsc / lint / build clean.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-operator-cli-e3.md`
+
 ### S15.e.2 `phase2-hotspot-operator-cli-e2` — operator.ts sandbox-list fetcher extraction
 
 #### Refactored
