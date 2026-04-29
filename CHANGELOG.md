@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.d.2 `phase2-hotspot-up-cli-d2` — up.ts preflight extraction
+
+#### Refactored
+
+- `cli/src/commands/up.ts` 1660 → 1296 LOC (sub-slice d.2 of the
+  S15.d up.ts multi-PR sub-train; d.3 + d.4 to follow). Preflight
+  phase (auto-detect dev mode, cached-context prefill, banner +
+  tool checks, Azure auth + subscription, interactive prompts,
+  RBAC + provider preflight, SKU availability check, dry-run plan
+  print) extracted to `cli/src/commands/up/preflight.ts` (392 LOC).
+  Caller is a 4-line dispatch returning `{ rg }` or `null`
+  (dry-run). Helper `isValidAzureHost` moved to the new module
+  and re-exported for the deploy section.
+
+#### Tests
+
+- All 454 CLI tests pass; 2 skipped pre-existing. `tsc --noEmit`,
+  `lint` (27 warnings, baseline-matched), `build` clean. No
+  behavioral change — body moved verbatim.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli-d2.md`
+  (sign-offs: Core ✅, Security ✅).
+
 ### S15.d.1 `phase2-hotspot-up-cli` — up.ts fast-upgrade extraction
 
 #### Refactored
