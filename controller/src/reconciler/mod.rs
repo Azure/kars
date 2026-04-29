@@ -1767,7 +1767,13 @@ pub async fn run(client: Client) -> Result<()> {
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())
-        .run(reconcile, error_policy, ctx)
+        .run(
+            |x, ctx| async move {
+                crate::metrics::observe_reconcile("ClawSandbox", reconcile(x, ctx)).await
+            },
+            error_policy,
+            ctx,
+        )
         .for_each(|res| async move {
             match res {
                 Ok(o) => tracing::info!("Reconciled {:?}", o),
