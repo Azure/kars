@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.d.4 `phase2-hotspot-up-cli-d4` — up.ts sandbox bring-up extraction (caps S15.d at 766 ✅)
+
+#### Refactored
+
+- `cli/src/commands/up.ts` 1182 → **766 LOC** — final sub-slice of
+  the S15.d up.ts multi-PR sub-train. Sandbox bring-up phase
+  (federated credentials + Foundry RBAC + ClawSandbox CR + wait
+  for Running + WebUI port-forward + deployment summary +
+  `saveContext()`) extracted to
+  `cli/src/commands/up/sandbox_bringup.ts` (482 LOC). Caller is a
+  9-line dispatch.
+- **§4.2 cap achieved for `up.ts`** (1849 → 766 over d.1-d.4;
+  cap = 800).
+
+#### Tests
+
+- All 454 CLI tests pass; 2 skipped pre-existing. `tsc --noEmit`,
+  `lint` (27 warnings, baseline-matched), `build` clean. No
+  behavioral change — body moved verbatim.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli-d4.md`
+  (sign-offs: Core ✅, Security ✅).
+
 ### S15.d.3 `phase2-hotspot-up-cli-d3` — up.ts AgentMesh deploy extraction
 
 #### Refactored
