@@ -89,3 +89,47 @@ When v2 is needed (e.g., to reintroduce wildcards, methods, paths, CIDR ranges):
 | S12.c | CLI canonical serializer + signing |
 | S12.d | `SignerPolicy` ConfigMap + identity-pinned authority |
 | S12.e | Authoritative ref mode (controller derives `allowedEndpoints` from canonical bytes) |
+
+## Producer (CLI)
+
+S12.c ships the producer side of this format inside the CLI as
+`azureclaw egress … --sign`. The flow is opt-in (must be combined with
+`--enforce` or `--approve`) and **non-authoritative** in this slice —
+the inline `allowedEndpoints` field on `ClawSandbox.spec.networkPolicy`
+remains the source of truth. The flip to authoritative ships in S12.e.
+
+What `--sign` does, in order:
+
+1. Reads the live `ClawSandbox` via `kubectl get -o json` to capture
+   `metadata.generation` and the just-mutated
+   `spec.networkPolicy.allowedEndpoints`.
+2. Builds canonical YAML using the deterministic encoder in
+   `cli/src/commands/egress/sign.ts`. The encoder is hand-rolled (not
+   `js-yaml`/`yaml` defaults) because the rules above are stricter than
+   any general-purpose YAML emitter — block style only, fixed key
+   order, IDNA-2008 host normalization, lexicographic sort, no
+   anchors/aliases/comments, LF-only with trailing newline. The
+   producer's local digest is recomputed and compared to the digest
+   reported by `oras push`; mismatch aborts before signing.
+3. Pushes the canonical bytes as an OCI artifact via
+   `oras push <registry>/<repository>:latest --artifact-type
+   application/vnd.azureclaw.egress-allowlist.v1+yaml`.
+4. Signs the resulting digest via `cosign sign --yes
+   <registry>/<repository>@<digest>` in one of three modes:
+   - `keyless` (auto-default when stdout is a TTY and no token env is
+     set) — interactive Fulcio OIDC.
+   - `identity-token` (auto-default when `SIGSTORE_ID_TOKEN` or
+     `OIDC_TOKEN` env is set, e.g., GitHub Actions OIDC) — passes the
+     token via `--identity-token`.
+   - `keyed` (selected by `--sign-mode keyed --sign-key <ref>`) —
+     supports a local key file or a KMS URI like `azurekms://kv/key`.
+5. Patches `ClawSandbox.spec.networkPolicy.allowlistRef` via
+   `kubectl patch --type=merge` with the `{registry, repository,
+   digest, artifactType}` tuple.
+
+**Fail-closed:** signature push failure aborts before patching the CR
+— no orphan `allowlistRef` pointing at an unsigned artifact ever lands
+on a `ClawSandbox`. The `oras` and `cosign` binaries must be present
+in `$PATH`; missing-binary errors include the upstream install URL
+(see `https://oras.land/docs/installation` and
+`https://docs.sigstore.dev/cosign/installation`).
