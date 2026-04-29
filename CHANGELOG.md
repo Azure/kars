@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
-### S15.f.9 `phase2-hotspot-plugin-cli-f9` — stateful AGT tool registrations
+### S15.f.10 `phase2-hotspot-plugin-cli-f10` — OpenClaw command/provider/CLI registrations (cap reached)
+
+#### Refactored
+
+- `cli/src/plugin.ts` 3233 → **2463 LOC** (−770, cumulative S15.f
+  −4676). **§4.2 Phase 2 cap of 3000 LOC achieved** — plugin.ts is
+  now 537 LOC under cap.
+- The final closure-bound block inside `register()` — the Foundry
+  `api.registerProvider` call, the `api.registerCli` registrar
+  emitting `openclaw azureclaw {status,connect,dev,logs}`, and the
+  ~12 `api.registerCommand` slash-command (`/azureclaw …`)
+  definitions — extracted to `cli/src/core/commands/openclaw.ts`
+  (~833 LOC). Command/tool bodies are byte-identical; closure
+  capture is replaced with explicit `OpenClawCommandsDeps` threading
+  (log, config, getFoundryProject, meshClient, identity, policy,
+  trustStore, auditLogger, memorySyncBuffer, syncToFoundryMemory).
+- All references to the module-level `foundryProject`,
+  `agtMeshClient`, `agtIdentity`, `agtPolicy`, `agtTrustStore`,
+  and `agtAuditLogger` mutables that this block read are replaced
+  with late-bound accessor calls so that command handlers observe
+  the current value at execution time, matching the pattern
+  established in S15.f.8 / S15.f.9.
+
+#### Verification
+
+- `npx tsc --noEmit` clean; `npm run lint` 33 warnings (was 32 —
+  one new pre-existing-style "import unused" warning for an
+  identifier whose only consumer was the extracted block);
+  `npm test -- --run` 454 passed / 2 skipped; `npm run build`
+  clean.
+
+
 
 #### Refactored
 
