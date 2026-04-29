@@ -21,11 +21,10 @@ import type {
   SandboxInfo,
   EgressDomain,
   SecurityState,
-  NodeInfo,
   ClusterHealth,
   MeshHealth,
 } from "./operator/types.js";
-import { timeSince, sumPrometheusCounter, kctl } from "./operator/helpers.js";
+import { timeSince, kctl } from "./operator/helpers.js";
 import { fetchSandboxes } from "./operator/fetchers/sandboxes.js";
 import {
   fetchEgressDomains,
@@ -37,6 +36,8 @@ import {
   fetchClusterHealth,
 } from "./operator/fetchers/cluster.js";
 import { createActions } from "./operator/actions.js";
+import { renderCluster as _renderCluster } from "./operator/render/cluster.js";
+import { renderTopology as _renderTopology } from "./operator/render/topology.js";
 
 // ── Command ─────────────────────────────────────────────────────────
 
@@ -632,308 +633,13 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     agtPanel.setContent(lines.join("\n"));
   }
 
-  function renderTopology() {
-    if (sandboxes.length === 0) {
-      topologyBox.setContent("{gray-fg}No agents{/}");
-      return;
-    }
-
-    const parents = sandboxes.filter((s) => s.role !== "sub-agent");
-    const children = sandboxes.filter((s) => s.role === "sub-agent");
-    const totalMesh = [...securityStates.values()].reduce((n, s) => n + s.agtMeshSessions, 0);
-
-    const lines: string[] = [];
-    lines.push(`{bold}Mesh Topology{/}  ${sandboxes.length} agent${sandboxes.length !== 1 ? "s" : ""}  ·  ${totalMesh} session${totalMesh !== 1 ? "s" : ""}  ·  {gray-fg}[t] back to table{/}`);
-    lines.push("");
-
-    function statusIcon(health: string): string {
-      return health === "healthy" ? "{green-fg}*{/}" :
-             health === "dormant" ? "{blue-fg}~{/}" :
-             health === "pending" ? "{yellow-fg}o{/}" :
-             health === "degraded" ? "{yellow-fg}!{/}" : "{red-fg}x{/}";
-    }
-
-    // Fixed column width for all boxes — keeps alignment clean at scale
-    const COL_W = 26;  // inner content width
-    const BOX_W = COL_W + 4; // +4 for "│ " and " │"
-    const CELL_W = BOX_W + 2; // +2 gap between columns
-
-    // Visual width of a string, counting emoji (surrogate pairs) as 2 cells
-    function visualLen(s: string): number {
-      const plain = s.replace(/\{[^}]+\}/g, "");
-      let w = 0;
-      for (const ch of plain) {
-        w += ch.codePointAt(0)! > 0xFFFF ? 2 : 1;
-      }
-      return w;
-    }
-
-    // Fit string to exactly w visual columns (pad or truncate)
-    function fitVis(s: string, w: number): string {
-      const vw = visualLen(s);
-      if (vw <= w) return s + " ".repeat(w - vw);
-      let used = 0;
-      let result = "";
-      let i = 0;
-      while (i < s.length) {
-        if (s[i] === "{") {
-          const end = s.indexOf("}", i);
-          if (end !== -1) { result += s.slice(i, end + 1); i = end + 1; continue; }
-        }
-        const cp = s.codePointAt(i)!;
-        const cw = cp > 0xFFFF ? 2 : 1;
-        if (used + cw > w - 1) break;
-        result += String.fromCodePoint(cp);
-        i += cp > 0xFFFF ? 2 : 1;
-        used += cw;
-      }
-      return result + "…" + " ".repeat(Math.max(0, w - used - 1));
-    }
-
-    function makeBox(name: string, icon: string, line2: string, line3: string): string[] {
-      const border = "─".repeat(COL_W + 2);
-      return [
-        `┌${border}┐`,
-        `│ ${icon} ${fitVis(name, COL_W - 2)} │`,
-        `│ ${fitVis(line2, COL_W)} │`,
-        `│ ${fitVis(line3, COL_W)} │`,
-        `└${border}┘`,
-      ];
-    }
-
-    for (const p of parents) {
-      const sec = securityStates.get(p.name);
-      const icon = statusIcon(p.health);
-      const mode = sec?.egressMode === "enforcing" ? "{green-fg}enforce{/}" :
-                   sec?.egressMode === "learning" ? "{yellow-fg}learn{/}" : "";
-      const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
-      const peerCount = sec?.agtTrustScores.filter((t) => t.agent !== p.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)).length || 0;
-
-      const rtLabel = p.runtime === "docker" ? "D" : "C";
-      const pBox = makeBox(p.name, icon, `${rtLabel} ${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
-      for (const l of pBox) lines.push(`  ${l}`);
-
-      const subs = children.filter((c) => c.parent === p.name);
-      if (subs.length > 0) {
-        // Vertical connector from parent center
-        const parentCenter = Math.floor(BOX_W / 2) + 2; // +2 for indent
-        lines.push(" ".repeat(parentCenter) + "│");
-
-        if (subs.length === 1) {
-          // Single child — straight line down
-          lines.push(" ".repeat(parentCenter) + "│");
-          const childSec = securityStates.get(subs[0].name);
-          const ci = statusIcon(subs[0].health);
-          const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
-          const cBox = makeBox(subs[0].name, ci, subs[0].model, cMesh);
-          // Center single child under parent
-          const childIndent = Math.max(2, parentCenter - Math.floor(BOX_W / 2));
-          for (const l of cBox) lines.push(" ".repeat(childIndent) + l);
-        } else {
-          // Multiple children — horizontal bar with drops
-          // Each child occupies CELL_W chars; center the group under parent
-          const totalGroupW = subs.length * CELL_W - 2; // -2 because last has no trailing gap
-          const groupStart = Math.max(4, parentCenter - Math.floor(totalGroupW / 2));
-
-          // Horizontal bar: ├──┬──┬──┤ centered under parent's │
-          let bar = " ".repeat(groupStart);
-          for (let i = 0; i < subs.length; i++) {
-            const mid = Math.floor(BOX_W / 2);
-            if (i === 0) {
-              bar += "┌" + "─".repeat(mid);
-            } else {
-              bar += "─".repeat(mid) + "┬";
-              if (i < subs.length - 1) {
-                bar += "─".repeat(CELL_W - mid - 1);
-              }
-            }
-            if (i === subs.length - 1 && i > 0) {
-              bar += "─".repeat(mid) + "┐";
-            }
-            if (i === 0 && subs.length > 1) {
-              bar += "─".repeat(CELL_W - mid - 1);
-            }
-          }
-          lines.push(bar);
-
-          // Drop stubs: │ at center of each column
-          let stubs = " ".repeat(groupStart);
-          for (let i = 0; i < subs.length; i++) {
-            const mid = Math.floor(BOX_W / 2);
-            stubs += " ".repeat(mid) + "│" + " ".repeat(CELL_W - mid - 1);
-          }
-          lines.push(stubs);
-
-          // Render child boxes side-by-side
-          const childBoxes: string[][] = [];
-          for (const s of subs) {
-            const childSec = securityStates.get(s.name);
-            const ci = statusIcon(s.health);
-            const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
-            childBoxes.push(makeBox(s.name, ci, s.model, cMesh));
-          }
-          for (let row = 0; row < 5; row++) {
-            let line = " ".repeat(groupStart);
-            for (let i = 0; i < childBoxes.length; i++) {
-              line += childBoxes[i][row];
-              if (i < childBoxes.length - 1) line += "  ";
-            }
-            lines.push(line);
-          }
-        }
-
-        // Peer-to-peer mesh links
-        const peerLinks: string[] = [];
-        for (const s of subs) {
-          const childSec = securityStates.get(s.name);
-          const peers = childSec?.agtTrustScores.filter((t) =>
-            t.agent !== s.name && subs.some((sub) => sub.name === t.agent) && t.interactions > 0
-          ) || [];
-          for (const peer of peers) {
-            const key = [s.name, peer.agent].sort().join(":");
-            if (!peerLinks.includes(key)) {
-              peerLinks.push(key);
-              const c = peer.score >= 600 ? "green" : peer.score >= 400 ? "yellow" : "red";
-              lines.push(`         {${c}-fg}⟷{/} ${s.name} ↔ ${peer.agent} {gray-fg}(${peer.interactions} msg${peer.interactions !== 1 ? "s" : ""}, trust: ${peer.score}){/}`);
-            }
-          }
-        }
-      }
-
-      lines.push("");
-    }
-
-    // Orphan sub-agents (parent destroyed but children remain)
-    const orphans = children.filter((c) => !parents.some((p) => p.name === c.parent));
-    if (orphans.length > 0) {
-      lines.push("{gray-fg}─── Orphaned agents ───{/}");
-      for (const s of orphans) {
-        const icon = statusIcon(s.health);
-        lines.push(`  ${icon} ${s.name} {gray-fg}(${s.model}) parent: ${s.parent || "?"}{/}`);
-      }
-    }
-
-    topologyBox.setContent(lines.join("\n"));
+  // Thin wrappers — bodies extracted to operator/render/{topology,cluster}.ts (S15.e.5)
+  function renderTopology(): void {
+    _renderTopology({ sandboxes, securityStates, topologyBox });
   }
 
-  function renderCluster() {
-    if (!clusterData) {
-      clusterNodeBox.setContent(" {gray-fg}Loading cluster data...{/}");
-      clusterInfoBox.setContent(" {gray-fg}Loading...{/}");
-      return;
-    }
-
-    const c = clusterData;
-
-    // ── Node table ──
-    const readyCount = c.nodes.filter((n) => n.status === "Ready").length;
-    const totalNodes = c.nodes.length;
-    const nodeColor = readyCount === totalNodes ? "green" : readyCount > 0 ? "yellow" : "red";
-    clusterNodeBox.setLabel(` 🖥  Nodes  {${nodeColor}-fg}${readyCount}/${totalNodes} Ready{/} `);
-
-    // Build per-pool summary
-    const pools = new Map<string, NodeInfo[]>();
-    for (const n of c.nodes) {
-      const p = n.pool || "default";
-      if (!pools.has(p)) pools.set(p, []);
-      pools.get(p)!.push(n);
-    }
-
-    const nodeLines: string[] = [];
-    for (const [pool, nodes] of pools) {
-      const poolReady = nodes.filter((n) => n.status === "Ready").length;
-      const poolColor = poolReady === nodes.length ? "green" : "yellow";
-      nodeLines.push(`{bold}{underline}Pool: ${pool}{/}  {${poolColor}-fg}${poolReady}/${nodes.length} Ready{/}`);
-      nodeLines.push("");
-
-      // Column headers
-      nodeLines.push(` {cyan-fg}${"Node".padEnd(38)} ${"Status".padEnd(10)} ${"CPU".padEnd(12)} ${"Memory".padEnd(12)} Version{/}`);
-
-      for (const n of nodes) {
-        const dot = n.status === "Ready" ? "{green-fg}●{/}" : "{red-fg}●{/}";
-        const shortName = n.name.length > 36 ? n.name.substring(0, 36) + ".." : n.name;
-
-        // CPU bar
-        const cpuNum = parseInt(n.cpuPct, 10);
-        const cpuBar = !isNaN(cpuNum) ? makeBar(cpuNum) : n.cpuPct;
-
-        // Mem bar
-        const memNum = parseInt(n.memPct, 10);
-        const memBar = !isNaN(memNum) ? makeBar(memNum) : n.memPct;
-
-        nodeLines.push(` ${dot} ${shortName.padEnd(37)} ${n.status.padEnd(10)} ${cpuBar.padEnd(12)} ${memBar.padEnd(12)} ${n.version}`);
-      }
-      nodeLines.push("");
-    }
-
-    clusterNodeBox.setContent(nodeLines.join("\n"));
-
-    // ── Cluster info ──
-    const apiColor = !c.apiReachable ? "red" : c.apiLatencyMs < 1000 ? "green" : "yellow";
-    const apiLabel = !c.apiReachable ? "unreachable" : `${c.apiLatencyMs}ms`;
-
-    const infoLines: string[] = [
-      `{bold}{underline}API Server{/}`,
-      ` Health     {${apiColor}-fg}● ${apiLabel}{/}`,
-      "",
-      `{bold}{underline}Resources{/}`,
-    ];
-
-    // Aggregate CPU/mem from top data
-    let totalCpuMilli = 0;
-    let totalMemMi = 0;
-    for (const n of c.nodes) {
-      const cpuStr = n.cpuCores;
-      if (cpuStr.endsWith("m")) totalCpuMilli += parseInt(cpuStr, 10) || 0;
-      const memStr = n.memBytes;
-      if (memStr.endsWith("Mi")) totalMemMi += parseInt(memStr, 10) || 0;
-    }
-    infoLines.push(
-      ` CPU Used   ${totalCpuMilli}m (${c.nodes.length > 0 ? (c.nodes.reduce((s, n) => s + (parseInt(n.cpuPct, 10) || 0), 0) / c.nodes.length).toFixed(0) : 0}% avg)`,
-      ` Mem Used   ${(totalMemMi / 1024).toFixed(1)}Gi (${c.nodes.length > 0 ? (c.nodes.reduce((s, n) => s + (parseInt(n.memPct, 10) || 0), 0) / c.nodes.length).toFixed(0) : 0}% avg)`,
-    );
-
-    // Quotas
-    if (c.quotas.length > 0) {
-      infoLines.push("", `{bold}{underline}Quotas{/}`);
-      for (const q of c.quotas) {
-        infoLines.push(` ${q.namespace}`);
-        if (q.cpuHard !== "-") infoLines.push(`   CPU  ${q.cpuUsed}/${q.cpuHard}`);
-        if (q.memHard !== "-") infoLines.push(`   Mem  ${q.memUsed}/${q.memHard}`);
-      }
-    }
-
-    // PVCs
-    if (c.pvcs.length > 0) {
-      const bound = c.pvcs.filter((p) => p.phase === "Bound").length;
-      const pending = c.pvcs.filter((p) => p.phase === "Pending").length;
-      const pvColor = pending > 0 ? "yellow" : "green";
-      infoLines.push("", `{bold}{underline}Storage{/}`);
-      infoLines.push(` PVCs  {${pvColor}-fg}${bound} bound{/}${pending > 0 ? ` {yellow-fg}${pending} pending{/}` : ""} / ${c.pvcs.length} total`);
-    }
-
-    // Warnings
-    if (c.warnings.length > 0) {
-      infoLines.push("", `{bold}{underline}⚠  Recent Warnings{/}`);
-      for (const w of c.warnings.slice(-6)) {
-        const color = ["BackOff", "OOMKilled", "ImagePullBackOff", "Evicted", "NodeNotReady"].includes(w.reason) ? "red" : "yellow";
-        infoLines.push(` {${color}-fg}${w.reason}{/} ${w.object}`);
-        infoLines.push(`   {gray-fg}${w.message} (${w.time} ago){/}`);
-      }
-    } else {
-      infoLines.push("", `{green-fg}✓ No warnings{/}`);
-    }
-
-    clusterInfoBox.setContent(infoLines.join("\n"));
-  }
-
-  /** Render a small bar chart: ██░░ 34% */
-  function makeBar(pct: number): string {
-    const width = 6;
-    const filled = Math.round((pct / 100) * width);
-    const color = pct > 80 ? "red" : pct > 50 ? "yellow" : "green";
-    const bar = "█".repeat(filled) + "░".repeat(width - filled);
-    return `{${color}-fg}${bar}{/} ${pct}%`;
+  function renderCluster(): void {
+    _renderCluster({ clusterData, clusterNodeBox, clusterInfoBox });
   }
 
   function render() {
