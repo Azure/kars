@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.d.3 `phase2-hotspot-up-cli-d3` — up.ts AgentMesh deploy extraction
+
+#### Refactored
+
+- `cli/src/commands/up.ts` 1296 → 1182 LOC (sub-slice d.3 of the
+  S15.d up.ts multi-PR sub-train; d.4 to follow). AgentMesh
+  infrastructure deploy phase (Inspektor Gadget eBPF, relay +
+  registry deployment, external-registry shortcut, optional AGIC
+  ingress) extracted to `cli/src/commands/up/agentmesh_deploy.ts`
+  (174 LOC). The result triple `{ registryMode,
+  globalRegistryUrl, globalRelayUrl }` flows forward unchanged to
+  the ClawSandbox CR creation step and `saveContext()`.
+
+#### Tests
+
+- All 454 CLI tests pass; 2 skipped pre-existing. `tsc --noEmit`,
+  `lint` (27 warnings, baseline-matched), `build` clean. No
+  behavioral change — body moved verbatim.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli-d3.md`
+  (sign-offs: Core ✅, Security ✅).
+
 ### S15.d.2 `phase2-hotspot-up-cli-d2` — up.ts preflight extraction
 
 #### Refactored

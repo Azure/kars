@@ -41,7 +41,6 @@ export function upCommand(): Command {
     .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
     .action(async (options) => {
       const { execa } = await import("execa");
-      const fs = await import("fs");
 
       // ── FAST UPGRADE PATH (S15.d.1: extracted to ./up/fast_upgrade.ts) ──
       // Skip all prompts and infra — just re-run Helm with cached context.
@@ -719,130 +718,16 @@ export function upCommand(): Command {
 
         stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
 
-        // ── Step 6b: Deploy Inspektor Gadget (eBPF observability) ────
-        // Non-fatal — kubectl-gadget may not be installed
-        await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {});
-
-        // ── Step 6c: Deploy AgentMesh infrastructure (relay + registry) ──
-        stepper.step("Deploying AgentMesh infrastructure...");
-
-        // Track registry mode for context save at end
-        let registryMode = "local";
-        let globalRegistryUrl: string | undefined;
-        let globalRelayUrl: string | undefined;
-
-        if (options.globalRegistry) {
-          // External registry mode — skip local deployment, set env vars
-          stepper.update(`Using external registry: ${options.globalRegistry}`);
-          kvLine("Registry mode", "global");
-          kvLine("Registry URL", options.globalRegistry);
-
-          registryMode = "global";
-          globalRegistryUrl = options.globalRegistry;
-
-          stepper.done("AgentMesh: using external registry (skipped local deploy)");
-        } else {
-          // Local registry mode — deploy relay + registry in-cluster
-          const agentmeshManifest = path.join(repoRoot, "deploy", "agentmesh.yaml");
-        if (existsSync(agentmeshManifest)) {
-          // Import postgres image into ACR (Azure Policy blocks Docker Hub images)
-          stepper.update("Importing postgres image into ACR...");
-          await execa("az", [
-            "acr", "import",
-            "--name", acr,
-            "--source", "docker.io/library/postgres:16-alpine",
-            "--image", "postgres:16-alpine",
-            "--force",
-          ], { stdio: "pipe" }).catch(() => {
-            // May already exist — non-fatal
-          });
-
-          // Ensure the agentmesh namespace exists before creating the secret
-          await execa("kubectl", ["create", "namespace", "agentmesh"], { stdio: "pipe" }).catch(() => {});
-
-          // Auto-generate postgres credentials if the secret doesn't exist yet
-          const secretExists = await execa("kubectl", [
-            "get", "secret", "agentmesh-db-credentials", "-n", "agentmesh",
-          ], { stdio: "pipe" }).then(() => true).catch(() => false);
-
-          if (!secretExists) {
-            stepper.update("Generating AgentMesh database credentials...");
-            const { randomBytes } = await import("crypto");
-            const dbPassword = randomBytes(24).toString("base64url");
-            await execa("kubectl", [
-              "create", "secret", "generic", "agentmesh-db-credentials",
-              "-n", "agentmesh",
-              `--from-literal=POSTGRES_PASSWORD=${dbPassword}`,
-            ], { stdio: "pipe" });
-          }
-
-          // Substitute ACR login server in the manifest
-          const fs = await import("fs");
-          const manifest = fs.readFileSync(agentmeshManifest, "utf-8");
-          const patchedManifest = manifest.replace(
-            /azureclawacr\.azurecr\.io/g,
-            acrLoginServer
-          );
-          const tmpManifest = path.join(repoRoot, ".tmp-agentmesh.yaml");
-          try {
-            fs.writeFileSync(tmpManifest, patchedManifest);
-            await execa("kubectl", ["apply", "-f", tmpManifest], { stdio: "pipe" });
-
-            // Wait for AgentMesh pods to be ready
-            stepper.update("Waiting for AgentMesh pods to be ready...");
-            await execa("kubectl", [
-              "wait", "--for=condition=Ready", "pod",
-              "-l", "app=agentmesh-relay",
-              "-n", "agentmesh",
-              "--timeout=180s",
-            ], { stdio: "pipe" }).catch(() => {});
-            await execa("kubectl", [
-              "wait", "--for=condition=Ready", "pod",
-              "-l", "app=agentmesh-registry",
-              "-n", "agentmesh",
-              "--timeout=180s",
-            ], { stdio: "pipe" }).catch(() => {});
-
-            stepper.done("AgentMesh infrastructure deployed");
-          } finally {
-            try { fs.unlinkSync(tmpManifest); } catch { /* noop */ }
-          }
-        } else {
-          stepper.warn("AgentMesh manifest not found — skipping");
-        }
-
-          // Deploy AGIC Ingress if --expose-registry is set
-          if (options.exposeRegistry) {
-            stepper.step("Deploying AgentMesh Ingress (public endpoints)...");
-            const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
-            if (existsSync(ingressManifest)) {
-              const ingressYaml = fs.readFileSync(ingressManifest, "utf-8");
-              const domain = `${baseName}.azureclaw.dev`;
-              const { stdout: currentSubId } = await execa("az", [
-                "account", "show", "--query", "id", "--output", "tsv",
-              ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
-              const patchedIngress = ingressYaml
-                .replace(/DOMAIN_PLACEHOLDER/g, domain)
-                .replace(/SUBSCRIPTION_ID/g, currentSubId.trim())
-                .replace(/RESOURCE_GROUP/g, rg)
-                .replace(/azureclawacr\.azurecr\.io/g, acrLoginServer);
-              const tmpIngress = path.join(repoRoot, ".tmp-agentmesh-ingress.yaml");
-              try {
-                fs.writeFileSync(tmpIngress, patchedIngress);
-                await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
-                stepper.done(`AgentMesh Ingress deployed (registry.${domain}, relay.${domain})`);
-
-                registryMode = "global";
-                globalRegistryUrl = `https://registry.${domain}`;
-                globalRelayUrl = `wss://relay.${domain}`;
-              } finally {
-                try { fs.unlinkSync(tmpIngress); } catch { /* noop */ }
-              }
-            } else {
-              stepper.warn("Ingress manifest not found — skipping");
-            }
-          }
-        }
+        // ── Step 6b/6c: Inspektor Gadget + AgentMesh deploy ──────────
+        // (S15.d.3: extracted to ./up/agentmesh_deploy.ts)
+        const { deployAgentMesh } = await import("./up/agentmesh_deploy.js");
+        const meshResult = await deployAgentMesh(
+          { repoRoot, acr, acrLoginServer, baseName, rg, stepper },
+          { globalRegistry: options.globalRegistry, exposeRegistry: options.exposeRegistry },
+        );
+        const registryMode = meshResult.registryMode;
+        const globalRegistryUrl = meshResult.globalRegistryUrl;
+        const globalRelayUrl = meshResult.globalRelayUrl;
 
         // ── Step 7: Create ClawSandbox CR ────────────────────────────
         stepper.step(`Creating sandbox '${options.name}'...`);
