@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
 
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
+    let proxy_blocked_egress = state.blocked_egress.clone();
 
     // Read admin token for protecting sensitive endpoints.
     // Priority: file mount (AKS Secret) > env var > unset.
@@ -251,7 +252,8 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8444);
     let proxy_addr = format!("127.0.0.1:{proxy_port}");
-    let proxy_shutdown = forward_proxy::start(&proxy_addr, proxy_blocklist).await;
+    let proxy_shutdown =
+        forward_proxy::start(&proxy_addr, proxy_blocklist, proxy_blocked_egress).await;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let shutdown_timeout = resolve_shutdown_timeout();
