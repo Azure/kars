@@ -36,9 +36,14 @@ or has only its own relative-import path edited (`./plugin.js` →
   those into `cli/dist/profiles/` for use by the host-side
   `azureclaw dev` command (seccomp staging) — the in-sandbox runtime
   adapter never reads those profile JSONs. So the new
-  `runtime-openclaw` builder stage drops the `policy-engine/profiles/`
-  copy; cli's own build pipeline still produces them for the operator
-  CLI tarball.
+  `runtime-openclaw` builder stage drops the profile copy; cli's
+  own build pipeline still produces them for the operator CLI
+  tarball.
+- The `policy-engine/` top-level directory has also been renamed to
+  `cli/profiles/` because (a) it contained a single seccomp JSON, no
+  engine, and (b) `azureclaw dev` is now its only consumer. cli's
+  `build` script becomes `cp -r profiles dist/profiles` (no more
+  `../`). CI scope regexes and docs updated accordingly.
 - No Helm chart, no Kustomize overlay, and no controller code
   references `cli/dist/plugin.js` or `cli/openclaw.plugin.json`
   directly. The only consumer of the `dist/` plugin layout is the

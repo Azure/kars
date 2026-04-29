@@ -29,8 +29,10 @@ Per principle §0.2 #9 of the implementation plan:
 - Anything under `controller/src/reconcilers/**` that changes a trust or
   identity-binding surface (`fedcred.rs`, `pairing.rs`, `mesh_peer.rs` today)
 - Anything under `inference-router/src/{mcp,a2a,providers,routes}/**`
+- Anything under `runtimes/openclaw/src/core/**` or
+  `runtimes/openclaw/src/index.ts` (in-sandbox runtime adapter)
 - Anything under `sandbox-images/*/Dockerfile`, `entrypoint.sh`,
-  `policy-engine/profiles/**`
+  `cli/profiles/**`, `deploy/seccomp/**`, `deploy/helm/azureclaw/files/**`
 - Vendored patch updates (`vendor/*/src/**`, `vendor/*/dist/**`)
 
 ## Scopes that accept any maintainer as second signer

@@ -11,7 +11,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 # Capability-introducing paths — mirrors §4.4 of the plan.
-CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|policy-engine/)'
+CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/azureclaw/files/)'
 
 changed=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only HEAD)
 touches_cap=$(printf '%s\n' "$changed" | grep -E "$CAP_RE" || true)

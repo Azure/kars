@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cli-builder` stage because it was only needed by cli's own build
   script (host-side `azureclaw dev` seccomp staging) — the
   in-sandbox runtime adapter has no use for those profile JSONs.
+- The misleadingly-named top-level `policy-engine/` directory has
+  been renamed to `cli/profiles/`. It only ever contained a single
+  seccomp JSON (no engine), and its only consumer is now
+  `cli/src/commands/dev.ts` (host-side `azureclaw dev`). cli's
+  `build` script becomes `cp -r profiles dist/profiles`. CI scope
+  regexes (`security-audit-required.sh`, `no-stubs.sh`,
+  `no-custom-crypto.sh`) and docs (`README.md`,
+  `docs/blueprints/05-sovereign-airgapped.md`,
+  `docs/security-reviewers.md`, `docs/security-audits/README.md`,
+  `docs/competitive.md`, `docs/implementation-plan.md`,
+  `docs/security.md`, `tests/conformance/specs/sandbox-isolation.spec.ts`,
+  `tests/conformance/fixtures/README.md`) updated accordingly.
 - `ci/loc-budget.yaml` repointed: the `plugin.ts` 7455 → 800
   budget entry now tracks `runtimes/openclaw/src/index.ts`.
 - `.github/workflows/ci.yml` adds a new `Runtime OpenClaw Build &

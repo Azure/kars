@@ -14,7 +14,7 @@ Any change to:
 - CLI commands / adapters / migrations
   (`cli/src/{commands,migrate,adapters}/**`)
 - Sandbox images (`sandbox-images/*/Dockerfile`, `entrypoint.sh`)
-- Policy-engine profiles (`policy-engine/**`)
+- Sandbox seccomp/policy profiles (`cli/profiles/**`)
 - Vendored patch updates (`vendor/*/src/**`, `vendor/*/dist/**`)
 
 ## Workflow
