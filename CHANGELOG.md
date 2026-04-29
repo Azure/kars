@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.3 `phase2-hotspot-plugin-cli-f3` — plugin.ts chunked mesh transport extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 6890 → **6648 LOC** (−242, cumulative S15.f
+  −491). The chunked-transport layer (`meshSend` + 
+  `meshHandleTransportMessage` + `pendingTransfers` Map + TTL
+  cleanup + `MESH_*` constants + `PendingMeshTransfer` interface,
+  ~265 LOC) extracted to `core/mesh-transport.ts`. Signal Protocol
+  crypto stays in plugin.ts; this is purely the JSON-splitting wire
+  layer.
+- `meshSend` keeps a thin wrapper that captures `agtIdentity` so all
+  14+ call sites stay byte-identical.
+- No behavior change.
+
 ### S15.f.2 `phase2-hotspot-plugin-cli-f2` — plugin.ts native-agent delegate extraction
 
 #### Refactored
