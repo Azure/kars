@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.2 `phase2-hotspot-operator-cli-e2` — operator.ts sandbox-list fetcher extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 2739 → **2483 LOC** (cumulative
+  S15.e: 2894 → 2483, −411). Sandbox-list fetchers
+  (`fetchSandboxes`, `fetchSandboxesAKS`, `fetchSandboxesDocker`)
+  extracted to `cli/src/commands/operator/fetchers/sandboxes.ts`
+  (287 LOC). Also moved `kctl(args, context?)` helper to
+  `operator/helpers.ts` so the new fetcher module can reuse it.
+- Closure-captured `kubeContext` now passed as explicit parameter
+  to AKS variant; semantics identical.
+- No behavior change; bodies byte-identical.
+
+#### Tests
+
+- All 454 CLI tests pass; tsc / lint (27 baseline) / build clean.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-operator-cli-e2.md`
+
 ### S15.e.1 `phase2-hotspot-operator-cli-e1` — operator.ts type + helper extraction
 
 #### Refactored

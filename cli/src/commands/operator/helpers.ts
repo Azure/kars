@@ -4,10 +4,20 @@
  * Extracted from `cli/src/commands/operator.ts` (S15.e.1) so the
  * top-level dashboard module can stay under §4.2's 800-line cap.
  *
- * Both helpers are pure: no I/O, no closure capture, no state.
+ * All helpers are pure: no I/O, no closure capture, no state.
  * They were already module-level in operator.ts (not nested inside
  * `startDashboard`) and are byte-identical to the originals.
  */
+
+/**
+ * Build a `kubectl` argv with an optional `--context` prefix.
+ *
+ * `kctl(["get","pods"], "my-cluster")` → `["--context","my-cluster","get","pods"]`
+ * `kctl(["get","pods"], undefined)`     → `["get","pods"]`
+ */
+export function kctl(args: string[], context?: string): string[] {
+  return context ? ["--context", context, ...args] : args;
+}
 
 /**
  * Return a compact human-readable duration string for "time since `date`".
