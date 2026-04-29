@@ -180,6 +180,6 @@ bundle.tar.gz
 
 - `inference-router/src/foundry.rs` (provider switch incl. `local-openai-compat` mode)
 - `deploy/helm/azureclaw/values.yaml` (`audit.sink`, `router.model.provider`)
-- `policy-engine/profiles/` (offline-portable policy bundle)
+- `cli/profiles/` (offline-portable policy bundle)
 - `Makefile` `bundle` target (🚧 to be added)
 - `docs/security.md` § "Air-gapped operating mode"

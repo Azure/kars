@@ -19,8 +19,9 @@ PROD_PATHS=(
   'controller/src/'
   'inference-router/src/'
   'cli/src/'
+  'runtimes/openclaw/src/'
   'sandbox-images/'
-  'policy-engine/'
+  'cli/profiles/'
 )
 
 # Patterns that indicate an unfinished production code path.

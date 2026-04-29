@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { redactSecrets } from "./plugin.js";
+import { redactSecrets } from "./index.js";
 
 describe("redactSecrets", () => {
   it("redacts azcp_1_ pairing tokens (bare, no preceding keyword)", () => {

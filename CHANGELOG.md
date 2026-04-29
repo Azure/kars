@@ -7,7 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
-### S15.h `phase2-hotspot-handoff-router` — extract `handoff_succession` (mod.rs 870 → 658 LOC)
+### S15.g.1 `phase2-runtime-package-split` — runtime adapter moved out of `cli/`
+
+#### Refactored
+
+- New top-level package `runtimes/openclaw/` (`@azureclaw/runtime-openclaw`).
+  The OpenClaw runtime adapter (formerly intermingled with the operator CLI
+  under `cli/src/`) now lives in its own package, sibling to the future
+  `runtimes/openai-agents/` and `runtimes/maf/` adapters that S10.A3+S10.A4
+  will land. No code change inside the moved files.
+
+  | Old path | New path |
+  |---|---|
+  | `cli/src/plugin.ts` | `runtimes/openclaw/src/index.ts` |
+  | `cli/src/core/` | `runtimes/openclaw/src/core/` |
+  | `cli/src/plugin.test.ts` | `runtimes/openclaw/src/index.test.ts` |
+  | `cli/src/redact.test.ts` | `runtimes/openclaw/src/redact.test.ts` |
+  | `cli/src/router-url.test.ts` | `runtimes/openclaw/src/router-url.test.ts` |
+  | `cli/openclaw.plugin.json` | `runtimes/openclaw/openclaw.plugin.json` |
+
+- New `runtimes/openclaw/package.json` (`@azureclaw/runtime-openclaw`)
+  + `tsconfig.json` mirroring the cli's compiler options. `main` /
+  `openclaw.extensions` point at `dist/index.js` (was
+  `dist/plugin.js`). Runtime deps narrowed to the actual surface
+  (`@agentmesh/sdk`, `commander`); the operator-CLI-only deps
+  (`@azure/identity`, `blessed`, `inquirer`, `node-pty`, `execa`,
+  …) stay in `cli/package.json` only.
+- `sandbox-images/openclaw/Dockerfile` updated to build from
+  `runtimes/openclaw/` instead of `cli/`. The `cli-builder` stage
+  now `COPY runtimes/openclaw/{package.json,package-lock.json,
+  tsconfig.json,src/}` and runs `npm ci && npm run build` there;
+  the runtime stage copies `runtimes/openclaw/dist/` →
+  `/opt/azureclaw-plugin/`. `cli/skills/` and `cli/policies/` are
+  still copied at the same destination (S15.g.2 will move skills).
+  The `policy-engine/profiles/` copy was removed from the
+  `cli-builder` stage because it was only needed by cli's own build
+  script (host-side `azureclaw dev` seccomp staging) — the
+  in-sandbox runtime adapter has no use for those profile JSONs.
+- The misleadingly-named top-level `policy-engine/` directory has
+  been renamed to `cli/profiles/`. It only ever contained a single
+  seccomp JSON (no engine), and its only consumer is now
+  `cli/src/commands/dev.ts` (host-side `azureclaw dev`). cli's
+  `build` script becomes `cp -r profiles dist/profiles`. CI scope
+  regexes (`security-audit-required.sh`, `no-stubs.sh`,
+  `no-custom-crypto.sh`) and docs (`README.md`,
+  `docs/blueprints/05-sovereign-airgapped.md`,
+  `docs/security-reviewers.md`, `docs/security-audits/README.md`,
+  `docs/competitive.md`, `docs/implementation-plan.md`,
+  `docs/security.md`, `tests/conformance/specs/sandbox-isolation.spec.ts`,
+  `tests/conformance/fixtures/README.md`) updated accordingly.
+- `ci/loc-budget.yaml` repointed: the `plugin.ts` 7455 → 800
+  budget entry now tracks `runtimes/openclaw/src/index.ts`.
+- `.github/workflows/ci.yml` adds a new `Runtime OpenClaw Build &
+  Test` job that runs `typecheck / lint / build / test / npm
+  audit` for `runtimes/openclaw/` at parity with the existing
+  `cli-build` and `mesh-plugin-build` jobs.
+
+#### Verification
+
+- `cd runtimes/openclaw && npx tsc --noEmit` clean; `npm run lint`
+  23 warnings, 0 errors; `npm test -- --run` 100 passed (3 files);
+  `npm run build` clean.
+- `cd cli && npx tsc --noEmit` clean; `npm run lint` 16 warnings,
+  0 errors; `npm test -- --run` 354 passed / 2 skipped (was 454 —
+  100 plugin/redact/router-url tests followed the source files);
+  `npm run build` clean.
+- Sandbox image build path: `cli-builder` stage now operates on
+  `/build/runtimes/openclaw/` and emits `dist/` at the same
+  position the runtime stage's `COPY --from=cli-builder` reads.
+  Skills + policies + vendored SDK overlay paths unchanged —
+  S15.g.2 will move skills next.
+
+#### §14.6 / §15 impact
+
+- Pure architectural hygiene. No protocol surface change. Improves
+  OSS-readiness — first-time readers can see at a glance that
+  `cli/` is the operator tool and `runtimes/<adapter>/` is the
+  in-sandbox plumbing. Unblocks S10.A3 (OpenAI Agents Python
+  adapter) and S10.A4 (Microsoft Agent Framework adapter) to land
+  cleanly under `runtimes/`.
+
+
 
 #### Refactored
 

@@ -528,7 +528,7 @@ azureclaw/
 │   └── src/{a2a,mcp,providers,routes,handoff,governance,...}/
 │   └── fuzz/             # 5 cargo-fuzz targets
 ├── sandbox-images/       # OpenClaw + nemoclaw container images
-├── policy-engine/        # Seccomp profiles & security policies
+├── runtimes/openclaw/    # AzureClaw runtime adapter for OpenClaw (in-sandbox plugin)
 ├── deploy/               # Bicep IaC, Helm charts (incl. VAP/MAP set), AgentMesh K8s manifests
 ├── docs/                 # Architecture, security, threat model, ADRs, security-audits/
 ├── examples/             # Sample agents (basic, confidential, telegram, demo)

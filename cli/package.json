@@ -22,7 +22,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js && cp -r ../policy-engine/profiles dist/profiles",
+    "build": "tsc && chmod +x dist/index.js && cp -r profiles dist/profiles",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",
