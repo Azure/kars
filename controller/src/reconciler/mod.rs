@@ -1643,14 +1643,32 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
                 .await;
         }
-    } else if !crate::status::running_status_matches(&sandbox, &sandbox_ns, runtime_kind_str) {
-        let sandbox_api: Api<ClawSandbox> =
-            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-        let status_obj =
-            crate::status::build_running_status_patch(&sandbox, &sandbox_ns, runtime_kind_str);
-        let _ = sandbox_api
-            .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
-            .await;
+    } else {
+        // S12.b status-only: when the feature gate is on AND the CR
+        // carries an `allowlistRef`, drive the policy-fetcher and
+        // surface the `AllowlistVerified` Condition. With the gate off
+        // (default) this is a no-op; the fetcher itself short-circuits
+        // before any network IO.
+        let allowlist_cond = crate::policy_fetcher::maybe_verify_allowlist(&sandbox).await;
+        let extras: Vec<_> = allowlist_cond.iter().cloned().collect();
+        if !crate::status::running_status_matches_with_extras(
+            &sandbox,
+            &sandbox_ns,
+            runtime_kind_str,
+            &extras,
+        ) {
+            let sandbox_api: Api<ClawSandbox> =
+                Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+            let status_obj = crate::status::build_running_status_patch_with_extras(
+                &sandbox,
+                &sandbox_ns,
+                runtime_kind_str,
+                &extras,
+            );
+            let _ = sandbox_api
+                .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
+                .await;
+        }
     }
 
     tracing::info!("ClawSandbox {name} reconciled successfully");
