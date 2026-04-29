@@ -45,6 +45,8 @@ import {
 } from "./operator/render/security.js";
 import { renderHeader as _renderHeader } from "./operator/render/header.js";
 import { openSpawnDialog } from "./operator/dialogs/spawn.js";
+import { deleteSelectedAgent as _deleteSelectedAgent } from "./operator/dialogs/delete.js";
+import { connectToAgent as _connectToAgent } from "./operator/dialogs/connect.js";
 
 // ── Command ─────────────────────────────────────────────────────────
 
@@ -794,212 +796,42 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   });
 
   // Delete
+  // Delete (body extracted to operator/dialogs/delete.ts in S15.e.7)
   function deleteSelectedAgent() {
     if (dialogOpen) return;
-    if (sandboxes.length === 0) return;
-    const idx = (agentTable as any).rows?.selected ?? 0;
-    const sb = sandboxes[idx];
-    if (!sb) return;
-    dialogOpen = true;
-
-    // Custom confirm dialog with selectable buttons
-    const dialog = blessed.box({
-      parent: screen, top: "center", left: "center",
-      width: 52, height: 7,
-      border: { type: "line" },
-      style: { border: { fg: "red" }, fg: "white", bg: "black" },
-      label: " ⚠  Confirm Delete ",
-      tags: true,
+    _deleteSelectedAgent({
+      screen,
+      agentTable,
+      sandboxes,
+      activityLog,
+      setDialogOpen: (v: boolean) => { dialogOpen = v; },
+      refresh,
     });
-    blessed.box({
-      parent: dialog, top: 0, left: 2, width: 46, height: 1,
-      tags: true, style: { fg: "white", bg: "black" },
-      content: `Destroy agent {bold}${sb.name}{/bold}?`,
-    });
-
-    let selected = 0; // 0 = Yes, 1 = Cancel
-    const btnYes = blessed.button({
-      parent: dialog, top: 2, left: 8, width: 12, height: 1,
-      content: "  [ Yes ]  ", tags: true, mouse: true,
-      style: { fg: "white", bg: "red", focus: { bg: "red", fg: "white", bold: true } },
-    });
-    const btnCancel = blessed.button({
-      parent: dialog, top: 2, left: 28, width: 14, height: 1,
-      content: "  [ Cancel ]  ", tags: true, mouse: true,
-      style: { fg: "white", bg: "gray", focus: { bg: "gray", fg: "white", bold: true } },
-    });
-
-    function updateButtons() {
-      btnYes.style.bg = selected === 0 ? "red" : "black";
-      btnYes.style.bold = selected === 0;
-      btnCancel.style.bg = selected === 1 ? "gray" : "black";
-      btnCancel.style.bold = selected === 1;
-      screen.render();
-    }
-
-    const cleanup = () => { dialog.destroy(); screen.render(); setTimeout(() => { dialogOpen = false; }, 50); };
-
-    const onKey = async (_ch: any, key: any) => {
-      if (key.name === "left" || key.name === "right" || key.name === "tab") {
-        selected = selected === 0 ? 1 : 0;
-        updateButtons();
-      } else if (key.name === "return" || key.name === "enter") {
-        screen.removeListener("keypress", onKey);
-        cleanup();
-        if (selected === 0) {
-          activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold}...{/}`);
-          screen.render();
-          try {
-            if (sb.runtime === "docker") {
-              await execa("docker", ["rm", "-f", sb.podName!], { stdio: "pipe" });
-            } else {
-              await execa("azureclaw", ["destroy", sb.name, "--cloud", "--yes"], { stdio: "pipe" });
-            }
-            activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
-          } catch (e: any) {
-            activityLog.log(`{red-fg}✗ Destroy fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
-          }
-          await refresh();
-        }
-      } else if (key.name === "escape" || key.name === "q") {
-        screen.removeListener("keypress", onKey);
-        cleanup();
-      }
-    };
-
-    screen.on("keypress", onKey);
-    btnYes.on("press", () => { selected = 0; onKey(null, { name: "return" }); });
-    btnCancel.on("press", () => { selected = 1; onKey(null, { name: "return" }); });
-
-    updateButtons();
-    btnYes.focus();
-    screen.render();
   }
 
   screen.key(["x"], () => deleteSelectedAgent());
 
   // ── Connect to agent (Enter) ──────────────────────────────────────
+  // (body extracted to operator/dialogs/connect.ts in S15.e.7)
   async function connectToAgent() {
     if (dialogOpen) return;
-    if (focusedPanel !== "agents") return;
-    const idx = (agentTable as any).rows?.selected ?? 0;
-    const sb = sandboxes[idx];
-    if (!sb) return;
-
-    dialogOpen = true;
-    connectedToAgent = true;
-    const sessionId = `operator-${sb.name}`;
-
-    // Stop the refresh timer — prevents blessed from writing to stdout
-    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-
-    // Save blessed state and leave alternate screen
-    try { screen.program.lsaveCursor("operator"); } catch {}
-    screen.program.normalBuffer();
-    screen.program.showCursor();
-    screen.program.flush();
-
-    // Remove ALL blessed listeners from stdin so we're the sole reader.
-    const savedDataListeners = process.stdin.listeners("data").slice();
-    const savedKeypressListeners = process.stdin.listeners("keypress").slice();
-    process.stdin.removeAllListeners("data");
-    process.stdin.removeAllListeners("keypress");
-
-    // Spawn PTY for proper TTY passthrough with colors
-    const nodePty = await import("node-pty");
-    const connectCmd = devMode ? "docker" : "kubectl";
-    const connectArgs = devMode
-      ? ["exec", "-it", sb.podName!, "openclaw", "tui"]
-      : kctl(["exec", "-it", "-n", sb.namespace, `deploy/${sb.name}`, "-c", "openclaw", "--", "openclaw", "tui"], kubeContext);
-
-    const cols = process.stdout.columns || 80;
-    const rows = process.stdout.rows || 24;
-    const ptyProcess = nodePty.spawn(connectCmd, connectArgs, {
-      name: "xterm-256color",
-      cols,
-      rows,
-      cwd: process.cwd(),
-      env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
+    await _connectToAgent({
+      screen,
+      agentTable,
+      sandboxes,
+      focusedPanel,
+      activityLog,
+      kctl,
+      kubeContext,
+      devMode,
+      refreshInterval,
+      refresh,
+      render,
+      setDialogOpen: (v: boolean) => { dialogOpen = v; },
+      setConnectedToAgent: (v: boolean) => { connectedToAgent = v; },
+      getRefreshTimer: () => refreshTimer,
+      setRefreshTimer: (t) => { refreshTimer = t; },
     });
-
-    // Pipe PTY output to stdout
-    ptyProcess.onData((data: string) => {
-      process.stdout.write(data);
-    });
-
-    // Raw mode: forward keystrokes to PTY.
-    // Detach: Ctrl+\ (0x1c) or Ctrl+] (0x1d)
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
-
-    const onData = (data: Buffer) => {
-      // Ctrl+\ = 0x1c, Ctrl+] = 0x1d — detach
-      if (data.length === 1 && (data[0] === 0x1c || data[0] === 0x1d)) {
-        cleanup("detach");
-        return;
-      }
-      try { ptyProcess.write(data.toString()); } catch {}
-    };
-    process.stdin.on("data", onData);
-
-    // Forward resize to PTY
-    const onResize = () => {
-      try { ptyProcess.resize(process.stdout.columns || 80, process.stdout.rows || 24); } catch {}
-    };
-    process.stdout.on("resize", onResize);
-
-    // Suppress SIGINT — let it reach child via PTY
-    const sigintHandler = () => {};
-    process.on("SIGINT", sigintHandler);
-
-    ptyProcess.onExit(() => cleanup("exit"));
-
-    let cleaned = false;
-    function cleanup(reason: string) {
-      if (cleaned) return;
-      cleaned = true;
-
-      process.stdin.removeAllListeners("data");
-      process.stdout.removeListener("resize", onResize);
-      process.removeListener("SIGINT", sigintHandler);
-      try { ptyProcess.kill(); } catch {}
-
-      // Restore ALL blessed stdin listeners
-      for (const fn of savedDataListeners) process.stdin.on("data", fn as (...args: any[]) => void);
-      for (const fn of savedKeypressListeners) process.stdin.on("keypress", fn as (...args: any[]) => void);
-
-      // Restore blessed terminal state
-      if (process.stdin.isTTY) process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdout.write("\x1b[?25l\x1b[?1049h");
-      screen.program.alternateBuffer();
-      try { screen.program.lrestoreCursor("operator"); } catch {}
-      screen.program.hideCursor();
-      screen.program.flush();
-      screen.alloc();
-
-      connectedToAgent = false;
-      dialogOpen = false;
-
-      // Restart refresh timer
-      refreshTimer = setInterval(async () => { await refresh(); }, refreshInterval);
-
-      if (reason === "detach") {
-        activityLog.log(`{cyan-fg}⏏ Detached from ${sb.name}{/}`);
-      } else {
-        activityLog.log(`{green-fg}↩ Back from ${sb.name} (session: ${sessionId}){/}`);
-      }
-      render();
-      screen.render();
-
-      // Immediate refresh to catch any changes while we were connected
-      setTimeout(() => refresh(), 500);
-    }
-
-    // Show hint
-    process.stdout.write(`\r\n\x1b[36m⟩ Connected to ${sb.name}. Press Ctrl+\\ to detach, /exit to quit.\x1b[0m\r\n\r\n`);
   }
 
   screen.key(["enter"], () => {

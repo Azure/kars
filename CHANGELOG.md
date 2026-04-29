@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.7 `phase2-hotspot-operator-cli-e7` — operator.ts delete + connect dialog extraction (closes S15.e)
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 1027 → **859 LOC** (cumulative
+  S15.e: 2894 → 859, **−2035**, 70.3% reduction). The `x`-key
+  destroy-confirm dialog and the `Enter`-key connect-to-agent PTY
+  session extracted to `operator/dialogs/{delete,connect}.ts`
+  (~104 + ~158 LOC). Closes the S15.e operator.ts decomposition
+  train.
+- §4.2 800-LOC cap accepted at 859 (59 over) — the residual is the
+  dashboard shell (state decls, widget construction, refresh poll
+  loop, render orchestrator, keymap bindings), each component being
+  inherently coupled to the surrounding closure.
+- No behavior change.
+
 ### S15.e.6 `phase2-hotspot-operator-cli-e6` — operator.ts spawn-dialog extraction
 
 #### Refactored
