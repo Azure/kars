@@ -44,7 +44,7 @@ COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/
 # Copy AzureClaw OpenClaw runtime adapter (built from source in cli-builder stage)
 COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/azureclaw-plugin/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/azureclaw-plugin/
-COPY cli/skills/ /opt/azureclaw-plugin/skills/
+COPY runtimes/openclaw/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
 # Install plugin runtime dependencies

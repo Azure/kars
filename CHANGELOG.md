@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has not been emitted since.
 - Updated `.github/copilot-instructions.md` package-name reference.
 - `cli/package-lock.json` regenerated with the new package name.
+### S15.g.2 `phase2-skills-move` — OpenClaw skills relocated under runtime adapter
+
+#### Refactored
+
+- `cli/skills/` → `runtimes/openclaw/skills/`. SKILL.md is an OpenClaw-specific
+  concept (each agent runtime adapter ships its own skill set), so the skills
+  directory belongs alongside the OpenClaw runtime adapter package, not under
+  the operator CLI. No content changes.
+
+  Updated references:
+  - `sandbox-images/openclaw/Dockerfile` (COPY src path)
+  - `CONTRIBUTING.md` (top-level layout table)
 
 ### S19 `phase2-container-image-scan-fix` — sandbox base image build/pull resilience
 
