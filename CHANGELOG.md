@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.b `phase2-hotspot-mesh-cli` — mesh CLI hotspot decomposition
+
+#### Refactored
+
+- `cli/src/commands/mesh.ts` 1583 → 667 LOC (under §15 800-LOC
+  cap). Decomposed along natural seams into a fresh
+  `cli/src/commands/mesh/` directory:
+  - `mesh/identity.ts` (137 LOC) — `MeshIdentity` interface, AES-256-GCM
+    at-rest key encryption, Ed25519 keypair + AMID derivation,
+    base58 encode, identity file load/save (0o700 dir / 0o600 file).
+  - `mesh/oauth.ts` (94 LOC) — OAuth callback HTTP server bound to
+    `127.0.0.1`, `OAuthResult` shape, `escapeHtml` (CWE-79) and
+    `sanitizeForLog` (CWE-117) helpers.
+  - `mesh/health.ts` (127 LOC) — `killProcessesOnPorts`,
+    `killStaleListeners`, `findDuplicateListeners`,
+    `checkRegistryHealth`, `checkRelayHealth`.
+  - `mesh/auth.ts` (221 LOC) — `mesh auth` subcommand body
+    (`attachAuthSubcommand`).
+  - `mesh/promote.ts` (409 LOC) — `mesh promote` subcommand body
+    (`attachPromoteSubcommand`).
+- Public re-export surface preserved; `mesh.test.ts` (28 tests)
+  continues to pass without modification.
+
+#### Tests
+
+- All 454 existing CLI tests still pass; 2 skipped. `tsc --noEmit`,
+  `npm run lint`, `npm run build` all clean. No behavioral change —
+  every helper and subcommand action body moved verbatim.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-mesh-cli.md`
+  (sign-offs: Core ✅, Security ✅).
+
 ### S15.a `phase2-hotspot-handoff-cli` — handoff CLI hotspot decomposition
 
 #### Refactored
