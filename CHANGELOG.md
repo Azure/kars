@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.g.2 `phase2-skills-move` — OpenClaw skills relocated under runtime adapter
+
+#### Refactored
+
+- `cli/skills/` → `runtimes/openclaw/skills/`. SKILL.md is an OpenClaw-specific
+  concept (each agent runtime adapter ships its own skill set), so the skills
+  directory belongs alongside the OpenClaw runtime adapter package, not under
+  the operator CLI. No content changes.
+
+  Updated references:
+  - `sandbox-images/openclaw/Dockerfile` (COPY src path)
+  - `CONTRIBUTING.md` (top-level layout table)
+
 ### S19 `phase2-container-image-scan-fix` — sandbox base image build/pull resilience
 
 #### Fixed
