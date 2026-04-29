@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.5c `phase2-hotspot-operator-cli-e5c` — operator.ts header render extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 1318 → **1279 LOC** (cumulative
+  S15.e: 2894 → 1279, **−1615**). `renderHeader` + `healthSummary`
+  extracted to `operator/render/header.ts` (~98 LOC) via
+  `HeaderRenderContext`.
+- No behavior change.
+
 ### S15.e.5b `phase2-hotspot-operator-cli-e5b` — operator.ts security + AGT render extraction
 
 #### Refactored
