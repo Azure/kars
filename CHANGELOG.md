@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.g.3 `phase2-cli-rename` — `@azure/azureclaw` → `@azureclaw/cli`
+
+#### Refactored
+
+- `cli/package.json` `name` field: `@azure/azureclaw` → `@azureclaw/cli`.
+  Aligns with the existing `@azureclaw/{runtime-openclaw,mesh,tests-compat,
+  tests-conformance}` packages — the entire workspace now lives under one
+  scope.
+- Removed three stale entries from `cli/package.json` left behind by S15.g.1:
+  `main: dist/plugin.js`, `types: dist/plugin.d.ts`, and
+  `openclaw.extensions: ["./dist/plugin.js"]`. The CLI is a pure binary
+  package (only `bin` is needed); the OpenClaw plugin entrypoint moved to
+  the `@azureclaw/runtime-openclaw` package in S15.g.1 and `cli/dist/plugin.js`
+  has not been emitted since.
+- Updated `.github/copilot-instructions.md` package-name reference.
+- `cli/package-lock.json` regenerated with the new package name.
+
 ### S19 `phase2-container-image-scan-fix` — sandbox base image build/pull resilience
 
 #### Fixed
