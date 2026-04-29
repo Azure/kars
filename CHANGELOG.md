@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.6 `phase2-hotspot-plugin-cli-f6` — plugin.ts in-process tool-loop extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 6104 → **5598 LOC** (−506, cumulative S15.f
+  −1541). The 521-LOC `processTaskWithTools` — the AGT sub-agent's
+  in-process tool-calling loop — extracted to
+  `cli/src/core/agt-task-loop.ts` (540 LOC).
+- `TaskLoopDeps` bag threads the two pieces of plugin.ts state the
+  loop reads / mutates (mesh client, handoff-interrupt flags); pure
+  imports (`TASK_TOOLS`, `routerUrl`, `resolveAmidByName`,
+  `sanitizeLog`) bind directly in the module.
+- No behavior change. Single semantic shift: `resolveAmidByName`
+  now called with the canonical 2-arg form `(name, routerUrl, opts?)`
+  inside the new module since the plugin-scope wrapper is no longer
+  reachable from `core/`.
+
 ### S15.f.5 `phase2-hotspot-plugin-cli-f5` — plugin.ts heartbeat + offload extraction
 
 #### Refactored
