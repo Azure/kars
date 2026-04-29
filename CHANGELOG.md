@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.F `phase2-content-safety-floor` — Content-Safety floor admission
+
+#### Added
+
+- **`deploy/helm/azureclaw/templates/admission-content-safety-floor.yaml`** —
+  ValidatingAdmissionPolicy + Binding rejecting `InferencePolicy.spec.contentSafety.{hate,selfHarm,sexual,violence}` values that are *more permissive* than the cluster minimum (Azure Content Safety ordering: Safe < Low < Medium < High; lower ordinal = stricter floor).
+- **`admission.contentSafetyFloor`** Helm values:
+  `enabled` (default `true`), `minimum` (default `"Medium"`,
+  validated at chart-render time against `Safe|Low|Medium|High`).
+- Per-CR opt-out via `azureclaw.azure.com/dev-only: "true"` label,
+  consistent with the null-provider-block VAP convention.
+
+#### Tests
+
+- `helm lint` clean. `helm template` renders both the policy and
+  the binding. Invalid `minimum` value fast-fails at template time
+  with a clear message. No code-side test count change (controller
+  349; CLI / router unchanged).
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-content-safety-floor.md`.
+
 ### S7.E `phase2-controller-metrics` — controller workqueue metrics
 
 #### Added
