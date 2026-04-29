@@ -92,8 +92,11 @@ RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
 # returns "missing.length === 0" with no staging because the deps are either
 # pre-resolved in the global tree or installed lazily at first channel use).
 ENV OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
-RUN set -o pipefail && \
-    mkdir -p /opt/openclaw-stage && \
+# Use bash with pipefail so the `openclaw doctor … | tail -40` pipe surfaces
+# a non-zero exit code from doctor instead of being masked by tail's success.
+# Scoped to this RUN only — subsequent stages re-default to /bin/sh.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN mkdir -p /opt/openclaw-stage && \
     openclaw doctor --fix --non-interactive --yes 2>&1 | tail -40 && \
     chmod -R a+rX /opt/openclaw-stage && \
     staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules 2>/dev/null | wc -l) && \
@@ -102,6 +105,7 @@ RUN set -o pipefail && \
     else \
       echo "OpenClaw doctor completed cleanly with no staging required"; \
     fi
+SHELL ["/bin/sh", "-c"]
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 
