@@ -7,7 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
-### S15.f.7 `phase2-hotspot-plugin-cli-f7` — plugin.ts handoff orchestration extraction
+### S15.f.8 `phase2-hotspot-plugin-cli-f8` — Foundry + http_fetch tool registrations
+
+#### Refactored
+
+- `cli/src/plugin.ts` 5071 → **4323 LOC** (−748, cumulative S15.f
+  −2816, **78% to §4.2 cap of 3000**). Ten `api.registerTool` blocks
+  (the nine `foundry_*` Foundry-shim tools + `http_fetch`) extracted
+  to a new `cli/src/core/agt-tools/` directory:
+  - `core/agt-tools/foundry.ts` — `registerFoundryTools(api, deps)`.
+    Nine tools: `foundry_code_execute`, `foundry_image_generation`,
+    `foundry_web_search`, `foundry_file_search`, `foundry_memory`,
+    `foundry_conversations`, `foundry_evaluations`,
+    `foundry_deployments`, `foundry_agents`. The bodies are
+    byte-identical to the previous inline registrations; only the
+    closure capture is replaced. `FoundryToolsDeps` threads `log`,
+    `config` (for `config.model`), and a late-bound
+    `getFoundryProject()` accessor — late binding is required because
+    `initFoundry()` runs concurrently with `register()` and may
+    complete after tool registration.
+  - `core/agt-tools/http-fetch.ts` —
+    `registerHttpFetchTool(api)`. The single `http_fetch` tool that
+    routes outbound HTTP through the inference router's egress
+    proxy.
+  - `core/safe-json.ts` — the small `safeJson(obj, maxLen)` helper
+    previously defined inline in `register()` lifted to a
+    module-level utility so cluster modules import it directly.
+- The cluster of 10 tools (~750 LOC) now appears in `plugin.ts` as
+  two function calls: `registerHttpFetchTool(api)` +
+  `registerFoundryTools(api, { log, config, getFoundryProject: () => foundryProject })`.
+
+#### Operational invariants
+
+- Tool names, parameters, descriptions, and execute-body semantics
+  are unchanged — vendored extension manifest in
+  `~/.openclaw-data/extensions/azureclaw/` keeps surfacing the
+  identical 10-tool list. Backward-compatible.
+- No new mesh / spawn / handoff / OpenClaw-specific surface
+  changes — those clusters remain in `plugin.ts` for S15.f.9.
+
+#### Tests
+
+- 454 pass / 2 skipped (unchanged); 30 lint warnings (unchanged).
+  `tsc --noEmit`, `npm run lint`, `npm test`, `npm run build` all
+  green on `dev` and on the new branch.
+- Foundry tool integration paths exercised by existing
+  `plugin.test.ts` suites; the extraction is a closure restructuring
+  with no observable behaviour change.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-hotspot-plugin-cli-f8.md`
+  documents the tool-by-tool extraction and confirms zero attack
+  surface change (same router endpoints, same parameters, same
+  egress posture).
+
+
 
 #### Refactored
 
