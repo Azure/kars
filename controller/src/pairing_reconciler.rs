@@ -152,7 +152,13 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(PairingContext { client });
 
     Controller::new(pairings, kube::runtime::watcher::Config::default())
-        .run(reconcile_pairing, pairing_error_policy, ctx)
+        .run(
+            |x, ctx| async move {
+                crate::metrics::observe_reconcile("ClawPairing", reconcile_pairing(x, ctx)).await
+            },
+            pairing_error_policy,
+            ctx,
+        )
         .for_each(|res| async move {
             match res {
                 Ok(o) => tracing::debug!("Pairing reconciled {:?}", o),

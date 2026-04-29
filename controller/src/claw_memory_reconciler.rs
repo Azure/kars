@@ -339,7 +339,13 @@ pub async fn run(client: Client) -> Result<()> {
     }
     let ctx = Arc::new(Ctx { client });
     Controller::new(memories, kube::runtime::watcher::Config::default())
-        .run(reconcile, error_policy, ctx)
+        .run(
+            |x, ctx| async move {
+                crate::metrics::observe_reconcile("ClawMemory", reconcile(x, ctx)).await
+            },
+            error_policy,
+            ctx,
+        )
         .for_each(|res| async move {
             match res {
                 Ok(o) => tracing::debug!("ClawMemory reconciled {:?}", o),

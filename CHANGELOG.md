@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.E.2 `phase2-reconcile-duration-histograms` — reconcile latency + outcome counter
+
+#### Added
+
+- `azureclaw_controller_reconcile_duration_seconds{crd_kind, outcome}`
+  Histogram and `azureclaw_controller_reconcile_total{crd_kind,
+  outcome}` IntCounterVec on the controller's `:9091/metrics`
+  surface. Closes the second half of S7.E (operator-craftsmanship
+  observability per `docs/implementation-plan.md` §9 P0).
+- `controller/src/metrics.rs::observe_reconcile(crd_kind, fut)` —
+  thin generic wrapper threaded through every `Controller::run(...)`
+  call site to record duration + outcome on completion. Generic
+  over the reconciler's `Result<T, E>` so each crate keeps its own
+  `ReconcileError` type unchanged.
+
+#### Wired
+
+- All 8 reconcilers — `reconciler/mod.rs` (ClawSandbox),
+  `a2a_agent_reconciler.rs`, `claw_eval_reconciler.rs`,
+  `claw_memory_reconciler.rs`, `inference_policy_reconciler.rs`,
+  `mcp_server_reconciler.rs`, `pairing_reconciler.rs` (ClawPairing),
+  `tool_policy_reconciler.rs`. Reconcile-fn bodies are untouched.
+
+#### Tests
+
+- 3 new unit tests in `metrics.rs`: success-outcome wiring,
+  error-outcome wiring + non-pollution of the success row,
+  Prometheus text-format render. Controller suite 349 → 352.
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-reconcile-duration-histograms.md`.
+
 ### S17.A `phase2-sca-permanent-rows` — npm audit as permanent CI gate
 
 #### Added
