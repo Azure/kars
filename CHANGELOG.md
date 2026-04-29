@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.5 `phase2-hotspot-plugin-cli-f5` — plugin.ts heartbeat + offload extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 6488 → **6104 LOC** (−384, cumulative S15.f
+  −1035). Two functional clusters extracted in one bundled PR
+  (per the OSS-prep no-micro-PR mandate):
+  - `core/agt-heartbeat.ts` — `recordMeshSession`, `agtReconnect`,
+    `notifyInboxToMemory` (~156 LOC).
+  - `core/agt-offload.ts` — `runOffloadTask`,
+    `startProactiveOffloadIfNeeded` plus `OffloadDeps`/`RunOffloadOpts`
+    interfaces (~339 LOC).
+- plugin.ts keeps thin wrappers that capture the AGT singleton state
+  via closure (`_offloadDeps()`); ~310 read/write sites elsewhere
+  in plugin.ts are unchanged. Same dep-injection pattern as
+  S15.f.3 mesh transport.
+- No behavior change. `agtReconnect` mutates `agtConnected` via a
+  `setConnected` callback (ES module live-binding constraint).
+
 ### S15.f.4 `phase2-hotspot-plugin-cli-f4` — plugin.ts task-tools array extraction
 
 #### Refactored

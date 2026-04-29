@@ -204,108 +204,26 @@ async function recordMeshSession(
   outcome: "success" | "failed" | "timeout",
   startedAt: string,
 ) {
-  if (!agtIdentity || !agtMeshClient) return;
-  try {
-    const [timestamp, signature] = await agtIdentity.signTimestamp();
-    const http = await import("node:http");
-    // Use the router's registry proxy (plugin can only reach localhost:8443)
-    // Route: /agt/registry/{path} → {AGT_REGISTRY_URL}/v1/{path}
-    const body = JSON.stringify({
-      session_id: sessionId,
-      initiator_amid: agtIdentity.amid,
-      receiver_amid: targetAmid,
-      intent,
-      outcome,
-      started_at: startedAt,
-      reporter_amid: agtIdentity.amid,
-      timestamp,
-      signature,
-    });
-    await new Promise<void>((resolve, reject) => {
-      const req = http.request(routerUrl("/agt/registry/registry/reputation/session"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-        timeout: 5000,
-      }, (res: any) => {
-        res.resume();
-        res.on("end", () => resolve());
-      });
-      req.on("error", reject);
-      req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-      req.write(body);
-      req.end();
-    });
-    console.log(`[azureclaw] recordMeshSession: ${outcome} for ${sessionId}`);
-  } catch (e: any) {
-    console.error(`[azureclaw] recordMeshSession failed: ${e.message}`);
-  }
+  return _recordMeshSession(agtIdentity, agtMeshClient, targetAmid, sessionId, intent, outcome, startedAt);
 }
 
 // Attempt to reconnect the AGT mesh client after a disconnect.
 async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  if (!agtMeshClient || agtConnected) return;
-  try {
-    // Force disconnect first to reset stale "Already connected" state in the SDK.
-    // The SDK sets client.connected = true even when transport fails, which blocks
-    // subsequent connect() calls with "Already connected". Disconnecting first
-    // resets both client.connected and transport.ws so connect() can proceed.
-    try { await agtMeshClient.disconnect(); } catch { /* ignore */ }
-    await agtMeshClient.connect({
-      displayName: agtSandboxName,
-      capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
-    });
-    agtConnected = true;
-    log.info("AGT mesh reconnected successfully");
-  } catch (e: any) {
-    log.warn(`AGT mesh reconnect failed: ${e.message}`);
-  }
+  return _agtReconnect(agtMeshClient, agtConnected, agtSandboxName, (v) => { agtConnected = v; }, log);
 }
 
 // Write unread inbox messages to a file the LLM can see in its context.
 // This is the key mechanism to keep conversations "lively" — the agent sees
 // pending messages in MEMORY.md without needing to manually call mesh_inbox.
 async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  if (agtInbox.length === 0) return;
-  try {
-    const fs = await import("node:fs/promises");
-    const memPath = process.env.MEMORY_FILE_PATH || "/home/user/MEMORY.md";
-    const INBOX_MARKER = "<!-- AGT_INBOX_START -->";
-    const INBOX_END = "<!-- AGT_INBOX_END -->";
-
-    let existing = "";
-    try { existing = await fs.readFile(memPath, "utf-8"); } catch { return; }
-
-    // Build inbox section with pending messages (don't drain — just preview)
-    const preview = agtInbox.slice(0, 10).map((m, i) =>
-      `${i + 1}. **${m.from_agent}** (${m.timestamp}): ${String(m.content).slice(0, 300)}`
-    ).join("\n");
-    const section = [
-      INBOX_MARKER,
-      "",
-      `## 📬 Unread Mesh Messages (${agtInbox.length})`,
-      "",
-      `> You have ${agtInbox.length} unread message(s) from sub-agents. Call \`azureclaw_mesh_inbox\` to read and respond.`,
-      "",
-      preview,
-      "",
-      INBOX_END,
-    ].join("\n");
-
-    // Replace existing inbox section or append
-    if (existing.includes(INBOX_MARKER)) {
-      const re = new RegExp(`${INBOX_MARKER}[\\s\\S]*?${INBOX_END}`, "m");
-      existing = existing.replace(re, section);
-    } else {
-      existing = existing + "\n\n" + section;
-    }
-    await fs.writeFile(memPath, existing, "utf-8");
-    log.info(`AGT inbox: wrote ${agtInbox.length} pending message(s) to MEMORY.md`);
-  } catch { /* best effort */ }
+  return _notifyInboxToMemory(agtInbox, log);
 }
 import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
 import { delegateToNativeAgent } from "./core/agt-task-delegate.js";
 import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
+import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory } from "./core/agt-heartbeat.js";
+import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 let foundryProject: FoundryProjectInfo | null = null;
 let foundryInitialized = false;
 
@@ -856,6 +774,18 @@ async function meshSend(
 // Executes a task either via the native agent (delegateToNativeAgent) or the
 // tool-based fallback (processTaskWithTools), streams progress updates to the
 // parent agent, collects output files, and sends offload_done/offload_error.
+// runOffloadTask + startProactiveOffloadIfNeeded extracted to core/agt-offload.ts in S15.f.5.
+function _offloadDeps() {
+  return {
+    meshClient: agtMeshClient,
+    identity: agtIdentity,
+    sandboxName: agtSandboxName,
+    isConnected: () => agtConnected,
+    offloadInFlight,
+    meshSend,
+    processTaskWithTools,
+  };
+}
 async function runOffloadTask(
   opts: {
     requestId: string;
@@ -863,331 +793,16 @@ async function runOffloadTask(
     parentName: string;
     task: string;
     files: any[];
-    source: "env" | "message"; // "env" = proactive (OFFLOAD_* env), "message" = reactive (offload_task msg)
+    source: "env" | "message";
   },
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<void> {
-  const { requestId, parentAmid, parentName, task, files, source } = opts;
-  const startTime = Date.now();
-  const fromAgent = agtSandboxName || process.env.SANDBOX_NAME || "sandbox";
-
-  log.info(
-    `☁️ Offload task ${source === "env" ? "auto-started from env" : "received from '" + parentName + "'"} ` +
-    `(${parentAmid.slice(0, 12)}...) — request: ${requestId.slice(0, 8)}, ` +
-    `task: ${String(task).slice(0, 100)}, files: ${files.length}`
-  );
-
-  // Heartbeat — periodic offload_progress pings while task is running.
-  // Parent's mesh_inbox will show these so the user sees liveness.
-  let heartbeatTick = 0;
-  const heartbeatTimer = setInterval(() => {
-    heartbeatTick += 1;
-    const elapsedSec = Math.round((Date.now() - startTime) / 1000);
-    meshSend(agtMeshClient, parentAmid, {
-      type: "offload_progress",
-      request_id: requestId,
-      stage: "executing",
-      message: `Task in progress (${elapsedSec}s elapsed, tick ${heartbeatTick})`,
-      pct: Math.min(10 + heartbeatTick * 2, 85), // cap at 85%, final 15% at done
-      elapsed_seconds: elapsedSec,
-      from_agent: fromAgent,
-      timestamp: new Date().toISOString(),
-    }, log).catch(() => { /* best-effort heartbeat */ });
-  }, 20_000); // every 20s
-
-  // Initial progress: task started
-  try {
-    await meshSend(agtMeshClient, parentAmid, {
-      type: "offload_progress",
-      request_id: requestId,
-      stage: "executing",
-      message: "Task execution started",
-      pct: 10,
-      from_agent: fromAgent,
-      timestamp: new Date().toISOString(),
-    }, log);
-  } catch { /* best effort */ }
-
-  // Write a start-marker so the workspace harvest below can reliably detect
-  // NEW files (those created during this task) via `find -newer <marker>`.
-  // Previously we used /proc/1/cmdline but that also flagged any file touched
-  // at boot (e.g. MEMORY.md is rewritten by Foundry bootstrap) and the find
-  // expression itself had an operator-precedence bug.
-  // Use mkdtempSync + crypto-random filename to avoid predictable tmp paths
-  // (CWE-377: insecure-temp-file).
-  let harvestMarker = "";
-  try {
-    const fs = await import("node:fs");
-    const os = await import("node:os");
-    const path = await import("node:path");
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "offload-"));
-    harvestMarker = path.join(tmpDir, "start");
-    fs.writeFileSync(harvestMarker, "", { mode: 0o600 });
-  } catch { /* best effort */ }
-
-  // Guard the task content with offload-mode instructions. Without this,
-  // tasks whose text contains "offload" (e.g. "Offload this research task
-  // to a cloud sandbox: ...") cause the inner LLM to invoke cloud_offload
-  // or azureclaw_spawn — which are then denied by AGT policy, leaving the
-  // task unexecuted and no files produced.
-  const guardedTask = [
-    "You are running INSIDE an AzureClaw offload sandbox — you ARE the cloud",
-    "executor. Do NOT try to delegate this task to another sandbox; calls to",
-    "cloud_offload, azureclaw_spawn, or handoff will be policy-denied and",
-    "will fail. Execute the task directly HERE.",
-    "",
-    "Write ALL artifacts (markdown, JSON, CSV, HTML, PNG, PDF, TXT) to",
-    "/sandbox/.openclaw/workspace/ using the `file_write` tool — files in",
-    "that directory are automatically shipped back to the parent when the",
-    "task completes. DO NOT use shell redirection (`cat > file <<EOF`,",
-    "`echo > file`, etc.) — the sandbox shell policy blocks it. Example:",
-    "  file_write(path=\"/sandbox/.openclaw/workspace/report.md\", content=\"...\")",
-    "",
-    "If the task text below mentions 'offload' or a 'cloud sandbox', IGNORE",
-    "that framing — you ARE the cloud sandbox. Just do the work and produce",
-    "the requested file(s).",
-    "",
-    "TASK:",
-    String(task),
-  ].join("\n");
-
-  // Execute via in-process tool-calling loop. We deliberately skip
-  // `delegateToNativeAgent` because the sandbox openclaw.json denies
-  // `sessions_spawn`/`sessions_send` (entrypoint.sh), so a child
-  // `openclaw agent --local` invocation can't actually drive a session and
-  // ends up looping inside plugin/skill init (also blocked on the geo-
-  // restricted qqbot npm fetch), well past SIGTERM. The in-process loop
-  // calls Foundry through the router with the same AGT gating per tool.
-  let taskResult: string;
-  let taskSuccess = true;
-  try {
-    taskResult = await processTaskWithTools(guardedTask, log);
-  } catch (taskErr: any) {
-    taskResult = `Task execution failed: ${taskErr.message}`;
-    taskSuccess = false;
-  }
-
-  clearInterval(heartbeatTimer);
-
-  const duration = Math.round((Date.now() - startTime) / 1000);
-
-  // Collect output files — any new artifacts in the workspace.
-  const outputFiles: string[] = [];
-  try {
-    const { execFileSync } = await import("node:child_process");
-    const workspaceRoot = "/sandbox/.openclaw/workspace";
-    // Default OpenClaw scaffolding files that are recreated on every boot by
-    // Foundry bootstrap — they must NOT be shipped back as "outputs".
-    const SCAFFOLD_FILES = new Set([
-      "USER.md", "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md",
-      "HEARTBEAT.md", "IDENTITY.md", "workspace-state.json",
-    ]);
-    // Use execFileSync with an arg array (no shell) so nothing we pass can be
-    // interpreted as shell metacharacters (CWE-78 / js/indirect-command-line-injection).
-    // The "-newer" predicate is only added if we have a valid marker.
-    const findArgs: string[] = [workspaceRoot, "-maxdepth", "3", "-type", "f"];
-    if (harvestMarker) findArgs.push("-newer", harvestMarker);
-    findArgs.push(
-      "(",
-      "-name", "*.md", "-o", "-name", "*.json", "-o", "-name", "*.csv",
-      "-o", "-name", "*.txt", "-o", "-name", "*.html", "-o", "-name", "*.png",
-      "-o", "-name", "*.pdf", "-o", "-name", "*.svg", "-o", "-name", "*.yaml",
-      "-o", "-name", "*.yml", "-o", "-name", "*.xml",
-      ")",
-    );
-    const newFiles = execFileSync("find", findArgs, {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim().split("\n").slice(0, 50).join("\n");
-    if (newFiles) {
-      for (const f of newFiles.split("\n")) {
-        if (!f) continue;
-        const rel = f.replace(`${workspaceRoot}/`, "");
-        const base = rel.split("/").pop() || rel;
-        if (SCAFFOLD_FILES.has(base)) continue; // skip boot-time scaffolding
-        if (base.startsWith(".")) continue;     // skip hidden/in-progress markers
-        outputFiles.push(rel);
-      }
-    }
-  } catch { /* no output files — that's fine */ }
-
-  // Fallback: agent produced a substantive textual response but wrote NO
-  // file to the workspace. Save that response as a markdown file so the
-  // parent still receives a deliverable instead of an empty offload_done.
-  // Threshold avoids shipping trivial "ok"/"done" responses.
-  if (taskSuccess && outputFiles.length === 0 && taskResult && taskResult.length > 400) {
-    try {
-      const fs = await import("node:fs");
-      const fallbackName = `offload-${requestId.slice(0, 8)}-response.md`;
-      const fallbackPath = `/sandbox/.openclaw/workspace/${fallbackName}`;
-      fs.mkdirSync("/sandbox/.openclaw/workspace", { recursive: true });
-      fs.writeFileSync(fallbackPath, taskResult, "utf-8");
-      outputFiles.push(fallbackName);
-      log.info(
-        `📝 No explicit output files — saved agent response as fallback ` +
-        `deliverable: ${fallbackName} (${taskResult.length} chars)`
-      );
-    } catch (fbErr: any) {
-      log.warn(`Failed to write fallback response file: ${fbErr.message}`);
-    }
-  }
-
-  // Clean up the harvest marker (best-effort — it is in tmpfs anyway).
-  try {
-    if (harvestMarker) {
-      const fs = await import("node:fs");
-      const path = await import("node:path");
-      fs.unlinkSync(harvestMarker);
-      // Remove the per-request tmp directory created by mkdtempSync as well.
-      try { fs.rmdirSync(path.dirname(harvestMarker)); } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-
-  // Send output files back to requester via file_transfer (before offload_done).
-  for (const relPath of outputFiles.slice(0, 10)) {
-    try {
-      const fPath = `/sandbox/.openclaw/workspace/${relPath}`;
-      const fs = await import("node:fs");
-      // Open once to avoid stat→read race (CWE-367 TOCTOU): reading via the
-      // same fd guarantees we act on the file we stat'd.
-      const fd = fs.openSync(fPath, "r");
-      let fStat: import("node:fs").Stats;
-      let fData: Buffer;
-      try {
-        fStat = fs.fstatSync(fd);
-        if (fStat.size > 30 * 1024 * 1024) { fs.closeSync(fd); continue; } // skip files >30MB
-        fData = Buffer.alloc(fStat.size);
-        fs.readSync(fd, fData, 0, fStat.size, 0);
-      } finally {
-        fs.closeSync(fd);
-      }
-      const fName = relPath.split("/").pop() || relPath;
-      await meshSend(agtMeshClient, parentAmid, {
-        type: "file_transfer",
-        file_name: fName,
-        file_path: relPath,
-        file_data: fData.toString("base64"),
-        size_bytes: fStat.size,
-        description: `Output file from offload ${requestId.slice(0, 8)}`,
-        from_agent: fromAgent,
-        timestamp: new Date().toISOString(),
-      }, log);
-      log.info(`📁 Sent output file '${fName}' (${(fStat.size / 1024).toFixed(1)} KB) to '${parentName}'`);
-    } catch (ftErr: any) {
-      log.warn(`Failed to send output file '${relPath}': ${ftErr.message}`);
-    }
-  }
-
-  // Final offload_done / offload_error.
-  if (taskSuccess) {
-    await meshSend(agtMeshClient, parentAmid, {
-      type: "offload_done",
-      request_id: requestId,
-      summary: taskResult.slice(0, 8000),
-      output_files: outputFiles,
-      output_file_contents: [],
-      tokens_used: { prompt: 0, completion: 0 },
-      duration_seconds: duration,
-      from_agent: fromAgent,
-      timestamp: new Date().toISOString(),
-    }, log);
-    log.info(
-      `✅ Offload complete: ${requestId.slice(0, 8)} — ` +
-      `${duration}s, ${outputFiles.length} output file(s)`
-    );
-  } else {
-    await meshSend(agtMeshClient, parentAmid, {
-      type: "offload_error",
-      request_id: requestId,
-      error: taskResult.slice(0, 4000),
-      phase: "execution",
-      from_agent: fromAgent,
-      timestamp: new Date().toISOString(),
-    }, log);
-    log.info(`❌ Offload failed: ${requestId.slice(0, 8)} — ${duration}s`);
-  }
+  return _runOffloadTask(opts, _offloadDeps(), log);
 }
-
-// ── Proactive offload start ─────────────────────────────────────────────────
-// When the controller spawns an offload sandbox it injects OFFLOAD_REQUEST_ID,
-// OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES env vars. Once
-// the mesh is up and the parent AMID is pre-trusted, this routine:
-//   1. Sends `offload_hello` to the parent (announce: "I'm available, task rcvd")
-//   2. Kicks off runOffloadTask in the background with source="env"
-// The parent's mesh-plugin orchestrator listens for offload_hello and knows
-// the sandbox is self-driving — no need to send offload_task round-trip.
 async function startProactiveOffloadIfNeeded(
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<void> {
-  const requestId = process.env.OFFLOAD_REQUEST_ID || "";
-  const parentAmid = process.env.OFFLOAD_PARENT_AMID || "";
-  const taskRaw = process.env.OFFLOAD_TASK || "";
-
-  if (!requestId || !parentAmid || !taskRaw) return; // not an offload sandbox
-  if (!agtMeshClient || !agtConnected) {
-    log.warn(
-      `⚠️ Proactive offload: mesh not ready — cannot announce ` +
-      `(requestId=${requestId.slice(0, 8)}, parent=${parentAmid.slice(0, 12)}...)`
-    );
-    return;
-  }
-  if (offloadInFlight.has(requestId)) return; // already started
-
-  // OFFLOAD_TASK may be raw text or a JSON envelope {task, files, parent_name}.
-  let task = taskRaw;
-  let files: any[] = [];
-  let parentName = "parent";
-  try {
-    const parsed = JSON.parse(taskRaw);
-    if (parsed && typeof parsed === "object") {
-      if (typeof parsed.task === "string") task = parsed.task;
-      if (Array.isArray(parsed.files)) files = parsed.files;
-      if (typeof parsed.parent_name === "string") parentName = parsed.parent_name;
-    }
-  } catch { /* treat as raw text */ }
-
-  const fromAgent = agtSandboxName || process.env.SANDBOX_NAME || "sandbox";
-
-  // Seed the name→AMID cache with the literal alias 'parent'. Sub-agent tool
-  // calls like mesh_send(to_agent='parent') otherwise fall through to registry
-  // lookup which won't return a match (the parent display name is e.g.
-  // 'nemoclawtest', not 'parent'). Seeding here + the offload-mode rewrite in
-  // the tool handlers guarantees all outbound traffic reaches the real parent.
-  nameToAmid.set("parent", parentAmid);
-  if (parentName && parentName !== "parent") {
-    nameToAmid.set(parentName, parentAmid);
-  }
-
-  // 1. Announce: "hi, I'm up, received task, starting now"
-  try {
-    await agtMeshClient.send(parentAmid, {
-      type: "offload_hello",
-      request_id: requestId,
-      from_agent: fromAgent,
-      task_preview: String(task).slice(0, 200),
-      started_at: new Date().toISOString(),
-      message: `Offload sandbox '${fromAgent}' online — starting task ${requestId.slice(0, 8)}`,
-    });
-    log.info(
-      `☁️ Proactive offload announced to parent (${parentAmid.slice(0, 12)}...) — ` +
-      `request: ${requestId.slice(0, 8)}`
-    );
-  } catch (helloErr: any) {
-    log.warn(
-      `Proactive offload: failed to send offload_hello (${helloErr.message}) — ` +
-      `continuing with execution, parent may rely on fallback flow`
-    );
-  }
-
-  // 2. Run task in background — don't block initAGT on task execution.
-  offloadInFlight.add(requestId);
-  runOffloadTask(
-    { requestId, parentAmid, parentName, task, files, source: "env" },
-    log,
-  )
-    .catch((err: any) => log.warn(`Proactive offload task crashed: ${err.message}`))
-    .finally(() => offloadInFlight.delete(requestId));
+  return _startProactiveOffloadIfNeeded(_offloadDeps(), log);
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
