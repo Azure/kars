@@ -1,7 +1,6 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import type { ChildProcess } from "node:child_process";
 
 /**
  * azureclaw handoff — live agent migration between local and cloud.
@@ -34,357 +33,36 @@ export function handoffCommand(): Command {
     .option("--status", "Show current handoff status", false)
     .option("--abort", "Abort an in-progress handoff", false)
     .action(async (name: string, options: { to?: string; status: boolean; abort: boolean }) => {
-      const { execa } = await import("execa");
-      const containerName = `azureclaw-${name}`;
-
-      // Shared tar command for workspace + config collection.
-      // Captures: workspace, gateway config, cron jobs, governance policies, agent state.
-      // Excludes: compiled extensions (regenerable), node_modules, git, python cache.
-      const WORKSPACE_TAR_CMD =
-        "tar czf - -C /sandbox " +
-        "--exclude='.openclaw/extensions/*/dist' --exclude='.openclaw/extensions/*/node_modules' " +
-        "--exclude='node_modules' --exclude='.git' " +
-        "--exclude='*.pyc' --exclude='__pycache__' " +
-        ".openclaw/workspace .openclaw/openclaw.json .openclaw/cron " +
-        ".openclaw/policies .openclaw/agents 2>/dev/null | base64 -w0";
-
-      // ── Helper: call the router inside the container ────────────
-      async function routerExec(
-        method: string,
-        path: string,
-        body?: unknown,
-        extraHeaders?: Record<string, string>,
-      ): Promise<{ status: number; body: any }> {
-        const curlArgs = [
-          "exec", containerName,
-          "curl", "-sf", "--max-time", "30",
-          "-X", method,
-          "-H", "Content-Type: application/json",
-        ];
-        if (extraHeaders) {
-          for (const [k, v] of Object.entries(extraHeaders)) {
-            curlArgs.push("-H", `${k}: ${v}`);
-          }
-        }
-        if (body) {
-          curlArgs.push("-d", JSON.stringify(body));
-        }
-        curlArgs.push("-w", "\n%{http_code}");
-        curlArgs.push(`http://127.0.0.1:8443${path}`);
-
-        const { stdout } = await execa("docker", curlArgs, { stdio: "pipe" });
-        const lines = stdout.trimEnd().split("\n");
-        const statusCode = parseInt(lines[lines.length - 1], 10);
-        const responseBody = lines.slice(0, -1).join("\n");
-        try {
-          return { status: statusCode, body: JSON.parse(responseBody) };
-        } catch {
-          return { status: statusCode, body: { raw: responseBody } };
-        }
-      }
-
-      // Read admin token from the container env
-      async function getAdminToken(): Promise<string | undefined> {
-        try {
-          const { stdout } = await execa("docker", [
-            "exec", containerName,
-            "printenv", "ADMIN_TOKEN",
-          ], { stdio: "pipe" });
-          return stdout.trim() || undefined;
-        } catch {
-          // Try reading from the secrets file
-          try {
-            const { stdout } = await execa("docker", [
-              "exec", containerName,
-              "cat", "/run/secrets/admin-token",
-            ], { stdio: "pipe" });
-            return stdout.trim() || undefined;
-          } catch {
-            // Fallback: entrypoint saves the token to /tmp/.agt-admin-token
-            try {
-              const { stdout } = await execa("docker", [
-                "exec", containerName,
-                "cat", "/tmp/.agt-admin-token",
-              ], { stdio: "pipe" });
-              return stdout.trim() || undefined;
-            } catch {
-              return undefined;
-            }
-          }
-        }
-      }
-
-      // ── Helper: port-forward to AKS pod and call its router ────
-      const targetNs = `azureclaw-${name}`;
-      let aksPfProc: ChildProcess | undefined;
-      let aksPfPort = 18445; // temp local port for source AKS pod
-
-      async function aksPortForwardStart(): Promise<void> {
-        if (aksPfProc) return; // already running
-        const { execa: ex } = await import("execa");
-        aksPfProc = ex("kubectl", [
-          "port-forward", "-n", targetNs,
-          `svc/${name}`, `${aksPfPort}:8443`,
-        ], { stdio: "pipe", reject: false }) as any;
-        // Wait for port-forward to be ready
-        const http = await import("node:http");
-        for (let i = 0; i < 15; i++) {
-          await new Promise(r => setTimeout(r, 1000));
-          try {
-            const ok: boolean = await new Promise((resolve) => {
-              const req = http.get(`http://127.0.0.1:${aksPfPort}/readyz`, { timeout: 2000 }, (res) => {
-                let data = "";
-                res.on("data", (c: Buffer) => { data += c.toString(); });
-                res.on("end", () => resolve(res.statusCode === 200));
-              });
-              req.on("error", () => resolve(false));
-              req.on("timeout", () => { req.destroy(); resolve(false); });
-            });
-            if (ok) return;
-          } catch { /* retry */ }
-        }
-        throw new Error("AKS port-forward not ready after 15s");
-      }
-
-      function aksPortForwardStop(): void {
-        if (aksPfProc) {
-          try { (aksPfProc as any).kill(); } catch { /* ignore */ }
-          aksPfProc = undefined;
-        }
-      }
-
-      async function aksRouterExec(
-        method: string,
-        path: string,
-        body?: unknown,
-        extraHeaders?: Record<string, string>,
-      ): Promise<{ status: number; body: any }> {
-        const http = await import("node:http");
-        const payload = body ? JSON.stringify(body) : undefined;
-        return new Promise((resolve, reject) => {
-          const opts: any = {
-            hostname: "127.0.0.1",
-            port: aksPfPort,
-            path,
-            method,
-            headers: {
-              "Content-Type": "application/json",
-              ...(extraHeaders || {}),
-              ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
-            },
-            timeout: 30000,
-          };
-          const req = http.request(opts, (res: any) => {
-            let data = "";
-            res.on("data", (c: Buffer) => { data += c.toString(); });
-            res.on("end", () => {
-              try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
-              catch { resolve({ status: res.statusCode, body: { raw: data } }); }
-            });
-          });
-          req.on("error", reject);
-          req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-          if (payload) req.write(payload);
-          req.end();
-        });
-      }
-
-      // ── Helper: get admin token from AKS pod ───────────────────
-      async function getAksAdminToken(): Promise<string | undefined> {
-        const { execa: ex } = await import("execa");
-        // On AKS, the controller mounts the admin token at /etc/azureclaw/secrets/admin-token
-        try {
-          const { stdout } = await ex("kubectl", [
-            "exec", "-n", targetNs,
-            `deploy/${name}`, "-c", "inference-router", "--",
-            "cat", "/etc/azureclaw/secrets/admin-token",
-          ], { stdio: "pipe", reject: false });
-          if (stdout.trim()) return stdout.trim();
-        } catch { /* fallback */ }
-        // Fallback: try the openclaw container (same volume mount)
-        try {
-          const { stdout } = await ex("kubectl", [
-            "exec", "-n", targetNs,
-            `deploy/${name}`, "-c", "openclaw", "--",
-            "cat", "/etc/azureclaw/secrets/admin-token",
-          ], { stdio: "pipe", reject: false });
-          if (stdout.trim()) return stdout.trim();
-        } catch { /* fallback */ }
-        // Fallback: read from K8s secret directly
-        try {
-          const { stdout } = await ex("kubectl", [
-            "get", "secret", "router-admin-token", "-n", targetNs,
-            "-o", "jsonpath={.data.token}",
-          ], { stdio: "pipe", reject: false });
-          if (stdout.trim()) {
-            return Buffer.from(stdout.trim(), "base64").toString("utf8").trim();
-          }
-        } catch { /* no secret */ }
-        return undefined;
-      }
-
-      // ── Helper: wake dormant local Docker container ─────────────
-      async function wakeDormantDocker(): Promise<{ ready: boolean; error?: string }> {
-        const { execa: ex } = await import("execa");
-        // Check if container exists
-        let containerState: string | undefined;
-        try {
-          const { stdout } = await ex("docker", [
-            "inspect", "-f", "{{.State.Status}}", containerName,
-          ], { stdio: "pipe" });
-          containerState = stdout.trim();
-        } catch {
-          return { ready: false, error: `Container '${containerName}' not found. Run 'azureclaw dev --name ${name}' first.` };
-        }
-
-        // Start if stopped/exited
-        if (containerState === "exited" || containerState === "created") {
-          try {
-            await ex("docker", ["start", containerName], { stdio: "pipe" });
-          } catch (e: any) {
-            return { ready: false, error: `Failed to start container: ${e.message}` };
-          }
-        } else if (containerState !== "running") {
-          return { ready: false, error: `Container in unexpected state: ${containerState}` };
-        }
-
-        // Wait for router to be healthy (up to 30s)
-        for (let i = 0; i < 30; i++) {
-          try {
-            await ex("docker", [
-              "exec", containerName, "sh", "-c",
-              "wget -qO- --timeout=2 http://127.0.0.1:8443/readyz 2>/dev/null || curl -sf --max-time 2 http://127.0.0.1:8443/readyz 2>/dev/null",
-            ], { stdio: "pipe" });
-            return { ready: true };
-          } catch { /* not ready yet */ }
-          await new Promise(r => setTimeout(r, 1000));
-        }
-        return { ready: false, error: "Local router not healthy after 30s" };
-      }
-
-      // ── Helper: read AKS CRD spec to inherit settings ──────────
-      async function readAksCrdSpec(): Promise<{
-        model: string; learnEgress: boolean; isolation: string; trustThreshold: number;
-      }> {
-        const defaults = { model: "gpt-5.4", learnEgress: true, isolation: "enhanced", trustThreshold: 500 };
-        try {
-          const { execa: ex } = await import("execa");
-          const { stdout } = await ex("kubectl", [
-            "get", "clawsandbox", name, "-n", "azureclaw-system",
-            "-o", "jsonpath={.spec}",
-          ], { stdio: "pipe" });
-          const spec = JSON.parse(stdout);
-          return {
-            model: spec.inference?.model || spec.runtime?.openclaw?.config?.agent?.model?.replace("azure/", "") || defaults.model,
-            learnEgress: spec.networkPolicy?.learnEgress ?? defaults.learnEgress,
-            isolation: spec.sandbox?.isolation || defaults.isolation,
-            trustThreshold: spec.governance?.trustThreshold || defaults.trustThreshold,
-          };
-        } catch {
-          return defaults;
-        }
-      }
-
-      // ── Helper: re-hydrate credentials from K8s secret to Docker ─
-      async function rehydrateCredentials(): Promise<string[]> {
-        const injected: string[] = [];
-        try {
-          const { execa: ex } = await import("execa");
-          const { stdout } = await ex("kubectl", [
-            "get", "secret", `${name}-credentials`, "-n", targetNs,
-            "-o", "json",
-          ], { stdio: "pipe" });
-          const secret = JSON.parse(stdout);
-          const data = secret.data || {};
-          for (const [key, b64] of Object.entries(data)) {
-            const val = Buffer.from(b64 as string, "base64").toString("utf8");
-            if (val) {
-              // Inject into running Docker container via a temp env file
-              // docker exec doesn't support -e, so write to a known location
-              // and have the entrypoint source it. Alternatively, we set it
-              // via the router's admin API if available.
-              // Simplest: use docker exec to export into the container's env
-              // by writing to /tmp/.handoff-credentials
-              injected.push(key);
-            }
-          }
-          if (injected.length > 0) {
-            // Write all credentials as env exports into a file the entrypoint sources
-            const envLines = Object.entries(data)
-              .map(([k, b64]) => `${k}=${Buffer.from(b64 as string, "base64").toString("utf8")}`)
-              .join("\n");
-            await ex("docker", [
-              "exec", containerName, "sh", "-c",
-              `cat > /tmp/.handoff-credentials << 'CRED_EOF'\n${envLines}\nCRED_EOF`,
-            ], { stdio: "pipe" });
-          }
-        } catch {
-          // K8s secret not available or no kubectl — fall back silently
-          // Local secrets.json will be used by the entrypoint
-        }
-        return injected;
-      }
+      // S15 hotspot-pass3: helpers + status/abort branches were
+      // extracted to ./handoff/helpers.ts to keep this file under
+      // the §15 hotspot LOC cap. Behaviour is unchanged.
+      const { createHandoffHelpers, runStatus, runAbort } = await import("./handoff/helpers.js");
+      const helpers = await createHandoffHelpers(name);
+      const {
+        execa,
+        containerName,
+        targetNs,
+        WORKSPACE_TAR_CMD,
+        routerExec,
+        getAdminToken,
+        aksPortForwardStart,
+        aksPortForwardStop,
+        aksRouterExec,
+        getAksAdminToken,
+        wakeDormantDocker,
+        readAksCrdSpec,
+        rehydrateCredentials,
+      } = helpers;
 
       // ── STATUS ──────────────────────────────────────────────────
       if (options.status) {
-        try {
-          const adminToken = await getAdminToken();
-          const headers: Record<string, string> = {};
-          if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
-
-          const resp = await routerExec("GET", "/agt/handoff/status", undefined, headers);
-          const s = resp.body;
-
-          banner("AzureClaw · Handoff Status", name);
-
-          kvLine("Phase", s.phase || "idle");
-          kvLine("Direction", s.direction || "—");
-          kvLine("Registry mode", s.registry_mode || "unknown");
-          kvLine("Handoff available", s.handoff_available ? chalk.green("yes") : chalk.yellow("no (requires --global-registry)"));
-          if (s.predecessor_amid) kvLine("Predecessor", s.predecessor_amid);
-          if (s.successor_amid) kvLine("Successor", s.successor_amid);
-          if (s.snapshot_size_bytes) kvLine("Snapshot size", `${(s.snapshot_size_bytes / 1024).toFixed(1)} KB`);
-          if (s.draining) kvLine("Draining", `${s.drain_duration_secs || 0}s`);
-          if (s.error) kvLine("Error", chalk.red(s.error));
-
-          console.log();
-        } catch (e: any) {
-          console.log(chalk.red(`\n  Could not reach sandbox '${name}': ${e.message}\n`));
-          process.exit(1);
-        }
+        await runStatus(name, helpers);
         return;
       }
 
       // ── ABORT ───────────────────────────────────────────────────
       if (options.abort) {
-        try {
-          const adminToken = await getAdminToken();
-          if (!adminToken) {
-            console.log(chalk.red("\n  Cannot abort: admin token not found.\n"));
-            process.exit(1);
-          }
-
-          // Need both admin and handoff tokens
-          const statusResp = await routerExec("GET", "/agt/handoff/status", undefined, {
-            Authorization: `Bearer ${adminToken}`,
-          });
-
-          if (!statusResp.body.handoff_token_active) {
-            console.log(chalk.yellow(`\n  No active handoff to abort (phase: ${statusResp.body.phase}).\n`));
-            return;
-          }
-
-          console.log(chalk.yellow(`\n  Aborting handoff (current phase: ${statusResp.body.phase})...`));
-
-          // The abort endpoint requires the handoff token, which only the
-          // initiating CLI process has. If we don't have it, we can't abort
-          // from a different terminal. Show guidance instead.
-          console.log(chalk.dim("  Note: abort must be called from the terminal that initiated the handoff."));
-          console.log(chalk.dim(`  The handoff token is held in that process's memory.\n`));
-        } catch (e: any) {
-          console.log(chalk.red(`\n  Abort failed: ${e.message}\n`));
-          process.exit(1);
-        }
+        await runAbort(helpers);
         return;
       }
 
