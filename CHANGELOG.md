@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.1 `phase2-hotspot-plugin-cli-f1` — plugin.ts redact + AMID-cache extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 7139 → **6974 LOC** (−165, 2.3% of pre).
+  First slice of the S15.f plugin.ts decomposition train. Lifts the
+  shared utility primitives — log-redaction helpers and the AMID
+  resolver/cache — into `core/log-redact.ts` (40 LOC) and
+  `core/amid-cache.ts` (213 LOC). `redactSecrets` re-exported from
+  plugin.ts to preserve the legacy import surface. Resolvers take
+  `routerUrl` as a parameter to avoid a circular dep.
+- No behavior change.
+
 ### S15.e.7 `phase2-hotspot-operator-cli-e7` — operator.ts delete + connect dialog extraction (closes S15.e)
 
 #### Refactored

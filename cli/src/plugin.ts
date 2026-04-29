@@ -90,8 +90,36 @@ import {
   pushTrustToRouter,
   pushSigningCounter,
 } from "./core/router-client.js";
+import { redactSecrets, sanitizeLog } from "./core/log-redact.js";
+import {
+  amidToName,
+  nameToAmid,
+  parentTrustedAmids,
+  peerSigningKeys,
+  getCachedAmid,
+  pickFreshestRegistryMatch,
+  resolveAmidByName as _resolveAmidByName,
+  resolveAmidToName as _resolveAmidToName,
+  resolveSigningKey as _resolveSigningKey,
+} from "./core/amid-cache.js";
+
+// Thin wrappers so internal callers don't need to thread `routerUrl` through.
+async function resolveAmidByName(
+  agentName: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean; bypassCache?: boolean } = {},
+): Promise<string | undefined> {
+  return _resolveAmidByName(agentName, routerUrl, opts);
+}
+async function resolveAmidToName(amid: string): Promise<string> {
+  return _resolveAmidToName(amid, routerUrl);
+}
+async function resolveSigningKey(amid: string): Promise<string> {
+  return _resolveSigningKey(amid, routerUrl);
+}
 
 export { routerBase, routerWsBase, routerUrl, routerWsUrl };
+export { redactSecrets };
 
 // ---------------------------------------------------------------------------
 // AGT SDK — AgentMesh (amitayks/agentmesh)
@@ -182,29 +210,7 @@ let handoffProgress: HandoffProgress | null = null;
 let handoffInterruptRequested = false;
 let handoffInterruptReason = "";
 
-// Redact values that look like secrets (tokens, bearer headers, API keys,
-// PEM blocks, AzureClaw pairing tokens) before they reach console.* sinks.
-// Applied in _log.info/warn below and at other logging sinks that accept
-// interpolated strings. Exported for unit-testing.
-export function redactSecrets(m: string): string {
-  return String(m)
-    // PEM private/public key blocks — redact the full block. Bounded char
-    // classes + length limits so this regex cannot exhibit catastrophic
-    // backtracking (CWE-1333 ReDoS).
-    .replace(/-----BEGIN [A-Z ]{1,40}-----[\s\S]{0,8192}?-----END [A-Z ]{1,40}-----/g, "-----BEGIN ***REDACTED***-----")
-    // AzureClaw one-time pairing tokens (azcp_<version>_<base64>)
-    .replace(/\bazcp_\d+_[A-Za-z0-9_\-=]+/g, "azcp_***")
-    // HTTP Bearer / Basic auth headers
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._\-+/=]+/gi, "$1 ***")
-    // JWTs (three dot-separated base64url segments, first starts with eyJ)
-    .replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b/g, "***JWT***")
-    // Generic "keyword: value" style (api_key, token, secret, password, authorization,
-    // pairing_token, handoff_token, admin_token, invite_code, access_token, refresh_token)
-    .replace(
-      /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|handoff[_-]?token|admin[_-]?token|pairing[_-]?token|invite[_-]?code|token|secret|password|authorization)["':=\s]{1,4})["']?([A-Za-z0-9._\-+/=]{8,})["']?/gi,
-      "$1***",
-    );
-}
+// redactSecrets — extracted to core/log-redact.ts in S15.f.1; re-exported below.
 
 // Module-level logger — set once during register(), used by background orchestration
 let _log: { info: (m: string) => void; warn: (m: string) => void } = {
@@ -212,190 +218,19 @@ let _log: { info: (m: string) => void; warn: (m: string) => void } = {
   warn: (m: string) => console.warn(`[azureclaw] ${redactSecrets(m)}`),
 };
 
-// AMID → agent name mapping (populated during send via registry search)
-const amidToName: Map<string, string> = new Map();
-const nameToAmid: Map<string, string> = new Map();
-// Per-name cache age for nameToAmid. Used to invalidate stale entries when a
-// sub-agent crashes and re-registers with a fresh AMID (sandbox identities are
-// ephemeral by design — keys regenerate on every pod boot, so an AMID cached
-// before a restart points at a dead identity in the registry).
-const nameToAmidTs: Map<string, number> = new Map();
-// 60s — long enough to amortize registry lookups across normal sends, short
-// enough that a crashed-and-restarted sub-agent is re-resolved within one
-// follow-up send cycle. The stable 'parent' alias bypasses TTL (see
-// getCachedAmid below) because it's seeded by the operator at spawn and never
-// changes for the lifetime of this pod.
-const AMID_CACHE_TTL_MS = 60_000;
+// AMID cache state + helpers — extracted to core/amid-cache.ts in S15.f.1.
 
-function getCachedAmid(name: string): string | undefined {
-  if (name === "parent") return nameToAmid.get(name);
-  const ts = nameToAmidTs.get(name);
-  if (ts === undefined) return nameToAmid.get(name);
-  if (Date.now() - ts > AMID_CACHE_TTL_MS) {
-    nameToAmid.delete(name);
-    nameToAmidTs.delete(name);
-    return undefined;
-  }
-  return nameToAmid.get(name);
-}
+// pickFreshestRegistryMatch + resolveAmidByName — extracted to core/amid-cache.ts in S15.f.1.
 
-function setCachedAmid(name: string, amid: string): void {
-  nameToAmid.set(name, amid);
-  nameToAmidTs.set(name, Date.now());
-}
+// parentTrustedAmids + peerSigningKeys — extracted to core/amid-cache.ts in S15.f.1.
 
-// Pick the freshest live entry from a registry /search response. Filters to
-// matches on display_name or capability, prefers online agents, then newest
-// last_seen.
-//
-// **Trust scope (important):** within a single cluster the AgentMesh registry
-// is cluster-local (NetworkPolicy-gated) and ClawSandbox names are unique by
-// K8s admission, so display_name uniquely identifies one sandbox and the
-// duplicates we see in the registry are always different AMIDs of the same
-// logical sandbox across pod restarts (sandbox identities are ephemeral by
-// design). When this assumption breaks — federated/multi-cluster registry, or
-// a compromised sandbox squatting another agent's name — pass a `scopeFilter`
-// that requires a known capability (e.g. `parent:<parent-amid>` or
-// `cluster:<cluster-id>`) emitted by trusted peers at registration. A
-// signed-spawn attestation from the controller is the longer-term fix.
-function pickFreshestRegistryMatch(
-  results: any[],
-  agentName: string,
-  scopeFilter?: (a: any) => boolean,
-): any | undefined {
-  if (!Array.isArray(results) || results.length === 0) return undefined;
-  const nameMatch = (a: any) =>
-    a?.display_name === agentName || (Array.isArray(a?.capabilities) && a.capabilities.includes(agentName));
-  const filtered = results.filter((a: any) => nameMatch(a) && (scopeFilter ? scopeFilter(a) : true));
-  // Fall back to results without the name filter only if no name match exists,
-  // never widen past the scope filter — that's the trust boundary.
-  const candidates = filtered.length > 0
-    ? filtered
-    : results.filter((a: any) => (scopeFilter ? scopeFilter(a) : true));
-  if (candidates.length === 0) return undefined;
-  return [...candidates].sort((a: any, b: any) => {
-    if (a?.status === "online" && b?.status !== "online") return -1;
-    if (b?.status === "online" && a?.status !== "online") return 1;
-    return (b?.last_seen || "").localeCompare(a?.last_seen || "");
-  })[0];
-}
+// sanitizeLog — extracted to core/log-redact.ts in S15.f.1.
 
-// Single source of truth for "name → live AMID" resolution. Honors the TTL'd
-// cache, and on miss queries the registry and picks the freshest live match.
-// Used by every send/discovery path so cache + freshness behaviour is uniform
-// — there is no other place where this lookup logic should be duplicated.
-//
-// Options:
-//   timeoutMs   — request timeout for the registry call (default 5s).
-//   registryBase — override base URL (sub-agents use AGT_REGISTRY_URL when set).
-//   scopeFilter — optional capability/identity guard (see pickFreshestRegistryMatch).
-async function resolveAmidByName(
-  agentName: string,
-  opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean; bypassCache?: boolean } = {},
-): Promise<string | undefined> {
-  if (!opts.bypassCache) {
-    const cached = getCachedAmid(agentName);
-    if (cached) return cached;
-  }
+// resolveAmidToName — extracted to core/amid-cache.ts in S15.f.1.
 
-  const base = opts.registryBase ?? routerUrl("/agt/registry");
-  const timeoutMs = opts.timeoutMs ?? 5000;
-  try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        `${base}/registry/search?capability=${encodeURIComponent(agentName)}`,
-        (res: any) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    const results: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
-    const match = pickFreshestRegistryMatch(results, agentName, opts.scopeFilter);
-    const amid: string | undefined = match?.amid || match?.id;
-    if (amid) {
-      if (!opts.bypassCache) {
-        setCachedAmid(agentName, amid);
-        amidToName.set(amid, agentName);
-      }
-      return amid;
-    }
-  } catch { /* transient — caller decides whether to retry */ }
-  return undefined;
-}
-// Parent-verified trusted peer AMIDs — pre-seeded at spawn via AGT_TRUSTED_PEERS env var.
-// Separate from amidToName to prevent trust escalation via arbitrary registry lookups.
-const parentTrustedAmids: Set<string> = new Set();
-// AMID → Ed25519 signing public key (base64) — cached from registry lookups
-const peerSigningKeys: Map<string, string> = new Map();
 
-// Sanitize user-influenced strings before logging — strip ANSI escapes and collapse newlines
-function sanitizeLog(s: string, maxLen = 500): string {
-  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\r\n]+/g, " ").slice(0, maxLen);
-}
+// resolveSigningKey — extracted to core/amid-cache.ts in S15.f.1.
 
-// Resolve AMID → display_name via registry lookup (results cached in amidToName).
-// Returns the display_name if found, or empty string on failure.
-async function resolveAmidToName(amid: string): Promise<string> {
-  const cached = amidToName.get(amid);
-  if (cached) return cached;
-  try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
-        (res) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    if (parsed.display_name) {
-      amidToName.set(amid, parsed.display_name);
-      nameToAmid.set(parsed.display_name, amid);
-      return parsed.display_name;
-    }
-  } catch { /* best effort */ }
-  return "";
-}
-
-// Resolve AMID → Ed25519 signing public key via registry lookup (cached).
-// Returns the base64-encoded public key, or empty string if unavailable.
-async function resolveSigningKey(amid: string): Promise<string> {
-  const cached = peerSigningKeys.get(amid);
-  if (cached) return cached;
-  try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
-        (res) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    const key = parsed.signing_public_key || parsed.public_info?.signing_public_key || "";
-    if (key) {
-      peerSigningKeys.set(amid, key);
-      return key;
-    }
-  } catch { /* best effort */ }
-  return "";
-}
 let agtSandboxName: string = "unknown";
 
 // Push trust updates to the router's local TrustStore + Ed25519 signing
