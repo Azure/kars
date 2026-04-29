@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.e.5 `phase2-hotspot-operator-cli-e5` — operator.ts cluster + topology render extraction
+
+#### Refactored
+
+- `cli/src/commands/operator.ts` 1880 → **1586 LOC** (cumulative
+  S15.e: 2894 → 1586, **−1308**). `renderTopology` (with nested
+  `makeBox`/`fitVis`/`visualLen`/`statusIcon`) → `operator/render/topology.ts`
+  (~199 LOC); `renderCluster` + `makeBar` → `operator/render/cluster.ts`
+  (~143 LOC).
+- Closure-captured `sandboxes`, `securityStates`, `topologyBox`,
+  `clusterData`, `clusterNodeBox`, `clusterInfoBox` now injected via
+  `RenderContext` interfaces. Two thin wrappers in operator.ts keep
+  call-sites unchanged.
+- Removed now-unused imports `NodeInfo`, `sumPrometheusCounter`.
+- No behavior change. Lint 21 → 20.
+
 ### S15.e.4 `phase2-hotspot-operator-cli-e4` — operator.ts action helpers extraction
 
 #### Refactored
