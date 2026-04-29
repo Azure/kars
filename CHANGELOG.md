@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S15.f.4 `phase2-hotspot-plugin-cli-f4` — plugin.ts task-tools array extraction
+
+#### Refactored
+
+- `cli/src/plugin.ts` 6648 → **6488 LOC** (−160, cumulative S15.f
+  −651). The 11-tool OpenAI function-call descriptor array consumed
+  by `processTaskWithTools` (offload / sub-agent LLM loop) extracted
+  to `core/agt-task-tools.ts` as `TASK_TOOLS`. Pure data move; no
+  closures, no captured variables.
+- No behavior change.
+
 ### S15.f.3 `phase2-hotspot-plugin-cli-f3` — plugin.ts chunked mesh transport extraction
 
 #### Refactored
