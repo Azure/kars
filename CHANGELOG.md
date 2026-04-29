@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S7.B `phase2-conditions-ssa-leader-b` — Conditions matrix `Progressing` emission
+
+#### Added
+
+- **`Progressing` Condition** now emitted on every `ClawSandbox` status
+  patch path: `build_running_status_patch` (`Progressing=False / Reconciled`),
+  `build_degraded_status_patch` (`Progressing=False / <degraded-reason>`),
+  and `build_runtime_unsupported_status_patch`
+  (`Progressing=False / AdapterMissing`). The overlay path already
+  emitted the full matrix in S8; this brings the other three paths to
+  parity so `kubectl wait --for=condition=Progressing=False` resolves
+  consistently across success / overlay / degraded / adapter-missing.
+- **Upgrade-time back-fill regression test**
+  `running_status_matches_returns_false_when_progressing_missing`: a
+  pre-S7.B status carrying only `[Ready=True, RuntimeReady=True]` is
+  now treated as stale by the idempotency guard so the new
+  `Progressing` field is written on the first reconcile after
+  controller upgrade, instead of being short-circuited as a no-op.
+
+#### Changed
+
+- `running_status_matches` and `runtime_unsupported_status_matches`
+  extended to verify `Progressing=False` is present with the expected
+  reason, mirroring the existing `Ready` / `RuntimeReady` checks.
+
+#### Tests
+
+- Controller bin tests: 328 → 329 (+1).
+
+#### Audit
+
+- `docs/security-audits/2026-04-29-phase2-conditions-progressing.md`.
+
 ### S7.A `phase2-conditions-ssa-leader` — stable SSA field managers (first sub-slice)
 
 #### Added
