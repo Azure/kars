@@ -32,10 +32,32 @@ use serde_json::{Value, json};
 /// foundryAgentId preservation) that are easy to get subtly wrong.
 /// Centralising the logic keeps reconcile bodies focused on side-effects
 /// and gives us one place to unit-test the wire shape.
+/// Build the `status` patch for a `ClawSandbox` that has reached the
+/// Running phase. See [`build_running_status_patch_with_extras`] for
+/// the additive variant; this convenience wrapper passes no extras and
+/// matches the pre-S12.b call-site shape used in unit tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_running_status_patch(
     sandbox: &ClawSandbox,
     sandbox_ns: &str,
     runtime_kind: &str,
+) -> Value {
+    build_running_status_patch_with_extras(sandbox, sandbox_ns, runtime_kind, &[])
+}
+
+/// As [`build_running_status_patch`], but appends `extra_conditions` to
+/// the emitted `conditions` array. Used by the reconciler to surface the
+/// `AllowlistVerified` Condition (S12.b) without forking the patch
+/// builder.
+///
+/// Each extra is upserted by `type_` (last-writer wins), so a caller can
+/// safely pass the freshly-computed condition without de-duplicating
+/// against the standard set above.
+pub fn build_running_status_patch_with_extras(
+    sandbox: &ClawSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
 ) -> Value {
     let name = sandbox.name_any();
     let generation = sandbox.metadata.generation;
@@ -76,6 +98,15 @@ pub fn build_running_status_patch(
         generation,
     );
 
+    let mut conditions_vec = vec![ready, progressing, runtime_ready];
+    for extra in extra_conditions {
+        if let Some(slot) = conditions_vec.iter_mut().find(|c| c.type_ == extra.type_) {
+            *slot = extra.clone();
+        } else {
+            conditions_vec.push(extra.clone());
+        }
+    }
+
     let mut status_obj = json!({
         "status": {
             "phase": "Running",
@@ -85,7 +116,7 @@ pub fn build_running_status_patch(
             "pendingApprovals": 0,
             "observedGeneration": generation,
             "runtimeKind": runtime_kind,
-            "conditions": [ready, progressing, runtime_ready],
+            "conditions": conditions_vec,
         }
     });
     if let Some(existing) = sandbox.status.as_ref()
@@ -116,7 +147,24 @@ pub fn build_running_status_patch(
 /// status), and accept that fields owned by other writers (e.g. a future
 /// `tokensUsed` updater) may differ — those would not be touched by our
 /// merge patch anyway.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_kind: &str) -> bool {
+    running_status_matches_with_extras(sandbox, sandbox_ns, runtime_kind, &[])
+}
+
+/// As [`running_status_matches`], but additionally requires that the
+/// existing CR status carries every condition in `extra_conditions`
+/// with the same `type_`/`status`/`reason` (message changes alone do
+/// **not** force a re-patch — they ride along on the next genuine
+/// transition). Used by the reconciler to keep the `AllowlistVerified`
+/// Condition stable across same-result reconciles without churning
+/// `resourceVersion`.
+pub fn running_status_matches_with_extras(
+    sandbox: &ClawSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> bool {
     use crate::status::conditions::{
         TYPE_PROGRESSING, TYPE_READY, TYPE_RUNTIME_READY,
         status::{FALSE as STATUS_FALSE, TRUE as STATUS_TRUE},
@@ -165,6 +213,19 @@ pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_k
         .is_some_and(|c| c.status == STATUS_TRUE);
     if !runtime_ready_ok {
         return false;
+    }
+    // S12.b: `AllowlistVerified` must match in (type,status,reason) so
+    // a transient → verified flip triggers a re-patch. We deliberately
+    // ignore `message` because the verifier rewrites the digest /
+    // generation summary on every successful pass and we don't want
+    // that to defeat the idempotency guard.
+    for extra in extra_conditions {
+        let matched = status.conditions.iter().any(|c| {
+            c.type_ == extra.type_ && c.status == extra.status && c.reason == extra.reason
+        });
+        if !matched {
+            return false;
+        }
     }
     true
 }
