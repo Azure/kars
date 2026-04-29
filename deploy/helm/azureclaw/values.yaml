@@ -171,6 +171,21 @@ admission:
     # upstream K8s 1.34, and AKS does not expose it yet — so we default
     # to false. Flip to true once the API surface is available.
     enabled: false
+  contentSafetyFloor:
+    # Deploy ValidatingAdmissionPolicy that rejects InferencePolicy
+    # objects whose `spec.contentSafety.{hate,selfHarm,sexual,violence}`
+    # is more permissive than the cluster minimum. Severity ordering
+    # follows Azure Content Safety: Safe (0) < Low (1) < Medium (2) <
+    # High (3); lower ordinal == stricter floor.
+    #
+    # Per-CR opt-out via the `azureclaw.azure.com/dev-only: "true"`
+    # label, mirroring the null-provider-block VAP convention.
+    #
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
+    # Cluster-wide minimum severity. InferencePolicy authors cannot
+    # set a value above this (which would loosen the floor).
+    minimum: "Medium"
 
 # Azure-specific configuration
 azure:
