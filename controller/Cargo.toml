@@ -49,3 +49,6 @@ futures-util.workspace = true
 
 # HTTP client for Azure ARM API (federated credential creation)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# HTTP server (controller metrics endpoint)
+axum = "0.8"

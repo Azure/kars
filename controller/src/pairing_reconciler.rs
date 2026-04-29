@@ -121,6 +121,11 @@ fn pairing_error_policy(
     error: &PairingReconcileError,
     _ctx: Arc<PairingContext>,
 ) -> Action {
+    let class = match error {
+        PairingReconcileError::Kube(_) => "kube_api",
+        PairingReconcileError::SerdeJson(_) => "serde",
+    };
+    crate::metrics::record_reconcile_error("ClawPairing", class);
     tracing::warn!(
         pairing = %pairing.name_any(),
         error = %error,
