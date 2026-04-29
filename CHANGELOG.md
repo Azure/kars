@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.c — CLI `--sign` flag (egress allowlist artifact producer)
+
+- New `cli/src/commands/egress/sign.ts` — canonical YAML serializer (matches `docs/policy-canonical-format.md` byte-for-byte), `oras push` artifact uploader, `cosign sign` orchestrator (keyless / identity-token / keyed), `kubectl patch` of `ClawSandbox.spec.networkPolicy.allowlistRef`.
+- New flags on `azureclaw egress`: `--sign`, `--sign-mode <keyless|identity-token|keyed>`, `--sign-key <ref>`, `--registry`, `--repository`, `--no-sign`.
+- Status: **non-authoritative** — inline `allowedEndpoints` remains the source of truth in this slice. The controller-side fetcher (S12.b) verifies the artifact and surfaces `AllowlistVerified`. The flip to authoritative ships in S12.e.
+- Auto-mode-detection: keyless when TTY + no token; identity-token when `SIGSTORE_ID_TOKEN`/`OIDC_TOKEN` env present; keyed when `--sign-mode keyed`+`--sign-key` set.
+- Fail-closed: signature push failure aborts the flow before patching the CR — no orphan refs on `ClawSandbox` resources.
+- Requires `oras` and `cosign` in `$PATH`; clear actionable errors if missing.
+- 41 new vitest tests across `cli/src/commands/egress/sign.test.ts` and `cli/src/commands/egress.test.ts`; CLI test count 354 → 395 (passing). Lint clean; typecheck clean; `npm run build` green.
+
 ### S12.a `phase2-s12-a-policyref-schema` — supply-chain policy foundations
 
 **Pure schema PR.** Foundation for the S12 signed-egress-allowlist work. No
