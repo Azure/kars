@@ -361,8 +361,8 @@ fn parse_rfc3339_secs(s: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::a2a::agent_card::{AgentCapabilities, AgentProvider};
-    use crate::a2a::card_signing::sign_card;
+    use crate::agent_card::{AgentCapabilities, AgentProvider};
+    use crate::card_signing::sign_card;
     use ed25519_dalek::SigningKey;
     use std::time::Duration;
 

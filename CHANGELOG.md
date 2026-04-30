@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S3.5 — A2A public-ingress gateway component (closes ADR-0001 #4)
+
+The largest slice in Phase 2. Introduces the public-edge component
+that terminates external A2A 1.0.0 traffic and forwards over mTLS
+to the router on a dedicated port (8445). Off by default;
+opt-in via `a2aGateway.enabled=true` + `A2A_MTLS_ENABLED=1` on the
+router. Existing :8443 mesh path is byte-for-byte unchanged.
+
+Workspace restructure:
+
+- New library-only crate `azureclaw-a2a-core` (workspace member).
+  Lifted `signature.rs`, `agent_card.rs`, `card_signing.rs`,
+  `card_verifier.rs`, and `error.rs` from `inference-router/src/a2a/`.
+  The router re-exports them under their original module paths so
+  every existing call site keeps compiling unchanged. Both the
+  router and the new gateway now share the same byte-for-byte JWS
+  verifier — no second implementation introduced (§0.2 #8).
+
+New crate `azureclaw-a2a-gateway` (binary):
+
+- `tls` — server TLS for the public listener (rustls + ring),
+  hot reload via `notify::Watcher` on cert rotation.
+- `mtls` — client TLS toward the router (CA-pinned).
+- `verify` — `ReplayCache` (TTL + cap, oldest-expiry eviction)
+  wrapping `azureclaw_a2a_core::verify_inbound_card`.
+- `proxy` — single-upstream URL builder; preserves
+  `X-A2A-Agent-Subject` header with the verified JWS subject.
+- `rate_limit` — per-subject token bucket; `SharedRedisLimiter`
+  reserved (`unimplemented!()`) for cross-replica sync — feature-
+  flagged off behind Helm value `a2aGateway.rateLimits.sharedRedisUrl`.
+- `metrics` — Prometheus exposition on `/metrics` (requests,
+  rejections by reason, active connections).
+- `health` — `/healthz` + `/readyz` on port 9090.
+
+Router-side mTLS port (additive):
+
+- New module `inference-router/src/a2a_mtls.rs`. Reads
+  `A2A_MTLS_ENABLED`, `A2A_MTLS_PORT` (default 8445),
+  `A2A_MTLS_CERT_PATH`, `A2A_MTLS_KEY_PATH`, `A2A_MTLS_CA_PATH`.
+  Default-disabled — when off, the router behaves exactly as before.
+
+Helm:
+
+- New template `templates/a2a-gateway-deployment.yaml` (Deployment
+  + ServiceAccount + Service). Conditional on `a2aGateway.enabled`.
+- New value block `a2aGateway.*` (default `enabled: false`),
+  including `tls.secretName`, `mtls.secretName`, `replicas`,
+  `rateLimits.{perSubjectBurst, perSubjectRefillPerSec, maxSubjects,
+  sharedRedisUrl}`, `image`, `resources`.
+- The existing `cilium-a2a-gateway-to-router` CCNP
+  (port 8445 → router, gateway-SA only) was already in the chart;
+  no change required.
+
+Image build:
+
+- New `a2a-gateway/Dockerfile` — two-stage, distroless static
+  base, musl target. Single binary `azureclaw-a2a-gateway`.
+- New matrix entry in `.github/workflows/image-cache-publish.yml`;
+  trigger paths extended to `a2a-gateway/**` and
+  `azureclaw-a2a-core/**`.
+
+Test deltas:
+
+- `azureclaw-a2a-core`: 73 (lifted from router; round-trip,
+  replay, expired-token, wrong-issuer coverage retained).
+- `azureclaw-a2a-gateway`: 31 (TLS load, mTLS load, replay cache,
+  rate limiter, metrics, health, proxy URL builder).
+- `azureclaw-inference-router`: +1 (`a2a_mtls` config).
+- Workspace total 1022 → 1127.
+
+Docs:
+
+- `docs/architecture/a2a-gateway.md` — data flow + threat model.
+- `docs/operations/a2a-gateway.md` — enable, cert rotation,
+  rate-limit tuning, observability.
+- `docs/security-audits/2026-04-30-phase2-a2a-gateway.md` — audit
+  with the surveyed-existing-implementation extraction map.
+
 ### S12.g — Sign-by-default + emit-manifest GitOps mode (S12 close-out)
 
 - **BREAKING (CLI default flip).** `azureclaw egress … --enforce`

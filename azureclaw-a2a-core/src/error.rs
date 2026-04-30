@@ -5,7 +5,7 @@
 //! below are the A2A-specific application error codes — they sit in
 //! the JSON-RPC server-error reserved range (-32099..=-32000 per
 //! RFC) and **MUST NOT** collide with the generic JSON-RPC codes
-//! defined in [`crate::mcp::error`].
+//! defined in the JSON-RPC base error catalogue (router's `mcp::error`).
 
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,7 @@ pub enum A2aErrorCode {
     /// AP2 commerce extension denial — set when an inbound message
     /// carrying a `metadata.ap2` extension is rejected by the
     /// signed-mandate verifier or the policy validator (see
-    /// [`crate::a2a::ap2::Ap2Denial`]). The `data.reason` field of
+    /// the router's `a2a::ap2::Ap2Denial`). The `data.reason` field of
     /// the JSON-RPC error envelope carries the rendered denial.
     Ap2Denied,
     /// Catch-all for forward compatibility — preserves unknown codes
