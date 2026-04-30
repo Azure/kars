@@ -35,6 +35,8 @@ Regardless of blueprint, every AzureClaw deployment ships:
 - **AGT-native governance** — `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` evaluated in-process on every tool call, every inference, every mesh message.
 - **Tamper-evident audit chain** — hash-chained log persisted via `AuditSink`.
 - **Signal-Protocol mesh** — X3DH + Double Ratchet. Relay sees only ciphertext. No plaintext fallback; failed-decrypt is a `security_event`, never a delivered cleartext message.
-- **CRD-driven control plane** — `ClawSandbox`, `Pairing`, `MeshPeer`, `A2AAgent`, `McpServer`, `ToolPolicy` (the last three are Phase 1 schema; reconcilers in Phase 2).
+- **CRD-driven control plane** — eight namespaced CRDs under `azureclaw.azure.com/v1alpha1`: `ClawSandbox`, `ClawPairing`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `A2AAgent`, `ClawMemory`, `ClawEval`. All eight reconcilers shipped in Phase 2. Full reference: [`docs/api/crd-reference.md`](../api/crd-reference.md).
+- **Multi-runtime hosting** — `spec.runtime.kind` selects the agent runtime variant: `OpenClaw` (default, Tier-1), `OpenAIAgents`, `MicrosoftAgentFramework` (Tier-1), `SemanticKernel`, `LangGraph`, `Anthropic` (Tier-2, schema shipped), or `BYO`. The inference-router, governance, and audit chain are runtime-agnostic.
+- **`spec.inferenceRef.name` (ref form)** — sandboxes reference an `InferencePolicy` CR by name rather than inlining model/budget config. Inline inference fields were removed in S13; all example YAMLs in these blueprints use the ref form.
 
 If your environment can't support one of those, you're outside the AzureClaw threat model — open an issue before deploying.
