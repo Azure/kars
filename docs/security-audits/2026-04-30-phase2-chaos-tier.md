@@ -1,7 +1,7 @@
 # Security Audit — Phase 2 S16 chaos tier (fault injection + perf baselines)
 
 **Date:** 2026-04-30
-**PR:** #TBD
+**PR:** #121
 **Author:** @copilot
 **Independent reviewer:** TBD (CI / reliability owner — not data-plane;
 this slice is purely additive test/CI scaffolding)
