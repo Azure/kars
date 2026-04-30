@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Shared A2A verifier (the entire reason this crate exists — same
 # byte-for-byte JWS path the router uses).
-azureclaw-a2a-core = { path = "../azureclaw-a2a-core" }
+azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
 
 # HTTP server / proxy
 axum.workspace = true

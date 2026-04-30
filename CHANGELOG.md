@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S17 `phase2-cncf-conformance` — K8s AI conformance + permanent supply-chain rows
+
+CNCF Kubernetes AI Conformance (v1.35+) gap-fix and supply-chain CI hardening.
+
+**Conformance gap-fixes (controller + helm):**
+- `ClawPairing` now ships a `status.conditions[]` array (Rust + helm CRD)
+  with the standard k8s condition shape (`type`/`status`/`lastTransitionTime`/
+  `reason`/`message`/`observedGeneration`) and a new `Ready` printer column
+  driven by `.status.conditions[?(@.type=="Ready")].status`.
+- `ClawPairing` schema gains two `x-kubernetes-validations` CEL rules
+  (`spec.slotsMax >= 1`, `spec.tokenBudget >= 0`).
+- All six split-file CRDs (`a2aagent`, `claweval`, `clawmemory`,
+  `inferencepolicy`, `mcpserver`, `toolpolicy`) carry the recommended
+  `app.kubernetes.io/name: azureclaw` and `app.kubernetes.io/component: crd`
+  labels. Helm-drift comparison strips labels, so no Rust schema change.
+- New `operator-default-deny-networkpolicy.yaml` template installs an
+  empty-podSelector default-deny policy in `azureclaw-system` (Ingress +
+  Egress in `policyTypes`), with allow-list exceptions for kube-DNS,
+  kube-apiserver, and Prometheus scrapes of `:9091`.
+
+**New CI rows (permanent, required):**
+- `cargo-deny` — runs `cargo deny check` against `deny.toml`. Two
+  documented advisory exceptions in the ignore list (RUSTSEC-2024-0370
+  proc-macro-error transitive via sigstore, RUSTSEC-2023-0071 rsa Marvin
+  attack via jsonwebtoken/sigstore — neither call site does
+  attacker-observable RSA decryption).
+- `cosign-verify` — keyless GitHub OIDC verification command pinned in
+  CI; PR runs are dry-run (verification command is recorded in the run
+  summary). The full verification recipe is documented in
+  `docs/operations/supply-chain.md`.
+
+**Conformance suite:**
+- New `tests/cncf-conformance` workspace crate. 15 conformance criteria
+  (C1–C15) and 17 `cargo test` cases gate every PR. The criteria are:
+  CRD versions/served/storage, additional printer columns, conditions[]
+  array, structural schema, CEL validation rule presence, status
+  subresource, deployment liveness+readiness probes, default-deny
+  NetworkPolicy in the operator namespace, explicit image tag/digest
+  (no implicit `:latest`), recommended labels, valid scope, status-state
+  printer column, pod security baseline (non-root + seccompProfile),
+  ci.yml supply-chain rows, deny.toml shape.
+- Binary `cncf-conformance` writes `tests/cncf-conformance/CONFORMANCE-REPORT.md`
+  and exits non-zero on any failure.
+- Suite renders the helm chart with `helm template ac deploy/helm/azureclaw
+  --namespace azureclaw-system` to avoid in-process Helm-token stripping
+  (serde_yaml 0.9 hangs on action blocks like `{{ if }}"0"{{ else }}"1"{{ end }}`
+  that strip to `value: "0""1"`).
+
+**Status:** 15 / 15 criteria pass. Run `cargo run -p azureclaw-cncf-conformance
+--bin cncf-conformance` to regenerate the report.
+
+
+
 ### S16 — Chaos tier (fault injection + perf baselines)
 
 Phase-2 close-out gate. Adds a feature-gated chaos / fault-injection tier
