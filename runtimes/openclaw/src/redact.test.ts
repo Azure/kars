@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { describe, it, expect } from "vitest";
 import { redactSecrets } from "./index.js";
 

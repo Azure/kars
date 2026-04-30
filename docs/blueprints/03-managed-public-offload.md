@@ -246,6 +246,50 @@ sequenceDiagram
 
 The CRDs and CLI are identical to Blueprint 02; the difference is **scale + automation + per-tenant scoping + confidential-by-default**.
 
+### Per-tenant CRD pattern
+
+Each tenant namespace gets its own set of CRDs so budgets, policies, and memory are fully isolated:
+
+| CRD | Per-tenant role |
+|---|---|
+| `InferencePolicy` | Token budget cap per tenant (`dailyTokens`, `monthlyTokens`). Sandboxes reference by name via `spec.inferenceRef.name`. Missing → `Degraded/InferencePolicyNotFound`. |
+| `ToolPolicy` | Commerce caps (`dailyCap`, `monthlyCap`), AP2 counterparty allowlist, per-tool rate limits. Budget plan → `ToolPolicy` CR; plan upgrade = new CR, old token revoked. |
+| `ClawMemory` | Foundry Memory Store binding scoped to the tenant's store/scope key. Memories never cross tenant boundaries. |
+| `ClawEval` | Scheduled regression evals on tenant sandbox at provider-defined cadence. Providers can gate plan tiers on `EvalsPassed` condition. |
+| `McpServer` | Tenant-scoped private MCP tools (e.g., a tenant's internal API gateway). Admission-denied from other namespaces. |
+| `A2AAgent` | A2A 1.2 agent card for cross-org collaboration. Tenants using the federation tier get their own `A2AAgent` CR; see Blueprint 04. |
+
+```yaml
+# Per-tenant bootstrap (emitted by your portal automation, not a human):
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: acme-budget
+  namespace: tenant-acme
+spec:
+  tokenBudget:
+    dailyTokens: 500000
+    monthlyTokens: 10000000
+  contentSafety:
+    requirePromptShields: true
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: acme-tools
+  namespace: tenant-acme
+spec:
+  appliesTo:
+    tool: "*"
+    sandboxMatchLabels:
+      azureclaw.azure.com/tenant: acme
+  rateLimit:
+    rps: 10
+    burst: 20
+```
+
+### CLI commands
+
 ```bash
 # Per regional cluster (one-time):
 azureclaw up --multi-tenant --regions eastus,westeurope \
@@ -271,11 +315,15 @@ azureclaw operator --tenant tenant-acme        # operator TUI scoped to one tena
 
 ## What's unique to this blueprint
 
+## What's unique to this blueprint
+
 - **Customers don't install your CLI.** Customer-side install is the OpenClaw plugin, which is upstreamed. Your portal hands them a token; that's the entire onboarding UX.
 - **Confidential by default for offload sandboxes.** Pairing CRs can carry `spec.requiredIsolation: confidential` so the controller refuses to spawn anything weaker than a Kata + SEV-SNP pod for that tenant's offloads. Customers shopping for a SaaS that won't read their prompts have a one-bit answer.
 - **Per-tenant namespace + per-tenant audit destination.** AzureClaw already namespaces every sandbox by name; the SaaS pattern just stamps a tenant prefix. Audit chains land in per-tenant Log Analytics workspaces (one workspace per Pairing CR's `tenantId` annotation).
 - **Pairing tokens are commerce-aware.** `--token-budget`, `--slots`, `--expires`, `--capabilities`, `--required-isolation` map directly to your billing plan. Plan upgrade = new Pairing CR with bigger limits; old token revoked.
 - **Provider observability without decryption.** You can see *that* tenant `acme` exchanged 142 mesh frames in the last hour and consumed 1.2M Foundry tokens. You cannot see *what was in those frames* — neither in flight (Signal Protocol) nor at rest in the sandbox (SEV-SNP).
+- **Operator HA out of the box.** Two controller replicas with leader election and jittered requeue are the cluster-level defaults. `azureclaw_controller_reconcile_errors_total` and `_retries_total` on `:9091` give you per-tenant incident signals.
+- **CNCF Kubernetes AI Conformance v1.35+.** The platform and all eight CRDs pass the CNCF AI Conformance suite — a vendor-neutral benchmark for enterprise and ISV customers who require auditable AI infrastructure.
 - **Future:** managed AP2 (Agent Payments Protocol) lets your customers spend their token budget through signed mandates with audit. Schema present today; mounting deferred to a future phase.
 
 ## Productization checklist (the "🚧" part)
@@ -310,11 +358,14 @@ None of these change the trust model. They change the customer-facing UX around 
 
 - `controller/src/pairing.rs` (multi-tenant `Pairing.spec.namespace`, `requiredIsolation` field)
 - `controller/src/reconciler/mod.rs` (Kata runtime class selection on `isolation: confidential`)
+- `controller/src/leader_election.rs` + `controller/src/backoff.rs` + `controller/src/metrics.rs` (operator HA + jitter + `:9091` metrics)
 - `inference-router/src/auth.rs` (per-namespace Workload Identity selection)
 - `cli/src/commands/pair.ts` (`--namespace`, `--capabilities`, `--token-budget`, `--required-isolation`)
 - `deploy/helm/azureclaw/templates/vap*.yaml` (admission policies enforcing posture invariants)
 - `docs/security-validation.md` (live-AKS validation of all 9 defence-in-depth layers, including Kata VM)
 - `docs/multi-tenant.md` (per-namespace tenant isolation patterns)
 - `docs/security.md` § Layer 2 (Kata VM Isolation)
+- `docs/api/crd-reference.md` (all 8 CRDs, especially `InferencePolicy`, `ToolPolicy`, `ClawMemory`, `A2AAgent`)
 - `docs/use-cases.md` Scenario 2 (the customer-side experience)
+- `docs/sigs-agent-sandbox-compat.md` (CNCF K8s AI Conformance v1.35+)
 - ADR-0001 (A2A ingress front-edge, identical pattern for A2A 1.0.0 inbound)

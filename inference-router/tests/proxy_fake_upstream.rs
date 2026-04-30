@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! End-to-end proxy test against fake upstream servers.
 //!
 //! Exercises the full `proxy::forward` → auth (IMDS / API-key) → upstream flow

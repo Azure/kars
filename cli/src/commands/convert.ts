@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * `azureclaw convert` — translate between AzureClaw and upstream
  * `agents.x-k8s.io/v1alpha1` Sandbox manifests (YAML in / YAML out).

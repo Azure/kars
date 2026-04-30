@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Handoff endpoint auth middleware.
 //!
 //! Extracted from `handoff/mod.rs` per §4.2 hotspot decomposition.

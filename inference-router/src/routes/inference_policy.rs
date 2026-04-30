@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Inference-side policy gating via the four-seam
 //! [`crate::providers::PolicyDecisionProvider`] trait.
 //!

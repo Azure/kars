@@ -1,23 +1,48 @@
 # Architecture
 
-## System Overview
+> **Cross-links:** [README](../README.md) · [CRD Reference](api/crd-reference.md) · [CLI Reference](cli-reference.md) · [Security](security.md) · [Threat Model](threat-model.md) · [Architecture Diagrams](architecture-diagrams.md) · [SIGS Agent Sandbox Compat](sigs-agent-sandbox-compat.md) · [ADR-0001](adr/0001-a2a-ingress-front-edge.md) · [Runtime Contract](runtime-contract.md) · [MCP Top 10](security-mcp-top10.md)
+
+---
+
+## 1. System Overview
+
+AzureClaw is a Kubernetes operator that runs sandboxed AI agents with defence-in-depth isolation, a per-sandbox inference/governance proxy, and native Azure AI Foundry integration. It ships as four deployable components across two languages, plus a test infrastructure.
+
+### Component map
+
+| Component | Language | Binary / Package | Runs on | Role |
+|-----------|----------|-----------------|---------|------|
+| **Controller** | Rust (kube-rs, edition 2024) | `azureclaw-controller` | `azureclaw-system` namespace | K8s operator — reconciles 8 CRDs; two replicas with leader election |
+| **Inference Router** | Rust (axum) | `azureclaw-inference-router` | sidecar in every sandbox pod | Per-sandbox proxy and policy choke-point |
+| **A2A Gateway** | Rust (axum + rustls) | `azureclaw-a2a-gateway` | `azureclaw-system` (shared) | Public TLS ingress for inbound A2A 1.0 federation |
+| **CLI** | TypeScript (Node.js 22+) | `@azureclaw/cli` | operator's laptop | 23 CLI commands; deploys and manages AzureClaw clusters |
+| **OpenClaw Adapter** | TypeScript | `runtimes/openclaw/` | inside sandbox container | OpenClaw plugin — tools, provider, mesh wiring |
+| **Additional Runtime Adapters** | TypeScript | `runtimes/{openai-agents,maf}/` | inside sandbox container | Native Phase 2 adapters for OpenAI Agents SDK and Microsoft Agent Framework |
+
+The `cli/` package is the operator CLI only (`@azureclaw/cli`). All runtime
+adapters live under `runtimes/` and are independently versioned. See
+[`docs/runtime-contract.md`](runtime-contract.md) for the BYO adapter contract.
+
+### Cluster topology
 
 ```
-                         azureclaw up / azureclaw add
-                                    │
-                                    ▼
 ┌─ AKS Cluster (Azure Linux, Cilium CNI) ──────────────────────────────────┐
 │                                                                           │
 │  azureclaw-system namespace                                               │
-│  ┌──────────────────────────────────────────────────────┐                 │
-│  │ Controller (Rust/kube-rs) × 2 replicas               │                 │
-│  │  • Watches ClawSandbox CRDs                          │                 │
-│  │  • Reconciles → NS, SA, NetworkPolicy, Deployment    │                 │
-│  │  • Creates egress-guard init, blocklist CM, CronJob  │                 │
-│  │  • Optional: AGT Service + policy CM + mesh ingress  │                 │
-│  └──────────────────────────────────────────────────────┘                 │
+│  ┌─────────────────────────────────────────────────────┐                  │
+│  │ Controller × 2 replicas (leader-elected)            │                  │
+│  │  • Watches 8 CRDs (ClawSandbox, ClawPairing,        │                  │
+│  │    McpServer, ToolPolicy, A2AAgent, InferencePolicy, │                  │
+│  │    ClawMemory, ClawEval)                             │                  │
+│  │  • Metrics: :9091/metrics                           │                  │
+│  └─────────────────────────────────────────────────────┘                  │
+│  ┌─────────────────────────────────────────────────────┐                  │
+│  │ A2A Gateway (opt-in, --enable-a2a-ingress)          │                  │
+│  │  • Public TLS :8443, mTLS → router :8444            │                  │
+│  │  • JWS AgentCard verifier + replay cache            │                  │
+│  │  • Prometheus: :9090                                │                  │
+│  └─────────────────────────────────────────────────────┘                  │
 │  seccomp DaemonSet → azureclaw-strict.json on every node                 │
-│  ClawSandbox CRD (v1alpha1)                                               │
 │                                                                           │
 │  azureclaw-<name> namespace (one per sandbox)                             │
 │  ┌──────────────────────────────────────────────────────────────────┐     │
@@ -26,20 +51,20 @@
 │  │  init: egress-guard (runs as root, then exits)                   │     │
 │  │   └─ iptables: UID 1000 → localhost + DNS + ESTABLISHED only     │     │
 │  │                                                                  │     │
-│  │  container: openclaw (UID 1000, network-restricted)              │     │
-│  │   ├─ Gateway :18789 (WebSocket + Control UI)                     │     │
-│  │   ├─ TUI :18791                                                  │     │
-│  │   ├─ Read-only rootfs, writable /sandbox + /tmp                  │     │
-│  │   ├─ AzureClaw plugin (tools: spawn, mesh, Foundry, http_fetch)   │     │
-│  │   ├─ Python 3 (43 packages: pandas, scipy, pdfplumber, Pillow, …)   │     │
+│  │  container: agent (UID 1000, network-restricted)                 │     │
+│  │   ├─ Runtime selected by ClawSandbox.spec.runtime.kind           │     │
+│  │   │    OpenClaw | OpenAIAgents | MicrosoftAgentFramework | BYO   │     │
+│  │   ├─ Gateway :18789 (WebSocket + Control UI)  [OpenClaw only]    │     │
+│  │   ├─ Python 3 (43 packages pre-installed)                        │     │
 │  │   └─ All external access → localhost:8443 only                   │     │
 │  │                                                                  │     │
 │  │  container: inference-router (UID 1001, unrestricted network)    │     │
-│  │   ├─ Inference proxy (/v1/*)              ───────────────────────┼──► Azure OpenAI / Foundry
+│  │   ├─ Inference proxy (/v1/*)              ───────────────────────┼──► Foundry
 │  │   ├─ Egress proxy (/egress/fetch)         ───────────────────────┼──► External HTTP (audited)
 │  │   ├─ AGT relay (/agt/relay)               ───────────────────────┼──► agentmesh-relay (WS)
-│  │   ├─ Content Safety + Prompt Shields      ───────────────────────┼──► Azure AI Content Safety
+│  │   ├─ Content Safety floor + Prompt Shields ──────────────────────┼──► Azure AI Content Safety
 │  │   ├─ Token budgets, audit logging, Prometheus metrics            │     │
+│  │   ├─ Signed OCI egress-allowlist verifier                        │     │
 │  │   └─ Sub-agent spawn (/sandbox/spawn)     ───────────────────────┼──► K8s API (CRD create)
 │  └──────────────────────────────────────────────────────────────────┘     │
 │  NetworkPolicy: default-deny egress + allowlist                           │
@@ -51,98 +76,529 @@
 
 ---
 
-## Components
+## 2. The Inference Data Path
 
-### Controller (Rust, kube-rs)
+Every external call an agent makes flows through a single choke-point: the
+inference router running in the same pod as UID 1001. The agent (UID 1000)
+is iptables-walled to `localhost:8443` — it can reach nothing else.
 
-Watches `ClawSandbox` CRDs and reconciles into running sandboxes. Source: `controller/src/reconciler.rs`.
+```mermaid
+sequenceDiagram
+    participant A as Agent (UID 1000)
+    participant R as Inference Router (UID 1001)
+    participant F as Azure AI Foundry
 
-**Reconciliation steps:**
-
-| Step | Resource Created | Key Details |
-|------|-----------------|-------------|
-| 1 | Namespace | `azureclaw-<name>`, PodSecurity labels (enforce: privileged, audit/warn: baseline) |
-| 2 | ServiceAccount | Workload Identity annotation, `azure.workload.identity/client-id` |
-| 2a | ClusterRoleBinding | `azureclaw-sandbox-spawner` — grants SA permission to create ClawSandbox CRDs |
-| 2b | Secret | `gateway-token` — shared auth token for TUI↔gateway (idempotent, reused on reconcile) |
-| 3 | NetworkPolicy | Default-deny egress; allows: DNS, IMDS, HTTPS :443, mesh :8443, relay :8765/:8080 |
-| 4 | Deployment | 1 init + 2 containers (see below), blocklist CM volume, optional AGT policy volume |
-| 4b | SA annotations | Azure Services RBAC annotations (reserved, no bindings yet) |
-| 4c | Service + ConfigMap + NP ingress | AGT governance infra (when `governance.enabled: true`) |
-| 4d | ConfigMap + CronJob | Blocklist seed + 6h refresh job |
-| 5 | CRD status | phase=Running, sandboxPod, namespace, inferenceEndpoint |
-
-**Isolation levels:**
-
-| Level | RuntimeClass | seccomp | Node Pool |
-|-------|-------------|---------|-----------|
-| standard | (default runc) | RuntimeDefault | `sandbox` |
-| enhanced (default) | (default runc) | Localhost `azureclaw-strict` (219 allowed syscalls) | `sandbox` |
-| confidential | `kata-vm-isolation` | RuntimeDefault (VM is the boundary) | `sandbox-kata` |
-
-**Isolation inheritance:** The controller exports `SANDBOX_ISOLATION` as an environment variable into every pod. When a sub-agent is spawned via `/sandbox/spawn`, the inference router reads the parent's isolation level from this env var and applies it as the default for the child. Downgrading from `confidential` to a lower isolation level is blocked — the spawn request returns an error.
-
-**Kata auto-provisioning:** `azureclaw add --isolation confidential` checks for a Kata-capable nodepool. If none exists, it offers to provision one automatically via `az aks nodepool add` with `--workload-runtime KataVmIsolation`, SKU `Standard_D4as_v6`, and appropriate labels/taints.
-
-### Inference Router (Rust, axum)
-
-Per-sandbox router on port 8443. Runs as UID 1001 (unrestricted network). The agent (UID 1000) can only reach `localhost:8443` — the router is the sole external path.
-
-**Request pipeline (inference):**
-
-```
-Agent → Token budget check (429) → IMDS/WI token (cached per scope)
-      → Forward to Azure OpenAI / Foundry → Foundry guardrails (Content Safety + Prompt Shields, server-side)
-      → Parse content filter annotations → Report flags to AGT → Extract usage → Prometheus metrics → Agent
+    A->>R: POST /v1/chat/completions (localhost:8443)
+    R->>R: InferencePolicy check (ref → compiled profile)
+    R->>R: Token budget check (daily + per-request)
+    R->>R: Content Safety floor (prompt-shield)
+    R->>R: AGT governance gate (PolicyDecisionProvider)
+    R->>R: Acquire IMDS/WI token (cached per scope)
+    R->>F: Forward request (Bearer token, no API key)
+    F-->>R: Response (content-filter annotations)
+    R->>R: Parse flags → AuditSink → Prometheus metrics
+    R-->>A: Response (filtered)
 ```
 
-**Embedding model routing:** The `/v1/embeddings` endpoint extracts the `model` field from the request body (e.g., `text-embedding-3-small`) and routes to that specific deployment. This prevents embedding requests from being sent to the default chat model, which would fail. Both AKS (Workload Identity) and dev (API key) code paths handle this.
-
-**Egress proxy pipeline:** `POST /egress/fetch`
-
-```
-Agent → Blocklist check (hard deny) → Learn mode? (log + allow)
-      → Allowlist check (approved domains pass) → Unknown? deny + create PendingApproval
-```
-
-See [`egress-proxy.md`](egress-proxy.md) for full details.
-
-### OpenClaw Sandbox (Node.js)
-
-Runs as UID 1000 (all outbound blocked by iptables except localhost + DNS + ESTABLISHED replies).
-
-- **Gateway** on port 18789 — WebSocket + Control UI
-- **TUI** on port 18791
-- **Plugin:** AzureClaw tools (`spawn`, `mesh`, `Foundry`, `http_fetch`), provider `azure-openai` routing to `localhost:8443`
-- **Native delegation:** Sub-agent tasks received via AGT mesh are delegated to the full OpenClaw agent loop (`openclaw agent --message`), giving sub-agents access to all registered tools (Foundry, exec, web_search, etc.)
-- **Python 3:** 43 packages pre-installed — pandas, numpy, scipy, sympy, matplotlib, seaborn, requests, httpx, beautifulsoup4, lxml, cssselect, aiohttp, websockets, rich, tabulate, pdfplumber, pypdf, python-docx, openpyxl, python-pptx, Pillow, jinja2, pydantic, jsonpath-ng, xmltodict, markdown, html2text, chardet, python-dateutil, pyyaml, toml, python-dotenv, sqlalchemy, cryptography, tiktoken, dnspython, networkx, geopy, ftfy, unidecode, qrcode, fpdf2, html5lib
-- **Channels:** Telegram, Slack, Discord, WhatsApp (via `/egress/fetch` proxy)
-- **Filesystem:** Read-only rootfs, writable `/sandbox` + `/tmp` (emptyDir, `/tmp` is tmpfs 1Gi)
-- **Explicit proxy:** `proxy-bootstrap.js` is preloaded via `NODE_OPTIONS="--require ..."` before any OpenClaw code runs. It sets undici's `EnvHttpProxyAgent` as the global fetch dispatcher so all outbound HTTP/HTTPS requests (Telegram polling, model pricing, etc.) honor `HTTPS_PROXY`/`NO_PROXY` env vars.
-
-### Egress Guard (init container)
-
-Runs as root with `NET_ADMIN` + `NET_RAW`, then exits. Installs iptables OUTPUT rules for UID 1000:
-
-```
-iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT
-iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT
-iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP
-```
-
-The `ESTABLISHED,RELATED` rule allows reply packets (SYN-ACK) for inbound connections to the gateway — required for WebUX and channel connections to work.
+**Why the router is the sole choke-point:**
+- Agent (UID 1000) has no API keys, no credentials, no direct network path
+  (iptables DROP on all non-loopback, non-DNS egress).
+- The router holds ephemeral IMDS tokens via Workload Identity — they are
+  never visible to UID 1000.
+- All policy decisions, content safety screening, token accounting, and audit
+  logging happen in the router before any byte reaches Foundry.
+- Sub-agent spawning (`/sandbox/spawn`) also runs through the router, so
+  the spawner policy can be enforced at the same gate.
 
 ---
 
-## Network Architecture
+## 3. CRD Overview
+
+Eight CRDs are registered under `azureclaw.azure.com/v1alpha1`. Full schemas
+live in [`docs/api/crd-reference.md`](api/crd-reference.md).
+
+| CRD | Short Name | Purpose | Key Relationship |
+|-----|-----------|---------|-----------------|
+| `ClawSandbox` | `cs`, `claw` | Declares a sandboxed agent instance | References `InferencePolicy` via `spec.inferenceRef`; optionally references `ToolPolicy` via `spec.governance.toolPolicy` |
+| `ClawPairing` | — | Operator-assisted cross-sandbox pairing as a K8s operation | Owned by a `ClawSandbox` pair |
+| `McpServer` | — | Configures an MCP 2026 endpoint with OAuth 2.1; the reconciler generates an Ed25519 signing key and optional JWKS cache | Referenced from `ClawSandbox.spec.governance` |
+| `ToolPolicy` | — | Carries AGT policy profile (allow/deny/rate-limit/approval rules) + AP2 commerce fields (`dailyCap`, `monthlyCap`, `counterpartyAllowlist`) | Referenced by `ClawSandbox` and `McpServer` |
+| `InferencePolicy` | — | Compiled guardrail bundle: model, content-safety floor, prompt-shield requirement, token budgets | Referenced by `ClawSandbox.spec.inferenceRef` (mandatory post-S13 inline→ref migration) |
+| `A2AAgent` | — | Declares an A2A 1.0 AgentCard (skills, interfaces, trust score) for inbound federation | The reconciler compiles and publishes the card as a ConfigMap |
+| `ClawMemory` | — | Binds a Foundry Memory Store to a sandbox | Owned by a `ClawSandbox` |
+| `ClawEval` | — | Declares an evaluation job (dataset + evaluators + pass criteria) | Owned by a `ClawSandbox`; runtime slice writes `lastScore`, `lastPass` |
+
+**Inline → ref migration (S13).** `ClawSandbox.spec.inference` (inline
+inference config) has been superseded by `spec.inferenceRef` (reference to an
+`InferencePolicy` CR in the same namespace). Inline fallback was removed in
+S13; sandboxes without an `inferenceRef` enter `Degraded` with reason
+`InferencePolicyNotFound`. Cross-namespace refs are disallowed (privilege
+escalation vector).
+
+**CRD CEL validation.** kube-rs `CustomResource` derive does not emit
+`x-kubernetes-validations` (upstream kube-rs#1557); CEL rules are
+post-processed by `controller/src/crd_validations.rs` after schema generation.
+
+---
+
+## 4. Reconciler Architecture
+
+### kube-rs controller loop
+
+Every CRD has a dedicated reconciler wired as an independent `kube::runtime::Controller`
+task. The main `tokio::select!` loop in `controller/src/main.rs` drives all
+eight reconcilers in parallel under a single leader election gate.
+
+**Leader election (S7.C).** Two controller replicas run for HA. Only the
+holder of the `azureclaw-controller-leader` Kubernetes `coordination.k8s.io/v1`
+Lease reconciles. The pure decision function `evaluate_lease(spec, identity, now) →
+LeaseAction::{Acquire,Renew,Yield}` is unit-tested independently of I/O
+(`controller/src/leader_election.rs`). On renewal failure the holder exits —
+fail-stop, no split-brain reconciliation. Disable with
+`LEADER_ELECTION_ENABLED=false`.
+
+**Reconciler table:**
+
+| Reconciler | File | CRD | What it creates |
+|-----------|------|-----|----------------|
+| ClawSandbox | `reconciler/mod.rs` | `ClawSandbox` | Namespace, SA, Deployment, Service, NetworkPolicy, ConfigMap, CronJob |
+| ClawPairing | `pairing_reconciler.rs` | `ClawPairing` | Pairing lifecycle status |
+| McpServer | `mcp_server_reconciler.rs` | `McpServer` | Ed25519 Secret, JWKS ConfigMap |
+| ToolPolicy | `tool_policy_reconciler.rs` | `ToolPolicy` | Compiled-profile ConfigMap |
+| A2AAgent | `a2a_agent_reconciler.rs` | `A2AAgent` | AgentCard ConfigMap |
+| InferencePolicy | `inference_policy_reconciler.rs` | `InferencePolicy` | Compiled-profile ConfigMap |
+| ClawMemory | `claw_memory_reconciler.rs` | `ClawMemory` | Memory-binding ConfigMap |
+| ClawEval | `claw_eval_reconciler.rs` | `ClawEval` | Eval-binding ConfigMap |
+
+### SSA field managers (S7.A)
+
+Every SSA patch carries a stable `fieldManager` string from
+`controller/src/field_managers.rs`. Convention: `azureclaw-controller/<subsystem>`.
+A uniqueness invariant is asserted in `tests::all_field_managers_are_unique`.
+The legacy `azureclaw-mesh-peer` string is preserved verbatim to avoid an SSA
+ownership transition on existing clusters.
+
+### Conditions matrix (S7.B + S7.B.2)
+
+All CRDs carry `status.conditions[]` (KEP-1623) and `status.observedGeneration`.
+Vocabulary from `controller/src/status/conditions.rs`:
+
+| Type | Meaning |
+|------|---------|
+| `Ready` | CR has reached desired state |
+| `Progressing` | Controller is actively working toward desired state |
+| `Degraded` | Something prevents reconciliation (missing dep, bad spec, quota, …) |
+| `Suspended` | Controller has intentionally stopped driving a sub-resource (e.g. OverlayMode) |
+
+`lastTransitionTime` only advances when `status` changes — not on every
+reconcile. This keeps watch churn low and makes `kubectl wait --for=condition=Ready`
+reliable.
+
+### Jittered requeue (S7.D)
+
+All nine reconcilers call `requeue_secs_with_jitter(N)` instead of
+`Duration::from_secs(N)`. The helper applies ±20% multiplicative jitter
+(matching `k8s.io/apimachinery/pkg/util/wait` defaults) to prevent thundering
+herds on resync. Pure math exposed in `apply_jitter_factor(base, factor, sample)`
+and unit-tested independently of the RNG
+(`controller/src/backoff.rs`).
+
+### Workqueue and duration metrics (S7.E)
+
+Controller pod exposes Prometheus metrics at **`:9091/metrics`** (axum server
+in `controller/src/metrics_server.rs`; override bind with
+`CONTROLLER_METRICS_ADDR`). Metrics:
+
+| Metric | Labels | Meaning |
+|--------|--------|---------|
+| `azureclaw_controller_reconcile_errors_total` | `crd_kind`, `error_class` | Total reconcile errors |
+| `azureclaw_controller_reconcile_retries_total` | `crd_kind` | Total retries scheduled |
+| `azureclaw_controller_reconcile_duration_seconds` | `crd_kind`, `outcome` | Duration histogram (buckets: 1ms → 30s) |
+| `azureclaw_controller_reconcile_total` | `crd_kind`, `outcome` | Total invocations (success + error) |
+
+---
+
+## 5. Multi-Runtime Dispatch
+
+`ClawSandbox.spec.runtime` selects the agent runtime. The `kind` discriminant
+controls which sibling struct the controller reads and which sandbox image +
+adapter the reconciler deploys.
+
+### Runtime kinds
+
+| `kind` | Adapter package | Description |
+|--------|----------------|-------------|
+| `OpenClaw` | `runtimes/openclaw/` | Default. OpenClaw gateway + AzureClaw plugin. Gateway :18789. |
+| `OpenAIAgents` | `runtimes/openai-agents/` | OpenAI Agents SDK native adapter (Phase 2) |
+| `MicrosoftAgentFramework` | `runtimes/maf/` | Microsoft Agent Framework native adapter (Phase 2) |
+| `BYO` | caller-supplied | Bring-Your-Own runtime. Must satisfy `docs/runtime-contract.md`. |
+
+### Dispatch flow
+
+1. Reconciler calls `validate_runtime_shape(&spec.runtime)` — rejects unknown
+   `kind` or conflicting sibling fields early, before any K8s writes.
+2. The `deploy_sandbox` function selects the sandbox image tag and adapter
+   entrypoint based on `runtime.kind`. Image tags always use `:latest`
+   (controller default) — no version pinning in `SANDBOX_IMAGE` /
+   `INFERENCE_ROUTER_IMAGE` env vars.
+3. The `runtimes/openclaw/` adapter is the AzureClaw TypeScript plugin
+   (`runtimes/openclaw/src/index.ts`) that wires tools, providers, and
+   `mesh-plugin` into the OpenClaw host. The `OpenAIAgents` and `MAF` adapters
+   follow the same contract surface but target their respective SDKs.
+4. BYO sandboxes must implement the three-endpoint runtime contract (health,
+   inference-proxy routing, sub-agent spawn); see `docs/runtime-contract.md`.
+
+### Isolation levels
+
+| Level | RuntimeClass | seccomp | Node pool |
+|-------|-------------|---------|-----------|
+| `standard` | (default runc) | `RuntimeDefault` | `sandbox` |
+| `enhanced` (default) | (default runc) | Localhost `azureclaw-strict` (~219 allowed syscalls) | `sandbox` |
+| `confidential` | `kata-vm-isolation` | `RuntimeDefault` (VM is the boundary) | `sandbox-kata` |
+
+Isolation inheritance: controller exports `SANDBOX_ISOLATION` into every pod;
+the router enforces it on spawn requests (downgrade from `confidential` is
+blocked). Kata auto-provisioning: `azureclaw add --isolation confidential`
+provisions a `Standard_D4as_v6` nodepool with `--workload-runtime KataVmIsolation`
+if no Kata-capable nodepool exists.
+
+---
+
+## 6. Inference Router Internals
+
+Source: `inference-router/src/`. The router is an axum server on `localhost:8443`
+(main), `0.0.0.0:8444` (forward-proxy for A2A inbound), `localhost:8445` (A2A
+inbound from a2a-gateway over mTLS). Every request traverses a fixed middleware
+stack; no path bypasses any layer.
+
+### Auth chain (`auth.rs`)
+
+```
+Request arrives at router
+  └─ API key present in /run/secrets/ → dev mode (API key forwarded)
+  └─ No key → AKS Workload Identity:
+       1. Read federated token from AZURE_FEDERATED_TOKEN_FILE (WI webhook mount)
+       2. Exchange at Entra /oauth2/v2.0/token (client_credentials + JWT assertion)
+       3. Token cached per scope in Arc<RwLock<HashMap<scope, CachedToken>>>
+       4. Token set as Authorization: Bearer on every upstream call
+```
+
+No API keys are ever injected into the sandbox pod spec. The router is the sole
+credential holder.
+
+### Middleware stack (inference path)
+
+```
+InferencePolicy check → token budget (daily + per-request, 429 on exceed)
+  → Content Safety floor (prompt-shield, configurable per InferencePolicy)
+  → AGT governance gate (PolicyDecisionProvider::decide)
+  → IMDS/WI token acquisition (cached)
+  → Forward to Foundry (18 API groups, all covered by egress NetworkPolicy)
+  → Parse content-filter annotations
+  → AuditSink::append (hash-chained receipt)
+  → Prometheus metrics (OTel GenAI SemConv 1.x spans)
+  → Return to agent
+```
+
+### AGT governance components (all native Rust, `inference-router/src/`)
+
+The four components live inside `Governance` and are accessible through the
+provider seams (see §8):
+
+| Component | File | Role |
+|-----------|------|------|
+| `PolicyEngine` | `governance.rs` / `providers/policy_impl.rs` | Evaluates tool requests against the compiled ToolPolicy profile |
+| `TrustManager` | `trust.rs` | Maintains per-agent trust scores; triggers re-evaluation on threshold breach |
+| `AuditLogger` | `audit.rs` / `audit_impl.rs` | Hash-chained tamper-evident log; Merkle-proof retrievable via `kubectl claw attest` |
+| `RateLimiter` | `rate_limiter.rs` | Per-subject token-bucket rate limiting |
+| `BehaviorMonitor` | `behavior_monitor.rs` | Detects anomalous call patterns; feeds TrustManager |
+
+### Content Safety floor (`safety.rs`)
+
+A floor is enforced regardless of per-request settings. The floor threshold is
+set by `InferencePolicy.spec.contentSafety` and cannot be disabled on production
+sandboxes (admission policy rejects `contentSafety: false` without a
+`dev-only` label). Prompt Shields (jailbreak + prompt injection detection) run
+server-side at Azure AI Content Safety; the router parses the `content-filter`
+annotations in the Foundry response and gates on them.
+
+### Token budget (`budget.rs`)
+
+Per-sandbox budgets (daily + per-request) are enforced before forwarding.
+Counters are persisted in the router's in-process store; daily reset is
+scheduled via tokio timer. Exceeding either limit returns HTTP 429 to the
+agent. Budget counters are available on `ClawSandbox.status.tokensUsed`.
+
+### Signed OCI egress-allowlist verifier (`policy_fetcher.rs`, `signer_policy.rs`)
+
+When `ClawSandbox.spec.networkPolicy.allowlistRef` is set, the controller
+fetches a content-addressed OCI artifact, verifies its cosign signature against
+the cluster `SignerPolicy` ConfigMap (`azureclaw-signer-policy` in
+`azureclaw-system`), and promotes the artifact as the **authoritative** egress
+allowlist. The inline `allowedEndpoints` is ignored when `allowlistRef` is set;
+a drift between inline and artifact surfaces as `AllowlistDrift=True` on the
+sandbox status. Failure is **fail-closed**: the controller preserves the last
+known-good allowlist if available, otherwise stamps `Degraded` without writing
+a permissive NetworkPolicy.
+
+The `SignerPolicy` ConfigMap provides Fulcio issuer URLs and SAN glob patterns.
+A malformed ConfigMap surfaces as `SignerPolicyMalformed` — no silent env-var
+fallback. ACR authentication uses the same four-step Workload Identity token
+exchange as inference auth (`acr_token_for_pull`).
+
+### Platform MCP shim (`mcp/platform.rs`)
+
+The router exposes Foundry built-in tools (Memory Store, Bing Grounding, Code
+Interpreter) as MCP tools via `POST /mcp`. OAuth 2.1 BCP gating is controlled
+by `McpServer.spec.productionMode: true`. The MCP module is 8 files under
+`inference-router/src/mcp/`: `streamable_http.rs`, `jsonrpc.rs`, `oauth.rs`,
+`oauth_layer.rs` (tower::Layer), `initialize.rs`, `pipeline.rs`, `tools.rs`,
+`error.rs`.
+
+### Egress proxy pipeline
+
+```
+POST /egress/fetch
+  → blocklist check (hard deny — OISD + URLhaus, 6h refresh CronJob)
+  → signed OCI allowlist (authoritative when allowlistRef set)
+  → learn mode? log + allow
+  → inline allowedEndpoints check (approved domains pass)
+  → unknown domain → deny + create PendingApproval record
+```
+
+Blocked attempts are recorded in a bounded ring buffer
+(`egress_blocked.rs`), deduped by `(source, host, port)`, surfaced at
+`GET /egress/learned/blocked`.
+
+---
+
+## 7. A2A Architecture
+
+A2A 1.0 (<https://a2a-protocol.org/v1.0.0/specification>) is the cross-runtime
+agent interop protocol. AzureClaw handles A2A on two distinct paths:
+outbound (initiated by the agent) and inbound (initiated by foreign runtimes).
+The design rationale is in [ADR-0001](adr/0001-a2a-ingress-front-edge.md).
+
+### Outbound A2A (router-internal)
+
+The agent calls A2A APIs via the router's existing inference and egress paths.
+The router implements the A2A client side (`inference-router/src/a2a/`):
+- `agent_card.rs` / `card_signing.rs` — Ed25519 AgentCard signing (RFC 7515, EdDSA)
+- `card_server.rs` — serves `GET /.well-known/agent.json`
+- `jsonrpc_dispatch.rs` — routes A2A 1.0 JSON-RPC method calls
+- `trust_store.rs` — pins verified caller AgentCards by thumbprint
+- AP2 extensions: `ap2.rs`, `mandate_signing.rs`, `mandate_trust_store.rs`,
+  `message_send_ap2.rs`
+
+All outbound A2A traffic flows through the standard governance gate
+(PolicyDecisionProvider → AuditSink).
+
+### Inbound A2A (a2a-gateway + mTLS)
+
+The inference router is **never** on the public internet — the `a2a-gateway`
+component is the sole public TLS endpoint for inbound A2A. This is a firm
+security invariant (ADR-0001 §D2).
+
+```
+Foreign Agent ──TLS :8443──► a2a-gateway (azureclaw-system)
+                                  │
+                                  │  JWS AgentCard verify
+                                  │  Replay cache check (5 min window)
+                                  │  Per-subject rate limit (token bucket)
+                                  │
+                              mTLS :8444 ──► inference-router (sandbox pod)
+                                              │
+                                              │  PolicyDecisionProvider
+                                              │  AuditSink
+                                              │  ClawSandbox.spec.a2a allowed callers
+                                              ▼
+                                          Agent (UID 1000)
+```
+
+The gateway binary (`a2a-gateway/src/main.rs`) is configured via env vars
+(Helm → Deployment → env). It verifies the caller's JWS-signed AgentCard using
+primitives from the shared `azureclaw-a2a-core` crate, then proxies
+authenticated requests to the target sandbox router over mTLS.
+
+**`azureclaw-a2a-core`** (`azureclaw-a2a-core/src/lib.rs`) is a library-only
+crate that lifts the A2A JWS verifier, AgentCard schema, signer, and error
+catalogue out of the router into a shared dependency used by both the gateway
+and the router. `#![forbid(unsafe_code)]` is enforced at the crate root.
+
+**Opt-in.** The a2a-gateway Deployment is created only when
+`azureclaw up --enable-a2a-ingress` is passed. Per-sandbox exposure is
+gated by `ClawSandbox.spec.a2a.enabled: true`; without this field the
+sandbox has no inbound A2A path.
+
+---
+
+## 8. AgentMesh Integration
+
+Inter-agent messaging uses the AgentMesh relay/registry (Signal Protocol, E2E
+encrypted). See [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) and
+[`docs/agt-vendored-patch-audit.md`](agt-vendored-patch-audit.md) for
+cryptographic details.
+
+### Vendored patches
+
+`vendor/` contains patched forks of three upstream packages — `agentmesh-relay`,
+`agentmesh-registry`, `agentmesh-sdk` — fixing 8 bugs documented in the
+respective `vendor/*/README.md` files. The sandbox Docker build installs
+`@agentmesh/sdk` via npm and then **overlays** the vendored dist files:
+
+```dockerfile
+COPY vendor/agentmesh-sdk/dist/ .../node_modules/@agentmesh/sdk/dist/
+```
+
+Notable patches include: timestamp format mismatch (`Z` vs `+00:00` in relay),
+ratchet key mismatch (session.ts in SDK), and base64Decode `x25519:`/`ed25519:`
+prefix stripping.
+
+### Signal Protocol session ownership
+
+The Signal Protocol X3DH + Double-Ratchet sessions are maintained by the
+**agent** (TypeScript `mesh-plugin/` + `@agentmesh/sdk`), not by the router.
+The router's role is purely transport: it forwards the relay WebSocket
+(`routes/mesh.rs`) and registry HTTPS calls (`agt/registry/*`), applying
+policy + audit hooks around them but never decrypting or holding key material.
+`providers/mesh.rs` documents this contract; it ships no `impl` and should
+not acquire one.
+
+### Singleton guard
+
+`process.env.__AGT_INITIALIZED = '1'` ensures only the first plugin load
+creates the AGT client. OpenClaw loads the plugin twice (tool registry + agent
+session); the guard prevents double-initialisation and duplicate mesh
+connections.
+
+### Upstream cleanup
+
+The goal is to upstream all 8 patches to `amitayks/agentmesh`. Until upstream
+merges, the vendored overlay remains. Progress is tracked in `vendor/*/README.md`.
+Relay/registry require Rust ≥ 1.94 (upstream's 1.83 is too old for the patches).
+
+---
+
+## 9. Provider Seams
+
+Four trait seams let operators substitute governance back-ends without changing
+the router. Source: `inference-router/src/providers/`.
+
+| Trait | File | Current production impl | Substitution surface |
+|-------|------|------------------------|---------------------|
+| `PolicyDecisionProvider` | `providers/policy.rs` | `VendoredPolicyDecisionProvider` (PolicyEngine + TrustManager + RateLimiter + BehaviorMonitor, native Rust) | AGT SDK (`AgtPolicyDecisionProvider`); swap via `spec.agt.providers.policy` |
+| `AuditSink` | `providers/audit.rs` | `VendoredAuditSink` (hash-chained log, Merkle proofs) | AGT SDK (`AgtAuditSink`); swap via `spec.agt.providers.audit` |
+| `SigningProvider` | `providers/signing.rs` | `VendoredSigningProvider` (Ed25519 via vendored `@agentmesh/sdk` keys) | AGT SDK (`AgtSigningProvider`); swap via `spec.agt.providers.signing` |
+| `MeshProvider` | `providers/mesh.rs` | **None** — plugin-side only | Contract document only; router never implements this |
+
+`AppState` carries three `Arc<dyn Trait>` views of a single `Arc<Governance>`
+instance. Swapping a provider (`vendored` → `agt` or vice versa) is a hot-
+reload: the router re-creates the provider in-process without a pod rollout.
+`spec.agt.outageMode` controls failure behaviour: `Strict` (fail-closed),
+`CachedRead` (read from last-known-good), `DegradedDev` (dev-only, no-op).
+
+`NullPolicyDecisionProvider` / `NullAuditSink` / `NullSigningProvider` are
+dev-only; the admission policy (`ci/no-null-provider-prod.sh` + VAP) rejects
+production sandboxes that reference them unless the `azureclaw.azure.com/dev-only`
+label is present.
+
+---
+
+## 10. Security Posture
+
+AzureClaw uses a defence-in-depth model with nine distinct enforcement layers.
+Full documentation: [`docs/security.md`](security.md), [`docs/threat-model.md`](threat-model.md).
+
+| Layer | Mechanism | What it stops |
+|-------|-----------|--------------|
+| 1. iptables egress-guard | init container installs UID-1000-scoped OUTPUT rules (lo + DNS + ESTABLISHED only) | Agent reaching external network directly |
+| 2. NetworkPolicy default-deny | Cilium NetworkPolicy per sandbox namespace | Pod-to-pod lateral movement; router reaching unexpected endpoints |
+| 3. Read-only rootfs + drop ALL caps | `readOnlyRootFilesystem: true`, `capabilities: drop: [ALL]`, `allowPrivilegeEscalation: false` | In-container privilege escalation |
+| 4. seccomp `azureclaw-strict` | Localhost profile (~219 allowed syscalls) on `enhanced` isolation | Kernel attack surface reduction |
+| 5. Workload Identity (no API keys) | IMDS token exchange via AKS WI webhook; credentials never in pod spec | Credential exfiltration via pod-spec leak |
+| 6. Content Safety floor | Azure AI Content Safety + Prompt Shields; threshold enforced by router | Prompt injection, jailbreaks, harmful output |
+| 7. AGT governance gate | PolicyDecisionProvider; every tool call evaluated before execution | Excessive agency, policy bypass, rate abuse |
+| 8. Signed OCI egress allowlist | cosign + Fulcio + SAN verification; `SignerPolicy` ConfigMap | Supply-chain attack via egress allowlist tampering |
+| 9. Kata Containers + AMD SEV-SNP (opt-in) | `isolation: confidential`; `kata-vm-isolation` RuntimeClass | VM-level tenant isolation; hardware attestation |
+
+**VAP / MAP admission set** (`deploy/helm/azureclaw/templates/`):
+- **VAP** (Kubernetes ≥ 1.30, GA): deny `exec/attach/portforward` on sandbox
+  namespaces; block posture downgrades (isolation step-down, seccomp removal,
+  `readOnlyRootFilesystem: false`); prevent `dev-only` label removal; require
+  `dev-only` for null/noop/disabled providers.
+- **MAP** (Kubernetes ≥ 1.32, Beta — Helm flag `controller.mutatingAdmissionPolicy.enabled`,
+  default `false`): auto-inject router sidecar; auto-stamp `azureclaw-strict` seccomp.
+  When the flag is `false`, the reconciler performs the same operations
+  deterministically before pod creation.
+
+**Federated-credential reaper** (`controller/src/fedcred_reaper.rs`): 4th arm of
+the main `tokio::select!` loop. Periodically cross-checks live federated
+credentials against active `ClawSandbox` CRs and deletes orphans. Default
+cadence 600 s (`FEDCRED_REAPER_INTERVAL_SECS`). Guards the 20-fedcred-per-MI
+Azure cap.
+
+---
+
+## 11. Observability
+
+### Prometheus metrics
+
+| Component | Endpoint | Series prefix |
+|-----------|---------|--------------|
+| Controller | `:9091/metrics` | `azureclaw_controller_*` |
+| Inference Router | `:8443/metrics` (per-pod) | `azureclaw_*` |
+| A2A Gateway | `:9090/metrics` | `azureclaw_a2a_gateway_*` |
+
+### OTel GenAI semantic conventions
+
+Every router span emits OTel GenAI SemConv 1.x attributes:
+`gen_ai.system`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and more.
+Export via `OTEL_EXPORTER_OTLP_ENDPOINT`. Source: `inference-router/src/telemetry/`.
+
+### Application Insights
+
+The CLI and controller emit structured JSON traces to Azure Application Insights
+when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set.
+
+### eBPF tracing
+
+`azureclaw trace <name>` attaches eBPF probes to the sandbox pod and streams
+syscall-level traces to the terminal. Requires `CAP_BPF` on the operator's
+kubeconfig identity.
+
+---
+
+## 12. Testing Layers
+
+| Layer | Location | What it gates |
+|-------|---------|--------------|
+| **Unit** | `cargo test --all` (inlined `#[cfg(test)]` modules) | Individual functions: `evaluate_lease`, `apply_jitter_factor`, field-manager uniqueness, CEL validation, content-safety parsing, etc. |
+| **Integration** | `cargo test --all` (separate `tests/` modules per crate) | Router middleware stack; controller reconcile logic; policy compile; auth token exchange |
+| **E2E** | `tests/e2e/` via `make test-e2e` | Full cluster lifecycle on Kind: `azureclaw up` → agent running → `azureclaw delete` |
+| **Negative / conformance** | `tests/conformance/` | Protocol edge cases: A2A JWS rejection, MCP OAuth 2.1 BCP gating, policy hot-reload propagation (≤ 5 s), VAP admission rejections |
+| **Chaos / fault injection** | `tests/chaos/` (feature-gated: `--features chaos`) | 22 chaos tests across 4 failure-mode categories: K8s API flakes (8), Foundry 429 storms (6), Entra rotation races (4), AGT relay disconnects (4). Runs as a parallel CI job. |
+| **CNCF AI Conformance v1.35+** | `tests/cncf-conformance/` | CNCF Kubernetes AI Conformance profile; wired into CI as a gating check |
+| **Load** | `tests/k6/router_smoke.js` (nightly) | Router throughput + tail latency regression gate |
+
+**Chaos tier details.** The 22 chaos tests exercise: 500/503/429 K8s API
+storms, stale `resourceVersion` (410 GONE), truncated watch JSON, premature
+EOF; Foundry 429 storms at 80 % and 100 % saturation, mid-stream 503 SSE
+close, slow-backend timeout, blocked-attempt metric accuracy; Workload Identity
+token refresh mid-flight, single-flight invariant, JWKS rotation re-fetch, SA
+token file rotation; AGT relay WS upstream disconnect, handshake timeout (504-
+class), slow-registry deadline, repeated churn with no task leak.
+Source: `tests/chaos/README.md`.
+
+---
+
+## 13. Network Architecture Detail
 
 ```
                         ┌─────────────────────────────────┐
                         │       iptables (per-UID)         │
                         │                                  │
-  UID 1000 (openclaw)   │  lo ✓  DNS ✓  ESTABLISHED ✓     │
+  UID 1000 (agent)      │  lo ✓  DNS ✓  ESTABLISHED ✓     │
                         │  everything else ✗ (DROP)        │
                         │                                  │
   UID 1001 (router)     │  no iptables restrictions        │
@@ -152,8 +608,8 @@ The `ESTABLISHED,RELATED` rule allows reply packets (SYN-ACK) for inbound connec
                         ┌──────────────┴──────────────┐
                         │     NetworkPolicy (pod)      │
                         │                              │
-                        │  Egress: DNS, IMDS, HTTPS    │
-                        │    :443, mesh :8443,          │
+                        │  Egress: DNS :53, IMDS,      │
+                        │    HTTPS :443, mesh :8443,   │
                         │    relay :8765/:8080          │
                         │  Ingress: mesh :8443,         │
                         │    gateway :18789/:18791      │
@@ -161,68 +617,22 @@ The `ESTABLISHED,RELATED` rule allows reply packets (SYN-ACK) for inbound connec
                         └──────────────────────────────┘
 ```
 
-**Three enforcement layers work together:**
-1. **iptables** — per-container (UID-based), blocks agent from any external network
-2. **NetworkPolicy** — per-pod, default-deny with allowlist
-3. **Inference-as-network-policy** — router is sole egress path; agent has no credentials
+**Egress guard iptables rules (UID 1000):**
 
----
-
-## CRD Schema
-
-```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
-metadata:
-  name: my-agent
-  namespace: azureclaw-system
-spec:
-  openclaw:                          # version, image, config
-  sandbox:
-    isolation: enhanced              # standard | enhanced | confidential
-    seccompProfile: azureclaw-strict # custom Localhost profile
-    readOnlyRootFilesystem: true
-    runAsNonRoot: true
-    allowPrivilegeEscalation: false
-    writablePaths: ["/sandbox", "/tmp"]
-  inference:
-    provider: azure-openai           # azure-openai | azure-ai-foundry | self-hosted
-    model: gpt-4.1
-    contentSafety: true
-    promptShields: true
-    tokenBudget:
-      daily: 0                       # 0 = unlimited
-      perRequest: 0
-  networkPolicy:
-    defaultDeny: true
-    approvalRequired: true
-    learnEgress: true                # observe domains (blocklist still enforced)
-    allowedEndpoints: []
-  governance:                        # AGT (opt-in)
-    enabled: false
-    toolPolicy: default              # policy profile name
-    trustThreshold: 500              # 0-1000
-  agent:                             # Foundry agent tools
-    tools: []                        # file_search, web_search, code_interpreter
-  azureServices: []                  # RESERVED — annotations only, no RBAC yet
-  resources:
-    requests: {cpu: 500m, memory: 1Gi}
-    limits: {cpu: "2", memory: 4Gi}
-status:
-  phase: Running                     # Pending | Creating | Running | Failed | Terminating
-  sandboxPod: my-agent-xxx
-  namespace: azureclaw-my-agent
-  inferenceEndpoint: localhost:8443
-  tokensUsed: {input: 0, output: 0}
-  pendingApprovals: 0
-  foundryAgentId: ""                 # if Foundry agent created
+```
+iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT
+iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT
+iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP
 ```
 
-Short names: `cs`, `claw`. Print columns: Phase, Model, Isolation, Age.
+The `ESTABLISHED,RELATED` rule allows inbound-connection reply packets (WebUX,
+channel integrations) without opening any outbound path.
 
 ---
 
-## API Endpoints
+## 14. API Endpoints
 
 All endpoints served by the inference router on `:8443`.
 
@@ -232,7 +642,7 @@ All endpoints served by the inference router on `:8443`.
 |--------|------|---------|
 | POST | `/v1/chat/completions` | Chat inference (SSE streaming supported) |
 | POST | `/v1/completions` | Text completions |
-| POST | `/v1/embeddings` | Embedding generation |
+| POST | `/v1/embeddings` | Embedding generation (model-routed) |
 | GET | `/v1/models` | Model catalog |
 
 ### Foundry Standalone APIs (18 API groups, IMDS auth)
@@ -251,6 +661,12 @@ All endpoints served by the inference router on `:8443`.
 | `/datasets/*`, `/insights/*` | Datasets, monitoring |
 | `/redTeams/runs/*`, `/schedules/*` | Red teams, scheduled jobs |
 
+### MCP 2026
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/mcp` | Streamable HTTP MCP endpoint (OAuth 2.1 BCP-gated in production) |
+
 ### Egress Proxy
 
 | Method | Path | Purpose |
@@ -262,6 +678,7 @@ All endpoints served by the inference router on `:8443`.
 | POST | `/egress/deny` | Deny a pending domain |
 | GET | `/egress/learned` | Domains observed in learn mode |
 | POST | `/egress/learned/clear` | Clear learned domains |
+| GET | `/egress/learned/blocked` | Domains blocked in enforce mode |
 
 ### AGT Governance
 
@@ -269,71 +686,10 @@ All endpoints served by the inference router on `:8443`.
 |--------|------|---------|
 | POST | `/agt/evaluate` | Policy evaluation |
 | GET | `/agt/trust`, `/agt/trust/{agent_id}` | Trust store queries |
-| GET | `/agt/audit`, `/agt/audit/verify` | Audit log + integrity verification |
+| GET | `/agt/audit`, `/agt/audit/verify` | Audit log + Merkle-proof verification |
 | GET | `/agt/relay` | WebSocket bridge to agentmesh-relay (E2E encrypted) |
 | GET/POST | `/agt/registry/*` | AgentMesh registry proxy |
 | GET | `/agt/status` | Governance status |
-
-### AGT Mesh Connection Model
-
-Each container maintains **one AGT mesh connection**, created by the gateway process. All other processes in the container skip mesh initialization:
-
-| Process | AGT Mesh | Environment |
-|---------|----------|-------------|
-| Gateway (OpenClaw) | ✅ Creates mesh connection | Default `HOME` |
-| Node host | ❌ Skips mesh init | `AGT_SKIP_INIT=1 HOME=/tmp/node-host-home` |
-| Approvals command | ❌ Skips mesh init | `AGT_SKIP_INIT=1` |
-| Delegated sub-agent tasks | ❌ Skips mesh init | `AGT_SKIP_INIT=1 HOME=/tmp/agt-delegate-home` |
-
-**Why `AGT_SKIP_INIT=1`:** The AGT SDK creates a device fingerprint and Signal Protocol key store on init. Multiple processes sharing the same `HOME` would cause fingerprint conflicts and corrupt the key store. Only the gateway needs a mesh connection — it handles all inter-agent communication via the plugin's `onMessage` handler.
-
-**Why separate `HOME` dirs:** Processes that run the OpenClaw runtime (node host, delegated tasks) get an isolated `HOME` to prevent any residual SDK state from colliding with the gateway's key material.
-
-**Relay listener:** There is no separate relay listener process. Incoming mesh messages are handled by the AzureClaw plugin's built-in `onMessage` handler inside the gateway, which delegates tasks to the native agent loop (`openclaw agent --message`).
-
-**Handler registration order:** All mesh handlers (`onMessage`, `onKnock`, `onError`, `onE2EVerified`) are registered BEFORE `connect()` to prevent a race condition where early messages arrive with no handler.
-
-**No plaintext fallback:** The HTTP mesh routes (`/agt/mesh/send`, `/agt/mesh/receive`) have been removed. All inter-agent communication is E2E encrypted via the Signal Protocol relay. If encryption fails, messages are rejected — never delivered in cleartext.
-
-### Global Registry Deployment
-
-For cross-environment handoff (local ↔ cloud), the AgentMesh relay and registry need public endpoints. Two deployment modes:
-
-| Mode | Flag | Registry Location | Handoff |
-|------|------|-------------------|---------|
-| **Local** (default) | — | In-cluster (`agentmesh` namespace) | ❌ |
-| **Global** | `--global-registry <url>` | External (public endpoint) | ✅ |
-
-**Exposing the registry:**
-
-```
-azureclaw up --expose-registry   # deploys AGIC Ingress + NetworkPolicy
-```
-
-This creates Application Gateway Ingress for `registry.<domain>` (HTTPS) and `relay.<domain>` (WSS) with Azure-managed TLS and WAF rate limiting.
-
-**4-layer authentication chain:**
-
-```
-Internet → [WAF rate limit] → [TLS termination] → [Ed25519 signature] → [Registry lookup] → Connected
-                                                         ↑                      ↑
-                                                    Proves AMID              Confirms agent
-                                                    ownership               is registered
-```
-
-| Layer | Component | What it stops |
-|-------|-----------|---------------|
-| 1. WAF | Application Gateway | DDoS, connection floods |
-| 2. Ed25519 | Relay `handle_auth()` | Impersonation, replay attacks |
-| 3. Registry check | Relay `RegistryVerifier` | Unregistered/anonymous/revoked agents |
-| 4. OAuth | Registry `oauth.rs` | Controls who can register (GitHub, Entra ID, Google) |
-
-**NetworkPolicy enforcement:**
-- PostgreSQL: inbound only from registry pods (port 5432)
-- Registry: inbound only from Application Gateway subnet + internal sandbox pods
-- Relay: inbound only from Application Gateway subnet + internal sandbox pods
-
-**Identity management:** `azureclaw mesh auth --registry <url> --provider github|entra` generates Ed25519 keypair, runs browser-based OAuth, stores encrypted identity in `~/.azureclaw/mesh-identity.json` (AES-256-GCM, machine-bound key).
 
 ### Sub-Agent Spawning
 
@@ -344,320 +700,103 @@ Internet → [WAF rate limit] → [TLS termination] → [Ed25519 signature] → 
 | GET | `/sandbox/{name}/status` | Child status |
 | DELETE | `/sandbox/{name}` | Tear down child sandbox |
 
-### Blocklist & Health
+### A2A 1.0 (outbound)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/blocklist/status` | Domain count + enabled state |
-| POST | `/blocklist/check` | Check domain against threat intel |
+| GET | `/.well-known/agent.json` | Serve signed AgentCard (card_server.rs) |
+
+### Health
+
+| Method | Path | Purpose |
+|--------|------|---------|
 | GET | `/healthz` | Liveness probe |
 | GET | `/readyz` | Deep readiness (token + Content Safety) |
 | GET | `/metrics` | Prometheus metrics |
 
 ---
 
-## Channels Architecture
+## 15. Channels and Plugin Auto-Discovery
 
-Messaging channels (Telegram, Slack, Discord, WhatsApp) connect to the agent through the gateway running inside the sandbox. All channel traffic flows through the egress proxy — the agent has no direct network access.
+Messaging channels (Telegram, Slack, Discord, WhatsApp) and third-party search
+plugins (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) follow the same
+discovery flow:
 
 ```
-                  Telegram API ◄──┐
-                  Slack API    ◄──┤
-                  Discord API  ◄──┤  Egress proxy (/egress/fetch)
-                  WhatsApp     ◄──┘       ▲
-                                          │
-┌─ Sandbox Pod ──────────────────────────────────────────────────┐
-│                                                                │
-│  openclaw (UID 1000)              inference-router (UID 1001)  │
-│  ┌──────────────────┐            ┌──────────────────────┐      │
-│  │ Gateway :18789   │            │ /egress/fetch        │      │
-│  │  ├─ Telegram     │──http_fetch──►│ blocklist → allow │      │
-│  │  ├─ Slack        │            │  → learn/pending     │      │
-│  │  ├─ Discord      │            └──────────────────────┘      │
-│  │  └─ WhatsApp     │                                          │
-│  └──────────────────┘                                          │
-└────────────────────────────────────────────────────────────────┘
+CLI flag  →  K8s Secret (<name>-credentials)  →  envFrom mount
+  →  entrypoint.sh reads env vars  →  plugins.allow + plugins.entries  →  gateway
 ```
 
-Channels are enabled via CLI flags (e.g., `--channels telegram --telegram-token "..."`) which inject environment variables into the pod. The entrypoint reads these at startup and configures the gateway adapters automatically. See [channels-plugins.md](channels-plugins.md) for setup details.
+Source: `sandbox-images/openclaw/entrypoint.sh` (plugin loop at lines 286–301).
+
+Credentials are **namespace-scoped** — each sandbox's secrets are isolated in
+`azureclaw-<name>`. Rotate with `azureclaw credentials update <name>`. The
+controller mounts secrets via `envFrom` with `optional: true` so pods start
+without the secret; it is expected for new sandboxes.
+
+**Node.js 22 proxy.** `proxy-bootstrap.js` is preloaded via
+`NODE_OPTIONS="--require ..."` before any OpenClaw code. It configures undici's
+`EnvHttpProxyAgent` as the global fetch dispatcher so all HTTP/HTTPS requests
+honour `HTTPS_PROXY`/`NO_PROXY`. Node.js 22's built-in `fetch()` ignores these
+env vars without this shim.
 
 ---
 
-## Plugin Auto-Discovery
+## 16. Identity Provider Seam
 
-The sandbox entrypoint (`sandbox-images/openclaw/entrypoint.sh`) auto-discovers plugins from environment variables at startup. No manual configuration files are needed.
+`controller/src/providers/identity_*.rs` manages the lifecycle of Microsoft
+Graph agent identities for each sandbox:
 
-**Discovery flow:**
-
-1. CLI flags (e.g., `--brave-api-key`) or env vars (e.g., `BRAVE_API_KEY`) are set
-2. On AKS, the CLI stores these as K8s secrets; the controller mounts them via `envFrom`
-3. At pod startup, the entrypoint iterates through known plugin/env-var pairs
-4. For each set env var, the plugin is added to `plugins.allow` and `plugins.entries` in the OpenClaw config
-5. The gateway loads only the enabled plugins
-
-**Plugin mapping:**
-
-| Plugin ID | Environment Variable | CLI Flag |
-|-----------|---------------------|----------|
-| `brave` | `BRAVE_API_KEY` | `--brave-api-key` |
-| `tavily` | `TAVILY_API_KEY` | `--tavily-api-key` |
-| `exa` | `EXA_API_KEY` | `--exa-api-key` |
-| `firecrawl` | `FIRECRAWL_API_KEY` | `--firecrawl-api-key` |
-| `perplexity` | `PERPLEXITY_API_KEY` | `--perplexity-api-key` |
-| `openai` | `OPENAI_API_KEY` | `--openai-api-key` |
-
-Source: `sandbox-images/openclaw/entrypoint.sh` (plugin loop at lines 286–301)
-
----
-
-## Foundry Integration
-
-### Bing Grounding (Web Search)
-
-The `foundry_web_search` tool uses Azure AI Foundry's Responses API with Bing Grounding. Unlike third-party plugins, it requires **no API key** — it auto-discovers the Bing connection from the Foundry project at runtime via Workload Identity.
-
-**Setup:** Create a Bing Grounding resource in Azure Portal → connect it to your Foundry project → deploy. The tool appears automatically.
-
-**Manual override:** If auto-discovery fails (e.g., multiple Bing connections), set `BING_CONNECTION_ID` explicitly.
-
-See [channels-plugins.md](channels-plugins.md#foundry-web-search-bing-grounding) for detailed setup instructions.
-
----
-
-## Credentials Secret Pattern
-
-Channel tokens and plugin API keys follow a consistent pattern from CLI to running pod:
-
-```
-CLI flag (--telegram-token)
-    │
-    ▼
-K8s Secret (azureclaw-<name>/<name>-credentials)
-    │
-    ▼
-envFrom in pod spec (controller injects all secrets)
-    │
-    ▼
-entrypoint.sh reads env vars → configures channels/plugins
-    │
-    ▼
-Agent process (never sees raw credentials)
-```
-
-| Step | Component | What Happens |
-|------|-----------|-------------|
-| 1 | `azureclaw add` | CLI creates K8s secrets in `azureclaw-<name>` namespace |
-| 2 | Controller | Mounts secrets as env vars via `envFrom` in the pod spec |
-| 3 | Entrypoint | Reads env vars, configures `openclaw.json`, enables channels/plugins |
-| 4 | Agent | Interacts with pre-configured channels — never handles raw tokens |
-
-Credentials are **namespace-scoped** — each sandbox's secrets are isolated. Use `azureclaw credentials update <name>` to rotate credentials on a running sandbox (updates the K8s secret and triggers a rolling restart).
-
----
-
-## Operator Dashboard
-
-`azureclaw operator` launches a terminal-based management UI (built with blessed/blessed-contrib) that provides a live view of all agents in the cluster.
-
-### Architecture
-
-```
-┌─ Terminal (blessed TUI) ──────────────────────────────────────────────┐
-│                                                                       │
-│  Agent List Panel        Security Panel      Activity Panel           │
-│  ┌───────────────┐       ┌─────────────┐     ┌─────────────┐         │
-│  │ ● agent-1     │       │ Isolation   │     │ ✓ Approved  │         │
-│  │ └ sub-agent-1 │       │ Seccomp     │     │ ↻ Refreshed │         │
-│  │ ● agent-2     │       │ Egress mode │     │ ✗ Denied    │         │
-│  └───────┬───────┘       └─────────────┘     └─────────────┘         │
-│          │                                                            │
-│  Egress Panel             Keybindings Panel                           │
-│  ┌───────────────┐       ┌──────────────────────────────────┐         │
-│  │ ●P pending    │       │ [Enter] Connect  [n] Spawn       │         │
-│  │ ✓A approved   │       │ [a] Approve  [d] Delete/Deny     │         │
-│  │ ✗D denied     │       │ [m] Model    [e] Enforce egress  │         │
-│  └───────────────┘       └──────────────────────────────────┘         │
-│                                                                       │
-│  ┌─ Enter key ──────────────────────────────────────────────┐         │
-│  │  spawnSync("openclaw", ["tui", ...])                     │         │
-│  │  Blocks Node.js event loop entirely                      │         │
-│  │  Terminal buffer: normalBuffer() → child → alternateBuffer()       │
-│  └──────────────────────────────────────────────────────────┘         │
-└───────────────────────────────────────────────────────────────────────┘
-         │                    │                    │
-         ▼                    ▼                    ▼
-    K8s API              kubectl exec         kubectl port-forward
-   (list CRDs,          (connect to pod)      (gateway/TUI access)
-    CRUD sandboxes)
-```
-
-### Features
-
-| Feature | Key | Description |
-|---------|-----|-------------|
-| Agent list | `↑↓` | Hierarchical view — parent agents + indented sub-agents |
-| Connect | `Enter` | Shell out to `openclaw tui` with persistent session ID |
-| Spawn agent | `n` | Multi-step wizard (name, model, isolation, governance) |
-| Delete agent | `d` | Confirmation dialog + CRD deletion |
-| Switch model | `m` | Hot-swap model on running agent (no restart) |
-| Approve egress | `a` / `Shift+A` | Approve single / all pending domains |
-| Deny egress | `d` (egress panel) | Deny pending domain request |
-| Enforce egress | `e` | Lock down to learned domain set |
-| Cluster health | `c` | Node count, API server status, resource usage |
-| Logs | `l` | Stream agent logs |
-| Refresh | `r` | Manual refresh |
-
-### Connect Shell-Out
-
-Pressing `Enter` on an agent uses `spawnSync` to launch `openclaw tui` with `stdio: "inherit"`. This blocks the Node.js event loop entirely, ensuring blessed doesn't interfere with the child process's terminal. The operator:
-
-1. Saves cursor position and switches to the normal terminal buffer
-2. Disables raw mode on stdin
-3. Runs `openclaw tui` synchronously with a persistent session ID (`operator-{agentName}`)
-4. Restores raw mode, alternate buffer, and cursor position on return
-
-SIGINT (Ctrl+C) is trapped during the child process so it only terminates the TUI session, not the operator itself.
-
----
-
-## Phase 1 architectural additions (PR #44)
-
-### Provider seam architecture
-
-Cross-component governance calls go through four trait seams. Three router-side
-(`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) have in-tree
-implementations on `Governance`. The fourth (`MeshProvider`) is plugin-side by
-design — the router's `providers/mesh.rs` is documentation only.
-
-```
-+-------------------------------------------------+
-|             inference-router/src/               |
-|                                                 |
-|   AppState                                      |
-|     ├── Arc<dyn PolicyDecisionProvider>  ──┐    |
-|     ├── Arc<dyn AuditSink>                ─┤    |
-|     ├── Arc<dyn SigningProvider>          ─┤    |
-|     └── Arc<Governance>  ←─────────────────┘    |
-|         (single instance; impls live in         |
-|          providers/{policy,audit,signing}_impl) |
-|                                                 |
-|   Outage dispatch:  providers/outage.rs         |
-|     Strict / CachedRead / DegradedDev           |
-|     per ClawSandbox.spec.agt.outageMode         |
-+-------------------------------------------------+
-```
-
-### MCP 2026 module
-
-`inference-router/src/mcp/` (8 files): `streamable_http.rs`, `jsonrpc.rs`,
-`oauth.rs`, `oauth_layer.rs` (mounted as `tower::Layer`), `initialize.rs`,
-`pipeline.rs`, `tools.rs`, `error.rs`. Mounted at `POST /mcp`. OAuth 2.1 BCP
-gated by `McpServer.spec.productionMode: true`.
-
-### A2A 1.0.0 module
-
-`inference-router/src/a2a/` (14 files) — `agent_card.rs`, `agent_projection.rs`,
-`card_server.rs` (`/.well-known/agent.json`), `card_signing.rs`,
-`card_verifier.rs`, `error.rs`, `jsonrpc_dispatch.rs`, `signature.rs`,
-`snapshot_rebuild.rs`, `trust_store.rs`, plus AP2: `ap2.rs`,
-`mandate_signing.rs`, `mandate_trust_store.rs`, `message_send_ap2.rs`. Schema:
-<https://a2a-protocol.org/v1.0.0/specification>. Default ingress is no public
-exposure; surgical opt-in via `ClawSandbox.spec.a2a.expose: true` — see
-[ADR-0001](adr/0001-a2a-ingress-front-edge.md).
-
-### CRD reconciliation status
-
-| CRD | Reconciled | File | Notes |
-|---|---|---|---|
-| `ClawSandbox` | ✅ | `controller/src/reconciler/mod.rs` (1464 LOC) | Status subresource (KEP-1623 conditions + `observedGeneration`) |
-| `ClawPairing` | ✅ | `controller/src/{pairing,pairing_reconciler}.rs` | Operator-assisted pairing as a K8s op |
-| `McpServer` | schema-only (Phase 1) | `controller/src/mcp_server.rs` | Reconciliation in Phase 2; CEL via `crd_validations.rs` |
-| `ToolPolicy` | schema-only (Phase 1) | `controller/src/tool_policy.rs` | Carries AP2 `commerce.{dailyCap,monthlyCap,counterpartyAllowlist}`; reconciliation in Phase 2 |
-
-**Note on CEL.** kube-rs `CustomResource` derive does not emit the
-`x-kubernetes-validations` field (kube-rs#1557), so CEL is post-processed in
-`controller/src/crd_validations.rs` after schema generation.
-
-### VAP / MAP set
-
-Shipped in the controller Helm chart (`deploy/helm/azureclaw/templates/`):
-
-- **VAP:** `pods/exec|attach|portforward` denied on sandbox namespaces;
-  posture-downgrades blocked (isolation step-down, seccomp removal,
-  `readOnlyRootFilesystem: false`); `azureclaw.azure.com/dev-only` label
-  cannot be removed once applied; `provider:` values of `null`, `noop`, or `disabled` require
-  `dev-only` label (mirror of `ci/no-null-provider-prod.sh`).
-- **MAP:** auto-inject router sidecar on `azureclaw.azure.com/inject-router=true`
-  pods; auto-set seccomp to `azureclaw-strict` if missing.
-
-**Kubernetes version requirements.**
-
-| Mechanism | Status | Required cluster version | Notes |
-|---|---|---|---|
-| `ValidatingAdmissionPolicy` (VAP) | GA | Kubernetes ≥ 1.30 | Available on AKS stable channels; no feature gate needed. |
-| CRD `x-kubernetes-validations` (CEL) | GA | Kubernetes ≥ 1.29 | No feature gate needed. |
-| `MutatingAdmissionPolicy` (MAP) | Beta | Kubernetes ≥ 1.32 | Requires `--feature-gates=MutatingAdmissionPolicy=true` and `--runtime-config=admissionregistration.k8s.io/v1beta1=true` on the kube-apiserver. On AKS this is currently only reachable on preview channels. |
-
-The MAP-driven sidecar inject and seccomp auto-stamp are therefore shipped
-behind a Helm flag (`controller.mutatingAdmissionPolicy.enabled`, default
-`false`). When the flag is `false`, the controller's reconciler performs the
-same injection/stamping deterministically before pod creation, so the
-end-state is identical regardless of admission path. This is the supported
-production posture until MAP is GA on the AKS stable channel.
-
-### Status subresource (KEP-1623)
-
-`ClawSandbox.status` carries `conditions[]` (`Ready`, `Degraded`,
-`Reconciling`, `Available`) and `observedGeneration`. Controller stamps
-`Degraded=True` / `Ready=False` on the three validation-failure exits.
-Code: `controller/src/status/{mod,conditions}.rs`.
-
-### Identity provider seam — Microsoft Graph agent identity
-
-`controller/src/providers/identity_*.rs` ships a production Graph client
-calling:
-
-- `POST /beta/servicePrincipals/microsoft.graph.agentIdentity` — provision
-  agent identity SP
+- `POST /beta/servicePrincipals/microsoft.graph.agentIdentity` — provision SP
 - `POST /beta/servicePrincipals/{id}/federatedIdentityCredentials` — bind
-  fedcred for sandbox SA
+  federated credential for the sandbox ServiceAccount
 - `DELETE /beta/servicePrincipals/{id}` — teardown on `ClawSandbox` deletion
 
-Endpoints verified against `learn.microsoft.com` (commit `2114bf2`).
+`OPENCLAW_GATEWAY_TOKEN` is mounted from a K8s `Secret` via `secretKeyRef`
+(not plain env); a one-shot `warn!` fires on any legacy plain-env path.
 
-### Policy hot-reload
+---
 
-The router subscribes to `ToolPolicy` / `InferencePolicy` via K8s informers +
-AGT SSE; new policy applies in-process without pod rollout. Flipping
-`spec.agt.providers.{policy,audit,signing}` between `vendored` and `agt` also
-hot-reloads (no rollout). Policy-change propagation is asserted within 5 s by
-the conformance corpus.
+## 17. Policy Hot-Reload
 
-### OTel GenAI SemConv 1.x
+The router subscribes to `ToolPolicy` and `InferencePolicy` ConfigMap changes
+via K8s informers + AGT SSE. New policy takes effect in-process without a
+pod rollout. Flipping `spec.agt.providers.{policy,audit,signing}` between
+`vendored` and `agt` also hot-reloads. Policy-change propagation is asserted
+within 5 s by the conformance corpus.
 
-Every router span emits OTel GenAI SemConv 1.x attributes
-(`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.{input,output}_tokens`,
-…). Enabled by default; export via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+---
 
-### Federated-credential reaper
+## 18. AgentMesh Global Registry (Optional)
 
-`controller/src/fedcred_reaper.rs` is the 4th `tokio::select!` arm of the
-controller event loop (232 LOC, 5 unit tests). It periodically lists Azure
-managed-identity federated credentials owned by the controller, cross-checks
-against live `ClawSandbox` resources, and deletes orphans. Default cadence is
-600 s; override via `FEDCRED_REAPER_INTERVAL_SECS`. This guards against the
-**20-fedcred-per-MI Azure cap** that would otherwise block sandbox creation
-once enough churn has accumulated.
+For cross-environment handoff (local ↔ cloud), expose the AgentMesh relay and
+registry:
 
-### Gateway token via `secretKeyRef`
+```
+azureclaw up --expose-registry   # AGIC Ingress + NetworkPolicy
+```
 
-`OPENCLAW_GATEWAY_TOKEN` is mounted from a K8s `Secret` rather than plain env,
-so a pod-spec leak no longer surfaces the token. A one-shot `warn!` is
-emitted if a legacy plain-env path is exercised, so operators can migrate
-in-flight tenants without breaking them.
+This creates Application Gateway Ingress for `registry.<domain>` (HTTPS) and
+`relay.<domain>` (WSS) with Azure-managed TLS and WAF rate limiting.
 
-### `registrationMode == full` gating
+**4-layer auth chain:**
 
-Mesh-side registration runs in `full` mode only when both relay and registry
-are reachable; if registry is degraded, the controller falls back to relay-only
-mode and stamps `Degraded=True` on `ClawSandbox.status.conditions`.
+| Layer | Component | What it stops |
+|-------|-----------|--------------|
+| 1. WAF | Application Gateway | DDoS, connection floods |
+| 2. Ed25519 | Relay `handle_auth()` | Impersonation, replay |
+| 3. Registry check | Relay `RegistryVerifier` | Unregistered / revoked agents |
+| 4. OAuth | Registry `oauth.rs` | Controls registration (GitHub, Entra, Google) |
+
+`azureclaw mesh auth --registry <url> --provider github|entra` generates an
+Ed25519 keypair, runs OAuth, and stores the identity in
+`~/.azureclaw/mesh-identity.json` (AES-256-GCM, machine-bound key).
+
+**Registration gating.** `registrationMode == full` requires both relay and
+registry to be reachable; registry degraded → relay-only mode +
+`Degraded=True` on the affected `ClawSandbox`.
+
+---
+
+*For inline diagrams of the full component topology, data flows, and
+multi-runtime dispatch, see [`docs/architecture-diagrams.md`](architecture-diagrams.md).*

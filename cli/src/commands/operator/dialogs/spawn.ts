@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Spawn-agent dialog (`n` key) — extracted from operator.ts startDashboard
 // closure (S15.e.6) so the closure stays under the §4.2 800-LOC cap.
 // Body byte-identical to the original; closure-captured state is passed

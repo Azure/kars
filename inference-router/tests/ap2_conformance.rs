@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! AP2 conformance corpus — fixture-driven integration tests.
 //!
 //! Each `tests/fixtures/ap2_conformance/NNN-*.json` file describes a

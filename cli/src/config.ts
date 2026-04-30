@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Shared credential management for AzureClaw CLI.
  * Used by `dev` (auto-prompts if missing) and `credentials` (explicit reconfigure).

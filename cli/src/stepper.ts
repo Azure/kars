@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Multi-step progress tracker for CLI commands.
  * Shows current step, elapsed time, and clear phase boundaries.

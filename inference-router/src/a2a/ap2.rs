@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 — AP2 (Agent Payments) commerce-mandate types and validation.
 // ci:loc-ok: AP2 spec §6 (IntentMandate, CartMandate, PaymentMandate) is a
 // single cohesive validator API where every helper consumes the same struct

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! AzureClaw Controller — Kubernetes operator for sandboxed OpenClaw agents.
 //!
 //! Watches `ClawSandbox` and `ClawPairing` custom resources and reconciles:

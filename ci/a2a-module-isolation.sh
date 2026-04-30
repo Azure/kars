@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ci/a2a-module-isolation.sh — enforces ADR-0001 D4.
 #
 # The A2A inbound code path (inference-router/src/a2a/ and any future

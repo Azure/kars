@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Foundry Guardrail annotation parsing + AGT content flag reporting.
 //!
 //! Instead of calling the standalone Content Safety API (which requires a

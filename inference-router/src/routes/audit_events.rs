@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Audit-event helpers for the `routes::handoff` module.
 //!
 //! Rather than pepper every handoff route with the `AuditEvent { … }`

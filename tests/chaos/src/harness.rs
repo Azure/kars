@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Shared chaos-test harness — small axum mock servers + counters.
 //!
 //! Tests inject arbitrary chaos (status code, delay, body) on the server

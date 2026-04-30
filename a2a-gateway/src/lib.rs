@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `azureclaw-a2a-gateway` — public-ingress A2A edge.
 //!
 //! ## Position in the call graph (ADR-0001 #4)

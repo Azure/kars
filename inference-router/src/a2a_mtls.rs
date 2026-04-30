@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Optional mTLS listener on port 8445, dedicated to traffic from
 //! the public-edge `azureclaw-a2a-gateway` (Phase 2 S3.5, ADR-0001 #4).
 //!

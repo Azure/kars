@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Scenario runner CLI — plan item T5.
  *

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // AzureClaw mesh CLI: identity/auth and registry management.
 //
 // S15.b decomposition: identity/crypto + OAuth callback + port-health

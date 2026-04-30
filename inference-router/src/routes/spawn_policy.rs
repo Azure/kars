@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! AGT policy gate for `POST /sandbox/spawn`. First production call-site
 //! on the four-seam [`crate::providers::PolicyDecisionProvider`] trait.
 //!

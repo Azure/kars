@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `SigningProvider` contract.
 //!
 //! Responsibility: `sign(key_ref, payload) -> Signature`;

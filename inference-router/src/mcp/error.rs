@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Canonical JSON-RPC 2.0 error codes per
 //! [the JSON-RPC 2.0 spec §5.1](https://www.jsonrpc.org/specification#error_object)
 //! plus the MCP-2026 reserved range.

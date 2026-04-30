@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Native AGT governance — in-process policy evaluation, trust management,
 //! audit logging, and agent identity.
 //!

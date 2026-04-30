@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * ClawEval panel (S6) — list + lastRunAt + lastScore + nextScheduledAt.
  */

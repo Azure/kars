@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Agent handoff — live migration (local ↔ cloud).
 //!
 //! Implements the handoff protocol per the AzureClaw inter-agent handoff design.

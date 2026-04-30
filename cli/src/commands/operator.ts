@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * AzureClaw Operator TUI — live terminal dashboard for managing sandboxes.
  *

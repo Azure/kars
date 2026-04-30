@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Token budget enforcement — per-sandbox daily and per-request limits.
 //!
 //! Tracks cumulative token usage in memory (resets daily) and rejects

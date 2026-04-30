@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Security + AGT render helpers — extracted from operator.ts startDashboard
 // closure (S15.e.5b) so the closure stays under the §4.2 800-LOC cap.
 // Bodies byte-identical to the originals; closure-captured `agentTable`,

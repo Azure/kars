@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! CRD status helpers shared across reconcilers.
 //!
 //! Everything here is pure logic — no K8s client calls. Reconcilers call

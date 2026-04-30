@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Prometheus metrics for inference routing and AGT governance.
 
 use prometheus::{

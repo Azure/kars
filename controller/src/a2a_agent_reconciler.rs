@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `A2AAgent` reconciler — Phase 2 §8 entry 4 (S3).
 //!
 //! Watches `A2AAgent` CRs and, for each:

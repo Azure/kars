@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ci/security-audit-required.sh — enforces internal Phase 1 plan §0.2 #9.
 #
 # If the PR touches a capability-introducing file, require a matching

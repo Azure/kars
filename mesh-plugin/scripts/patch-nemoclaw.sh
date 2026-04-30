@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # patch-nemoclaw.sh — bolt the azureclaw-mesh plugin into a NemoClaw source tree.
 #
 # Fresh Azure/azureclaw clone + fresh NemoClaw clone:

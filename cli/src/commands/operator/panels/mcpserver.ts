@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * McpServer panel (S1) — list + Conditions + JWKS Secret presence.
  *

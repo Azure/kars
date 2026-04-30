@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `azureclaw-a2a-core` — shared A2A 1.0.0 primitives.
 //!
 //! ## Why this crate exists (Phase 2 S3.5 — ADR-0001 #4)

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Helm ↔ Rust CRD drift detection.
 //!
 //! Phase 1 ships `deploy/helm/azureclaw/templates/crd.yaml` (ClawSandbox)

@@ -361,6 +361,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "azureclaw-cncf-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "walkdir",
+]
+
+[[package]]
 name = "azureclaw-controller"
 version = "0.1.0"
 dependencies = [

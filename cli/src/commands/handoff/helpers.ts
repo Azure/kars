@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 / S15 hotspot-pass3: extracted helpers + state for
 // `azureclaw handoff`. The command is intentionally a single
 // long-lived action handler — its many helpers all share one piece

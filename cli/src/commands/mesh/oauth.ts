@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 / S15.b: OAuth callback server + log/HTML escapers
 // extracted from mesh.ts. Public surface preserved (re-exported
 // from mesh.ts) for any test or external use.

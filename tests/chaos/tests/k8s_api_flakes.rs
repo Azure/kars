@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! K8s API flake chaos — controller-side reliability invariants.
 //!
 //! Each test exercises a specific failure mode the kube-rs client (and our

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! OpenTelemetry GenAI Semantic Conventions — attribute constants + typed
 //! helpers.
 //!

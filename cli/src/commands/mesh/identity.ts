@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 / S15.b: identity persistence + at-rest crypto + AMID
 // derivation extracted from mesh.ts. Public surface preserved
 // (re-exported from mesh.ts) to keep mesh.test.ts imports stable.

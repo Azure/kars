@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # AzureClaw Infrastructure E2E Test Suite
 #
 # Runs against a LIVE AKS cluster with Azure AI Foundry connectivity.

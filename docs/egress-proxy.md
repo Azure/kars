@@ -225,13 +225,16 @@ decisions are recorded in the governance audit log.
 | `cli/src/commands/egress.ts` | CLI `azureclaw egress` command |
 | `controller/src/reconciler.rs` | iptables init container + NetworkPolicy generation |
 
-## Signing artifacts (`--sign`)
+## Phase 2: Signed OCI Egress Allowlist
 
-Phase 2 / S12.c adds an opt-in `--sign` flag to `azureclaw egress` that
-seals the current allowlist as a content-addressed, cosign-signed OCI
-artifact:
+Phase 2 (S12.c onward) adds supply-chain integrity for egress allowlists.
+The `--sign` flag seals the current allowlist as a content-addressed,
+cosign-signed OCI artifact and wires the digest into the `ClawSandbox` CRD
+so the controller can verify it on every reconcile.
 
-```
+### Signing an allowlist
+
+```bash
 azureclaw egress <name> --enforce --sign \
   --registry myacr.azurecr.io \
   [--repository policy/egress-allowlist/<name>] \
@@ -239,25 +242,115 @@ azureclaw egress <name> --enforce --sign \
   [--sign-key azurekms://...]
 ```
 
-Behavior:
+`--sign` must be combined with `--enforce` or `--approve` — using it alone is
+an error.
 
-- Combine with `--enforce` or `--approve` (using `--sign` alone is an
-  error).
-- The producer reads the live `ClawSandbox.spec.networkPolicy.allowed
-  Endpoints` and `metadata.generation`, builds a byte-stable canonical
-  YAML per `docs/policy-canonical-format.md`, pushes it via `oras`,
-  signs it via `cosign`, and patches `spec.networkPolicy.allowlistRef`
-  with the resulting digest.
-- Sign-mode auto-detects: keyless when a TTY is attached and no token
-  env is set; identity-token when `SIGSTORE_ID_TOKEN` or `OIDC_TOKEN`
-  is set (e.g., GitHub Actions OIDC); keyed when `--sign-mode keyed
-  --sign-key <ref>` is passed.
-- Fail-closed: if `oras push` or `cosign sign` fails, the kubectl
-  patch is skipped — no orphan `allowlistRef` ever lands on a
-  `ClawSandbox`.
-- Status: **non-authoritative** in S12.c — the inline
-  `allowedEndpoints` remains the source of truth. The flip to
-  authoritative ships in S12.e.
+**What happens (in order):**
 
-Required tools: `oras` and `cosign` in `$PATH`. See the canonical
-format doc and the S12.c security audit for the full threat model.
+1. CLI reads `ClawSandbox.spec.networkPolicy.allowedEndpoints` +
+   `metadata.generation`.
+2. Builds a byte-stable canonical YAML per `docs/policy-canonical-format.md`
+   (`buildCanonicalAllowlist`).
+3. Pushes the artifact to the registry via `oras` (`buildOrasPushArgv`).
+4. Signs the OCI manifest with `cosign` (`buildCosignSignArgv`).
+5. Patches `spec.networkPolicy.allowlistRef` with the resulting
+   `<registry>/<repo>@sha256:<digest>` reference (`buildPatchArgv`).
+6. If `oras push` or `cosign sign` fails, the patch is skipped — no orphan
+   `allowlistRef` ever lands on a `ClawSandbox`.
+
+### Sign-mode auto-detection
+
+| Environment | Auto-detected mode | Trigger condition |
+|-------------|--------------------|-------------------|
+| Interactive TTY | `keyless` | No `SIGSTORE_ID_TOKEN` / `OIDC_TOKEN`, TTY attached |
+| GitHub Actions / CI | `identity-token` | `SIGSTORE_ID_TOKEN` or `OIDC_TOKEN` set |
+| Explicit KMS | `keyed` | `--sign-mode keyed --sign-key azurekms://...` |
+
+Override with `--sign-mode` if auto-detection picks the wrong mode.
+
+### Controller verification
+
+When `spec.networkPolicy.allowlistRef` is set the controller verifies the
+artifact on every reconcile using the `SignerPolicy` ConfigMap.
+
+**`SignerPolicy` ConfigMap wire shape** (name: `azureclaw-signer-policy`,
+namespace: `azureclaw-system`):
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azureclaw-signer-policy
+  namespace: azureclaw-system
+data:
+  fulcioIssuers: |
+    https://token.actions.githubusercontent.com
+    https://accounts.google.com
+  sanPatterns: |
+    https://github.com/Azure/azureclaw/*
+    *.microsoft.com
+```
+
+Both keys are required and must contain at least one non-comment line.
+A malformed or empty ConfigMap sets `SignerPolicyMalformed` condition and
+blocks verification — there is no silent fallback to permissive defaults.
+If the ConfigMap is absent, the controller falls back to the
+`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`
+environment variables as an emergency operator override.
+
+### Status conditions on `ClawSandbox`
+
+| Condition | Value | Meaning |
+|-----------|-------|---------|
+| `AllowlistVerified` | `True / Verified` | Artifact fetched, signature verified, allowlist applied |
+| `AllowlistVerified` | `False / VerifyFailed` | Signature check failed — sandbox stays on last-known-good |
+| `AllowlistDrift` | `True / InlineDiffersFromArtifact` | `spec.networkPolicy.allowedEndpoints` diverges from the signed artifact |
+| `AllowlistDrift` | `False / InSync` | Inline and artifact are identical |
+
+These conditions are only emitted when `spec.networkPolicy.allowlistRef` is
+set. An unset `allowlistRef` leaves both conditions absent.
+
+**Fail-closed behaviour:** if no last-known-good (LKG) allowlist is cached
+and verification fails, `status.failClosedNoLkg` is set to `true` and
+the sandbox NetworkPolicy blocks all egress until a valid artifact is
+reachable.
+
+### Phase status
+
+| Slice | Behaviour |
+|-------|-----------|
+| **S12.c** (current) | Non-authoritative — inline `spec.networkPolicy.allowedEndpoints` is still the source of truth. Signed artifact is advisory. |
+| **S12.e** (planned) | Authoritative flip — signed artifact becomes the only source of truth; inline field is read-only. |
+
+### GitOps mode (`--emit-manifest`)
+
+To produce a Kubernetes manifest instead of patching live:
+
+```bash
+azureclaw egress <name> --enforce --sign \
+  --registry myacr.azurecr.io \
+  --emit-manifest ./egress-allowlist-<name>.yaml
+```
+
+The emitted manifest is a `ClawSandbox` patch fragment with
+`spec.networkPolicy.allowlistRef` pre-filled. Commit it to Git;
+apply with `kubectl apply -f`. The YAML is deterministic (same input
+→ same bytes) to enable diff-based drift detection in CI.
+
+### Required tools
+
+| Tool | Purpose |
+|------|---------|
+| `oras` | Push OCI artifacts to ACR |
+| `cosign` | Sign + verify OCI manifests |
+
+Both must be in `$PATH`. See `docs/security-audits/2026-04-30-phase2.5-ops-docs.md`
+and the S12.c security audit for the full threat model.
+
+### Source files
+
+| File | Role |
+|------|------|
+| `cli/src/commands/egress/sign.ts` | Producer: `buildCanonicalAllowlist`, `buildOrasPushArgv`, `buildCosignSignArgv`, `buildPatchArgv`, `buildEmitManifestYaml`, `autoDetectSignMode` |
+| `controller/src/signer_policy.rs` | `SignerPolicy` ConfigMap watcher, `SharedSignerPolicy` state, `SignerPolicyState` |
+| `controller/src/policy_fetcher.rs` | `AllowlistVerified` / `AllowlistDrift` conditions, fail-closed logic |

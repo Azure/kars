@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `ClawEval` reconciler — Phase 2 §8 entry 6 (S6).
 //!
 //! Watches `ClawEval` CRs and, for each:

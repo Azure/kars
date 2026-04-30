@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Mesh identity management — Ed25519 signing + X25519 exchange keypairs.
  *
@@ -201,4 +204,3 @@ export async function loadOrCreateIdentity(): Promise<MeshIdentity> {
 export function getIdentityPath(): string {
   return IDENTITY_FILE;
 }
-

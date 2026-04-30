@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Server TLS for the public listener.
 //!
 //! Loads cert + key from PEM files (typically projected from a K8s

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! MCP 2026 Streamable HTTP transport — production code path.
 //!
 //! This module is the **router-side** implementation of the Model Context

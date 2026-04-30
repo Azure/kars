@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 S9.1 — `azureclaw migrate` mode-switch CLI subcommand.
 //
 // Operator-facing tool to flip a `ClawSandbox` between the four

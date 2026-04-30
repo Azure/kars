@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";

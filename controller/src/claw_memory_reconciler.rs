@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `ClawMemory` reconciler — Phase 2 §8 entry 5 (S5).
 //!
 //! Watches `ClawMemory` CRs and, for each:
