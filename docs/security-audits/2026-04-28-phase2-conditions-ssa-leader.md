@@ -66,3 +66,7 @@ The `mesh_peer/*` sites kept the legacy string `azureclaw-mesh-peer` exactly to 
 
 - [x] Author: GitHub Copilot CLI agent (claude-opus-4.7).
 - [x] Reviewer: Pal Lakatos-Toth (admin merge).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

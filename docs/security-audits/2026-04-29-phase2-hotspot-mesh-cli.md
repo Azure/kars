@@ -69,3 +69,7 @@ Custom-crypto lint (`ci/no-custom-crypto.sh`) continues to pass — the moved co
 
 - Core: ✅ — module split is a pure refactor; behavior preserved; LOC budget enforced; no new public surface.
 - Security: ✅ — no change to identity-at-rest encryption, OAuth bind/timeout, log/HTML escapers, or file mode bits; threat model unchanged.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

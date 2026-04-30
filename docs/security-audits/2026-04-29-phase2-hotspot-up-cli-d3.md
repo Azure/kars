@@ -122,3 +122,7 @@ named-import API surface as the rest of the repo.
 - Security ✅ — no threat-model surface change; no new dependencies; no
   new network or auth flows; `randomBytes(24)` and existing manifest
   patches preserved verbatim.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

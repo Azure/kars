@@ -40,3 +40,7 @@ runtime path with the same ownership/mode bits.
 - `runtimes/openclaw` build + tests: green (100 pass).
 - `grep -rn "cli/skills"` in source tree: no remaining matches outside
   CHANGELOG / audit-doc history.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

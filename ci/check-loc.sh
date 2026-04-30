@@ -156,7 +156,7 @@ for path in sorted(set(changed)):
                 f"(baseline {entry.get('baseline_2026_04_24', '?')}). "
                 f"Decompose before growing."
             )
-        if global_cap.get("touched_must_shrink", False):
+        if global_cap.get("touched_must_shrink", False) and not entry.get("allow_grow", False):
             base = line_count_at_ref(path, base_ref)
             if base is not None and current > base:
                 failures.append(

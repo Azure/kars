@@ -170,3 +170,7 @@ Rust suites unchanged (this is a CLI-only slice).
 - No bulk emit (one ClawSandbox per invocation). Multi-sandbox
   emission is a backlog item — keep S12.g tight to the single-sandbox
   flow.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

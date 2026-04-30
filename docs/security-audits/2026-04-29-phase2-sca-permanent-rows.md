@@ -94,3 +94,7 @@ default `warnings` corresponds roughly to npm's `high`).
 - §15.2 #6 (CNCF Sandbox conformance): incremental progress; the
   K8s AI Conformance v1.35+ suite wiring is the larger remaining
   S17 deliverable.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

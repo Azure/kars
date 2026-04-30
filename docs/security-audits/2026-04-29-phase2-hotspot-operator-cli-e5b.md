@@ -57,3 +57,7 @@ The widget refs are typed structurally to avoid pulling
   extraction (~200 LOC).
 - **S15.e.6** — modal/dialog state machine (`startEdit`, `launch`,
   `connectToAgent`, `deleteSelectedAgent`, ~700 LOC).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

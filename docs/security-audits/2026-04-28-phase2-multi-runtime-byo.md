@@ -110,3 +110,7 @@ E2E (Kind):
 - `docs/internal/agt-upstream-asks.md` (per-language AGT SDK gaps blocking native Class B).
 - `controller/src/reconciler/runtime.rs` (`raw_env` field, `plan_byo`).
 - `controller/src/reconciler/mod.rs` (`is_byo` flag, `agent_container` extraction, `raw_env` consumption block).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

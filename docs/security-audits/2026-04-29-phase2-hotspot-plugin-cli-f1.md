@@ -91,3 +91,7 @@ green test pass = green semantics.
   module.
 - **S15.f.3+** — Class A Foundry shims to `/platform/mcp` per S10.B.
 - **S15.f.N** — Class B mesh tool extractions per-tool.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

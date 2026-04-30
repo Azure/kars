@@ -101,3 +101,7 @@ After f.10 the file should land at ~2800 LOC, closing the §4.2 hotspot for `plu
 
 - Implementation: GitHub Copilot CLI (this slice).
 - Review: pending CodeQL `Analyze (javascript-typescript)` on PR.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

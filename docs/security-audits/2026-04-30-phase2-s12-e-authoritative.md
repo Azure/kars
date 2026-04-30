@@ -226,3 +226,7 @@ Net: 401 → 412 controller tests passing.
   Degraded.** Phase is reserved for the runtime kind / pod
   lifecycle; allowlist resolution failure is an orthogonal axis
   exposed via `Conditions` + `Degraded`.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

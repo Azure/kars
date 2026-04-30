@@ -59,3 +59,7 @@ closes the final §4.2 hotspot.
 
 - Implementer: Copilot CLI agent (S15.h ship).
 - Reviewer: pending PR review.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

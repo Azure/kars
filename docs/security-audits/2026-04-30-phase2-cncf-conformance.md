@@ -103,3 +103,7 @@ Eight CRDs in scope:
 - Promote `cargo-audit` from `continue-on-error` to required once
   the advisory ignore list is reviewed against the new `cargo deny`
   output.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

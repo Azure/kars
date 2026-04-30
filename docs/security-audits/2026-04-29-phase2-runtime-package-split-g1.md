@@ -123,3 +123,7 @@ without re-rooting prior file moves.
 
 - Implementer: Copilot CLI agent (S15.g.1 ship).
 - Reviewer: pending PR review.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

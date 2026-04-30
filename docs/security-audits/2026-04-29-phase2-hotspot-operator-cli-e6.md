@@ -52,3 +52,7 @@ pre-slice file). Closure-captured state injected via context:
 
 - **S15.e.7** — `connectToAgent` + `deleteSelectedAgent` modal
   extraction. Closes the §4.2 cap (1027 → ~800).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

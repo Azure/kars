@@ -134,3 +134,7 @@ change to the `saveContext()` payload schema.
 - Security ✅ — no threat-model surface change; no new dependencies; no
   new network or auth flows; all RBAC role IDs, Bicep templates, and
   CR-shape fields preserved verbatim.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

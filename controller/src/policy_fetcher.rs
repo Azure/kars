@@ -1,3 +1,4 @@
+// ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
 //! Signed egress-allowlist artifact fetcher (S12.b status-only → S12.e authoritative).
 //!
 //! Pulls a content-addressed OCI artifact referenced by

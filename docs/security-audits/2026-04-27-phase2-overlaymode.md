@@ -115,3 +115,7 @@ Controller workspace: 264 → 276 (+12).
 - **Reviewer 1 (controller / reconciler):** All changes are additive to the reconcile path; no existing-mode behaviour modified. Idempotency guard mirrored from `running_status_matches`. Failure modes route through the same `degrade!` macro as Phase 1 validation. NetworkPolicy + SA creation order unchanged — overlay mode does not bypass the egress policy. **Approved.**
 
 - **Reviewer 2 (security / threat model):** STRIDE pass surfaced one documented gap (Native → Overlay flip leaves Deployments running). Acceptable for Phase 2 in exchange for never auto-deleting an in-flight Pod; explicit operator action required. Cross-namespace ref impossible by schema. Status-sub-resource RBAC unchanged. **Approved.**
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

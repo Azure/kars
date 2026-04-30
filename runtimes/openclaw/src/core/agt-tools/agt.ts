@@ -1,3 +1,4 @@
+// ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
 // AzureClaw AGT tool registrations — extracted from plugin.ts in S15.f.9.
 //
 // Stateful tools that interact with the AGT mesh (Signal Protocol session

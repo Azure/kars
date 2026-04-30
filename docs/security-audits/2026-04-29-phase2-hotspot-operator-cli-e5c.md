@@ -51,3 +51,7 @@ most of the 1318 → 800 path lives in the dialog state machine
 - **S15.e.6** — modal/dialog state machine (`startEdit`, `launch`,
   `connectToAgent`, `deleteSelectedAgent`, ~480 LOC). Heaviest
   closure-capture; will close the §4.2 cap.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

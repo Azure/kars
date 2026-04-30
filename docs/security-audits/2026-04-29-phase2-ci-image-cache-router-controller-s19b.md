@@ -78,3 +78,7 @@ own exit code is the right source of truth.
 - `sandbox-images/openclaw/Dockerfile.base` (drop false-negative sanity check)
 - `CHANGELOG.md`
 - `docs/security-audits/2026-04-29-phase2-ci-image-cache-router-controller-s19b.md` (this file)
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

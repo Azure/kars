@@ -83,3 +83,7 @@ boundaries). The TTL cleanup interval keeps `unref()` semantics.
   AGT singleton scope shifted to a small state-bag module so future
   slices can break `processTaskWithTools` (~680 LOC).
 - **S15.f.5+** — Class A Foundry shims to `/platform/mcp` (S10.B).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

@@ -107,3 +107,7 @@ S15.e.2+ candidate seams (each is its own PR):
 
 Each sub-slice should land independently behind its own audit doc;
 target is `operator.ts` ≤ 800 LOC by S15.e close-out.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

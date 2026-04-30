@@ -76,3 +76,7 @@ The new tests (`allowlist_ref_round_trips_through_camel_case_json`, `allowlist_r
 - Plan §S12 (post-critique decomposition): `~/.copilot/session-state/.../plan.md`
 - ADR-0001 step #4 (gateway component) — independent; this slice doesn't touch the public-edge path.
 - Rubber-duck critique 2026-04-30: trust model + decomposition adopted; in-sandbox cosign rejected as out-of-scope (controller-side verification only).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

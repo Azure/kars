@@ -57,3 +57,7 @@ behavior changes.
 - `.github/copilot-instructions.md`
 - `CHANGELOG.md`
 - `docs/security-audits/2026-04-29-phase2-cli-rename-g3.md` (this file)
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

@@ -61,3 +61,7 @@ A new module `cli/src/runtime.ts` is the single source of truth for the kebab-ca
 ## §14.6 column-11 status after this slice
 
 §14.6 column 11 (Multi-runtime hosting) **flipped to ✓** with S10.A4 (PR #70) — ≥2 native non-OpenClaw runtimes (OpenAI Agents Python + MAF Python) shipped end-to-end, plus BYO with documented contract. S10.A5 makes the value prop **operator-accessible**: a customer can now `azureclaw add --runtime microsoft-agent-framework my-maf-agent` and it works without reading the CRD by hand.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

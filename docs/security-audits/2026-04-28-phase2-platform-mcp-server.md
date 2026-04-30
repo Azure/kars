@@ -119,3 +119,7 @@ The only behaviour unique to this slice is "catalogued tool returns deferred-wir
 
 - Implementer: agent (Claude Opus 4.7, this session).
 - Reviewer: pending — opening PR for human review against `dev`.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

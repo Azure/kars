@@ -251,3 +251,7 @@ test coverage incidentally).
   cross-referenced to S7/S13. CEL rule count (6) matches the
   threat-model coverage (budget consistency × 2, severity closed set,
   primary/fallback shape × 2, action closed set).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

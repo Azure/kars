@@ -102,3 +102,7 @@ GHCR caching.
 - `.github/workflows/sandbox-base-publish.yml` (new)
 - `CHANGELOG.md`
 - `docs/security-audits/2026-04-29-phase2-container-image-scan-fix-s19.md` (this file)
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

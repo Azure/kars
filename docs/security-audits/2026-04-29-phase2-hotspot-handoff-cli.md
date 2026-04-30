@@ -59,3 +59,7 @@ $ cd cli && npm run lint                    # 0 errors (26 pre-existing warnings
 
 - Core: ✅
 - Security: ✅
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

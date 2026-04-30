@@ -80,3 +80,7 @@ CLI test count 354 → 395 passing (2 pre-existing skipped). `npx tsc --noEmit` 
 
 - [ ] Author: ____________________
 - [ ] Independent reviewer: ____________________
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

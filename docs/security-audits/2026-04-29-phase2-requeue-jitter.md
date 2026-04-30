@@ -110,3 +110,7 @@ Controller bin tests: 336 → 345 (+9). Clippy `-D warnings` clean.
   (predicated informers) deferred — would require enabling the unstable
   `unstable-runtime-stream-control` feature and refactoring all 9
   reconcilers to use `Controller::for_stream` with a manual reflector.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

@@ -55,3 +55,7 @@ local interface (`TaskLogger`) instead of an inline structural type.
   / identity by parameter so the extraction keeps the singletons in
   plugin.ts but moves the chunked-transfer state machine out.
 - **S15.f.4+** — Class A Foundry shims to `/platform/mcp` (S10.B).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

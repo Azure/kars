@@ -295,3 +295,7 @@ it converts cleanly, fail the build if it does not.
   convert` exits 0 on a confidential-mode upstream Sandbox; upstream API
   shape verified against `kubernetes-sigs/agent-sandbox @ c8c85f5` directly
   via GitHub MCP (no stale doc reliance).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

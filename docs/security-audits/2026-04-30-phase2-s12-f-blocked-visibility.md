@@ -133,3 +133,7 @@ binary = **+17 total**. Workspace `cargo test --all` green.
 - No new auth path.
 - Hostname-only contract enforced at the type boundary (`record`
   rejects IP literals + empty strings).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

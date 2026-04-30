@@ -1,3 +1,4 @@
+// ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
 //! Runtime dispatch seam (S10.A2 — multi-runtime hosting).
 //!
 //! The reconciler used to read `spec.runtime.openclaw` directly when

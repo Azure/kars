@@ -68,3 +68,7 @@ After this slice, operator.ts is thoroughly decomposed:
 The remaining 859 LOC in operator.ts is the dashboard "shell":
 imports, state declarations, blessed widget construction, `refresh()`
 data-poll loop, `render()` orchestrator, keymap bindings.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

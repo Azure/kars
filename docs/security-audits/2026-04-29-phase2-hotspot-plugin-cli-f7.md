@@ -89,3 +89,7 @@ because JS objects pass by reference. Same for `inbox` (an array).
 Then **S15.g** moves the lot under `runtimes/openclaw/` per
 `plan.md` (executes after cap is met, NOT before, to avoid
 re-rooting the f.8/f.9 diffs).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

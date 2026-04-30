@@ -299,3 +299,7 @@ directory `panels/` with its own data source, registry, and overlay
 wired via Shift-P. The legacy data fetchers (`fetchers/sandboxes.ts`)
 are reused inside `KubectlDataSource` for sandbox listing — no
 duplication.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

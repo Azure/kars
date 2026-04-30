@@ -109,3 +109,7 @@ prompts.
 - Security ✅ — no threat-model surface change; no new dependencies; no
   new network or auth flows; existing `isValidAzureHost` URL validator
   preserved verbatim.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

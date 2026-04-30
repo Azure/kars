@@ -81,3 +81,4 @@ commit/PR that absorbed it.
 | Date | AGT SDK | SDK upstream | Relay upstream | Registry upstream | Auditor | Delta |
 |---|---|---|---|---|---|---|
 | 2026-04-24 | TBD (landing in Phase 0) | v0.1.2 | v0.3.0 | v0.3.0 | *(initial entry — to be co-signed at first Phase 0 PR)* | Baseline; no patches absorbed upstream yet. |
+| 2026-04-30 | TBD | v0.1.2 | v0.3.0 | v0.3.0 | Copilot <223556219+Copilot@users.noreply.github.com>, Pal Lakatos-Toth <pallakatos@microsoft.com> | Phase 2 dev → main integration (PR #125). All 8 SDK patches re-verified still required against upstream v0.1.2; no upstream absorption observed. AGT Rust SDK consumption is via path overlays + pinned versions in `Cargo.toml`; no AgentMesh upstream version bump in this integration. Relay + Registry pins unchanged from baseline. |

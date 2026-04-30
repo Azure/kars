@@ -119,3 +119,7 @@ After f.10 the file should land below the §4.2 cap. S15.g `phase2-runtime-packa
 
 - Implementation: GitHub Copilot CLI (this slice).
 - Review: pending CodeQL `Analyze (javascript-typescript)` on PR.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

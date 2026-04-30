@@ -110,3 +110,7 @@ Future slices (locked):
   (~1500 LOC of registerTool blocks from initAGT)
 - **f.8** `openclaw-commands/*.ts` (the OpenClaw plugin slash
   commands, ~500 LOC) — closes §4.2 cap of 3000.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

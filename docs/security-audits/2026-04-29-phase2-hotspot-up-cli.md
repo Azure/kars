@@ -80,3 +80,7 @@ No new attack surface. No change to:
 
 - Core: ✅ — pure extraction; behavior preserved; partial (sub-slice d.1) progress toward §15 cap.
 - Security: ✅ — no change to deploy auth, kubeconfig handling, or FedCred audience; threat model unchanged.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

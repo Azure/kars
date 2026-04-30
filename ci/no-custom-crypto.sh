@@ -43,6 +43,15 @@ ALLOW_PATHS=(
   'inference-router/src/handoff/mod.rs'   # pre-existing handoff AES-GCM blob cipher; plan §4.1 slates extraction into a SigningProvider-backed submodule
   'inference-router/src/handoff/crypto.rs' # extracted crypto submodule (AES-256-GCM + HKDF-SHA256 + integrity hash); single allow-listed home for the handoff blob cipher
   'inference-router/src/handoff/token.rs' # HandoffTokenStore — 32-byte random + SHA-256 hash + constant-time compare, extracted from mod.rs
+  # Phase 2 CRD reconciler/compile modules — mint or wrap signing keys (Ed25519 via ed25519-dalek)
+  # for AGT-profile YAML compilation. Pure conduits to ed25519-dalek::{SigningKey, VerifyingKey};
+  # no hand-rolled signing math. Tracked alongside `mesh_peer/` for SigningProvider extraction.
+  'controller/src/mcp_server_reconciler.rs'    # JWKS Secret minting for McpServer (S1)
+  'controller/src/tool_policy_compile.rs'      # ToolPolicy → AGT YAML profile (S2)
+  'controller/src/a2a_agent_compile.rs'        # A2AAgent card-signing key Secret + AGT profile (S3)
+  'controller/src/inference_policy_compile.rs' # InferencePolicy → AGT-profile compile (S4)
+  'controller/src/claw_memory_compile.rs'      # ClawMemory binding compile (S5)
+  'controller/src/claw_eval_compile.rs'        # ClawEval suite compile (S6)
   'vendor/'
   'tests/'
 )

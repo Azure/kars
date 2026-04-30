@@ -202,3 +202,7 @@ diff after.
 
 - **Author / dev:** AzureClaw Phase 2 implementer (this PR).
 - **Reviewer:** to be filled at PR review.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

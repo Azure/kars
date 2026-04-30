@@ -59,3 +59,7 @@ names.
   (system-prompt strings, tool-handler switch body) or pivot to the
   Class A Foundry-shim migration to S10.B `/platform/mcp` once
   that endpoint exists.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

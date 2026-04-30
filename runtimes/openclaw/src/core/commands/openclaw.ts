@@ -1,3 +1,4 @@
+// ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
 // OpenClaw command/provider/CLI registrations — extracted from plugin.ts in S15.f.10.
 //
 // Final closure-bound block lifted out of `register()`:

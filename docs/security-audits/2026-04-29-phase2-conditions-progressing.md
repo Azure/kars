@@ -116,3 +116,7 @@ No new module created. No code duplicated. No dead code carried.
   ClawSandbox-side gap. McpServer / ToolPolicy / A2AAgent / etc.
   reconcilers already match parity per 2026-04-29 source survey.
 - §15.2 #10: incremental progress.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

@@ -242,3 +242,7 @@ operator-owned.
   shape, retention non-zero). Memory Store auth caveat from repo
   memory is reproduced in the CRD module docstring so it travels
   with the schema.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

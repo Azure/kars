@@ -129,3 +129,7 @@ A2.b is intentionally a separate slice so the seam in A2 lands without
 the deployment-builder refactor in its diff. This keeps reviewers
 focused on "is the dispatch shape right?" before "is the BYO container
 right?"
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

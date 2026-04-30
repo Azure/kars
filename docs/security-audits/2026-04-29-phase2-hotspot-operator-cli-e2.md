@@ -94,3 +94,7 @@ remaining in-file rendering / action / dialog code.
 - Render helpers (`renderSecurity`, `renderAGT*`, `renderTopology`, `renderCluster`) → `operator/render/`
 - Action helpers (`approveDomain`/`denyDomain`/`enforceEgress`/`learnEgress`) → `operator/actions.ts`
 - Modal/dialog (`startEdit`, `launch`, `connectToAgent`) — context-object pattern (similar to S15.d.4)
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

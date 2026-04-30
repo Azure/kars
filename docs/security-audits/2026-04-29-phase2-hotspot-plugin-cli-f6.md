@@ -88,3 +88,7 @@ After f.6:
 
 Then **S15.g** moves the lot under `runtimes/openclaw/` per the
 package-split plan recorded in `plan.md`.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

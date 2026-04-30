@@ -71,3 +71,7 @@ four egress action helpers (`approveDomain`, `denyDomain`, `enforceEgress`,
   `connectToAgent`, `deleteSelectedAgent`, ~700 LOC). Likely 1-2 PRs.
 
 After e.4-e.6 land, operator.ts should hit ≤800 cap.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

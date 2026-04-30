@@ -63,3 +63,7 @@ Custom-crypto lint and no-stubs lint continue to pass — moved code is the same
 
 - Core: ✅ — pure extraction; behavior preserved; LOC budget enforced; no new public surface.
 - Security: ✅ — no change to request validation, content-safety integration, token-budget enforcement, or upstream auth path; threat model unchanged.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

@@ -115,3 +115,7 @@ rejected when the cluster floor is `Medium`.
 - §15.2 #10 (S7 craftsmanship train): closes the explicit
   Content-Safety floor item; S7.C.2 (predicated informers) and
   S7.E.2 (reconcile histograms) remain.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

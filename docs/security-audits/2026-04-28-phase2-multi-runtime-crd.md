@@ -105,3 +105,7 @@ clean.
 
 - [ ] Reviewer 1 — controller correctness + status churn invariant
 - [ ] Reviewer 2 — CRD wire-format + breaking-change scope
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

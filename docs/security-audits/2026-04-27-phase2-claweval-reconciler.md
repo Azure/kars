@@ -293,3 +293,7 @@ REQUEUE intervals: success 300s, failure 60s — matches S5.
   contract executable. `regressionAction` always materialises with
   default `Suspend` so the runtime actuator has a deterministic
   default to read.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

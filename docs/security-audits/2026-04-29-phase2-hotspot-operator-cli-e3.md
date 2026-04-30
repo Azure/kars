@@ -99,3 +99,7 @@ new modules).
 - Modal/dialog interaction (`startEdit`, `launch`, `connectToAgent`,
   `deleteSelectedAgent`) — context-object pattern (similar to
   S15.d.4 `SandboxBringUpContext`).
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>

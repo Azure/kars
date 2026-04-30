@@ -127,3 +127,7 @@ hadolint a2a-gateway/Dockerfile        # if installed
 This audit covers S3.5. The next ADR-0001 follow-up (cross-replica
 limiter sync, automatic CA rotation) is tracked in the slice
 backlog and explicitly **out of scope** here.
+
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
