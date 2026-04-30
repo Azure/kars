@@ -120,11 +120,62 @@ Lint-passed all 30 mermaid blocks in `docs/architecture-diagrams.md`
 locally with `npx -y -p @mermaid-js/mermaid-cli mmdc`. Zero parse
 errors.
 
+## Fix 3 — `Dockerfile.base` extension-deps gap-fill
+
+### Root cause
+
+After Fix 1 unblocked the gateway from staring, end-to-end testing surfaced
+a second pre-existing issue: the node-host (`openclaw node`, started at
+entrypoint.sh:978) crashed at startup with
+`Cannot find module '@mariozechner/pi-ai/dist/oauth.js'`. Without the
+node-host, the gateway hosts `agents.list` and accepts WS connections but
+no agent turn ever runs — chat sends silently stall.
+
+The missing module is declared as a dependency in the bundled `xai`
+extension's `package.json`. OpenClaw's own bundled chunks (e.g.
+`dist/oauth-*.js`, loaded by `memory-core` in the node-host) statically
+require it whether or not `xai` is enabled. `openclaw doctor --fix` at
+base-image build time only stages deps for *configured* plugins, so
+`pi-ai` was being skipped — leaving a latent crash that was previously
+masked by Fix 1's EACCES.
+
+### Fix
+
+Add `sandbox-images/openclaw/stage-extension-deps.sh` (build-time helper)
+and invoke it from `Dockerfile.base` immediately after `openclaw doctor`.
+The helper:
+
+1. Walks every bundled extension's `package.json`
+2. Takes the union of declared `dependencies`
+3. Installs anything not already resolvable in the stage tree's
+   `node_modules` via `npm install --no-save --omit=dev`
+
+Then a small assertion fails the build if
+`@mariozechner/pi-ai/dist/oauth.js` is still missing — converting future
+regressions into build failures rather than silent runtime breakage.
+
+### Threat-model analysis
+
+| Concern | Outcome |
+|---|---|
+| New network access at build time? | **No.** The base image already runs `openclaw doctor --fix` and `npm audit fix --force` and several `openclaw skills install` commands. Threat model unchanged: full network at build, frozen-in-image at runtime. |
+| New runtime privileges? | **No.** Helper runs at build time only. Runtime stage tree is still under `OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage` with `chmod -R a+rX` (read+execute for all, write for none). |
+| Extra packages = larger TCB? | **Yes, marginally.** We pull in `@mariozechner/pi-ai@0.70.5` which OpenClaw's own oauth chunk *already requires at runtime*. Either it was getting lazy-installed at first agent turn (worse — runtime npm trust) or the agent was crashing (today). Pre-staging the package OpenClaw already requires reduces runtime trust surface. |
+| Supply-chain pinning? | **Same as upstream.** Versions come from each extension manifest's `dependencies` (committed in OpenClaw's own bundle). We don't introduce new version ranges. |
+
+### Verification
+
+- Without the fix: container starts, gateway "ready", node-host crashes,
+  WebUI connects, chat sends silently stall.
+- With the fix (build-time assertion passes, runtime smoke):
+  `docker logs azureclaw-dev-agent | grep -i "Failed to start CLI"` is
+  empty; `tail /tmp/node-host.log` shows clean plugin registration.
+
 ## CI gate considerations
 
 `ci/security-audit-required.sh` flags `sandbox-images/openclaw/entrypoint.sh`
-as a capability-introducing path. This audit document discharges the gate
-for this PR.
+and `sandbox-images/openclaw/Dockerfile.base` as capability-introducing
+paths. This audit document discharges the gate for this PR.
 
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
 Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
