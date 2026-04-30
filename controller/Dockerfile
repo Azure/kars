@@ -18,6 +18,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY controller/ controller/
 COPY inference-router/ inference-router/
+COPY a2a-gateway/ a2a-gateway/
+COPY azureclaw-a2a-core/ azureclaw-a2a-core/
 COPY cli/policies/ cli/policies/
 COPY cli/blocklists/ cli/blocklists/
 

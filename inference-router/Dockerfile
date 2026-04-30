@@ -19,6 +19,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY inference-router/ inference-router/
 COPY controller/ controller/
+COPY a2a-gateway/ a2a-gateway/
+COPY azureclaw-a2a-core/ azureclaw-a2a-core/
 
 # Cache-bust: changing this ARG invalidates the cargo build layer
 ARG ROUTER_CACHE_BUST=0
