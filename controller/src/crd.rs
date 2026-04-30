@@ -360,7 +360,7 @@ fn default_session_max() -> u32 {
 ///
 /// Tier 1 (S10.A3/A4) — controller adapter shipping in Phase 2:
 /// `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`.
-/// Tier 2 — declared roadmap; CRD-level placeholders so authors can pin
+/// Tier 2 — declared roadmap; CRD-level placeholders so authors can pin  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
 /// `kind:` without later schema breakage. Reconciler stamps
 /// `RuntimeReady=False / AdapterMissing` until adapters land.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
@@ -402,19 +402,19 @@ pub struct RuntimeSpec {
     pub microsoft_agent_framework: Option<MicrosoftAgentFrameworkConfig>,
 
     /// Semantic Kernel configuration. Required iff `kind == SemanticKernel`.
-    /// Tier-2 placeholder — controller stamps
+    /// Tier-2 placeholder — controller stamps  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
     /// `RuntimeReady=False / AdapterMissing` until the adapter image ships.
     /// Schema is locked now to avoid a CRD breaking change later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_kernel: Option<SemanticKernelConfig>,
 
     /// LangGraph configuration. Required iff `kind == LangGraph`.
-    /// Tier-2 placeholder — see `semantic_kernel`.
+    /// Tier-2 placeholder — see `semantic_kernel`.  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang_graph: Option<LangGraphConfig>,
 
     /// Anthropic Claude Agents SDK configuration. Required iff
-    /// `kind == Anthropic`. Tier-2 placeholder — see `semantic_kernel`.
+    /// `kind == Anthropic`. Tier-2 placeholder — see `semantic_kernel`.  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<AnthropicConfig>,
 
@@ -489,7 +489,7 @@ pub enum MafLanguage {
     Dotnet,
 }
 
-/// Semantic Kernel runtime variant (Tier-2 placeholder).
+/// Semantic Kernel runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticKernelConfig {
@@ -515,7 +515,7 @@ pub enum SkLanguage {
     Java,
 }
 
-/// LangGraph runtime variant (Tier-2 placeholder).
+/// LangGraph runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LangGraphConfig {
@@ -539,7 +539,7 @@ pub enum LangGraphLanguage {
     Typescript,
 }
 
-/// Anthropic Claude Agents SDK runtime variant (Tier-2 placeholder).
+/// Anthropic Claude Agents SDK runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
 /// The Anthropic Agent SDK is currently Python-first; `pythonVersion`
 /// mirrors the `OpenAIAgentsConfig` field.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -1223,7 +1223,7 @@ mod tests {
         assert!(!obj.contains_key("byo"));
     }
 
-    // ─── Tier-2 placeholder runtime variants ──────────────────────────
+    // ─── Tier-2 placeholder runtime variants ──────────────────────────  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
 
     #[test]
     fn runtime_semantic_kernel_round_trip() {
@@ -1279,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_tier2_placeholders_default_to_python() {
+    fn runtime_tier2_placeholders_default_to_python() {  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
         // Defaults of new language enums must be `python` (most-common
         // flavour for each runtime) so omitting `language` doesn't
         // surprise authors with `dotnet`/`typescript`.

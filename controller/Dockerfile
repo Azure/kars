@@ -20,6 +20,7 @@ COPY controller/ controller/
 COPY inference-router/ inference-router/
 COPY a2a-gateway/ a2a-gateway/
 COPY azureclaw-a2a-core/ azureclaw-a2a-core/
+COPY tests/ tests/
 COPY cli/policies/ cli/policies/
 COPY cli/blocklists/ cli/blocklists/
 

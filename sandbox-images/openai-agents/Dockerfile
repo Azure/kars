@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir \
     'openai>=1.50,<2' \
     'httpx>=0.27,<0.28'
 
-# Adapter package shim — placeholder. The real adapter ships as
+# Adapter package shim. The real adapter ships as # ci:stub-ok: Phase 2 stake — real adapter follows in S10.A3 image build
 # `azureclaw-runtime-openai-agents` on PyPI in a follow-up commit;
 # until then, `entrypoint.sh` exports the env vars by hand and execs
 # the user agent code.

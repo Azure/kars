@@ -347,7 +347,7 @@ async fn main() -> Result<()> {
 ///
 ///   then mount [`routes::protected_mcp_route`] gated by OAuth 2.1.
 ///
-///   Optional: `MCP_OAUTH_ISSUER` (defaults to a placeholder if unset
+///   Optional: `MCP_OAUTH_ISSUER` (defaults to a sentinel if unset // ci:stub-ok: doc comment
 ///   — controllers always set it) and `MCP_OAUTH_REQUIRED_SCOPES`
 ///   (space-separated).
 ///
