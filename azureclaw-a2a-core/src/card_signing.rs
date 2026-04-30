@@ -214,7 +214,7 @@ pub use signature::SignatureInput;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::a2a::agent_card::{
+    use crate::agent_card::{
         AgentCapabilities, AgentInterface, KnownProtocolBinding, ProtocolBinding,
     };
 

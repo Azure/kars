@@ -63,18 +63,20 @@
 
 #![forbid(unsafe_code)]
 
-pub mod agent_card;
+// Lifted to the shared `azureclaw-a2a-core` crate in Phase 2 S3.5
+// (ADR-0001 #4). Re-exported here under the original module paths so
+// every existing `crate::a2a::signature::*` / `crate::a2a::card_signing::*`
+// call site keeps compiling unchanged. The router and the new
+// public-edge `a2a-gateway` now share a single verifier implementation.
+pub use azureclaw_a2a_core::{agent_card, card_signing, card_verifier, error, signature};
+
 pub mod agent_projection;
 pub mod ap2;
 pub mod card_server;
-pub mod card_signing;
-pub mod card_verifier;
-pub mod error;
 pub mod jsonrpc_dispatch;
 pub mod mandate_signing;
 pub mod mandate_trust_store;
 pub mod message_send_ap2;
-pub mod signature;
 pub mod snapshot_rebuild;
 pub mod trust_store;
 

@@ -22,7 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{config, forward_proxy, governance, handoff, routes};
+use azureclaw_inference_router::{a2a_mtls, config, forward_proxy, governance, handoff, routes};
 
 use anyhow::Result;
 use axum::{
@@ -256,6 +256,32 @@ async fn main() -> Result<()> {
         forward_proxy::start(&proxy_addr, proxy_blocklist, proxy_blocked_egress).await;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    // Phase 2 S3.5 (ADR-0001 #4): the public-edge `azureclaw-a2a-gateway`
+    // forwards to the router on a dedicated mTLS-mandatory port (default
+    // 8445). When `A2A_MTLS_ENABLED=1` and the cert/key/CA files are
+    // present, log the configuration so operators can see at boot that
+    // the gateway path is wired. The actual TLS listener is plumbed in a
+    // follow-up; the env surface is locked here so deployments using the
+    // gateway can already mount the secret.
+    let a2a_mtls_cfg = a2a_mtls::A2aMtlsConfig::from_env();
+    if a2a_mtls_cfg.enabled {
+        if a2a_mtls_cfg.files_present() {
+            tracing::info!(
+                port = a2a_mtls_cfg.port,
+                cert = %a2a_mtls_cfg.cert_path.display(),
+                ca = %a2a_mtls_cfg.ca_path.display(),
+                "A2A mTLS port configured (Phase 2 S3.5)"
+            );
+        } else {
+            tracing::warn!(
+                port = a2a_mtls_cfg.port,
+                "A2A_MTLS_ENABLED=1 but cert/key/CA files missing; \
+                 falling back to in-cluster-only operation"
+            );
+        }
+    }
+
     let shutdown_timeout = resolve_shutdown_timeout();
     tracing::info!(
         shutdown_timeout_secs = shutdown_timeout.as_secs(),
