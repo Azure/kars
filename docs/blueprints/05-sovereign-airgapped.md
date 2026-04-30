@@ -9,6 +9,7 @@
 - **You are:** a defence, intelligence, regulator, financial-services, or sovereign-cloud operator. Or an enterprise that has chosen to self-host LLMs.
 - **You want:** AzureClaw's threat model, but with the model running on private hardware (e.g. Foundry-Edge, vLLM, llama.cpp, ONNX Runtime, an on-prem Triton) and zero traffic crossing the network island.
 - **You do not want:** any default outbound destination — every domain in the blocklist, the Foundry SDK, Application Insights, and the audit sink — to be assumed reachable.
+- **Runtime:** choose `spec.runtime.kind: OpenClaw` (default, Tier-1) for zero agent-code changes, or `BYO` for a custom container image that declares the `org.azureclaw.runtime.contract` OCI label. Python teams using the OpenAI Agents SDK or Microsoft Agent Framework can set `OpenAIAgents` or `MicrosoftAgentFramework` (Tier-1) — the same isolation and governance apply. Tier-2 runtimes (`SemanticKernel`, `LangGraph`, `Anthropic`) carry `RuntimeReady=False/AdapterMissing` until adapters ship.
 
 ## Topology
 
@@ -112,6 +113,98 @@ sequenceDiagram
 
 ## What you provision
 
+### Runtime and CRD model in air-gap
+
+All eight CRDs work offline. The runtime adapter and model connection are configured via Helm values, not by choosing a different CRD schema:
+
+| CRD | Air-gap role |
+|---|---|
+| `InferencePolicy` | Token budget (daily/monthly) + content safety against the local model. Referenced by `ClawSandbox.spec.inferenceRef.name` (S13 ref form; omitting it → `Degraded/InferencePolicyNotFound`). |
+| `ToolPolicy` | Per-tool rate limits and spend caps for local tool servers (e.g., code search over cluster-local MCP). |
+| `McpServer` | Declare cluster-local private MCP servers. No OAuth unless you run an on-prem IdP. |
+| `ClawMemory` | Bind to an on-prem Foundry-Edge or compatible memory-store endpoint. |
+| `ClawEval` | Schedule regression evals against your local model server. |
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: analyst-policy
+  namespace: azureclaw-analyst
+spec:
+  tokenBudget:
+    dailyTokens: 500000
+    monthlyTokens: 10000000
+  contentSafety:
+    requirePromptShields: false   # local model; no Azure Content Safety endpoint
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: analyst
+  namespace: azureclaw-analyst
+spec:
+  runtime:
+    kind: OpenClaw               # or BYO if you supply your own container
+  inferenceRef:
+    name: analyst-policy         # S13 ref form; required
+  networkPolicy:
+    allowlistRef:                # signed OCI artifact bundled offline (see below)
+      registry: private-registry.local
+      repository: azureclaw-policy/analyst-egress
+      digest: sha256:…
+      artifactType: application/vnd.azureclaw.egress-allowlist.v1+yaml
+```
+
+### Signed OCI egress allowlist — offline / bundle signing
+
+In an air-gapped deployment the allowlist artifact is built and signed on the online build host, then transferred in the same bundle as the images:
+
+```bash
+# === Online build host ===
+
+# 1. Sign the egress allowlist (kms mode for sovereign key custody,
+#    or keyless on an OIDC-capable CI runner):
+azureclaw egress sign \
+  --allowlist analyst-egress.yaml \
+  --push private-registry.local/azureclaw-policy/analyst-egress \
+  --mode kms \
+  --kms-key https://myvault.vault.azure.net/keys/airgap-signer/v1
+
+# 2. Save the artifact + signature to the bundle tarball:
+cosign save private-registry.local/azureclaw-policy/analyst-egress \
+  --dir bundle/policy/analyst-egress/
+
+# 3. Install the SignerPolicy ConfigMap in the bundle values
+#    (applied by the offline helm install):
+cat bundle/values/offline-values.yaml
+# …
+# signerPolicy:
+#   fulcioIssuers: []          # not used in kms mode
+#   sanPatterns: []
+#   kmsKeyId: "https://myvault.vault.azure.net/keys/airgap-signer/v1"
+```
+
+```bash
+# === Air-gapped admin host ===
+
+# 4. Load the policy artifact into the private registry:
+cosign load \
+  --dir bundle/policy/analyst-egress/ \
+  private-registry.local/azureclaw-policy/analyst-egress
+
+# 5. Helm install applies the SignerPolicy ConfigMap automatically.
+#    The controller verifies the signature on first reconcile.
+#    AllowlistVerified=True → NetworkPolicy applied.
+#    AllowlistVerified=False/SignerPolicyMissing → sandbox stays safe (fail-closed).
+```
+
+**Signing modes in air-gap:**
+- `kms` — use Azure Key Vault (on-prem or Azure Stack) for sovereign key custody. The signing key never leaves the HSM.
+- `keyless` — works if the build host has an OIDC issuer (GitHub Actions, Azure Pipelines) and you transfer the Fulcio certificate bundle in the offline kit. Set `fulcioIssuers` + `sanPatterns` in the ConfigMap.
+
+### CLI commands
+
 ```bash
 # On the (online) build host:
 make bundle                                       # 🚧 roadmap; today: assemble manually
@@ -126,7 +219,7 @@ cosign verify-blob ./bundle.tar.gz \
   --key cosign.pub \
   --signature ./bundle.sig
 docker load < bundle.tar.gz
-docker push private-registry.local/azureclaw/{controller,router,sandbox}:vX
+docker push private-registry.local/azureclaw/{controller,router,sandbox}:latest
 
 helm install azureclaw deploy/helm/azureclaw \
   --values offline-values.yaml \
@@ -142,7 +235,9 @@ azureclaw add analyst --model llama-3.1-70b --governance \
 ## What's unique to this blueprint
 
 - **Local-model adapter.** The router has an OpenAI-compatible local-model adapter (`router.model.provider=local-openai-compat`) so any model server speaking that wire format slots in. No code change to the agent; the same `gpt-4.1`-style interface is preserved.
+- **BYO runtime or existing agent code.** Use `spec.runtime.kind: BYO` for a custom container declaring the `org.azureclaw.runtime.contract` OCI label. Teams with existing Python OpenAI Agents or MAF code can use Tier-1 adapters (`OpenAIAgents`, `MicrosoftAgentFramework`) without changes to the governance or audit chain.
 - **Egress NetworkPolicy is the primary control,** not the 51k-domain blocklist. The blocklist is irrelevant when default-deny is enforced and only one internal DNS name is allowed.
+- **Signed OCI egress allowlist — air-gap / offline / KMS path.** Build and sign the allowlist artifact on the online build host; include it in the bundle; load it into the private registry on the air-gapped side. Use `--mode kms` with an on-prem or Azure Stack Key Vault for sovereign key custody. The controller verifies on every reconcile and fails closed if the signature is absent or invalid.
 - **Audit chain stays local.** The default `AuditSink` writes to a configurable destination (App Insights, Log Analytics, Splunk HEC, file). For sovereign deployments, a Splunk HEC or local file backend is the typical choice; the hash chain is preserved either way.
 - **No telemetry leaks.** All Microsoft-hosted telemetry (App Insights, Microsoft Defender for Cloud) is off-by-default and replaced by your local SIEM.
 - **Cosign-signed bundle.** The reproducible bundle is the only authenticated trust root; the air-gapped side has only a public key.
@@ -179,7 +274,10 @@ bundle.tar.gz
 ## References
 
 - `inference-router/src/foundry.rs` (provider switch incl. `local-openai-compat` mode)
-- `deploy/helm/azureclaw/values.yaml` (`audit.sink`, `router.model.provider`)
+- `deploy/helm/azureclaw/values.yaml` (`audit.sink`, `router.model.provider`, `signerPolicy.*`)
 - `cli/profiles/` (offline-portable policy bundle)
+- `controller/src/policy_fetcher.rs` (allowlist fetch + offline KMS verify)
 - `Makefile` `bundle` target (🚧 to be added)
+- `docs/api/crd-reference.md` (all 8 CRDs; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
+- `docs/policy-canonical-format.md` (signed OCI egress allowlist format + signing modes)
 - `docs/security.md` § "Air-gapped operating mode"
