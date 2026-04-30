@@ -37,6 +37,9 @@ Source of truth: `vendor/agentmesh-sdk/README.md`. Numbering matches.
 | 6 | `connect()` prekey/register order — registry requires registration first | **Yes** | Plus sender-side retry in `plugin.ts`. |
 | 7 | `submitReputation` — silent error swallowing | **Yes** | Logs only; safe to keep until AGT TrustManager replaces. |
 | 8 | `connect()` — stale connected state blocks reconnect | **Yes** | Reconnect-loop correctness; cannot ship without. |
+| 9 | `bytesToBase64` — stack overflow for large payloads (>100 KB) | **Yes** | Chunked encoding fix; reproducible with any attachment >100 KB. |
+| 10 | `initiateSession` — reuse crash on second message to same peer | **Yes** | Session-state lifecycle bug; second handoff to same sub-agent panics without this. |
+| 11 | `wsFactory` + `plaintextPeers` extensibility hooks | **Yes** | Required for Node.js 22 proxy-bootstrap integration and for legacy-peer plain-text path; `wsFactory` hook is the only way to inject an HTTPS agent into the WebSocket constructor. |
 
 **Known remaining gap** (documented in SDK README): transport `receive`
 events are not wired to `AgentMeshClient.onMessage()`. Parent → sub-agent send
@@ -62,6 +65,8 @@ Source of truth: `vendor/agentmesh-registry/README.md`.
 |---|---|---|---|
 | 1 | Raw-timestamp signature verification (same root cause as relay Patch 1) | **Yes** | Prekey uploads fail 401 without it. |
 | 2 | Ghost agent cleanup + heartbeat + search freshness | **Yes** | Sub-agent restart hygiene. |
+| 3 | Wrong table name in reputation queries (`reputation_feedbacks` → `reputation_feedback`) | **Yes** | Reputation queries silently return empty results without this fix. |
+| 4 | Operational hardening bundle (graceful shutdown, stale-entry cleanup, health-check honesty, input limits, TOCTOU fix, startup panic fix) | **Yes** | Six independent reliability/safety fixes bundled in one patch; all required for production stability. |
 
 ## Re-audit cadence
 
@@ -82,3 +87,4 @@ commit/PR that absorbed it.
 |---|---|---|---|---|---|---|
 | 2026-04-24 | TBD (landing in Phase 0) | v0.1.2 | v0.3.0 | v0.3.0 | *(initial entry — to be co-signed at first Phase 0 PR)* | Baseline; no patches absorbed upstream yet. |
 | 2026-04-30 | TBD | v0.1.2 | v0.3.0 | v0.3.0 | Copilot <223556219+Copilot@users.noreply.github.com>, Pal Lakatos-Toth <pallakatos@microsoft.com> | Phase 2 dev → main integration (PR #125). All 8 SDK patches re-verified still required against upstream v0.1.2; no upstream absorption observed. AGT Rust SDK consumption is via path overlays + pinned versions in `Cargo.toml`; no AgentMesh upstream version bump in this integration. Relay + Registry pins unchanged from baseline. |
+| 2026-04-30 | TBD | v0.1.2 | v0.3.0 | v0.3.0 | Copilot <223556219+Copilot@users.noreply.github.com>, Pal Lakatos-Toth <pallakatos@microsoft.com> | Phase 2.5 D6 docs re-audit. SDK patches 9–11 discovered in `vendor/agentmesh-sdk/README.md` and added to this document (bytesToBase64 stack overflow, initiateSession reuse crash, wsFactory+plaintextPeers extensibility). Registry patches 3–4 discovered in `vendor/agentmesh-registry/README.md` and added (reputation table name bug, operational hardening bundle). All pre-existing patches re-verified still required. No upstream version bump. |

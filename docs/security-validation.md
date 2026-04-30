@@ -167,12 +167,28 @@ inference:
 | Prompt Shields (jailbreak detection) | ✅ Enabled | `promptShields: true` in CRD |
 | Token budgets | ✅ Enforced | Per-sandbox daily + per-request limits |
 | Metrics | ✅ Active | Prometheus endpoint on router |
+| **Content Safety Floor VAP** | ✅ Enforced | See below |
 
 Content Safety operates via **Foundry-side guardrails** (`Microsoft.DefaultV2`): content filter
 annotations are applied server-side by Azure AI Foundry on every model inference call. The router
 parses `prompt_filter_results` from the response and reports detected flags to AGT governance.
 There is no separate Content Safety API call — if the model response lacks filter annotations,
 inference proceeds normally.
+
+### Content Safety Floor (admission-time enforcement)
+
+The `azureclaw-content-safety-floor` ValidatingAdmissionPolicy rejects any
+`InferencePolicy` whose `spec.inference.contentSafetyMinimum` is set to a
+value less strict than the cluster floor (`Medium` by default).
+
+```bash
+kubectl get validatingadmissionpolicy azureclaw-content-safety-floor \
+  -o jsonpath='{.spec.validations[0].expression}'
+# Output: object.spec.inference.contentSafetyMinimum >= clusterFloor
+```
+
+Severity ordinal enforced by CEL: `Safe(0) < Low(1) < Medium(2) < High(3)`.
+Requires Kubernetes ≥ 1.30.
 
 ---
 
@@ -240,7 +256,32 @@ Full hex-dump analysis: [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md
 
 ---
 
-## Cross-cutting Hardening ✅
+## `azureclaw attest` — Spec Hash & Reconcile Trace
+
+`azureclaw attest <NAME>` surfaces tamper-evident evidence for a sandbox
+without requiring cluster-admin access. It reads only `ClawSandbox` status
+fields and Deployment annotations.
+
+| Evidence field | Source | Notes |
+|----------------|--------|-------|
+| **Spec hash** | SHA-256 over canonical JSON of `spec` | Changes on any CRD field mutation |
+| **SSA owner map** | `metadata.managedFields` | Lists field-level owners (controller, CLI, user) |
+| **Observed-generation lineage** | `status.observedGeneration` vs `metadata.generation` | Drift = pending reconcile |
+| **Policy version hashes** | `status.versionHash` per referenced policy | Changes when referenced `ToolPolicy` / `InferencePolicy` is updated |
+| **Reconcile trace ID** | `azureclaw.azure.com/last-trace-id` annotation on Deployment | Prints `(Phase 3)` if not yet present |
+| **AGT audit-receipt id** | Phase 3 scaffold | Always `(Phase 3)` in current builds |
+
+```bash
+# Human-readable summary
+azureclaw attest <NAME>
+
+# Machine-readable (for CI diff or SIEM ingestion)
+azureclaw attest <NAME> --format json
+```
+
+---
+
+
 
 Validated by automated test suites (no live cluster needed):
 

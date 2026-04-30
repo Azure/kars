@@ -72,10 +72,68 @@ Three layers enforce network boundaries between tenants:
 
 Cross-namespace traffic is blocked by default. The only exception is AGT mesh traffic (port 8443) when governance is enabled — this requires an explicit ingress NetworkPolicy created by the controller.
 
-## Usage
+## Content Safety Floor (Phase 2)
 
-```bash
-# First tenant deploys the full AKS stack
+A Kubernetes `ValidatingAdmissionPolicy` (`azureclaw-content-safety-floor`)
+enforces a minimum severity threshold on every `InferencePolicy` CR before it
+is accepted by the API server.
+
+**How it works:**
+
+The VAP uses a CEL expression to check the `spec.inference.contentSafetyMinimum`
+field. Severity is an ordinal: `Safe (0) < Low (1) < Medium (2) < High (3)`.
+Lower ordinal = stricter. The default cluster floor is `Medium`, so any
+`InferencePolicy` that sets a floor *less strict than `Medium`* (i.e., `Low` or
+`Safe`) is rejected at admission.
+
+```yaml
+# Helm values to configure the floor
+admission:
+  contentSafetyFloor:
+    enabled: true        # default: true
+    minimum: Medium      # default: Medium; valid: Safe | Low | Medium | High
+```
+
+**Per-CR developer opt-out (non-production only):**
+
+A sandbox can bypass the floor by labelling the `InferencePolicy` with
+`azureclaw.azure.com/dev-only: "true"`. This label is rejected in namespaces
+that carry the `azureclaw.azure.com/production: "true"` label — the VAP
+enforces this invariant.
+
+**Requirements:** Kubernetes ≥ 1.30 (ValidatingAdmissionPolicy GA).
+
+## A2A Public Ingress (Phase 2)
+
+AzureClaw can expose a sandboxed agent to external A2A (Agent-to-Agent) traffic
+via a Kubernetes `LoadBalancer` service fronted by an ingress-layer TLS
+termination. This is opt-in at the Helm level.
+
+```yaml
+# deploy/helm/azureclaw/values.yaml
+a2aGateway:
+  enabled: true           # default: false; set to true to provision the gateway
+  tlsSecretName: ""       # cert-manager populates this automatically when empty
+```
+
+When `a2aGateway.enabled: true` the Helm chart provisions:
+- A `LoadBalancer` service exposing port 443 for inbound A2A traffic
+- A cert-manager `Certificate` CR for TLS (requires cert-manager ≥ 1.14 in
+  the cluster)
+- An ingress rule that routes `/.well-known/agent.json` requests to the
+  sandbox's A2A card server
+
+**Cross-tenant A2A federation:** an external agent (in another cluster or
+tenant) discovers the sandbox via its Agent Card (`/.well-known/agent.json`),
+then initiates an authenticated A2A session over the public ingress. The
+inference router's A2A handler validates the inbound Agent Card signature and
+enforces `ClawPairing` policy before forwarding the request to the sandbox.
+
+**Security note:** enabling public ingress adds a `Microsoft.Network/loadBalancers/write`
+action requirement to the deployer role — see [permissions.md](permissions.md)
+for details.
+
+
 azureclaw up --name tenant-a --isolation enhanced --model gpt-4.1
 
 # Subsequent tenants add sandboxes without redeploying infrastructure
