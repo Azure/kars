@@ -49,7 +49,13 @@ const POLICY_CR_KINDS: ReadonlyArray<{
   plural: string;
   refField: string;
 }> = [
+  // S13: spec-level refs.
   { kind: "ToolPolicy", plural: "toolpolicies", refField: "toolPolicyRef" },
+  {
+    kind: "InferencePolicy",
+    plural: "inferencepolicies",
+    refField: "inferenceRef",
+  },
   {
     kind: "InferencePolicy",
     plural: "inferencepolicies",
@@ -213,12 +219,26 @@ export function extractPolicyRefs(spec: unknown): Array<{
   }
   const gov = s.governance as Record<string, unknown> | undefined;
   if (gov && typeof gov === "object") {
+    // S13: same-namespace `toolPolicyRef.name` shape.
+    const tpr = gov.toolPolicyRef as Record<string, unknown> | undefined;
+    if (tpr && typeof tpr === "object" && typeof tpr.name === "string") {
+      out.push({ kind: "ToolPolicy", name: tpr.name });
+    }
+    // Legacy `governance.toolPolicy.ref: string` shape — pre-S13.
     const tp = gov.toolPolicy as Record<string, unknown> | undefined;
-    if (tp && typeof tp.ref === "string") {
+    if (tp && typeof tp === "object" && typeof tp.ref === "string") {
       out.push({ kind: "ToolPolicy", name: tp.ref });
     }
   }
-  return out;
+  // De-duplicate (S13 may reference the same ToolPolicy via two paths
+  // during the rollout window).
+  const seen = new Set<string>();
+  return out.filter((r) => {
+    const k = `${r.kind}/${r.name}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 async function buildReport(name: string, opts: { namespace: string }): Promise<AttestationReport> {

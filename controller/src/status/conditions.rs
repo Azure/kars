@@ -117,6 +117,15 @@ pub mod reason {
     /// cosign signature passed, signer identity matched cluster
     /// SignerPolicy, canonical form re-validated.
     pub const VERIFIED: &str = "Verified";
+    /// Phase 2 S13 — `InferencePolicyNotFound`: the
+    /// `ClawSandbox.spec.inferenceRef.name` did not resolve to an
+    /// `InferencePolicy` CR in the sandbox's namespace. Same-namespace
+    /// constraint is enforced; cross-namespace lookups are not allowed.
+    pub const INFERENCE_POLICY_NOT_FOUND: &str = "InferencePolicyNotFound";
+    /// Phase 2 S13 — `ToolPolicyNotFound`: governance is enabled and
+    /// `spec.governance.toolPolicyRef.name` did not resolve to a
+    /// `ToolPolicy` CR in the sandbox's namespace.
+    pub const TOOL_POLICY_NOT_FOUND: &str = "ToolPolicyNotFound";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
@@ -227,6 +236,8 @@ mod tests {
             reason::SPEC_INVALID,
             reason::DEPENDENCY_MISSING,
             reason::TIMED_OUT,
+            reason::INFERENCE_POLICY_NOT_FOUND,
+            reason::TOOL_POLICY_NOT_FOUND,
         ] {
             assert!(r.chars().next().unwrap().is_uppercase(), "{r}");
             assert!(!r.contains('_'), "{r}");

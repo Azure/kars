@@ -18,7 +18,7 @@ spec:
           properties:
             spec:
               type: object
-              required: ["runtime", "sandbox", "inference"]
+              required: ["runtime", "sandbox", "inferenceRef"]
               properties:
                 runtime:
                   type: object
@@ -315,38 +315,25 @@ spec:
                       items:
                         type: string
                       default: ["/sandbox", "/tmp"]
-                inference:
+                inferenceRef:
                   type: object
+                  description: |
+                    Same-namespace reference to an `InferencePolicy` CR
+                    (S13 config-authority refs). The controller resolves
+                    the target at reconcile time; missing target → status
+                    `Degraded` with reason `InferencePolicyNotFound`.
+                    Cross-namespace refs are not supported (security
+                    invariant — see `docs/crd-precedence.md`).
+                  required: ["name"]
                   properties:
-                    provider:
+                    name:
                       type: string
-                      enum: ["azure-openai", "azure-ai-foundry", "self-hosted"]
-                      default: "azure-openai"
-                    endpoint:
-                      type: string
-                    model:
-                      type: string
-                      default: "gpt-4.1"
-                    fallback:
-                      type: object
-                      properties:
-                        provider:
-                          type: string
-                        model:
-                          type: string
-                    contentSafety:
-                      type: boolean
-                      default: true
-                    promptShields:
-                      type: boolean
-                      default: true
-                    tokenBudget:
-                      type: object
-                      properties:
-                        daily:
-                          type: integer
-                        perRequest:
-                          type: integer
+                      description: "Name of a sibling InferencePolicy CR in the same namespace as this ClawSandbox."
+                      maxLength: 253
+                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                  x-kubernetes-validations:
+                    - rule: "self.name.size() > 0"
+                      message: "spec.inferenceRef.name must not be empty"
                 agent:
                   type: object
                   description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"
@@ -367,15 +354,33 @@ spec:
                 governance:
                   type: object
                   description: "AGT behavioral governance (opt-in for multi-agent)"
+                  x-kubernetes-validations:
+                    - rule: "!has(self.enabled) || !self.enabled || (has(self.toolPolicyRef) && self.toolPolicyRef.name.size() > 0)"
+                      message: "spec.governance.toolPolicyRef.name must be set when governance.enabled=true"
                   properties:
                     enabled:
                       type: boolean
                       default: false
                       description: "Enable AGT governance (tool-level policy, trust, audit)"
-                    toolPolicy:
-                      type: string
-                      default: "default"
-                      description: "Policy profile name (references policies ConfigMap)"
+                    toolPolicyRef:
+                      type: object
+                      description: |
+                        Same-namespace reference to a `ToolPolicy` CR
+                        (S13 config-authority refs). When
+                        `governance.enabled=true`, the controller
+                        resolves the target at reconcile time; missing
+                        target → status `Degraded` with reason
+                        `ToolPolicyNotFound`. The resolved CR's
+                        `metadata.name` doubles as the AGT policy
+                        profile name carried into the sandbox via
+                        `AGT_POLICY_PROFILE`. Cross-namespace refs are
+                        not supported.
+                      properties:
+                        name:
+                          type: string
+                          description: "Name of a sibling ToolPolicy CR in the same namespace as this ClawSandbox."
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
                     trustThreshold:
                       type: integer
                       default: 500
@@ -535,9 +540,9 @@ spec:
         - name: Runtime
           type: string
           jsonPath: .spec.runtime.kind
-        - name: Model
+        - name: InferencePolicy
           type: string
-          jsonPath: .spec.inference.model
+          jsonPath: .spec.inferenceRef.name
         - name: Isolation
           type: string
           jsonPath: .spec.sandbox.isolation
