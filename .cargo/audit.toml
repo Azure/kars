@@ -53,4 +53,16 @@ ignore = [
     # TODO: drop this ignore when `sigstore` switches off `json-syntax`/`locspan-derive`
     # or those crates adopt `proc-macro-error2`.
     "RUSTSEC-2024-0370",
+    # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained
+    # https://rustsec.org/advisories/RUSTSEC-2025-0134
+    #
+    # Severity: informational ("unmaintained"), NOT a vulnerability.
+    # Source: transitive dependency chain (S3.5, a2a-gateway + inference-router):
+    #   rustls 0.23 ecosystem → rustls-pemfile 1.x (legacy reader)
+    # `rustls-pemfile` 2.x exists but the rustls/tokio-rustls/rustls-native-certs
+    # ecosystem still pulls 1.x transitively. Switching to `rustls-pki-types`
+    # parsers requires upstream churn we don't control. Build-time + parse-only
+    # behavior; no runtime/network exposure beyond what rustls itself provides.
+    # TODO: drop this ignore once rustls-native-certs / tokio-rustls roll forward.
+    "RUSTSEC-2025-0134",
 ]
