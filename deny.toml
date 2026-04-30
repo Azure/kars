@@ -49,6 +49,11 @@ ignore = [
     # public keys. Re-evaluate when RustCrypto/RSA ships a const-time
     # backend (issue #626).
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained. Pulled
+    # transitively via the rustls 0.23 ecosystem (parse-only path).
+    # Re-evaluate when the rustls maintainers publish a successor or
+    # inline the parse path. Mirrors the ignore in `.cargo/audit.toml`.
+    "RUSTSEC-2025-0134",
 ]
 
 # ─── Licenses ───────────────────────────────────────────────────────────
