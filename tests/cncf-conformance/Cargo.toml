@@ -1,0 +1,22 @@
+[package]
+name = "azureclaw-cncf-conformance"
+description = "K8s AI Conformance v1.35+ test suite for AzureClaw CRDs and operator manifests (S17)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "cncf-conformance"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+walkdir = "2"
+
+[dev-dependencies]

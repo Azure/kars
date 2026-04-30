@@ -646,6 +646,33 @@ spec:
                   type: integer
                 activeSandbox:
                   type: string
+                conditions:
+                  type: array
+                  description: "Standard Kubernetes conditions for ClawPairing"
+                  items:
+                    type: object
+                    required: ["type", "status", "lastTransitionTime", "reason", "message"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+          x-kubernetes-validations:
+            - rule: "self.spec.slotsMax == null || self.spec.slotsMax >= 1"
+              message: "spec.slotsMax must be >= 1"
+            - rule: "self.spec.tokenBudget == null || self.spec.tokenBudget >= 0"
+              message: "spec.tokenBudget must be >= 0"
       subresources:
         status: {}
       additionalPrinterColumns:
@@ -658,6 +685,9 @@ spec:
         - name: Budget
           type: integer
           jsonPath: .spec.tokenBudget
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

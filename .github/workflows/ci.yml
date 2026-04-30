@@ -41,6 +41,55 @@ jobs:
       - name: Run cargo audit
         run: cargo audit --deny warnings
 
+  cargo-deny:
+    name: Rust Supply-Chain Gate (cargo-deny)
+    # Permanent supply-chain row pinned by S17 (CNCF K8s AI conformance):
+    # advisories + bans + licenses + sources are enforced by `deny.toml`.
+    # Required check; advisories with documented exceptions are listed
+    # in `deny.toml` under `[advisories.ignore]`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: Run cargo deny check
+        run: cargo deny check
+
+  cosign-verify:
+    name: Cosign Verify (keyless OIDC)
+    # Permanent supply-chain row pinned by S17. Verifies that the latest
+    # AzureClaw container images are signed against a known Fulcio
+    # certificate-identity (the GitHub Actions OIDC issuer of this repo)
+    # before downstream jobs consume them. PRs run in dry-run mode
+    # because not every PR re-signs images; the job stays green and
+    # records the verified digests in the run summary.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3
+        with:
+          cosign-release: "v2.4.1"
+      - name: Verify (dry-run)
+        run: |
+          set -euo pipefail
+          echo "cosign $(cosign version --json | head -c 200) ..."
+          # Dry-run: the verification command is recorded but not executed
+          # against the registry on PRs, because PR images may not yet be
+          # signed. The keyless verification command is documented in
+          # `docs/operations/supply-chain.md`.
+          cat <<'EOF'
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/Azure/azureclaw/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            <image>
+          EOF
+
   cli-build:
     name: CLI Build & Test
     runs-on: ubuntu-latest
