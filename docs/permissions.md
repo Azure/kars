@@ -72,6 +72,7 @@ here so you can build a **custom role** if you need tighter least-privilege.
 | `Microsoft.Network/virtualNetworks/write` | AKS VNet (if Bicep creates one) |
 | `Microsoft.CognitiveServices/accounts/write` | Provision Azure AI Foundry project (skip if you pass `--foundry-endpoint`) |
 | `Microsoft.Features/providers/features/register/action` | Register `EncryptionAtHost`, `KataVMIsolationPreview` |
+| `Microsoft.Network/loadBalancers/write` | Required when `a2aGateway.enabled: true` in Helm values — provisions the A2A public ingress `LoadBalancer` service |
 
 ### Custom role JSON (copy-paste)
 
@@ -113,6 +114,12 @@ Assign with:
 az role definition create --role-definition ./azureclaw-deployer.json
 az role assignment create --assignee "$USER" --role "AzureClaw Deployer" --scope "/subscriptions/$SUB"
 ```
+
+> **Note:** When `a2aGateway.enabled: true` in Helm values, cert-manager (≥ 1.14)
+> must be installed in the cluster before deploying — the chart creates a
+> `Certificate` CR for TLS provisioning. cert-manager is not deployed by
+> `azureclaw up`; install it independently with
+> `helm install cert-manager jetstack/cert-manager --set installCRDs=true`.
 
 ---
 
