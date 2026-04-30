@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Tests for plan item q7 — centralized router URL helpers.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { routerBase, routerUrl, routerWsBase, routerWsUrl } from "./index.js";

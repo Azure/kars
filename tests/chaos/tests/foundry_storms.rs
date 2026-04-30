@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Foundry 429 / 503 storm chaos — router-side reliability invariants.
 //!
 //! Models Azure OpenAI / AI Search / Document Intelligence pushing back

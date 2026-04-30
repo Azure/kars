@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Pair-request handling: validates a `pair_request` against a `ClawPairing`
 //! CRD, binds the requester's AMID, and produces the `PairResponse`.
 //!

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Provider contracts for the AzureClaw controller.
 //!
 //! Mirrors `inference-router/src/providers/` but scoped to controller-side

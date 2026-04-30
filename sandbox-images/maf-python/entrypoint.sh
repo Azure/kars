@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # AzureClaw MAF Python runtime entrypoint (S10.A4 scaffolding).
 #
 # This script is the in-pod adapter's bootstrap. It sets the env the

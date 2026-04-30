@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Stable Server-Side Apply field managers for every controller-emitted patch.
 //!
 //! Per `docs/implementation-plan.md` §10.4 #1 and the S7 Phase 2 slice

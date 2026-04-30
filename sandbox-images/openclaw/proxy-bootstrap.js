@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // proxy-bootstrap.js — preloaded via NODE_OPTIONS="--require ..."
 // Sets undici's EnvHttpProxyAgent as the global fetch dispatcher so all
 // outbound HTTP(S) requests honour HTTPS_PROXY / NO_PROXY env vars.

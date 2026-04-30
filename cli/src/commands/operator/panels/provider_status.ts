@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Provider-status panel (S14) — Foundry, AGT, ACR pull-through, AGC ingress,
  * identity provider.

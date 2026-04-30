@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Prometheus metrics for the AzureClaw controller.
 //!
 //! S7.E (workqueue metrics): exposes counters / histograms that

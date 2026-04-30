@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Thin helpers routing signing call-sites through the `SigningProvider`
 //! trait, so the legacy `state.governance.identity.sign(...)` path can be
 //! migrated one site at a time without breaking unrelated code.

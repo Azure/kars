@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Standalone CLI entry for the fake router — groundwork for the
  * docker-compose dev stack (plan item T4).

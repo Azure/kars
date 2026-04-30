@@ -1,4 +1,7 @@
 #![no_main]
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Fuzz target: chat-snapshot sanitizer.
 //!
 //! `sanitize_chat_snapshot` returns `Vec<u8>` (no Result) so *any* panic is a

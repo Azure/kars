@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Docker dev-mode sandbox spawn — `azureclaw dev` path.
 //!
 //! Extracted from `spawn.rs` per §4.2 hotspot decomposition. The

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ci/vendored-patch-audit.sh — enforces internal Phase 1 plan §0.2 #8, #9.
 #
 # If the PR changes vendor/** or bumps the AGT SDK pin (Cargo.toml /

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Configuration loaded from environment variables.
 
 use anyhow::{Context, Result};

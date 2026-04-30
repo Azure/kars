@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Pending-handoff store — the two-step "request → confirm" gate that
 //! defends against LLM self-initiated handoff (§9.9.9).
 //!

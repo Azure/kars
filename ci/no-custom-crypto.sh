@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ci/no-custom-crypto.sh — enforces internal Phase 1 plan §0.2 principle #8.
 #
 # No hand-rolled Signal/X3DH/Double-Ratchet, no hand-rolled OAuth/JWT signing,

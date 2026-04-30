@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! handoff route handlers and router builders.
 //!
 //! Extracted from `routes/mod.rs` as part of the Q1 split.

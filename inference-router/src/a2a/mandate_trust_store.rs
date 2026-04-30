@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Mandate-issuer trust store — type-safe wrapper around
 //! [`crate::a2a::trust_store::TrustStore`] for AP2 mandate signing
 //! keys.

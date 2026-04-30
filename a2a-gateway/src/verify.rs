@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Inbound JWS verification + replay protection.
 //!
 //! Wraps [`azureclaw_a2a_core::verify_inbound_card`] and adds a

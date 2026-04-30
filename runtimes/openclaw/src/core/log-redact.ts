@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Log redaction + sanitization helpers — extracted from plugin.ts in
 // S15.f.1 to give plugin.ts headroom under the §4.2 800-LOC cap.
 //

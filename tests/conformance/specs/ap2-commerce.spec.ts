@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * AP2 commerce caps — Phase 1 conformance corpus.
  *

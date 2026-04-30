@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * cli/src/core/foundry-discovery.ts — Azure AI Foundry project discovery.
  *

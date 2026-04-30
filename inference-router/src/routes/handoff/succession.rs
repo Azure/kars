@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `POST /agt/handoff/succession` handler.
 //!
 //! Extracted from `handoff/mod.rs` in S15.h

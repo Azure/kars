@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! JSON-RPC 2.0 frame types and parser.
 //!
 //! Strictly conforms to [the JSON-RPC 2.0 spec](https://www.jsonrpc.org/specification):

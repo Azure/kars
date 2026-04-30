@@ -1,4 +1,7 @@
 #![no_main]
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Fuzz target: A2A 1.0.0 JWS detached-content signing input builder.
 //!
 //! `build_signing_input` parses an attacker-controlled protected

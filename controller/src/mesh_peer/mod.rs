@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Controller mesh peer — connects the controller to AgentMesh relay as a
 //! long-running peer, enabling external agents to pair and request offloads.
 //!

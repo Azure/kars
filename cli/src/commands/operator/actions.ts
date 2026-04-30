@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Operator dashboard action helpers — extracted from startDashboard
 // (S15.e.4) so the closure stays under the §4.2 800-LOC cap. Bodies
 // are byte-identical to the originals; closure-captured `sandboxes`,

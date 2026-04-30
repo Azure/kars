@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * InferencePolicy panel (S4) — list + budgets + guardrail floor + model preference.
  */

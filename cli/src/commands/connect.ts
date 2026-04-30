@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { Command } from "commander";
 import chalk from "chalk";
 import { agentContainerName, runtimeKindFromCr, type RuntimeKind } from "../runtime.js";

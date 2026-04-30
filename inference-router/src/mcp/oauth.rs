@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! OAuth 2.1 access-token verifier for MCP 2025-03-26 / 2026 Streamable HTTP.
 // ci:loc-ok: The OAuth 2.1 / RFC 9700 / RFC 7517 (JWK) / RFC 7515 (JWS)
 // verifier is one cohesive defence-in-depth pipeline (header parsing,

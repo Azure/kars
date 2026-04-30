@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Integration tests for `GET /egress/learned/blocked` (S12.f).
 //!
 //! Mounts the egress sub-router with a real `AppState` and verifies the
