@@ -679,10 +679,11 @@ pub struct NetworkPolicyConfig {
     #[serde(default)]
     pub learn_egress: bool,
     /// Reference to a signed OCI artifact containing the canonical egress
-    /// allowlist. Populated by `azureclaw egress … --sign` (S12.c). Audit-only
-    /// in S12.a — controller still derives `NetworkPolicy` from
-    /// `allowed_endpoints`. Becomes authoritative in S12.e behind the
-    /// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate (S12.b).
+    /// allowlist. Populated by `azureclaw egress … --sign` (S12.c).
+    /// **Authoritative** in S12.e — when set, the controller derives
+    /// `NetworkPolicy` egress from the verified canonical artifact and
+    /// inline `allowed_endpoints` is ignored (a non-empty inline that
+    /// differs surfaces as `AllowlistDrift=True`).
     ///
     /// Canonical format documented at `docs/policy-canonical-format.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

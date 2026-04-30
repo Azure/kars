@@ -1,4 +1,4 @@
-//! Signed egress-allowlist artifact fetcher (S12.b, status-only).
+//! Signed egress-allowlist artifact fetcher (S12.b status-only → S12.e authoritative).
 //!
 //! Pulls a content-addressed OCI artifact referenced by
 //! [`crate::crd::OciArtifactRef`], verifies the cosign signature against a
@@ -6,22 +6,22 @@
 //! re-validates the byte-stable canonical-form rules from
 //! `docs/policy-canonical-format.md`.
 //!
-//! ## Status-only in S12.b
+//! ## Authoritative mode (S12.e)
 //!
-//! Verification semantics are wired in S12.b but the controller still
-//! derives the live `NetworkPolicy` from inline
-//! [`crate::crd::NetworkPolicyConfig::allowed_endpoints`]. This module's
-//! output is surfaced **only** as the `AllowlistVerified` Condition on
-//! `ClawSandbox.status` — it does not change network behavior. The
-//! authoritative-mode flip (controller derives `NetworkPolicy` from the
-//! verified artifact) ships in S12.e behind the same env gate.
+//! When `spec.networkPolicy.allowlistRef` is set on a `ClawSandbox`, the
+//! verified canonical artifact is the **authoritative** source of egress
+//! endpoints — inline `allowedEndpoints` is ignored (a non-empty inline
+//! that differs from the artifact surfaces as `AllowlistDrift=True`).
+//! When verification fails the controller fails closed: it preserves the
+//! last-known-good (LKG) endpoint set from the prior successful reconcile
+//! if available, and otherwise stamps `Degraded` without writing a
+//! NetworkPolicy that opens egress beyond the always-allowed defaults.
+//! See [`resolve_allowlist`].
 //!
-//! ## Feature gate
-//!
-//! The fetcher is **only** invoked when the env var
-//! `AZURECLAW_FEATURE_SIGNED_ALLOWLIST=1` is set. With the gate off, no
-//! `AllowlistVerified` Condition is emitted and existing deployments
-//! observe **no** behavior change.
+//! The S12.b `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in
+//! S12.e — the verification + authoritative resolution path is always-on
+//! when `allowlistRef` is set; existing deployments without `allowlistRef`
+//! observe no behavior change.
 //!
 //! ## SignerPolicy — S12.d (landed)
 //!
@@ -59,8 +59,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Env gate for the signed-allowlist path. See module docs.
-const FEATURE_ENV: &str = "AZURECLAW_FEATURE_SIGNED_ALLOWLIST";
 /// Comma-separated list of Fulcio issuer URLs (e.g.
 /// `https://token.actions.githubusercontent.com`). See [`SignerPolicyConfig`].
 const SIGNER_FULCIO_ISSUERS_ENV: &str = "AZURECLAW_SIGNER_FULCIO_ISSUERS";
@@ -86,8 +84,6 @@ const CACHE_TTL: Duration = Duration::from_secs(3600);
 /// [`reason_for_error`].
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
-    #[error("AZURECLAW_FEATURE_SIGNED_ALLOWLIST is not enabled")]
-    FeatureDisabled,
     #[error("SignerPolicy is not configured for this cluster")]
     SignerPolicyMissing,
     /// S12.d — `SignerPolicy` ConfigMap was present but failed to
@@ -119,7 +115,6 @@ pub enum FetchError {
 /// status (see plan §S12.b dispatch table).
 pub fn reason_for_error(err: &FetchError) -> Option<&'static str> {
     match err {
-        FetchError::FeatureDisabled => None,
         FetchError::SignerPolicyMissing => Some("SignerPolicyMissing"),
         FetchError::SignerPolicyMalformed(_) => Some("SignerPolicyMalformed"),
         FetchError::InvalidRef(_) => Some("InvalidRef"),
@@ -214,14 +209,6 @@ fn split_csv_env(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether the feature gate is enabled. Cheap; safe to call on every
-/// reconcile.
-pub fn feature_enabled() -> bool {
-    std::env::var(FEATURE_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
 // ─────────────────────────── cache ───────────────────────────
 
 #[derive(Debug, Clone)]
@@ -267,15 +254,113 @@ fn cache_clear() {
     }
 }
 
+// ─────────────────────── last-known-good cache (S12.e) ───────────────────────
+//
+// Per-(namespace, sandbox-name) cache of the most recently verified
+// allowlist endpoints. Distinct from the digest-keyed `cache` above:
+// the digest cache memoizes "this artifact's bytes are already
+// verified, skip the cosign roundtrip"; the LKG cache memoizes "the
+// last time we successfully resolved endpoints for THIS sandbox, this
+// is what we got" so a subsequent verify failure can fall back to
+// known-safe state instead of broadening egress.
+//
+// In-memory only by design — controller restart deliberately drops
+// the LKG so the first post-restart reconcile of a verify-failing
+// sandbox fails closed (no broad egress) instead of carrying a stale
+// allowlist across operator-visible controller events. See audit doc
+// `docs/security-audits/2026-04-30-phase2-s12-e-authoritative.md`.
+
+/// Per-sandbox state remembered across reconciles to support
+/// fail-closed degradation and drift-cleared debouncing.
+#[derive(Debug, Clone, Default)]
+struct LkgEntry {
+    /// Last successfully verified endpoint set, in canonical form.
+    /// `Some(empty)` is meaningful (deny-all artifact) and distinct
+    /// from `None` (never seen a successful verify).
+    endpoints: Option<Vec<crate::crd::EndpointConfig>>,
+    /// Number of consecutive reconciles where inline was empty *after*
+    /// drift was previously observed. Used to debounce
+    /// `AllowlistDrift=False/InlineCleared` for ≤2 reconciles before
+    /// dropping the condition entirely.
+    drift_clear_counter: u8,
+    /// Whether the most recent reconcile observed drift.
+    drift_active: bool,
+}
+
+fn lkg_cache() -> &'static Mutex<HashMap<(String, String), LkgEntry>> {
+    static LKG: OnceLock<Mutex<HashMap<(String, String), LkgEntry>>> = OnceLock::new();
+    LKG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lkg_get(ns: &str, name: &str) -> LkgEntry {
+    lkg_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&(ns.to_string(), name.to_string())).cloned())
+        .unwrap_or_default()
+}
+
+fn lkg_put(ns: &str, name: &str, entry: LkgEntry) {
+    if let Ok(mut g) = lkg_cache().lock() {
+        g.insert((ns.to_string(), name.to_string()), entry);
+    }
+}
+
+/// Drop the LKG entry for a given sandbox (test-only — used to
+/// simulate controller restart in unit tests).
+#[cfg(test)]
+#[allow(dead_code)]
+pub fn lkg_clear() {
+    if let Ok(mut g) = lkg_cache().lock() {
+        g.clear();
+    }
+}
+
+/// Convert a verified canonical endpoint list into the
+/// [`crate::crd::EndpointConfig`] shape consumed by the reconciler's
+/// NetworkPolicy builder. v1 canonical artifacts only carry
+/// `(host, port)`, so `methods` / `paths` are left `None` — the
+/// router (not the NetworkPolicy) is the enforcement point for those.
+fn canonical_to_endpoint_config(
+    endpoints: &[CanonicalEndpoint],
+) -> Vec<crate::crd::EndpointConfig> {
+    endpoints
+        .iter()
+        .map(|e| crate::crd::EndpointConfig {
+            host: e.host.clone(),
+            port: Some(e.port),
+            methods: None,
+            paths: None,
+        })
+        .collect()
+}
+
+/// Compare two endpoint lists for set-equality after normalizing
+/// (host lowercase, port defaults to 443 when absent). Used by drift
+/// detection — operators may write inline endpoints in any order /
+/// case, so a strict `Vec::eq` would over-flag.
+fn endpoint_lists_equivalent(
+    a: &[crate::crd::EndpointConfig],
+    b: &[crate::crd::EndpointConfig],
+) -> bool {
+    let norm = |list: &[crate::crd::EndpointConfig]| -> Vec<(String, u16)> {
+        let mut v: Vec<(String, u16)> = list
+            .iter()
+            .map(|e| (e.host.to_ascii_lowercase(), e.port.unwrap_or(443)))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    norm(a) == norm(b)
+}
+
 // ─────────────────────────── public entry ───────────────────────────
 
 /// Pull, verify, and parse a signed egress-allowlist artifact.
 ///
-/// Returns `Err(FetchError::FeatureDisabled)` if the env gate is off
-/// (defensive — the reconciler should check [`feature_enabled`] before
-/// calling). Returns `Err(FetchError::SignerPolicyMissing)` when no
-/// SignerPolicy is configured; this is the expected outcome in S12.b
-/// until S12.d ships the ConfigMap watcher.
+/// Returns `Err(FetchError::SignerPolicyMissing)` when no SignerPolicy
+/// is configured (cluster ConfigMap absent and env-fallback empty).
 ///
 /// On success, the result is cached by `<registry>/<repository>@<digest>`
 /// for [`CACHE_TTL`].
@@ -283,16 +368,12 @@ pub async fn fetch_and_verify(
     artifact_ref: &OciArtifactRef,
     signer_policy: &SignerPolicyConfig,
 ) -> Result<VerifiedAllowlist, FetchError> {
-    if !feature_enabled() {
-        return Err(FetchError::FeatureDisabled);
-    }
-
     validate_ref_shape(artifact_ref)?;
 
     if !signer_policy.is_configured() {
-        // S12.b fail-closed: without identity pinning we treat
-        // "valid sig" alone as insufficient authority. The reconciler
-        // surfaces this as `AllowlistVerified=False/SignerPolicyMissing`.
+        // Without identity pinning we treat "valid sig" alone as
+        // insufficient authority. The reconciler surfaces this as
+        // `AllowlistVerified=False/SignerPolicyMissing`.
         return Err(FetchError::SignerPolicyMissing);
     }
 
@@ -921,66 +1002,145 @@ pub mod canonical {
     }
 }
 
-// ─────────────────────── reconciler integration ────────────────────────
+// ─────────────────────── reconciler integration (S12.e) ───────────────────────
+//
+// `resolve_allowlist_with_handle` is the single entry point the
+// reconciler calls per reconcile of a `ClawSandbox`. It encapsulates the
+// authoritative-mode decision tree (artifact wins; LKG fallback;
+// fail-closed when no LKG; legacy inline path when no `allowlistRef`)
+// and emits the three S12.e conditions:
+//
+// - `AllowlistVerified`  — only emitted when `allowlistRef` is set.
+// - `AllowlistAuthoritative` — emitted whenever any user-visible
+//   networkPolicy concept is on the CR (ref or inline endpoints).
+// - `AllowlistDrift` — emitted when ref + inline both set and they
+//   differ; or briefly (≤2 reconciles) on the cleared transition.
+//
+// The reconciler consumes `endpoints` to build the NetworkPolicy and
+// `conditions` to merge into the status patch.
 
-/// Reconciler-side driver: when the feature gate is on AND the sandbox
-/// has a `networkPolicy.allowlistRef`, run the fetcher and translate the
-/// outcome into a Condition (with `lastTransitionTime` preserved across
-/// same-status reconciles via [`crate::status::conditions::preserve_transition_time`]).
-///
-/// Returns `None` when the slice should NOT emit any
-/// `AllowlistVerified` Condition: either the gate is off, or the CR has
-/// no `allowlistRef`, or the fetch returned a `Transient` error (in
-/// which case the prior condition value is preserved by the caller — we
-/// never overwrite known-good state with a flap).
-pub async fn maybe_verify_allowlist(
-    sandbox: &crate::crd::ClawSandbox,
-) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
-    maybe_verify_allowlist_with_handle(sandbox, &crate::signer_policy::global()).await
+/// Outcome of resolving the egress allowlist for a single sandbox.
+/// See [`resolve_allowlist_with_handle`].
+#[derive(Debug, Clone, Default)]
+pub struct AllowlistResolution {
+    /// Endpoints the controller should program into the user-defined
+    /// portion of the sandbox NetworkPolicy. `None` means "do not add
+    /// any user endpoints" — the always-allowed defaults (DNS, IMDS,
+    /// HTTPS for the inference-router, mesh) still apply, but the
+    /// sandbox's own additional egress is denied. Distinct from
+    /// `Some(empty)` which is a deliberate deny-all-user-egress signal
+    /// from a verified canonical artifact (also treated as no extra
+    /// rules, but with `AllowlistAuthoritative=True/Verified`).
+    pub endpoints: Option<Vec<crate::crd::EndpointConfig>>,
+    /// Conditions to surface. Caller upserts these into
+    /// `status.conditions` via the existing `_with_extras` helpers.
+    pub conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
+    /// True when `allowlistRef` is set, verify failed, and there is
+    /// no LKG to fall back to. Caller stamps `Degraded` in the status
+    /// patch (in addition to merging `conditions`) and requeues.
+    pub fail_closed_no_lkg: bool,
 }
 
-/// Test-friendly variant: callers can inject a
-/// [`crate::signer_policy::SharedSignerPolicy`] in any state without
-/// spinning up the watcher. Production code uses
-/// [`maybe_verify_allowlist`], which reads the process-global handle.
+/// Resolve the effective egress allowlist for a `ClawSandbox`.
 ///
-/// Resolution order:
-/// 1. `FromConfigMap(p)` → use `p`. If both lists empty (defensive —
-///    parser already rejects this), surface `SignerPolicyMissing`.
-/// 2. `Malformed(msg)` → surface `SignerPolicyMalformed(msg)`. **No**
-///    env-var fallback — a broken cluster config is an operator
-///    signal, not a reason to silently trust the (possibly stale) env.
-/// 3. `Absent` → fall back to env vars
-///    (`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`).
-///    Empty env → `SignerPolicyMissing` (existing S12.b semantics).
-pub async fn maybe_verify_allowlist_with_handle(
+/// Decision tree (see slice S12.e):
+///
+/// 1. **No `allowlistRef`** (legacy / inline path) → endpoints =
+///    inline; `AllowlistAuthoritative=False/Inline`; no
+///    `AllowlistVerified`; no `AllowlistDrift`. Zero behavior change
+///    versus pre-S12.e.
+/// 2. **`allowlistRef` set, verify ok** → endpoints = artifact;
+///    `AllowlistVerified=True/Verified`;
+///    `AllowlistAuthoritative=True/Verified`. If inline non-empty +
+///    differs → `AllowlistDrift=True/InlineDiffersFromArtifact`. The
+///    LKG cache is updated with the just-verified set.
+/// 3. **`allowlistRef` set, verify fails, LKG present** → endpoints =
+///    LKG; `AllowlistVerified=False/<reason>`;
+///    `AllowlistAuthoritative=False/StaleLKG`. Caller should also
+///    stamp Degraded (the verify-fail reason is surfaced via
+///    `AllowlistVerified`'s `reason`).
+/// 4. **`allowlistRef` set, verify fails, no LKG** → endpoints =
+///    None; `AllowlistVerified=False/<reason>`;
+///    `AllowlistAuthoritative=False/FailedClosed`;
+///    `fail_closed_no_lkg = true`.
+///
+/// `Transient` fetch errors preserve the prior `AllowlistVerified`
+/// condition and re-use the prior LKG (if any) — a network blip must
+/// not collapse a working sandbox.
+pub async fn resolve_allowlist_with_handle(
     sandbox: &crate::crd::ClawSandbox,
     signer_policy_handle: &crate::signer_policy::SharedSignerPolicy,
-) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+) -> AllowlistResolution {
     use crate::signer_policy::SignerPolicyState;
     use crate::status::conditions::{
-        TYPE_ALLOWLIST_VERIFIED, preserve_transition_time, reason as cond_reason,
-        status as cond_status,
+        TYPE_ALLOWLIST_AUTHORITATIVE, TYPE_ALLOWLIST_DRIFT, TYPE_ALLOWLIST_VERIFIED, new_condition,
+        preserve_transition_time, reason as cond_reason, status as cond_status,
     };
-    if !feature_enabled() {
-        return None;
-    }
-    let artifact_ref = sandbox
-        .spec
-        .network_policy
-        .as_ref()
-        .and_then(|np| np.allowlist_ref.as_ref())?;
 
-    let prior = sandbox.status.as_ref().and_then(|s| {
-        s.conditions
-            .iter()
-            .find(|c| c.type_ == TYPE_ALLOWLIST_VERIFIED)
-    });
+    let np = match sandbox.spec.network_policy.as_ref() {
+        Some(np) => np,
+        None => {
+            // No networkPolicy at all → no user endpoints, no
+            // conditions to emit. The reconciler builds the standard
+            // baseline NetworkPolicy and that's it.
+            return AllowlistResolution::default();
+        }
+    };
+
+    let inline = np.allowed_endpoints.clone().unwrap_or_default();
+    let inline_present = !inline.is_empty();
+
+    let prior_conditions: &[_] = sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let prior_verified = prior_conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_ALLOWLIST_VERIFIED);
+    let prior_authoritative = prior_conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_ALLOWLIST_AUTHORITATIVE);
+    let prior_drift = prior_conditions
+        .iter()
+        .find(|c| c.type_ == TYPE_ALLOWLIST_DRIFT);
     let generation = sandbox.metadata.generation;
 
-    // Resolve the live SignerPolicy. ConfigMap wins; malformed is a
-    // hard error path; absent → env fallback.
-    let result: Result<VerifiedAllowlist, FetchError> = match signer_policy_handle.snapshot() {
+    // ─── Branch 1: legacy inline path ───
+    let Some(artifact_ref) = np.allowlist_ref.as_ref() else {
+        let mut conditions = Vec::new();
+        if inline_present {
+            conditions.push(preserve_transition_time(
+                prior_authoritative,
+                TYPE_ALLOWLIST_AUTHORITATIVE,
+                cond_status::FALSE,
+                cond_reason::INLINE,
+                "no allowlistRef set; using inline allowedEndpoints",
+                generation,
+            ));
+        }
+        return AllowlistResolution {
+            endpoints: if inline_present { Some(inline) } else { None },
+            conditions,
+            fail_closed_no_lkg: false,
+        };
+    };
+
+    // ─── Branches 2–4: allowlistRef is set ───
+    let ns = sandbox
+        .metadata
+        .namespace
+        .clone()
+        .unwrap_or_else(|| "default".into());
+    let name = sandbox
+        .metadata
+        .name
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
+    let mut lkg_entry = lkg_get(&ns, &name);
+
+    // Run the verify path.
+    let verify: Result<VerifiedAllowlist, FetchError> = match signer_policy_handle.snapshot() {
         SignerPolicyState::FromConfigMap(p) => {
             let cfg: SignerPolicyConfig = p.into();
             fetch_and_verify(artifact_ref, &cfg).await
@@ -992,44 +1152,239 @@ pub async fn maybe_verify_allowlist_with_handle(
         }
     };
 
-    match result {
+    let mut conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> = Vec::new();
+    let emit_drift_condition =
+        |conds: &mut Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
+         entry: &mut LkgEntry,
+         is_drift: bool,
+         msg: &str| {
+            if is_drift {
+                entry.drift_active = true;
+                entry.drift_clear_counter = 0;
+                conds.push(preserve_transition_time(
+                    prior_drift,
+                    TYPE_ALLOWLIST_DRIFT,
+                    cond_status::TRUE,
+                    cond_reason::INLINE_DIFFERS_FROM_ARTIFACT,
+                    msg,
+                    generation,
+                ));
+            } else if entry.drift_active {
+                // Drift just cleared — emit False/InlineCleared and
+                // count down. After 2 successive cleared reconciles we
+                // stop emitting (condition drops out of status on the
+                // next merge-patch).
+                entry.drift_clear_counter = entry.drift_clear_counter.saturating_add(1);
+                if entry.drift_clear_counter <= 2 {
+                    conds.push(preserve_transition_time(
+                        prior_drift,
+                        TYPE_ALLOWLIST_DRIFT,
+                        cond_status::FALSE,
+                        cond_reason::INLINE_CLEARED,
+                        msg,
+                        generation,
+                    ));
+                } else {
+                    entry.drift_active = false;
+                    entry.drift_clear_counter = 0;
+                }
+            }
+        };
+
+    match verify {
+        // ── Branch 2: verify ok ──
         Ok(verified) => {
             tracing::info!(
                 digest = %verified.digest,
                 gen = verified.generation,
-                "AllowlistVerified=True (S12.b status-only)"
+                "AllowlistVerified=True; AllowlistAuthoritative=True"
             );
-            let msg = format!(
-                "digest={}, generation={}",
-                verified.digest, verified.generation
-            );
-            Some(preserve_transition_time(
-                prior,
+            let derived = canonical_to_endpoint_config(&verified.endpoints);
+            let drift = inline_present && !endpoint_lists_equivalent(&inline, &derived);
+
+            conditions.push(preserve_transition_time(
+                prior_verified,
                 TYPE_ALLOWLIST_VERIFIED,
                 cond_status::TRUE,
                 cond_reason::VERIFIED,
-                &msg,
+                &format!(
+                    "digest={}, generation={}",
+                    verified.digest, verified.generation
+                ),
                 generation,
-            ))
+            ));
+            conditions.push(preserve_transition_time(
+                prior_authoritative,
+                TYPE_ALLOWLIST_AUTHORITATIVE,
+                cond_status::TRUE,
+                cond_reason::VERIFIED,
+                &format!(
+                    "deriving NetworkPolicy egress from artifact {}",
+                    verified.digest
+                ),
+                generation,
+            ));
+            emit_drift_condition(
+                &mut conditions,
+                &mut lkg_entry,
+                drift,
+                if drift {
+                    "inline allowedEndpoints differs from verified artifact; artifact wins"
+                } else {
+                    "inline allowedEndpoints empty or matches artifact"
+                },
+            );
+
+            // Update LKG with the freshly verified endpoints.
+            lkg_entry.endpoints = Some(derived.clone());
+            lkg_put(&ns, &name, lkg_entry);
+
+            AllowlistResolution {
+                endpoints: Some(derived),
+                conditions,
+                fail_closed_no_lkg: false,
+            }
         }
+        // ── Transient: preserve prior; do not stamp anew. ──
         Err(FetchError::Transient(msg)) => {
-            tracing::warn!(error = %msg, "policy_fetcher transient; preserving prior AllowlistVerified");
-            prior.cloned()
+            tracing::warn!(error = %msg, "policy_fetcher transient; preserving prior conditions");
+            if let Some(c) = prior_verified.cloned() {
+                conditions.push(c);
+            }
+            if let Some(c) = prior_authoritative.cloned() {
+                conditions.push(c);
+            }
+            if let Some(c) = prior_drift.cloned() {
+                conditions.push(c);
+            }
+            // Endpoints: prefer LKG; otherwise None (fail-closed).
+            let lkg_endpoints = lkg_entry.endpoints.clone();
+            let fail_closed = lkg_endpoints.is_none();
+            AllowlistResolution {
+                endpoints: lkg_endpoints,
+                conditions,
+                fail_closed_no_lkg: fail_closed,
+            }
         }
-        Err(FetchError::FeatureDisabled) => None,
+        // ── Branches 3–4: verify failed (terminal). ──
         Err(other) => {
             let reason = reason_for_error(&other).unwrap_or("Failed");
-            tracing::warn!(reason = %reason, error = %other, "AllowlistVerified=False");
-            Some(preserve_transition_time(
-                prior,
+            let msg = other.to_string();
+            tracing::warn!(reason = %reason, error = %msg, "AllowlistVerified=False");
+            conditions.push(new_condition(
                 TYPE_ALLOWLIST_VERIFIED,
                 cond_status::FALSE,
                 reason,
-                &other.to_string(),
+                &msg,
                 generation,
-            ))
+            ));
+            // Do not overwrite prior_verified's transition time when
+            // status flipped — `preserve_transition_time` already
+            // handles that via the prior condition lookup. Use it:
+            let last = conditions.last_mut().unwrap();
+            *last = preserve_transition_time(
+                prior_verified,
+                TYPE_ALLOWLIST_VERIFIED,
+                cond_status::FALSE,
+                reason,
+                &msg,
+                generation,
+            );
+
+            match lkg_entry.endpoints.clone() {
+                // Branch 3: LKG present → use it.
+                Some(lkg_endpoints) => {
+                    conditions.push(preserve_transition_time(
+                        prior_authoritative,
+                        TYPE_ALLOWLIST_AUTHORITATIVE,
+                        cond_status::FALSE,
+                        cond_reason::STALE_LKG,
+                        &format!("verify failed ({reason}); preserving last-known-good endpoints"),
+                        generation,
+                    ));
+                    // Drift is undefined when verify fails (we don't
+                    // know the artifact). Preserve the prior drift
+                    // condition if any so operators don't lose
+                    // visibility across a flap.
+                    if let Some(c) = prior_drift.cloned() {
+                        conditions.push(c);
+                    }
+                    lkg_put(&ns, &name, lkg_entry);
+                    AllowlistResolution {
+                        endpoints: Some(lkg_endpoints),
+                        conditions,
+                        fail_closed_no_lkg: false,
+                    }
+                }
+                // Branch 4: no LKG → fail closed.
+                None => {
+                    conditions.push(preserve_transition_time(
+                        prior_authoritative,
+                        TYPE_ALLOWLIST_AUTHORITATIVE,
+                        cond_status::FALSE,
+                        cond_reason::FAILED_CLOSED,
+                        &format!(
+                            "verify failed ({reason}) and no last-known-good endpoints; refusing to broaden egress"
+                        ),
+                        generation,
+                    ));
+                    AllowlistResolution {
+                        endpoints: None,
+                        conditions,
+                        fail_closed_no_lkg: true,
+                    }
+                }
+            }
         }
     }
+}
+
+/// Production-side wrapper around [`resolve_allowlist_with_handle`]
+/// using the process-global signer-policy handle.
+pub async fn resolve_allowlist(sandbox: &crate::crd::ClawSandbox) -> AllowlistResolution {
+    resolve_allowlist_with_handle(sandbox, &crate::signer_policy::global()).await
+}
+
+/// Reconciler-side driver: when the sandbox has a
+/// `networkPolicy.allowlistRef`, run the fetcher and translate the
+/// outcome into a Condition (with `lastTransitionTime` preserved across
+/// same-status reconciles via [`crate::status::conditions::preserve_transition_time`]).
+///
+/// Kept as a thin wrapper around [`resolve_allowlist`] — returns just
+/// the `AllowlistVerified` condition. New code should consume
+/// [`resolve_allowlist`] directly to also get `AllowlistAuthoritative`
+/// / `AllowlistDrift` and the resolved endpoints.
+///
+/// Returns `None` when no `allowlistRef` is set, or when the fetch
+/// returned a `Transient` error and there is no prior condition to
+/// preserve.
+#[allow(dead_code)]
+pub async fn maybe_verify_allowlist(
+    sandbox: &crate::crd::ClawSandbox,
+) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    maybe_verify_allowlist_with_handle(sandbox, &crate::signer_policy::global()).await
+}
+
+/// Test-friendly variant: callers can inject a
+/// [`crate::signer_policy::SharedSignerPolicy`] in any state without
+/// spinning up the watcher. Production code uses
+/// [`maybe_verify_allowlist`], which reads the process-global handle.
+#[allow(dead_code)]
+pub async fn maybe_verify_allowlist_with_handle(
+    sandbox: &crate::crd::ClawSandbox,
+    signer_policy_handle: &crate::signer_policy::SharedSignerPolicy,
+) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    use crate::status::conditions::TYPE_ALLOWLIST_VERIFIED;
+    sandbox
+        .spec
+        .network_policy
+        .as_ref()
+        .and_then(|np| np.allowlist_ref.as_ref())?;
+    let resolution = resolve_allowlist_with_handle(sandbox, signer_policy_handle).await;
+    resolution
+        .conditions
+        .into_iter()
+        .find(|c| c.type_ == TYPE_ALLOWLIST_VERIFIED)
 }
 
 // ─────────────────────────── tests ───────────────────────────
@@ -1097,30 +1452,6 @@ mod tests {
          - host: api.github.com\n    port: 443\n  \
          - host: dev.azure.com\n    port: 443\n"
             .to_string()
-    }
-
-    #[test]
-    fn feature_disabled_by_default() {
-        let _g = env_lock().lock().unwrap();
-        let _e = EnvGuard::unset(FEATURE_ENV);
-        assert!(!feature_enabled());
-    }
-
-    #[test]
-    fn feature_enabled_when_env_one() {
-        let _g = env_lock().lock().unwrap();
-        let _e = EnvGuard::set(FEATURE_ENV, "1");
-        assert!(feature_enabled());
-    }
-
-    #[test]
-    fn feature_disabled_for_non_one_truthy_values() {
-        let _g = env_lock().lock().unwrap();
-        // Operators sometimes set "true" expecting it to work; we
-        // accept only "1" to keep the surface unambiguous (mirrors
-        // many Kubernetes feature gates).
-        let _e = EnvGuard::set(FEATURE_ENV, "true");
-        assert!(!feature_enabled());
     }
 
     #[test]
@@ -1339,7 +1670,6 @@ mod tests {
 
     #[test]
     fn reason_for_error_maps_each_variant() {
-        assert_eq!(reason_for_error(&FetchError::FeatureDisabled), None);
         assert_eq!(
             reason_for_error(&FetchError::SignerPolicyMissing),
             Some("SignerPolicyMissing")
@@ -1417,18 +1747,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_returns_feature_disabled_when_gate_off() {
-        let _g = env_lock().lock().unwrap();
-        let _e = EnvGuard::unset(FEATURE_ENV);
-        let policy = SignerPolicyConfig::default();
-        let err = fetch_and_verify(&good_ref(), &policy).await.unwrap_err();
-        assert!(matches!(err, FetchError::FeatureDisabled));
-    }
-
-    #[tokio::test]
     async fn fetch_returns_signer_policy_missing_when_no_signer_policy() {
         let _g = env_lock().lock().unwrap();
-        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
         let _e2 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e3 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         let policy = SignerPolicyConfig::from_env();
@@ -1442,7 +1762,6 @@ mod tests {
     #[tokio::test]
     async fn fetch_returns_invalid_ref_for_bad_digest() {
         let _g = env_lock().lock().unwrap();
-        let _e = EnvGuard::set(FEATURE_ENV, "1");
         let mut r = good_ref();
         r.digest = "not-a-digest".into();
         let policy = SignerPolicyConfig::default();
@@ -1500,21 +1819,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_handle_returns_none_when_feature_gate_off() {
-        let _g = env_lock().lock().unwrap();
-        let _e = EnvGuard::unset(FEATURE_ENV);
-        let sb = sandbox_with_allowlist_ref();
-        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
-        assert!(
-            maybe_verify_allowlist_with_handle(&sb, &h).await.is_none(),
-            "feature off → no condition emitted"
-        );
-    }
-
-    #[tokio::test]
     async fn with_handle_malformed_emits_signer_policy_malformed_condition() {
         let _g = env_lock().lock().unwrap();
-        let _e = EnvGuard::set(FEATURE_ENV, "1");
         let sb = sandbox_with_allowlist_ref();
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Malformed(
             "missing required key `fulcioIssuers`".into(),
@@ -1538,7 +1844,6 @@ mod tests {
         // SignerPolicyMalformed — operators need the signal that
         // their cluster config is broken.
         let _g = env_lock().lock().unwrap();
-        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
         let _e2 = EnvGuard::set(SIGNER_FULCIO_ISSUERS_ENV, "https://issuer.example");
         let _e3 = EnvGuard::set(SIGNER_SAN_PATTERNS_ENV, "signer@example.com");
         let sb = sandbox_with_allowlist_ref();
@@ -1552,7 +1857,6 @@ mod tests {
     #[tokio::test]
     async fn with_handle_absent_falls_back_to_env_missing() {
         let _g = env_lock().lock().unwrap();
-        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
         let _e2 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e3 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         let sb = sandbox_with_allowlist_ref();
@@ -1570,7 +1874,6 @@ mod tests {
         // simultaneously unsetting potentially-stale env vars on
         // every replica.)
         let _g = env_lock().lock().unwrap();
-        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
         let _e2 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e3 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         let sb = sandbox_with_allowlist_ref();
@@ -1592,8 +1895,336 @@ mod tests {
             );
             assert_ne!(cond.reason, "SignerPolicyMalformed");
         }
-        // None is also acceptable (Transient → preserve prior, no
-        // prior → None). The forbidden outcome is a missing/malformed
-        // reason, which we asserted above.
+    }
+
+    // ─────────────── S12.e: resolver / LKG / drift tests ───────────────
+
+    fn ep(host: &str, port: Option<u16>) -> crate::crd::EndpointConfig {
+        crate::crd::EndpointConfig {
+            host: host.into(),
+            port,
+            methods: None,
+            paths: None,
+        }
+    }
+
+    fn sandbox_with_inline_only(eps: Vec<crate::crd::EndpointConfig>) -> ClawSandbox {
+        ClawSandbox {
+            metadata: ObjectMeta {
+                name: Some("inline".into()),
+                namespace: Some("azureclaw-inline".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: ClawSandboxSpec {
+                network_policy: Some(NetworkPolicyConfig {
+                    allowed_endpoints: if eps.is_empty() { None } else { Some(eps) },
+                    allowlist_ref: None,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            status: None,
+        }
+    }
+
+    fn sandbox_with_ref_and_inline(
+        name: &str,
+        ns: &str,
+        inline: Vec<crate::crd::EndpointConfig>,
+    ) -> ClawSandbox {
+        ClawSandbox {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                namespace: Some(ns.into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: ClawSandboxSpec {
+                network_policy: Some(NetworkPolicyConfig {
+                    allowed_endpoints: if inline.is_empty() {
+                        None
+                    } else {
+                        Some(inline)
+                    },
+                    allowlist_ref: Some(good_ref()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            status: None,
+        }
+    }
+
+    fn cond_by_type<'a>(
+        conds: &'a [k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+        ty: &str,
+    ) -> Option<&'a k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+        conds.iter().find(|c| c.type_ == ty)
+    }
+
+    #[tokio::test]
+    async fn resolve_no_network_policy_returns_default() {
+        let _g = env_lock().lock().unwrap();
+        let sb = ClawSandbox {
+            metadata: ObjectMeta {
+                name: Some("nope".into()),
+                namespace: Some("azureclaw-nope".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: ClawSandboxSpec {
+                network_policy: None,
+                ..Default::default()
+            },
+            status: None,
+        };
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.endpoints.is_none());
+        assert!(res.conditions.is_empty());
+        assert!(!res.fail_closed_no_lkg);
+    }
+
+    #[tokio::test]
+    async fn resolve_inline_only_emits_authoritative_inline() {
+        let _g = env_lock().lock().unwrap();
+        let sb = sandbox_with_inline_only(vec![ep("api.example.com", None)]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.endpoints.is_some(), "inline endpoints carried through");
+        assert_eq!(res.endpoints.as_ref().unwrap().len(), 1);
+        let auth = cond_by_type(&res.conditions, "AllowlistAuthoritative")
+            .expect("AllowlistAuthoritative emitted");
+        assert_eq!(auth.status, "False");
+        assert_eq!(auth.reason, "Inline");
+        assert!(cond_by_type(&res.conditions, "AllowlistVerified").is_none());
+        assert!(cond_by_type(&res.conditions, "AllowlistDrift").is_none());
+        assert!(!res.fail_closed_no_lkg);
+    }
+
+    #[tokio::test]
+    async fn resolve_inline_empty_no_ref_emits_no_conditions() {
+        let _g = env_lock().lock().unwrap();
+        let sb = sandbox_with_inline_only(vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.endpoints.is_none());
+        assert!(
+            res.conditions.is_empty(),
+            "no AllowlistAuthoritative when there's nothing to authorise"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_with_ref_no_signer_no_lkg_fails_closed() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        lkg_clear();
+        let sb = sandbox_with_ref_and_inline("noLkgSandbox", "azureclaw-fc", vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(
+            res.endpoints.is_none(),
+            "no LKG → endpoints must be None (fail-closed)"
+        );
+        assert!(res.fail_closed_no_lkg);
+        let v = cond_by_type(&res.conditions, "AllowlistVerified").expect("Verified emitted");
+        assert_eq!(v.status, "False");
+        assert_eq!(v.reason, "SignerPolicyMissing");
+        let a =
+            cond_by_type(&res.conditions, "AllowlistAuthoritative").expect("Authoritative emitted");
+        assert_eq!(a.status, "False");
+        assert_eq!(a.reason, "FailedClosed");
+    }
+
+    #[tokio::test]
+    async fn resolve_with_ref_no_signer_with_lkg_uses_lkg() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        lkg_clear();
+        lkg_put(
+            "azureclaw-lkg",
+            "lkgSandbox",
+            LkgEntry {
+                endpoints: Some(vec![ep("cached.example.com", Some(443))]),
+                drift_clear_counter: 0,
+                drift_active: false,
+            },
+        );
+        let sb = sandbox_with_ref_and_inline("lkgSandbox", "azureclaw-lkg", vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        let eps = res.endpoints.as_ref().expect("endpoints from LKG");
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].host, "cached.example.com");
+        assert!(!res.fail_closed_no_lkg);
+        let a =
+            cond_by_type(&res.conditions, "AllowlistAuthoritative").expect("Authoritative emitted");
+        assert_eq!(a.status, "False");
+        assert_eq!(a.reason, "StaleLKG");
+        lkg_clear();
+    }
+
+    #[tokio::test]
+    async fn controller_restart_simulation_drops_lkg_fail_closed() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        lkg_put(
+            "azureclaw-restart",
+            "rs",
+            LkgEntry {
+                endpoints: Some(vec![ep("a.example", None)]),
+                drift_clear_counter: 0,
+                drift_active: false,
+            },
+        );
+        lkg_clear();
+        let sb = sandbox_with_ref_and_inline("rs", "azureclaw-restart", vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.fail_closed_no_lkg, "restart must drop LKG");
+        assert!(res.endpoints.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_with_ref_does_not_silently_use_inline_as_fallback() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        lkg_clear();
+        let sb = sandbox_with_ref_and_inline(
+            "evil",
+            "azureclaw-evil",
+            vec![ep("attacker.example.com", None)],
+        );
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.endpoints.is_none());
+        assert!(res.fail_closed_no_lkg);
+    }
+
+    #[test]
+    fn endpoint_lists_equivalent_normalizes_case_and_default_port() {
+        let a = vec![ep("API.Example.COM", None), ep("b.example", Some(443))];
+        let b = vec![ep("b.example", None), ep("api.example.com", Some(443))];
+        assert!(endpoint_lists_equivalent(&a, &b));
+    }
+
+    #[test]
+    fn endpoint_lists_equivalent_distinguishes_ports() {
+        let a = vec![ep("api.example", Some(443))];
+        let b = vec![ep("api.example", Some(8443))];
+        assert!(!endpoint_lists_equivalent(&a, &b));
+    }
+
+    #[test]
+    fn endpoint_lists_equivalent_distinguishes_hosts() {
+        let a = vec![ep("api.example", None)];
+        let b = vec![ep("other.example", None)];
+        assert!(!endpoint_lists_equivalent(&a, &b));
+    }
+
+    #[test]
+    fn canonical_to_endpoint_config_round_trips_host_port() {
+        let canonical = vec![
+            CanonicalEndpoint {
+                host: "api.example.com".into(),
+                port: 443,
+                protocol: None,
+            },
+            CanonicalEndpoint {
+                host: "telemetry.example.com".into(),
+                port: 8443,
+                protocol: None,
+            },
+        ];
+        let derived = canonical_to_endpoint_config(&canonical);
+        assert_eq!(derived.len(), 2);
+        assert_eq!(derived[0].host, "api.example.com");
+        assert_eq!(derived[0].port, Some(443));
+        assert_eq!(derived[1].port, Some(8443));
+        assert!(
+            derived
+                .iter()
+                .all(|e| e.methods.is_none() && e.paths.is_none())
+        );
+    }
+
+    #[test]
+    fn lkg_round_trip_get_put_clear() {
+        let _g = env_lock().lock().unwrap();
+        lkg_clear();
+        let entry = LkgEntry {
+            endpoints: Some(vec![ep("x.example", None)]),
+            drift_clear_counter: 1,
+            drift_active: true,
+        };
+        lkg_put("ns", "name", entry.clone());
+        let got = lkg_get("ns", "name");
+        assert_eq!(got.endpoints.as_ref().unwrap().len(), 1);
+        assert!(got.drift_active);
+        assert_eq!(got.drift_clear_counter, 1);
+        lkg_clear();
+        let after = lkg_get("ns", "name");
+        assert!(after.endpoints.is_none());
+        assert!(!after.drift_active);
+    }
+
+    #[test]
+    fn allowlist_resolution_default_is_no_op() {
+        let r = AllowlistResolution::default();
+        assert!(r.endpoints.is_none());
+        assert!(r.conditions.is_empty());
+        assert!(!r.fail_closed_no_lkg);
+    }
+
+    #[tokio::test]
+    async fn resolve_inline_with_ref_does_not_emit_authoritative_inline() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        lkg_clear();
+        let sb = sandbox_with_ref_and_inline(
+            "withInline",
+            "azureclaw-wi",
+            vec![ep("inline.example", None)],
+        );
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        let a =
+            cond_by_type(&res.conditions, "AllowlistAuthoritative").expect("Authoritative emitted");
+        assert_ne!(a.reason, "Inline");
+    }
+
+    #[tokio::test]
+    async fn resolve_fail_closed_emits_two_conditions() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        lkg_clear();
+        let sb = sandbox_with_ref_and_inline("two", "azureclaw-two", vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert_eq!(
+            res.conditions.len(),
+            2,
+            "Verified + Authoritative on fail-closed; no Drift"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_malformed_signer_policy_fails_closed_with_specific_reason() {
+        let _g = env_lock().lock().unwrap();
+        lkg_clear();
+        let sb = sandbox_with_ref_and_inline("malformed", "azureclaw-mal", vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Malformed("bad yaml".into()));
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.fail_closed_no_lkg);
+        let v = cond_by_type(&res.conditions, "AllowlistVerified").expect("Verified emitted");
+        assert_eq!(v.reason, "SignerPolicyMalformed");
     }
 }

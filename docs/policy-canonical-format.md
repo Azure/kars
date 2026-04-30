@@ -84,11 +84,11 @@ When v2 is needed (e.g., to reintroduce wildcards, methods, paths, CIDR ranges):
 
 | Slice | Owns |
 |---|---|
-| **S12.a** *(this slice)* | Format definition, CRD field, no behavior |
-| S12.b | Controller fetcher + format validator (status-only) |
-| S12.c | CLI canonical serializer + signing |
-| S12.d | `SignerPolicy` ConfigMap + identity-pinned authority *(this slice — landed)* |
-| S12.e | Authoritative ref mode (controller derives `allowedEndpoints` from canonical bytes) |
+| **S12.a** | Format definition, CRD field, no behavior *(landed)* |
+| S12.b | Controller fetcher + format validator (status-only) *(landed)* |
+| S12.c | CLI canonical serializer + signing *(landed)* |
+| S12.d | `SignerPolicy` ConfigMap + identity-pinned authority *(landed)* |
+| **S12.e** *(this slice — landed)* | Authoritative ref mode (controller derives NetworkPolicy egress from verified canonical bytes; fail-closed with LKG fallback) |
 
 ## Producer (CLI)
 
@@ -133,3 +133,49 @@ on a `ClawSandbox`. The `oras` and `cosign` binaries must be present
 in `$PATH`; missing-binary errors include the upstream install URL
 (see `https://oras.land/docs/installation` and
 `https://docs.sigstore.dev/cosign/installation`).
+
+## Authoritative mode (S12.e — current behavior)
+
+When `spec.networkPolicy.allowlistRef` is set, the controller treats
+the verified canonical artifact as the **source of truth** for
+NetworkPolicy egress. The decision tree per reconcile:
+
+1. **No `allowlistRef`** → legacy inline path: NP egress derived from
+   inline `allowedEndpoints`. `AllowlistAuthoritative=False/Inline` is
+   surfaced if inline is non-empty (otherwise no S12 condition is
+   emitted).
+2. **`allowlistRef` set + verify ok** → NP egress derived from the
+   artifact. Inline (if any) is ignored. Surfaced:
+   - `AllowlistVerified=True/Verified`
+   - `AllowlistAuthoritative=True/Verified`
+   - `AllowlistDrift=True/InlineDiffersFromArtifact` if inline is
+     non-empty and disagrees with the artifact (set-equal check after
+     host-lowercase + default-port-443 normalization)
+3. **`allowlistRef` set + verify fails + last-known-good (LKG)
+   present** → NP egress derived from LKG. Surfaced:
+   - `AllowlistVerified=False/<reason>` (e.g. `SignerPolicyMissing`,
+     `Unauthorized`, `DigestMismatch`, `IdentityMismatch`,
+     `CanonicalFormViolation`)
+   - `AllowlistAuthoritative=False/StaleLKG`
+4. **`allowlistRef` set + verify fails + no LKG** → fail closed:
+   - `AllowlistAuthoritative=False/FailedClosed`
+   - the sandbox NetworkPolicy is written with **only** the
+     baseline rules (DNS, IMDS UID-restricted, HTTPS:443 for the
+     inference-router, mesh, relay) — no user-defined egress
+   - the CR is stamped Degraded
+   - the sandbox pod is **not** deployed
+   - the controller requeues with backoff
+
+Transient errors (`FetchError::Transient`) preserve the prior
+conditions verbatim and re-use the prior LKG (if any). A network blip
+cannot collapse a working sandbox.
+
+The LKG cache is **in-process only** — controller restart drops it
+deliberately so the first post-restart reconcile of a verify-failing
+sandbox cannot ride a stale allowlist across an operator-visible
+event. See
+`docs/security-audits/2026-04-30-phase2-s12-e-authoritative.md` for
+the full threat model.
+
+The `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate from S12.b is
+**lifted**; setting or unsetting it has no effect.
