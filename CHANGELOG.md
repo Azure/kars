@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S16 — Chaos tier (fault injection + perf baselines)
+
+Phase-2 close-out gate. Adds a feature-gated chaos / fault-injection tier
+under `tests/chaos/` plus criterion + k6 perf baselines. **No production
+code paths are modified.**
+
+What landed:
+
+- **`tests/chaos/` Rust crate** (`azureclaw-chaos-tests`, `publish = false`)
+  with 22 fault-injection tests across four reliability categories:
+  - `tests/chaos/tests/k8s_api_flakes.rs` (8 cases) — 500/503 storms,
+    429 + Retry-After, stale resourceVersion 410 GONE, truncated watch
+    JSON, premature EOF, persistent 500 (bounded retry), concurrent
+    watchers (no deadlock).
+  - `tests/chaos/tests/foundry_storms.rs` (6 cases) — 80 / 100 429
+    storm with Retry-After, 429 propagation (not synthesized 500),
+    mid-stream 503 SSE clean close, slow-backend caller timeout,
+    blocked-attempt metric increments, mixed-storm convergence.
+  - `tests/chaos/tests/entra_rotation.rs` (4 cases) — token refresh
+    mid-flight, single-flight invariant (16 concurrent → 1 network
+    call), JWKS Kid rotation re-fetch, SA token file rotation.
+  - `tests/chaos/tests/agt_relay.rs` (4 cases) — WS upstream
+    disconnect, handshake timeout (504-class vs 502), slow registry
+    deadline, repeated churn (no task leak).
+
+- **`chaos = []` feature** declared in `controller/Cargo.toml`,
+  `inference-router/Cargo.toml`, and `tests/chaos/Cargo.toml`. Default
+  `cargo test --all` does **not** compile or run chaos tests; CI runs
+  them in a parallel job via `cargo test --workspace --tests --features
+  chaos`.
+
+- **Criterion benches + committed baselines:**
+  - `controller/benches/reconciler_bench.rs` — reconcile-decision
+    latency at n=0 / 100 / 1000. Baseline:
+    `controller/benches/baselines.json`.
+  - `inference-router/benches/proxy_bench.rs` — proxy hot path
+    (route lookup + auth-header attach + safety quick-check). Baseline:
+    `inference-router/benches/baselines.json`. Hard ceiling: 5 ms p99.
+
+- **`tests/k6/router_smoke.js`** — 50 VUs / 30 s against `/healthz`.
+  Thresholds: p95 < 100 ms, error-rate < 0.1 %.
+
+- **CI wiring:**
+  - New job `Chaos Tier` in `.github/workflows/ci.yml` runs the chaos
+    tier on every PR / push to `dev` / `main`.
+  - New job `Bench Regression` runs both criterion benches and gates the
+    PR on > 25 % median drift via `ci/bench_regression.py`.
+  - New workflow `.github/workflows/perf-nightly.yml` runs the k6 smoke
+    nightly at 04:00 UTC (intentionally **not** a PR check — k6 +
+    hosted-runner network behaviour is too noisy).
+
+- **Docs:** `docs/operations/chaos-tier.md` (operations guide, when each
+  job runs, how to add new cases) and `docs/security-audits/2026-04-30-
+  phase2-chaos-tier.md` (Phase-2 §15 success-gate close).
+
+Default `cargo test --all` still passes 1096 tests; `cargo test
+--workspace --tests --features chaos` adds the 22 chaos cases.
+
 ### S3.5 — A2A public-ingress gateway component (closes ADR-0001 #4)
 
 The largest slice in Phase 2. Introduces the public-edge component

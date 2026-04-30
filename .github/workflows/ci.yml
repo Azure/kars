@@ -292,3 +292,40 @@ jobs:
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile
           hadolint $IGNORE vendor/agentmesh-relay/Dockerfile
           hadolint $IGNORE vendor/agentmesh-registry/Dockerfile
+
+  chaos-tier:
+    name: Chaos Tier (fault injection)
+    runs-on: ubuntu-latest
+    # Phase 2 S16. Default `cargo test --all` does NOT run these tests; this
+    # job runs them in parallel so PR signal stays fast. See
+    # `docs/operations/chaos-tier.md`.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --workspace --tests --features chaos --no-fail-fast
+
+  bench-regression:
+    name: Bench Regression (criterion)
+    runs-on: ubuntu-latest
+    # Phase 2 S16. Compiles + runs criterion benches and fails if median
+    # exceeds the value in `<crate>/benches/baselines.json` by more than 25%.
+    # Runs on every PR (cheap to compile) but only enforces regression on
+    # PRs that touch controller or router source paths — see paths filter
+    # in the workflow trigger when expanding to a separate workflow file.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build benches (compile-only on every PR)
+        run: cargo bench --no-run --workspace
+      - name: Run controller bench + compare to baseline
+        run: |
+          cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \
+            | tee bench-controller.txt
+          python3 ci/bench_regression.py controller/benches/baselines.json bench-controller.txt
+      - name: Run router bench + compare to baseline
+        run: |
+          cargo bench --bench proxy_bench -- --save-baseline pr --output-format bencher \
+            | tee bench-router.txt
+          python3 ci/bench_regression.py inference-router/benches/baselines.json bench-router.txt
