@@ -1,0 +1,53 @@
+# Default-deny NetworkPolicy for the operator namespace.
+#
+# Pinned by the CNCF K8s AI conformance suite (criterion C8). The
+# AzureClaw controller reaches the K8s API server via the
+# in-cluster service (egress on TCP/443 to kube-apiserver) and
+# scrapes /metrics over TCP/9091 from a co-located Prometheus or
+# `kubectl port-forward`. Everything else is denied unless an
+# operator opts in via an additional NetworkPolicy.
+#
+# This is the *operator* namespace policy, distinct from the
+# per-sandbox default-deny that the controller renders into each
+# `azureclaw-<sandbox>` namespace from `network-policies.yaml`.
+{{- $netpol := (((.Values.controller).networkPolicy).enabled) }}
+{{- if or (eq $netpol nil) $netpol }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: azureclaw-system-default-deny
+  namespace: {{ .Release.Namespace | default "azureclaw-system" }}
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: azureclaw
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow Prometheus / port-forward scrapes of /metrics on :9091.
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    # DNS resolution.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API server (in-cluster Service: kubernetes.default).
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+{{- end }}

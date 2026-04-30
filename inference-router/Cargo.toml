@@ -53,6 +53,11 @@ kube.workspace = true
 k8s-openapi.workspace = true
 tokio-stream = "0.1.18"
 
+# A2A 1.0.0 verifier + AgentCard schema — lifted into a workspace
+# library crate in S3.5 (ADR-0001 #4) so the public-edge `a2a-gateway`
+# binary can share the exact same JWS path.
+azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
+
 # Handoff encryption (AES-256-GCM + HKDF key derivation + SHA-256 verification)
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -70,3 +75,15 @@ ed25519-dalek.workspace = true
 # Property-based testing (s5) — inline #[cfg(test)] proptest! blocks exercise
 # parsers/sanitizers with generated inputs. Shrinks counterexamples automatically.
 proptest = "1"
+
+# S16 — perf baseline criterion benches. See `inference-router/benches/`.
+criterion = { workspace = true }
+
+[features]
+# S16 — chaos tier. See controller/Cargo.toml for rationale; the feature
+# itself is empty and only exists so `--workspace --features chaos` works.
+chaos = []
+
+[[bench]]
+name = "proxy_bench"
+harness = false

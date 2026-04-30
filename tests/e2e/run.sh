@@ -93,16 +93,36 @@ test_controller_running() {
 
 test_create_sandbox() {
     cat <<EOF | kubectl apply -f -
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: e2e-test-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: e2e-test
+spec:
+  appliesTo:
+    sandboxName: e2e-test
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
   name: e2e-test
   namespace: azureclaw-system
 spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
   sandbox:
     isolation: standard
-  inference:
-    model: gpt-4.1
+  inferenceRef:
+    name: e2e-test-inference
 EOF
     sleep 5
 

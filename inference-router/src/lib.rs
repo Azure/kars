@@ -11,11 +11,13 @@
 )]
 
 pub mod a2a;
+pub mod a2a_mtls;
 pub mod auth;
 pub mod behavior_monitor;
 pub mod blocklist;
 pub mod budget;
 pub mod config;
+pub mod egress_blocked;
 pub mod errors;
 pub mod forward_proxy;
 pub mod governance;

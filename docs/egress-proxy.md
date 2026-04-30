@@ -224,3 +224,40 @@ decisions are recorded in the governance audit log.
 | `inference-router/src/routes.rs` | HTTP handlers for `/egress/*` endpoints |
 | `cli/src/commands/egress.ts` | CLI `azureclaw egress` command |
 | `controller/src/reconciler.rs` | iptables init container + NetworkPolicy generation |
+
+## Signing artifacts (`--sign`)
+
+Phase 2 / S12.c adds an opt-in `--sign` flag to `azureclaw egress` that
+seals the current allowlist as a content-addressed, cosign-signed OCI
+artifact:
+
+```
+azureclaw egress <name> --enforce --sign \
+  --registry myacr.azurecr.io \
+  [--repository policy/egress-allowlist/<name>] \
+  [--sign-mode keyless|identity-token|keyed] \
+  [--sign-key azurekms://...]
+```
+
+Behavior:
+
+- Combine with `--enforce` or `--approve` (using `--sign` alone is an
+  error).
+- The producer reads the live `ClawSandbox.spec.networkPolicy.allowed
+  Endpoints` and `metadata.generation`, builds a byte-stable canonical
+  YAML per `docs/policy-canonical-format.md`, pushes it via `oras`,
+  signs it via `cosign`, and patches `spec.networkPolicy.allowlistRef`
+  with the resulting digest.
+- Sign-mode auto-detects: keyless when a TTY is attached and no token
+  env is set; identity-token when `SIGSTORE_ID_TOKEN` or `OIDC_TOKEN`
+  is set (e.g., GitHub Actions OIDC); keyed when `--sign-mode keyed
+  --sign-key <ref>` is passed.
+- Fail-closed: if `oras push` or `cosign sign` fails, the kubectl
+  patch is skipped — no orphan `allowlistRef` ever lands on a
+  `ClawSandbox`.
+- Status: **non-authoritative** in S12.c — the inline
+  `allowedEndpoints` remains the source of truth. The flip to
+  authoritative ships in S12.e.
+
+Required tools: `oras` and `cosign` in `$PATH`. See the canonical
+format doc and the S12.c security audit for the full threat model.

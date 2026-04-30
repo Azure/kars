@@ -56,10 +56,13 @@ function buildSandboxManifest(name: string, options: AddOptions) {
     kind: "ClawSandbox",
     metadata: { name, namespace: "azureclaw-system" },
     spec: {
-      openclaw: {
-        version: "2026.3.13",
-        ...(options.image ? { image: options.image } : {}),
-        config: { agent: { model: `azure/${options.model}` } },
+      runtime: {
+        kind: "OpenClaw",
+        openclaw: {
+          version: "2026.3.13",
+          ...(options.image ? { image: options.image } : {}),
+          config: { agent: { model: `azure/${options.model}` } },
+        },
       },
       sandbox: {
         isolation: options.isolation,
@@ -69,15 +72,8 @@ function buildSandboxManifest(name: string, options: AddOptions) {
         allowPrivilegeEscalation: false,
         writablePaths: ["/sandbox", "/tmp"],
       },
-      inference: {
-        provider: "azure-ai-foundry",
-        model: options.model,
-        contentSafety: true,
-        promptShields: true,
-        tokenBudget: {
-          daily: parseInt(options.tokenBudgetDaily) || 0,
-          perRequest: parseInt(options.tokenBudgetPerRequest) || 0,
-        },
+      inferenceRef: {
+        name: `${name}-inference`,
       },
       networkPolicy: {
         defaultDeny: true,
@@ -105,7 +101,7 @@ function buildSandboxManifest(name: string, options: AddOptions) {
   if (options.governance) {
     (sandbox.spec as Record<string, unknown>).governance = {
       enabled: true,
-      toolPolicy: options.policyProfile || "default",
+      toolPolicyRef: { name: `${name}-toolpolicy` },
       trustThreshold: parseInt(options.trustThreshold) || 500,
     };
   }
@@ -185,15 +181,18 @@ describe("ClawSandbox manifest generation", () => {
   it("uses default model gpt-4.1 with azure/ prefix", () => {
     const manifest = buildSandboxManifest("a", defaultOptions());
     const spec = manifest.spec as any;
-    expect(spec.openclaw.config.agent.model).toBe("azure/gpt-4.1");
-    expect(spec.inference.model).toBe("gpt-4.1");
+    expect(spec.runtime.kind).toBe("OpenClaw");
+    expect(spec.runtime.openclaw.config.agent.model).toBe("azure/gpt-4.1");
+    expect(spec.inferenceRef.name).toBe("a-inference");
   });
 
   it("uses custom model when specified", () => {
     const manifest = buildSandboxManifest("a", defaultOptions({ model: "o4-mini" }));
     const spec = manifest.spec as any;
-    expect(spec.openclaw.config.agent.model).toBe("azure/o4-mini");
-    expect(spec.inference.model).toBe("o4-mini");
+    expect(spec.runtime.openclaw.config.agent.model).toBe("azure/o4-mini");
+    // S13: model is carried on the sibling InferencePolicy CR, not the
+    // sandbox spec. The runtime block still seeds OpenClaw config.
+    expect(spec.inferenceRef.name).toBe("a-inference");
   });
 
   it("sets standard isolation with RuntimeDefault seccomp", () => {
@@ -217,21 +216,23 @@ describe("ClawSandbox manifest generation", () => {
     expect(spec.sandbox.seccompProfile).toBe("azureclaw-strict");
   });
 
-  it("applies token budget values", () => {
+  it("references the InferencePolicy CR by name (token budget lives on the policy)", () => {
     const manifest = buildSandboxManifest(
       "a",
       defaultOptions({ tokenBudgetDaily: "100000", tokenBudgetPerRequest: "4096" }),
     );
     const spec = manifest.spec as any;
-    expect(spec.inference.tokenBudget.daily).toBe(100000);
-    expect(spec.inference.tokenBudget.perRequest).toBe(4096);
+    // S13 phase2-config-authority-refs: budgets are carried on the
+    // sibling InferencePolicy CR, not inline on the sandbox spec.
+    expect(spec.inferenceRef.name).toBe("a-inference");
+    expect(spec.inference).toBeUndefined();
   });
 
-  it("defaults token budgets to 0 (unlimited)", () => {
+  it("does not emit an inline inference block (S13 refs-only)", () => {
     const manifest = buildSandboxManifest("a", defaultOptions());
     const spec = manifest.spec as any;
-    expect(spec.inference.tokenBudget.daily).toBe(0);
-    expect(spec.inference.tokenBudget.perRequest).toBe(0);
+    expect(spec.inference).toBeUndefined();
+    expect(spec.inferenceRef).toEqual({ name: "a-inference" });
   });
 
   it("includes custom image when specified", () => {
@@ -240,13 +241,13 @@ describe("ClawSandbox manifest generation", () => {
       defaultOptions({ image: "myregistry.azurecr.io/custom:v1" }),
     );
     const spec = manifest.spec as any;
-    expect(spec.openclaw.image).toBe("myregistry.azurecr.io/custom:v1");
+    expect(spec.runtime.openclaw.image).toBe("myregistry.azurecr.io/custom:v1");
   });
 
   it("omits image field when not specified", () => {
     const manifest = buildSandboxManifest("a", defaultOptions());
     const spec = manifest.spec as any;
-    expect(spec.openclaw.image).toBeUndefined();
+    expect(spec.runtime.openclaw.image).toBeUndefined();
   });
 
   it("includes default network policy with github endpoints", () => {
@@ -265,7 +266,7 @@ describe("ClawSandbox manifest generation", () => {
     expect(spec.networkPolicy.learnEgress).toBe(true);
   });
 
-  it("adds governance config when enabled", () => {
+  it("adds governance config when enabled (S13: toolPolicyRef)", () => {
     const manifest = buildSandboxManifest(
       "a",
       defaultOptions({ governance: true, trustThreshold: "750", policyProfile: "strict" }),
@@ -273,7 +274,7 @@ describe("ClawSandbox manifest generation", () => {
     const spec = manifest.spec as any;
     expect(spec.governance).toEqual({
       enabled: true,
-      toolPolicy: "strict",
+      toolPolicyRef: { name: "a-toolpolicy" },
       trustThreshold: 750,
     });
   });

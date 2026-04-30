@@ -1,0 +1,120 @@
+# cargo-deny configuration — S17 supply-chain row.
+#
+# Enforced by `.github/workflows/ci.yml :: cargo-deny` (required PR row;
+# see `docs/operations/branch-protection.md`). Run locally with:
+#
+#     cargo install cargo-deny
+#     cargo deny check
+#
+# This complements `cargo audit` (advisory-only, day-0 RustSec feed) and
+# Trivy (filesystem CVE feed) by enforcing license, source, and ban
+# policy on every dependency we ship in the controller and inference
+# router binaries.
+
+[graph]
+# Match what the workspace builds for in CI/release. Keep this minimal —
+# expanding the target set expands the dependency graph cargo-deny has
+# to walk.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ─── Advisories ─────────────────────────────────────────────────────────
+# Day-0 vulnerability + yanked-crate gate. Mirrors `cargo audit --deny
+# warnings` posture; cargo-deny consumes the same RustSec advisory DB
+# but as part of one unified "supply-chain check" pass.
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2024-0370 — `proc-macro-error` (unmaintained). Pulled
+    # transitively via sigstore → json-syntax → locspan-derive. No
+    # safe upgrade available; sigstore upstream is tracking the
+    # migration. Re-evaluate when sigstore-rs > 0.13 ships.
+    "RUSTSEC-2024-0370",
+    # RUSTSEC-2023-0071 — `rsa` Marvin timing sidechannel. Pulled via
+    # `jsonwebtoken` (RS256 verify path) and `sigstore` (Fulcio cert
+    # parse). No constant-time replacement is published yet; we never
+    # decrypt RSA-encrypted payloads with attacker-observable timing
+    # — both call sites verify signatures against trust-store
+    # public keys. Re-evaluate when RustCrypto/RSA ships a const-time
+    # backend (issue #626).
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained. Pulled
+    # transitively via the rustls 0.23 ecosystem (parse-only path).
+    # Re-evaluate when the rustls maintainers publish a successor or
+    # inline the parse path. Mirrors the ignore in `.cargo/audit.toml`.
+    "RUSTSEC-2025-0134",
+]
+
+# ─── Licenses ───────────────────────────────────────────────────────────
+# AzureClaw is MIT-licensed. The allow-list here is the standard
+# permissive set compatible with shipping a binary; copyleft and
+# unknown licenses are denied so we never silently pick up GPL/AGPL
+# code into the controller or router image.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ring's license is BSD/MIT/ISC + the OpenSSL license per its
+# COPYING file; SPDX expression detection is fuzzy. Pin the
+# clarification here so a transitive ring bump doesn't trip the
+# license gate.
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+# ─── Bans ───────────────────────────────────────────────────────────────
+# `multiple-versions = "warn"` rather than "deny" — Rust's transitive
+# graph routinely drags in two minor versions of `windows-sys` /
+# `syn` / `bitflags` etc., and we don't want supply-chain CI to fail
+# on every transitive bump. We *do* want a hard ban list for known-
+# bad crates (rustls predecessor, openssl unmaintained etc.).
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ─── Sources ────────────────────────────────────────────────────────────
+# Only crates.io. Any git dependency must be explicitly approved here
+# (matches the `vendor/` overlay convention — vendored forks are
+# committed in-tree, not pulled from random git URLs at build time).
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []

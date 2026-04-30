@@ -18,25 +18,275 @@ spec:
           properties:
             spec:
               type: object
-              required: ["openclaw", "sandbox", "inference"]
+              required: ["runtime", "sandbox", "inferenceRef"]
               properties:
-                openclaw:
+                runtime:
                   type: object
+                  required: ["kind"]
+                  description: |
+                    Agent runtime selector (S10.A1 multi-runtime hosting).
+                    The `kind` discriminator selects which sibling struct
+                    (`openclaw` / `openaiAgents` / `microsoftAgentFramework`
+                    / `semanticKernel` / `langGraph` / `anthropic` / `byo`)
+                    is required; the others must be absent.
+                    Replaces the legacy `spec.openclaw` field — the
+                    AzureClaw v1alpha1 schema is in-place edited (no
+                    conversion webhook; pre-release simplification).
+                    Tier-2 placeholders (`semanticKernel`, `langGraph`,
+                    `anthropic`) parse but the controller stamps
+                    `RuntimeReady=False / AdapterMissing` until the
+                    respective adapter image ships.
+                  x-kubernetes-validations:
+                    - rule: "(self.kind == 'OpenClaw') == has(self.openclaw)"
+                      message: "spec.runtime.openclaw must be set iff kind is OpenClaw"
+                    - rule: "(self.kind == 'OpenAIAgents') == has(self.openaiAgents)"
+                      message: "spec.runtime.openaiAgents must be set iff kind is OpenAIAgents"
+                    - rule: "(self.kind == 'MicrosoftAgentFramework') == has(self.microsoftAgentFramework)"
+                      message: "spec.runtime.microsoftAgentFramework must be set iff kind is MicrosoftAgentFramework"
+                    - rule: "(self.kind == 'SemanticKernel') == has(self.semanticKernel)"
+                      message: "spec.runtime.semanticKernel must be set iff kind is SemanticKernel"
+                    - rule: "(self.kind == 'LangGraph') == has(self.langGraph)"
+                      message: "spec.runtime.langGraph must be set iff kind is LangGraph"
+                    - rule: "(self.kind == 'Anthropic') == has(self.anthropic)"
+                      message: "spec.runtime.anthropic must be set iff kind is Anthropic"
+                    - rule: "(self.kind == 'BYO') == has(self.byo)"
+                      message: "spec.runtime.byo must be set iff kind is BYO"
                   properties:
-                    version:
+                    kind:
                       type: string
-                      description: "OpenClaw version to deploy"
-                    image:
-                      type: string
-                      description: "Container image for the sandbox"
-                    config:
+                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "BYO"]
+                      description: "Variant discriminator. PascalCase wire values."
+                    openclaw:
                       type: object
-                      x-kubernetes-preserve-unknown-fields: true
-                      description: "OpenClaw configuration (openclaw.json equivalent)"
-                    extraEnv:
+                      properties:
+                        version:
+                          type: string
+                          description: "OpenClaw version to deploy"
+                        image:
+                          type: string
+                          description: "Container image for the sandbox"
+                        config:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                          description: "OpenClaw configuration (openclaw.json equivalent)"
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                          description: "Extra environment variables (key/value map) injected into the openclaw container. Used by the controller for offload parameters (OFFLOAD_REQUEST_ID, OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES)."
+                    openaiAgents:
                       type: object
-                      x-kubernetes-preserve-unknown-fields: true
-                      description: "Extra environment variables (key/value map) injected into the openclaw container. Used by the controller for offload parameters (OFFLOAD_REQUEST_ID, OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES)."
+                      description: "OpenAI Agents Python runtime variant. Phase 2 parses but does not deploy until S10.A3 lands the adapter image."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'"
+                        agentCode:
+                          type: object
+                          description: "Where the user's agent code comes from. Exactly one of `oci` / `git`."
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.openaiAgents.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                                  description: "Fully-qualified OCI image reference"
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                  description: "Branch / tag / commit SHA. Defaults to HEAD."
+                                path:
+                                  type: string
+                                  description: "Subdirectory inside the repo. Defaults to repo root."
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                          description: "Container entrypoint override. Defaults to the adapter's stock launcher."
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    microsoftAgentFramework:
+                      type: object
+                      description: "Microsoft Agent Framework runtime variant. Phase 2 parses but does not deploy until S10.A4 lands the adapter image."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "dotnet"]
+                          description: "Adapter image flavour."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.microsoftAgentFramework.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    semanticKernel:
+                      type: object
+                      description: "Semantic Kernel runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the SK adapter image ships."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "dotnet", "java"]
+                          description: "Adapter image flavour. Defaults to `python`."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.semanticKernel.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    langGraph:
+                      type: object
+                      description: "LangGraph runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the LangGraph adapter image ships."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "typescript"]
+                          description: "Adapter image flavour. Defaults to `python`."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.langGraph.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    anthropic:
+                      type: object
+                      description: "Anthropic Claude Agents SDK runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the Anthropic adapter image ships."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.anthropic.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    byo:
+                      type: object
+                      required: ["image", "contractVersion"]
+                      description: "Bring-your-own runtime. The image must honor the BYO contract. Phase 2 enforcement is warn-only via `RuntimeReady` Condition."
+                      properties:
+                        image:
+                          type: string
+                          description: "Container image (must declare org.azureclaw.runtime.contract label)."
+                        command:
+                          type: array
+                          items:
+                            type: string
+                        args:
+                          type: array
+                          items:
+                            type: string
+                        env:
+                          type: array
+                          items:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                          description: "Raw K8s EnvVar entries (supports valueFrom)."
+                        contractVersion:
+                          type: string
+                          enum: ["v1"]
+                          description: "BYO contract version. REQUIRED — silent default would defeat the declared-contract guard."
                 sandbox:
                   type: object
                   properties:
@@ -65,38 +315,25 @@ spec:
                       items:
                         type: string
                       default: ["/sandbox", "/tmp"]
-                inference:
+                inferenceRef:
                   type: object
+                  description: |
+                    Same-namespace reference to an `InferencePolicy` CR
+                    (S13 config-authority refs). The controller resolves
+                    the target at reconcile time; missing target → status
+                    `Degraded` with reason `InferencePolicyNotFound`.
+                    Cross-namespace refs are not supported (security
+                    invariant — see `docs/crd-precedence.md`).
+                  required: ["name"]
                   properties:
-                    provider:
+                    name:
                       type: string
-                      enum: ["azure-openai", "azure-ai-foundry", "self-hosted"]
-                      default: "azure-openai"
-                    endpoint:
-                      type: string
-                    model:
-                      type: string
-                      default: "gpt-4.1"
-                    fallback:
-                      type: object
-                      properties:
-                        provider:
-                          type: string
-                        model:
-                          type: string
-                    contentSafety:
-                      type: boolean
-                      default: true
-                    promptShields:
-                      type: boolean
-                      default: true
-                    tokenBudget:
-                      type: object
-                      properties:
-                        daily:
-                          type: integer
-                        perRequest:
-                          type: integer
+                      description: "Name of a sibling InferencePolicy CR in the same namespace as this ClawSandbox."
+                      maxLength: 253
+                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                  x-kubernetes-validations:
+                    - rule: "self.name.size() > 0"
+                      message: "spec.inferenceRef.name must not be empty"
                 agent:
                   type: object
                   description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"
@@ -117,15 +354,33 @@ spec:
                 governance:
                   type: object
                   description: "AGT behavioral governance (opt-in for multi-agent)"
+                  x-kubernetes-validations:
+                    - rule: "!has(self.enabled) || !self.enabled || (has(self.toolPolicyRef) && self.toolPolicyRef.name.size() > 0)"
+                      message: "spec.governance.toolPolicyRef.name must be set when governance.enabled=true"
                   properties:
                     enabled:
                       type: boolean
                       default: false
                       description: "Enable AGT governance (tool-level policy, trust, audit)"
-                    toolPolicy:
-                      type: string
-                      default: "default"
-                      description: "Policy profile name (references policies ConfigMap)"
+                    toolPolicyRef:
+                      type: object
+                      description: |
+                        Same-namespace reference to a `ToolPolicy` CR
+                        (S13 config-authority refs). When
+                        `governance.enabled=true`, the controller
+                        resolves the target at reconcile time; missing
+                        target → status `Degraded` with reason
+                        `ToolPolicyNotFound`. The resolved CR's
+                        `metadata.name` doubles as the AGT policy
+                        profile name carried into the sandbox via
+                        `AGT_POLICY_PROFILE`. Cross-namespace refs are
+                        not supported.
+                      properties:
+                        name:
+                          type: string
+                          description: "Name of a sibling ToolPolicy CR in the same namespace as this ClawSandbox."
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
                     trustThreshold:
                       type: integer
                       default: 500
@@ -186,6 +441,45 @@ spec:
                             type: array
                             items:
                               type: string
+                    allowlistRef:
+                      type: object
+                      description: |
+                        Reference to a signed OCI artifact containing the
+                        canonical egress allowlist. Populated by
+                        `azureclaw egress … --sign` (S12.c). Audit-only
+                        in S12.a — controller still derives NetworkPolicy
+                        from `allowedEndpoints`. **Authoritative in
+                        S12.e** (always-on, no feature gate): when set,
+                        the verified canonical artifact is the source
+                        of truth for NetworkPolicy egress; on verify
+                        failure the controller fails closed (last-known
+                        good cache fallback, then no-broad-egress).
+                        See docs/policy-canonical-format.md.
+                      required:
+                        - registry
+                        - repository
+                        - digest
+                        - artifactType
+                      properties:
+                        registry:
+                          type: string
+                          description: "Registry hostname (e.g. myacr.azurecr.io, ghcr.io)."
+                        repository:
+                          type: string
+                          description: "Repository path (e.g. azureclaw/policies/sandbox-foo)."
+                        digest:
+                          type: string
+                          pattern: "^sha(256|384|512):[a-f0-9]+$"
+                          description: |
+                            Content-addressed digest including algorithm
+                            prefix. Covers the canonical artifact bytes
+                            per docs/policy-canonical-format.md.
+                        artifactType:
+                          type: string
+                          description: |
+                            OCI artifactType media-type, e.g.
+                            application/vnd.azureclaw.egress-allowlist.v1+yaml.
+                            Consumers MUST reject mismatched artifactTypes.
                 resources:
                   type: object
                   properties:
@@ -237,18 +531,30 @@ spec:
                 foundryAgentId:
                   type: string
                   description: "Foundry Agent Service agent ID (created by controller)"
+                runtimeKind:
+                  type: string
+                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "BYO"]
+                  description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
       subresources:
         status: {}
       additionalPrinterColumns:
         - name: Phase
           type: string
           jsonPath: .status.phase
-        - name: Model
+        - name: Runtime
           type: string
-          jsonPath: .spec.inference.model
+          jsonPath: .spec.runtime.kind
+        - name: InferencePolicy
+          type: string
+          jsonPath: .spec.inferenceRef.name
         - name: Isolation
           type: string
           jsonPath: .spec.sandbox.isolation
+        - name: Allowlist
+          type: string
+          description: "Authoritative-allowlist condition status (S12.e)"
+          jsonPath: .status.conditions[?(@.type=="AllowlistAuthoritative")].status
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -340,6 +646,33 @@ spec:
                   type: integer
                 activeSandbox:
                   type: string
+                conditions:
+                  type: array
+                  description: "Standard Kubernetes conditions for ClawPairing"
+                  items:
+                    type: object
+                    required: ["type", "status", "lastTransitionTime", "reason", "message"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+          x-kubernetes-validations:
+            - rule: "self.spec.slotsMax == null || self.spec.slotsMax >= 1"
+              message: "spec.slotsMax must be >= 1"
+            - rule: "self.spec.tokenBudget == null || self.spec.tokenBudget >= 0"
+              message: "spec.tokenBudget must be >= 0"
       subresources:
         status: {}
       additionalPrinterColumns:
@@ -352,6 +685,9 @@ spec:
         - name: Budget
           type: integer
           jsonPath: .spec.tokenBudget
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

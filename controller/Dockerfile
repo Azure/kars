@@ -7,7 +7,7 @@ ARG VERSION=0.1.0
 
 FROM ${AZURELINUX_BASE} AS builder
 
-RUN tdnf install -y gcc glibc-devel binutils make pkg-config openssl-devel ca-certificates curl && tdnf clean all
+RUN tdnf install -y gcc glibc-devel binutils make pkg-config openssl-devel ca-certificates curl kernel-headers && tdnf clean all
 
 # Install Rust via rustup (no distro packages needed)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
@@ -18,6 +18,9 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY controller/ controller/
 COPY inference-router/ inference-router/
+COPY a2a-gateway/ a2a-gateway/
+COPY azureclaw-a2a-core/ azureclaw-a2a-core/
+COPY tests/ tests/
 COPY cli/policies/ cli/policies/
 COPY cli/blocklists/ cli/blocklists/
 

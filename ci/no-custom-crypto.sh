@@ -24,6 +24,14 @@ ALLOW_PATHS=(
   'inference-router/src/a2a/card_server.rs'     # /.well-known/agent.json builder — wires SigningKey into card_signing::sign_card; no in-place crypto math
   'inference-router/src/a2a/card_signing.rs'    # RFC 7515 JWS / RFC 8037 EdDSA over AgentCards (A2A 1.0.0 §4.4.7) — standard JOSE primitive
   'inference-router/src/a2a/card_verifier.rs'   # inbound caller-card verifier — uses ed25519-dalek::VerifyingKey only (no signing primitives)
+  # Phase 2 S3.5 (ADR-0001 #4): the verifier + AgentCard schema were lifted into the
+  # `azureclaw-a2a-core` workspace member so the new public-edge `a2a-gateway` shares
+  # the exact same JWS path as the router. Same files, same crypto surface — just
+  # under a new path. The router still re-exports them at `crate::a2a::*`.
+  'azureclaw-a2a-core/src/agent_card.rs'        # see inference-router/src/a2a/agent_card.rs above
+  'azureclaw-a2a-core/src/card_signing.rs'      # see inference-router/src/a2a/card_signing.rs above
+  'azureclaw-a2a-core/src/card_verifier.rs'     # see inference-router/src/a2a/card_verifier.rs above
+  'azureclaw-a2a-core/src/signature.rs'         # RFC 7515 base64url + signing-input helper; no crypto math
   'inference-router/src/a2a/jsonrpc_dispatch.rs' # JSON-RPC 2.0 binding for message/send / tasks/* — no crypto math; references ed25519-dalek types only via AP2 trust glue
   'inference-router/src/a2a/mandate_signing.rs' # AP2 IntentMandate / CartMandate / PaymentMandate Ed25519 sign — RFC 8032 EdDSA via ed25519-dalek; signs only, no key derivation
   'inference-router/src/a2a/mandate_trust_store.rs' # AP2 mandate verifier-side public-key store; uses ed25519-dalek::VerifyingKey only (no signing primitives)
@@ -35,6 +43,15 @@ ALLOW_PATHS=(
   'inference-router/src/handoff/mod.rs'   # pre-existing handoff AES-GCM blob cipher; plan §4.1 slates extraction into a SigningProvider-backed submodule
   'inference-router/src/handoff/crypto.rs' # extracted crypto submodule (AES-256-GCM + HKDF-SHA256 + integrity hash); single allow-listed home for the handoff blob cipher
   'inference-router/src/handoff/token.rs' # HandoffTokenStore — 32-byte random + SHA-256 hash + constant-time compare, extracted from mod.rs
+  # Phase 2 CRD reconciler/compile modules — mint or wrap signing keys (Ed25519 via ed25519-dalek)
+  # for AGT-profile YAML compilation. Pure conduits to ed25519-dalek::{SigningKey, VerifyingKey};
+  # no hand-rolled signing math. Tracked alongside `mesh_peer/` for SigningProvider extraction.
+  'controller/src/mcp_server_reconciler.rs'    # JWKS Secret minting for McpServer (S1)
+  'controller/src/tool_policy_compile.rs'      # ToolPolicy → AGT YAML profile (S2)
+  'controller/src/a2a_agent_compile.rs'        # A2AAgent card-signing key Secret + AGT profile (S3)
+  'controller/src/inference_policy_compile.rs' # InferencePolicy → AGT-profile compile (S4)
+  'controller/src/claw_memory_compile.rs'      # ClawMemory binding compile (S5)
+  'controller/src/claw_eval_compile.rs'        # ClawEval suite compile (S6)
   'vendor/'
   'tests/'
 )
@@ -44,8 +61,9 @@ PROD_PATHS=(
   'controller/src/'
   'inference-router/src/'
   'cli/src/'
+  'runtimes/openclaw/src/'
   'sandbox-images/'
-  'policy-engine/'
+  'cli/profiles/'
 )
 
 # Patterns — each is a canonical import / invocation we never want written by us.

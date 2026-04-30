@@ -16,6 +16,7 @@ schemars.workspace = true
 # Async
 tokio.workspace = true
 futures.workspace = true
+async-trait.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -48,3 +49,30 @@ futures-util.workspace = true
 
 # HTTP client for Azure ARM API (federated credential creation)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# HTTP server (controller metrics endpoint)
+axum = "0.8"
+
+# Sigstore cosign verification + OCI fetch (S12.b: signed egress allowlist artifacts).
+# Status-only fetcher; actual NetworkPolicy still derives from inline allowedEndpoints.
+# See `controller/src/policy_fetcher.rs` and `docs/policy-canonical-format.md`.
+sigstore = { version = "0.13", default-features = false, features = ["cosign", "verify", "rustls-tls"] }
+oci-client = { version = "0.16", default-features = false, features = ["rustls-tls"] }
+idna = "1"
+
+[features]
+# S16 — chaos tier. Default `cargo test` does NOT enable this feature; the
+# chaos tier compiles only under `cargo test --workspace --features chaos` to
+# keep PR CI fast. The flag itself is empty: feature-gating happens inside
+# the `tests/chaos/` crate, this declaration just lets `--workspace
+# --features chaos` succeed against this crate.
+chaos = []
+
+[dev-dependencies]
+# S16 — perf baseline criterion benches. See `controller/benches/`.
+criterion = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "reconciler_bench"
+harness = false

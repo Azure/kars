@@ -34,6 +34,17 @@ spec:
           env:
             - name: RUST_LOG
               value: "info,azureclaw_controller=debug"
+            # Downward API — used by leader-election + S12.d
+            # SignerPolicy watcher to scope to the controller's own
+            # namespace without cluster-wide watch RBAC.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: AZURE_WI_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: INFERENCE_ROUTER_IMAGE
@@ -80,6 +91,10 @@ spec:
             # registration provisioned.
             - name: AZURECLAW_DISABLE_ENTRA_AUTH
               value: {{ if .Values.azure.entraAuth.enabled }}"0"{{ else }}"1"{{ end }}
+          ports:
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

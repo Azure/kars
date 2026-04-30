@@ -1,0 +1,65 @@
+[package]
+name = "azureclaw-a2a-gateway"
+description = "Public-ingress A2A 1.0.0 edge for AzureClaw — TLS termination, JWS verification, mTLS to inference-router. Phase 2 S3.5 (ADR-0001 #4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "azureclaw-a2a-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Shared A2A verifier (the entire reason this crate exists — same
+# byte-for-byte JWS path the router uses).
+azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
+
+# HTTP server / proxy
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper = { workspace = true, features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio", "http1", "http2"] }
+http-body-util = "0.1"
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+
+# Async
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+futures.workspace = true
+futures-util.workspace = true
+
+# TLS — workspace-wide constraint: rustls only. ADR forbids
+# introducing a second TLS implementation.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+# Cert / key file watching for hot reload.
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+
+# Serialisation
+serde.workspace = true
+serde_json.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+prometheus.workspace = true
+
+# Errors
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Time / rate-limit bookkeeping
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+tempfile = "3"

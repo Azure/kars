@@ -77,33 +77,35 @@ RUN openclaw skills install summarize 2>/dev/null || true && \
 # Install npm CLIs that unlock built-in OpenClaw skills
 RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
 
-# Pre-stage OpenClaw bundled-runtime-deps (channels: telegram/discord/slack/feishu/qqbot,
-# plus model-provider channels). OpenClaw 2026.4+ lazily npm-installs these at first
-# plugin load, which fails inside the sandbox where UID 1000 has no direct egress
-# (egress-guard) and npm doesn't honour our HTTP forward-proxy. Solution: stage the
-# whole tree at build time (full network) into a stable path that we mount read-only
-# at runtime via `OPENCLAW_PLUGIN_STAGE_DIR`.
+# Pre-stage OpenClaw bundled-runtime-deps. OpenClaw 2026.4+ may lazily
+# npm-install per-channel runtime deps at first plugin load, which fails
+# inside the sandbox where UID 1000 has no direct egress (egress-guard) and
+# npm doesn't honour our HTTP forward-proxy. Solution: invoke
+# `openclaw doctor --fix` at base-image build time (full network) to do
+# whatever pre-staging openclaw considers necessary — into
+# `OPENCLAW_PLUGIN_STAGE_DIR` if applicable, or no-op if everything is
+# already resolved in the global npm tree.
 #
-# `openclaw doctor --fix --non-interactive --yes` invokes `installBundledRuntimeDeps`
-# from `dist/bundled-runtime-deps-*.js`, which honours `OPENCLAW_PLUGIN_STAGE_DIR`
-# (or `STATE_DIRECTORY`) by writing to `<dir>/openclaw-<version>-<hash>/`.
-# `<hash>` = `createPathHash(packageRoot)` and is deterministic for the fixed
-# `/usr/local/lib/node_modules/openclaw` install path → cache hits at runtime.
-#
-# `@tencent-connect/qqbot-connector` is geo-restricted upstream and may 403 even
-# from open networks. We tolerate that single failure (|| true) — qqbot is the
-# only currently-shipped channel we don't expose; staging still succeeds for
-# every other channel.
+# We trust openclaw doctor's own exit code as the source of truth for
+# correctness — being opinionated about *where* deps land is fragile because
+# the layout changes across openclaw versions (in 2026.4.26 doctor commonly
+# returns "missing.length === 0" with no staging because the deps are either
+# pre-resolved in the global tree or installed lazily at first channel use).
 ENV OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
+# Use bash with pipefail so the `openclaw doctor … | tail -40` pipe surfaces
+# a non-zero exit code from doctor instead of being masked by tail's success.
+# Scoped to this RUN only — subsequent stages re-default to /bin/sh.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN mkdir -p /opt/openclaw-stage && \
-    openclaw doctor --fix --non-interactive --yes 2>&1 | tail -20 || true && \
-    staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules | wc -l) && \
-    if [ "$staged_count" -lt 1 ]; then \
-      echo "ERROR: openclaw doctor did not stage any node_modules under /opt/openclaw-stage" >&2; \
-      ls -la /opt/openclaw-stage >&2; exit 1; \
-    fi && \
+    openclaw doctor --fix --non-interactive --yes 2>&1 | tail -40 && \
     chmod -R a+rX /opt/openclaw-stage && \
-    echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"
+    staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules 2>/dev/null | wc -l) && \
+    if [ "$staged_count" -gt 0 ]; then \
+      echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"; \
+    else \
+      echo "OpenClaw doctor completed cleanly with no staging required"; \
+    fi
+SHELL ["/bin/sh", "-c"]
 
 # ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
 

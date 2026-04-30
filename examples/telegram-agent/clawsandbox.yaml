@@ -15,6 +15,27 @@
 # Or deploy via CLI (creates the secret automatically):
 #   azureclaw add telegram-agent --channels telegram --telegram-token "YOUR_TOKEN"
 
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: telegram-agent-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: telegram-agent
+spec:
+  appliesTo:
+    sandboxName: telegram-agent
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
@@ -23,12 +44,14 @@ metadata:
   labels:
     azureclaw.azure.com/channels: telegram
 spec:
-  openclaw:
-    version: "2026.3.13"
-    image: azureclaw.azurecr.io/openclaw-sandbox:latest
-    config:
-      agent:
-        model: "azure/gpt-4.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      config:
+        agent:
+          model: "azure/gpt-4.1"
 
   sandbox:
     isolation: "enhanced"
@@ -40,14 +63,8 @@ spec:
       - /sandbox
       - /tmp
 
-  inference:
-    provider: "azure-openai"
-    model: "gpt-4.1"
-    contentSafety: true
-    promptShields: true
-    tokenBudget:
-      daily: 500000
-      perRequest: 128000
+  inferenceRef:
+    name: telegram-agent-inference
 
   # Egress rules — Telegram Bot API + optional Bing search
   networkPolicy:

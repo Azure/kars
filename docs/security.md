@@ -49,7 +49,7 @@ The seccomp profile is installed on every node via a DaemonSet that writes `azur
 
 **inotify syscalls:** The profile allows `inotify_init`, `inotify_init1`, `inotify_add_watch`, and `inotify_rm_watch`. These are required by Node.js file watchers (used by OpenClaw for config reloading and plugin hot-reload). They are safe to allow — inotify operates only on files the process can already access (governed by filesystem permissions and read-only rootfs). It cannot be used for privilege escalation or sandbox escape.
 
-**fsync/fdatasync/sync syscalls:** The profile allows `fsync`, `fdatasync`, and `sync`. These are required for reliable file I/O (SQLite WAL, Python package writes, etc.) and were previously missing — causing `EPERM` errors on AKS nodes with the strict profile. The policy-engine profile (~219 syscalls) already included them; the deploy profiles were updated to match.
+**fsync/fdatasync/sync syscalls:** The profile allows `fsync`, `fdatasync`, and `sync`. These are required for reliable file I/O (SQLite WAL, Python package writes, etc.) and were previously missing — causing `EPERM` errors on AKS nodes with the strict profile. The canonical seccomp profile (~219 syscalls) already included them; the deploy profiles were updated to match.
 
 **Explicit proxy bootstrap:** The sandbox uses `proxy-bootstrap.js`, preloaded via `NODE_OPTIONS="--require ..."` before any OpenClaw code executes. It sets undici's `EnvHttpProxyAgent` as the global fetch dispatcher, ensuring all outbound HTTP/HTTPS requests (Telegram polling, model pricing, plugin calls) honor `HTTPS_PROXY` and `NO_PROXY` environment variables. This provides a forward (explicit) proxy path complementing the iptables-based transparent proxy on port 8444.
 

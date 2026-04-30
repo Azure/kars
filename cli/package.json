@@ -1,5 +1,5 @@
 {
-  "name": "@azure/azureclaw",
+  "name": "@azureclaw/cli",
   "version": "0.1.0-alpha.1",
   "description": "Enterprise-grade runtime for running OpenClaw AI assistants safely on Azure",
   "license": "MIT",
@@ -10,19 +10,12 @@
   "bin": {
     "azureclaw": "./dist/index.js"
   },
-  "main": "dist/plugin.js",
-  "types": "dist/plugin.d.ts",
-  "openclaw": {
-    "extensions": [
-      "./dist/plugin.js"
-    ]
-  },
   "files": [
     "dist"
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js && cp -r ../policy-engine/profiles dist/profiles",
+    "build": "tsc && chmod +x dist/index.js && cp -r profiles dist/profiles",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",

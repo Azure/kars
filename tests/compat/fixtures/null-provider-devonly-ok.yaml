@@ -4,6 +4,22 @@
 # admission-null-provider.yaml must ACCEPT this manifest.
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: dev-null-provider-ok-inference
+  namespace: azureclaw-fixtures
+  labels:
+    azureclaw.azure.com/sandbox: dev-null-provider-ok
+spec:
+  appliesTo:
+    sandboxName: dev-null-provider-ok
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+      endpoint: "https://example.openai.azure.com"
+---
+apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
   name: dev-null-provider-ok
@@ -11,12 +27,14 @@ metadata:
   labels:
     azureclaw.azure.com/dev-only: "true"
 spec:
-  openclaw:
-    version: "0.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "0.1"
   sandbox:
     isolation: strict
-  inference:
-    endpoint: "https://example.openai.azure.com"
+  inferenceRef:
+    name: dev-null-provider-ok-inference
   # Forward-compatible with Phase 1 CRD schema; current v1alpha1 has
   # x-kubernetes-preserve-unknown-fields on spec, so this is accepted.
   agt:
