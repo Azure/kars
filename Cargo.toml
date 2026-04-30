@@ -3,6 +3,10 @@ resolver = "2"
 members = [
     "inference-router",
     "controller",
+    "azureclaw-a2a-core",
+    "a2a-gateway",
+    "tests/chaos",
+    "tests/cncf-conformance",
 ]
 exclude = [
     "vendor/agentmesh-registry",
@@ -76,6 +80,10 @@ futures-util = "0.3"
 
 # AGT governance (native — replaces former Python sidecar)
 agentmesh = "3.1.0"
+
+# Benchmarking (S16 — chaos tier perf baselines). Used by `controller/benches/`
+# and `inference-router/benches/`. Kept out of the binary builds via dev-deps.
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
 
 [profile.release]
 lto = true

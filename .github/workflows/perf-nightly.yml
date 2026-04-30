@@ -1,0 +1,65 @@
+name: Perf Nightly (k6)
+
+# Phase 2 S16. Wall-clock perf smoke against the inference router.
+# Intentionally NOT a PR check — k6 + hosted-runner network behaviour is
+# too noisy to gate merges. Failures here surface as a nightly issue
+# (alerting wire-up TBD) and inform the next baseline refresh.
+
+on:
+  schedule:
+    # 04:00 UTC daily — after the cargo-audit advisory feed has rolled.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  k6-router-smoke:
+    name: k6 router smoke (50 VUs, 30s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build inference router
+        run: cargo build --release --package azureclaw-inference-router
+
+      - name: Start router (background)
+        run: |
+          # Minimal env — the smoke test only hits /healthz which has no
+          # auth dependency.
+          ./target/release/azureclaw-inference-router &
+          echo "ROUTER_PID=$!" >> "$GITHUB_ENV"
+          # Give the router a moment to bind.
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8443/healthz >/dev/null 2>&1; then
+              echo "router up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "router did not become healthy"
+          exit 1
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y k6
+
+      - name: Run k6 smoke
+        env:
+          ROUTER_URL: http://127.0.0.1:8443
+        run: k6 run tests/k6/router_smoke.js
+
+      - name: Stop router
+        if: always()
+        run: |
+          if [ -n "${ROUTER_PID:-}" ]; then
+            kill "$ROUTER_PID" || true
+          fi

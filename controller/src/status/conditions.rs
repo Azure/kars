@@ -53,6 +53,71 @@ pub const TYPE_PROGRESSING: &str = "Progressing";
 /// missing dependency, quota, etc.). `status=True` means degraded.
 pub const TYPE_DEGRADED: &str = "Degraded";
 
+/// Well-known condition type (Phase 2 S8): controller has *intentionally
+/// stopped driving* a sub-resource — e.g. `OverlayMode` skips Pod
+/// creation because an upstream `Sandbox` CR owns the Pod. `status=True`
+/// means suspended; `status=False` means actively reconciling.
+pub const TYPE_SUSPENDED: &str = "Suspended";
+
+/// Well-known condition type (Phase 2 S10): the runtime declared in
+/// `spec.runtime.kind` is implemented by the controller and its adapter
+/// is wired up. `status=True/Reconciled` means the runtime adapter is
+/// present and the Pod was templated for that runtime. `status=False`
+/// with reason `AdapterMissing` means the controller parsed the
+/// runtime kind but no adapter is wired (e.g. `OpenAIAgents` /
+/// `MicrosoftAgentFramework` before S10.A3/A4 land); the controller
+/// will *not* create a Deployment in that case to avoid silently
+/// running the wrong runtime image.
+pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
+
+/// Phase 2 S12.e — `AllowlistVerified`: the controller fetched the
+/// signed OCI artifact referenced by
+/// `spec.networkPolicy.allowlistRef`, verified its cosign signature
+/// against the cluster `SignerPolicy` (S12.d), and re-validated the
+/// canonical-form rules from `docs/policy-canonical-format.md`.
+///
+/// Emitted whenever `allowlistRef` is set on the CR. The S12.b
+/// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in S12.e —
+/// the verification path is always-on once an operator opts in by
+/// populating `allowlistRef`.
+///
+/// `status=True/Verified` means the artifact is current and trusted.
+/// `status=False/<reason>` carries the failure category — see
+/// [`super::super::policy_fetcher::reason_for_error`] for the mapping.
+pub const TYPE_ALLOWLIST_VERIFIED: &str = "AllowlistVerified";
+
+/// Phase 2 S12.e — `AllowlistAuthoritative`: the controller derived the
+/// live NetworkPolicy egress endpoints from the verified canonical
+/// artifact (`status=True`) rather than from inline `allowedEndpoints`
+/// or a stale last-known-good cache (`status=False`).
+///
+/// Reasons:
+/// - `Verified` (status=True) — current reconcile used freshly verified
+///   artifact bytes.
+/// - `Inline` (status=False) — no `allowlistRef` set; controller fell
+///   back to inline `allowedEndpoints` (the S12.b legacy path).
+/// - `StaleLKG` (status=False) — `allowlistRef` set but verify failed;
+///   controller is preserving the last-known-good endpoints from a
+///   prior successful reconcile. Pair with `AllowlistVerified=False`
+///   for the verify-failure reason.
+/// - `FailedClosed` (status=False) — `allowlistRef` set, verify failed,
+///   no LKG available (first reconcile after CR create or controller
+///   restart). The controller did **not** write user-defined egress;
+///   the sandbox is restricted to the always-allowed defaults.
+pub const TYPE_ALLOWLIST_AUTHORITATIVE: &str = "AllowlistAuthoritative";
+
+/// Phase 2 S12.e — `AllowlistDrift`: the CR has both `allowlistRef` and
+/// non-empty inline `allowedEndpoints`, and the inline list differs from
+/// the artifact-derived list. Informational — the artifact wins
+/// (authoritative); operators should clean up the inline field.
+///
+/// Reasons:
+/// - `InlineDiffersFromArtifact` (status=True) — drift observed.
+/// - `InlineCleared` (status=False) — inline was just emptied;
+///   condition kept visible briefly (≤2 reconciles) so operators see
+///   the resolution before it disappears from status.
+pub const TYPE_ALLOWLIST_DRIFT: &str = "AllowlistDrift";
+
 /// `status` canonical values.
 pub mod status {
     pub const TRUE: &str = "True";
@@ -70,6 +135,46 @@ pub mod reason {
     pub const SPEC_INVALID: &str = "SpecInvalid";
     pub const DEPENDENCY_MISSING: &str = "DependencyMissing";
     pub const TIMED_OUT: &str = "TimedOut";
+    /// Phase 2 S8 — `OverlayMode`: operator's upstream `Sandbox` CR
+    /// owns the Pod; AzureClaw provides the governance overlay only.
+    pub const OVERLAY_MODE: &str = "OverlayMode";
+    /// Phase 2 S10 — `AdapterMissing`: the runtime declared in
+    /// `spec.runtime.kind` is recognised by the CRD but the controller
+    /// has no adapter wired (e.g. `OpenAIAgents` before S10.A3,
+    /// `MicrosoftAgentFramework` before S10.A4). The controller refuses
+    /// to create a Deployment rather than silently fall through to the
+    /// OpenClaw image.
+    pub const ADAPTER_MISSING: &str = "AdapterMissing";
+    /// Phase 2 S12.b — `Verified`: signed allowlist artifact fetched,
+    /// cosign signature passed, signer identity matched cluster
+    /// SignerPolicy, canonical form re-validated.
+    pub const VERIFIED: &str = "Verified";
+    /// Phase 2 S13 — `InferencePolicyNotFound`: the
+    /// `ClawSandbox.spec.inferenceRef.name` did not resolve to an
+    /// `InferencePolicy` CR in the sandbox's namespace. Same-namespace
+    /// constraint is enforced; cross-namespace lookups are not allowed.
+    pub const INFERENCE_POLICY_NOT_FOUND: &str = "InferencePolicyNotFound";
+    /// Phase 2 S13 — `ToolPolicyNotFound`: governance is enabled and
+    /// `spec.governance.toolPolicyRef.name` did not resolve to a
+    /// `ToolPolicy` CR in the sandbox's namespace.
+    pub const TOOL_POLICY_NOT_FOUND: &str = "ToolPolicyNotFound";
+    /// Phase 2 S12.e — `Inline`: `AllowlistAuthoritative=False` reason
+    /// for sandboxes without `allowlistRef`. Inline `allowedEndpoints`
+    /// is the (legacy) source of truth.
+    pub const INLINE: &str = "Inline";
+    /// Phase 2 S12.e — `StaleLKG`: verify failed but the controller is
+    /// preserving the last-known-good endpoints from a prior reconcile.
+    pub const STALE_LKG: &str = "StaleLKG";
+    /// Phase 2 S12.e — `FailedClosed`: verify failed and no LKG was
+    /// cached; the controller refused to write user-defined egress.
+    pub const FAILED_CLOSED: &str = "FailedClosed";
+    /// Phase 2 S12.e — `InlineDiffersFromArtifact`: drift detected
+    /// between inline `allowedEndpoints` and the verified artifact.
+    pub const INLINE_DIFFERS_FROM_ARTIFACT: &str = "InlineDiffersFromArtifact";
+    /// Phase 2 S12.e — `InlineCleared`: drift just resolved; condition
+    /// kept visible briefly so operators see the cleanup before it is
+    /// dropped from status.
+    pub const INLINE_CLEARED: &str = "InlineCleared";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
@@ -180,6 +285,8 @@ mod tests {
             reason::SPEC_INVALID,
             reason::DEPENDENCY_MISSING,
             reason::TIMED_OUT,
+            reason::INFERENCE_POLICY_NOT_FOUND,
+            reason::TOOL_POLICY_NOT_FOUND,
         ] {
             assert!(r.chars().next().unwrap().is_uppercase(), "{r}");
             assert!(!r.contains('_'), "{r}");

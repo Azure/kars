@@ -99,11 +99,14 @@ pub(super) async fn handle_offload_request(
         std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
 
     let spec = json!({
-        "openclaw": {
-            "version": "2026.3.13",
-            "config": {
-                "agent": {
-                    "model": format!("azure/{model}")
+        "runtime": {
+            "kind": "OpenClaw",
+            "openclaw": {
+                "version": "2026.3.13",
+                "config": {
+                    "agent": {
+                        "model": format!("azure/{model}")
+                    }
                 }
             }
         },
@@ -185,9 +188,9 @@ pub(super) async fn handle_offload_request(
     let api: Api<kube::api::DynamicObject> =
         Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
 
-    // Merge extra env into the CRD spec
+    // Merge extra env into the CRD spec (S10.A1: inside spec.runtime.openclaw, not spec.openclaw)
     let mut crd_value = crd;
-    if let Some(openclaw) = crd_value["spec"]["openclaw"].as_object_mut() {
+    if let Some(openclaw) = crd_value["spec"]["runtime"]["openclaw"].as_object_mut() {
         openclaw.insert("extraEnv".to_string(), extra_env);
     }
 
@@ -248,7 +251,7 @@ pub(super) async fn handle_offload_request(
     let _ = pairings_api
         .patch_status(
             &pairing_name,
-            &PatchParams::apply("azureclaw-mesh-peer"),
+            &PatchParams::apply(crate::field_managers::MESH_PEER),
             &Patch::Merge(usage_patch),
         )
         .await;
@@ -573,7 +576,7 @@ pub(super) async fn annotate_ready_sent(state: &MeshPeerState, sandbox_name: &st
     });
     api.patch(
         sandbox_name,
-        &PatchParams::apply("azureclaw-mesh-peer"),
+        &PatchParams::apply(crate::field_managers::MESH_PEER),
         &Patch::Merge(patch),
     )
     .await

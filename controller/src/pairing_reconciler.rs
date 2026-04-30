@@ -66,7 +66,7 @@ async fn reconcile_pairing(
         });
         api.patch_status(
             &name,
-            &PatchParams::apply("azureclaw-controller"),
+            &PatchParams::apply(crate::field_managers::PAIRING),
             &Patch::Merge(patch),
         )
         .await?;
@@ -98,7 +98,7 @@ async fn reconcile_pairing(
                 });
                 api.patch_status(
                     &name,
-                    &PatchParams::apply("azureclaw-controller"),
+                    &PatchParams::apply(crate::field_managers::PAIRING),
                     &Patch::Merge(patch),
                 )
                 .await?;
@@ -121,12 +121,17 @@ fn pairing_error_policy(
     error: &PairingReconcileError,
     _ctx: Arc<PairingContext>,
 ) -> Action {
+    let class = match error {
+        PairingReconcileError::Kube(_) => "kube_api",
+        PairingReconcileError::SerdeJson(_) => "serde",
+    };
+    crate::metrics::record_reconcile_error("ClawPairing", class);
     tracing::warn!(
         pairing = %pairing.name_any(),
         error = %error,
-        "ClawPairing reconcile error — requeuing in 30s"
+        "ClawPairing reconcile error — requeuing in ~30s (±20% jitter)"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 /// Start the pairing reconciler controller loop.
@@ -147,7 +152,13 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(PairingContext { client });
 
     Controller::new(pairings, kube::runtime::watcher::Config::default())
-        .run(reconcile_pairing, pairing_error_policy, ctx)
+        .run(
+            |x, ctx| async move {
+                crate::metrics::observe_reconcile("ClawPairing", reconcile_pairing(x, ctx)).await
+            },
+            pairing_error_policy,
+            ctx,
+        )
         .for_each(|res| async move {
             match res {
                 Ok(o) => tracing::debug!("Pairing reconciled {:?}", o),

@@ -3,6 +3,7 @@
 //! This is the Rust representation of the ClawSandbox CRD.
 //! kube-rs derives the CRD schema, API bindings, and JSON schema automatically.
 
+use crate::mcp_server::LocalObjectRef;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -19,20 +20,42 @@ use serde::{Deserialize, Serialize};
     shortname = "cs",
     shortname = "claw",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.inference.model"}"#,
+    printcolumn = r#"{"name":"Runtime","type":"string","jsonPath":".spec.runtime.kind"}"#,
+    printcolumn = r#"{"name":"InferencePolicy","type":"string","jsonPath":".spec.inferenceRef.name"}"#,
     printcolumn = r#"{"name":"Isolation","type":"string","jsonPath":".spec.sandbox.isolation"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ClawSandboxSpec {
-    /// OpenClaw configuration
-    pub openclaw: Option<OpenClawConfig>,
+    /// Agent runtime selector (S10.A1 multi-runtime hosting).
+    ///
+    /// Replaces the original `spec.openclaw` field. The `kind` discriminator
+    /// selects which sibling struct (`openclaw` / `openaiAgents` /
+    /// `microsoftAgentFramework` / `byo`) is required; the others must be
+    /// absent. Mutual exclusion is enforced by Helm CRD CEL `x-kubernetes-
+    /// validations`; the controller additionally validates shape defensively
+    /// via `validate_runtime_shape` before deployment planning.
+    ///
+    /// Default constructed value (used in tests + when k8s defaulting is
+    /// active) is `kind: OpenClaw` with an empty `OpenClawConfig`. Required
+    /// on the wire — Helm CRD `required: ["runtime", "sandbox", "inference"]`.
+    #[serde(default)]
+    pub runtime: RuntimeSpec,
 
     /// Sandbox security settings
     pub sandbox: Option<SandboxConfig>,
 
-    /// Inference routing
-    pub inference: Option<InferenceConfig>,
+    /// Reference to an `InferencePolicy` CR in the **same namespace** as
+    /// this `ClawSandbox`. The referenced CR is the single source of
+    /// truth for inference guardrails: model preference, content-safety
+    /// floor, prompt-shield requirement, token budgets. The reconciler
+    /// resolves the ref at apply time; if the target is missing the
+    /// sandbox enters `Degraded` with reason `InferencePolicyNotFound`
+    /// (no inline-fallback path post-S13).
+    ///
+    /// Cross-namespace refs are deliberately not supported — would be a
+    /// privilege-escalation vector. See `docs/crd-precedence.md`.
+    pub inference_ref: LocalObjectRef,
 
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
@@ -85,18 +108,44 @@ pub struct ClawSandboxSpec {
     pub upstream_compatibility: Option<UpstreamCompatibilityConfig>,
 }
 
-/// Upstream-protocol compatibility (Phase 1 scaffold).
+/// Upstream-protocol compatibility (Phase 1 scaffold extended in Phase 2 S8).
 ///
-/// Codifies §2 (TranslateMode) of the implementation plan as a CRD field.
-/// All values default to OFF — opt-in per sandbox.
+/// Codifies §2 (Native | Translate | Overlay) of the implementation plan
+/// as CRD fields. All values default to OFF — opt-in per sandbox.
+///
+/// **`OverlayMode` (Phase 2 S8).** When `sigs_agent_sandbox == "overlay"`,
+/// the operator already manages an upstream `Sandbox` CR in the same
+/// namespace; AzureClaw provides only the *overlay* (namespace + sandbox
+/// ServiceAccount + Workload-Identity binding + NetworkPolicy + governance
+/// ConfigMaps). The controller **skips Deployment/Service/CronJob
+/// creation**: those are owned by the upstream reconciler. The
+/// `upstream_sandbox_ref` field names that upstream CR. Implementation
+/// plan §2 lines 269-271 + §8 entry "S8 phase2-overlaymode".
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamCompatibilityConfig {
     /// `sigs.k8s.io/agent-sandbox` SandboxClaim translation mode.
-    /// Values: `"off"` (default), `"observe"` (mirror status only),
-    /// `"translate"` (accept SandboxClaim semantics on inbound).
+    /// Values:
+    /// - `"off"` (default) — no upstream interaction; pure Native mode.
+    /// - `"observe"` — mirror status only.
+    /// - `"translate"` — accept SandboxClaim semantics on inbound (P1
+    ///   schema-only, runtime path deferred).
+    /// - `"overlay"` — operator's upstream `Sandbox` CR owns the Pod;
+    ///   AzureClaw provides governance overlay only. Requires
+    ///   [`upstream_sandbox_ref`] (admission-enforced).
+    ///
     /// Reconciler refuses unknown strings.
     pub sigs_agent_sandbox: Option<String>,
+
+    /// Reference to an upstream `Sandbox` CR in the same namespace.
+    /// **Required when `sigs_agent_sandbox == "overlay"`.** Ignored
+    /// otherwise. The controller does not watch the upstream object's
+    /// status today (deferred to a future slice that adds an upstream
+    /// CRD discovery / informer); operators read overlay state from
+    /// the upstream CR directly. AzureClaw never mutates the upstream
+    /// object — the relationship is read-only at the boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_sandbox_ref: Option<LocalObjectRef>,
 
     /// CNCF AI Conformance reference-mode toggle. When `true`, the
     /// reconciler emits the canonical conformance status block on the
@@ -104,6 +153,95 @@ pub struct UpstreamCompatibilityConfig {
     /// no code path consumes this yet.
     #[serde(default)]
     pub ai_conformance_reference: bool,
+}
+
+impl UpstreamCompatibilityConfig {
+    /// Returns `true` if this configuration selects `OverlayMode`.
+    /// Pure helper — no I/O, no logging.
+    #[must_use]
+    pub fn is_overlay_mode(&self) -> bool {
+        self.sigs_agent_sandbox.as_deref() == Some("overlay")
+    }
+
+    /// Returns the upstream `Sandbox` CR name when in overlay mode,
+    /// otherwise `None`. Centralises the "extract overlay target"
+    /// logic so the reconciler does not duplicate the match.
+    #[must_use]
+    pub fn overlay_target_name(&self) -> Option<&str> {
+        if self.is_overlay_mode() {
+            self.upstream_sandbox_ref.as_ref().map(|r| r.name.as_str())
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod upstream_compat_tests {
+    use super::*;
+
+    fn cfg(mode: Option<&str>, name: Option<&str>) -> UpstreamCompatibilityConfig {
+        UpstreamCompatibilityConfig {
+            sigs_agent_sandbox: mode.map(str::to_owned),
+            upstream_sandbox_ref: name.map(|n| LocalObjectRef { name: n.into() }),
+            ai_conformance_reference: false,
+        }
+    }
+
+    #[test]
+    fn is_overlay_mode_true_only_for_overlay_string() {
+        assert!(cfg(Some("overlay"), Some("up")).is_overlay_mode());
+        assert!(!cfg(Some("off"), None).is_overlay_mode());
+        assert!(!cfg(Some("observe"), None).is_overlay_mode());
+        assert!(!cfg(Some("translate"), None).is_overlay_mode());
+        assert!(!cfg(None, None).is_overlay_mode());
+        assert!(!cfg(Some("OVERLAY"), None).is_overlay_mode());
+        assert!(!cfg(Some(""), None).is_overlay_mode());
+    }
+
+    #[test]
+    fn overlay_target_name_extracts_only_in_overlay_mode() {
+        assert_eq!(
+            cfg(Some("overlay"), Some("upstream-1")).overlay_target_name(),
+            Some("upstream-1")
+        );
+        assert_eq!(
+            cfg(Some("translate"), Some("upstream-1")).overlay_target_name(),
+            None
+        );
+        assert_eq!(cfg(Some("overlay"), None).overlay_target_name(), None);
+    }
+
+    #[test]
+    fn defaults_are_native_mode() {
+        let c = UpstreamCompatibilityConfig::default();
+        assert!(!c.is_overlay_mode());
+        assert!(c.overlay_target_name().is_none());
+        assert!(c.sigs_agent_sandbox.is_none());
+        assert!(c.upstream_sandbox_ref.is_none());
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_overlay_fields() {
+        let c = cfg(Some("overlay"), Some("my-upstream"));
+        let j = serde_json::to_string(&c).expect("serialise");
+        let back: UpstreamCompatibilityConfig = serde_json::from_str(&j).expect("deserialise");
+        assert_eq!(back.sigs_agent_sandbox.as_deref(), Some("overlay"));
+        assert_eq!(
+            back.upstream_sandbox_ref.as_ref().map(|r| r.name.as_str()),
+            Some("my-upstream")
+        );
+    }
+
+    #[test]
+    fn serde_omits_upstream_ref_when_none() {
+        let c = cfg(Some("off"), None);
+        let j = serde_json::to_string(&c).expect("serialise");
+        assert!(
+            !j.contains("upstreamSandboxRef"),
+            "off-mode should not serialise upstreamSandboxRef field, got {j}"
+        );
+    }
 }
 
 /// `ClawSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.
@@ -206,6 +344,276 @@ fn default_session_max() -> u32 {
     60
 }
 
+// ─── Runtime selector (S10.A1 multi-runtime hosting) ─────────────────────
+//
+// Discriminated-union variant struct for `spec.runtime`. The `kind` enum
+// selects which sibling struct is required; CEL `x-kubernetes-validations`
+// in the Helm CRD enforce mutual exclusion at admission, and
+// `validate_runtime_shape` (in `crd_validations`) is the controller-side
+// defense-in-depth guard. Phase 2 ships exactly four variants — adding a
+// fifth is a deliberate slice (Phase 3) covering image, adapter, e2e, CLI,
+// docs.
+
+/// Discriminator for [`RuntimeSpec`]. Locked to PascalCase wire values per
+/// the multi-runtime naming convention (CLI flags use kebab-case; CRD field
+/// names use camelCase; `kind` enum values use PascalCase).
+///
+/// Tier 1 (S10.A3/A4) — controller adapter shipping in Phase 2:
+/// `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`.
+/// Tier 2 — declared roadmap; CRD-level placeholders so authors can pin  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+/// `kind:` without later schema breakage. Reconciler stamps
+/// `RuntimeReady=False / AdapterMissing` until adapters land.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)] // `BYO` is the locked wire-format value (see plan.md S10 naming).
+pub enum RuntimeKind {
+    #[default]
+    OpenClaw,
+    OpenAIAgents,
+    MicrosoftAgentFramework,
+    SemanticKernel,
+    LangGraph,
+    Anthropic,
+    BYO,
+}
+
+/// Agent runtime selector. Exactly one variant struct (matching `kind`)
+/// must be set; the others must be absent. See [`ClawSandboxSpec::runtime`].
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSpec {
+    /// Variant discriminator: `OpenClaw | OpenAIAgents | MicrosoftAgentFramework | BYO`.
+    pub kind: RuntimeKind,
+
+    /// OpenClaw configuration. Required iff `kind == OpenClaw`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw: Option<OpenClawConfig>,
+
+    /// OpenAI Agents Python configuration. Required iff `kind == OpenAIAgents`.
+    /// In Phase 2 the controller parses this variant but does not yet build
+    /// a Deployment for it — `RuntimeReady=False, reason=AdapterMissing`
+    /// until S10.A3 lands the adapter image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_agents: Option<OpenAIAgentsConfig>,
+
+    /// Microsoft Agent Framework configuration. Required iff
+    /// `kind == MicrosoftAgentFramework`. Phase-2 status mirrors
+    /// `OpenAIAgents` — adapter ships in S10.A4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microsoft_agent_framework: Option<MicrosoftAgentFrameworkConfig>,
+
+    /// Semantic Kernel configuration. Required iff `kind == SemanticKernel`.
+    /// Tier-2 placeholder — controller stamps  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+    /// `RuntimeReady=False / AdapterMissing` until the adapter image ships.
+    /// Schema is locked now to avoid a CRD breaking change later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_kernel: Option<SemanticKernelConfig>,
+
+    /// LangGraph configuration. Required iff `kind == LangGraph`.
+    /// Tier-2 placeholder — see `semantic_kernel`.  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang_graph: Option<LangGraphConfig>,
+
+    /// Anthropic Claude Agents SDK configuration. Required iff
+    /// `kind == Anthropic`. Tier-2 placeholder — see `semantic_kernel`.  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic: Option<AnthropicConfig>,
+
+    /// Bring-your-own runtime. Required iff `kind == BYO`. Image must
+    /// honor the BYO contract (UID 1000, inference via `127.0.0.1:8443`,
+    /// `AZURECLAW_*` env, no privileged caps). Phase 2 enforcement is
+    /// warn-only via `RuntimeReady` Condition; `contractVersion` is
+    /// required (no silent default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byo: Option<ByoRuntimeConfig>,
+}
+
+impl Default for RuntimeSpec {
+    fn default() -> Self {
+        Self {
+            kind: RuntimeKind::OpenClaw,
+            openclaw: Some(OpenClawConfig::default()),
+            openai_agents: None,
+            microsoft_agent_framework: None,
+            semantic_kernel: None,
+            lang_graph: None,
+            anthropic: None,
+            byo: None,
+        }
+    }
+}
+
+/// OpenAI Agents Python runtime variant.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIAgentsConfig {
+    /// Python interpreter version (e.g. `"3.12"`). Adapter image picks the
+    /// matching base; defaults to the adapter's latest-supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_version: Option<String>,
+    /// Where the user's agent code comes from (OCI image or git URL).
+    /// Required at runtime; CEL enforces exactly-one of `oci`/`git`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    /// Container entrypoint. Defaults to the adapter's stock launcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    /// Extra env vars merged into the adapter container. Reserved
+    /// prefixes (`AGT_`, `AZURE_`, `AZURECLAW_`, …) are stripped by the
+    /// reconciler — same policy as `OpenClawConfig::extra_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Microsoft Agent Framework runtime variant.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MicrosoftAgentFrameworkConfig {
+    /// Language flavour: `python` (default) or `dotnet`. Adapter image
+    /// is selected accordingly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<MafLanguage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+pub enum MafLanguage {
+    #[default]
+    #[serde(rename = "python")]
+    Python,
+    #[serde(rename = "dotnet")]
+    Dotnet,
+}
+
+/// Semantic Kernel runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticKernelConfig {
+    /// Language flavour: `python` (default), `dotnet`, or `java`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<SkLanguage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+pub enum SkLanguage {
+    #[default]
+    #[serde(rename = "python")]
+    Python,
+    #[serde(rename = "dotnet")]
+    Dotnet,
+    #[serde(rename = "java")]
+    Java,
+}
+
+/// LangGraph runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LangGraphConfig {
+    /// Language flavour: `python` (default) or `typescript`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<LangGraphLanguage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+pub enum LangGraphLanguage {
+    #[default]
+    #[serde(rename = "python")]
+    Python,
+    #[serde(rename = "typescript")]
+    Typescript,
+}
+
+/// Anthropic Claude Agents SDK runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+/// The Anthropic Agent SDK is currently Python-first; `pythonVersion`
+/// mirrors the `OpenAIAgentsConfig` field.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AnthropicConfig {
+    /// Python interpreter version (e.g. `"3.12"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Reference to user-supplied agent code. Exactly one of `oci` / `git`
+/// must be set (CEL-validated in Helm CRD).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCodeRef {
+    /// Pull agent code from an OCI image (production path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci: Option<OciAgentCode>,
+    /// Clone agent code from a git URL (development iteration path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitAgentCode>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct OciAgentCode {
+    /// Fully-qualified OCI image reference, e.g.
+    /// `myregistry.azurecr.io/agent:1.2.3`.
+    pub image: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitAgentCode {
+    /// Git URL (https or ssh).
+    pub url: String,
+    /// Branch / tag / commit SHA. Defaults to `HEAD` of default branch.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// Subdirectory inside the repo. Defaults to repo root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Bring-your-own-runtime variant. The image must honor the documented
+/// BYO contract (`docs/byo-runtime-contract.md`). Phase 2 enforcement is
+/// warn-only via `RuntimeReady` Condition; strict-mode admission is a
+/// Phase 3 follow-up.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ByoRuntimeConfig {
+    /// Container image (must declare `org.azureclaw.runtime.contract`
+    /// label matching `contract_version`).
+    pub image: String,
+    /// Container entrypoint override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// Container args override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Extra env vars (raw K8s `EnvVar` shape — supports `valueFrom`).
+    /// Reserved prefixes are stripped same as openclaw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<serde_json::Value>>,
+    /// BYO contract version. **Required, no default.** A silent default
+    /// would let an undeclaring image appear contract-compliant.
+    pub contract_version: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenClawConfig {
@@ -256,49 +664,7 @@ impl Default for SandboxConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct InferenceConfig {
-    /// azure-openai | azure-ai-foundry | self-hosted
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    pub endpoint: Option<String>,
-    #[serde(default = "default_model")]
-    pub model: String,
-    pub fallback: Option<FallbackConfig>,
-    #[serde(default = "default_true")]
-    pub content_safety: bool,
-    #[serde(default = "default_true")]
-    pub prompt_shields: bool,
-    pub token_budget: Option<TokenBudgetConfig>,
-}
-
-impl Default for InferenceConfig {
-    fn default() -> Self {
-        Self {
-            provider: "azure-openai".into(),
-            endpoint: None,
-            model: "gpt-4.1".into(),
-            fallback: None,
-            content_safety: true,
-            prompt_shields: true,
-            token_budget: None,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-pub struct FallbackConfig {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenBudgetConfig {
-    pub daily: Option<i64>,
-    pub per_request: Option<i64>,
-}
+// See `crate::mcp_server::LocalObjectRef` — re-used here for sandbox refs.
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -312,6 +678,16 @@ pub struct NetworkPolicyConfig {
     /// Use `azureclaw policy learn <name>` to export the learned allowlist.
     #[serde(default)]
     pub learn_egress: bool,
+    /// Reference to a signed OCI artifact containing the canonical egress
+    /// allowlist. Populated by `azureclaw egress … --sign` (S12.c).
+    /// **Authoritative** in S12.e — when set, the controller derives
+    /// `NetworkPolicy` egress from the verified canonical artifact and
+    /// inline `allowed_endpoints` is ignored (a non-empty inline that
+    /// differs surfaces as `AllowlistDrift=True`).
+    ///
+    /// Canonical format documented at `docs/policy-canonical-format.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist_ref: Option<OciArtifactRef>,
 }
 
 impl Default for NetworkPolicyConfig {
@@ -321,6 +697,7 @@ impl Default for NetworkPolicyConfig {
             approval_required: true,
             allowed_endpoints: None,
             learn_egress: false,
+            allowlist_ref: None,
         }
     }
 }
@@ -331,6 +708,36 @@ pub struct EndpointConfig {
     pub port: Option<u16>,
     pub methods: Option<Vec<String>>,
     pub paths: Option<Vec<String>>,
+}
+
+/// Reference to a signed OCI artifact (e.g., a sealed policy document).
+///
+/// Generic shape: any consumer that needs to point at a content-addressed,
+/// cosign-signed OCI blob uses this struct. Keep registry-agnostic — works
+/// against ACR, GHCR, or any OCI-1.1 distribution endpoint.
+///
+/// Verification (consumer-side) requires:
+/// 1. Cryptographic validity (cosign sig present, chain valid).
+/// 2. Signer identity match against a cluster `SignerPolicy` (S12.d):
+///    Fulcio issuer + SAN/subject pattern.
+///
+/// Both checks must pass; "valid sig" alone is not authority.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OciArtifactRef {
+    /// Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+    pub registry: String,
+    /// Repository path (e.g. `azureclaw/policies/sandbox-foo`).
+    pub repository: String,
+    /// Content-addressed digest, including the algorithm prefix
+    /// (`sha256:abc…`). The digest covers the canonical artifact bytes —
+    /// see `docs/policy-canonical-format.md` for the egress-allowlist
+    /// canonicalization rules.
+    pub digest: String,
+    /// OCI artifactType media-type, e.g.
+    /// `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+    /// reject artifacts whose pulled `artifactType` doesn't match.
+    pub artifact_type: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -360,15 +767,27 @@ pub struct AgentConfig {
 }
 
 /// AGT behavioral governance configuration.
+///
+/// **S13:** the `tool_policy` profile name was replaced with
+/// `tool_policy_ref` — a same-namespace reference to a `ToolPolicy` CR.
+/// The dedicated `ToolPolicy` CRD is the single source of truth for
+/// tool-call gating (rate limit, approval, AP2 commerce caps); this
+/// struct keeps only behavior knobs that aren't expressed by `ToolPolicy`
+/// itself (AGT enable flag, trust threshold, trusted peers, registry mode).
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernanceConfig {
     /// Enable AGT governance (tool policy, trust, audit).
     #[serde(default)]
     pub enabled: bool,
-    /// Policy profile name (references policies ConfigMap).
-    #[serde(default = "default_policy")]
-    pub tool_policy: String,
+    /// Reference to a `ToolPolicy` CR in the **same namespace** as this
+    /// `ClawSandbox`. Required — the controller resolves the target at
+    /// reconcile time; missing target → `Degraded` with reason
+    /// `ToolPolicyNotFound` (no inline-fallback path post-S13). The
+    /// resolved CR's `metadata.name` doubles as the AGT policy profile
+    /// name carried into the sandbox via `AGT_POLICY_PROFILE`.
+    #[serde(default)]
+    pub tool_policy_ref: LocalObjectRef,
     /// Minimum trust score (0-1000) for inter-agent communication.
     #[serde(default = "default_trust_threshold")]
     pub trust_threshold: i32,
@@ -381,9 +800,6 @@ pub struct GovernanceConfig {
     pub registry_mode: Option<String>,
 }
 
-fn default_policy() -> String {
-    "default".into()
-}
 fn default_trust_threshold() -> i32 {
     500
 }
@@ -401,6 +817,13 @@ pub struct ClawSandboxStatus {
     pub pending_approvals: Option<i32>,
     /// Foundry Agent ID created by the controller.
     pub foundry_agent_id: Option<String>,
+    /// The runtime kind the controller observed for the current
+    /// `observedGeneration`. Mirrors `spec.runtime.kind` once the
+    /// reconciler has accepted it; consumers should interpret this
+    /// alongside `observedGeneration` to detect stale observations
+    /// (per S10.A1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_kind: Option<String>,
     /// The `metadata.generation` that produced this status. Consumers
     /// compare against `metadata.generation` to detect stale observations.
     /// See `controller/src/status/conditions.rs` for semantics.
@@ -429,12 +852,6 @@ fn default_seccomp() -> String {
 }
 fn default_selinux() -> String {
     String::new()
-}
-fn default_provider() -> String {
-    "azure-openai".into()
-}
-fn default_model() -> String {
-    "gpt-4.1".into()
 }
 fn default_true() -> bool {
     true
@@ -472,28 +889,20 @@ mod tests {
     }
 
     #[test]
-    fn default_model_is_gpt_4_1() {
-        let cfg = InferenceConfig::default();
-        assert_eq!(cfg.model, "gpt-4.1");
+    fn local_object_ref_round_trips() {
+        let r = LocalObjectRef {
+            name: "my-policy".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v.get("name").and_then(|s| s.as_str()), Some("my-policy"));
+        let back: LocalObjectRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
     }
 
     #[test]
-    fn default_provider_is_azure_openai() {
-        let cfg = InferenceConfig::default();
-        assert_eq!(cfg.provider, "azure-openai");
-    }
-
-    #[test]
-    fn default_inference_enables_content_safety() {
-        let cfg = InferenceConfig::default();
-        assert!(cfg.content_safety);
-        assert!(cfg.prompt_shields);
-    }
-
-    #[test]
-    fn default_inference_has_no_token_budget() {
-        let cfg = InferenceConfig::default();
-        assert!(cfg.token_budget.is_none());
+    fn local_object_ref_default_is_empty_name() {
+        let r = LocalObjectRef::default();
+        assert!(r.name.is_empty());
     }
 
     #[test]
@@ -503,38 +912,77 @@ mod tests {
         assert!(cfg.approval_required);
         assert!(cfg.allowed_endpoints.is_none());
         assert!(!cfg.learn_egress);
+        assert!(cfg.allowlist_ref.is_none());
+    }
+
+    #[test]
+    fn allowlist_ref_round_trips_through_camel_case_json() {
+        // Wire-format hygiene: K8s uses camelCase, so `allowlistRef` /
+        // `artifactType` must serialize as such (S12.a contract).
+        let r = OciArtifactRef {
+            registry: "myacr.azurecr.io".into(),
+            repository: "azureclaw/policies/sandbox-foo".into(),
+            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+            artifact_type: "application/vnd.azureclaw.egress-allowlist.v1+yaml".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("registry").is_some());
+        assert!(v.get("repository").is_some());
+        assert!(v.get("digest").is_some());
+        assert!(
+            v.get("artifactType").is_some(),
+            "must use camelCase artifactType"
+        );
+        let back: OciArtifactRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn allowlist_ref_omitted_when_none() {
+        // S12.a: existing CRs without `allowlistRef` must round-trip
+        // unchanged. `skip_serializing_if = "Option::is_none"` enforces this.
+        let cfg = NetworkPolicyConfig::default();
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            v.get("allowlistRef").is_none(),
+            "default NetworkPolicyConfig must not emit allowlistRef field"
+        );
     }
 
     #[test]
     fn default_governance_config() {
-        // GovernanceConfig derives Default (empty/zero), serde defaults apply on deserialization
         let cfg = GovernanceConfig::default();
         assert!(!cfg.enabled);
-        // Serde default_policy() and default_trust_threshold() are used during deserialization only
+        // S13: tool_policy is now a same-namespace ref to a ToolPolicy CR.
+        // Default is an empty name (a sandbox spec with governance.enabled=true
+        // MUST set toolPolicyRef.name; reconciler degrades on missing ref).
+        assert!(cfg.tool_policy_ref.name.is_empty());
         let cfg_serde: GovernanceConfig = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(cfg_serde.tool_policy, "default");
         assert_eq!(cfg_serde.trust_threshold, 500);
-        assert_eq!(cfg.tool_policy, ""); // derive Default gives empty string
     }
 
     #[test]
     fn sandbox_spec_fields_all_optional() {
         let spec = ClawSandboxSpec::default();
-        assert!(spec.openclaw.is_none());
+        // S10.A1: `runtime` replaces `openclaw`; default is OpenClaw kind
+        // with an empty `OpenClawConfig` (so the spec round-trips through
+        // tests that previously constructed `ClawSandboxSpec::default()`).
+        assert_eq!(spec.runtime.kind, RuntimeKind::OpenClaw);
+        assert!(spec.runtime.openclaw.is_some());
+        assert!(spec.runtime.openai_agents.is_none());
+        assert!(spec.runtime.microsoft_agent_framework.is_none());
+        assert!(spec.runtime.byo.is_none());
         assert!(spec.sandbox.is_none());
-        assert!(spec.inference.is_none());
+        // S13: `inferenceRef` is a value-type required field. Default is
+        // a `LocalObjectRef` with an empty name; admission CEL rejects
+        // empty-name on apply.
+        assert!(spec.inference_ref.name.is_empty());
         assert!(spec.network_policy.is_none());
         assert!(spec.agent.is_none());
         assert!(spec.governance.is_none());
         assert!(spec.azure_services.is_none());
         assert!(spec.resources.is_none());
-    }
-
-    #[test]
-    fn token_budget_config_defaults_to_none() {
-        let cfg = TokenBudgetConfig::default();
-        assert!(cfg.daily.is_none());
-        assert!(cfg.per_request.is_none());
     }
 
     #[test]
@@ -582,9 +1030,272 @@ mod tests {
     }
 
     #[test]
-    fn inference_config_default_has_no_fallback() {
-        let cfg = InferenceConfig::default();
-        assert!(cfg.fallback.is_none());
-        assert!(cfg.endpoint.is_none());
+    fn inference_ref_round_trips_via_camel_case() {
+        // Wire-format hygiene: K8s uses camelCase. The ref field on the
+        // ClawSandboxSpec must serialize as `inferenceRef`.
+        let spec = ClawSandboxSpec {
+            inference_ref: LocalObjectRef {
+                name: "my-sandbox-inference".into(),
+            },
+            ..ClawSandboxSpec::default()
+        };
+        let v = serde_json::to_value(&spec).unwrap();
+        assert!(
+            v.get("inferenceRef").is_some(),
+            "must use camelCase inferenceRef"
+        );
+        let ir = v.get("inferenceRef").unwrap();
+        assert_eq!(
+            ir.get("name").and_then(|n| n.as_str()),
+            Some("my-sandbox-inference")
+        );
+    }
+
+    #[test]
+    fn governance_tool_policy_ref_serializes_camel_case() {
+        let g = GovernanceConfig {
+            enabled: true,
+            tool_policy_ref: LocalObjectRef { name: "tp".into() },
+            trust_threshold: 500,
+            trusted_peers: None,
+            registry_mode: None,
+        };
+        let v = serde_json::to_value(&g).unwrap();
+        assert!(
+            v.get("toolPolicyRef").is_some(),
+            "must use camelCase toolPolicyRef"
+        );
+    }
+
+    // ─── S10.A1 RuntimeSpec tests ────────────────────────────────────
+
+    #[test]
+    fn runtime_kind_serializes_to_pascal_case_literals() {
+        // Wire-format guarantees — these strings appear in CRD YAML, in
+        // the print column, and (post-S10.A2) in admission CEL rules. Any
+        // schemars/serde change that flipped the case would break
+        // operators silently.
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::OpenClaw).unwrap(),
+            r#""OpenClaw""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::OpenAIAgents).unwrap(),
+            r#""OpenAIAgents""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::MicrosoftAgentFramework).unwrap(),
+            r#""MicrosoftAgentFramework""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::SemanticKernel).unwrap(),
+            r#""SemanticKernel""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::LangGraph).unwrap(),
+            r#""LangGraph""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::Anthropic).unwrap(),
+            r#""Anthropic""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::BYO).unwrap(),
+            r#""BYO""#
+        );
+    }
+
+    #[test]
+    fn runtime_default_is_openclaw_with_empty_config() {
+        let rt = RuntimeSpec::default();
+        assert_eq!(rt.kind, RuntimeKind::OpenClaw);
+        assert!(rt.openclaw.is_some());
+        assert!(rt.openai_agents.is_none());
+        assert!(rt.microsoft_agent_framework.is_none());
+        assert!(rt.semantic_kernel.is_none());
+        assert!(rt.lang_graph.is_none());
+        assert!(rt.anthropic.is_none());
+        assert!(rt.byo.is_none());
+    }
+
+    #[test]
+    fn runtime_openclaw_round_trip() {
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "OpenClaw",
+            "openclaw": {
+                "image": "myregistry.azurecr.io/openclaw:1.2.3"
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::OpenClaw);
+        assert_eq!(
+            rt.openclaw.as_ref().unwrap().image.as_deref(),
+            Some("myregistry.azurecr.io/openclaw:1.2.3")
+        );
+    }
+
+    #[test]
+    fn runtime_openai_agents_round_trip() {
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "OpenAIAgents",
+            "openaiAgents": {
+                "pythonVersion": "3.12",
+                "agentCode": {
+                    "oci": { "image": "myregistry.azurecr.io/agent:1.0" }
+                },
+                "entrypoint": ["python", "-m", "agent"]
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::OpenAIAgents);
+        let cfg = rt.openai_agents.as_ref().unwrap();
+        assert_eq!(cfg.python_version.as_deref(), Some("3.12"));
+        let code = cfg.agent_code.as_ref().unwrap();
+        assert!(code.oci.is_some());
+        assert!(code.git.is_none());
+    }
+
+    #[test]
+    fn runtime_microsoft_agent_framework_dotnet_round_trip() {
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "MicrosoftAgentFramework",
+            "microsoftAgentFramework": {
+                "language": "dotnet",
+                "agentCode": {
+                    "git": { "url": "https://github.com/contoso/agent.git", "ref": "main" }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::MicrosoftAgentFramework);
+        let cfg = rt.microsoft_agent_framework.as_ref().unwrap();
+        assert_eq!(cfg.language, Some(MafLanguage::Dotnet));
+        let code = cfg.agent_code.as_ref().unwrap();
+        assert!(code.git.is_some());
+        assert_eq!(
+            code.git.as_ref().unwrap().git_ref.as_deref(),
+            Some("main"),
+            "git ref must round-trip through the `ref` rename"
+        );
+    }
+
+    #[test]
+    fn runtime_byo_requires_contract_version() {
+        // contractVersion is REQUIRED; a missing value must fail to deserialize
+        // (silent default would defeat the declared-contract guard).
+        let res: Result<RuntimeSpec, _> = serde_json::from_value(serde_json::json!({
+            "kind": "BYO",
+            "byo": { "image": "myregistry.azurecr.io/agent:1.0" }
+        }));
+        assert!(
+            res.is_err(),
+            "missing contractVersion must reject (rubber-duck #9)"
+        );
+
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "BYO",
+            "byo": {
+                "image": "myregistry.azurecr.io/agent:1.0",
+                "contractVersion": "v1"
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::BYO);
+        assert_eq!(rt.byo.as_ref().unwrap().contract_version, "v1");
+    }
+
+    #[test]
+    fn runtime_serializes_only_set_variant() {
+        // Default path: kind=OpenClaw + openclaw set, others omitted.
+        let rt = RuntimeSpec::default();
+        let v = serde_json::to_value(&rt).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("kind").and_then(|v| v.as_str()), Some("OpenClaw"));
+        assert!(obj.contains_key("openclaw"));
+        assert!(
+            !obj.contains_key("openaiAgents"),
+            "absent variants must be omitted from wire format"
+        );
+        assert!(!obj.contains_key("microsoftAgentFramework"));
+        assert!(!obj.contains_key("semanticKernel"));
+        assert!(!obj.contains_key("langGraph"));
+        assert!(!obj.contains_key("anthropic"));
+        assert!(!obj.contains_key("byo"));
+    }
+
+    // ─── Tier-2 placeholder runtime variants ──────────────────────────  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+
+    #[test]
+    fn runtime_semantic_kernel_round_trip() {
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "SemanticKernel",
+            "semanticKernel": {
+                "language": "java",
+                "agentCode": {
+                    "oci": { "image": "contoso.azurecr.io/sk-agent:1.0" }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::SemanticKernel);
+        let cfg = rt.semantic_kernel.as_ref().unwrap();
+        assert_eq!(cfg.language, Some(SkLanguage::Java));
+        assert!(cfg.agent_code.as_ref().unwrap().oci.is_some());
+    }
+
+    #[test]
+    fn runtime_lang_graph_round_trip() {
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "LangGraph",
+            "langGraph": {
+                "language": "typescript",
+                "agentCode": {
+                    "git": { "url": "https://github.com/contoso/lg-agent.git" }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::LangGraph);
+        let cfg = rt.lang_graph.as_ref().unwrap();
+        assert_eq!(cfg.language, Some(LangGraphLanguage::Typescript));
+        assert!(cfg.agent_code.as_ref().unwrap().git.is_some());
+    }
+
+    #[test]
+    fn runtime_anthropic_round_trip() {
+        let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "Anthropic",
+            "anthropic": {
+                "pythonVersion": "3.12",
+                "agentCode": {
+                    "oci": { "image": "contoso.azurecr.io/claude-agent:1.0" }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(rt.kind, RuntimeKind::Anthropic);
+        let cfg = rt.anthropic.as_ref().unwrap();
+        assert_eq!(cfg.python_version.as_deref(), Some("3.12"));
+    }
+
+    #[test]
+    fn runtime_tier2_placeholders_default_to_python() {
+        // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+        // Defaults of new language enums must be `python` (most-common
+        // flavour for each runtime) so omitting `language` doesn't
+        // surprise authors with `dotnet`/`typescript`.
+        assert_eq!(SkLanguage::default(), SkLanguage::Python);
+        assert_eq!(LangGraphLanguage::default(), LangGraphLanguage::Python);
+    }
+
+    #[test]
+    fn status_runtime_kind_is_optional_and_omitted_when_none() {
+        let status = ClawSandboxStatus::default();
+        let v = serde_json::to_value(&status).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("runtimeKind"),
+            "None runtimeKind must be absent (would wipe a real value via merge patch)"
+        );
+        assert!(status.runtime_kind.is_none());
     }
 }

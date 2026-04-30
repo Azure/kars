@@ -6,7 +6,7 @@ Vendored test vectors and fixtures for protocol-invariant tests.
 | Subdirectory | Source | Pinned commit / version | Phase landing |
 |---|---|---|---|
 | `signal/` | libsignal + agentmesh vectors | TBD — populated in the PR that wires the first assertion (Phase 0 follow-up) | 0 |
-| `isolation/` | our own policy profiles | N/A — regenerated from `policy-engine/` | 0 |
+| `isolation/` | our own policy profiles | N/A — regenerated from `cli/profiles/` | 0 |
 | `oauth/` | RFC 9700 + MCP 2026 conformance | TBD — Phase 1 | 1 |
 | `mcp/` | AAIF MCP test corpus | TBD — Phase 1 | 1 |
 | `a2a/` | A2A spec fixtures | TBD — Phase 1 | 1 |

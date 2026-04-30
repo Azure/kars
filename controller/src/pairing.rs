@@ -8,6 +8,7 @@
 //! - **task**: ephemeral sandbox executes a single task, returns results, self-destructs
 //! - **handoff**: full agent state migrates to cloud, runs long-term, returns on recall
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"AMID","type":"string","jsonPath":".status.boundAmid"}"#,
     printcolumn = r#"{"name":"Budget","type":"integer","jsonPath":".spec.tokenBudget"}"#,
+    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +92,17 @@ pub struct ClawPairingStatus {
 
     /// Name of the currently active offload sandbox (if any).
     pub active_sandbox: Option<String>,
+
+    /// Standard Kubernetes condition list (S17 — CNCF AI Conformance v1.35+
+    /// requires every CRD to expose a `status.conditions` array using the
+    /// `meta/v1.Condition` shape). The reconciler emits `Ready`,
+    /// `Progressing`, and `Degraded` types here; reason/message taxonomy
+    /// is documented in `docs/api/conditions.md`.
+    ///
+    /// Skipped on the wire when empty so a populated status is never reset
+    /// to `[]` by a no-op patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
 }
 
 fn default_slots() -> i32 {
@@ -155,7 +168,7 @@ pub async fn release_offload_slot(client: kube::Client, requester: &str, sandbox
     let _ = pairings_api
         .patch_status(
             &pairing_name,
-            &PatchParams::apply("azureclaw-controller"),
+            &PatchParams::apply(crate::field_managers::PAIRING),
             &Patch::Merge(patch),
         )
         .await;

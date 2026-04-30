@@ -2,18 +2,41 @@
 # Uses Kata VM isolation for per-pod dedicated kernel.
 # Container escape attacks are trapped inside the VM, not the host.
 
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: confidential-assistant-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: confidential-assistant
+spec:
+  appliesTo:
+    sandboxName: confidential-assistant
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 1000000
+    perRequestTokens: 128000
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
   name: confidential-assistant
   namespace: azureclaw-system
 spec:
-  openclaw:
-    version: "2026.3.13"
-    image: azureclaw.azurecr.io/openclaw-sandbox:latest
-    config:
-      agent:
-        model: "azure/gpt-4.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      config:
+        agent:
+          model: "azure/gpt-4.1"
 
   sandbox:
     isolation: "confidential"        # Kata VM with dedicated kernel
@@ -25,14 +48,8 @@ spec:
       - /sandbox
       - /tmp
 
-  inference:
-    provider: "azure-openai"
-    model: "gpt-4.1"
-    contentSafety: true
-    promptShields: true
-    tokenBudget:
-      daily: 1000000
-      perRequest: 128000
+  inferenceRef:
+    name: confidential-assistant-inference
 
   networkPolicy:
     defaultDeny: true

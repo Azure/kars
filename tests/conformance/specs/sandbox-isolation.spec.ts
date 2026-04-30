@@ -10,7 +10,7 @@
  * harness (Phase 1) supplies the `kubectl` proxy used here.
  *
  * Every negative case here maps to a documented hardening path:
- *   - seccomp: policy-engine/profiles/seccomp/azureclaw-strict.json
+ *   - seccomp: cli/profiles/seccomp/azureclaw-strict.json
  *   - Landlock: sandbox-images/openclaw/entrypoint.sh landlock_policy()
  *   - egress-guard: iptables rules in init container (see
  *     sandbox-images/openclaw/Dockerfile + entrypoint.sh)

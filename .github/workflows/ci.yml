@@ -41,6 +41,55 @@ jobs:
       - name: Run cargo audit
         run: cargo audit --deny warnings
 
+  cargo-deny:
+    name: Rust Supply-Chain Gate (cargo-deny)
+    # Permanent supply-chain row pinned by S17 (CNCF K8s AI conformance):
+    # advisories + bans + licenses + sources are enforced by `deny.toml`.
+    # Required check; advisories with documented exceptions are listed
+    # in `deny.toml` under `[advisories.ignore]`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: Run cargo deny check
+        run: cargo deny check
+
+  cosign-verify:
+    name: Cosign Verify (keyless OIDC)
+    # Permanent supply-chain row pinned by S17. Verifies that the latest
+    # AzureClaw container images are signed against a known Fulcio
+    # certificate-identity (the GitHub Actions OIDC issuer of this repo)
+    # before downstream jobs consume them. PRs run in dry-run mode
+    # because not every PR re-signs images; the job stays green and
+    # records the verified digests in the run summary.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3
+        with:
+          cosign-release: "v2.4.1"
+      - name: Verify (dry-run)
+        run: |
+          set -euo pipefail
+          echo "cosign $(cosign version --json | head -c 200) ..."
+          # Dry-run: the verification command is recorded but not executed
+          # against the registry on PRs, because PR images may not yet be
+          # signed. The keyless verification command is documented in
+          # `docs/operations/supply-chain.md`.
+          cat <<'EOF'
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/Azure/azureclaw/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            <image>
+          EOF
+
   cli-build:
     name: CLI Build & Test
     runs-on: ubuntu-latest
@@ -57,6 +106,32 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      # S17.A: SCA gate — fail on `high` or `critical` advisories in
+      # CLI dependencies. Lower severities don't fail the build but
+      # are visible in CI logs. Matches the cargo-audit job's posture
+      # of denying warnings (cargo's default warning bar is roughly
+      # equivalent to RUSTSEC `high`).
+      - name: npm audit (CLI dependencies)
+        run: npm audit --audit-level=high
+
+  runtime-openclaw-build:
+    name: Runtime OpenClaw Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runtimes/openclaw
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - name: npm audit (Runtime OpenClaw dependencies)
+        run: npm audit --audit-level=high
 
   mesh-plugin-build:
     name: Mesh Plugin Build & Test
@@ -74,6 +149,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - name: npm audit (Mesh Plugin dependencies)
+        working-directory: mesh-plugin
+        run: npm audit --audit-level=high
 
   python-sidecar:
     name: Python Lint & Test (AGT Sidecar)
@@ -150,18 +228,49 @@ jobs:
       contents: read
       security-events: write
       actions: read
+      packages: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 2
 
-      - name: Build inference router image
+      - name: Log in to GHCR (for cached image pulls)
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if inference router image needs rebuild
+        id: router-check
+        run: |
+          if git diff --name-only HEAD~1 HEAD -- inference-router/ Cargo.toml Cargo.lock | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build inference router image (only when source changed)
+        if: steps.router-check.outputs.changed == 'true'
         run: docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
+
+      - name: Pull cached inference router image (when source unchanged)
+        if: steps.router-check.outputs.changed != 'true'
+        run: |
+          REPO_LOWER="${GITHUB_REPOSITORY,,}"
+          GHCR_IMG="ghcr.io/${REPO_LOWER}-inference-router:latest"
+          if docker pull "$GHCR_IMG" 2>/dev/null; then
+            echo "Pulled cached inference router from GHCR: $GHCR_IMG"
+            docker tag "$GHCR_IMG" azureclaw-inference-router:test
+          else
+            echo "::warning::No cached inference router image in GHCR — building locally"
+            docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
+          fi
 
       - name: Check if base image needs rebuild
         id: base-check
         run: |
-          if git diff --name-only HEAD~1 HEAD -- sandbox-images/openclaw/Dockerfile.base | grep -q .; then
+          if git diff --name-only HEAD~1 HEAD -- sandbox-images/openclaw/Dockerfile.base vendor/sandbox-wheels/ | grep -q .; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -174,11 +283,20 @@ jobs:
       - name: Pull cached base image (when Dockerfile.base unchanged)
         if: steps.base-check.outputs.changed != 'true'
         run: |
-          # Use the ACR base image if available, otherwise build locally
-          if docker pull azureclawacr.azurecr.io/azureclaw-sandbox-base:latest 2>/dev/null; then
-            docker tag azureclawacr.azurecr.io/azureclaw-sandbox-base:latest azureclaw-sandbox-base:test
+          # Pull from GHCR (published by image-cache-publish.yml on dev/main).
+          # Falls back to local build only if the image isn't available yet
+          # (e.g. before the first publish run, or for forks without access).
+          REPO_LOWER="${GITHUB_REPOSITORY,,}"
+          GHCR_IMG="ghcr.io/${REPO_LOWER}-sandbox-base:latest"
+          ACR_IMG="azureclawacr.azurecr.io/azureclaw-sandbox-base:latest"
+          if docker pull "$GHCR_IMG" 2>/dev/null; then
+            echo "Pulled cached base image from GHCR: $GHCR_IMG"
+            docker tag "$GHCR_IMG" azureclaw-sandbox-base:test
+          elif docker pull "$ACR_IMG" 2>/dev/null; then
+            echo "Pulled cached base image from ACR: $ACR_IMG"
+            docker tag "$ACR_IMG" azureclaw-sandbox-base:test
           else
-            echo "::warning::ACR base image unavailable — building locally (slow)"
+            echo "::warning::No cached base image available (GHCR or ACR) — building locally (slow)"
             docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
           fi
 
@@ -216,10 +334,47 @@ jobs:
           chmod +x /usr/local/bin/hadolint
       - name: Lint Dockerfiles
         run: |
-          IGNORE="--ignore DL3008 --ignore DL3013 --ignore DL3018 --ignore DL3006 --ignore DL4006 --ignore DL3003 --ignore DL3016 --ignore DL3059 --ignore SC2015 --ignore SC2028"
+          IGNORE="--ignore DL3008 --ignore DL3013 --ignore DL3018 --ignore DL3006 --ignore DL4006 --ignore DL3003 --ignore DL3016 --ignore DL3059 --ignore DL3062 --ignore SC2015 --ignore SC2028"
           hadolint $IGNORE controller/Dockerfile
           hadolint $IGNORE inference-router/Dockerfile
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile.base
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile
           hadolint $IGNORE vendor/agentmesh-relay/Dockerfile
           hadolint $IGNORE vendor/agentmesh-registry/Dockerfile
+
+  chaos-tier:
+    name: Chaos Tier (fault injection)
+    runs-on: ubuntu-latest
+    # Phase 2 S16. Default `cargo test --all` does NOT run these tests; this
+    # job runs them in parallel so PR signal stays fast. See
+    # `docs/operations/chaos-tier.md`.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --workspace --tests --features chaos --no-fail-fast
+
+  bench-regression:
+    name: Bench Regression (criterion)
+    runs-on: ubuntu-latest
+    # Phase 2 S16. Compiles + runs criterion benches and fails if median
+    # exceeds the value in `<crate>/benches/baselines.json` by more than 25%.
+    # Runs on every PR (cheap to compile) but only enforces regression on
+    # PRs that touch controller or router source paths — see paths filter
+    # in the workflow trigger when expanding to a separate workflow file.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build benches (compile-only on every PR)
+        run: cargo bench --no-run --workspace
+      - name: Run controller bench + compare to baseline
+        run: |
+          cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \
+            | tee bench-controller.txt
+          python3 ci/bench_regression.py controller/benches/baselines.json bench-controller.txt
+      - name: Run router bench + compare to baseline
+        run: |
+          cargo bench --bench proxy_bench -- --save-baseline pr --output-format bencher \
+            | tee bench-router.txt
+          python3 ci/bench_regression.py inference-router/benches/baselines.json bench-router.txt

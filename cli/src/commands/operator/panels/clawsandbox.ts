@@ -1,0 +1,43 @@
+/**
+ * ClawSandbox panel — list of sandboxes with health, model, isolation.
+ *
+ * S14 refactor: wraps the existing operator-TUI sandbox table data into
+ * the `Panel` interface so it lives alongside the new Phase-2 panels.
+ * The byte-level rendering of the legacy agent table is unchanged — this
+ * panel is for the new modular-panels layout (`--panels` / `--per-sandbox`).
+ */
+import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
+import { EMPTY } from "./util.js";
+
+export const clawSandboxPanel: Panel = {
+  id: "clawsandbox",
+  title: "ClawSandbox",
+  refreshIntervalMs: 10_000,
+
+  render(state: ClusterState, opts?: PanelRenderOpts): string {
+    const all = state.sandboxes;
+    const items = opts?.sandbox ? all.filter((s) => s.name === opts.sandbox) : all;
+    if (items.length === 0) return `${EMPTY}`;
+
+    const lines: string[] = [];
+    lines.push(
+      `{gray-fg}${"NAME".padEnd(28)} ${"HEALTH".padEnd(10)} ${"MODEL".padEnd(14)} ${"ISOLATION".padEnd(12)} ${"AGE".padEnd(6)} ROLE{/}`,
+    );
+    for (const s of items) {
+      const healthColor =
+        s.health === "healthy" ? "green" :
+        s.health === "degraded" ? "yellow" :
+        s.health === "down" ? "red" :
+        s.health === "dormant" ? "blue" : "gray";
+      lines.push(
+        `${s.name.padEnd(28)} ` +
+          `{${healthColor}-fg}${s.health.padEnd(10)}{/} ` +
+          `${(s.model || "-").padEnd(14)} ` +
+          `${(s.isolation || "-").padEnd(12)} ` +
+          `${(s.age || "-").padEnd(6)} ` +
+          `${s.role}`,
+      );
+    }
+    return lines.join("\n");
+  },
+};

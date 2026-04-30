@@ -1,0 +1,9 @@
+{
+  "_comment": "S16 — inference-router proxy overhead criterion baseline. Captured 2026-04-30. CI's Bench Regression job fails the PR if median exceeds baseline * 1.25. Hard ceiling for the full proxy hot path (routing + auth + safety) is 5ms p99; the per-step medians below are well under that. Refresh via `cargo bench --bench proxy_bench -- --save-baseline dev`.",
+  "_threshold_pct": 25,
+  "groups": {
+    "proxy_overhead/route_lookup": { "median_ns": 1 },
+    "proxy_overhead/attach_auth_headers": { "median_ns": 360 },
+    "proxy_overhead/safety_quick_check": { "median_ns": 90 }
+  }
+}

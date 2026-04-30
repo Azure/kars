@@ -171,6 +171,21 @@ admission:
     # upstream K8s 1.34, and AKS does not expose it yet — so we default
     # to false. Flip to true once the API surface is available.
     enabled: false
+  contentSafetyFloor:
+    # Deploy ValidatingAdmissionPolicy that rejects InferencePolicy
+    # objects whose `spec.contentSafety.{hate,selfHarm,sexual,violence}`
+    # is more permissive than the cluster minimum. Severity ordering
+    # follows Azure Content Safety: Safe (0) < Low (1) < Medium (2) <
+    # High (3); lower ordinal == stricter floor.
+    #
+    # Per-CR opt-out via the `azureclaw.azure.com/dev-only: "true"`
+    # label, mirroring the null-provider-block VAP convention.
+    #
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
+    # Cluster-wide minimum severity. InferencePolicy authors cannot
+    # set a value above this (which would loosen the floor).
+    minimum: "Medium"
 
 # Azure-specific configuration
 azure:
@@ -202,3 +217,80 @@ azure:
 # CiliumNetworkPolicy is then emitted per-sandbox by the controller.
 cilium:
   enabled: false
+
+# S12.d — Cluster-scoped SignerPolicy ConfigMap.
+#
+# Watched by the controller (filtered to the `azureclaw-signer-policy`
+# ConfigMap in this namespace). Defines who is permitted to sign egress
+# allowlist OCI artifacts (see `docs/policy-canonical-format.md`).
+#
+# Both lists are required when `enabled: true`. Either list empty → the
+# controller surfaces `SignerPolicyMalformed` on affected ClawSandbox
+# resources (no silent fallback). Set `enabled: false` only if you
+# intend to use the env-var emergency-override path
+# (`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`
+# on the controller Deployment).
+#
+# Glob syntax in `sanPatterns`: `*` matches any run of non-`/`
+# characters, `?` matches one character — same as the env-var path.
+# Entries that look like `https://...` are matched against
+# `Subject.uri`; everything else is matched against `Subject.email`.
+signerPolicy:
+  enabled: true
+  fulcioIssuers:
+    # GitHub Actions OIDC — for CI signing via `azureclaw egress --sign`.
+    - https://token.actions.githubusercontent.com
+    # Entra workload identity (replace <tenant> with your tenant ID).
+    - https://login.microsoftonline.com/<tenant>/v2.0
+  sanPatterns:
+    # Workflow-identity SAN for repo-scoped CI runners. Tighten the
+    # path / branch component for your fork before going to production.
+    - https://github.com/Azure/azureclaw/.github/workflows/*.yml@*
+
+
+# A2A public-ingress gateway (Phase 2 S3.5 — ADR-0001 #4).
+#
+# Opt-in. When `enabled: false` (default), the inference router is
+# reachable only on the cluster-internal mesh (port 8443) — current
+# behaviour, byte-for-byte unchanged.
+#
+# When `enabled: true`, a separate `azureclaw-a2a-gateway` Deployment
+# is rendered. It terminates public TLS, verifies inbound JWS-signed
+# AgentCards, applies a per-subject token-bucket rate limit, then
+# forwards over mTLS to the router's port 8445. The router-side
+# listener is enabled by setting `inferenceRouter.a2aMtls.enabled=true`
+# in lockstep — both halves must agree.
+a2aGateway:
+  enabled: false
+  image:
+    repository: azureclaw.azurecr.io/azureclaw-a2a-gateway
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 2
+  # Server cert presented to external A2A callers. Provisioned by
+  # cert-manager / AGC controller; the chart only references the
+  # Secret name.
+  tls:
+    secretName: azureclaw-a2a-gateway-tls
+  # Client cert presented to the router on port 8445. Must be signed
+  # by the CA whose bundle the router mounts at A2A_MTLS_CA_PATH.
+  mtls:
+    secretName: azureclaw-a2a-gateway-mtls
+  rateLimits:
+    # Per-subject token-bucket parameters.
+    perSubjectBurst: 60
+    perSubjectRefillPerSec: 5
+    # Subject map cap. Beyond this, the most-stale subject is evicted
+    # (RAM-only — replicas do NOT share state in v1).
+    maxSubjects: 50000
+    # Cross-replica synchronisation entry-point. **Not implemented in
+    # S3.5** — the field is locked here so future opt-in is
+    # backward-compatible. Setting this value today has no effect.
+    sharedRedisUrl: ""
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"

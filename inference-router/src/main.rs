@@ -22,7 +22,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{config, forward_proxy, governance, handoff, routes};
+use azureclaw_inference_router::{a2a_mtls, config, forward_proxy, governance, handoff, routes};
 
 use anyhow::Result;
 use axum::{
@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
 
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
+    let proxy_blocked_egress = state.blocked_egress.clone();
 
     // Read admin token for protecting sensitive endpoints.
     // Priority: file mount (AKS Secret) > env var > unset.
@@ -226,6 +227,8 @@ async fn main() -> Result<()> {
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
+            .merge(build_mcp_router())
+            .merge(build_platform_mcp_router())
             .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
                 std::env::var("ROUTER_CONCURRENCY_LIMIT")
@@ -249,9 +252,36 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8444);
     let proxy_addr = format!("127.0.0.1:{proxy_port}");
-    let proxy_shutdown = forward_proxy::start(&proxy_addr, proxy_blocklist).await;
+    let proxy_shutdown =
+        forward_proxy::start(&proxy_addr, proxy_blocklist, proxy_blocked_egress).await;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    // Phase 2 S3.5 (ADR-0001 #4): the public-edge `azureclaw-a2a-gateway`
+    // forwards to the router on a dedicated mTLS-mandatory port (default
+    // 8445). When `A2A_MTLS_ENABLED=1` and the cert/key/CA files are
+    // present, log the configuration so operators can see at boot that
+    // the gateway path is wired. The actual TLS listener is plumbed in a
+    // follow-up; the env surface is locked here so deployments using the
+    // gateway can already mount the secret.
+    let a2a_mtls_cfg = a2a_mtls::A2aMtlsConfig::from_env();
+    if a2a_mtls_cfg.enabled {
+        if a2a_mtls_cfg.files_present() {
+            tracing::info!(
+                port = a2a_mtls_cfg.port,
+                cert = %a2a_mtls_cfg.cert_path.display(),
+                ca = %a2a_mtls_cfg.ca_path.display(),
+                "A2A mTLS port configured (Phase 2 S3.5)"
+            );
+        } else {
+            tracing::warn!(
+                port = a2a_mtls_cfg.port,
+                "A2A_MTLS_ENABLED=1 but cert/key/CA files missing; \
+                 falling back to in-cluster-only operation"
+            );
+        }
+    }
+
     let shutdown_timeout = resolve_shutdown_timeout();
     tracing::info!(
         shutdown_timeout_secs = shutdown_timeout.as_secs(),
@@ -306,18 +336,110 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Derive the graceful-shutdown deadline.
+/// Build the `/mcp` axum sub-router.
 ///
-/// Resolution order (first that yields a positive duration wins):
-/// 1. `SHUTDOWN_TIMEOUT_SECS` — explicit operator override.
-/// 2. `TERMINATION_GRACE_PERIOD_SECS` − 5s, floored at 10s — matches the K8s
-///    `terminationGracePeriodSeconds` so we self-abort a few seconds before
-///    the kubelet escalates to SIGKILL.
-/// 3. 25s — sensible default for the K8s 30s pod-termination convention.
+/// Selection rule (Phase 2 §8 entry 1, S1):
+///
+/// - When all three env vars are set:
+///   - `MCP_PRODUCTION_MODE=true`
+///   - `MCP_JWKS_PATH` (path to a file containing a raw RFC 7517 JWKSet)
+///   - `MCP_OAUTH_AUDIENCE` (expected `aud` claim)
+///
+///   then mount [`routes::protected_mcp_route`] gated by OAuth 2.1.
+///
+///   Optional: `MCP_OAUTH_ISSUER` (defaults to a sentinel if unset // ci:stub-ok: doc comment
+///   — controllers always set it) and `MCP_OAUTH_REQUIRED_SCOPES`
+///   (space-separated).
+///
+/// - Otherwise mount the bare [`routes::mcp_route`] for dev/test.
+///   Admission CEL on the `McpServer` CRD plus the
+///   `admission-dev-only-label-immutable` policy block any tenant from
+///   pointing a `productionMode=false` `McpServer` at this dev mount in
+///   a non-dev namespace.
+///
+/// On a malformed production-mode configuration (e.g. JWKS path is
+/// unreadable) the router refuses to mount `/mcp` rather than silently
+/// falling back to the unauthenticated dev route. Operators see a clear
+/// startup-time error instead of a route that quietly serves
+/// unauthenticated MCP traffic.
+fn build_mcp_router() -> Router {
+    use azureclaw_inference_router::mcp::oauth::OAuthVerifierConfig;
+
+    let production = std::env::var("MCP_PRODUCTION_MODE")
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let jwks_path = std::env::var("MCP_JWKS_PATH").ok();
+    let audience = std::env::var("MCP_OAUTH_AUDIENCE").ok();
+
+    let state = routes::McpRouteState::standard();
+
+    if production && jwks_path.is_some() && audience.is_some() {
+        let path = std::path::PathBuf::from(jwks_path.unwrap());
+        let aud = audience.unwrap();
+        let issuer = std::env::var("MCP_OAUTH_ISSUER").unwrap_or_default();
+        let required_scopes = std::env::var("MCP_OAUTH_REQUIRED_SCOPES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+        match OAuthVerifierConfig::from_jwks_file(&path, &issuer, &aud, required_scopes) {
+            Ok(cfg) => {
+                tracing::info!(
+                    jwks = %path.display(),
+                    issuer = %issuer,
+                    audience = %aud,
+                    "Mounting /mcp with OAuth 2.1 verification (productionMode)"
+                );
+                return routes::protected_mcp_route(state, Arc::new(cfg));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "MCP_PRODUCTION_MODE=true but JWKS load failed; refusing to mount /mcp");
+                return Router::new();
+            }
+        }
+    }
+
+    if production {
+        tracing::warn!(
+            "MCP_PRODUCTION_MODE=true but MCP_JWKS_PATH or MCP_OAUTH_AUDIENCE missing; \
+             refusing to mount /mcp (would otherwise be unauthenticated)"
+        );
+        return Router::new();
+    }
+
+    tracing::info!("Mounting /mcp in dev mode (no OAuth — productionMode=false)");
+    routes::mcp_route().with_state(state)
+}
+
+/// Mount the **platform MCP server** at `POST /platform/mcp`.
+///
+/// Unconditionally mounted — it has no production-mode toggle because:
+///
+/// 1. It is loopback-only by virtue of the router's bind address. The
+///    egress-guard init container restricts UID 1000 to `127.0.0.1`
+///    plus DNS, so the only process that can reach `/platform/mcp` is
+///    the agent in the same pod.
+/// 2. It is single-tenant by construction (one agent per pod). There
+///    is no cross-tenant trust boundary inside the router process for
+///    OAuth to enforce.
+/// 3. It exposes only Foundry-shim affordances that already flow
+///    through governance gates (InferencePolicy, Content Safety,
+///    token budget, audit chain) at their respective downstream
+///    routes — adding an OAuth layer here would gate discovery
+///    without changing the actual exposure surface.
+///
+/// See `mcp/platform.rs` and `plan.md` S10.B for the full rationale.
+fn build_platform_mcp_router() -> Router {
+    let state = routes::McpRouteState::platform();
+    tracing::info!(
+        "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"
+    );
+    routes::platform_mcp_route().with_state(state)
+}
+
 fn resolve_shutdown_timeout() -> std::time::Duration {
     const FLOOR_SECS: u64 = 10;
     const DEFAULT_SECS: u64 = 25;
-
     if let Some(v) = std::env::var("SHUTDOWN_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())

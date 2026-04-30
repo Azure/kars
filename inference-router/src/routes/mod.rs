@@ -14,6 +14,7 @@ use crate::auth::WorkloadIdentityAuth;
 use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
+use crate::egress_blocked::BlockedBuffer;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
@@ -44,8 +45,12 @@ pub use egress::egress_routes;
 mod inference;
 pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
 
+mod chat_completions;
+
 mod mcp;
-pub use mcp::{MCP_SESSION_HEADER, McpRouteState, mcp_route, protected_mcp_route};
+pub use mcp::{
+    MCP_SESSION_HEADER, McpRouteState, mcp_route, platform_mcp_route, protected_mcp_route,
+};
 
 mod a2a;
 pub use a2a::{A2aRouteState, a2a_routes};
@@ -74,6 +79,10 @@ pub struct AppState {
     /// keypair owned by `Governance.identity`.
     pub signing_provider: Arc<dyn SigningProvider>,
     pub blocklist: Blocklist,
+    /// S12.f — bounded ring buffer of blocked egress attempts surfaced via
+    /// `GET /egress/learned/blocked`. Hostname-only, deduped, rate-limited
+    /// per source. Populated by the forward proxy's deny branches.
+    pub blocked_egress: Arc<BlockedBuffer>,
     pub sandbox_name: Arc<String>,
     pub inbox: Arc<MeshInbox>,
     pub mesh_metrics: Arc<MeshMetrics>,
@@ -163,6 +172,7 @@ impl AppState {
             signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
             governance,
             blocklist,
+            blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
             sandbox_name: Arc::new(sandbox_name),
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),

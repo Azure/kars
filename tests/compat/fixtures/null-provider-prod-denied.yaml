@@ -12,6 +12,22 @@
 # driver strips the dev-only label at apply time.
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: prod-null-provider-denied-inference
+  namespace: azureclaw-fixtures
+  labels:
+    azureclaw.azure.com/sandbox: prod-null-provider-denied
+spec:
+  appliesTo:
+    sandboxName: prod-null-provider-denied
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+      endpoint: "https://example.openai.azure.com"
+---
+apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
   name: prod-null-provider-denied
@@ -23,12 +39,14 @@ metadata:
   annotations:
     azureclaw.azure.com/admission-test: "strip-devonly-label-before-apply"
 spec:
-  openclaw:
-    version: "0.1"
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "0.1"
   sandbox:
     isolation: strict
-  inference:
-    endpoint: "https://example.openai.azure.com"
+  inferenceRef:
+    name: prod-null-provider-denied-inference
   agt:
     providers:
       mesh: noop

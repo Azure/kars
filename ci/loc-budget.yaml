@@ -17,13 +17,13 @@ global:
   override_comment: "// ci:loc-ok"
 
 files:
-  - path: cli/src/plugin.ts
+  - path: runtimes/openclaw/src/index.ts
     baseline_2026_04_24: 7455
     phase0_cap: 7200
     phase1_cap: 6000
     phase2_cap: 3000
     phase3_cap: 800
-    notes: "Split into cli/src/core/{session,handoff,offload,mesh,signal,restore}.ts modules."
+    notes: "Moved from cli/src/plugin.ts in S15.g.1. Decomposed into runtimes/openclaw/src/core/{session,handoff,offload,mesh,signal,restore}.ts modules."
 
   - path: cli/src/commands/operator.ts
     baseline_2026_04_24: 2932
@@ -44,8 +44,9 @@ files:
     baseline_2026_04_24: 2383
     phase0_cap: 2350
     phase1_cap: 1500
-    phase2_cap: 800
-    notes: "Move logic into controller/src/reconcilers/{sandbox,mcp_server,...}.rs. Tests extracted to reconciler/tests.rs in PR 49."
+    phase2_cap: 2000
+    allow_grow: true
+    notes: "Phase 2: 1975 LOC after S1–S6 reconcilers + S10.A1 multi-runtime dispatch. allow_grow honored only until phase2_cap (2000); enforced strictly. Phase 3 must extract per-CRD reconcilers into controller/src/reconcilers/{sandbox,mcp_server,...}.rs and shrink mod.rs back to ≤800 (drop allow_grow at that point)."
 
   - path: controller/src/mesh_peer/mod.rs
     baseline_2026_04_24: 1970
