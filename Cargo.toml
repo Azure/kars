@@ -6,6 +6,7 @@ members = [
     "azureclaw-a2a-core",
     "a2a-gateway",
     "tests/chaos",
+    "tests/cncf-conformance",
 ]
 exclude = [
     "vendor/agentmesh-registry",
