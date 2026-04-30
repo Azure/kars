@@ -19,6 +19,8 @@ on:
       - 'vendor/sandbox-wheels/**'
       - 'inference-router/**'
       - 'controller/**'
+      - 'a2a-gateway/**'
+      - 'azureclaw-a2a-core/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/image-cache-publish.yml'
@@ -49,6 +51,10 @@ jobs:
             suffix: -controller
             dockerfile: controller/Dockerfile
             paths: 'controller/ Cargo.toml Cargo.lock'
+          - name: a2a-gateway
+            suffix: -a2a-gateway
+            dockerfile: a2a-gateway/Dockerfile
+            paths: 'a2a-gateway/ azureclaw-a2a-core/ Cargo.toml Cargo.lock'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

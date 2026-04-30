@@ -247,3 +247,50 @@ signerPolicy:
     # path / branch component for your fork before going to production.
     - https://github.com/Azure/azureclaw/.github/workflows/*.yml@*
 
+
+# A2A public-ingress gateway (Phase 2 S3.5 — ADR-0001 #4).
+#
+# Opt-in. When `enabled: false` (default), the inference router is
+# reachable only on the cluster-internal mesh (port 8443) — current
+# behaviour, byte-for-byte unchanged.
+#
+# When `enabled: true`, a separate `azureclaw-a2a-gateway` Deployment
+# is rendered. It terminates public TLS, verifies inbound JWS-signed
+# AgentCards, applies a per-subject token-bucket rate limit, then
+# forwards over mTLS to the router's port 8445. The router-side
+# listener is enabled by setting `inferenceRouter.a2aMtls.enabled=true`
+# in lockstep — both halves must agree.
+a2aGateway:
+  enabled: false
+  image:
+    repository: azureclaw.azurecr.io/azureclaw-a2a-gateway
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 2
+  # Server cert presented to external A2A callers. Provisioned by
+  # cert-manager / AGC controller; the chart only references the
+  # Secret name.
+  tls:
+    secretName: azureclaw-a2a-gateway-tls
+  # Client cert presented to the router on port 8445. Must be signed
+  # by the CA whose bundle the router mounts at A2A_MTLS_CA_PATH.
+  mtls:
+    secretName: azureclaw-a2a-gateway-mtls
+  rateLimits:
+    # Per-subject token-bucket parameters.
+    perSubjectBurst: 60
+    perSubjectRefillPerSec: 5
+    # Subject map cap. Beyond this, the most-stale subject is evicted
+    # (RAM-only — replicas do NOT share state in v1).
+    maxSubjects: 50000
+    # Cross-replica synchronisation entry-point. **Not implemented in
+    # S3.5** — the field is locked here so future opt-in is
+    # backward-compatible. Setting this value today has no effect.
+    sharedRedisUrl: ""
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"

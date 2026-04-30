@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "inference-router",
     "controller",
+    "azureclaw-a2a-core",
+    "a2a-gateway",
 ]
 exclude = [
     "vendor/agentmesh-registry",

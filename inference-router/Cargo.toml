@@ -53,6 +53,11 @@ kube.workspace = true
 k8s-openapi.workspace = true
 tokio-stream = "0.1.18"
 
+# A2A 1.0.0 verifier + AgentCard schema — lifted into a workspace
+# library crate in S3.5 (ADR-0001 #4) so the public-edge `a2a-gateway`
+# binary can share the exact same JWS path.
+azureclaw-a2a-core = { path = "../azureclaw-a2a-core" }
+
 # Handoff encryption (AES-256-GCM + HKDF key derivation + SHA-256 verification)
 aes-gcm = "0.10"
 hkdf = "0.12"
