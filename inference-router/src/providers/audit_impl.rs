@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! In-tree `AuditSink` implementation on `crate::governance::Governance`.
 //!
 //! The four-seam trait is defined in `providers/audit.rs`; this module

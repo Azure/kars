@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Chunked mesh transport — extracted from plugin.ts in S15.f.3.
 //
 // Provides the wire-level large-payload chunking protocol used by every

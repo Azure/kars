@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Signal KNOCK sequence invariants — Phase 0 scaffold.
  *

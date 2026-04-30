@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Domain blocklist engine with auto-refresh from threat intelligence feeds.
 //!
 //! The blocklist prevents sandboxed agents from reaching known-malicious domains

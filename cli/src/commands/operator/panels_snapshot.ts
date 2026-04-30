@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * `azureclaw operator --snapshot` — non-interactive panel render.
  *

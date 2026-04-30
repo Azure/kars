@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Harness placeholder — conformance test wiring lands alongside each
  * implementation PR. Phase 0 scaffold keeps this intentionally empty.

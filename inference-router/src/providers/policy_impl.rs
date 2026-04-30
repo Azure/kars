@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! In-tree `PolicyDecisionProvider` implementation on `crate::governance::Governance`.
 //!
 //! The four-seam trait lives in `providers/policy.rs`; the in-tree

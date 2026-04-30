@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Controller-side offload orchestration over the AgentMesh peer
 //! channel.
 //!

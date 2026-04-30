@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! One-shot handoff token — auth for the second half of the live
 //! migration handshake.
 //!

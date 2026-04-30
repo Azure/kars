@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 AgentCard verifier conformance corpus.
 //!
 //! Mirrors the AP2 fixture corpus (`tests/ap2_conformance.rs`) for the

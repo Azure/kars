@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Reconciler perf baseline (Phase 2 S16).
 //!
 //! Measures the synthetic reconcile-decision hot path at three workload

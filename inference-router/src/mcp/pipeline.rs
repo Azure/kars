@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! MCP request pipeline — the full body→response transform.
 //!
 //! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/basic/transports>

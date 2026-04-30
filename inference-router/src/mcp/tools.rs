@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! MCP `tools/list` and `tools/call` method handlers — pure dispatch.
 //!
 //! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/server/tools>

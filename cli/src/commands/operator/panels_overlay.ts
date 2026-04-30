@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Operator-TUI panels overlay (S14) — wires the modular-panels view as
  * a blessed overlay box on the main dashboard. Extracted out of

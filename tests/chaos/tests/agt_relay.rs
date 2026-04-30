@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! AGT relay timeout chaos — WebSocket proxy resilience.
 //!
 //! The router proxies `/agt/relay` to the AgentMesh relay over WebSocket.

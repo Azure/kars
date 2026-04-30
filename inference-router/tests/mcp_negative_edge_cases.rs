@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! MCP 2026 Streamable HTTP — negative-only edge-case integration tests.
 //!
 //! These complement the broad in-tree pipeline corpus

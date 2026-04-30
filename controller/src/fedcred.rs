@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Azure federated identity credential management via ARM REST API.
 //!
 //! When the controller reconciles a new ClawSandbox, it creates a federated

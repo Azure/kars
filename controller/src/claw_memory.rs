@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `ClawMemory` CRD — Phase 2 §8 entry 5 (S5).
 //!
 //! Per `docs/implementation-plan.md` §3 non-compete table, `ClawMemory`

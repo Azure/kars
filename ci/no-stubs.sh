@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ci/no-stubs.sh — enforces internal Phase 1 plan §0.2 principle #8.
 #
 # Rejects *newly added* stub/placeholder markers on production code paths.

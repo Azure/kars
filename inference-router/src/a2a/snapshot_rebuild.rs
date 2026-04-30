@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Trust-store snapshot rebuild orchestration.
 //!
 //! Composes [`agent_projection::project_anchors`] across many

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Runtime-aware helpers for CLI commands (S10.A5).
  *

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Hot-reloadable policy envelope — pure-function core.
 //!
 //! ## What this module is

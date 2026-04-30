@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Transparent HTTP forward proxy for egress enforcement.
 //!
 //! Listens on a separate port (default 8444) and handles:

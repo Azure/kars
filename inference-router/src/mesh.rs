@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Local mesh state — inbox buffer and metrics counters.
 //!
 //! These are the only pieces of governance.rs that survive: simple data

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 S9.3 — `azureclaw migrate from-kagent` translator.
 //
 // Pure translator (no I/O). Reads a kagent.dev/v1alpha2 `Agent` YAML

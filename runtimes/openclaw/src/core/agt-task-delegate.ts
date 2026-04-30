@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Native-agent task delegation — extracted from plugin.ts in S15.f.2
 // to give plugin.ts headroom under the §4.2 800-LOC cap.
 //

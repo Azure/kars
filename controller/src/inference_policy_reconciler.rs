@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `InferencePolicy` reconciler — Phase 2 §8 entry 4 (S4).
 //!
 //! Watches `InferencePolicy` CRs and, for each:

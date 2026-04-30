@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 S11 — `azureclaw attest <name>` CLI subcommand.
 //
 // **Read surface only.** Phase 2 ships the *consumer* that prints whatever

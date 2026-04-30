@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! ToolPolicy reconciler — Phase 2 §8 entry 4 (S2).
 //!
 //! Watches `ToolPolicy` CRs and, for each:

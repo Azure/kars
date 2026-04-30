@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 axum routes — `/.well-known/agent.json` + `POST /a2a` JSON-RPC.
 //!
 //! Spec: <https://a2a-protocol.org/v1.0.0/specification>

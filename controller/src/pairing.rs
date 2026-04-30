@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! ClawPairing Custom Resource Definition.
 //!
 //! Represents a trust relationship between an external OpenClaw agent and this

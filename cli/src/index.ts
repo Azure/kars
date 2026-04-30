@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 
 /**
  * AzureClaw CLI — Enterprise-grade runtime for OpenClaw on Azure.

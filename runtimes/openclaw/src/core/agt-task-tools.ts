@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Tool-calling loop tool definitions — extracted from
 // plugin.ts processTaskWithTools() in S15.f.4.
 //

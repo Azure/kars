@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * A2A 1.0.0 AgentCard JWS verification — Phase 1 conformance corpus.
  *

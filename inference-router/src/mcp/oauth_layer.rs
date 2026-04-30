@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! OAuth 2.1 bearer-token verification as a `tower::Layer`.
 //!
 //! ## Why a tower layer

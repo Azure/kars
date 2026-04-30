@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { describe, it, expect, vi } from "vitest";
 import { MeshConnection } from "./connection.js";
 import { generateIdentity } from "./identity.js";

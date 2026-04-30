@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Controller-wide leader election via Kubernetes coordination Lease.
 //!
 //! ## Why a controller-wide gate?

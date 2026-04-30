@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! End-to-end integration: trust-store hot-reload feeds card_verifier.
 //!
 //! This corpus stitches together the three pieces that previously lived

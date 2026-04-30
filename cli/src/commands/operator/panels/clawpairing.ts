@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * ClawPairing panel — peer-pairing CRDs with trust state.
  *

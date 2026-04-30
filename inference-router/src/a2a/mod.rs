@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 — Agent2Agent protocol implementation.
 //!
 //! Spec: <https://a2a-protocol.org/v1.0.0/specification>
