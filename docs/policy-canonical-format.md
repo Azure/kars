@@ -88,15 +88,23 @@ When v2 is needed (e.g., to reintroduce wildcards, methods, paths, CIDR ranges):
 | S12.b | Controller fetcher + format validator (status-only) *(landed)* |
 | S12.c | CLI canonical serializer + signing *(landed)* |
 | S12.d | `SignerPolicy` ConfigMap + identity-pinned authority *(landed)* |
-| **S12.e** *(this slice — landed)* | Authoritative ref mode (controller derives NetworkPolicy egress from verified canonical bytes; fail-closed with LKG fallback) |
+| S12.e | Authoritative ref mode (controller derives NetworkPolicy egress from verified canonical bytes; fail-closed with LKG fallback) *(landed)* |
+| S12.f | Router-side blocked-egress visibility *(landed)* |
+| **S12.g** *(this slice — landed)* | Sign-by-default + `--emit-manifest` GitOps mode (S12 close-out) |
 
 ## Producer (CLI)
 
-S12.c ships the producer side of this format inside the CLI as
-`azureclaw egress … --sign`. The flow is opt-in (must be combined with
-`--enforce` or `--approve`) and **non-authoritative** in this slice —
-the inline `allowedEndpoints` field on `ClawSandbox.spec.networkPolicy`
-remains the source of truth. The flip to authoritative ships in S12.e.
+S12.c shipped the producer side of this format inside the CLI as
+`azureclaw egress … --sign`. **As of S12.g, signing is default-on**
+whenever the producer flow runs — that is, whenever the operator
+combines `azureclaw egress` with `--enforce` or `--approve <domain>`.
+Pass `--no-sign` to opt out (the CLI prints a loud yellow warning that
+the controller will emit `AllowlistVerified=False/SignerPolicyMissing`
+and refuse the artifact in authoritative mode). The on-CR
+`allowlistRef` is **authoritative** since S12.e — the controller
+derives NetworkPolicy egress from the verified canonical bytes. See
+[`docs/operations/gitops.md`](operations/gitops.md) for the full
+sign-by-default + emit-manifest walkthrough.
 
 What `--sign` does, in order:
 

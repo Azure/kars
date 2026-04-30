@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.g — Sign-by-default + emit-manifest GitOps mode (S12 close-out)
+
+- **BREAKING (CLI default flip).** `azureclaw egress … --enforce`
+  and `azureclaw egress … --approve <domain>` now sign the resulting
+  allowlist by default. The `--sign` flag is no longer required —
+  pass `--no-sign` to opt out (with a loud yellow warning that
+  the controller will emit
+  `AllowlistVerified=False/SignerPolicyMissing` and refuse the
+  artifact in authoritative mode). Operators relying on the
+  unsigned `--enforce` flow must add `--no-sign` explicitly or
+  install a `SignerPolicy` (see S12.d).
+- **New `--emit-manifest <path>` flag (GitOps mode).** When set, the
+  CLI pushes + signs the artifact as before but **does not** call
+  `kubectl patch`; instead it writes a byte-stable `ClawSandbox`
+  patch YAML to `<path>` for the operator to commit to their GitOps
+  repo. The file's leading comment surfaces the artifact digest +
+  signer identity for human review. The marker annotation
+  `azureclaw.io/applied-via-gitops=true` is set on the resource so
+  cluster-side audit can distinguish GitOps-applied allowlists.
+- **`--force` flag.** With `--emit-manifest`, refuses to overwrite
+  existing files unless `--force` is set (typical in CI re-runs).
+- **`--emit-manifest` + `--no-sign` is rejected.** GitOps mode
+  promotes off-cluster; an unsigned artifact would fail
+  authoritative-mode verify with no operator present to retry.
+  Fail-fast at flag-parse time.
+- **`azureclaw migrate from-kagent` integration.** When the
+  translated bundle includes an egress allowlist, the runner emits a
+  "Next step (S12.g)" hint to stderr with the exact
+  `azureclaw egress … --emit-manifest …` command to run.
+- **Byte-stable manifest emitter.** Hand-rolled (no `yaml`/`js-yaml`)
+  with fixed key order, LF line endings, single trailing newline, no
+  trailing whitespace, no timestamps. `git diff` between two emit
+  runs against the same allowlist is empty unless the digest
+  changes.
+- New audit doc:
+  `docs/security-audits/2026-04-30-phase2-s12-g-gitops.md`.
+- New operator walkthrough: `docs/operations/gitops.md` (workflow
+  diagram + GitHub Actions snippet + failure-mode table).
+- `docs/policy-canonical-format.md` Producer section updated to call
+  out sign-by-default.
+- +17 CLI unit tests (CLI total 434 → 451 passing).
+- **Migration**: operators running `--enforce` / `--approve` in CI
+  without `--sign` will start producing signed artifacts. If your
+  cluster has no `SignerPolicy` installed, add one (S12.d) before
+  rolling this CLI version, or pass `--no-sign` to keep the
+  pre-S12.g behavior. With this slice S12 is **complete**.
+
 ### S12.e — Authoritative-ref mode (fail-closed)
 
 - **`AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate lifted.** Signed
