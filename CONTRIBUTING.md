@@ -2,6 +2,59 @@
 
 This project welcomes contributions and suggestions.
 
+## External Contributions — Scope & Goals
+
+AzureClaw is a **community-supported, best-effort** project. We are grateful for contributions from the Azure / AKS operator community, OpenClaw / OpenAI Agents SDK adopters, security researchers, and MCP/plugin vendors.
+
+### Audience
+
+We expect external contributions from:
+
+- **Azure / AKS operators** running AzureClaw in production, troubleshooting edge cases or adding new observability/governance features
+- **OpenClaw / OpenAI Agents SDK / Microsoft Agent Framework users** adopting AzureClaw for AI governance, security, or sandboxing
+- **Security researchers** reviewing the runtime, auditing isolation guarantees, or reporting vulnerabilities
+- **MCP server vendors** and plugin authors (Brave, Tavily, Firecrawl, Perplexity, OpenAI, custom web-search providers) adding new providers or channels (Telegram, Slack, Discord, WhatsApp)
+
+### In Scope — We Welcome PRs For
+
+- **Bug fixes** against documented behavior (regressions, incorrect error handling, unmet API contracts)
+- **New MCP servers** that conform to the `McpServer` CRD and do not relax sandbox isolation
+- **New channels** (Telegram/Slack/Discord/WhatsApp pattern) or **web-search plugins** (Brave/Tavily/Exa/Firecrawl/Perplexity/OpenAI pattern)
+- **New Tier-2 BYO runtime adapters** that implement the multi-runtime architecture per `docs/architecture.md` (or `docs/runtime-contract.md` if present)
+- **Egress allowlist contributions** for the signed-OCI workflow (per S12 / `docs/security-audits/`)
+- **Documentation improvements**, especially for use-case blueprints, troubleshooting guides, and architecture clarifications
+- **Test coverage improvements** (chaos tests, conformance tests, unit tests) that increase confidence in isolation or governance
+- **Performance fixes** that do not relax security invariants (latency, throughput, resource utilization)
+
+### Out of Scope — We Will Not Merge
+
+- **New cross-cluster transports** — AgentMesh (via `vendor/agentmesh-{relay,registry,sdk}`) is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review. See ADR-0001 and `vendor/*/README.md` for the vendor-patch process.
+- **Changes to sandbox isolation** — modifications to UID/GID, Landlock rules, seccomp profiles, or NetworkPolicy that weaken pod isolation or increase privilege
+- **Inference router / governance bypass** — any change that routes agent traffic outside the router, skips the governance chain, or adds unauthenticated API endpoints
+- **Direct cloud-side telemetry** — telemetry must remain opt-in via OpenTelemetry (see Data Collection notice in README). Direct Azure Monitor / Application Insights SDKs are not accepted.
+- **New top-level CRDs** without a published ADR in `docs/adr/` and an RFC issue
+- **Vendor patches without upstream PR** — all AgentMesh / third-party patches must attempt an upstream merge first (document in `vendor/*/README.md` why upstream rejected or didn't respond)
+
+### Triage Cadence & Response Time
+
+- The maintainer team (`@AzureClawTeam`) reviews open PRs **at least weekly**
+- PRs without CLA signature, missing security-audit documentation, or failing CI gates will not be reviewed until those issues are resolved
+- Support is **community-driven, best-effort** — no SLAs or guaranteed response times. For critical security issues, follow the SECURITY.md vulnerability reporting process instead of opening a PR.
+
+### Architecture-Level Changes
+
+PRs that propose new CRDs, new runtimes, transport changes, or new direct dependencies require:
+
+1. An **Architecture Decision Record (ADR)** in `docs/adr/` (see existing ADRs for format)
+2. A public **RFC issue** discussing the motivation, design trade-offs, and impact on existing users
+3. **Security audit documentation** in `docs/security-audits/` with `Signed-off-by:` from at least one maintainer
+
+The maintainer team will not review implementation PRs for architecture changes without prior ADR + RFC. Implementation PRs must follow the slice-train pattern (breaking large changes into reviewable chunks). See existing examples in `docs/security-audits/2026-04-*` for the audit format.
+
+### Security Disclosures
+
+**Do not open public issues or PRs for vulnerabilities.** See [SECURITY.md](SECURITY.md) for the vulnerability reporting process. All security fixes will be fast-tracked and credited to the reporter.
+
 ## Quick Start
 
 ```bash
