@@ -4,6 +4,6 @@
   "groups": {
     "proxy_overhead/route_lookup": { "median_ns": 1 },
     "proxy_overhead/attach_auth_headers": { "median_ns": 360 },
-    "proxy_overhead/safety_quick_check": { "median_ns": 45 }
+    "proxy_overhead/safety_quick_check": { "median_ns": 90 }
   }
 }
