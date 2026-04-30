@@ -579,3 +579,107 @@ make images   # Docker images
 ## License
 
 [MIT](LICENSE) · [Code of Conduct](CODE_OF_CONDUCT.md)
+
+---
+
+## Trademarks
+
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
+trademarks or logos is subject to and must follow
+[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
+Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
+Any use of third-party trademarks or logos are subject to those third-party's policies.
+
+---
+
+## Data Collection
+
+The software may collect information about you and your use of the software and send it to Microsoft.
+Microsoft may use this information to provide services and improve our products and services.
+You may turn off the telemetry as described in the repository.
+There are also some features in the software that may enable you and Microsoft to collect data from users of your applications.
+If you use these features, you must comply with applicable law, including providing appropriate notices to users of your applications together with a copy of Microsoft's privacy statement.
+Our privacy statement is located at <https://go.microsoft.com/fwlink/?LinkID=824704>.
+You can learn more about data collection and use in the help documentation and our privacy statement.
+Your use of the software operates as your consent to these practices.
+
+### AzureClaw telemetry details
+
+#### What is collected
+
+AzureClaw is a **self-hosted Kubernetes operator**. The inference router (`azureclaw-inference-router`) emits the following telemetry within your own cluster:
+
+**Prometheus metrics** (scraped from the pod's `/metrics` endpoint by your own Prometheus instance):
+
+| Metric | Labels | Description |
+|---|---|---|
+| `azureclaw_inference_requests_total` | `sandbox`, `model`, `status` | Counter of inference requests |
+| `azureclaw_inference_latency_seconds` | `sandbox`, `model` | Latency histogram (buckets: 0.1–30 s) |
+| `azureclaw_tokens_total` | `sandbox`, `model`, `direction` (`input`/`output`) | Token counts from the model's `usage` field |
+| `azureclaw_upstream_retries_total` | `sandbox`, `reason` (`transport`/`status`) | Upstream retry count |
+| `azureclaw_agt_policy_evaluations_total` | `decision` | AGT governance policy decisions |
+| `azureclaw_agt_eval_latency_seconds` | — | AGT policy evaluation latency |
+| `azureclaw_agt_known_agents` | — | Agents in the trust store |
+| `azureclaw_agt_audit_entries_total` | — | Cumulative AGT audit log entries |
+| `azureclaw_agt_content_flags_total` | `category` | Content Safety flags |
+| `azureclaw_agt_behavior_alerts_total` | — | Behavior anomaly alerts |
+| `azureclaw_agt_policy_rules` | — | Loaded policy rules |
+| `azureclaw_agt_redactions_total` | `kind` | Credential redactions from output |
+| `azureclaw_agt_response_threats_total` | `type` | Response threat detections |
+| `azureclaw_agt_tool_rate_limits_total` | `tool` | Per-tool rate-limit denials |
+| `azureclaw_agt_message_signatures_total` | `action` | Ed25519 sign/verify operations |
+| `azureclaw_handoff_pending_events_total` | `action` | Handoff lifecycle events |
+| `azureclaw_handoff_phase_transitions_total` | `from`, `to`, `result` | Handoff session phase transitions |
+
+**Structured JSON logs** (written to pod stdout via `tracing`). Each log line contains: timestamp, severity, `trace_id` (16-hex correlation id), `sandbox`, `model`, HTTP status, latency, Azure correlation ids (`x-ms-request-id`, `apim-request-id`), and AGT governance verdicts.
+
+**OTel GenAI Semantic Convention span attributes** are defined in `inference-router/src/telemetry/gen_ai.rs` following the [OpenTelemetry GenAI SemConv specification](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/registry/attributes/gen-ai.md). Call-site wiring for OTLP span emission will be added in a future release; as of this writing, no OTLP spans are exported.
+
+#### What is NOT collected
+
+**No prompt text or completion text is ever captured.** The router reads only the `usage` object (`prompt_tokens`, `completion_tokens`) from upstream responses to record token counts. Message content (`messages[].content`, `choices[].message.content`) is forwarded transparently to the agent and is never read, logged, or stored by the router.
+
+Source reference: `inference-router/src/proxy.rs` — `record_metrics()` and the SSE streaming path both parse only `body_json["usage"]["prompt_tokens"]` and `body_json["usage"]["completion_tokens"]`.
+
+#### Where telemetry goes — NOT sent to Microsoft by default
+
+AzureClaw runs entirely in **your own AKS cluster**. Microsoft has no cloud-side ingestion of these metrics or logs.
+
+- **Prometheus metrics** are scraped by whichever Prometheus instance you configure (or Azure Monitor managed Prometheus if you enable `monitoring.containerInsights: true` in `deploy/helm/azureclaw/values.yaml`). If no scraper is configured, the `/metrics` endpoint is never read.
+- **Structured logs** go to your cluster's log pipeline (e.g., Azure Monitor Container Insights, your SIEM). Microsoft only receives these logs if you configure Azure Monitor Container Insights.
+- **OTLP spans** are not currently emitted. When OTLP emission is added, it will respect `OTEL_EXPORTER_OTLP_ENDPOINT`; if that variable is unset, no spans leave the pod.
+
+#### How to disable telemetry / opt out
+
+**Option 1 — Disable Prometheus scraping (Helm):**
+
+```yaml
+# deploy/helm/azureclaw/values.yaml
+monitoring:
+  enabled: false
+  prometheus:
+    enabled: false
+  containerInsights: false
+```
+
+**Option 2 — Do not configure a Prometheus scraper:**
+
+Simply do not configure a Prometheus `ServiceMonitor` or pod-annotation scraping for the `azureclaw-inference-router` pods. The `/metrics` endpoint exists but is never read.
+
+**Option 3 — Disable Azure Monitor Container Insights:**
+
+If you are not using Azure Monitor Container Insights to collect container logs, structured log output stays within your cluster's internal log pipeline and is not forwarded to Microsoft.
+
+**Future OTLP opt-out (when span emission is added):**
+
+Do not set `OTEL_EXPORTER_OTLP_ENDPOINT` on the inference-router pods. When that environment variable is absent, the OpenTelemetry SDK will be configured with a no-op exporter and no spans will leave the pod.
+
+#### Source-of-truth files
+
+| File | What it documents |
+|---|---|
+| `inference-router/src/metrics.rs` | All Prometheus metric definitions, labels, and descriptions |
+| `inference-router/src/proxy.rs` | Token count extraction — confirms only `usage.*_tokens` fields are read |
+| `inference-router/src/telemetry/gen_ai.rs` | OTel GenAI SemConv constants (not yet emitted) |
+| `inference-router/src/main.rs` | JSON structured log initialisation (`tracing_subscriber`) |
+| `deploy/helm/azureclaw/values.yaml` | `monitoring.*` Helm knobs for Prometheus and Container Insights |
