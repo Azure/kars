@@ -143,40 +143,104 @@ sequenceDiagram
 
 ---
 
-## 3. Controller Reconciliation — Resources Created
+## 3. Controller Architecture — All 8 Reconcilers (Phase 2)
+
+Shows the Phase 2 controller operator structure: all 8 CRD reconcilers running under a single leader-election
+Lease, each with its own SSA field manager to detect out-of-band drift. The metrics server at `:9091` exposes
+Prometheus counters for every reconcile outcome; jittered requeue (±20%) prevents thundering-herd bursts
+against the K8s API server. Source: `controller/src/`.
+
+### 3.1 Reconciler Map
 
 ```mermaid
 graph TD
-    CRD["ClawSandbox CRD<br/>(azureclaw-system)"] -->|"triggers"| Ctrl["AzureClaw Controller<br/>(Rust / kube-rs)"]
+    subgraph operator["AzureClaw Controller Pod (× 2 replicas, azureclaw-system)"]
+        direction TB
+        LE["Leader Election<br/>coordination.k8s.io/v1 Lease<br/>LEADER_ELECTION_ENABLED env<br/>(default: true)"]
 
-    Ctrl --> NS["Namespace<br/>azureclaw-‹name›"]
-    Ctrl --> SA["ServiceAccount<br/>sandbox"]
-    Ctrl --> CRB["ClusterRoleBinding<br/>azureclaw-spawner-‹name›"]
-    Ctrl --> S1["Secret<br/>gateway-token (32 char)"]
-    Ctrl --> S2["Secret<br/>router-admin-token (64 char)"]
-    Ctrl --> NP["NetworkPolicy<br/>sandbox-policy"]
-    Ctrl --> DEP["Deployment<br/>1 replica, 3 containers"]
-    Ctrl --> SVC["Service<br/>:8443 (mesh DNS)"]
-    Ctrl --> CM1["ConfigMap<br/>blocklist seed"]
-    Ctrl --> CM2["ConfigMap<br/>AGT policy profile"]
-    Ctrl --> CJ["CronJob<br/>blocklist refresh (6h)"]
-    Ctrl --> FC["Azure Federated Credential"]
+        subgraph reconcilers["Reconciler Tasks (spawned after leader gate)"]
+            direction LR
+            R1["ClawSandbox<br/>fm: azureclaw-controller/clawsandbox"]
+            R2["ClawPairing<br/>fm: azureclaw-controller/pairing"]
+            R3["McpServer<br/>fm: azureclaw-controller/mcp"]
+            R4["ToolPolicy<br/>fm: azureclaw-controller/toolpolicy"]
+            R5["InferencePolicy<br/>fm: azureclaw-controller/inferencepolicy"]
+            R6["A2AAgent<br/>fm: azureclaw-controller/a2aagent"]
+            R7["ClawMemory<br/>fm: azureclaw-controller/clawmemory"]
+            R8["ClawEval<br/>fm: azureclaw-controller/claweval"]
+        end
+
+        MESH["mesh-peer reconciler<br/>(own Lease: agentmesh-mesh-peer-leader)<br/>intentionally outside main gate"]
+
+        METRICS["Metrics + health server<br/>CONTROLLER_METRICS_ADDR<br/>(default: 0.0.0.0:9091)"]
+    end
+
+    LE --> reconcilers
+    LE -.->|"independent"| MESH
+
+    style LE fill:#9b59b6,color:#fff
+    style R1 fill:#e67e22,color:#fff
+    style R3 fill:#3498db,color:#fff
+    style R4 fill:#3498db,color:#fff
+    style R5 fill:#3498db,color:#fff
+    style R6 fill:#3498db,color:#fff
+    style R7 fill:#3498db,color:#fff
+    style R8 fill:#3498db,color:#fff
+    style METRICS fill:#2ecc71,color:#fff
+```
+
+### 3.2 ClawSandbox Reconciliation — Resources Created
+
+```mermaid
+graph TD
+    CRD["ClawSandbox CRD<br/>(azureclaw-system)"] -->|"watch event"| R1["ClawSandbox Reconciler<br/>(SSA fieldManager: azureclaw-controller/clawsandbox)"]
+
+    R1 --> NS["Namespace<br/>azureclaw-‹name›"]
+    R1 --> SA["ServiceAccount<br/>sandbox (Workload Identity)"]
+    R1 --> CRB["ClusterRoleBinding<br/>azureclaw-spawner-‹name›"]
+    R1 --> S1["Secret<br/>gateway-token (32 char)"]
+    R1 --> S2["Secret<br/>router-admin-token (64 char)"]
+    R1 --> NP["NetworkPolicy<br/>sandbox-policy"]
+    R1 --> DEP["Deployment<br/>1 replica, 3 containers"]
+    R1 --> SVC["Service<br/>:8443 (mesh DNS)"]
+    R1 --> A2ASVC["Service :8445<br/>(A2A ClusterIP — only when<br/>spec.a2a.enabled: true)"]
+    R1 --> CM1["ConfigMap<br/>blocklist seed"]
+    R1 --> CM2["ConfigMap<br/>AGT policy profile"]
+    R1 --> CJ["CronJob<br/>blocklist refresh (6h)"]
+    R1 --> FC["Azure Federated Credential"]
 
     DEP --> IC["Init: egress-guard"]
     DEP --> C1["Container: openclaw<br/>UID 1000 · :18789"]
-    DEP --> C2["Container: inference-router<br/>UID 1001 · :8443 :8444 :9090<br/>+ native AGT governance"]
+    DEP --> C2["Container: inference-router<br/>UID 1001 · :8443 :8444 :9090<br/>+ :8445 (A2A, conditional)<br/>+ native AGT governance"]
 
     NP --> NP1["Egress: DNS ✅"]
     NP --> NP2["Egress: IMDS ✅ (router only)"]
     NP --> NP3["Egress: HTTPS ✅ (no private IPs)"]
     NP --> NP4["Egress: Mesh ✅ (other sandboxes)"]
     NP --> NP5["Egress: Relay/Registry ✅"]
-    NP --> NP6["Ingress: deny all"]
+    NP --> NP6["Ingress: deny all (default)<br/>Ingress :8445 from gateway SA<br/>(when spec.a2a.enabled)"]
 
     style CRD fill:#9b59b6,color:#fff
-    style Ctrl fill:#e67e22,color:#fff
+    style R1 fill:#e67e22,color:#fff
     style DEP fill:#3498db,color:#fff
     style NP fill:#e74c3c,color:#fff
+    style A2ASVC fill:#f39c12,color:#fff
+```
+
+### 3.3 Operator Polish (Phase 2)
+
+```mermaid
+graph LR
+    subgraph polish["Phase 2 Operator Polish (S7)"]
+        direction TB
+        LE["S7.C — Leader Election<br/>replicas: 2, Lease per controller<br/>fail-fast on renewal loss"]
+        SSA["S7.A — SSA Field Managers<br/>unique suffix per reconciler<br/>detects out-of-band tampering"]
+        JIT["S7.D — Jittered Requeue<br/>±20% multiplicative jitter<br/>spreads retry thundering herd"]
+        COND["S7.B — Progressing=False<br/>stamped once reconcile loop<br/>completes (KEP-1623 compliant)"]
+        METR["S7.E — Metrics :9091<br/>/metrics (Prometheus text)<br/>/healthz (always 200 when live)"]
+    end
+
+    LE --- SSA --- JIT --- COND --- METR
 ```
 
 ---
@@ -290,47 +354,91 @@ flowchart TD
 
 ---
 
-## 6. Inference Request Flow
+## 6. Inference Router Data Path — Phase 2
+
+Shows the complete Phase 2 inference-router request pipeline for a `POST /v1/chat/completions` call. The AGT
+governance gate now runs a full chain (PolicyEngine → TrustManager → AuditLogger → RateLimiter →
+BehaviorMonitor); InferencePolicy is resolved from a hot-reloadable PolicyEnvelope; the platform MCP shim
+translates Foundry tool calls; and the signed-OCI egress allowlist verifier gates any outbound fetch. Source:
+`inference-router/src/`.
+
+### 6.1 Full Request Sequence
 
 ```mermaid
 sequenceDiagram
     participant Agent as Agent<br/>(UID 1000)
     participant Router as Inference Router<br/>(UID 1001)
+    participant PE as PolicyEnvelope<br/>(ArcSwap hot-reload)
     participant IMDS as IMDS<br/>(169.254.169.254)
+    participant CS as Content Safety<br/>(Azure AI)
     participant Foundry as Azure AI Foundry
 
     Agent->>Router: POST /v1/chat/completions<br/>{model, messages, stream}
 
-    rect rgb(255, 240, 240)
-        Note over Router: Gate 1: Governance Policy
+    rect rgb(255, 235, 235)
+        Note over Router,PE: Gate 1: AGT Governance Chain
+        Router->>PE: snapshot() → InferencePolicy rules
         Router->>Router: PolicyEngine.evaluate()<br/>{action: "inference:chat_completions"}
-        Note right of Router: ✅ allow (or ❌ 403 deny)
+        Router->>Router: TrustManager: sender score check
+        Router->>Router: RateLimiter: token-bucket gate
+        Router->>Router: BehaviorMonitor: anomaly signal
+        Router->>Router: AuditLogger: append event (SHA-256 Merkle)
+        Note right of Router: ❌ 403 deny / 429 rate-limit if gates fail
     end
 
     rect rgb(255, 248, 220)
         Note over Router: Gate 2: Token Budget
-        Router->>Router: Check daily budget<br/>(TOKEN_BUDGET_DAILY)
-        Router->>Router: Check per-request limit<br/>(TOKEN_BUDGET_PER_REQUEST)
+        Router->>Router: Check daily budget (TOKEN_BUDGET_DAILY)<br/>Check per-request limit (TOKEN_BUDGET_PER_REQUEST)
         Note right of Router: ❌ 429 if exceeded
     end
 
     rect rgb(240, 248, 255)
-        Note over Router,IMDS: Gate 3: Authentication
-        Router->>IMDS: GET /metadata/identity/oauth2/token<br/>(Workload Identity)
-        IMDS-->>Router: Bearer token<br/>(agent never sees this)
+        Note over Router,IMDS: Gate 3: IMDS Auth Chain
+        Router->>IMDS: GET /metadata/identity/oauth2/token<br/>(federated token → Workload Identity exchange)
+        IMDS-->>Router: Bearer token (cached per scope)<br/>Agent never sees this token
     end
 
-    rect rgb(240, 255, 240)
-        Note over Router,Foundry: Gate 4: Inference + Safety
-        Router->>Foundry: POST /chat/completions<br/>+ Bearer token<br/>+ Content Safety (DefaultV2)
-        Foundry->>Foundry: Prompt Shields<br/>(jailbreak detection)
-        Foundry->>Foundry: Content filters<br/>(hate, violence, self-harm, sexual)
-        Foundry-->>Router: Response + filter annotations
+    rect rgb(235, 255, 240)
+        Note over Router,CS: Gate 4: Content Safety Floor
+        Router->>CS: Analyze prompt (DefaultV2 policy)<br/>Prompt Shields jailbreak detection
+        CS-->>Router: category scores + action
+        Note right of CS: ❌ 400 if threshold breached<br/>(always-on; InferencePolicy can tighten)
+    end
+
+    rect rgb(240, 240, 255)
+        Note over Router,Foundry: Gate 5: Inference + Foundry Tools
+        Router->>Foundry: POST /chat/completions + Bearer token
+        Foundry-->>Router: Response (may include tool_calls)
+        Router->>Router: Platform MCP shim: translate<br/>Foundry tool_calls → MCP dispatch
+        Foundry-->>Router: Final response + usage
     end
 
     Router->>Router: Record token usage to budget
-    Router->>Router: Parse safety annotations<br/>(trust penalty if violations)
+    Router->>Router: Trust penalty if content flags present
     Router-->>Agent: Response (filtered)
+```
+
+### 6.2 AGT Governance Gate Detail
+
+```mermaid
+flowchart TD
+    REQ["Incoming request<br/>(inference / mesh / spawn)"] --> PE["Load PolicyEnvelope snapshot<br/>(ArcSwap — zero-lock read)"]
+    PE --> POL["PolicyEngine.evaluate()<br/>match action against InferencePolicy rules"]
+    POL --> DENY{"Decision?"}
+    DENY -->|"deny"| R403["❌ 403 Forbidden<br/>audit event: Deny"]
+    DENY -->|"allow"| TRUST["TrustManager<br/>sender score ≥ threshold?"]
+    TRUST -->|"below threshold"| R403B["❌ 403 Forbidden<br/>audit event: TrustDeny"]
+    TRUST -->|"ok"| RL["RateLimiter<br/>token-bucket per sandbox"]
+    RL -->|"exceeded"| R429["❌ 429 Too Many Requests"]
+    RL -->|"ok"| BM["BehaviorMonitor<br/>anomaly / prompt injection signal"]
+    BM -->|"alert"| AUD["AuditLogger<br/>append to SHA-256 Merkle chain"]
+    BM -->|"ok"| AUD
+    AUD --> NEXT["Continue pipeline<br/>(budget → auth → safety → Foundry)"]
+
+    style R403 fill:#e74c3c,color:#fff
+    style R403B fill:#e74c3c,color:#fff
+    style R429 fill:#f39c12,color:#fff
+    style NEXT fill:#2ecc71,color:#fff
 ```
 
 ---
@@ -559,7 +667,329 @@ graph TB
 
 ---
 
-## 11. Cloud Handoff Flow (Dev → AKS)
+## 11. A2A Inbound Flow — Phase 2
+
+Shows the inbound A2A 1.2 request path from an external foreign agent to a sandboxed AzureClaw agent.
+The a2a-gateway is the single public TLS endpoint; it verifies the caller's AgentCard JWS signature
+and forwards over cluster-internal mTLS to the per-sandbox router on port 8445. The router then
+delivers to the OpenClaw agent via the plugin on port 18789. Applies when `spec.a2a.enabled: true`
+on the target ClawSandbox. See [ADR-0001](adr/0001-a2a-ingress-front-edge.md) for the full rationale.
+
+### 11.1 Network Topology
+
+```mermaid
+flowchart TD
+    subgraph internet["Internet"]
+        FA["Foreign Agent<br/>(LangChain / Google ADK / OpenAI Agents)"]
+    end
+
+    subgraph cilium_l7["Cilium L7 Policy — azureclaw-system ns"]
+        direction TB
+        CL7["Method allow-list (POST/GET/OPTIONS)<br/>Path regex pinning<br/>Body cap: 4 MiB<br/>Per-source-IP rate limit + connection limit"]
+    end
+
+    subgraph gw["azureclaw-a2a-gateway (azureclaw-system)"]
+        direction TB
+        TLS_TERM["Public TLS termination<br/>(cert-manager, rustls)"]
+        JWS_V["Verify caller AgentCard JWS<br/>(RFC 7515, EdDSA/RFC 8037)"]
+        REPLAY["ReplayCache<br/>(300s window, 100k entries)"]
+        SUBJ_RL["SubjectLimiter<br/>(per-caller token bucket)"]
+        AGT_TRUST["AGT trust score gate<br/>(minimumTrustScore check)"]
+        ROUTE["Route by sandbox-id<br/>(controller-owned ConfigMap<br/>gateway: get/watch only)"]
+        GW_METRICS["Admin + metrics :9090<br/>/healthz /readyz /metrics"]
+    end
+
+    subgraph cilium_sbx["Cilium CCNP — sandbox ns"]
+        CNP["Permit TCP 8445 only from<br/>azureclaw-a2a-gateway SA<br/>(ADR-0001 D3)"]
+    end
+
+    subgraph sandbox["Sandbox Pod"]
+        direction TB
+        IR["inference-router (UID 1001)<br/>0.0.0.0:8445 — A2A inbound<br/>routes/a2a/ingress.rs<br/>forbid(unsafe_code)<br/>module-isolated from auth::ImdsToken"]
+        OC["openclaw (UID 1000)<br/>plugin :18789"]
+    end
+
+    FA --> CL7 --> TLS_TERM --> JWS_V --> REPLAY --> SUBJ_RL --> AGT_TRUST --> ROUTE
+    ROUTE -->|"mTLS (Workload Identity certs)"| CNP
+    CNP --> IR
+    IR -->|"127.0.0.1:18789"| OC
+
+    style FA fill:#e74c3c,color:#fff
+    style gw fill:#f39c12,color:#000
+    style IR fill:#ff6b35,color:#fff
+    style OC fill:#4a9eff,color:#fff
+    style cilium_sbx fill:#9b59b6,color:#fff
+```
+
+### 11.2 Inbound A2A Request Sequence
+
+```mermaid
+sequenceDiagram
+    participant FA as Foreign Agent
+    participant GW as a2a-gateway
+    participant CNP as CiliumNetworkPolicy<br/>(sandbox ns)
+    participant Router as Router :8445<br/>(inference-router)
+    participant OC as openclaw :18789
+
+    FA->>GW: HTTPS POST /a2a/v1/{sandbox-id}/send<br/>AgentCard JWS header + JSON-RPC body
+
+    rect rgb(255, 245, 238)
+        Note over GW: Gateway checks
+        GW->>GW: Verify JWS (EdDSA, RFC 8037)<br/>Check ReplayCache (jti + iat)<br/>SubjectLimiter token-bucket<br/>allowedCallers thumbprint pin<br/>advertisedSkills allow-list<br/>AGT minimumTrustScore gate
+        Note right of GW: ❌ 401/403/429 if any gate fails
+    end
+
+    rect rgb(240, 248, 255)
+        Note over GW,Router: mTLS forward (cluster-internal)
+        GW->>CNP: TCP 8445 (Workload Identity cert)
+        CNP->>Router: permitted (gateway SA only)
+        GW->>Router: POST /a2a/v1/{sandbox-id}/send<br/>mTLS mutual auth, sandbox-id in path
+    end
+
+    rect rgb(240, 255, 240)
+        Note over Router: Router re-validates
+        Router->>Router: Re-verify JWS + body cap (4 MiB)<br/>JSON-RPC dispatch (message/send,<br/>tasks/get, tasks/cancel)<br/>ToolPolicy gate via PolicyEnvelope<br/>AuditLogger append
+        Note right of Router: module-isolated: cannot import auth::ImdsToken
+    end
+
+    Router->>OC: Deliver A2A task<br/>(127.0.0.1:18789)
+    OC-->>Router: Task result / streaming SSE
+    Router-->>GW: JSON-RPC response
+    GW-->>FA: HTTPS response
+
+    Note over FA,OC: /.well-known/agents/{sandbox-id}/agent.json
+    FA->>GW: GET /.well-known/agents/{sandbox-id}/agent.json
+    GW->>Router: Fetch signed AgentCard (cluster-internal mTLS)
+    Router-->>GW: JWS-signed AgentCard (cached)
+    GW-->>FA: AgentCard JSON
+```
+
+### 11.3 A2A Exposure Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disabled: ClawSandbox created<br/>(spec.a2a.enabled: false, default)
+
+    Disabled: 🔒 A2A Disabled
+    Disabled: No :8445 Service
+    Disabled: No CiliumNetworkPolicy
+    Disabled: No gateway route entry
+
+    OptIn: ✅ A2A Enabled
+    OptIn: Controller emits :8445 ClusterIP Service
+    OptIn: Controller emits CiliumNetworkPolicy
+    OptIn: Controller writes gateway ConfigMap entry
+    OptIn: expiresAt mandatory (≤ 30d)
+
+    Expired: ⏰ A2A Expired
+    Expired: Controller removes Service + NetworkPolicy
+    Expired: Removes gateway ConfigMap entry
+    Expired: status.a2a.state = Expired
+
+    Disabled --> OptIn: spec.a2a.enabled true\n+ allowedCallers + expiresAt set
+    OptIn --> Expired: expiresAt passes\n(controller reconcile < 30s)
+    OptIn --> Disabled: spec.a2a.enabled flipped false\nor ClawSandbox deleted
+    Expired --> OptIn: operator sets new expiresAt\n(audited as fresh opt-in)
+```
+
+---
+
+## 12. Multi-Runtime Dispatch — Phase 2
+
+Shows how `spec.runtime.kind` on a ClawSandbox CR is resolved by the controller into a concrete container
+image, adapter env vars, and runtime-specific sidecar configuration. Tier-1 adapters (OpenClaw,
+OpenAIAgents, MicrosoftAgentFramework) are fully wired; Tier-2 variants (SemanticKernel, LangGraph,
+Anthropic, BYO) are schema stubs that stamp `RuntimeReady=False/AdapterMissing`. Source:
+`controller/src/reconciler/runtime.rs`.
+
+```mermaid
+flowchart TD
+    CS["ClawSandbox CR<br/>spec.runtime.kind: ?"] --> VALIDATE["validate_runtime_shape()<br/>CEL mirror: kind ↔ variant struct coherence"]
+
+    VALIDATE -->|"shape invalid"| DEGRADE["Stamp Degraded/SpecInvalid<br/>RuntimeReady=False"]
+
+    VALIDATE -->|"shape ok"| DISPATCH{"spec.runtime.kind"}
+
+    DISPATCH -->|"OpenClaw"| OC_PLAN["RuntimeDeploymentPlan<br/>image: SANDBOX_IMAGE (controller default :latest)<br/>entrypoint: entrypoint.sh<br/>env: AGT_*, AZURE_*, AZURECLAW_*<br/>runtime injection: router sidecar + egress-guard"]
+
+    DISPATCH -->|"OpenAIAgents"| OAI_PLAN["RuntimeDeploymentPlan<br/>image: azureclaw-runtime-openai-agents:latest<br/>(override: OPENAI_AGENTS_RUNTIME_IMAGE)<br/>agentCode: OCI image or git.url/ref/path<br/>env: OPENAI_AGENTS_* + shared AGT env<br/>+ inference-router sidecar injected"]
+
+    DISPATCH -->|"MicrosoftAgentFramework"| MAF_PLAN["RuntimeDeploymentPlan<br/>image: azureclaw-runtime-maf-python:latest<br/>(override: MAF_RUNTIME_IMAGE)<br/>language: python (dotnet deferred to Phase 3)<br/>env: MAF_* + shared AGT env<br/>+ inference-router sidecar injected"]
+
+    DISPATCH -->|"SemanticKernel\nLangGraph\nAnthropic\nBYO"| MISSING["RuntimePlanError::AdapterMissing<br/>stamp RuntimeReady=False/AdapterMissing<br/>Degraded condition on ClawSandbox"]
+
+    OC_PLAN --> BUILD["Build Deployment spec<br/>(deployment builder consumes RuntimeDeploymentPlan<br/>— no runtime-specific logic outside this module)"]
+    OAI_PLAN --> BUILD
+    MAF_PLAN --> BUILD
+
+    BUILD --> POD["Pod: agent-runtime container<br/>+ inference-router sidecar (all runtimes)<br/>+ egress-guard init container (all runtimes)"]
+
+    style OC_PLAN fill:#4a9eff,color:#fff
+    style OAI_PLAN fill:#2ecc71,color:#fff
+    style MAF_PLAN fill:#9b59b6,color:#fff
+    style MISSING fill:#e74c3c,color:#fff
+    style BUILD fill:#e67e22,color:#fff
+```
+
+---
+
+## 13. Signed OCI Egress Allowlist — Phase 2
+
+Shows the full lifecycle of a signed egress allowlist: from the operator running `azureclaw egress --sign`
+through ACR push + cosign signing, to the controller fetching and verifying the artifact, and finally
+deriving `allowedEndpoints` for the NetworkPolicy. Source: `controller/src/policy_fetcher.rs`,
+`controller/src/signer_policy.rs`.
+
+### 13.1 CLI → ACR → Controller Flow
+
+```mermaid
+flowchart TD
+    CLI["azureclaw egress ‹name› --sign<br/>--allowlist api.github.com,pypi.org"] --> BUILD["CLI builds canonical artifact<br/>(JSON, byte-stable canonical form<br/>per docs/policy-canonical-format.md)"]
+
+    BUILD --> PUSH["Push OCI artifact to ACR<br/>azureclawacr.azurecr.io/allowlists/‹name›:‹sha›"]
+
+    PUSH --> SIGN{"Signing method"}
+    SIGN -->|"--keyless (default)"| KL["cosign sign (keyless)<br/>Fulcio CA + Rekor transparency log<br/>GitHub Actions OIDC issuer"]
+    SIGN -->|"--token"| TK["cosign sign --key k8s://…<br/>OIDC token from Azure Workload Identity"]
+    SIGN -->|"--kms"| KMS["cosign sign --key azurekms://…<br/>Azure Key Vault signing key"]
+
+    KL --> PATCH["CLI patches ClawSandbox<br/>spec.networkPolicy.allowlistRef:<br/>  registry: azureclawacr.azurecr.io<br/>  repository: allowlists/‹name›<br/>  digest: sha256:…"]
+    TK --> PATCH
+    KMS --> PATCH
+
+    PATCH --> RECONCILE["Controller reconcile triggered<br/>(watch event on ClawSandbox)"]
+
+    RECONCILE --> ACR_AUTH["acr_token_for_pull()<br/>4-step Workload Identity token exchange:<br/>1. Read federated token from AZURE_FEDERATED_TOKEN_FILE<br/>2. Exchange at Entra oauth2/v2.0/token<br/>3. Exchange at ACR /oauth2/exchange (refresh token)<br/>4. Exchange at ACR /oauth2/token (access token, pull scope)"]
+
+    ACR_AUTH --> FETCH["policy_fetcher: pull OCI artifact<br/>verify cosign signature"]
+
+    FETCH --> SIGPOL["Load SignerPolicy ConfigMap<br/>azureclaw-signer-policy (watched)<br/>fulcioIssuers + sanPatterns<br/>(malformed → SignerPolicyMalformed, fail closed)"]
+
+    SIGPOL --> VERIFY{"Signature valid?"}
+    VERIFY -->|"❌ fail"| LKG["Preserve last-known-good (LKG)<br/>endpoint set from prior reconcile<br/>stamp AllowlistVerified=False<br/>Degraded if no LKG exists"]
+    VERIFY -->|"✅ pass"| CANONICAL["Validate canonical form<br/>(byte-stable JSON rules)"]
+
+    CANONICAL --> DRIFT{"inline allowedEndpoints<br/>also set?"}
+    DRIFT -->|"yes and differs"| DRIFT_COND["AllowlistDrift=True/InlineDiffersFromArtifact"]
+    DRIFT -->|"no or matches"| APPLY["Derive allowedEndpoints<br/>from verified artifact<br/>(inline ignored in authoritative mode)"]
+
+    DRIFT_COND --> APPLY
+    APPLY --> NP["Update NetworkPolicy<br/>AllowlistVerified=True/Verified"]
+
+    style LKG fill:#f39c12,color:#fff
+    style APPLY fill:#2ecc71,color:#fff
+    style NP fill:#2ecc71,color:#fff
+    style VERIFY fill:#3498db,color:#fff
+```
+
+### 13.2 SignerPolicy ConfigMap Wire Shape
+
+```mermaid
+classDiagram
+    class SignerPolicyConfigMap {
+        name: azureclaw-signer-policy
+        namespace: azureclaw-system
+        data.fulcioIssuers: string (newline-separated)
+        data.sanPatterns: string (newline-separated)
+    }
+    class SignerPolicy {
+        fulcio_issuers: Vec~String~
+        san_patterns: Vec~String~
+        is_configured() bool
+    }
+    class FetchError {
+        SignerPolicyMissing
+        SignerPolicyMalformed(reason)
+        SignatureVerificationFailed
+        ArtifactFetchFailed
+        CanonicalFormInvalid
+    }
+    SignerPolicyConfigMap --> SignerPolicy : watched by controller\n(malformed → FetchError)
+    SignerPolicy --> FetchError : empty lists → reject all
+```
+
+---
+
+## 14. InferencePolicy / ToolPolicy Ref Resolution — Phase 2
+
+Shows how `ClawSandbox.spec.inference.policyRef` and `spec.governance.toolPolicy.policyRef` are resolved
+at reconcile time. Each policy CRD has its own reconciler that compiles the spec to an AGT profile
+ConfigMap; the ClawSandbox reconciler resolves the ref, stamps a condition, and mounts the ConfigMap
+into the router pod. The router loads it via `PolicyEnvelope` (ArcSwap-backed hot reload). Source:
+`controller/src/inference_policy_reconciler.rs`, `controller/src/tool_policy_reconciler.rs`.
+
+### 14.1 Reconcile-Time Ref Resolution
+
+```mermaid
+sequenceDiagram
+    participant Ops as Operator
+    participant K8s as K8s API
+    participant IPR as InferencePolicy Reconciler<br/>fm: azureclaw-controller/inferencepolicy
+    participant TPR as ToolPolicy Reconciler<br/>fm: azureclaw-controller/toolpolicy
+    participant CSR as ClawSandbox Reconciler<br/>fm: azureclaw-controller/clawsandbox
+    participant Router as inference-router<br/>(PolicyEnvelope ArcSwap)
+
+    Ops->>K8s: kubectl apply InferencePolicy/my-policy
+    K8s->>IPR: watch event: InferencePolicy upserted
+
+    rect rgb(240, 248, 255)
+        Note over IPR: InferencePolicy reconcile
+        IPR->>IPR: compile_to_profile() → AGT profile JSON
+        IPR->>K8s: SSA patch ConfigMap<br/>inferencepolicy-my-policy-profile<br/>(key: profile.json, label: router-pod selector)
+        IPR->>K8s: SSA patch status:<br/>observedGeneration, phase=Ready<br/>profileConfigMapRef, versionHash, lastCompiledAt
+        IPR->>K8s: Set conditions: Ready=True, Degraded=False
+    end
+
+    Ops->>K8s: kubectl apply ClawSandbox with<br/>spec.inference.policyRef: my-policy
+
+    K8s->>CSR: watch event: ClawSandbox upserted
+
+    rect rgb(255, 248, 220)
+        Note over CSR: ClawSandbox reconcile — policy resolution
+        CSR->>K8s: GET InferencePolicy/my-policy
+        K8s-->>CSR: CR + status.profileConfigMapRef
+        CSR->>K8s: GET ConfigMap inferencepolicy-my-policy-profile
+        K8s-->>CSR: profile.json payload
+        CSR->>K8s: Mount ConfigMap as volume in Deployment<br/>inject INFERENCE_POLICY_CM env var to router
+        CSR->>K8s: Set conditions on ClawSandbox:<br/>Ready=True (or Degraded/InferencePolicyNotFound)
+    end
+
+    Note over CSR,Router: Hot reload path (no pod restart needed)
+    Router->>K8s: Watch ConfigMap changes via informer
+    K8s-->>Router: ConfigMap updated (versionHash changed)
+    Router->>Router: apply_policy_change(PolicyChange::Upserted)<br/>replace_snapshot() on PolicyEnvelope (ArcSwap store)<br/>next snapshot() call sees new rules immediately
+```
+
+### 14.2 PolicyEnvelope Hot-Reload State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty: Router startup\n(no policies loaded)
+
+    Empty: PolicyEnvelope generation 0\nNo InferencePolicy rules
+
+    Loaded: PolicyEnvelope generation N\nInferencePolicy rules active\nBTreeMap keyed by PolicyId
+
+    Updated: PolicyEnvelope generation N+1\nNew snapshot (ArcSwap store)\nIn-flight requests hold prior Arc
+
+    Empty --> Loaded: PolicyChange::Upserted\n(first policy)
+    Loaded --> Updated: PolicyChange::Upserted\nor PolicyChange::Deleted
+    Updated --> Updated: Additional changes\n(each bumps generation by 1)
+    Loaded --> Empty: PolicyChange::Reset\n(all policies removed)
+    Updated --> Empty: PolicyChange::Reset
+
+    note right of Updated
+        ArcSwap guarantees:
+        replace_snapshot() = single store op
+        snapshot() = zero-lock read
+        In-flight requests see prior Arc
+        until their scope drops
+    end note
+```
+
+---
+
+## 15. Cloud Handoff Flow (Dev → AKS)
 
 LLM-driven agent migration from local Docker to AKS cloud. The LLM requests the handoff, the user confirms with a code, and the plugin orchestrates the transfer asynchronously — reporting live progress via emoji status updates.
 
@@ -912,7 +1342,7 @@ graph TB
 
 ---
 
-## 12. Bidirectional Handoff with Sub-Agents
+## 16. Bidirectional Handoff with Sub-Agents
 
 Full roundtrip handoff: local Docker ↔ AKS cloud, including sub-agent lifecycle (snapshot, destroy, re-spawn, workspace inject, task resume). The local Docker parent is the permanent "home base" — everything else is ephemeral.
 
