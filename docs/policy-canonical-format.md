@@ -68,7 +68,7 @@ The `oras push` step computes the `sha256` digest over the raw YAML bytes; the p
 Two-step:
 
 1. **Cryptographic validity:** cosign signature exists, chains to a Fulcio root, certificate not expired at signing time.
-2. **Authority:** signer identity (Fulcio cert SAN + issuer claim) matches an entry in the cluster `SignerPolicy` ConfigMap (S12.d). Without S12.d, no identity is authoritative — verification is "valid sig" only and the controller MUST surface this as a `AllowlistVerified=Unknown` condition with reason `NoSignerPolicy`.
+2. **Authority:** signer identity (Fulcio cert SAN + issuer claim) matches an entry in the cluster `SignerPolicy` ConfigMap. The authoritative configuration lives in the cluster-scoped ConfigMap `azureclaw-signer-policy` in the controller namespace (provisioned by the Helm chart via `signerPolicy.fulcioIssuers` / `signerPolicy.sanPatterns` — see `deploy/helm/azureclaw/templates/signer-policy-configmap.yaml`). Env vars (`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`) remain as an emergency-override fallback when the ConfigMap is **absent**; a *malformed* ConfigMap surfaces as `AllowlistVerified=False / SignerPolicyMalformed` and does **not** silently fall back to the env path.
 
 After verification, parse the YAML and revalidate every canonicalization rule above. Reject (set `AllowlistVerified=False`, reason `CanonicalFormViolation`) on any mismatch — even a valid signature over malformed canonical bytes is not authority.
 
@@ -87,7 +87,7 @@ When v2 is needed (e.g., to reintroduce wildcards, methods, paths, CIDR ranges):
 | **S12.a** *(this slice)* | Format definition, CRD field, no behavior |
 | S12.b | Controller fetcher + format validator (status-only) |
 | S12.c | CLI canonical serializer + signing |
-| S12.d | `SignerPolicy` ConfigMap + identity-pinned authority |
+| S12.d | `SignerPolicy` ConfigMap + identity-pinned authority *(this slice — landed)* |
 | S12.e | Authoritative ref mode (controller derives `allowedEndpoints` from canonical bytes) |
 
 ## Producer (CLI)

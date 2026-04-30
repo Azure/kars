@@ -1,0 +1,45 @@
+{{- /*
+S12.d — SignerPolicy ConfigMap.
+
+Cluster-scoped trust roots for cosign-signed egress allowlist artifacts
+(see `controller/src/policy_fetcher.rs` and
+`docs/policy-canonical-format.md`). The controller watches this single
+ConfigMap (filtered by name + controller-namespace) and rebuilds its
+in-memory `SignerPolicy` on every Apply / Delete event.
+
+The ConfigMap is rendered when `.Values.signerPolicy.enabled` is true
+(default). Set `signerPolicy.enabled: false` only if you intend to fall
+back to the env-var emergency-override path
+(`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS` set
+on the controller Deployment).
+
+Two `data` keys, both required, both newline-separated:
+
+* `fulcioIssuers` — Fulcio issuer URLs that may issue keyless certs.
+* `sanPatterns`   — SAN patterns matched against the signer cert
+                    (URL or email; glob `*` / `?` per `policy_fetcher`).
+
+Comment lines starting with `#` are stripped at parse time. Either list
+empty after trimming → parse error → controller surfaces
+`SignerPolicyMalformed` on affected `ClawSandbox` resources (NOT a
+silent fallback to env vars; broken config is a hard signal).
+*/ -}}
+{{- if .Values.signerPolicy.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azureclaw-signer-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: signer-policy
+data:
+  fulcioIssuers: |
+{{- range .Values.signerPolicy.fulcioIssuers }}
+    {{ . }}
+{{- end }}
+  sanPatterns: |
+{{- range .Values.signerPolicy.sanPatterns }}
+    {{ . }}
+{{- end }}
+{{- end }}
