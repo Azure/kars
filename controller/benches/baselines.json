@@ -3,7 +3,7 @@
   "_threshold_pct": 25,
   "groups": {
     "reconcile_decision/n=0": { "median_ns": 2 },
-    "reconcile_decision/n=100": { "median_ns": 1700 },
-    "reconcile_decision/n=1000": { "median_ns": 18200 }
+    "reconcile_decision/n=100": { "median_ns": 3185 },
+    "reconcile_decision/n=1000": { "median_ns": 37488 }
   }
 }
