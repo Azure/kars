@@ -135,3 +135,8 @@ Signed: @reviewer-handle — `<date>`
 ---
 
 *Companion to `docs/internal/phase3-manual-verification.md`. Not a code change; process + evidence tracking only.*
+
+---
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
