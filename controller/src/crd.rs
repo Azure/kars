@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
     shortname = "claw",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Runtime","type":"string","jsonPath":".spec.runtime.kind"}"#,
-    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.inference.model"}"#,
+    printcolumn = r#"{"name":"InferencePolicy","type":"string","jsonPath":".spec.inferenceRef.name"}"#,
     printcolumn = r#"{"name":"Isolation","type":"string","jsonPath":".spec.sandbox.isolation"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
@@ -45,8 +45,17 @@ pub struct ClawSandboxSpec {
     /// Sandbox security settings
     pub sandbox: Option<SandboxConfig>,
 
-    /// Inference routing
-    pub inference: Option<InferenceConfig>,
+    /// Reference to an `InferencePolicy` CR in the **same namespace** as
+    /// this `ClawSandbox`. The referenced CR is the single source of
+    /// truth for inference guardrails: model preference, content-safety
+    /// floor, prompt-shield requirement, token budgets. The reconciler
+    /// resolves the ref at apply time; if the target is missing the
+    /// sandbox enters `Degraded` with reason `InferencePolicyNotFound`
+    /// (no inline-fallback path post-S13).
+    ///
+    /// Cross-namespace refs are deliberately not supported — would be a
+    /// privilege-escalation vector. See `docs/crd-precedence.md`.
+    pub inference_ref: LocalObjectRef,
 
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
@@ -655,49 +664,7 @@ impl Default for SandboxConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct InferenceConfig {
-    /// azure-openai | azure-ai-foundry | self-hosted
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    pub endpoint: Option<String>,
-    #[serde(default = "default_model")]
-    pub model: String,
-    pub fallback: Option<FallbackConfig>,
-    #[serde(default = "default_true")]
-    pub content_safety: bool,
-    #[serde(default = "default_true")]
-    pub prompt_shields: bool,
-    pub token_budget: Option<TokenBudgetConfig>,
-}
-
-impl Default for InferenceConfig {
-    fn default() -> Self {
-        Self {
-            provider: "azure-openai".into(),
-            endpoint: None,
-            model: "gpt-4.1".into(),
-            fallback: None,
-            content_safety: true,
-            prompt_shields: true,
-            token_budget: None,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-pub struct FallbackConfig {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenBudgetConfig {
-    pub daily: Option<i64>,
-    pub per_request: Option<i64>,
-}
+// See `crate::mcp_server::LocalObjectRef` — re-used here for sandbox refs.
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -799,15 +766,27 @@ pub struct AgentConfig {
 }
 
 /// AGT behavioral governance configuration.
+///
+/// **S13:** the `tool_policy` profile name was replaced with
+/// `tool_policy_ref` — a same-namespace reference to a `ToolPolicy` CR.
+/// The dedicated `ToolPolicy` CRD is the single source of truth for
+/// tool-call gating (rate limit, approval, AP2 commerce caps); this
+/// struct keeps only behavior knobs that aren't expressed by `ToolPolicy`
+/// itself (AGT enable flag, trust threshold, trusted peers, registry mode).
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernanceConfig {
     /// Enable AGT governance (tool policy, trust, audit).
     #[serde(default)]
     pub enabled: bool,
-    /// Policy profile name (references policies ConfigMap).
-    #[serde(default = "default_policy")]
-    pub tool_policy: String,
+    /// Reference to a `ToolPolicy` CR in the **same namespace** as this
+    /// `ClawSandbox`. Required — the controller resolves the target at
+    /// reconcile time; missing target → `Degraded` with reason
+    /// `ToolPolicyNotFound` (no inline-fallback path post-S13). The
+    /// resolved CR's `metadata.name` doubles as the AGT policy profile
+    /// name carried into the sandbox via `AGT_POLICY_PROFILE`.
+    #[serde(default)]
+    pub tool_policy_ref: LocalObjectRef,
     /// Minimum trust score (0-1000) for inter-agent communication.
     #[serde(default = "default_trust_threshold")]
     pub trust_threshold: i32,
@@ -820,9 +799,6 @@ pub struct GovernanceConfig {
     pub registry_mode: Option<String>,
 }
 
-fn default_policy() -> String {
-    "default".into()
-}
 fn default_trust_threshold() -> i32 {
     500
 }
@@ -876,12 +852,6 @@ fn default_seccomp() -> String {
 fn default_selinux() -> String {
     String::new()
 }
-fn default_provider() -> String {
-    "azure-openai".into()
-}
-fn default_model() -> String {
-    "gpt-4.1".into()
-}
 fn default_true() -> bool {
     true
 }
@@ -918,28 +888,20 @@ mod tests {
     }
 
     #[test]
-    fn default_model_is_gpt_4_1() {
-        let cfg = InferenceConfig::default();
-        assert_eq!(cfg.model, "gpt-4.1");
+    fn local_object_ref_round_trips() {
+        let r = LocalObjectRef {
+            name: "my-policy".into(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v.get("name").and_then(|s| s.as_str()), Some("my-policy"));
+        let back: LocalObjectRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
     }
 
     #[test]
-    fn default_provider_is_azure_openai() {
-        let cfg = InferenceConfig::default();
-        assert_eq!(cfg.provider, "azure-openai");
-    }
-
-    #[test]
-    fn default_inference_enables_content_safety() {
-        let cfg = InferenceConfig::default();
-        assert!(cfg.content_safety);
-        assert!(cfg.prompt_shields);
-    }
-
-    #[test]
-    fn default_inference_has_no_token_budget() {
-        let cfg = InferenceConfig::default();
-        assert!(cfg.token_budget.is_none());
+    fn local_object_ref_default_is_empty_name() {
+        let r = LocalObjectRef::default();
+        assert!(r.name.is_empty());
     }
 
     #[test]
@@ -989,14 +951,14 @@ mod tests {
 
     #[test]
     fn default_governance_config() {
-        // GovernanceConfig derives Default (empty/zero), serde defaults apply on deserialization
         let cfg = GovernanceConfig::default();
         assert!(!cfg.enabled);
-        // Serde default_policy() and default_trust_threshold() are used during deserialization only
+        // S13: tool_policy is now a same-namespace ref to a ToolPolicy CR.
+        // Default is an empty name (a sandbox spec with governance.enabled=true
+        // MUST set toolPolicyRef.name; reconciler degrades on missing ref).
+        assert!(cfg.tool_policy_ref.name.is_empty());
         let cfg_serde: GovernanceConfig = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(cfg_serde.tool_policy, "default");
         assert_eq!(cfg_serde.trust_threshold, 500);
-        assert_eq!(cfg.tool_policy, ""); // derive Default gives empty string
     }
 
     #[test]
@@ -1011,19 +973,15 @@ mod tests {
         assert!(spec.runtime.microsoft_agent_framework.is_none());
         assert!(spec.runtime.byo.is_none());
         assert!(spec.sandbox.is_none());
-        assert!(spec.inference.is_none());
+        // S13: `inferenceRef` is a value-type required field. Default is
+        // a `LocalObjectRef` with an empty name; admission CEL rejects
+        // empty-name on apply.
+        assert!(spec.inference_ref.name.is_empty());
         assert!(spec.network_policy.is_none());
         assert!(spec.agent.is_none());
         assert!(spec.governance.is_none());
         assert!(spec.azure_services.is_none());
         assert!(spec.resources.is_none());
-    }
-
-    #[test]
-    fn token_budget_config_defaults_to_none() {
-        let cfg = TokenBudgetConfig::default();
-        assert!(cfg.daily.is_none());
-        assert!(cfg.per_request.is_none());
     }
 
     #[test]
@@ -1071,10 +1029,41 @@ mod tests {
     }
 
     #[test]
-    fn inference_config_default_has_no_fallback() {
-        let cfg = InferenceConfig::default();
-        assert!(cfg.fallback.is_none());
-        assert!(cfg.endpoint.is_none());
+    fn inference_ref_round_trips_via_camel_case() {
+        // Wire-format hygiene: K8s uses camelCase. The ref field on the
+        // ClawSandboxSpec must serialize as `inferenceRef`.
+        let spec = ClawSandboxSpec {
+            inference_ref: LocalObjectRef {
+                name: "my-sandbox-inference".into(),
+            },
+            ..ClawSandboxSpec::default()
+        };
+        let v = serde_json::to_value(&spec).unwrap();
+        assert!(
+            v.get("inferenceRef").is_some(),
+            "must use camelCase inferenceRef"
+        );
+        let ir = v.get("inferenceRef").unwrap();
+        assert_eq!(
+            ir.get("name").and_then(|n| n.as_str()),
+            Some("my-sandbox-inference")
+        );
+    }
+
+    #[test]
+    fn governance_tool_policy_ref_serializes_camel_case() {
+        let g = GovernanceConfig {
+            enabled: true,
+            tool_policy_ref: LocalObjectRef { name: "tp".into() },
+            trust_threshold: 500,
+            trusted_peers: None,
+            registry_mode: None,
+        };
+        let v = serde_json::to_value(&g).unwrap();
+        assert!(
+            v.get("toolPolicyRef").is_some(),
+            "must use camelCase toolPolicyRef"
+        );
     }
 
     // ─── S10.A1 RuntimeSpec tests ────────────────────────────────────

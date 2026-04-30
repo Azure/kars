@@ -3,6 +3,12 @@ import chalk from "chalk";
 import ora from "ora";
 import { loadContext, resolveSecret } from "../config.js";
 import { assertRuntimeWired, buildRuntimeBlock, flagToKind } from "../runtime.js";
+import {
+  buildInferencePolicy,
+  buildToolPolicy,
+  inferenceRefName,
+  toolPolicyRefName,
+} from "../refs.js";
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -72,15 +78,8 @@ export function addCommand(): Command {
             allowPrivilegeEscalation: false,
             writablePaths: ["/sandbox", "/tmp"],
           },
-          inference: {
-            provider: "azure-ai-foundry",
-            model: options.model,
-            contentSafety: true,
-            promptShields: true,
-            tokenBudget: {
-              daily: parseInt(options.tokenBudgetDaily) || 0,
-              perRequest: parseInt(options.tokenBudgetPerRequest) || 0,
-            },
+          inferenceRef: {
+            name: inferenceRefName(name),
           },
           networkPolicy: {
             defaultDeny: true,
@@ -113,7 +112,7 @@ export function addCommand(): Command {
       if (options.governance) {
         (sandbox.spec as Record<string, unknown>).governance = {
           enabled: true,
-          toolPolicy: options.policyProfile || "default",
+          toolPolicyRef: { name: toolPolicyRefName(name) },
           trustThreshold: parseInt(options.trustThreshold) || 500,
         };
       }
@@ -209,7 +208,29 @@ export function addCommand(): Command {
         console.log(chalk.dim(`  Skills: ${options.skills}`));
       }
 
-      const yaml = JSON.stringify(sandbox, null, 2);
+      // S13: build companion same-namespace policy CRs (sibling to ClawSandbox).
+      const inferencePolicy = buildInferencePolicy({
+        sandboxName: name,
+        namespace: "azureclaw-system",
+        model: options.model,
+        provider: "azure-ai-foundry",
+        contentSafety: true,
+        promptShields: true,
+        tokenBudgetDaily: parseInt(options.tokenBudgetDaily) || 0,
+        tokenBudgetPerRequest: parseInt(options.tokenBudgetPerRequest) || 0,
+      });
+      const toolPolicy = options.governance
+        ? buildToolPolicy({
+            sandboxName: name,
+            namespace: "azureclaw-system",
+            profile: options.policyProfile || "default",
+          })
+        : undefined;
+
+      const bundle: Record<string, unknown>[] = [inferencePolicy];
+      if (toolPolicy) bundle.push(toolPolicy);
+      bundle.push(sandbox);
+      const yaml = JSON.stringify(bundle, null, 2);
 
       if (options.dryRun) {
         console.log(chalk.bold("\nClawSandbox manifest (dry-run):\n"));
@@ -363,8 +384,16 @@ export function addCommand(): Command {
           }
         }
         spinner.text = `Creating sandbox '${name}'...`;
+        // Apply InferencePolicy + (optional) ToolPolicy + ClawSandbox as a
+        // single multi-doc bundle. The controller resolves refs at reconcile
+        // time; if the policy CRs are missing the sandbox goes Degraded.
+        const bundleManifest = {
+          apiVersion: "v1",
+          kind: "List",
+          items: bundle,
+        };
         await execa("kubectl", ["apply", "-f", "-"], {
-          input: JSON.stringify(sandbox),
+          input: JSON.stringify(bundleManifest),
           stdio: ["pipe", "pipe", "pipe"],
         });
 

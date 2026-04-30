@@ -1,6 +1,28 @@
 # AzureClaw Example: Basic OpenClaw Agent
 # This creates a sandboxed OpenClaw agent with default security settings.
 
+---
+# S13: ClawSandbox.spec.inferenceRef points at this sibling InferencePolicy.
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: my-assistant-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: my-assistant
+spec:
+  appliesTo:
+    sandboxName: my-assistant
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
@@ -26,14 +48,10 @@ spec:
       - /sandbox
       - /tmp
 
-  inference:
-    provider: "azure-openai"
-    model: "gpt-4.1"
-    contentSafety: true
-    promptShields: true
-    tokenBudget:
-      daily: 500000
-      perRequest: 128000
+  # S13 phase2-config-authority-refs: inline `inference:` is gone — the
+  # spec now references a sibling InferencePolicy CR by name (above).
+  inferenceRef:
+    name: my-assistant-inference
 
   networkPolicy:
     defaultDeny: true

@@ -647,7 +647,19 @@ export function translate(
   }
   if (resources) sbSpec.resources = resources;
   if (networkPolicy) sbSpec.networkPolicy = networkPolicy;
-  if (governanceEnabled) sbSpec.governance = { enabled: true };
+  // S13: ClawSandbox.spec.inferenceRef is required. Emit a sibling
+  // InferencePolicy CR named `<sandbox>-inference` and reference it.
+  sbSpec.inferenceRef = { name: `${sandboxName}-inference` };
+  if (governanceEnabled) {
+    sbSpec.governance = {
+      enabled: true,
+      // S13: same-namespace reference to a top-level ToolPolicy CR
+      // (per-tool ToolPolicy CRs are still emitted below for fine-grained
+      // approval/rate-limit scoping; the sandbox's ref points at the
+      // synthetic `<sandbox>-toolpolicy` aggregator).
+      toolPolicyRef: { name: `${sandboxName}-toolpolicy` },
+    };
+  }
 
   const clawsandbox: KubeResource = {
     apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
@@ -661,35 +673,64 @@ export function translate(
     spec: sbSpec,
   };
 
-  // ---- InferencePolicy (provenance-only) ----------------------------------
+  // ---- InferencePolicy ----------------------------------------------------
+  // S13: ClawSandbox.spec.inferenceRef is required, so always emit a
+  // sibling `<sandbox>-inference` InferencePolicy CR. When the upstream
+  // kagent Agent declared a `modelConfig`, preserve it as provenance.
   const inferencePolicies: KubeResource[] = [];
-  if (agentType === "Declarative" && isObj(spec.declarative)) {
-    const modelConfig = asString((spec.declarative as Record<string, unknown>).modelConfig);
-    if (modelConfig && modelConfig.length > 0) {
-      warnings.push(
-        warn(
-          "spec.declarative.modelConfig",
-          `kagent ModelConfig '${modelConfig}' is preserved only as an InferencePolicy annotation; AzureClaw inference provider/model are not configured from it`,
-        ),
-      );
-      inferencePolicies.push({
-        apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
-        kind: "InferencePolicy",
-        metadata: {
-          name: `${sandboxName}-inference`,
-          namespace,
-          labels: { [SANDBOX_LABEL_KEY]: sandboxName },
-          annotations: {
-            [PROVENANCE_FROM_KEY]: `${KAGENT_API_VERSION} ${KAGENT_KIND}`,
-            [PROVENANCE_AGENT_KEY]: `${inputNs}/${sandboxName}`,
-            [KAGENT_MODEL_CONFIG_KEY]: modelConfig,
-          },
-        },
-        spec: {
-          appliesTo: { sandboxName },
-        },
-      });
+  {
+    const ipAnnotations: Record<string, string> = {
+      [PROVENANCE_FROM_KEY]: `${KAGENT_API_VERSION} ${KAGENT_KIND}`,
+      [PROVENANCE_AGENT_KEY]: `${inputNs}/${sandboxName}`,
+    };
+    if (agentType === "Declarative" && isObj(spec.declarative)) {
+      const modelConfig = asString((spec.declarative as Record<string, unknown>).modelConfig);
+      if (modelConfig && modelConfig.length > 0) {
+        warnings.push(
+          warn(
+            "spec.declarative.modelConfig",
+            `kagent ModelConfig '${modelConfig}' is preserved only as an InferencePolicy annotation; AzureClaw inference provider/model are not configured from it`,
+          ),
+        );
+        ipAnnotations[KAGENT_MODEL_CONFIG_KEY] = modelConfig;
+      }
     }
+    inferencePolicies.push({
+      apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
+      kind: "InferencePolicy",
+      metadata: {
+        name: `${sandboxName}-inference`,
+        namespace,
+        labels: { [SANDBOX_LABEL_KEY]: sandboxName },
+        annotations: ipAnnotations,
+      },
+      spec: {
+        appliesTo: { sandboxName },
+      },
+    });
+  }
+
+  // S13: when governance is on, emit a synthetic top-level
+  // `<sandbox>-toolpolicy` aggregator (the per-tool CRs above stay; this
+  // one is what `ClawSandbox.spec.governance.toolPolicyRef` points at).
+  if (governanceEnabled) {
+    toolPolicies.push({
+      apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
+      kind: "ToolPolicy",
+      metadata: {
+        name: `${sandboxName}-toolpolicy`,
+        namespace,
+        labels: { [SANDBOX_LABEL_KEY]: sandboxName },
+        annotations: {
+          [PROVENANCE_FROM_KEY]: `${KAGENT_API_VERSION} ${KAGENT_KIND}`,
+          [PROVENANCE_AGENT_KEY]: `${inputNs}/${sandboxName}`,
+        },
+      },
+      spec: {
+        appliesTo: { sandboxName },
+      },
+    });
+    toolPolicies.sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
   }
 
   const resourcesOut: KubeResource[] = [

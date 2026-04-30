@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S13 `phase2-config-authority-refs` — sandbox config moves to refs
+
+**BREAKING (in-place v1alpha1 schema edit; pre-release, no conversion webhook).**
+
+The `ClawSandbox` spec no longer carries inline inference or tool-policy
+configuration. Instead, the sandbox holds same-namespace references to
+sibling `InferencePolicy` and `ToolPolicy` CRDs which become the single
+source of truth.
+
+Schema changes (`controller/src/crd.rs`,
+`deploy/helm/azureclaw/templates/crd.yaml`):
+
+- `spec.inference: InferenceConfig` → **removed**.
+- `spec.inferenceRef: { name: string }` → **new, required**. References
+  a sibling `InferencePolicy` CR. Cross-namespace refs are not supported
+  (same-namespace only — security invariant).
+- `spec.governance.toolPolicy: string` (profile name) → **removed**.
+- `spec.governance.toolPolicyRef: { name: string }` → **new**. Required
+  when `governance.enabled=true` (CEL-enforced). References a sibling
+  `ToolPolicy` CR; the resolved CR's `metadata.name` doubles as the AGT
+  policy profile carried into the sandbox via `AGT_POLICY_PROFILE`.
+- New status reasons `InferencePolicyNotFound`, `ToolPolicyNotFound` —
+  emitted on `Degraded` when a referenced CR is missing.
+
+CLI updates (`cli/src/commands/{up/sandbox_bringup,add,attest}.ts`,
+`cli/src/migrate/from_kagent.ts`, new `cli/src/refs.ts`): the `azureclaw
+up` and `azureclaw add` commands now emit a multi-doc bundle
+(`InferencePolicy` + optional `ToolPolicy` + `ClawSandbox`) and apply
+all three in one shot. Naming convention: `<sandbox>-inference` and
+`<sandbox>-toolpolicy`, DNS-1123 truncated to 63 chars. The
+`from-kagent` migrator now always emits an `<sandbox>-inference`
+InferencePolicy (preserving any kagent `modelConfig` provenance) and
+adds an aggregator `<sandbox>-toolpolicy` whenever governance is on.
+
+Examples (`examples/basic-agent/`, `examples/confidential-agent/`,
+`examples/telegram-agent/`, `examples/demo-clawshield/*-agent.yaml`)
+and e2e fixtures (`tests/e2e/run.sh`,
+`tests/compat/fixtures/null-provider-*.yaml`) updated to the
+two-doc-per-sandbox shape.
+
 ### S12.d — SignerPolicy ConfigMap (Fulcio issuer + SAN allowlist)
 
 - New `controller/src/signer_policy.rs` — cluster-scoped

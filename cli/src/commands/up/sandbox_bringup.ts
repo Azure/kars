@@ -13,6 +13,12 @@ import chalk from "chalk";
 import type { Stepper } from "../../stepper.js";
 import { section, kvLine, checkLine } from "../../stepper.js";
 import { saveContext } from "../../config.js";
+import {
+  buildInferencePolicy,
+  buildToolPolicy,
+  inferenceRefName,
+  toolPolicyRefName,
+} from "../../refs.js";
 
 export interface SandboxBringUpContext {
   options: {
@@ -325,12 +331,27 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   }
 
   stepper.update(`Creating sandbox '${options.name}'...`);
+  const sandboxNamespace = "azureclaw-system";
+  const inferencePolicy = buildInferencePolicy({
+    sandboxName: options.name,
+    namespace: sandboxNamespace,
+    model: options.model,
+    provider: "azure-openai",
+    endpoint: openAiEndpoint,
+    contentSafety: true,
+    promptShields: true,
+  });
+  const toolPolicy = buildToolPolicy({
+    sandboxName: options.name,
+    namespace: sandboxNamespace,
+    profile: "default",
+  });
   const sandboxManifest = {
     apiVersion: "azureclaw.azure.com/v1alpha1",
     kind: "ClawSandbox",
     metadata: {
       name: options.name,
-      namespace: "azureclaw-system",
+      namespace: sandboxNamespace,
     },
     spec: {
       runtime: {
@@ -342,12 +363,8 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       sandbox: {
         isolation: options.isolation,
       },
-      inference: {
-        provider: "azure-openai",
-        model: options.model,
-        endpoint: openAiEndpoint,
-        contentSafety: true,
-        promptShields: true,
+      inferenceRef: {
+        name: inferenceRefName(options.name),
       },
       networkPolicy: {
         defaultDeny: true,
@@ -356,13 +373,18 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       },
       governance: {
         enabled: true,
-        toolPolicy: "default",
+        toolPolicyRef: { name: toolPolicyRefName(options.name) },
         trustThreshold: 500,
       },
     },
   };
+  const bundleManifest = {
+    apiVersion: "v1",
+    kind: "List",
+    items: [inferencePolicy, toolPolicy, sandboxManifest],
+  };
   await execa("kubectl", ["apply", "-f", "-"], {
-    input: JSON.stringify(sandboxManifest),
+    input: JSON.stringify(bundleManifest),
     stdio: ["pipe", "pipe", "pipe"],
   });
 
