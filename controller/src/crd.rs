@@ -1279,7 +1279,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_tier2_placeholders_default_to_python() {  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
+    fn runtime_tier2_placeholders_default_to_python() {
+        // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
         // Defaults of new language enums must be `python` (most-common
         // flavour for each runtime) so omitting `language` doesn't
         // surprise authors with `dotnet`/`typescript`.
