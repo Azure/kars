@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { Command } from "commander";
 import { upCommand } from "./commands/up.js";
 import { devCommand } from "./commands/dev.js";

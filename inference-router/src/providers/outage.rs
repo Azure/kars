@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Outage semantics for AGT / mesh provider calls.
 //!
 //! Reference: internal Phase 1 plan §1.3.

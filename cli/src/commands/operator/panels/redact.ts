@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Secret-redaction helpers for the operator TUI panels (S14).
  *

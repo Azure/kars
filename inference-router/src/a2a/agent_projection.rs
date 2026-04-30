@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `A2AAgent` CRD → trust-anchor projection.
 //!
 //! Pure synchronous projection from the eventual `A2AAgent` v1alpha1

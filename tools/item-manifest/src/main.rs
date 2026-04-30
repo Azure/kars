@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Byte-level equivalence extractor for refactor-safety proofs.
 //
 // Walks one or more Rust source files, parses them with `syn`, and emits a

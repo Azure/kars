@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 AgentCard data model per spec §4.4.
 //!
 //! Spec: <https://a2a-protocol.org/v1.0.0/specification#44-agent-discovery-objects>

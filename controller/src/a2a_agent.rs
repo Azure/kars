@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `A2AAgent` CRD — full reconciler (Phase 2 §8 entry 4 / S3).
 //!
 //! Status: **full-schema** as of `phase2/a2aagent-reconciler` (S3 of

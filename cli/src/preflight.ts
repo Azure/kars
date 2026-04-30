@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Preflight RBAC & provider checks for `azureclaw up`.
  *

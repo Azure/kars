@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Reconciler unit tests — extracted from reconciler/mod.rs to keep the
 //! reconcile-loop file under its Phase 1 LOC cap. `use super::*`
 //! continues to give the tests access to crate-private helpers

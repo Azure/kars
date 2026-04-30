@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Reverse proxy logic — forwards inference requests to Azure AI Foundry.
 //!
 //! Supports both buffered and SSE streaming responses.

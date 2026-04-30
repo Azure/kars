@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Sub-slice S15.d.2 of S15.d phase2-hotspot-up-cli.
 //
 // Preflight phase extracted verbatim from cli/src/commands/up.ts:

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Controller reconciliation loop — watches ClawSandbox CRDs and reconciles state.
 //!
 //! When a ClawSandbox is created or updated, the reconciler:

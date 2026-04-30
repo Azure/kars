@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Outbound proxy → inference-router :8444 (mTLS).
 //!
 //! Forwards the inbound, post-verification body to the router,

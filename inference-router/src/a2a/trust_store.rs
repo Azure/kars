@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A trust-store cache — snapshot-style hot-reload for `kid → VerifyingKey`
 //! anchors used by [`crate::a2a::card_verifier::verify_inbound_card`].
 //!

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Token-bucket rate limiter — local fallback used by `Governance`.
 //!
 //! Extracted from `governance.rs` per §4.2 hotspot decomposition. The

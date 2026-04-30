@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! MCP `initialize` method handler — Streamable HTTP entry point.
 //!
 //! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle>

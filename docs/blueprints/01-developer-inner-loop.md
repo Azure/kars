@@ -108,6 +108,37 @@ make build images && azureclaw push --only sandbox --apply
 azureclaw down --mode local       # kind delete + docker compose down
 ```
 
+### Runtime selection and the ref form
+
+Blueprint 01 defaults to `runtime.kind: OpenClaw`. To test a different runtime adapter locally, set `spec.runtime.kind` in the `ClawSandbox` manifest. The `spec.inferenceRef.name` field (S13 ref form) is **mandatory** on every sandbox — it points to an `InferencePolicy` CR in the same namespace instead of inlining model/budget config:
+
+```yaml
+# azureclaw-dev namespace is created by the controller on reconcile
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: dev-policy
+  namespace: azureclaw-dev
+spec:
+  tokenBudget:
+    dailyTokens: 500000
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: dev
+  namespace: azureclaw-dev
+spec:
+  runtime:
+    kind: OpenClaw   # swap to OpenAIAgents / MicrosoftAgentFramework / BYO to test adapters
+  inferenceRef:
+    name: dev-policy # ref form — never inline; missing CR → Degraded/InferencePolicyNotFound
+  governance:
+    enabled: true
+```
+
+`azureclaw add dev --model stub-foundry --governance` emits the above CRs automatically; the YAML above is for direct `kubectl apply` iteration.
+
 For the cross-runtime mesh path (Blueprint 04 reduced to one machine), the same stack supports:
 
 ```bash

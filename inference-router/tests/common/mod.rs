@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Shared integration test infrastructure.
 //!
 //! Three tiny axum servers simulate the Azure surface so the router can be

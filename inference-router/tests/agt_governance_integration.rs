@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Integration tests for the AGT governance HTTP endpoints.
 //!
 //! These tests spin up the axum Router with a real AppState and make actual

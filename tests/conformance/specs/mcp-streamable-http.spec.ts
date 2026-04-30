@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * MCP 2026-01-15 Streamable HTTP framing — Phase 1 conformance corpus.
  *

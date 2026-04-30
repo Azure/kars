@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Azure authentication — supports both Workload Identity (AKS) and API key (local dev).
 //!
 //! In AKS: uses Workload Identity token exchange (federated OIDC → Azure AD token)

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { describe, it, expect } from "vitest";
 import { emptyClusterState, type ClusterState } from "./types.js";
 import { clawSandboxPanel } from "./clawsandbox.js";

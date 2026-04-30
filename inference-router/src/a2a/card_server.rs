@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 AgentCard server-side build pipeline — end-to-end.
 //!
 //! Given a declarative [`AgentCardConfig`] + [`SigningKey`], produces

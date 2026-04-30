@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // AGT mesh heartbeat & memory-notify helpers — extracted from plugin.ts in S15.f.5.
 //
 // These three helpers all read AGT singleton state owned by plugin.ts. To

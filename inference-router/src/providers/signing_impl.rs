@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! In-tree `SigningProvider` implementation on [`Governance`].
 //!
 //! Mirrors the pattern used by `policy_impl.rs` and `audit_impl.rs`:

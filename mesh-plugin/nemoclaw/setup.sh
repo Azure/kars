@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # setup.sh — resolve host.docker.internal and render the azureclaw-mesh preset
 #
 # Resolves host.docker.internal via DNS and substitutes the __HOST_IP__

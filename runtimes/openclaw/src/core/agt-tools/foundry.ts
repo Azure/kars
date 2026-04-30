@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Foundry AGT tool registrations — extracted from plugin.ts in S15.f.8.
 //
 // Nine tools that proxy through the inference router to Azure AI Foundry

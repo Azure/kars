@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `InferencePolicy` CRD — Phase 2 §8 entry 4 (S4).
 //!
 //! Per `docs/implementation-plan.md` §8 entry 2 and `docs/competitive.md`

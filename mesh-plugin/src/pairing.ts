@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Pairing ceremony — decode token, connect to mesh, pair with controller.
  */

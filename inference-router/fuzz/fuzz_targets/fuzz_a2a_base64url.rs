@@ -1,4 +1,7 @@
 #![no_main]
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Fuzz target: A2A 1.0.0 base64url decoder.
 //!
 //! `base64url_decode` parses the base64url segments of a JWS at

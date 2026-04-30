@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // AGT offload executor — extracted from plugin.ts in S15.f.5.
 //
 // Two functions:

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! mesh route handlers and router builder.
 //!
 //! Extracted from `routes/mod.rs` as part of the Q1 split.

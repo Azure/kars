@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 / S15.d.1: `azureclaw up --upgrade` fast-path extracted
 // from up.ts. Skips all prompts and infra; just re-runs Helm with
 // cached context. Caller invokes when `options.upgrade` is set and

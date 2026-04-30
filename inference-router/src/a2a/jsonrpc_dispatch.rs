@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 JSON-RPC method dispatch — pure handler layer.
 //!
 //! Spec: <https://a2a-protocol.org/v1.0.0/specification#33-jsonrpc-binding>

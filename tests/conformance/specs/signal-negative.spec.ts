@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Signal tamper / replay / denial-of-service invariants — Phase 0 scaffold.
  *

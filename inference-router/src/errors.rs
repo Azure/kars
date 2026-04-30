@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Centralised error-response constructors for the inference router.
 //!
 //! The router exposes two distinct error shapes on the wire:

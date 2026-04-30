@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Per-criterion conformance tests. Each `#[test]` covers one row of
 //! [`azureclaw_cncf_conformance::run_all_checks`] and asserts pass.
 //!

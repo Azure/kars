@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Provider contracts for AzureClaw.
 //!
 //! ## Router-side seams (three real ones)

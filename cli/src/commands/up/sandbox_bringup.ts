@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Sub-slice S15.d.4 of S15.d phase2-hotspot-up-cli.
 //
 // Sandbox bring-up phase extracted verbatim from cli/src/commands/up.ts:

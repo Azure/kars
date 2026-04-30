@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Per-subject token-bucket rate limiter.
 //!
 //! In-memory only. Replicas of the gateway do not synchronise their

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Router-client helpers — small, pure I/O wrappers around the in-pod
  * inference-router. Extracted from `plugin.ts` to satisfy the LOC budget

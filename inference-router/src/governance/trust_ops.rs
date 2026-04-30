@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Trust-management operations on `Governance`.
 //!
 //! Extracted from `governance/mod.rs` per plan §4.2 hotspot

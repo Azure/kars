@@ -1,4 +1,7 @@
 #![no_main]
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Fuzz target: streaming Azure content-safety parser.
 //!
 //! `parse_streaming_prompt_filter` runs on every SSE chunk returned from

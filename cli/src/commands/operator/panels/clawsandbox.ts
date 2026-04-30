@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * ClawSandbox panel — list of sandboxes with health, model, isolation.
  *

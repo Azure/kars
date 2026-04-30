@@ -140,6 +140,12 @@ kubectl get pod -n azureclaw-fabrikam-legal-agent -o jsonpath='{.items[0].spec.r
 
 # Each namespace has default-deny NetworkPolicy
 kubectl get networkpolicies -A | grep azureclaw
+
+# Operator TUI — all 8 CRD panels + provider status
+azureclaw operator --snapshot
+
+# A2A gateway exposure (if a2aGateway.enabled in Helm values)
+azureclaw a2a list-exposed
 ```
 
 ---
@@ -539,6 +545,37 @@ azureclaw trace fabrikam-legal-agent --exec --network --files --dns
 #    Sandbox: fabrikam-legal-agent
 #    Recommendation: Investigate and consider terminating sandbox
 ```
+
+### Operator TUI (modular panels)
+
+`azureclaw operator` provides a live terminal dashboard with modular panels
+covering all 8 Phase-2 CRD types plus a per-sandbox provider-status panel.
+Use the TUI to see real-time anomaly signals across all tenants simultaneously.
+
+```bash
+# Full TUI — press Shift-P to toggle the modular-panels overlay
+azureclaw operator
+
+# Filter to security-relevant panels only
+azureclaw operator --panels clawsandbox,inferencepolicy,provider_status
+
+# One-shot snapshot (CI-friendly)
+azureclaw operator --snapshot
+```
+
+### `azureclaw attest` — tamper-evident spec evidence
+
+```bash
+# Print attestation evidence for a specific sandbox
+azureclaw attest fabrikam-legal-agent
+
+# Machine-readable (for CI diff or SIEM ingestion)
+azureclaw attest fabrikam-legal-agent --format json
+```
+
+Surfaces: spec hash, SSA field-owner map, observed-generation lineage,
+referenced policy version hashes, and (Phase 3) reconcile trace ID + AGT
+audit-receipt id.
 
 ### Azure Monitor KQL Dashboard
 

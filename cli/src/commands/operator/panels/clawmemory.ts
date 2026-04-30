@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * ClawMemory panel (S5) — list + Foundry binding + RBAC scope summary.
  *
