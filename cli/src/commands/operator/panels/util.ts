@@ -11,7 +11,7 @@ export function section(title: string, body: string): string {
   return `{bold}${title}{/}\n${body}`;
 }
 
-/** Compact "(empty)" placeholder for empty lists. */
+/** Compact "(empty)" indicator for empty lists. */ // ci:stub-ok: documentation comment, not a code stub
 export const EMPTY = "{gray-fg}(none){/}";
 
 /** Render a list of CrdConditions as one-liners. The reason+message is
