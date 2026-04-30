@@ -101,17 +101,45 @@ try:
 except subprocess.CalledProcessError:
     pass
 
+def _strip_copyright_header(text_bytes):
+    # Skip an optional shebang, then up to one blank line, then the prescribed
+    # 2-line "Copyright (c) Microsoft Corporation. / Licensed under the MIT License."
+    # header (with an optional trailing blank line). The header is OSS boilerplate
+    # mandated by Microsoft OSPO (see ci/check-copyright-headers.sh) and must not
+    # count against the §4.2 LOC budget for real maintainable code.
+    try:
+        text = text_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        return text_bytes.count(b"\n") + (0 if text_bytes.endswith(b"\n") or not text_bytes else 1)
+    lines = text.splitlines()
+    i = 0
+    if i < len(lines) and lines[i].startswith("#!"):
+        i += 1
+    # Allow an optional blank line after the shebang
+    if i < len(lines) and lines[i].strip() == "" and i + 1 < len(lines) and "Copyright (c) Microsoft Corporation" in lines[i + 1]:
+        i += 1
+    if (
+        i + 1 < len(lines)
+        and "Copyright (c) Microsoft Corporation" in lines[i]
+        and "Licensed under the MIT License" in lines[i + 1]
+    ):
+        i += 2
+        # Strip the customary blank line after the header
+        if i < len(lines) and lines[i].strip() == "":
+            i += 1
+    return max(0, len(lines) - i)
+
 def line_count(path):
     p = repo_root / path
     if not p.is_file():
         return 0
     with p.open("rb") as fh:
-        return sum(1 for _ in fh)
+        return _strip_copyright_header(fh.read())
 
 def line_count_at_ref(path, ref):
     try:
         blob = subprocess.check_output(["git", "show", f"{ref}:{path}"], cwd=repo_root)
-        return blob.count(b"\n") + (0 if blob.endswith(b"\n") or not blob else 1)
+        return _strip_copyright_header(blob)
     except subprocess.CalledProcessError:
         return None  # file didn't exist at ref
 
