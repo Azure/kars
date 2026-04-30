@@ -1,230 +1,887 @@
 # AzureClaw Use Cases
 
-Three canonical scenarios shipping today, plus a roadmap track for future agentic runtimes. Each shipping scenario is implemented end-to-end on `main` and exercised by the compat / conformance / e2e harness before any merge.
+Six fully-shipped use cases covering every deployment pattern from laptop inner-loop to cross-organisation A2A federation. All six are implemented end-to-end and exercised by the compat / conformance / e2e harness before any merge.
 
-> **Looking for "how do I run AzureClaw for *audience X*?"** see [`docs/blueprints/`](blueprints/00-index.md) for the five end-to-end deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) — each with topology + trust-boundary + flow Mermaid diagrams.
+> **Looking for a concrete deployment recipe?** See [`docs/blueprints/`](blueprints/00-index.md) for five end-to-end deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) — each with topology, trust-boundary, and flow Mermaid diagrams.
 
 | # | Scenario | Where the user runs | Network shape | Status | Reference |
 |---|---|---|---|---|---|
-| 1 | **AzureClaw-native agent** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
-| 2 | **Any OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E) | ✅ Shipping | [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
-| 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, possibly across tenants/clusters | Cluster ↔ cluster via AgentMesh relay (E2E) | ✅ Shipping | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
-| 4 | **Any agentic runtime → AzureClaw** (LangChain, AutoGen, Semantic Kernel, custom) | Anywhere the runtime runs | Host ↔ AKS via MCP / A2A / AP2 | 🚧 On roadmap | [`docs/phase-0-1-capabilities.md`](phase-0-1-capabilities.md) |
+| 1 | **AzureClaw-native agents (OpenClaw)** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
+| 2 | **Any-OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
+| 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
+| 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (Tier-1: OpenClaw, OpenAIAgents, MAF, BYO) | [`docs/api/crd-reference.md#spec.runtime`](api/crd-reference.md) |
+| 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
+| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → AzureClaw cluster | Translate + apply | ✅ Shipping | [`docs/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
 
-All shipping scenarios share the same trust boundary:
+All use cases share the same trust boundary:
 
 - The agent process (UID 1000) **never** sees Azure credentials.
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
-- Every tool call, every inference, every mesh message, every handoff, is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
+- Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
+- All 8 CRDs (`ClawSandbox`, `ClawPairing`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `A2AAgent`, `ClawMemory`, `ClawEval`) are first-class and visible in the operator TUI.
 
 ---
 
-## 1. AzureClaw-native agent
+## 1. AzureClaw-native agents (OpenClaw)
 
-> "I run AKS. Give me a hardened, governed AI agent that I can talk to from
-> Telegram or a TUI, with all access mediated by Azure AI Foundry."
+> "I run AKS. Give me a hardened, governed AI agent I can talk to from Telegram
+> or a TUI, with all access mediated by Azure AI Foundry."
 
-### What you do
+### What the operator wants
+
+A single-tenant AKS cluster running one or more OpenClaw agents in fully isolated namespaces. The operator wants the developer inner-loop (`azureclaw up`, `azureclaw add`, `azureclaw connect`) plus an operational dashboard (`azureclaw operator`) covering all 8 CRDs.
+
+### Topology
+
+```mermaid
+graph TD
+    subgraph Laptop
+        CLI[azureclaw CLI]
+        TUI[azureclaw operator TUI]
+    end
+    subgraph AKS["AKS cluster (azureclaw namespace)"]
+        CTRL[Controller]
+        subgraph NS["azureclaw-research-bot"]
+            EG[egress-guard\n(init container, UID 0)]
+            OC[openclaw\n(UID 1000)]
+            IR[inference-router\n(UID 1001, port 8443)]
+        end
+    end
+    Foundry[Azure AI Foundry\n(Workload Identity)]
+    Telegram[Telegram Bot API]
+
+    CLI -->|kubectl / Helm| CTRL
+    CTRL -->|reconciles| NS
+    OC -->|"127.0.0.1:8443"| IR
+    IR -->|Workload Identity (IMDS)| Foundry
+    IR -->|"HTTPS (allowlist)"| Telegram
+    EG -.->|"iptables: UID 1000\nblocked except localhost+DNS"| OC
+    TUI -->|kubectl watch| CTRL
+```
+
+### CLI walkthrough
 
 ```bash
-azureclaw up                                   # provisions AKS + ACR + Foundry + first sandbox
-azureclaw add research-bot --model gpt-4.1 \
-  --governance --learn-egress
+# 1. Bootstrap — provisions AKS, ACR, Key Vault, Foundry, and first sandbox
+azureclaw up --name research-bot --model gpt-4.1 --governance \
+  --isolation enhanced
+
+# 2. Add a second agent with a daily token budget
+azureclaw add analyst --model gpt-4.1 --governance \
+  --token-budget-daily 100000 --isolation enhanced
+
+# 3. Wire Telegram to research-bot
 azureclaw credentials update research-bot \
   --telegram-token "<bot-token>"
+
+# 4. Connect (opens OpenClaw TUI via port-forward)
 azureclaw connect research-bot
+
+# 5. Operator dashboard — shows all 8 CRDs live
+azureclaw operator
+
+# 6. Learn, review, and enforce egress for analyst
+azureclaw add analyst --learn-egress
+azureclaw egress analyst --learned
+azureclaw egress analyst --approve api.github.com
+azureclaw egress analyst --enforce          # signs + patches allowlistRef
+
+# 7. Hot-swap model; no pod restart
+azureclaw model set research-bot gpt-4.1-mini
+
+# 8. eBPF trace to confirm egress invariants
+azureclaw trace research-bot --network
 ```
 
-### What you get
+### Example `ClawSandbox` YAML
 
-- A `ClawSandbox` CR per agent in its own namespace (`azureclaw-<name>`).
-- One pod with **2 main containers** + **1 init container**:
-  - `egress-guard` (init) → installs UID-1000 iptables egress block.
-  - `openclaw` (UID 1000) → agent process; can only reach `localhost` + DNS + reply packets.
-  - `inference-router` (UID 1001) → sole external path; calls Azure AI Foundry via Workload Identity.
-- Defense-in-depth security (`enhanced` isolation by default):
-  - Read-only rootfs, drop ALL caps, non-root, no privilege escalation.
-  - Custom strict seccomp profile (219 allowed / 28 blocked syscalls).
-  - NetworkPolicy default-deny + 51k-domain blocklist auto-refreshed every 6h.
-  - Foundry `Microsoft.DefaultV2` Content Safety + Prompt Shields on every inference.
-  - AGT governance: `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` (native Rust, in-process, <1µs eval latency).
-- **Optional `confidential` isolation** — Kata VM on AMD SEV-SNP hardware; per-pod dedicated kernel. Container escape attempts hit a hardware boundary. Sub-agents inherit the parent's isolation level and cannot downgrade.
-
-### Operator surface
-
-```bash
-azureclaw operator                # live TUI dashboard for the whole cluster
-azureclaw egress research-bot --learned     # review what the agent reached for
-azureclaw policy allow research-bot api.example.com
-azureclaw model set research-bot gpt-5-mini # hot-swap the model
-azureclaw trace research-bot --network      # eBPF trace
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: research-bot
+  namespace: azureclaw-research-bot
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      config:
+        channels:
+          telegram:
+            enabled: true
+  inferenceRef:
+    name: research-bot-inference
+  sandbox:
+    isolation: enhanced
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: research-bot-policy
+    trustThreshold: 500
+  networkPolicy:
+    defaultDeny: true
+    learnEgress: false
+    allowlistRef:
+      registry: azureclawacr.azurecr.io
+      repository: policy/egress-allowlist/research-bot
+      digest: sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+      artifactType: application/vnd.azureclaw.egress-allowlist.v1+yaml
+  agent:
+    instructions: "You are a research assistant with access to web search and code execution."
+    tools:
+      - web_search
+      - code_interpreter
 ```
 
-### Code references
-- Controller reconcile path: `controller/src/reconciler/mod.rs`
-- Sandbox pod composition: `controller/src/reconciler/mod.rs::deployment_template`
-- Egress-guard init container: `sandbox-images/openclaw/entrypoint.sh`
-- Foundry route handlers: `inference-router/src/routes/inference.rs`, `routes/governance.rs`
+### Key behaviors
+
+- One pod: **init `egress-guard`** → installs UID-1000 iptables egress block; **`openclaw`** (UID 1000) agent; **`inference-router`** (UID 1001) sole external path.
+- Read-only rootfs, drop ALL caps, non-root, no privilege escalation.
+- Custom strict seccomp profile (219 allowed / 28 blocked syscalls).
+- NetworkPolicy default-deny + 51k-domain blocklist auto-refreshed every 6 h.
+- Foundry `Microsoft.DefaultV2` Content Safety + Prompt Shields on every inference.
+- AGT governance: `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` (native Rust, in-process, <1 µs eval latency).
+- Optional `confidential` isolation — Kata VM on AMD SEV-SNP; per-pod dedicated kernel.
+- Signed OCI egress allowlists (`spec.networkPolicy.allowlistRef`) — the controller refuses unsigned artifacts when a `SignerPolicy` is configured.
+- Operator TUI (`azureclaw operator`) renders all 8 CRDs in real time.
+
+### Cross-links
+
+| Resource | Reference |
+|---|---|
+| Blueprint | [Blueprint 01 — Developer inner-loop](blueprints/01-developer-inner-loop.md), [Blueprint 02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md) |
+| CRD fields | [`spec.runtime.openclaw`](api/crd-reference.md#spcruntimeopenclaw-sub-table), [`spec.sandbox`](api/crd-reference.md#spec-fields--specsandbox), [`spec.networkPolicy.allowlistRef`](api/crd-reference.md#spec-fields--specnetworkpolicy) |
+| CLI commands | [`azureclaw up`](cli-reference.md#azureclaw-up), [`azureclaw add`](cli-reference.md#azureclaw-add), [`azureclaw operator`](cli-reference.md#azureclaw-operator), [`azureclaw egress`](cli-reference.md#azureclaw-egress) |
+| Architecture | [`docs/architecture.md`](architecture.md) |
 
 ---
 
-## 2. Any OpenClaw → AzureClaw cloud offload
+## 2. Any-OpenClaw → AzureClaw cloud offload
 
 > "I run OpenClaw on my laptop (or NemoClaw, or any other OpenClaw host).
-> A heavy task came in; I want to offload it to a hardened AKS sandbox without
-> sharing local credentials or installing anything cloud-specific."
+> A heavy or sensitive task came in; I want to offload it to a hardened
+> AKS sandbox without sharing my local credentials or installing anything
+> cloud-specific."
 
-The defining property of this scenario is that **the laptop user does not install AzureClaw**. They install an OpenClaw plugin. AzureClaw is somebody else's problem — a managed AzureClaw provider runs the AKS cluster, mints a one-time pairing token for the user, and the LLM in the user's host registers itself the first time it sees the token.
+### What the operator wants
 
-### Roles
+The defining property of this scenario is that **the plugin user does not install AzureClaw**. They install the `azureclaw-mesh` plugin into their existing OpenClaw host. An AzureClaw operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. See [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) for the full walkthrough.
 
-- **AzureClaw operator** — runs the AKS cluster. Has the `azureclaw` CLI. Mints pairing tokens. Today this is typically a self-hosted instance per organisation; the same pattern works for managed AzureClaw providers (cloud or in-house) who hand out tokens via their own portal, SMS, or any secure-share channel.
-- **Plugin user** — runs OpenClaw / NemoClaw / any OpenClaw-compatible host on a laptop. Has only the `azureclaw-mesh` plugin installed (we aim to upstream this to OpenClaw). Has **no** `azureclaw` CLI, no kubeconfig, no Azure credentials.
+### Topology
 
-### What the operator does (once per user)
+```mermaid
+graph LR
+    subgraph Laptop["Plugin user laptop"]
+        HOST[OpenClaw / NemoClaw\nazureclaw-mesh plugin]
+    end
+    subgraph Edge["Operator mesh edge\n(port-forward or LoadBalancer)"]
+        REG[agentmesh-registry\n:18080]
+        RELAY[agentmesh-relay\n:18765]
+    end
+    subgraph AKS["Operator AKS cluster"]
+        CTRL[Controller]
+        subgraph OFFLOAD["azureclaw-offload-<id>"]
+            OC[openclaw\n(UID 1000)]
+            IR[inference-router\n(UID 1001)]
+        end
+    end
+    Foundry[Azure AI Foundry]
 
-```bash
-# On the AKS-side operator workstation:
-azureclaw mesh promote --port-forward       # (one-time) expose registry + relay so the laptop can reach them
-azureclaw pair generate --name alice-laptop --slots 3 --expires 90d \
-  --capabilities offload,handoff
+    HOST -- "X3DH + Double Ratchet\n(Signal Protocol, E2E)" --> RELAY
+    HOST -- "prekey exchange" --> REG
+    RELAY --> CTRL
+    CTRL -->|reconciles| OFFLOAD
+    IR -->|Workload Identity| Foundry
+    OFFLOAD -->|"result (E2E)"| RELAY
+    RELAY -->|"result (E2E)"| HOST
 ```
 
-`mesh promote` is what makes the cluster's relay/registry reachable from off-cluster — see [§How the laptop reaches the AKS mesh edge](#how-the-laptop-reaches-the-aks-mesh-edge) below for the available modes. `pair generate` then prints (and copies to clipboard) a one-time, opaque, expiring token of the form `azc_pair_v1_<base64url-payload>` containing the controller AMID, the relay/registry URLs that `mesh promote` just established, and a sealed pairing secret. The token is sent to the user via any secure channel — secret-share link, SMS, encrypted email, in-person, etc. Today's self-hosted operator typically uses a one-tap secret-share UI; a managed AzureClaw provider would issue tokens through its own portal.
+### CLI walkthrough — operator side (once per user)
 
-### What the plugin user does
+```bash
+# Expose the cluster's relay and registry to the operator's workstation
+azureclaw mesh promote --port-forward
 
-1. Install the `azureclaw-mesh` plugin in their OpenClaw host (today: bundled into NemoClaw images; goal: upstreamed into OpenClaw plugin marketplace).
-2. Either:
-   - Set the token as an OpenClaw system environment variable (`AZURECLAW_PAIRING_TOKEN=azc_pair_v1_…`), **or**
-   - Paste it once into chat: *"Pair this OpenClaw to AzureClaw cloud with token `azc_pair_v1_…`."*
-3. The LLM calls the plugin's `azureclaw_pair` tool with the token. The plugin handshakes with the AzureClaw registry, claims a pairing slot, exchanges X3DH prekeys, and the host is now a registered mesh peer. The token is single-use and auto-zeroized.
-4. From that point on the user can simply say: *"Offload `analyze_repo("/big-codebase")` to AzureClaw cloud."*
+# Generate a one-time pairing token (copy-paste to the plugin user)
+azureclaw pair generate \
+  --name alice-laptop \
+  --slots 3 \
+  --expires 90d \
+  --capabilities offload,handoff
 
-### What happens under the hood
+# Monitor active offload sandboxes
+azureclaw mesh list
 
-1. Plugin opens a CONNECT tunnel through the egress proxy (Node.js 22 + undici quirks documented in `mesh-plugin/src/connection.ts`).
-2. Plugin registers in the AgentMesh registry with an Ed25519-derived AMID, scoped to the pairing slot.
-3. KNOCK handshake → trust evaluation → X3DH key agreement → Double Ratchet session.
-4. Plugin sends an offload request frame to the AzureClaw `controller`.
-5. Controller spawns an offload sub-agent sandbox (`offload-<id>`) with the requested model + the parent's task descriptor, capped to the pairing's `tokenBudget` and `slots`.
-6. Sub-agent runs the task inside the AzureClaw security perimeter — Foundry inference, Content Safety, audit chain, blocklist all in effect.
-7. Result + any produced files flow back over the same E2E channel as a `file_transfer` payload.
-8. Sub-agent self-destructs.
+# Revoke a pairing if compromised
+azureclaw pair revoke alice-laptop
+```
 
-### How the laptop reaches the AKS mesh edge
+### What the plugin user does (no AzureClaw CLI)
 
-The relay and registry live inside the cluster on private ClusterIP services. Something has to expose them so the laptop's plugin can reach them. We ship two mechanisms today and have two more on the roadmap:
+1. Install the `azureclaw-mesh` plugin in their OpenClaw host.
+2. Set `AZURECLAW_PAIRING_TOKEN=azc_pair_v1_…` **or** paste the token into chat once.
+3. The plugin calls `azureclaw_pair`; performs X3DH handshake; the token is single-use and auto-zeroized.
+4. Say: *"Offload `analyze_repo("/big-codebase")` to AzureClaw cloud."*
 
-| Mode | How | Status | When to use |
-|---|---|---|---|
-| **Port-forward** (default for testing) | `azureclaw mesh promote --port-forward` opens `kubectl port-forward` tunnels for the registry (`:18080`) and relay (`:18765`) on the operator's workstation; the operator publishes those reachable endpoints in the pairing token. | ✅ Shipping | Single operator laptop, demos, CI, e2e harness. |
-| **LoadBalancer + IP allowlist** | `azureclaw mesh promote --allow-ip <cidr>` provisions a public LoadBalancer in front of the registry/relay services, restricted to the supplied CIDR. | ✅ Shipping | Trusted internal network or known external user IPs. |
-| **Public managed mesh edge** | A globally addressable, WAF-fronted relay/registry endpoint provisioned for the operator (Application Gateway Ingress + WAF, or a managed cloud edge), no per-user CIDR pinning. | 🚧 Roadmap | Self-hosted operators handing out tokens to anonymous-IP laptops. |
-| **Managed AzureClaw provider edge** | The provider runs the relay/registry as part of their service; the pairing token they mint already points at their public endpoints. The plugin user never sees an operator-side detail. | 🚧 Roadmap | SaaS-style consumption. Same wire protocol; pairing token + plugin path are unchanged. |
+### Example `ClawSandbox` YAML (offload sub-agent — controller-generated)
 
-Whichever edge is in use, the pairing token carries the `relay_url` and `registry_url` fields verbatim, so the plugin doesn't need any additional configuration to follow the operator's edge choice.
+The controller generates this automatically when processing an offload request. Shown here for reference:
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: offload-a1b2c3d4
+  namespace: azureclaw-offload-a1b2c3d4
+  labels:
+    azureclaw.io/offload: "true"
+    azureclaw.io/pairing: alice-laptop
+spec:
+  runtime:
+    kind: OpenClaw
+  inferenceRef:
+    name: offload-a1b2c3d4-inference
+  sandbox:
+    isolation: enhanced
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: offload-a1b2c3d4-policy
+  networkPolicy:
+    defaultDeny: true
+```
 
 ### Why this matters
 
 - The plugin user **never** holds Azure credentials, never installs a cloud CLI, never sees a kubeconfig. Onboarding is "paste a string once."
-- The token is single-use, expiring, slot-bounded, budget-bounded, capability-bounded — leaking it gives an attacker at most one pairing slot inside one tenant.
+- The token is single-use, expiring, slot-bounded, budget-bounded, and capability-bounded.
 - The relay sees only ciphertext.
-- Both sides emit AGT audit chain entries (visible to the AKS operator via `kubectl claw attest` once Phase 2 lands; today via `GET /agt/audit`).
+- Both sides emit AGT audit chain entries.
 - The host's local data scope is unchanged: only what was sent in the offload task descriptor leaves the laptop.
 
-### Code references
-- Plugin (host side): `mesh-plugin/src/` and the bundled drop in `sandbox-images/nemoclaw/scripts/azureclaw-mesh/`
-- Pairing CRD + token format: `controller/src/pairing.rs`, `cli/src/commands/pair.ts`
-- Mesh edge exposure: `cli/src/commands/mesh.ts` (`promote` subcommand)
-- Offload reconcile: `controller/src/mesh_peer/offload.rs`
-- Spawn handler: `inference-router/src/routes/spawn_policy.rs`, `routes/inference.rs`
-- AgentMesh wire patches: `vendor/agentmesh-{sdk,relay,registry}/`
-- Walkthrough: `docs/any-openclaw-cloud-offload.md`
+### Cross-links
+
+| Resource | Reference |
+|---|---|
+| Blueprint | [Blueprint 03 — Managed public offload](blueprints/03-managed-public-offload.md) |
+| Full walkthrough | [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
+| CLI commands | [`azureclaw mesh`](cli-reference.md#azureclaw-mesh), [`azureclaw pair`](cli-reference.md#azureclaw-pair) |
+| CRD fields | [`ClawPairing`](api/crd-reference.md#clawpairing), [`spec.governance`](api/crd-reference.md#spec-fields--specgovernance) |
+| E2E proof | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
 
 ---
 
 ## 3. AzureClaw ↔ AzureClaw mesh
 
-> "I have multiple AzureClaw agents (in one cluster, or two). I want them to
+> "I have multiple AzureClaw agents — in one cluster, or two. I want them to
 > coordinate end-to-end-encrypted, with policy + trust + audit on every hop."
 
-### What you do
+### What the operator wants
 
-```bash
-# Option A: single cluster, two agents
-azureclaw add planner   --model gpt-5-mini --governance
-azureclaw add worker    --model gpt-4.1    --governance
+Intra-org multi-agent workflows where each hop is E2E encrypted and policy-gated. For inter-org collaboration without sharing the AgentMesh relay, see [Scenario 5 (A2A federation)](#5-a2a-federation-across-organisations).
 
-# Option B: cross-cluster — expose the registry (Application Gateway Ingress + WAF)
-azureclaw up --expose-registry           # provisions public registry endpoints
+### Topology
 
-# Option C: pair two existing sandboxes (one-shot)
-azureclaw pair planner worker
+```mermaid
+graph LR
+    subgraph ClusterA["Cluster A"]
+        subgraph NSP["azureclaw-planner"]
+            OCP[openclaw\nplanner]
+            IRP[inference-router]
+        end
+        RELAY_A[agentmesh-relay A]
+        REG_A[agentmesh-registry A]
+    end
+    subgraph ClusterB["Cluster B (optional)"]
+        subgraph NSW["azureclaw-worker"]
+            OCW[openclaw\nworker]
+            IRW[inference-router]
+        end
+        RELAY_B[agentmesh-relay B]
+    end
+
+    OCP -- "KNOCK→X3DH→Double Ratchet" --> RELAY_A
+    RELAY_A -- "encrypted frame" --> RELAY_B
+    RELAY_B -- "decrypted locally" --> OCW
+    OCW -- "reply (E2E)" --> RELAY_B
+    RELAY_B --> RELAY_A
+    RELAY_A --> OCP
 ```
 
-In a chat:
+### CLI walkthrough — single cluster
 
-> `@worker can you review this commit?`
+```bash
+# Option A: two agents in one cluster
+azureclaw add planner --model gpt-4.1 --governance
+azureclaw add worker  --model gpt-4.1 --governance
 
-### What happens
+# Pair them (one-shot; controller creates a ClawPairing for each direction)
+azureclaw pair planner worker
 
-1. The plugin emits a `mesh_send` tool call.
-2. The router's `policy_provider.decide(...)` evaluates the call (sender trust, peer trust, AGT policy).
-3. The plugin uses the local AgentMesh SDK to look up the peer's prekey bundle from the registry.
-4. KNOCK handshake → trust gate (registry tier × spawner-affinity bonus).
-5. Encrypted payload over the relay (`/agt/relay`).
-6. Receiver's `onMessage` handler decrypts via Double Ratchet.
-7. The receiver's plugin invokes the OpenClaw native delegation path (`openclaw agent --message`) so the sub-task has access to the receiver's full toolset (Foundry, exec, web search, …).
-8. Reply traverses the same E2E channel.
+# Verify trust state
+azureclaw mesh status
 
-### Why this matters
+# Connect to planner and send a message to worker
+azureclaw connect planner
+# In the TUI: @worker can you review this commit?
+```
 
-- **No plaintext fallback.** If E2E encryption fails (key mismatch, decrypt error), the message is dropped and a `security_event` is raised; messages are never delivered in cleartext.
-- **Trust scoring is queryable.** `azureclaw mesh status`, `GET /agt/trust`, operator-TUI panel.
-- **Phase 1 A2A 1.0.0** is a parallel ingress path for inter-agent traffic that **doesn't** terminate at the relay — see [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md). When `ClawSandbox.spec.a2a.expose: true`, the router serves a signed `/.well-known/agent.json` and accepts JSON-RPC `message/send` / `tasks/get` / `tasks/cancel`. Agent-card signatures use the in-tree `SigningProvider` (Ed25519 detached JWS); inbound cards are verified against a hot-reloading trust-store snapshot.
+### CLI walkthrough — cross-cluster
 
-### Code references
-- Mesh handlers (plugin side): `cli/src/plugin.ts` (mesh tools)
-- Relay route (router side): `inference-router/src/routes/mesh.rs`
-- Pairing CRD: `controller/src/pairing.rs` + `pairing_reconciler.rs`
-- A2A 1.0.0 inbound: `inference-router/src/a2a/` (14 modules)
-- E2E proof: `docs/e2e-encryption-proof.md`
-- ADR-0001: A2A ingress front-edge
+```bash
+# On Cluster A: expose the registry so Cluster B can see it
+azureclaw up --expose-registry              # AGIC Ingress + WAF in front of registry
+
+# Enable controller federation peer mode on both clusters
+azureclaw mesh peer enable
+
+# Generate a cross-cluster pairing token on Cluster A
+azureclaw pair generate --name cluster-b-worker --slots 5 --expires 30d
+
+# On Cluster B: consume the token
+AZURECLAW_PAIRING_TOKEN=azc_pair_v1_… azureclaw mesh auth
+```
+
+### Example `ClawSandbox` YAML (peer agent)
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: worker
+  namespace: azureclaw-worker
+spec:
+  runtime:
+    kind: OpenClaw
+  inferenceRef:
+    name: worker-inference
+  sandbox:
+    isolation: enhanced
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: worker-policy
+    trustThreshold: 500
+    registryMode: global          # enables cross-cluster mesh
+  networkPolicy:
+    defaultDeny: true
+```
+
+### Security properties
+
+- **No plaintext fallback.** Failed decryption drops the message and emits a `security_event`.
+- **Trust scoring is queryable.** `azureclaw mesh status`, `GET /agt/trust`, operator TUI.
+- **A2A 1.0.0 parallel ingress path.** When `spec.a2a.enabled: true`, the router serves a signed `/.well-known/agent.json` and accepts JSON-RPC `message/send` / `tasks/get` / `tasks/cancel` for inter-agent traffic that doesn't use the AgentMesh relay. See ADR-0001 and Scenario 5 for the public-internet variant.
+
+### Cross-links
+
+| Resource | Reference |
+|---|---|
+| Blueprint | [Blueprint 04 — Cross-org federation](blueprints/04-cross-org-federation.md) |
+| CLI commands | [`azureclaw mesh`](cli-reference.md#azureclaw-mesh), [`azureclaw pair`](cli-reference.md#azureclaw-pair), [`azureclaw up --expose-registry`](cli-reference.md#azureclaw-up) |
+| CRD fields | [`ClawPairing`](api/crd-reference.md#clawpairing), [`spec.governance.registryMode`](api/crd-reference.md#spec-fields--specgovernance) |
+| E2E proof | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
+| ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
 
 ---
 
-## 4. Any agentic runtime → AzureClaw  *(roadmap)*
+## 4. Multi-runtime hosting
 
-> "I'm not running OpenClaw. I'm running LangChain / AutoGen / Semantic Kernel
-> / a hand-rolled agent. Can I still get an AzureClaw sandbox as a tool surface?"
+> "I'm not running OpenClaw. I'm running OpenAI Agents SDK, Microsoft Agent
+> Framework, or a hand-rolled runtime. Can I get the same governance,
+> isolation, and audit as OpenClaw?"
 
-The Phase 1 protocol scaffolding (MCP 2026 Streamable HTTP, A2A 1.0.0, AP2 mandates) is in the tree precisely so the answer becomes "yes" without a second framework integration. The modules are implemented and unit-tested today; **route mounting is deferred to Phase 2** so we never expose a default-keys / no-auth path.
+### What the operator wants — now SHIPPED
 
-### Target shapes
+Phase 2 ships full support for three Tier-1 runtimes and a BYO contract for everything else. The same `ClawSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `ClawMemory` / `ClawEval` CRDs, and the same operator TUI apply regardless of runtime kind.
 
-- **MCP (Model Context Protocol).** Any MCP-aware client (Copilot, Claude Desktop, VS Code, custom agents) connects to a `ClawSandbox`'s `/mcp` endpoint and gets the sandbox's tools + governance + audit as a remote MCP server. AzureClaw becomes a hosted-MCP provider that any agent can plug into. Today: modules implemented + tested in `inference-router/src/mcp/`; deferred to Phase 2 mount once the `McpServer` reconciler ships JWKS + signing keys via K8s Secrets.
-- **A2A (Agent-to-Agent 1.0.0).** Any A2A-aware peer fetches a signed `/.well-known/agent.json` from a `ClawSandbox` and invokes JSON-RPC `message/send` / `tasks/get` / `tasks/cancel`. Cross-organisation agent collaboration without each side adopting the other's mesh stack. Today: modules implemented + tested in `inference-router/src/a2a/` (14 modules); deferred to Phase 2 mount once the `A2AAgent` reconciler ships agent-card signing keys via K8s Secrets.
-- **AP2 (Agent Payments Protocol).** Agents transact under signed mandates (IntentMandate → CartMandate → PaymentMandate) with full audit. Today: ledger + signing scaffolding present; integrating-payments use cases tracked for a later phase.
-- **`sigs/agent-sandbox` translator.** A K8s SIG-style standardised sandbox object translates to / from `ClawSandbox`, so anyone using the upstream sandbox API gets AzureClaw's controls automatically. Design landed in Phase 0; reconciler in a later phase.
+| Tier | `spec.runtime.kind` | Status |
+|---|---|---|
+| Tier-1 | `OpenClaw` | ✅ Fully wired |
+| Tier-1 | `OpenAIAgents` | ✅ Fully wired |
+| Tier-1 | `MicrosoftAgentFramework` | ✅ Fully wired |
+| Tier-1 | `BYO` | ✅ Contract v1 |
+| Tier-2 | `SemanticKernel`, `LangGraph`, `Anthropic` | Schema present; `RuntimeReady=False/AdapterMissing` until adapters land |
 
-### Why phase this
+### Topology (same for all Tier-1 runtimes)
 
-Mounting `/mcp` or `/a2a` before keys are CRD-bound would create a default-keys path that an external agent could speak to without authentication — exactly the foot-gun the Phase 0 `no-stubs` and `no-null-provider-prod` CI gates exist to prevent. So the modules ship behind the seams in Phase 1, the reconcilers ship in Phase 2, and the routes mount on the same merge.
+```mermaid
+graph TD
+    subgraph AKS["AKS cluster"]
+        CTRL[Controller]
+        subgraph NS["azureclaw-<name>"]
+            RUNTIME["runtime container\n(any Tier-1 image, UID 1000)"]
+            IR["inference-router\n(UID 1001, port 8443)"]
+        end
+        TP[ToolPolicy CR]
+        IP[InferencePolicy CR]
+        M[ClawMemory CR]
+        E[ClawEval CR]
+    end
+    Foundry[Azure AI Foundry\n(Workload Identity)]
 
-### Code references
-- MCP modules: `inference-router/src/mcp/{jsonrpc,streamable_http,error,initialize,tools,pipeline,oauth,oauth_layer}.rs`
-- A2A modules: `inference-router/src/a2a/` (14 modules)
-- Phase status: [`docs/phase-0-1-capabilities.md`](phase-0-1-capabilities.md)
-- ADR-0001 (A2A ingress front-edge): [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md)
+    CTRL --> NS
+    CTRL --> TP
+    CTRL --> IP
+    CTRL --> M
+    CTRL --> E
+    RUNTIME -->|"127.0.0.1:8443"| IR
+    IR -->|Workload Identity| Foundry
+```
+
+### CLI walkthrough — OpenAI Agents SDK
+
+```bash
+# Add an OpenAI Agents runtime sandbox (OCI image carrying agent code)
+azureclaw add oai-researcher \
+  --runtime openai-agents \
+  --model gpt-4.1 \
+  --governance \
+  --isolation enhanced
+
+# Dry-run to preview the ClawSandbox YAML
+azureclaw add oai-researcher --runtime openai-agents --dry-run
+```
+
+### CLI walkthrough — Microsoft Agent Framework (Python)
+
+```bash
+azureclaw add maf-support-bot \
+  --runtime microsoft-agent-framework \
+  --maf-language python \
+  --model gpt-4.1 \
+  --governance \
+  --isolation enhanced
+```
+
+### CLI walkthrough — BYO runtime
+
+```bash
+# The image MUST declare the OCI label org.azureclaw.runtime.contract=v1
+azureclaw add custom-agent \
+  --runtime byo \
+  --byo-image myacr.azurecr.io/my-agent:latest \
+  --byo-contract-version v1 \
+  --governance \
+  --isolation enhanced
+```
+
+### Example `ClawSandbox` YAML — OpenAI Agents SDK
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: oai-researcher
+  namespace: azureclaw-oai-researcher
+spec:
+  runtime:
+    kind: OpenAIAgents
+    openaiAgents:
+      pythonVersion: "3.12"
+      agentCode:
+        oci:
+          image: myacr.azurecr.io/oai-researcher:latest
+  inferenceRef:
+    name: oai-researcher-inference
+  sandbox:
+    isolation: enhanced
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: oai-researcher-policy
+    trustThreshold: 500
+  networkPolicy:
+    defaultDeny: true
+```
+
+### Example `ClawSandbox` YAML — Microsoft Agent Framework (Python)
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: maf-support-bot
+  namespace: azureclaw-maf-support-bot
+spec:
+  runtime:
+    kind: MicrosoftAgentFramework
+    microsoftAgentFramework:
+      language: python
+      agentCode:
+        git:
+          url: https://github.com/my-org/support-bot.git
+          ref: main
+          path: agent/
+  inferenceRef:
+    name: maf-support-bot-inference
+  sandbox:
+    isolation: enhanced
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: maf-support-bot-policy
+  networkPolicy:
+    defaultDeny: true
+```
+
+### Example `ClawSandbox` YAML — BYO runtime
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: custom-agent
+  namespace: azureclaw-custom-agent
+spec:
+  runtime:
+    kind: BYO
+    byo:
+      image: myacr.azurecr.io/my-agent:latest
+      contractVersion: v1
+      command: ["/app/agent"]
+      args: ["--mode", "production"]
+  inferenceRef:
+    name: custom-agent-inference
+  sandbox:
+    isolation: enhanced
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: custom-agent-policy
+  networkPolicy:
+    defaultDeny: true
+```
+
+> **BYO contract requirement:** the image label `org.azureclaw.runtime.contract=v1` must be present. Images without this label are rejected at admission. See [`docs/runtime-contract.md`](runtime-contract.md) for the full contract specification.
+
+### What you get regardless of runtime
+
+- Same egress isolation (egress-guard init container + UID-1000 iptables rules).
+- Same inference router — `InferencePolicy`, Content Safety, token budgets, Workload Identity auth.
+- Same AGT governance — `ToolPolicy`, `TrustManager`, `AuditLogger`, `RateLimiter`.
+- Same `ClawMemory` (Foundry Memory Store binding) and `ClawEval` CRDs.
+- Same operator TUI — all 8 CRDs visible regardless of runtime kind.
+- `RuntimeReady` condition reflects per-runtime health; Tier-2 runtimes stamp `False/AdapterMissing`.
+
+### Cross-links
+
+| Resource | Reference |
+|---|---|
+| CRD fields | [`spec.runtime`](api/crd-reference.md#spec-fields--specruntime), [`InferencePolicy`](api/crd-reference.md#inferencepolicy), [`ToolPolicy`](api/crd-reference.md#toolpolicy), [`ClawMemory`](api/crd-reference.md#clawmemory), [`ClawEval`](api/crd-reference.md#claweval) |
+| CLI commands | [`azureclaw add --runtime`](cli-reference.md#azureclaw-add), [`azureclaw add --byo-image`](cli-reference.md#azureclaw-add) |
+| BYO contract | [`docs/runtime-contract.md`](runtime-contract.md) |
+| Conditions | [`RuntimeReady`, `AdapterMissing`](api/crd-reference.md#conditions-emitted) |
+
+---
+
+## 5. A2A federation across organisations
+
+> "A foreign agent (LangChain, Google ADK, OpenAI Agents, AWS Bedrock) wants
+> to call one of my AzureClaw sandboxes as a tool surface. I want that
+> collaboration to be audited, rate-limited, and revocable without exposing
+> the router to the internet."
+
+### What the operator wants
+
+Inbound A2A 1.0.0 traffic from external (cross-org) agents, routed through a single shared `azureclaw-a2a-gateway`, with the sandbox router **never** on the public internet. Per ADR-0001, a2a-gateway is the only public TLS endpoint; sandbox exposure is opt-in, time-bounded, and revocable in < 30 seconds.
+
+### Topology (from ADR-0001)
+
+```mermaid
+graph TD
+    Foreign["Foreign agent\n(any A2A 1.0.0 runtime)"]
+    subgraph Internet
+        TLS["Cilium L7 ingress\n(method allow-list, path regex, body cap 4 MiB, rate limit)"]
+    end
+    GW["azureclaw-a2a-gateway\n(Rust, shared across sandboxes)\n- Public TLS terminator\n- Verify caller AgentCard JWS\n- AGT trust score gate\n- Per-caller rate limit + audit\n- Routing table from controller ConfigMap\n- NO Foundry creds, NO IMDS"]
+    subgraph NS["azureclaw-research-bot (namespace)"]
+        CNP["CiliumNetworkPolicy\n(TCP 8445, gateway SA only)\nEmitted only when spec.a2a.enabled: true"]
+        IR["inference-router (UID 1001)\n0.0.0.0:8445 A2A inbound\nroutes/a2a/ingress.rs (forbid unsafe_code)\nRe-verifies JWS, body cap, JSON-RPC"]
+        OC["openclaw (UID 1000)"]
+    end
+    Foundry["Azure AI Foundry\n(Workload Identity)"]
+
+    Foreign -->|"HTTPS (TLS)"| TLS
+    TLS --> GW
+    GW -->|"cluster-internal mTLS\n(Workload Identity, peer-pinned)"| CNP
+    CNP --> IR
+    IR -->|"127.0.0.1:18789"| OC
+    IR -->|Workload Identity| Foundry
+```
+
+### CLI walkthrough
+
+```bash
+# 1. azureclaw up deploys the a2a-gateway as part of the Helm chart (always)
+azureclaw up --name research-bot --model gpt-4.1 --governance
+
+# 2. Check the A2A schema this cluster will publish
+azureclaw a2a schema
+
+# 3. Enable inbound A2A for a specific sandbox via CRD patch (--dry-run first)
+kubectl patch clawsandbox research-bot \
+  -n azureclaw-research-bot \
+  --type=merge \
+  --dry-run=server \
+  -p '{
+    "spec": {
+      "a2a": {
+        "enabled": true,
+        "allowedCallers": [
+          {
+            "jwsThumbprint": "sha256:abcd1234...",
+            "displayName": "partner-planner",
+            "issuer": "https://partner.example.com/.well-known/agent.json"
+          }
+        ],
+        "expiresAt": "2026-05-30T00:00:00Z",
+        "advertisedSkills": [
+          {"name": "search.web", "description": "Web search via Bing grounding"},
+          {"name": "summarize.text", "description": "Summarise documents"}
+        ],
+        "minimumTrustScore": 700,
+        "rateLimit": {"rpm": 30, "burst": 5},
+        "bodyCapBytes": 1048576,
+        "sessionMaxSeconds": 60
+      }
+    }
+  }'
+
+# 4. Apply (no --dry-run)
+kubectl patch clawsandbox research-bot \
+  -n azureclaw-research-bot \
+  --type=merge \
+  -p '{ ... same payload ... }'
+
+# 5. Verify exposure posture at a glance
+azureclaw a2a list-exposed
+
+# 6. Revoke: flip enabled to false — controller tears down Service + CNP
+#    + gateway routing entry within one reconcile loop (< 30 s target)
+kubectl patch clawsandbox research-bot \
+  -n azureclaw-research-bot \
+  --type=merge \
+  -p '{"spec":{"a2a":{"enabled":false}}}'
+```
+
+### Example `ClawSandbox` YAML (with A2A exposure enabled)
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: research-bot
+  namespace: azureclaw-research-bot
+spec:
+  runtime:
+    kind: OpenClaw
+  inferenceRef:
+    name: research-bot-inference
+  sandbox:
+    isolation: enhanced
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: research-bot-policy
+    trustThreshold: 500
+  networkPolicy:
+    defaultDeny: true
+  a2a:
+    enabled: true
+    allowedCallers:
+      - jwsThumbprint: "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+        displayName: partner-planner
+        issuer: "https://partner.example.com/.well-known/agent.json"
+    expiresAt: "2026-05-30T00:00:00Z"          # max 30 days; admission rejects longer windows
+    advertisedSkills:
+      - name: search.web
+        description: Web search via Bing grounding
+      - name: summarize.text
+        description: Summarise documents
+    minimumTrustScore: 700
+    rateLimit:
+      rpm: 30
+      burst: 5
+    bodyCapBytes: 1048576                        # 1 MiB; hard ceiling 4 MiB
+    sessionMaxSeconds: 60
+    allowStreaming: false
+```
+
+### Security invariants (all from ADR-0001)
+
+- **Router never on the public internet.** The sandbox router's A2A bind (`0.0.0.0:8445`) is gated by a `CiliumNetworkPolicy` permitting TCP 8445 **only from the gateway's ServiceAccount**. A `ValidatingAdmissionPolicy` rejects any sandbox-namespace `Ingress`, `LoadBalancer` Service, or `NetworkPolicy.ingress.from.ipBlock`.
+- **Module-level secret isolation.** `routes/a2a/ingress.rs` is `forbid(unsafe_code)` and structurally prohibited from importing `crate::auth::ImdsToken` or any `*Credential*` type. Enforced by `ci/a2a-module-isolation.sh`.
+- **Opt-in, time-bounded, revocable.** `spec.a2a.enabled: false` tears everything down within one reconcile loop. `expiresAt` is mandatory and capped at 30 days.
+- **Blast radius bounds.** A compromised foreign caller cannot reach any other sandbox, call any tool not in `advertisedSkills`, exceed `rateLimit`, or persist past `expiresAt`.
+- **Audit.** Every inbound A2A call emits an audit event: caller subject, caller thumbprint, caller AGT trust score, target sandbox-id, RPC method, payload SHA-256, gateway and router latency, and decision.
+
+### Cross-links
+
+| Resource | Reference |
+|---|---|
+| Blueprint | [Blueprint 04 — Cross-org federation](blueprints/04-cross-org-federation.md) |
+| ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
+| CRD fields | [`spec.a2a`](api/crd-reference.md#spec-fields--speca2a), [`AllowlistVerified` condition](api/crd-reference.md#conditions-emitted) |
+| CLI commands | [`azureclaw a2a list-exposed`](cli-reference.md#azureclaw-a2a), [`azureclaw a2a schema`](cli-reference.md#azureclaw-a2a) |
+| Architecture | [`docs/architecture/a2a-gateway.md`](architecture/a2a-gateway.md) |
+
+---
+
+## 6. Migration from kagent or `sigs/agent-sandbox`
+
+> "My team already uses `kagent.dev/v1alpha2 Agent` YAMLs or
+> `agents.x-k8s.io/v1alpha1 Sandbox` manifests. I want to run them on
+> AzureClaw without rewriting YAML from scratch."
+
+### What the operator wants
+
+A translator that converts existing agent manifests into AzureClaw resource bundles, with explicit warnings for lossy fields and a dry-run path. See [`docs/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) for the full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`).
+
+### Topology — migration flow
+
+```mermaid
+graph LR
+    subgraph Source["Source cluster (or local files)"]
+        KA["kagent.dev/v1alpha2\nAgent YAML"]
+        SS["agents.x-k8s.io/v1alpha1\nSandbox YAML"]
+    end
+    subgraph CLI["azureclaw CLI (no cluster required)"]
+        MIGRATE["azureclaw migrate from-kagent"]
+        CONVERT["azureclaw convert"]
+    end
+    subgraph Target["AzureClaw cluster"]
+        CS["ClawSandbox CR"]
+        IP["InferencePolicy CR"]
+        TP["ToolPolicy CR"]
+    end
+
+    KA -->|"azureclaw migrate from-kagent"| MIGRATE
+    SS -->|"azureclaw convert --to clawsandbox"| CONVERT
+    MIGRATE --> CS
+    MIGRATE --> IP
+    MIGRATE --> TP
+    CONVERT --> CS
+```
+
+### CLI walkthrough — migrate from kagent
+
+```bash
+# Dry run first — see what would be emitted and any lossy warnings
+azureclaw migrate from-kagent agent.yaml --dry-run
+
+# Translate with enhanced isolation, write to a manifests/ directory
+azureclaw migrate from-kagent agent.yaml \
+  --isolation enhanced \
+  --out-dir ./manifests
+
+# From stdin (pipe from kubectl get)
+kubectl get agent my-agent -n kagent-system -o yaml \
+  | azureclaw migrate from-kagent -
+
+# Allow lossy translation (fields with no AzureClaw analog are dropped with warnings)
+azureclaw migrate from-kagent agent.yaml \
+  --allow-lossy \
+  --out-dir ./manifests
+
+# Apply the generated manifests
+kubectl apply -f ./manifests/
+
+# Verify the sandbox came up
+azureclaw status my-agent
+```
+
+### CLI walkthrough — convert from `sigs/agent-sandbox`
+
+```bash
+# Convert an upstream Sandbox YAML to a ClawSandbox (no cluster required)
+azureclaw convert -f sandbox.yaml --to clawsandbox > clawsandbox.yaml
+
+# Review diff preamble for lossy fields (mesh, policy, inference budget default to disabled)
+head -20 clawsandbox.yaml
+
+# Convert a ClawSandbox to upstream format (for cluster comparison)
+azureclaw convert -f clawsandbox.yaml --to upstream-sandbox --allow-lossy
+
+# Overlay mode: AzureClaw adds governance over an existing upstream-controller-owned pod
+azureclaw convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web-agent
+
+# Switch a live sandbox to overlay mode
+azureclaw migrate to-overlay my-agent --upstream-ref upstream-sandbox
+
+# Revert to native AzureClaw (controller resumes full ownership)
+azureclaw migrate to-native my-agent --dry-run
+azureclaw migrate to-native my-agent
+```
+
+### Example `ClawSandbox` YAML (generated by `migrate from-kagent`)
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: my-agent                    # preserved from kagent Agent metadata.name
+  namespace: azureclaw-my-agent     # standard AzureClaw namespace convention
+  annotations:
+    azureclaw.io/migrated-from: kagent.dev/v1alpha2/Agent
+    azureclaw.io/migration-date: "2026-04-30"
+spec:
+  runtime:
+    kind: OpenClaw                  # kagent-native runtimes map to OpenClaw
+  inferenceRef:
+    name: my-agent-inference        # emitted as a separate InferencePolicy CR
+  sandbox:
+    isolation: enhanced             # default from --isolation flag
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+  governance:
+    enabled: true                   # emitted; toolPolicyRef points to generated ToolPolicy
+    toolPolicyRef:
+      name: my-agent-policy
+  networkPolicy:
+    defaultDeny: true
+  upstreamCompatibility:
+    sigsAgentSandbox: "off"         # Native mode; use "overlay" for co-existence
+```
+
+### Compatibility modes
+
+| Mode | What AzureClaw does | When to use |
+|---|---|---|
+| `Native` (default) | AzureClaw owns all objects. No upstream CR involved. | Fresh migrations; kagent YAML fully converted. |
+| `Translate` (opt-in) | AzureClaw emits an upstream `Sandbox` CR as a subresource. | Co-existence with an existing upstream controller. |
+| `Overlay` (opt-in) | AzureClaw adds only governance overlay; upstream CR owns the pod. | Upstream controller must remain; add governance without pod re-ownership. |
+| `Observe` | AzureClaw mirrors status of an upstream CR without overlay. | Read-only integration for auditing. |
+
+### What is lossy
+
+The inverse translation (`Sandbox → ClawSandbox`) drops fields with no AzureClaw analog:
+- Inter-agent mesh membership
+- Tool governance / policy decisions
+- A2A agent-card publication
+- Inference budget policy
+- Confidential runtime attestation surface
+
+All dropped fields default to `disabled` (dev-only label applied automatically) and the CLI warns the user to re-configure.
+
+### Cross-links
+
+| Resource | Reference |
+|---|---|
+| Compat design | [`docs/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
+| CLI commands | [`azureclaw migrate from-kagent`](cli-reference.md#azureclaw-migrate), [`azureclaw migrate to-overlay`](cli-reference.md#azureclaw-migrate), [`azureclaw convert`](cli-reference.md#azureclaw-convert) |
+| CRD fields | [`spec.upstreamCompatibility`](api/crd-reference.md#spec-fields--specupstreamcompatibility) |
+| Blueprint | [Blueprint 02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md) |
 
 ---
 
 ## What's NOT a use case
 
-- AzureClaw is **not** a model router. Model selection sits in Foundry; `InferencePolicy` (Phase 2) is a budget/guardrail CR, not a router.
-- AzureClaw is **not** a memory backend. `ClawMemory` (Phase 2) is a Foundry Memory Store binding CR, never an in-cluster store.
-- AzureClaw is **not** a managed-MCP host *for the public Microsoft-managed catalog*. `McpServer` (schema-only on Phase 1, full reconciler in Phase 2) is for **AKS-hosted private/custom** tool servers; the publicly managed MCP surface stays with Foundry.
+- AzureClaw is **not** a model router. Model selection sits in Foundry; `InferencePolicy` is a budget / guardrail CR, not a router.
+- AzureClaw is **not** a memory backend. `ClawMemory` is a Foundry Memory Store binding CR, never an in-cluster store.
+- AzureClaw is **not** a managed-MCP host for the public Microsoft-managed catalog. `McpServer` is for **AKS-hosted private/custom** tool servers; the publicly managed MCP surface stays with Foundry.
 - AzureClaw is **not** a SaaS agent author. Agent authoring lives in Microsoft 365 Agent Framework / Copilot Studio. AzureClaw is the AKS runtime substrate; M365 Copilot Studio agents can invoke AzureClaw-hosted MCP servers as a tool surface.
-
+- AzureClaw is **not** a Tier-2 runtime host today. `SemanticKernel`, `LangGraph`, `Anthropic` variants are in the schema; adapters land in a future phase. The controller stamps `RuntimeReady=False/AdapterMissing` on these variants so the operator knows immediately, rather than silently booting broken sandboxes.
