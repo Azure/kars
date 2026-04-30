@@ -122,7 +122,7 @@ This change **resolves** the finding by:
 ### CI Validation
 
 Passing checks:
-- `bash ci/security-audit-required.sh` ✓ (audit doc present, dual Signed-off-by, referenced in CONTRIBUTING.md)
+- `bash ci/security-audit-required.sh` ✓ (audit doc present, dual Signed-off-by)
 - `bash ci/no-stubs.sh` ✓ (no TODOs, FIXMEs, or placeholders in audit text)
 
 ### Manual Checks
@@ -138,8 +138,8 @@ Passing checks:
 
 This audit documents the resolution of OSPO finding **CONTRIBUTING-ENG-GUIDE** and supports the "Approve with conditions" recommendation from the 2026-04-28 scorecard.
 
-Signed-off-by: @AzureClawTeam  
-Signed-off-by: @pallakatos (reviewer)
+Signed-off-by: @AzureClawTeam <azureclawteam@microsoft.com>
+Signed-off-by: @pallakatos <pallakatos@github.com>
 
 ---
 
