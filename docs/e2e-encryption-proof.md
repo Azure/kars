@@ -193,3 +193,25 @@ To reproduce:
 3. Send a message: `azureclaw_mesh_send { target: "test-agent", message: "Hello" }`
 4. Read router logs: `kubectl logs -c inference-router ... | grep "TRAFFIC CAPTURE"`
 5. Compare with gateway logs for plaintext side
+
+---
+
+## SDK Patch Relevance
+
+The traffic capture above is only achievable because the vendored
+`@agentmesh/sdk` patches are applied. Each frame in this capture depends on
+one or more patches:
+
+| Frame(s) | Patch | Why it matters |
+|----------|-------|----------------|
+| Key Exchange (Frames 1–6) | SDK Patch 1 (`PrekeyManager.buildBundle`) | Without this, the prekey bundle has an empty signature — the registry rejects it and key exchange never completes. |
+| Key Exchange (Frames 1–6) | SDK Patch 2 (`base64Decode` prefix crash) | Registry returns `x25519:…` prefixed keys; without this patch the SDK throws on decode and session setup fails. |
+| Session Establishment (Frames 7–12) | SDK Patch 3 (X3DH → Double Ratchet handoff) | The peer ratchet key is required for the first Double Ratchet step; without it the ratchet never initialises and all subsequent frames are undecryptable. |
+| Session Establishment (Frames 7–12) | SDK Patch 4 (KNOCK wiring) | The KNOCK handshake is not wired to the relay transport in upstream v0.1.2; sessions silently never establish without this patch. |
+| Message Send (Frame 13) | SDK Patch 5 (KNOCK race condition) | Without this, a 1–33 ms race window between KNOCK accept and first message causes the send to fail under load. |
+| Message Send (Frame 13) | SDK Patch 9 (`bytesToBase64` stack overflow) | Any message body > 100 KB causes a JS stack overflow in the base64 encoder; patched to use chunked encoding. |
+| Reply (Frame 14) | SDK Patch 10 (`initiateSession` reuse) | The second message to the same peer (e.g., reply path) crashes without this fix. |
+| Full round-trip | Relay Patch 1 (timestamp format) | The relay's Rust `chrono::to_rfc3339` emits `+00:00`; the SDK's `Date.toISOString()` emits `Z`. Without the relay patch, signature verification fails on every frame. |
+
+See [agt-vendored-patch-audit.md](agt-vendored-patch-audit.md) for the full
+patch inventory and re-audit history.
