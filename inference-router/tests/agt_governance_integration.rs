@@ -56,6 +56,9 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
         governance,
         blocklist: Blocklist::disabled(),
+        blocked_egress: Arc::new(
+            azureclaw_inference_router::egress_blocked::BlockedBuffer::with_defaults(),
+        ),
         sandbox_name: Arc::new(sandbox.to_string()),
         inbox: Arc::new(MeshInbox::new()),
         mesh_metrics: Arc::new(MeshMetrics::new()),

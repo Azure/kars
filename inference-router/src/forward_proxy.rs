@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::blocklist::Blocklist;
+use crate::egress_blocked::BlockedBuffer;
 
 /// Maximum concurrent tunnel connections (prevents resource exhaustion).
 const MAX_CONCURRENT_TUNNELS: usize = 256;
@@ -25,19 +26,28 @@ const MAX_TUNNEL_LIFETIME_SECS: u64 = 3600;
 
 /// Start the transparent forward proxy on the given address.
 /// Returns a CancellationToken that triggers graceful shutdown when cancelled.
-pub async fn start(addr: &str, blocklist: Blocklist) -> CancellationToken {
+pub async fn start(
+    addr: &str,
+    blocklist: Blocklist,
+    blocked_egress: Arc<BlockedBuffer>,
+) -> CancellationToken {
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
 
     let addr = addr.to_string();
     tokio::spawn(async move {
-        run(addr, blocklist, shutdown_clone).await;
+        run(addr, blocklist, blocked_egress, shutdown_clone).await;
     });
 
     shutdown
 }
 
-async fn run(addr: String, blocklist: Blocklist, shutdown: CancellationToken) {
+async fn run(
+    addr: String,
+    blocklist: Blocklist,
+    blocked_egress: Arc<BlockedBuffer>,
+    shutdown: CancellationToken,
+) {
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -76,12 +86,13 @@ async fn run(addr: String, blocklist: Blocklist, shutdown: CancellationToken) {
 
                 let bl = blocklist.clone();
                 let sb = sandbox_name.clone();
+                let be = blocked_egress.clone();
                 let count = active_count.clone();
                 let conn_shutdown = shutdown.clone();
                 count.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = handle_connection(stream, &bl, &sb) => {
+                        result = handle_connection(stream, &bl, &sb, &be) => {
                             if let Err(e) = result {
                                 tracing::debug!(peer = %peer, error = %e, "Forward proxy connection error");
                             }
@@ -199,6 +210,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     blocklist: &Blocklist,
     sandbox: &str,
+    blocked_egress: &BlockedBuffer,
 ) -> anyhow::Result<()> {
     // Read the initial request. For TLS ClientHello, we may need multiple reads
     // if the handshake is fragmented across TCP segments (rare, but possible).
@@ -245,9 +257,18 @@ async fn handle_connection(
     let target = parts[1];
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        handle_connect(stream, target, request, blocklist, sandbox).await
+        handle_connect(stream, target, request, blocklist, sandbox, blocked_egress).await
     } else {
-        handle_http(stream, target, request, total, blocklist, sandbox).await
+        handle_http(
+            stream,
+            target,
+            request,
+            total,
+            blocklist,
+            sandbox,
+            blocked_egress,
+        )
+        .await
     }
 }
 
@@ -260,6 +281,7 @@ async fn handle_connect(
     _request: &[u8],
     blocklist: &Blocklist,
     sandbox: &str,
+    blocked_egress: &BlockedBuffer,
 ) -> anyhow::Result<()> {
     let (domain, port) = parse_host_port(target, 443);
     let log_dom = safe_domain(&domain);
@@ -268,6 +290,7 @@ async fn handle_connect(
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %log_dom, reason = %reason, "CONNECT blocked");
+        blocked_egress.record(sandbox, &domain, port);
         send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
         return Ok(());
     }
@@ -277,6 +300,7 @@ async fn handle_connect(
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(domain = %log_dom, error = %e, "CONNECT: DNS validation failed");
+            blocked_egress.record(sandbox, &domain, port);
             send_response(&mut stream, 502, "DNS validation failed").await?;
             return Ok(());
         }
@@ -314,11 +338,20 @@ async fn handle_http(
     request_len: usize,
     blocklist: &Blocklist,
     sandbox: &str,
+    blocked_egress: &BlockedBuffer,
 ) -> anyhow::Result<()> {
     // Check if this is a TLS ClientHello (iptables-redirected HTTPS).
     // TLS records start with 0x16 (handshake) 0x03 (TLS version major).
     if request_len > 5 && request[0] == 0x16 && request[1] == 0x03 {
-        return handle_tls_redirect(stream, request, request_len, blocklist, sandbox).await;
+        return handle_tls_redirect(
+            stream,
+            request,
+            request_len,
+            blocklist,
+            sandbox,
+            blocked_egress,
+        )
+        .await;
     }
 
     // Plain HTTP: extract Host header
@@ -338,6 +371,8 @@ async fn handle_http(
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %log_dom, reason = %reason, "HTTP blocked");
+        let (_h, p) = parse_host_port(&domain, 80);
+        blocked_egress.record(sandbox, &domain, p);
         send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
         return Ok(());
     }
@@ -348,6 +383,7 @@ async fn handle_http(
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(domain = %log_dom, error = %e, "HTTP: DNS validation failed");
+            blocked_egress.record(sandbox, &host, port);
             send_response(&mut stream, 502, "DNS validation failed").await?;
             return Ok(());
         }
@@ -380,6 +416,7 @@ async fn handle_tls_redirect(
     data_len: usize,
     blocklist: &Blocklist,
     sandbox: &str,
+    blocked_egress: &BlockedBuffer,
 ) -> anyhow::Result<()> {
     let (sni, has_ech) = extract_sni_ex(initial_data, data_len);
 
@@ -391,6 +428,7 @@ async fn handle_tls_redirect(
         tracing::warn!(outer_sni = %outer_sni,
             "TLS redirect: Encrypted Client Hello (ECH) detected, rejecting — \
             cannot verify destination domain. Outer SNI visible in pending approvals.");
+        blocked_egress.record(sandbox, outer_sni, 443);
         blocklist
             .record_proxy_block(
                 outer_sni,
@@ -427,6 +465,7 @@ async fn handle_tls_redirect(
 
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %log_dom, reason = %reason, "TLS blocked (SNI)");
+        blocked_egress.record(sandbox, &domain, 443);
         return Ok(());
     }
 
@@ -435,6 +474,7 @@ async fn handle_tls_redirect(
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(domain = %log_dom, error = %e, "TLS redirect: DNS validation failed");
+            blocked_egress.record(sandbox, &domain, 443);
             return Ok(());
         }
     };

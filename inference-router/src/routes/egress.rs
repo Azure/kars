@@ -19,12 +19,36 @@ pub fn egress_routes() -> Router<AppState> {
         .route("/egress/learn", post(egress_learn_toggle))
         .route("/egress/learned", get(egress_learned))
         .route("/egress/learned/clear", post(egress_learned_clear))
+        .route("/egress/learned/blocked", get(egress_learned_blocked))
         .route("/egress/fetch", post(egress_fetch))
         .route("/egress/allowlist", get(egress_allowlist))
         .route("/egress/approve", post(egress_approve))
         .route("/egress/deny", post(egress_deny))
         .route("/egress/pending", get(egress_pending))
         .route("/egress/enforce", post(egress_enforce))
+}
+
+/// GET /egress/learned/blocked — list blocked egress attempts captured in
+/// enforce mode. S12.f: sibling of `/egress/learned` (allowed-observation
+/// learn buffer). Hostname + port only — no paths, headers, or payload data.
+/// RBAC: mounted in the `protected` router that already gates `/egress/*`
+/// behind `Authorization: Bearer <admin-token>` — no new auth path.
+async fn egress_learned_blocked(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let limit = headers
+        .get("x-azureclaw-limit")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(256)
+        .min(4096);
+    let entries = state.blocked_egress.snapshot(limit);
+    Json(serde_json::json!({
+        "total": state.blocked_egress.len(),
+        "count": entries.len(),
+        "entries": entries,
+    }))
 }
 
 /// GET /egress/learned — list all domains observed during learn mode.
