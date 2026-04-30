@@ -37,6 +37,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: "x",        action: "delete selected agent (confirm)",       scope: "agents" },
   { key: "Enter",    action: "connect (shell session)",               scope: "agents" },
   { key: "c",        action: "toggle cluster health view",            scope: "global" },
+  { key: "Shift-p",  action: "toggle CRD panels overlay (S14)",       scope: "global" },
   { key: "r",        action: "refresh now",                           scope: "global" },
   { key: "q / Esc",  action: "quit (or close overlay)",               scope: "global" },
 ] as const;
@@ -50,7 +51,7 @@ const viewClusterDim  = "{gray-fg}Cluster{/}";
 const viewTopologyDim = "{gray-fg}Topology{/}";
 
 const AGENTS_ACTIONS =
-  "[Tab] Focus  [↑↓] Nav  [Enter] Connect  [c] Cluster  [t] Topology  " +
+  "[Tab] Focus  [↑↓] Nav  [Enter] Connect  [c] Cluster  [t] Topology  [P] Panels  " +
   "[a] Approve  [A] All  [d] Del/Deny  [e] Enforce  [L] Learn/Enforce  [g] AGT  [n] Spawn  [r] Refresh  [q] Quit";
 
 /**
@@ -71,9 +72,9 @@ export function statusBarForAgents(args: {
 }
 
 export function statusBarForTopology(): string {
-  return ` ${viewTopology}  │  [t] Back to Agents  [c] Cluster  [r] Refresh  [q] Quit`;
+  return ` ${viewTopology}  │  [t] Back to Agents  [c] Cluster  [P] Panels  [r] Refresh  [q] Quit`;
 }
 
 export function statusBarForCluster(): string {
-  return ` ${viewCluster}  │  [c] Back to Agents  [t] Topology  [r] Refresh  [q] Quit`;
+  return ` ${viewCluster}  │  [c] Back to Agents  [t] Topology  [P] Panels  [r] Refresh  [q] Quit`;
 }
