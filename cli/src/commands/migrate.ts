@@ -526,6 +526,42 @@ async function runFromKagent(
     ),
   );
 
+  // S12.g — when the migrated bundle includes an egress allowlist on a
+  // ClawSandbox, point the operator at the sign-by-default + GitOps
+  // emit-manifest flow.
+  const sandboxesWithEgress = result.resources.filter(
+    (r) =>
+      r.kind === "ClawSandbox" &&
+      Array.isArray(
+        ((r.spec as Record<string, unknown>)?.networkPolicy as
+          | Record<string, unknown>
+          | undefined)?.allowedEndpoints,
+      ),
+  );
+  if (sandboxesWithEgress.length > 0) {
+    process.stderr.write(
+      chalk.hex("#0078D4")(
+        `\nNext step (S12.g): the migrated bundle includes an egress allowlist. ` +
+          `Sign and emit a GitOps manifest with:\n`,
+      ),
+    );
+    for (const r of sandboxesWithEgress) {
+      const sbName = r.metadata.name;
+      const sbNs = r.metadata.namespace;
+      process.stderr.write(
+        chalk.gray(
+          `  azureclaw egress ${sbName} --namespace ${sbNs} --enforce ` +
+            `--emit-manifest ./gitops/${sbName}-allowlist.yaml\n`,
+        ),
+      );
+    }
+    process.stderr.write(
+      chalk.gray(
+        `(Signing is default-on; pass --no-sign to opt out — note the controller will refuse unsigned artifacts in authoritative mode.)\n`,
+      ),
+    );
+  }
+
   if (options.dryRun) return;
 
   if (options.outDir) {

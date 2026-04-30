@@ -5,11 +5,14 @@ import {
   EGRESS_ALLOWLIST_MEDIA_TYPE,
   autoDetectSignMode,
   buildCanonicalAllowlist,
+  buildEmitManifestYaml,
+  describeSignerIdentity,
   ensureSigningTools,
   patchClawSandbox,
   pushArtifact,
   readClawSandboxState,
   signArtifact,
+  writeEmitManifest,
 } from "./egress/sign.js";
 
 export function egressCommand(): Command {
@@ -28,20 +31,67 @@ export function egressCommand(): Command {
     .option("--allowlist", "Show currently approved domains")
     .option("--enforce", "Graduate: promote all learned domains to allowlist, switch to enforcement mode")
     .option("--status", "Show blocklist and learn mode status")
-    .option("--sign", "Build canonical allowlist artifact, push to ACR, sign with cosign, patch allowlistRef (S12.c, opt-in; non-authoritative)")
-    .option("--no-sign", "Disable signing even if a future default flips it on (forward-compat placeholder)")
+    .option("--sign", "Build canonical allowlist artifact, push to OCI registry, sign with cosign, patch allowlistRef. **Default-on** when combined with --enforce or --approve (S12.g). Pass --no-sign to opt out.")
+    .option("--no-sign", "Skip signing. The controller will refuse to use the artifact in authoritative mode (SignerPolicyMissing). Use only for local dev.")
     .option("--sign-mode <mode>", "Cosign mode: keyless | identity-token | keyed (default: auto-detect)")
     .option("--sign-key <ref>", "Cosign key reference (path or KMS URI like azurekms://...) — required for --sign-mode keyed")
     .option("--registry <fqdn>", "Override target ACR for the artifact push (default: auto-discover)")
     .option("--repository <repo>", "Repository path within the registry (default: policy/egress-allowlist/<sandbox>)")
+    .option("--emit-manifest <path>", "GitOps mode (S12.g): write the ClawSandbox patch to <path> instead of running 'kubectl patch'. Requires signing (default-on). Refuses to overwrite without --force.")
+    .option("--force", "With --emit-manifest, overwrite an existing file.")
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
 
-      // Validate --sign requires --enforce or --approve.
-      if (options.sign && !options.enforce && !options.approve) {
+      // S12.g — sign-by-default. When the operator runs --enforce or
+      // --approve, signing happens automatically unless --no-sign is
+      // passed. options.sign is:
+      //   - undefined → not specified → default to true in signing context
+      //   - true      → user passed --sign explicitly
+      //   - false     → user passed --no-sign
+      const inSigningContext = Boolean(options.enforce || options.approve);
+      const signRequested =
+        options.sign === false ? false : (options.sign === true || inSigningContext);
+
+      // --emit-manifest implies a signing context; require --enforce or --approve.
+      if (options.emitManifest && !inSigningContext) {
+        console.log(
+          chalk.red(
+            `\n  --emit-manifest requires --enforce or --approve (the artifact is built from the live allowlist).\n`,
+          ),
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      // --emit-manifest with --no-sign is a contradiction. GitOps mode
+      // promotes the artifact off-cluster; an unsigned artifact would
+      // fail authoritative-mode verify on the cluster with no
+      // operator present to retry. Refuse loud.
+      if (options.emitManifest && options.sign === false) {
+        console.log(
+          chalk.red(
+            `\n  --emit-manifest cannot be combined with --no-sign — GitOps mode requires signed artifacts.\n`,
+          ),
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      // Legacy guard: --sign without --enforce/--approve is still a hard
+      // error (sign-by-default only applies inside a signing context).
+      if (options.sign === true && !inSigningContext) {
         console.log(chalk.red(`\n  --sign requires --enforce or --approve.\n`));
         process.exitCode = 1;
         return;
+      }
+
+      // Loud warning when the user opts out of default-on signing.
+      if (inSigningContext && options.sign === false) {
+        console.log(
+          chalk.yellow(
+            `\n  ⚠ --no-sign: the resulting allowlist will be unsigned. The controller will emit AllowlistVerified=False/SignerPolicyMissing and refuse the artifact in authoritative mode. Use only for local dev.\n`,
+          ),
+        );
       }
 
       const containerName = `azureclaw-${name}`;
@@ -113,7 +163,7 @@ export function egressCommand(): Command {
           console.log(chalk.red(`\n  Failed to approve: ${e.message}\n`));
           return;
         }
-        if (options.sign) {
+        if (signRequested) {
           await runSignFlow(name, ns, options);
         }
         return;
@@ -158,7 +208,7 @@ export function egressCommand(): Command {
           console.log(chalk.red(`\n  Failed to enforce: ${e.message}\n`));
           return;
         }
-        if (options.sign) {
+        if (signRequested) {
           await runSignFlow(name, ns, options);
         }
         return;
@@ -310,7 +360,8 @@ async function runSignFlow(
   ns: string,
   options: any,
 ): Promise<void> {
-  console.log(chalk.hex("#0078D4")(`\n  Signing egress allowlist artifact for '${name}' (S12.c)`));
+  const headerSlice = options.emitManifest ? "S12.g GitOps mode" : "S12.g sign-by-default";
+  console.log(chalk.hex("#0078D4")(`\n  Signing egress allowlist artifact for '${name}' (${headerSlice})`));
   try {
     const { orasPath, cosignPath } = await ensureSigningTools();
 
@@ -383,6 +434,45 @@ async function runSignFlow(
     }
     console.log(chalk.green(`     ✅ Signed   (mode=${mode})`));
 
+    if (options.emitManifest) {
+      // S12.g — GitOps mode. Skip kubectl patch; write a byte-stable
+      // ClawSandbox manifest the operator commits to their GitOps
+      // repo. The cluster never sees this command.
+      const manifest = buildEmitManifestYaml({
+        namespace: ns,
+        name,
+        registry,
+        repository,
+        digest,
+        artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
+        signerIdentity: describeSignerIdentity({
+          mode,
+          keyRef: options.signKey,
+          env: process.env,
+        }),
+      });
+      try {
+        writeEmitManifest({
+          path: options.emitManifest,
+          yaml: manifest,
+          force: Boolean(options.force),
+        });
+      } catch (e: any) {
+        throw new Error(e.message);
+      }
+      console.log(
+        chalk.green(`     ✅ Wrote     ${options.emitManifest}`),
+      );
+      console.log();
+      console.log(
+        chalk.hex("#0078D4")(
+          `  → Commit this file and apply via your GitOps controller.`,
+        ),
+      );
+      console.log();
+      return;
+    }
+
     await patchClawSandbox({
       kubectlPath: "kubectl",
       namespace: ns,
@@ -393,7 +483,7 @@ async function runSignFlow(
       artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
     });
     console.log(chalk.green(`     ✅ Patched  spec.networkPolicy.allowlistRef`));
-    console.log(chalk.dim(`\n  Note: this slice is non-authoritative — inline allowedEndpoints remains the source of truth (see plan §S12.e).\n`));
+    console.log(chalk.dim(`\n  The controller will verify the artifact and program NetworkPolicy egress on next reconcile (S12.e authoritative mode).\n`));
   } catch (e: any) {
     console.log(chalk.red(`\n  Signing aborted: ${e.message}\n`));
     process.exitCode = 1;
