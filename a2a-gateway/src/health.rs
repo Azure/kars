@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `/healthz` and `/readyz` endpoints.
 //!
 //! - `/healthz`: liveness — process is alive and event loop is

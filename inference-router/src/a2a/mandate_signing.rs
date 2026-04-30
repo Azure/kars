@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! AP2 IntentMandate detached-JWS signing primitive.
 //!
 //! Today [`IntentMandate::signature`](super::ap2::IntentMandate) is an

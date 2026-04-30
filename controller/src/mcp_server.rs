@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `McpServer` CRD — full reconciler (Phase 2 §8 entry 1).
 //!
 //! Status: **full** as of `phase2/mcp-reconciler` (S1 of Phase 2).

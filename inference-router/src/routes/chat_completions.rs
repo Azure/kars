@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! POST /v1/chat/completions handler — extracted from
 //! `routes/inference.rs` in S15.c (Phase 2 hotspot decomposition,
 //! §4.2 file-budget enforcement).

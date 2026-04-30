@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! AP2-aware `message/send` wrapper for A2A 1.0.0 JSON-RPC dispatch.
 //!
 //! Spec context:

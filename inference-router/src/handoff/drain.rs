@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Router drain-state — "stop accepting new work, complete in-flight".
 //!
 //! Extracted from `handoff.rs` as the first step of the Phase 1 split

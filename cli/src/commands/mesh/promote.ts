@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 / S15.b: `azureclaw mesh promote` subcommand body extracted
 // from mesh.ts. Attaches as a subcommand of an existing Commander command.
 

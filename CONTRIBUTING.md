@@ -194,6 +194,19 @@ you exceed it intentionally.
 `cli/src/plugin.ts` is a known outlier (>4000 LOC) tracked separately —
 same rule applies to new TS files.
 
+### Copyright Headers
+
+Every AzureClaw-authored source file (`.rs`, `.ts`, `.tsx`, `.js`, `.sh`) **must** begin with the two-line Microsoft + MIT copyright header:
+
+```
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+```
+
+(Use `#` instead of `//` for shell scripts.) For shell scripts with a shebang, the shebang stays on line 1 and the header follows immediately on lines 2–3.
+
+The CI gate `ci/check-copyright-headers.sh` enforces this on every PR. Add the header to any new file before opening your PR. Vendored code under `vendor/` is excluded — do not add Microsoft headers there.
+
 ## Code of Conduct
 
 [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/) · [FAQ](https://opensource.microsoft.com/codeofconduct/faq/) · [opencode@microsoft.com](mailto:opencode@microsoft.com)

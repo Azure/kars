@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Inference + Foundry proxy handlers.
 
 use axum::Json;

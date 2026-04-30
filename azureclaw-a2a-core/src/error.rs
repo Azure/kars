@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A2A 1.0.0 error catalogue per spec §3.3.2 (errors).
 //!
 //! These errors are surfaced over the JSON-RPC binding using the

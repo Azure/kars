@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Vitest fixtures for operator-TUI panels tests (S14).
  */

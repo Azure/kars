@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * A2AAgent panel (S3) — list + Conditions + AgentCard publication status.
  */

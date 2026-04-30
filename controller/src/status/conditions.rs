@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Standardised K8s Condition helpers for AzureClaw CRD status subresources.
 //!
 //! **Why a helper module, not inline `json!({...})` in the reconciler.**

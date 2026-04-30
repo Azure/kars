@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Mesh connection adapter — wraps @agentmesh/sdk's `AgentMeshClient`.
  *

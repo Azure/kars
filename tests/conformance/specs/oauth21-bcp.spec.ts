@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * OAuth 2.1 (RFC 9700) BCP — Phase 1 conformance corpus.
  *

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // http_fetch AGT tool registration — extracted from plugin.ts in S15.f.8.
 
 import { routerCall } from "../router-client.js";

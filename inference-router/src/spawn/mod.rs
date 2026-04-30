@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Sandbox spawn — create/list/delete ClawSandbox sub-agents via K8s API.
 //!
 //! The agent inside a sandbox has no kubectl or CLI access. This module exposes

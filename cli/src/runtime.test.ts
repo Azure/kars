@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Tests for `runtime.ts` — the CLI's runtime-aware helpers (S10.A5).
  */

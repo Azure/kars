@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * `ClusterDataSource` — pluggable abstraction hiding whether `ClusterState`
  * comes from live Kube list-watch or a fixture used by tests.

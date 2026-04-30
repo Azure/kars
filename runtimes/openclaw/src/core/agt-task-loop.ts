@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // AGT in-process tool-calling loop — extracted from plugin.ts in S15.f.6.
 //
 // Drives a sub-agent's task execution against the inference router using the

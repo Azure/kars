@@ -29,6 +29,7 @@ jobs:
           - security-audit-required
           - vendored-patch-audit
           - a2a-module-isolation
+          - copyright-headers
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,4 +61,5 @@ jobs:
             security-audit-required)   ./ci/security-audit-required.sh ;;
             vendored-patch-audit)      ./ci/vendored-patch-audit.sh ;;
             a2a-module-isolation)      ./ci/a2a-module-isolation.sh ;;
+            copyright-headers)         ./ci/check-copyright-headers.sh ;;
           esac

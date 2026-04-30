@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! S12.d — `SignerPolicy` ConfigMap watcher.
 //!
 //! Replaces the env-var path that S12.b used (`AZURECLAW_SIGNER_FULCIO_ISSUERS`,

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Minimal axum HTTP server exposing controller metrics + health.
 //!
 //! S7.E: `:9091/metrics` (Prometheus text format) and

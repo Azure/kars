@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! POST /mcp axum route — thin wrapper around [`crate::mcp::pipeline::process_request`].
 //!
 //! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/basic/transports>

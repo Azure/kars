@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! JWS detached-content signature primitives for AgentCard signing.
 //!
 //! Implements the small subset of RFC 7515 needed to sign and verify

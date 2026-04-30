@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Requeue duration helpers with bounded random jitter.
 //!
 //! ## Why jitter?

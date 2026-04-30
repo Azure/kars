@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 S12.c — `azureclaw egress … --sign` helpers.
 //
 // Producer side of the signed-egress-allowlist supply chain. Builds a

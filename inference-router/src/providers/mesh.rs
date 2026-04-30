@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `MeshProvider` contract — **plugin-side**. No Rust implementation
 //! exists in the router and **none should**.
 //!

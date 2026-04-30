@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Pure-function compile step: `ClawMemorySpec` → binding JSON.
 //!
 //! Separated from the reconciler so it is unit-testable without a

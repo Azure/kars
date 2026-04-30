@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! ClawSandbox Custom Resource Definition.
 //!
 //! This is the Rust representation of the ClawSandbox CRD.

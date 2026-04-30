@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Prometheus exporter for the A2A gateway.
 //!
 //! Single registry; metric names are stable across releases (they

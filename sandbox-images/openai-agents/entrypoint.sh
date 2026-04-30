@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # AzureClaw OpenAI Agents Python runtime entrypoint (S10.A3 scaffolding).
 #
 # This script is the in-pod adapter's bootstrap. It sets the environment

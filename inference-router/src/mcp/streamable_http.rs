@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Streamable HTTP transport envelope per
 //! [MCP spec rev. 2025-03-26 §Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports).
 //!

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Periodic federated-credential garbage collector.
 //!
 //! ## Why

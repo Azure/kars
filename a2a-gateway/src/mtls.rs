@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Upstream mTLS to the inference-router (port 8444).
 //!
 //! Loads:

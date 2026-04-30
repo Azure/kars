@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `AuditSink` contract.
 //!
 //! Responsibility: `append(event) -> ReceiptId`. The router appends a

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Inference-router proxy hot-path bench (Phase 2 S16).
 //!
 //! Captures the proxy overhead per request — routing decision, auth-header

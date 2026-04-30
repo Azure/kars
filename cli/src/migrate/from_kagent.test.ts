@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Phase 2 S9.3 — vitest cases for the kagent → AzureClaw translator.
 //
 // Pure-helper coverage. CLI runner I/O is exercised separately via

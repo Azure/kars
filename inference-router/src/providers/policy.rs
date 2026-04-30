@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `PolicyDecisionProvider` contract.
 //!
 //! Responsibility: `decide(request) -> verdict`. A single synchronous call

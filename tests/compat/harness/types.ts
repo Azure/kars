@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Types shared by all compat specs.
  * Keep this file small — types only, no runtime code.

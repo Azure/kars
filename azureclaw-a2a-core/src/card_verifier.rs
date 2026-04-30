@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Inbound A2A AgentCard verification — the symmetric counterpart to
 //! [`card_server`](super::card_server).
 //!

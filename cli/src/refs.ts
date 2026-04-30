@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // S13 phase2-config-authority-refs:
 // `ClawSandbox.spec.inferenceRef` → sibling `InferencePolicy` CR (required).
 // `ClawSandbox.spec.governance.toolPolicyRef` → sibling `ToolPolicy` CR

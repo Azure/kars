@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `ToolPolicy` CRD — minimal scaffold per implementation-plan §7 entry 4.
 //!
 //! Status: **scaffold-only**. Compiles to AGT policy profiles via

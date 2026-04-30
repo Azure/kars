@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Regression tests for the sandbox entrypoint hardening invariants.
 // Plan item s7. Derived from the production incident on 2026-04-22 where
 // a stale sandbox image lacked the `cp ... 2>/dev/null || true` wrapping

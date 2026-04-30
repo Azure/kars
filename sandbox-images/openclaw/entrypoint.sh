@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # AzureClaw sandbox entrypoint
 # Configures OpenClaw automatically from mounted secrets and env vars.
 # The user never needs to manually configure anything.

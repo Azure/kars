@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Telemetry helpers for the inference router.
 //!
 //! Today this module hosts only the OTel GenAI Semantic Conventions

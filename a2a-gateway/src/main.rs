@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `azureclaw-a2a-gateway` binary entry-point.
 //!
 //! Wires:

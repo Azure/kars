@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * ToolPolicy panel (S2) — list + appliesTo + commerce / approval / rate-limit.
  */

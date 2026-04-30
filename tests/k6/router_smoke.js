@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // k6 smoke test — inference-router (Phase 2 S16).
 //
 // 50 VUs for 30s against /healthz and a stub upstream. Asserts:

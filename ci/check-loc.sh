@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ci/check-loc.sh — enforces internal Phase 1 plan §4.2 LOC budget.
 #
 # Fails if:

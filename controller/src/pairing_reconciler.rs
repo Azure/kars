@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Pairing reconciler — watches ClawPairing CRDs and manages lifecycle.
 //!
 //! Responsibilities:

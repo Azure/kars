@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Platform MCP server — Foundry-shim discovery surface.
 //!
 //! This module ships the **runtime-agnostic platform MCP server** mounted at

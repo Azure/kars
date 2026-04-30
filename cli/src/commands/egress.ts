@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { Command } from "commander";
 import chalk from "chalk";
 import { getAdminToken, withAdminAuth } from "../router-admin.js";

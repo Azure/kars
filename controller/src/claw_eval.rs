@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `ClawEval` CRD — Phase 2 §8 entry 6 (S6).
 //!
 //! Per `docs/implementation-plan.md` §10.5 #6, `ClawEval` is **a binding

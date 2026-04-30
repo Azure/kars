@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Entra rotation race chaos — token refresh + JWKS rotation.
 //!
 //! The router caches Workload Identity tokens (see

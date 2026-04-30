@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Background handoff orchestration — extracted from plugin.ts in S15.f.7.
 //
 // runHandoffOrchestration executes the multi-step transfer of an agent's
@@ -612,4 +615,3 @@ export async function runHandoffOrchestration(
     }
   }
 }
-

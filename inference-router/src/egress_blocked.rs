@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Bounded, rate-limited, deduplicated ring buffer of egress attempts that
 //! were *blocked* in enforce mode (S12.f). Sibling of the existing
 //! learn-mode buffer for *allowed* egress observations on `Blocklist`.

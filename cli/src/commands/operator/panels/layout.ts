@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
  * Panel registry + layout — assembles the operator-TUI dashboard from a
  * list of `Panel` modules, with optional `--panels <a,b,c>` filtering and

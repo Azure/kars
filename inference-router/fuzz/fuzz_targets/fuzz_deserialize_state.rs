@@ -1,4 +1,7 @@
 #![no_main]
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Fuzz target: handoff state deserializer.
 //!
 //! `deserialize_state` takes attacker-controlled bytes (gzip-compressed JSON

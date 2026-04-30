@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Chat ↔ Responses API body translation helpers.
 //!
 //! Extracted from `routes/inference.rs` in `phase1/hotspot-pass2-inference-split`

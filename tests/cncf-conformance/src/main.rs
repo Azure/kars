@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! `cncf-conformance` — render the CNCF K8s AI conformance report.
 //!
 //! Usage: `cargo run -p azureclaw-cncf-conformance --bin cncf-conformance`.
