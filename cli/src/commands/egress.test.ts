@@ -51,6 +51,17 @@ describe("egressCommand — --sign family wiring", () => {
     const cmd = egressCommand();
     expect(getOption(cmd, "--repository")).toBeDefined();
   });
+  it("registers --emit-manifest <path>", () => {
+    const cmd = egressCommand();
+    const opt = getOption(cmd, "--emit-manifest");
+    expect(opt).toBeDefined();
+    expect(opt?.flags).toContain("<path>");
+  });
+
+  it("registers --force", () => {
+    const cmd = egressCommand();
+    expect(getOption(cmd, "--force")).toBeDefined();
+  });
 });
 
 describe("egressCommand — --sign requires --enforce or --approve", () => {
@@ -78,5 +89,63 @@ describe("egressCommand — --sign requires --enforce or --approve", () => {
     expect(all).toMatch(/--sign requires --enforce or --approve/);
     expect(process.exitCode).toBe(1);
     process.exitCode = prevExit;
+  });
+});
+
+describe("egressCommand — S12.g default-on sign + emit-manifest guards", () => {
+  function captureLogs() {
+    const logged: string[] = [];
+    const realLog = console.log;
+    console.log = (msg?: any) => {
+      logged.push(String(msg ?? ""));
+    };
+    return {
+      logs: logged,
+      restore: () => {
+        console.log = realLog;
+      },
+    };
+  }
+
+  it("--emit-manifest without --enforce/--approve errors", async () => {
+    const cmd = egressCommand();
+    cmd.exitOverride();
+    const cap = captureLogs();
+    const prev = process.exitCode;
+    process.exitCode = 0;
+    try {
+      await cmd.parseAsync(
+        ["demo-agent", "--emit-manifest", "./out.yaml"],
+        { from: "user" },
+      );
+    } catch {
+      /* commander */
+    } finally {
+      cap.restore();
+    }
+    expect(cap.logs.join("\n")).toMatch(/--emit-manifest requires --enforce or --approve/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = prev;
+  });
+
+  it("--emit-manifest with --no-sign errors loudly", async () => {
+    const cmd = egressCommand();
+    cmd.exitOverride();
+    const cap = captureLogs();
+    const prev = process.exitCode;
+    process.exitCode = 0;
+    try {
+      await cmd.parseAsync(
+        ["demo-agent", "--enforce", "--no-sign", "--emit-manifest", "./m.yaml"],
+        { from: "user" },
+      );
+    } catch {
+      /* commander */
+    } finally {
+      cap.restore();
+    }
+    expect(cap.logs.join("\n")).toMatch(/--emit-manifest cannot be combined with --no-sign/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = prev;
   });
 });
