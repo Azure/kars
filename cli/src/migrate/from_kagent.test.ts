@@ -344,14 +344,16 @@ describe("translate: Declarative agent runnability", () => {
     ).toBe(true);
   });
 
-  it("does NOT emit InferencePolicy when modelConfig is absent", () => {
+  it("emits InferencePolicy without modelConfig annotation when modelConfig is absent (S13: ref is required)", () => {
     const noModel = {
       ...decl,
       spec: { type: "Declarative", declarative: { runtime: "python" } },
     };
     const r = translate(noModel, { image: "x" });
-    expect(r.resources.find((x) => x.kind === "InferencePolicy")).toBeUndefined();
-    expect(r.summary.inferencePolicyCount).toBe(0);
+    const ip = r.resources.find((x) => x.kind === "InferencePolicy");
+    expect(ip).toBeDefined();
+    expect(ip!.metadata.annotations?.[`${AZURECLAW_GROUP}/kagent-model-config`]).toBeUndefined();
+    expect(r.summary.inferencePolicyCount).toBe(1);
   });
 });
 
@@ -373,13 +375,16 @@ describe("translate: Tools", () => {
       ]),
       { image: "x" },
     );
-    const tps = r.resources.filter((x) => x.kind === "ToolPolicy");
+    const tps = r.resources
+      .filter((x) => x.kind === "ToolPolicy")
+      .filter((t) => (t.spec.appliesTo as { tool?: string }).tool !== undefined);
     expect(tps).toHaveLength(2);
     expect(tps.map((t) => (t.spec.appliesTo as { tool: string }).tool).sort()).toEqual(
       ["read", "write"],
     );
     // governance auto-enabled when at least one ToolPolicy is emitted.
-    expect((r.resources[0]!.spec.governance as { enabled: boolean }).enabled).toBe(
+    const sandbox = r.resources.find((x) => x.kind === "ClawSandbox")!;
+    expect((sandbox.spec.governance as { enabled: boolean }).enabled).toBe(
       true,
     );
   });
@@ -412,7 +417,9 @@ describe("translate: Tools", () => {
       withTools([{ type: "McpServer", mcpServer: { name: "fs" } }]),
       { image: "x" },
     );
-    const tps = r.resources.filter((x) => x.kind === "ToolPolicy");
+    const tps = r.resources
+      .filter((x) => x.kind === "ToolPolicy")
+      .filter((t) => (t.spec.appliesTo as { tool?: string }).tool !== undefined);
     expect(tps).toHaveLength(1);
     expect((tps[0]!.spec.appliesTo as { tool: string }).tool).toBe("*");
     expect(r.warnings.some((w) => w.message.includes("wildcard"))).toBe(true);
@@ -464,7 +471,11 @@ describe("translate: Tools", () => {
       ]),
       { image: "x" },
     );
-    expect(r.resources.filter((x) => x.kind === "ToolPolicy")).toHaveLength(1);
+    expect(
+      r.resources
+        .filter((x) => x.kind === "ToolPolicy")
+        .filter((t) => (t.spec.appliesTo as { tool?: string }).tool !== undefined),
+    ).toHaveLength(1);
   });
 
   it("warns on Tool.headersFrom and mcpServer.allowedHeaders", () => {
@@ -648,6 +659,7 @@ describe("translate: bundle ordering and JSON shape", () => {
     expect(r.resources.map((x) => x.kind)).toEqual([
       "ClawSandbox",
       "InferencePolicy",
+      "ToolPolicy",
       "ToolPolicy",
     ]);
   });

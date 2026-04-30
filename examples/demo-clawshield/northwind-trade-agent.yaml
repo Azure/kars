@@ -3,6 +3,27 @@
 # Role: Validates trade records against compliance frameworks
 # Allowed egress: Northwind APIs, trade data feeds
 
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: northwind-trade-agent-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: northwind-trade-agent
+spec:
+  appliesTo:
+    sandboxName: northwind-trade-agent
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
@@ -37,14 +58,8 @@ spec:
       - /sandbox
       - /tmp
 
-  inference:
-    provider: "foundry"
-    model: "gpt-4.1"
-    contentSafety: true
-    promptShields: true
-    tokenBudget:
-      daily: 300000
-      perRequest: 128000
+  inferenceRef:
+    name: northwind-trade-agent-inference
 
   networkPolicy:
     defaultDeny: true

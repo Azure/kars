@@ -221,7 +221,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();
-    let inference_config = spec.inference.unwrap_or_default();
+    let sandbox_self_ns = sandbox.namespace().unwrap_or_default();
     // S10.A2: runtime dispatch flows through `reconciler::runtime` —
     // a `RuntimeDeploymentPlan` flattens the `spec.runtime` discriminated
     // union to the concrete image / command / args / runtime-specific env
@@ -288,10 +288,89 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             format!("invalid sandbox.isolation: {isolation}")
         );
     }
-    if inference_config.model.is_empty() {
-        tracing::error!("ClawSandbox {name} has empty model — skipping reconciliation");
-        degrade!(SPEC_INVALID, "inference.model is empty");
+
+    // ── S13: resolve the sandbox's InferencePolicy ref ───────────────────
+    // ClawSandbox.spec.inferenceRef is the single source of truth for
+    // inference guardrails (model preference, content-safety floor,
+    // prompt-shield requirement, token budgets). The reconciler resolves
+    // the ref against the sandbox's *own* namespace; cross-namespace
+    // refs are deliberately not supported (privilege-escalation vector
+    // — see docs/crd-precedence.md). Missing ref target → Degraded with
+    // reason `InferencePolicyNotFound`; we do not fall through with
+    // defaults.
+    let inference_ref_name = spec.inference_ref.name.clone();
+    if inference_ref_name.is_empty() {
+        tracing::error!(sandbox = %name, "spec.inferenceRef.name is empty");
+        degrade!(SPEC_INVALID, "spec.inferenceRef.name is required");
     }
+    let ip_api: Api<crate::inference_policy::InferencePolicy> =
+        Api::namespaced(client.clone(), &sandbox_self_ns);
+    let inference_policy = match ip_api.get(&inference_ref_name).await {
+        Ok(ip) => ip,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            tracing::error!(
+                sandbox = %name,
+                ref = %inference_ref_name,
+                ns = %sandbox_self_ns,
+                "InferencePolicy not found in sandbox namespace",
+            );
+            degrade!(
+                crate::status::conditions::reason::INFERENCE_POLICY_NOT_FOUND,
+                format!(
+                    "InferencePolicy `{inference_ref_name}` not found in namespace \
+                     `{sandbox_self_ns}` (cross-namespace refs not supported)"
+                )
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, sandbox = %name, "InferencePolicy lookup failed");
+            return Ok(Action::requeue(Duration::from_secs(15)));
+        }
+    };
+    let inference_policy_spec = inference_policy.spec.clone();
+    // Model is required: it's plumbed into AZURE_OPENAI_DEPLOYMENT and (for
+    // OpenClaw) OPENCLAW_MODEL. Without it the agent container has no
+    // Foundry deployment to call.
+    let inference_model = inference_policy_spec
+        .model_preference
+        .as_ref()
+        .map(|mp| mp.primary.deployment.clone())
+        .unwrap_or_default();
+    if inference_model.is_empty() {
+        tracing::error!(
+            sandbox = %name,
+            ref = %inference_ref_name,
+            "InferencePolicy.modelPreference.primary.deployment is empty",
+        );
+        degrade!(
+            SPEC_INVALID,
+            format!(
+                "InferencePolicy `{inference_ref_name}` is missing \
+                 spec.modelPreference.primary.deployment"
+            )
+        );
+    }
+    // Prompt Shields default-on; opt-out via require_prompt_shields=false.
+    let prompt_shields_enabled = inference_policy_spec
+        .content_safety
+        .as_ref()
+        .and_then(|c| c.require_prompt_shields)
+        .unwrap_or(true);
+    // Content Safety always enabled at the router boundary; the policy
+    // CR's severity floors tighten the router's defaults but do not
+    // disable the feature.
+    let content_safety_enabled = true;
+    let token_budget_daily = inference_policy_spec
+        .token_budget
+        .as_ref()
+        .and_then(|b| b.daily_tokens)
+        .unwrap_or(0) as i64;
+    let token_budget_per_request = inference_policy_spec
+        .token_budget
+        .as_ref()
+        .and_then(|b| b.per_request_tokens)
+        .unwrap_or(0) as i64;
+
     if ctx.foundry_endpoint.is_empty() && ctx.openai_endpoint.is_empty() {
         tracing::error!("No inference endpoint configured");
         degrade!(
@@ -360,6 +439,52 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // overlay still relies on these.
     let governance_config = spec.governance.clone().unwrap_or_default();
     let blocklist_cm_name = format!("{}-blocklist", &name);
+
+    // ── S13: resolve the sandbox's ToolPolicy ref (if governance enabled) ─
+    // Governance == off ⇒ no ref required. Governance == on ⇒ the ref
+    // is authoritative; missing target → Degraded with reason
+    // `ToolPolicyNotFound`. The resolved CR's `metadata.name` doubles as
+    // the AGT policy profile name carried into the sandbox.
+    let tool_policy_profile: String = if governance_config.enabled {
+        let tp_ref_name = governance_config.tool_policy_ref.name.clone();
+        if tp_ref_name.is_empty() {
+            tracing::error!(sandbox = %name, "spec.governance.toolPolicyRef.name is empty");
+            degrade!(
+                SPEC_INVALID,
+                "spec.governance.toolPolicyRef.name is required when governance.enabled=true"
+            );
+        }
+        let tp_api: Api<crate::tool_policy::ToolPolicy> =
+            Api::namespaced(client.clone(), &sandbox_self_ns);
+        match tp_api.get(&tp_ref_name).await {
+            Ok(_) => tp_ref_name,
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                tracing::error!(
+                    sandbox = %name,
+                    ref = %tp_ref_name,
+                    ns = %sandbox_self_ns,
+                    "ToolPolicy not found in sandbox namespace",
+                );
+                degrade!(
+                    crate::status::conditions::reason::TOOL_POLICY_NOT_FOUND,
+                    format!(
+                        "ToolPolicy `{tp_ref_name}` not found in namespace \
+                         `{sandbox_self_ns}` (cross-namespace refs not supported)"
+                    )
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, sandbox = %name, "ToolPolicy lookup failed");
+                return Ok(Action::requeue(Duration::from_secs(15)));
+            }
+        }
+    } else {
+        // governance off ⇒ no profile is shipped. The reconciler still
+        // needs *some* string for the ConfigMap name when it's referenced;
+        // it never is in this branch (all `tool_policy_profile` reads are
+        // gated by `governance_config.enabled`).
+        String::new()
+    };
 
     // ── Step 1: Create namespace ─────────────────────────────────────────
     let ns_api: Api<Namespace> = Api::all(client.clone());
@@ -688,17 +813,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
-        // Token budget values from CRD (0 = unlimited)
-        let token_budget_daily = inference_config
-            .token_budget
-            .as_ref()
-            .and_then(|b| b.daily)
-            .unwrap_or(0);
-        let token_budget_per_request = inference_config
-            .token_budget
-            .as_ref()
-            .and_then(|b| b.per_request)
-            .unwrap_or(0);
+        // Token budget values resolved from the InferencePolicy ref above
+        // (hoisted to the top of `reconcile` after S13). 0 = unlimited.
 
         // S10.A2.b / S10.A3: OpenClaw vs non-OpenClaw branch the *agent
         // container shape*. The router sidecar, init container,
@@ -728,8 +844,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // ImagePullBackOff-style fail to start.
         let mut openclaw_env: Vec<serde_json::Value> = Vec::new();
         if is_openclaw {
-            openclaw_env
-                .push(json!({"name": "OPENCLAW_MODEL", "value": inference_config.model.clone()}));
+            openclaw_env.push(json!({"name": "OPENCLAW_MODEL", "value": inference_model.clone()}));
         }
         openclaw_env.push(json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}));
         openclaw_env.push(json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}));
@@ -805,9 +920,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-            openclaw_env.push(
-                json!({"name": "AGT_POLICY_PROFILE", "value": governance_config.tool_policy}),
-            );
+            openclaw_env
+                .push(json!({"name": "AGT_POLICY_PROFILE", "value": tool_policy_profile.clone()}));
             openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
             // Validate and propagate trusted peers (format: "name:AMID,name:AMID,...")
             let valid_peers = governance_config.trusted_peers.as_deref().filter(|p| {
@@ -835,9 +949,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
             // Router needs governance vars too (handoff auth, policy enforcement)
             router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-            router_agt_env.push(
-                json!({"name": "AGT_POLICY_PROFILE", "value": &governance_config.tool_policy}),
-            );
+            router_agt_env
+                .push(json!({"name": "AGT_POLICY_PROFILE", "value": &tool_policy_profile}));
             router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
             // Behavior-monitor burst threshold: offload workers run long
             // research loops that make many tool/inference calls in short
@@ -845,7 +958,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             // (100/60s) so legitimate research bursts aren't flagged as
             // "abuse" by the self-burst detector. Non-offload profiles keep
             // the router's built-in default.
-            if governance_config.tool_policy == "offload" {
+            if tool_policy_profile == "offload" {
                 router_agt_env
                     .push(json!({"name": "AGT_BEHAVIOR_BURST_THRESHOLD", "value": "1000"}));
             }
@@ -945,10 +1058,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint}),
             json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
             json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
-            json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_config.model}),
+            json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_model}),
             json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
-            json!({"name": "CONTENT_SAFETY_ENABLED", "value": inference_config.content_safety.to_string()}),
-            json!({"name": "PROMPT_SHIELDS_ENABLED", "value": inference_config.prompt_shields.to_string()}),
+            json!({"name": "CONTENT_SAFETY_ENABLED", "value": content_safety_enabled.to_string()}),
+            json!({"name": "PROMPT_SHIELDS_ENABLED", "value": prompt_shields_enabled.to_string()}),
             json!({"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint}),
             json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
             json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
@@ -1182,7 +1295,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         // If AGT governance is enabled, mount the policy ConfigMap into the router
         if governance_config.enabled {
-            let policy_profile = &governance_config.tool_policy;
+            let policy_profile = &tool_policy_profile;
             let cm_name = format!("agt-policy-{}", policy_profile);
 
             // Add policy volume
@@ -1399,7 +1512,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Known profiles: "default" (interactive/normal) and "offload" (leaf worker,
         // no spawn/handoff). Unknown profile names fall back to default to preserve
         // backward compatibility — the router will still load whatever YAML key we ship.
-        let policy_profile = &governance_config.tool_policy;
+        let policy_profile = &tool_policy_profile;
         let policy_yaml: &str = match policy_profile.as_str() {
             "offload" => include_str!("../../../cli/policies/azureclaw-offload.yaml"),
             _ => include_str!("../../../cli/policies/azureclaw-default.yaml"),

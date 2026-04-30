@@ -3,6 +3,27 @@
 # Role: Analyzes transaction records, generates compliance reports
 # Allowed egress: GitHub, Contoso internal APIs
 
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: contoso-bank-agent-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: contoso-bank-agent
+spec:
+  appliesTo:
+    sandboxName: contoso-bank-agent
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
@@ -37,14 +58,8 @@ spec:
       - /sandbox
       - /tmp
 
-  inference:
-    provider: "foundry"
-    model: "gpt-4.1"
-    contentSafety: true
-    promptShields: true
-    tokenBudget:
-      daily: 500000
-      perRequest: 128000
+  inferenceRef:
+    name: contoso-bank-agent-inference
 
   networkPolicy:
     defaultDeny: true
