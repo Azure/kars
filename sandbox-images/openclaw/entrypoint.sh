@@ -29,6 +29,17 @@ set -e
 if [ -z "${OPENCLAW_PLUGIN_STAGE_DIR:-}" ] && [ -d /opt/openclaw-stage ]; then
   if [ ! -d /tmp/openclaw-stage ]; then
     cp -r /opt/openclaw-stage /tmp/openclaw-stage
+    # OpenClaw writes a `.openclaw-runtime-deps.lock` sentinel inside the
+    # version-hash dir on first plugin resolve. The agent process runs as the
+    # sandbox UID (1000 in AKS, 1000 via runuser in dev), so the staged tree
+    # must be writable by that UID. cp -r preserves the source mode (a+rX)
+    # and makes the new tree owned by whoever ran cp (root in dev,
+    # sandbox in AKS), so a `chmod u+w` alone is insufficient in dev mode.
+    # In dev mode chown to sandbox; in AKS the entrypoint already runs as
+    # sandbox so cp produced sandbox-owned files and chmod -R u+w suffices.
+    if [ "$(id -u)" = "0" ]; then
+      chown -R sandbox:sandbox /tmp/openclaw-stage 2>/dev/null || true
+    fi
     chmod -R u+w /tmp/openclaw-stage 2>/dev/null || true
   fi
   export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-stage
