@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S14 — Operator TUI redesign (modular panels per CRD)
+
+- New `cli/src/commands/operator/panels/` directory: `Panel` interface,
+  `ClusterDataSource` abstraction (`KubectlDataSource` + `FixtureDataSource`),
+  registry + layout, and one panel per Phase-2 CRD.
+  - `clawsandbox`, `clawpairing` — refactored from existing operator
+    surface into the panel shape.
+  - `mcpserver` (S1) — list + Conditions + JWKS Secret presence (`<present>`/`<missing>`/`<unknown>`).
+  - `toolpolicy` (S2) — list + appliesTo + commerce / approval / rate-limit summary.
+  - `inferencepolicy` (S4) — list + budgets + guardrail floor + ordered model preference.
+  - `a2aagent` (S3) — list + Conditions + AgentCard publication status.
+  - `clawmemory` (S5) — list + Foundry binding + RBAC scope summary.
+  - `claweval` (S6) — list + lastRunAt + lastScore + nextScheduledAt.
+  - `provider_status` — Foundry, AGT, ACR pull-through, AGC ingress,
+    Identity (WI). Probes that can't observe the truth surface as
+    `unknown` with a verbatim reason — never invented data
+    (plan §0.2 #10 "verify, don't guess").
+- New `azureclaw operator` flags: `--panels <a,b,c>` (filter), `--per-sandbox`
+  (group panels vertically per sandbox-name), `--snapshot` (one-shot
+  stdout render, no TUI). Live TUI gains a Shift-P overlay for the
+  modular-panels view.
+- Secret-redaction guard (`panels/redact.ts`): every value whose key
+  matches `KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|JWKS|PRIVATE` collapses
+  to `<present>`/`<missing>`. No raw secret bytes are rendered.
+- 39 new vitest cases — one empty-cluster test per panel, layout flag
+  wiring, provider-`unknown` reason rendering, redaction. CLI test
+  total: 395 → 434 (+39).
+- Docs: `docs/operator-tui.md`, security audit
+  `docs/security-audits/2026-04-30-phase2-tui-redesign.md` (closes the
+  §15 success-gate item "Operator TUI renders all five CRDs + provider
+  status per sandbox").
+
 ### S13 `phase2-config-authority-refs` — sandbox config moves to refs
 
 **BREAKING (in-place v1alpha1 schema edit; pre-release, no conversion webhook).**

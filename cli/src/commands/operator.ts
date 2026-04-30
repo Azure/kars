@@ -47,6 +47,7 @@ import { renderHeader as _renderHeader } from "./operator/render/header.js";
 import { openSpawnDialog } from "./operator/dialogs/spawn.js";
 import { deleteSelectedAgent as _deleteSelectedAgent } from "./operator/dialogs/delete.js";
 import { connectToAgent as _connectToAgent } from "./operator/dialogs/connect.js";
+import { createPanelsOverlay } from "./operator/panels_overlay.js";
 
 // ── Command ─────────────────────────────────────────────────────────
 
@@ -58,12 +59,20 @@ export function operatorCommand(): Command {
     .option("--refresh <seconds>", "Auto-refresh interval", "10")
     .option("--context <name>", "Kubernetes context to use")
     .option("--dev", "Dev mode — discover Docker containers instead of K8s pods")
+    .option("--panels <list>", "S14 panel ids (comma-separated). Default = all.")
+    .option("--per-sandbox", "S14: group panels vertically per sandbox-name")
+    .option("--snapshot", "S14: render one snapshot to stdout and exit")
     .action(async (options) => {
       const isDevMode = !!options.dev;
-      // Dev mode: default 3s refresh (local Docker, no K8s latency)
       const defaultRefresh = isDevMode ? 3 : 10;
       const refreshInterval = (options.refresh ? parseInt(options.refresh, 10) : defaultRefresh) * 1000;
-      await startDashboard(refreshInterval, options.context, isDevMode);
+      const panelOpts = { panels: options.panels, perSandbox: !!options.perSandbox };
+      if (options.snapshot) {
+        const { runSnapshot } = await import("./operator/panels_snapshot.js");
+        await runSnapshot({ kubeContext: options.context, ...panelOpts });
+        return;
+      }
+      await startDashboard(refreshInterval, options.context, isDevMode, panelOpts);
     });
 
   return cmd;
@@ -72,7 +81,7 @@ export function operatorCommand(): Command {
 // Helper to build kubectl args with optional context
 
 
-async function startDashboard(refreshInterval: number, kubeContext?: string, devMode = false) {
+async function startDashboard(refreshInterval: number, kubeContext?: string, devMode = false, panelOpts: { panels?: string; perSandbox?: boolean } = {}) {
   // ── Resolve cluster ───────────────────────────────────────────────
   let clusterName = devMode ? "docker (dev)" : "unknown";
   if (!devMode) {
@@ -235,6 +244,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     border: { type: "line" },
     style: { border: { fg: "blue" }, fg: "white", bg: "default" },
     padding: { left: 1, right: 1 },
+  });
+
+  // S14 panels overlay (modular per-CRD dashboard) — body in panels_overlay.ts
+  const panelsOverlay = createPanelsOverlay({
+    screen,
+    kubeContext,
+    panelOpts,
+    dialogOpen: () => dialogOpen,
   });
 
   // ── State ─────────────────────────────────────────────────────────
@@ -566,6 +583,10 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   screen.key(["q", "escape"], () => {
     if (dialogOpen) return;
+    if (panelsOverlay.isOpen()) {
+      panelsOverlay.hide();
+      return;
+    }
     if (agtOverlayOpen) {
       (agtOverlay as any).hide();
       agtOverlayOpen = false;
@@ -624,6 +645,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     agtOverlayOpen = true;
     screen.render();
   });
+
+  // S14 — panels overlay (modular per-CRD dashboard)
+  screen.key(["S-p"], async () => { await panelsOverlay.toggle(); });
 
   // Egress actions
   screen.key(["a"], async () => {
