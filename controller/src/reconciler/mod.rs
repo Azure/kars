@@ -706,6 +706,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // Per-container egress restriction (agent vs. inference-router) is enforced
     // by the iptables init container below (UID-based rules), since K8s
     // NetworkPolicy has no per-container granularity.
+    //
+    // S12.e: the user-defined endpoints are resolved here via
+    // [`crate::policy_fetcher::resolve_allowlist`]. When
+    // `spec.networkPolicy.allowlistRef` is set, the controller derives
+    // endpoints from the verified canonical artifact (or the LKG cache
+    // on verify failure). When the ref is unset, the legacy inline
+    // path is used. The resolution carries the
+    // `AllowlistVerified` / `AllowlistAuthoritative` / `AllowlistDrift`
+    // conditions which are merged into the running-status patch below.
+    let allowlist_resolution = crate::policy_fetcher::resolve_allowlist(&sandbox).await;
     let np_api: Api<NetworkPolicy> = Api::namespaced(client.clone(), &sandbox_ns);
     let mut egress_rules = vec![
         // Allow DNS — target the kube-dns ClusterIP directly (works with all CNIs
@@ -747,10 +757,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     ];
 
     // Add user-defined allowed endpoints (for the inference-router to reach
-    // on behalf of the agent — agent itself can only reach localhost)
-    if let Some(ref policy) = spec.network_policy
-        && let Some(ref endpoints) = policy.allowed_endpoints
-    {
+    // on behalf of the agent — agent itself can only reach localhost).
+    // S12.e fail-closed: when `endpoints == None` (verify failed and no
+    // LKG), no user-defined egress rules are added — the sandbox is
+    // restricted to the always-allowed defaults above.
+    if let Some(endpoints) = allowlist_resolution.endpoints.as_ref() {
         for ep in endpoints {
             let port = ep.port.unwrap_or(443);
             if port != 443 {
@@ -785,6 +796,48 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             &Patch::Apply(netpol),
         )
         .await?;
+
+    // S12.e: if the allowlist resolved to fail-closed-no-LKG (verify
+    // failed on first reconcile / after controller restart, no
+    // last-known-good cached), stamp Degraded with FailedClosed and
+    // requeue. The NetworkPolicy above carries only the always-allowed
+    // baseline rules; user-defined egress is denied. We deliberately
+    // do NOT proceed to deploy the sandbox pod — running an agent
+    // whose egress policy cannot be authoritatively determined is a
+    // failure mode that should be visible to operators, not papered
+    // over.
+    if allowlist_resolution.fail_closed_no_lkg {
+        tracing::warn!(
+            sandbox = %name,
+            "AllowlistAuthoritative=False/FailedClosed: verify failed and no last-known-good; \
+             refusing to deploy sandbox pod with broad egress"
+        );
+        let sandbox_api: Api<ClawSandbox> =
+            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+        let mut status_obj = crate::status::build_degraded_status_patch(
+            &sandbox,
+            crate::status::conditions::reason::FAILED_CLOSED,
+            "egress allowlist verify failed and no last-known-good cached; \
+             refusing to broaden egress (fail-closed)",
+        );
+        // Preserve the resolution's three conditions so operators see
+        // the verify-fail reason alongside the Degraded marker.
+        if let Some(arr) = status_obj["status"]["conditions"].as_array_mut() {
+            for c in &allowlist_resolution.conditions {
+                let v = serde_json::to_value(c).unwrap_or(serde_json::Value::Null);
+                if let Some(t) = v.get("type").and_then(|t| t.as_str()) {
+                    arr.retain(|e| e.get("type").and_then(|x| x.as_str()) != Some(t));
+                }
+                arr.push(v);
+            }
+        }
+        let _ = sandbox_api
+            .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
+            .await;
+        return Ok(Action::requeue(crate::backoff::requeue_secs_with_jitter(
+            60,
+        )));
+    }
 
     // ── Step 4: Deploy sandbox pod ───────────────────────────────────────
     // Skipped wholesale in OverlayMode (Phase 2 S8): the operator's
@@ -1757,13 +1810,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .await;
         }
     } else {
-        // S12.b status-only: when the feature gate is on AND the CR
-        // carries an `allowlistRef`, drive the policy-fetcher and
-        // surface the `AllowlistVerified` Condition. With the gate off
-        // (default) this is a no-op; the fetcher itself short-circuits
-        // before any network IO.
-        let allowlist_cond = crate::policy_fetcher::maybe_verify_allowlist(&sandbox).await;
-        let extras: Vec<_> = allowlist_cond.iter().cloned().collect();
+        // S12.e: surface the AllowlistVerified / AllowlistAuthoritative
+        // / AllowlistDrift conditions computed earlier as part of the
+        // allowlist resolution. With no `allowlistRef` set, this is a
+        // single AllowlistAuthoritative=False/Inline condition (or an
+        // empty list when `networkPolicy` itself is unset). The
+        // fetcher itself short-circuits before any network IO.
+        let extras: Vec<_> = allowlist_resolution.conditions.clone();
         if !crate::status::running_status_matches_with_extras(
             &sandbox,
             &sandbox_ns,

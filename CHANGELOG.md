@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.e — Authoritative-ref mode (fail-closed)
+
+- **`AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate lifted.** Signed
+  allowlist verification is now always-on. When
+  `spec.networkPolicy.allowlistRef` is set, the verified canonical
+  artifact is **authoritative** for NetworkPolicy egress — the
+  controller derives the user-defined egress rules from the artifact,
+  not from inline `allowedEndpoints`. When the ref is unset, the legacy
+  inline path is unchanged.
+- **Fail-closed semantics with last-known-good (LKG) cache.**
+  `controller/src/policy_fetcher.rs` gains an in-process
+  per-`(namespace, sandbox)` LKG cache. On verify failure: if an LKG
+  endpoint set is present, the controller programs it (status:
+  `AllowlistAuthoritative=False/StaleLKG`); if there is no LKG, the
+  sandbox is **refused** — no user-defined egress rules are added,
+  the pod is not deployed, and the CR is stamped Degraded with
+  `FailedClosed`. The LKG is in-memory only; controller restart
+  drops it deliberately so the first post-restart reconcile of a
+  verify-failing sandbox cannot ride a stale allowlist across an
+  operator-visible event.
+- **Three new status conditions**, surfaced for every reconcile of a
+  sandbox that has either an `allowlistRef` or non-empty inline
+  `allowedEndpoints`:
+  - `AllowlistVerified` — same wire shape as S12.b (only emitted when
+    `allowlistRef` is set).
+  - `AllowlistAuthoritative` (new) — `True/Verified` |
+    `False/StaleLKG` | `False/FailedClosed` | `False/Inline`. Tells
+    operators which source the controller actually used.
+  - `AllowlistDrift` (new) — `True/InlineDiffersFromArtifact` when
+    inline `allowedEndpoints` is non-empty and disagrees with the
+    verified artifact (artifact wins; inline is ignored). Cleared via
+    a 2-reconcile `False/InlineCleared` debounce so operators see the
+    transition before the condition drops out of status.
+- **Transient errors preserve prior conditions and re-use prior LKG.**
+  A network blip cannot collapse a working sandbox.
+- **New printer column** `Allowlist` (`priority: 1`) — surfaces the
+  `AllowlistAuthoritative` status at the column level (`-o wide`).
+- New audit doc: `docs/security-audits/2026-04-30-phase2-s12-e-authoritative.md`.
+- ~16 new resolver / LKG / drift unit tests in
+  `controller/src/policy_fetcher.rs` (controller suite: 401 → 412
+  passing — net +11 after dropping 5 feature-gate-specific tests
+  whose code path no longer exists).
+- **Migration**: none. There is no installed base; the prior gate
+  (`AZURECLAW_FEATURE_SIGNED_ALLOWLIST`) defaulted off so no production
+  cluster relied on it. Operators with an `allowlistRef` set on a
+  `ClawSandbox` will see verify run on the next reconcile; either
+  publish a SignerPolicy (cluster ConfigMap or env fallback) or unset
+  the ref to keep using inline endpoints.
+
 ### S14 — Operator TUI redesign (modular panels per CRD)
 
 - New `cli/src/commands/operator/panels/` directory: `Panel` interface,

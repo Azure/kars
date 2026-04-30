@@ -448,9 +448,13 @@ spec:
                         canonical egress allowlist. Populated by
                         `azureclaw egress … --sign` (S12.c). Audit-only
                         in S12.a — controller still derives NetworkPolicy
-                        from `allowedEndpoints`. Becomes authoritative in
-                        S12.e behind the AZURECLAW_FEATURE_SIGNED_ALLOWLIST
-                        env gate. See docs/policy-canonical-format.md.
+                        from `allowedEndpoints`. **Authoritative in
+                        S12.e** (always-on, no feature gate): when set,
+                        the verified canonical artifact is the source
+                        of truth for NetworkPolicy egress; on verify
+                        failure the controller fails closed (last-known
+                        good cache fallback, then no-broad-egress).
+                        See docs/policy-canonical-format.md.
                       required:
                         - registry
                         - repository
@@ -546,6 +550,11 @@ spec:
         - name: Isolation
           type: string
           jsonPath: .spec.sandbox.isolation
+        - name: Allowlist
+          type: string
+          description: "Authoritative-allowlist condition status (S12.e)"
+          jsonPath: .status.conditions[?(@.type=="AllowlistAuthoritative")].status
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

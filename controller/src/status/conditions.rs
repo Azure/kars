@@ -70,21 +70,53 @@ pub const TYPE_SUSPENDED: &str = "Suspended";
 /// running the wrong runtime image.
 pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
 
-/// Phase 2 S12.b — `AllowlistVerified`: the controller fetched the
+/// Phase 2 S12.e — `AllowlistVerified`: the controller fetched the
 /// signed OCI artifact referenced by
 /// `spec.networkPolicy.allowlistRef`, verified its cosign signature
 /// against the cluster `SignerPolicy` (S12.d), and re-validated the
 /// canonical-form rules from `docs/policy-canonical-format.md`.
 ///
-/// Only emitted when both `allowlistRef` is set on the CR *and* the
-/// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST=1` env gate is on. Status-only in
-/// S12.b — the live `NetworkPolicy` continues to derive from inline
-/// `allowedEndpoints` until S12.e flips authoritative mode.
+/// Emitted whenever `allowlistRef` is set on the CR. The S12.b
+/// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in S12.e —
+/// the verification path is always-on once an operator opts in by
+/// populating `allowlistRef`.
 ///
 /// `status=True/Verified` means the artifact is current and trusted.
 /// `status=False/<reason>` carries the failure category — see
 /// [`super::super::policy_fetcher::reason_for_error`] for the mapping.
 pub const TYPE_ALLOWLIST_VERIFIED: &str = "AllowlistVerified";
+
+/// Phase 2 S12.e — `AllowlistAuthoritative`: the controller derived the
+/// live NetworkPolicy egress endpoints from the verified canonical
+/// artifact (`status=True`) rather than from inline `allowedEndpoints`
+/// or a stale last-known-good cache (`status=False`).
+///
+/// Reasons:
+/// - `Verified` (status=True) — current reconcile used freshly verified
+///   artifact bytes.
+/// - `Inline` (status=False) — no `allowlistRef` set; controller fell
+///   back to inline `allowedEndpoints` (the S12.b legacy path).
+/// - `StaleLKG` (status=False) — `allowlistRef` set but verify failed;
+///   controller is preserving the last-known-good endpoints from a
+///   prior successful reconcile. Pair with `AllowlistVerified=False`
+///   for the verify-failure reason.
+/// - `FailedClosed` (status=False) — `allowlistRef` set, verify failed,
+///   no LKG available (first reconcile after CR create or controller
+///   restart). The controller did **not** write user-defined egress;
+///   the sandbox is restricted to the always-allowed defaults.
+pub const TYPE_ALLOWLIST_AUTHORITATIVE: &str = "AllowlistAuthoritative";
+
+/// Phase 2 S12.e — `AllowlistDrift`: the CR has both `allowlistRef` and
+/// non-empty inline `allowedEndpoints`, and the inline list differs from
+/// the artifact-derived list. Informational — the artifact wins
+/// (authoritative); operators should clean up the inline field.
+///
+/// Reasons:
+/// - `InlineDiffersFromArtifact` (status=True) — drift observed.
+/// - `InlineCleared` (status=False) — inline was just emptied;
+///   condition kept visible briefly (≤2 reconciles) so operators see
+///   the resolution before it disappears from status.
+pub const TYPE_ALLOWLIST_DRIFT: &str = "AllowlistDrift";
 
 /// `status` canonical values.
 pub mod status {
@@ -126,6 +158,23 @@ pub mod reason {
     /// `spec.governance.toolPolicyRef.name` did not resolve to a
     /// `ToolPolicy` CR in the sandbox's namespace.
     pub const TOOL_POLICY_NOT_FOUND: &str = "ToolPolicyNotFound";
+    /// Phase 2 S12.e — `Inline`: `AllowlistAuthoritative=False` reason
+    /// for sandboxes without `allowlistRef`. Inline `allowedEndpoints`
+    /// is the (legacy) source of truth.
+    pub const INLINE: &str = "Inline";
+    /// Phase 2 S12.e — `StaleLKG`: verify failed but the controller is
+    /// preserving the last-known-good endpoints from a prior reconcile.
+    pub const STALE_LKG: &str = "StaleLKG";
+    /// Phase 2 S12.e — `FailedClosed`: verify failed and no LKG was
+    /// cached; the controller refused to write user-defined egress.
+    pub const FAILED_CLOSED: &str = "FailedClosed";
+    /// Phase 2 S12.e — `InlineDiffersFromArtifact`: drift detected
+    /// between inline `allowedEndpoints` and the verified artifact.
+    pub const INLINE_DIFFERS_FROM_ARTIFACT: &str = "InlineDiffersFromArtifact";
+    /// Phase 2 S12.e — `InlineCleared`: drift just resolved; condition
+    /// kept visible briefly so operators see the cleanup before it is
+    /// dropped from status.
+    pub const INLINE_CLEARED: &str = "InlineCleared";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
