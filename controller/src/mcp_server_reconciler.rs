@@ -1,3 +1,4 @@
+// ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
 //! McpServer reconciler — Phase 2 §8 entry 1.
 //!
 //! Watches `McpServer` CRs and, for each:
