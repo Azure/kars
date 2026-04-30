@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.f — router blocked-attempt visibility
+
+- New `inference-router/src/egress_blocked.rs` — bounded, rate-limited,
+  deduplicated ring buffer of blocked egress attempts surfaced via
+  `GET /egress/learned/blocked`.
+- Wired into the forward-proxy deny branches (`handle_connect`,
+  `handle_http`, `handle_tls_redirect` — including the SNI-blocked,
+  ECH-rejected, and DNS-rebind-blocked paths); emits
+  `(source_sandbox, host, port)` on every block.
+- Defaults: capacity 1024 entries, rate limit 100 events / 60 s sliding
+  window per source. Hostname-only (no paths, no headers, no payload data).
+  IPs rejected. Empty hosts rejected. Trailing dots stripped, lowercased.
+- Sibling of the existing `/egress/learned` allowed-observations buffer;
+  mirrors its admin-token RBAC via the existing `protected` router layer
+  in `main.rs` — no new auth path introduced.
+- 14 new unit tests (`src/egress_blocked.rs`) + 2 endpoint integration
+  tests (`tests/egress_blocked_endpoint.rs`).
+
 ### S12.b `phase2-s12-bd-policy-fetcher` — controller policy fetcher (status-only, feature-gated)
 
 - New `controller/src/policy_fetcher.rs` — pulls signed OCI egress-allowlist
