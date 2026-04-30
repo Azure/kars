@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Phase 2
 
+### S12.d — SignerPolicy ConfigMap (Fulcio issuer + SAN allowlist)
+
+- New `controller/src/signer_policy.rs` — cluster-scoped
+  `azureclaw-signer-policy` ConfigMap watcher (filtered by name +
+  controller-namespace). Parses `data.fulcioIssuers` /
+  `data.sanPatterns` (newline-separated, `#` comments stripped) into a
+  `SharedSignerPolicy` handle that the policy fetcher consults on every
+  reconcile. Atomic rebuild on watch-restart; absent → env-fallback,
+  malformed → fail-closed surface.
+- New `FetchError::SignerPolicyMalformed(String)` variant in
+  `controller/src/policy_fetcher.rs`; `reason_for_error` maps to
+  `"SignerPolicyMalformed"`. Reconciler now emits
+  `AllowlistVerified=False/SignerPolicyMalformed` on affected
+  `ClawSandbox` resources when the cluster ConfigMap fails to parse —
+  distinct from `SignerPolicyMissing` so operators can disambiguate
+  "I never installed one" from "the one I installed is broken".
+- `policy_fetcher::maybe_verify_allowlist` rewired to consult a
+  process-global `SharedSignerPolicy` handle; a new
+  `maybe_verify_allowlist_with_handle` variant takes an injected
+  handle for unit-test cleanliness. Resolution order:
+  ConfigMap-configured → use it; ConfigMap-malformed →
+  `SignerPolicyMalformed` (no env fallback); ConfigMap-absent →
+  fall back to env (`AZURECLAW_SIGNER_FULCIO_ISSUERS` /
+  `AZURECLAW_SIGNER_SAN_PATTERNS` — emergency-override path).
+- New Helm template `deploy/helm/azureclaw/templates/signer-policy-configmap.yaml`
+  with `signerPolicy.enabled` (default `true`), `signerPolicy.fulcioIssuers`
+  (defaults: GitHub Actions OIDC + Entra workload-identity placeholder),
+  `signerPolicy.sanPatterns` (default: repo-scoped CI workflow SAN).
+  Set `enabled: false` to opt into the env-var emergency-override path.
+- Controller Deployment now wires `POD_NAMESPACE` + `POD_NAME` via the
+  downward API (previously only relied on by leader-election with a
+  hard-coded fallback; now the authoritative source for both
+  consumers).
+- RBAC unchanged: the controller `ClusterRole` already grants
+  `get/list/watch` on `configmaps`. The new watcher fits within the
+  existing rule; no broadening introduced. (A future least-privilege
+  pass could narrow this to a namespace-scoped Role on
+  `azureclaw-system`.)
+- 18 new unit tests; controller test count 383 → 401. Workspace green;
+  clippy clean; `cargo fmt` clean; `helm lint` clean.
+
 ### S12.f — router blocked-attempt visibility
 
 - New `inference-router/src/egress_blocked.rs` — bounded, rate-limited,

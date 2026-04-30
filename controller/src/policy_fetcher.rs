@@ -23,14 +23,17 @@
 //! `AllowlistVerified` Condition is emitted and existing deployments
 //! observe **no** behavior change.
 //!
-//! ## SignerPolicy is S12.d
+//! ## SignerPolicy — S12.d (landed)
 //!
-//! S12.b ships without a `SignerPolicy` ConfigMap watcher; the policy is
-//! provisionally read from the env vars
-//! `AZURECLAW_SIGNER_FULCIO_ISSUERS` and `AZURECLAW_SIGNER_SAN_PATTERNS`
-//! (both comma-separated). When unset the verifier returns
-//! [`FetchError::SignerPolicyMissing`] — that is the intended fail-closed
-//! behavior until the cluster operator provisions a SignerPolicy.
+//! The cluster `SignerPolicy` is now sourced from the watched
+//! `azureclaw-signer-policy` ConfigMap in the controller namespace
+//! (see [`crate::signer_policy`]). The env vars
+//! `AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`
+//! remain as an emergency-override fallback that activates only when
+//! the ConfigMap is absent. A *malformed* ConfigMap surfaces as
+//! [`FetchError::SignerPolicyMalformed`] and does **not** silently
+//! fall back — operators get a hard signal on every affected
+//! `ClawSandbox`.
 //!
 //! ## ACR auth via Workload Identity
 //!
@@ -87,6 +90,12 @@ pub enum FetchError {
     FeatureDisabled,
     #[error("SignerPolicy is not configured for this cluster")]
     SignerPolicyMissing,
+    /// S12.d — `SignerPolicy` ConfigMap was present but failed to
+    /// parse. Distinct from [`Self::SignerPolicyMissing`] so operators
+    /// can disambiguate "I never installed one" from "the one I
+    /// installed is broken — fix it before trusting any allowlist".
+    #[error("SignerPolicy ConfigMap is malformed: {0}")]
+    SignerPolicyMalformed(String),
     #[error("invalid artifact reference: {0}")]
     InvalidRef(String),
     #[error("OCI registry auth failed: {0}")]
@@ -112,6 +121,7 @@ pub fn reason_for_error(err: &FetchError) -> Option<&'static str> {
     match err {
         FetchError::FeatureDisabled => None,
         FetchError::SignerPolicyMissing => Some("SignerPolicyMissing"),
+        FetchError::SignerPolicyMalformed(_) => Some("SignerPolicyMalformed"),
         FetchError::InvalidRef(_) => Some("InvalidRef"),
         FetchError::Unauthorized(_) => Some("Unauthorized"),
         FetchError::NotFound(_) => Some("NotFound"),
@@ -180,6 +190,15 @@ impl SignerPolicyConfig {
     /// that issuer), so we require both.
     pub fn is_configured(&self) -> bool {
         !self.fulcio_issuers.is_empty() && !self.san_patterns.is_empty()
+    }
+}
+
+impl From<crate::signer_policy::SignerPolicy> for SignerPolicyConfig {
+    fn from(s: crate::signer_policy::SignerPolicy) -> Self {
+        Self {
+            fulcio_issuers: s.fulcio_issuers,
+            san_patterns: s.san_patterns,
+        }
     }
 }
 
@@ -917,6 +936,28 @@ pub mod canonical {
 pub async fn maybe_verify_allowlist(
     sandbox: &crate::crd::ClawSandbox,
 ) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    maybe_verify_allowlist_with_handle(sandbox, &crate::signer_policy::global()).await
+}
+
+/// Test-friendly variant: callers can inject a
+/// [`crate::signer_policy::SharedSignerPolicy`] in any state without
+/// spinning up the watcher. Production code uses
+/// [`maybe_verify_allowlist`], which reads the process-global handle.
+///
+/// Resolution order:
+/// 1. `FromConfigMap(p)` → use `p`. If both lists empty (defensive —
+///    parser already rejects this), surface `SignerPolicyMissing`.
+/// 2. `Malformed(msg)` → surface `SignerPolicyMalformed(msg)`. **No**
+///    env-var fallback — a broken cluster config is an operator
+///    signal, not a reason to silently trust the (possibly stale) env.
+/// 3. `Absent` → fall back to env vars
+///    (`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`).
+///    Empty env → `SignerPolicyMissing` (existing S12.b semantics).
+pub async fn maybe_verify_allowlist_with_handle(
+    sandbox: &crate::crd::ClawSandbox,
+    signer_policy_handle: &crate::signer_policy::SharedSignerPolicy,
+) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    use crate::signer_policy::SignerPolicyState;
     use crate::status::conditions::{
         TYPE_ALLOWLIST_VERIFIED, preserve_transition_time, reason as cond_reason,
         status as cond_status,
@@ -930,7 +971,6 @@ pub async fn maybe_verify_allowlist(
         .as_ref()
         .and_then(|np| np.allowlist_ref.as_ref())?;
 
-    let policy = SignerPolicyConfig::from_env();
     let prior = sandbox.status.as_ref().and_then(|s| {
         s.conditions
             .iter()
@@ -938,7 +978,21 @@ pub async fn maybe_verify_allowlist(
     });
     let generation = sandbox.metadata.generation;
 
-    match fetch_and_verify(artifact_ref, &policy).await {
+    // Resolve the live SignerPolicy. ConfigMap wins; malformed is a
+    // hard error path; absent → env fallback.
+    let result: Result<VerifiedAllowlist, FetchError> = match signer_policy_handle.snapshot() {
+        SignerPolicyState::FromConfigMap(p) => {
+            let cfg: SignerPolicyConfig = p.into();
+            fetch_and_verify(artifact_ref, &cfg).await
+        }
+        SignerPolicyState::Malformed(msg) => Err(FetchError::SignerPolicyMalformed(msg)),
+        SignerPolicyState::Absent => {
+            let cfg = SignerPolicyConfig::from_env();
+            fetch_and_verify(artifact_ref, &cfg).await
+        }
+    };
+
+    match result {
         Ok(verified) => {
             tracing::info!(
                 digest = %verified.digest,
@@ -1291,6 +1345,10 @@ mod tests {
             Some("SignerPolicyMissing")
         );
         assert_eq!(
+            reason_for_error(&FetchError::SignerPolicyMalformed("x".into())),
+            Some("SignerPolicyMalformed")
+        );
+        assert_eq!(
             reason_for_error(&FetchError::Unauthorized("x".into())),
             Some("Unauthorized")
         );
@@ -1402,5 +1460,140 @@ mod tests {
         assert!(
             matches!(err, FetchError::Unauthorized(ref m) if m.contains("AZURE_FEDERATED_TOKEN_FILE"))
         );
+    }
+
+    // ─────── S12.d: SharedSignerPolicy resolution in maybe_verify_allowlist ───────
+    //
+    // These tests exercise the new `_with_handle` variant directly so
+    // they don't touch the OnceLock global (parallel-test safe). Each
+    // case constructs a `ClawSandbox` carrying an `allowlistRef` + an
+    // injected handle in a specific [`SignerPolicyState`], asserts on
+    // the resulting `Condition.reason`. Network IO never executes
+    // because we either short-circuit on policy state (Malformed) or
+    // we use an obviously-fake registry that the cosign client will
+    // refuse before any DNS lookup; the assertion only inspects the
+    // mapped reason.
+
+    use crate::crd::{ClawSandbox, ClawSandboxSpec, NetworkPolicyConfig};
+    use crate::signer_policy::{
+        SharedSignerPolicy, SignerPolicy as ParsedSignerPolicy, SignerPolicyState,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn sandbox_with_allowlist_ref() -> ClawSandbox {
+        ClawSandbox {
+            metadata: ObjectMeta {
+                name: Some("demo".into()),
+                namespace: Some("azureclaw-demo".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: ClawSandboxSpec {
+                network_policy: Some(NetworkPolicyConfig {
+                    allowlist_ref: Some(good_ref()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            status: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn with_handle_returns_none_when_feature_gate_off() {
+        let _g = env_lock().lock().unwrap();
+        let _e = EnvGuard::unset(FEATURE_ENV);
+        let sb = sandbox_with_allowlist_ref();
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        assert!(
+            maybe_verify_allowlist_with_handle(&sb, &h).await.is_none(),
+            "feature off → no condition emitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_handle_malformed_emits_signer_policy_malformed_condition() {
+        let _g = env_lock().lock().unwrap();
+        let _e = EnvGuard::set(FEATURE_ENV, "1");
+        let sb = sandbox_with_allowlist_ref();
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Malformed(
+            "missing required key `fulcioIssuers`".into(),
+        ));
+        let cond = maybe_verify_allowlist_with_handle(&sb, &h)
+            .await
+            .expect("condition emitted");
+        assert_eq!(cond.type_, "AllowlistVerified");
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "SignerPolicyMalformed");
+        assert!(
+            cond.message.contains("missing required key"),
+            "message preserves parse-error detail: {cond:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_handle_malformed_does_not_fall_back_to_env() {
+        // Critical safety property: even with a fully-configured env
+        // emergency-override, a malformed ConfigMap MUST surface as
+        // SignerPolicyMalformed — operators need the signal that
+        // their cluster config is broken.
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
+        let _e2 = EnvGuard::set(SIGNER_FULCIO_ISSUERS_ENV, "https://issuer.example");
+        let _e3 = EnvGuard::set(SIGNER_SAN_PATTERNS_ENV, "signer@example.com");
+        let sb = sandbox_with_allowlist_ref();
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Malformed("broken yaml".into()));
+        let cond = maybe_verify_allowlist_with_handle(&sb, &h)
+            .await
+            .expect("condition emitted");
+        assert_eq!(cond.reason, "SignerPolicyMalformed");
+    }
+
+    #[tokio::test]
+    async fn with_handle_absent_falls_back_to_env_missing() {
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
+        let _e2 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e3 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        let sb = sandbox_with_allowlist_ref();
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let cond = maybe_verify_allowlist_with_handle(&sb, &h)
+            .await
+            .expect("condition emitted");
+        assert_eq!(cond.reason, "SignerPolicyMissing");
+    }
+
+    #[tokio::test]
+    async fn with_handle_configmap_takes_precedence_over_env() {
+        // ConfigMap configured → env vars MUST be ignored. (Otherwise
+        // operators couldn't roll out a stricter policy without
+        // simultaneously unsetting potentially-stale env vars on
+        // every replica.)
+        let _g = env_lock().lock().unwrap();
+        let _e1 = EnvGuard::set(FEATURE_ENV, "1");
+        let _e2 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
+        let _e3 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
+        let sb = sandbox_with_allowlist_ref();
+        let h =
+            SharedSignerPolicy::from_state(SignerPolicyState::FromConfigMap(ParsedSignerPolicy {
+                fulcio_issuers: vec!["https://token.actions.githubusercontent.com".into()],
+                san_patterns: vec!["signer@example.com".into()],
+            }));
+        // ConfigMap is configured so we proceed past the policy gate;
+        // the next failure mode is whatever sigstore does with our
+        // fake registry — which is `SignatureVerifyFailed` /
+        // `Unauthorized` / `NotFound` / `Transient`. The key
+        // assertion is that we did NOT exit at SignerPolicyMissing.
+        let cond_opt = maybe_verify_allowlist_with_handle(&sb, &h).await;
+        if let Some(cond) = cond_opt {
+            assert_ne!(
+                cond.reason, "SignerPolicyMissing",
+                "ConfigMap was configured; must not fall back to env-missing path"
+            );
+            assert_ne!(cond.reason, "SignerPolicyMalformed");
+        }
+        // None is also acceptable (Transient → preserve prior, no
+        // prior → None). The forbidden outcome is a missing/malformed
+        // reason, which we asserted above.
     }
 }
