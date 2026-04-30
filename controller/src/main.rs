@@ -43,6 +43,7 @@ mod pairing_reconciler;
 mod policy_fetcher;
 mod providers;
 mod reconciler;
+mod signer_policy;
 mod status;
 #[allow(dead_code)] // helpers consumed by tool_policy_reconciler + future slices.
 mod tool_policy;
@@ -169,6 +170,29 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { claw_eval_reconciler::run(client).await })
     };
+
+    // S12.d: SignerPolicy ConfigMap watcher. Installs a process-global
+    // handle so `policy_fetcher::maybe_verify_allowlist` resolves
+    // identity-pinning policy from the live cluster ConfigMap. Falls
+    // back to env vars (`AZURECLAW_SIGNER_*`) when the ConfigMap is
+    // absent — that's the emergency-override path. Malformed
+    // ConfigMaps surface as `SignerPolicyMalformed` and **do not**
+    // silently fall back to env (operator must fix the cluster
+    // config). Watcher is namespace-scoped to the controller's own
+    // namespace + filtered to the singleton object name, so RBAC stays
+    // narrow.
+    let signer_policy_handle = signer_policy::SharedSignerPolicy::new();
+    signer_policy::install_global(signer_policy_handle.clone());
+    let signer_policy_watcher_handle = {
+        let client = client.clone();
+        let shared = signer_policy_handle.clone();
+        let ns = std::env::var("POD_NAMESPACE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "azureclaw-system".to_string());
+        tokio::spawn(async move { signer_policy::run(client, ns, shared).await })
+    };
+
     let mesh_peer_handle = {
         let client = client.clone();
         tokio::spawn(async move {
@@ -287,6 +311,13 @@ async fn main() -> Result<()> {
             res??;
         }
         res = fedcred_reaper_handle => {
+            res??;
+        }
+        res = signer_policy_watcher_handle => {
+            // SignerPolicy watcher exiting is non-fatal but we
+            // propagate so the controller restarts and re-establishes
+            // the watch — avoids serving stale policy state forever
+            // after a transient kube-apiserver blip.
             res??;
         }
     }
