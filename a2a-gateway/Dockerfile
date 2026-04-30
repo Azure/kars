@@ -43,7 +43,9 @@ COPY a2a-gateway/src a2a-gateway/src
 COPY a2a-gateway/testdata a2a-gateway/testdata
 COPY azureclaw-a2a-core/src azureclaw-a2a-core/src
 COPY inference-router/src inference-router/src
+COPY inference-router/benches inference-router/benches
 COPY controller/src controller/src
+COPY controller/benches controller/benches
 COPY tests/chaos/src tests/chaos/src
 COPY tests/cncf-conformance/src tests/cncf-conformance/src
 
