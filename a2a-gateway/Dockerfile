@@ -33,6 +33,8 @@ COPY a2a-gateway/Cargo.toml a2a-gateway/Cargo.toml
 COPY azureclaw-a2a-core/Cargo.toml azureclaw-a2a-core/Cargo.toml
 COPY inference-router/Cargo.toml inference-router/Cargo.toml
 COPY controller/Cargo.toml controller/Cargo.toml
+COPY tests/chaos/Cargo.toml tests/chaos/Cargo.toml
+COPY tests/cncf-conformance/Cargo.toml tests/cncf-conformance/Cargo.toml
 
 # Source. Workspace-wide copy is wasteful but keeps the image build
 # context honest with the workspace shape (cargo refuses to build a
@@ -41,7 +43,11 @@ COPY a2a-gateway/src a2a-gateway/src
 COPY a2a-gateway/testdata a2a-gateway/testdata
 COPY azureclaw-a2a-core/src azureclaw-a2a-core/src
 COPY inference-router/src inference-router/src
+COPY inference-router/benches inference-router/benches
 COPY controller/src controller/src
+COPY controller/benches controller/benches
+COPY tests/chaos/src tests/chaos/src
+COPY tests/cncf-conformance/src tests/cncf-conformance/src
 
 RUN cargo build \
         --release \
