@@ -23,4 +23,4 @@
 ---
 
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
-Signed-off-by: Microsoft OSPO
+Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
