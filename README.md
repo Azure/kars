@@ -576,6 +576,10 @@ make images   # Docker images
 
 ---
 
+## Third-Party Notices
+
+AzureClaw bundles four vendored upstream packages under `vendor/`. Full license texts, copyright notices, and a summary of local patches applied to each are in [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt).
+
 ## License
 
 [MIT](LICENSE) · [Code of Conduct](CODE_OF_CONDUCT.md)
