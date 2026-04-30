@@ -1,0 +1,9 @@
+{
+  "_comment": "S16 — controller reconcile-decision criterion baseline. Captured 2026-04-30 (workspace local + ubuntu-latest hosted runner, x86_64, 4 vCPU). CI's Bench Regression job fails the PR if median exceeds baseline * 1.25. Refresh via `cargo bench --bench reconciler_bench -- --save-baseline dev` and copy the criterion-reported medians.",
+  "_threshold_pct": 25,
+  "groups": {
+    "reconcile_decision/n=0": { "median_ns": 2 },
+    "reconcile_decision/n=100": { "median_ns": 3185 },
+    "reconcile_decision/n=1000": { "median_ns": 37488 }
+  }
+}

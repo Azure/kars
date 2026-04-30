@@ -1,0 +1,39 @@
+[package]
+name = "azureclaw-chaos-tests"
+description = "Phase 2 S16 — fault-injection chaos tier (K8s API flakes, Foundry 429 storms, Entra rotation, AGT relay timeouts)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Empty library — this crate is only a host for integration tests under `tests/`.
+# A `lib.rs` is required so the `[[test]]` targets can compile against this
+# crate's feature set.
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Tests are gated behind the `chaos` feature so default `cargo test --all` is
+# not slowed down. Run with `cargo test --workspace --features chaos`.
+default = []
+chaos = []
+
+[dependencies]
+# All deps are optional-feel: only used when `chaos` is enabled, but Cargo
+# requires them at the crate level. They are small and dev-only — this crate
+# is `publish = false` and never linked into the binaries.
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+hyper = { workspace = true }
+bytes = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"

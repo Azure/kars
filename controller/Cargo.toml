@@ -59,3 +59,20 @@ axum = "0.8"
 sigstore = { version = "0.13", default-features = false, features = ["cosign", "verify", "rustls-tls"] }
 oci-client = { version = "0.16", default-features = false, features = ["rustls-tls"] }
 idna = "1"
+
+[features]
+# S16 — chaos tier. Default `cargo test` does NOT enable this feature; the
+# chaos tier compiles only under `cargo test --workspace --features chaos` to
+# keep PR CI fast. The flag itself is empty: feature-gating happens inside
+# the `tests/chaos/` crate, this declaration just lets `--workspace
+# --features chaos` succeed against this crate.
+chaos = []
+
+[dev-dependencies]
+# S16 — perf baseline criterion benches. See `controller/benches/`.
+criterion = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "reconciler_bench"
+harness = false
