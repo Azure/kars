@@ -308,10 +308,11 @@ async fn agt_registry_proxy(
         "registry/capabilities",
         "registry/revocations/bulk",
     ];
-    let is_idempotent =
-        method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    let is_idempotent = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
     let post_retry = method == axum::http::Method::POST
-        && POST_RETRY_PATHS.iter().any(|p| path == *p || path.starts_with(&format!("{}?", p)));
+        && POST_RETRY_PATHS
+            .iter()
+            .any(|p| path == *p || path.starts_with(&format!("{}?", p)));
     let retry_allowed = is_idempotent || post_retry;
     let max_attempts: u32 = if retry_allowed { 3 } else { 1 };
     let total_budget = std::time::Duration::from_millis(2000);
@@ -323,8 +324,7 @@ async fn agt_registry_proxy(
 
     for attempt in 1..=max_attempts {
         let mut req = state.client.request(
-            reqwest::Method::from_bytes(method.as_str().as_bytes())
-                .unwrap_or(reqwest::Method::GET),
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
             &url,
         );
         if let Some(ct) = headers.get("content-type") {
@@ -336,8 +336,8 @@ async fn agt_registry_proxy(
 
         match req.timeout(std::time::Duration::from_secs(10)).send().await {
             Ok(resp) => {
-                let status = StatusCode::from_u16(resp.status().as_u16())
-                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let status =
+                    StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let resp_body = resp.bytes().await.unwrap_or_default();
 
                 let should_retry = retry_allowed
@@ -387,9 +387,8 @@ async fn agt_registry_proxy(
                     .into_response();
             }
             Err(e) => {
-                let should_retry = retry_allowed
-                    && attempt < max_attempts
-                    && started_at.elapsed() < total_budget;
+                let should_retry =
+                    retry_allowed && attempt < max_attempts && started_at.elapsed() < total_budget;
                 if should_retry {
                     let wait = std::time::Duration::from_millis(
                         100u64.saturating_mul(1u64 << (attempt - 1)),
