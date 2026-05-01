@@ -15,7 +15,7 @@
 
 import type { AgtInboxEntry } from "./agt-handoff.js";
 import { TASK_TOOLS } from "./agt-task-tools.js";
-import { resolveAmidByName } from "./amid-cache.js";
+import { resolveAmidByName, getStaleAmid } from "./amid-cache.js";
 import { sanitizeLog } from "./log-redact.js";
 import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
@@ -441,10 +441,27 @@ export async function processTaskWithTools(
                 log.info(`AGT sub-agent mesh_send: resolved AMID for '${toAgent}' (${targetAmid.slice(0, 12)}...)`);
               }
 
-              for (let attempt = 1; attempt < 8 && !targetAmid; attempt++) {
-                log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt}/7)...`);
-                await new Promise(r => setTimeout(r, 2000));
+              // F7: Exponential backoff (1s..10s, ~50s total budget) instead of
+              // 7 × 2s = 14s flat. Registry 502 bursts can outlast 14s; with
+              // backoff we keep the upper bound bounded but give registry time
+              // to recover.
+              const F7_BACKOFFS_MS = [1000, 1500, 2000, 3000, 4500, 6500, 8000, 10000, 10000, 10000, 10000];
+              for (let attempt = 0; attempt < F7_BACKOFFS_MS.length && !targetAmid; attempt++) {
+                log.info(`AGT sub-agent mesh_send: waiting for '${toAgent}' to register (${attempt + 1}/${F7_BACKOFFS_MS.length})...`);
+                await new Promise(r => setTimeout(r, F7_BACKOFFS_MS[attempt]));
                 targetAmid = await resolveAmidByName(toAgent, routerUrl, { bypassCache: true });
+              }
+
+              // F7: Last-known-good fallback. If registry retries exhausted but
+              // we previously knew this peer's AMID, try it — the meshClient.send
+              // will fail fast if the peer is genuinely dead, and we surface that
+              // error. Better than dropping a real send during a registry blip.
+              if (!targetAmid) {
+                const stale = getStaleAmid(toAgent);
+                if (stale) {
+                  log.warn(`AGT sub-agent mesh_send: registry exhausted for '${toAgent}' — falling back to last-known-good AMID (${stale.slice(0, 12)}...)`);
+                  targetAmid = stale;
+                }
               }
 
               const meshClient = deps.meshClient();
@@ -540,10 +557,20 @@ export async function processTaskWithTools(
                     const fileName = path.basename(resolvedPath);
 
                     let targetAmid = await resolveAmidByName(toAgent, routerUrl);
-                    for (let attempt = 1; attempt < 8 && !targetAmid; attempt++) {
-                      log.info(`AGT sub-agent mesh_transfer_file: waiting for '${toAgent}' to register (${attempt}/7)...`);
-                      await new Promise(r => setTimeout(r, 2000));
+                    // F7: Exponential backoff + last-known-good fallback (see
+                    // mesh_send branch above for rationale).
+                    const F7_BACKOFFS_MS = [1000, 1500, 2000, 3000, 4500, 6500, 8000, 10000, 10000, 10000, 10000];
+                    for (let attempt = 0; attempt < F7_BACKOFFS_MS.length && !targetAmid; attempt++) {
+                      log.info(`AGT sub-agent mesh_transfer_file: waiting for '${toAgent}' to register (${attempt + 1}/${F7_BACKOFFS_MS.length})...`);
+                      await new Promise(r => setTimeout(r, F7_BACKOFFS_MS[attempt]));
                       targetAmid = await resolveAmidByName(toAgent, routerUrl, { bypassCache: true });
+                    }
+                    if (!targetAmid) {
+                      const stale = getStaleAmid(toAgent);
+                      if (stale) {
+                        log.warn(`AGT sub-agent mesh_transfer_file: registry exhausted for '${toAgent}' — falling back to last-known-good AMID (${stale.slice(0, 12)}...)`);
+                        targetAmid = stale;
+                      }
                     }
 
                     const meshClient = deps.meshClient();
