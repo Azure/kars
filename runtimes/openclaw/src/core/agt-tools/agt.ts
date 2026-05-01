@@ -95,7 +95,7 @@ export interface AgtToolsDeps {
    * transfer ack handler). Index sites that do `agtInbox.splice(...)`
    * bypass `pushInbox` so counters would otherwise drift.
    */
-  notifyConsumed?: (kind: "send_wait" | "protocol_drain", count: number) => void;
+  notifyConsumed?: (kind: "send_wait" | "protocol_drain" | "progress_drain", count: number) => void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   meshClient: () => any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -487,28 +487,42 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // To recover from rolling deploys (parent's cached/registered AMID is for
           // the previous pod incarnation), we retry ONCE on reply timeout: clear
           // the cache, re-resolve, and if the AMID actually changed, resend.
-          const waitMaxMs = 60_000; // 60 seconds — prevents blocking the agent loop too long
-          const pollIntervalMs = 500; // 500ms — fast polling for responsive feel
+          //
+          // Heartbeat-aware timeout (added 2026-04-30 fix-pass F6): the
+          // sub-agent emits periodic `task_progress` pings while running its
+          // in-process LLM tool-loop (see `index.ts` task_request handler +
+          // `core/agt-heartbeat.ts::startTaskProgressHeartbeat`). Each
+          // progress drain resets the idle clock so long-running tool
+          // sequences no longer time out at a fixed 60s. A hard ceiling
+          // bounds the total wait absolutely — even continuous heartbeats
+          // cannot keep a stuck tool call running forever.
+          const idleTimeoutMs = 60_000;       // reset on each task_progress
+          const hardCeilingMs = 600_000;      // absolute upper bound (10 min)
+          const pollIntervalMs = 500;
           let replyContent: string | null = null;
           let retriedAfterTimeout = false;
+          const overallStart = Date.now();
 
           // eslint-disable-next-line no-constant-condition
           while (true) {
-            const replyWaitStart = Date.now();
-            log.info(`AGT relay: waiting up to ${waitMaxMs / 1000}s for reply from '${agentName}'...`);
+            let replyWaitStart = Date.now();
+            log.info(`AGT relay: waiting up to ${idleTimeoutMs / 1000}s idle / ${hardCeilingMs / 1000}s total for reply from '${agentName}'...`);
 
-            while (Date.now() - replyWaitStart < waitMaxMs) {
+            while (
+              Date.now() - replyWaitStart < idleTimeoutMs &&
+              Date.now() - overallStart < hardCeilingMs
+            ) {
               // Check inbox for a reply from this target, skipping protocol messages
               const replyIdx = agtInbox.findIndex((m) => {
                 if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
-                // Skip Signal Protocol handshake messages (ACCEPT, KNOCK, KEY_EXCHANGE)
+                // Skip Signal Protocol handshake + heartbeat messages
                 const mt = m.message_type || "";
-                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE") return false;
+                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE" || mt === "task_progress") return false;
                 // Also check content for JSON protocol messages
                 if (typeof m.content === "string") {
                   try {
                     const parsed = JSON.parse(m.content);
-                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE") return false;
+                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE" || parsed.type === "task_progress") return false;
                   } catch { /* not JSON, treat as real content */ }
                 }
                 return true;
@@ -519,7 +533,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 replyContent = typeof reply.content === "string"
                   ? reply.content
                   : JSON.stringify(reply.content);
-                log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - replyWaitStart) / 1000).toFixed(1)}s`);
+                log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - overallStart) / 1000).toFixed(1)}s`);
                 break;
               }
               // Drain protocol messages to keep inbox clean
@@ -533,6 +547,46 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 }
               }
               if (drained > 0) deps.notifyConsumed?.("protocol_drain", drained);
+
+              // Drain task_progress heartbeats and reset the idle clock for
+              // every one we see — sub-agent is signalling "still working".
+              let progressDrained = 0;
+              let lastProgressStage: string | undefined;
+              let lastProgressElapsed: number | undefined;
+              for (let i = agtInbox.length - 1; i >= 0; i--) {
+                const m = agtInbox[i];
+                if (m.from_amid !== targetAmid && m.from_agent !== agentName) continue;
+                let isProgress = m.message_type === "task_progress";
+                let parsed: any = null;
+                if (typeof m.content === "string") {
+                  try {
+                    parsed = JSON.parse(m.content);
+                    if (parsed?.type === "task_progress") isProgress = true;
+                  } catch { /* not JSON */ }
+                } else if (typeof m.content === "object" && m.content !== null) {
+                  parsed = m.content;
+                  if (parsed?.type === "task_progress") isProgress = true;
+                }
+                if (!isProgress) continue;
+                if (parsed) {
+                  lastProgressStage = String(parsed.stage ?? "");
+                  if (typeof parsed.elapsed_seconds === "number") {
+                    lastProgressElapsed = parsed.elapsed_seconds;
+                  }
+                }
+                agtInbox.splice(i, 1);
+                progressDrained++;
+              }
+              if (progressDrained > 0) {
+                deps.notifyConsumed?.("progress_drain", progressDrained);
+                replyWaitStart = Date.now();
+                log.info(
+                  `AGT relay: '${agentName}' still working ` +
+                  `(stage=${lastProgressStage ?? "?"}, ` +
+                  `elapsed=${lastProgressElapsed ?? "?"}s, ` +
+                  `progress_pings=${progressDrained}) — extending idle wait`,
+                );
+              }
               await new Promise((r) => setTimeout(r, pollIntervalMs));
             }
 
@@ -546,7 +600,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             // race where parent's discovery happened during the gap between old
             // pod terminating and new pod re-registering its identity.
             const previousAmid = targetAmid!;
-            log.warn(`AGT relay: no reply from '${agentName}' within ${waitMaxMs / 1000}s — clearing cache and re-discovering (target may have been recycled during a rollout)`);
+            log.warn(`AGT relay: no reply from '${agentName}' within ${idleTimeoutMs / 1000}s idle (or ${hardCeilingMs / 1000}s ceiling) — clearing cache and re-discovering (target may have been recycled during a rollout)`);
             nameToAmid.delete(agentName);
             amidToName.delete(previousAmid);
             let freshAmid: string | undefined;
@@ -672,6 +726,8 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           "handoff:workspace_inject", "handoff:workspace_inject_ack",
           "handoff:resume", "handoff:resume_ack",
           "file_transfer_ack",
+          // Heartbeats — drained by mesh_send wait loop; never user-visible.
+          "task_progress", "offload_progress",
         ]);
 
         const visible = agtInbox.filter((m) => {
