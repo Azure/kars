@@ -60,7 +60,7 @@ azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
 
 # Handoff encryption (AES-256-GCM + HKDF key derivation + SHA-256 verification)
 aes-gcm = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = "0.10"
 rand = "0.9"
 base64 = "0.22"
