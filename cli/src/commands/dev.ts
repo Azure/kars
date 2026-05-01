@@ -586,6 +586,12 @@ export function devCommand(): Command {
           "-e", `SANDBOX_NAME=${options.name}`,
           "-e", "AZURECLAW_DEV_MODE=true",
           "-e", `DOCKER_NETWORK=${AGT_NETWORK}`,
+          // Phase 2/F8 mitigations — env-gated suppression of false-positive
+          // governance findings. Default-on in dev so research/citation
+          // workloads aren't impeded; override with =0 to restore strict mode.
+          "-e", "AZURECLAW_SUPPRESS_EXFIL_URL=1",
+          "-e", "AZURECLAW_SUPPRESS_CONTENT_FLAGS=violence",
+          "-e", "AZURECLAW_CONTENT_FLAG_MIN_SEVERITY=medium",
           ...(creds.foundryProjectEndpoint ? ["-e", `FOUNDRY_PROJECT_ENDPOINT=${creds.foundryProjectEndpoint}`] : []),
           ...(discoveredDeployments ? ["-e", `FOUNDRY_DEPLOYMENTS=${discoveredDeployments}`] : []),
           "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,

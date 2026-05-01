@@ -2956,6 +2956,23 @@ var AgentMeshClient = class _AgentMeshClient {
       }
       try {
         const parsed = JSON.parse(rawPayload);
+        // Vendor patch #11: handle peer-initiated session close (e.g. ratchet desync).
+        // Clear our local session so the next outbound send to that peer triggers
+        // a fresh KNOCK + X3DH handshake.
+        if (msgType === "close" || parsed?.type === "close") {
+          const reason = parsed?.reason || "unknown";
+          console.warn(`[AGT] peer ${fromAmid} signalled session close (reason=${reason}) \u2014 clearing local session`);
+          const localSessionId = this.activeSessions.get(fromAmid);
+          if (localSessionId) {
+            try { this.sessionManager.closeSession(localSessionId); } catch {}
+            this.activeSessions.delete(fromAmid);
+          }
+          try { this.sessionCache?.clearByAmid?.(fromAmid); } catch {}
+          for (const handler of this.errorHandlers) {
+            try { handler("session_desync", fromAmid, `peer_close:${reason}`); } catch {}
+          }
+          return;
+        }
         if (msgType === "knock") {
           const request = parsed.request || parsed;
           // PATCH: Track this KNOCK as pending so concurrent messages wait
@@ -3072,6 +3089,32 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             } catch (decErr) {
               console.error("[AGT] E2E decrypt failed for existing session \u2014 message REJECTED:", decErr?.message || decErr);
+              // Vendor patch #11: ratchet desync recovery.
+              // The local session is now unusable (Double Ratchet keys are
+              // out of sync — typical causes: post-KNOCK message reordering,
+              // duplicate KNOCK, or stale session from earlier exchange).
+              // Clear local state so the next outbound mesh_send triggers a
+              // fresh KNOCK + X3DH. Best-effort notify peer to clear too.
+              try {
+                this.sessionManager.closeSession(sessionId);
+              } catch {}
+              this.activeSessions.delete(fromAmid);
+              try { this.sessionCache?.clearByAmid?.(fromAmid); } catch {}
+              if (this.isConnected) {
+                try {
+                  await this.transport.send(
+                    fromAmid,
+                    JSON.stringify({ type: "close", reason: "ratchet_desync" }),
+                    "close",
+                  );
+                } catch {}
+              }
+              for (const handler of this.errorHandlers) {
+                try {
+                  handler("session_desync", fromAmid, decErr?.message || "ratchet_desync");
+                } catch {
+                }
+              }
               for (const handler of this.errorHandlers) {
                 try {
                   handler("decrypt_failed", fromAmid, decErr?.message || "unknown");
