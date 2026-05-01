@@ -157,6 +157,7 @@ const inboxStats = {
   received_total: 0,
   consumed_by_send_wait: 0,
   consumed_by_protocol_drain: 0,
+  consumed_by_progress_drain: 0,
   read_total: 0,
   // ISO timestamp of last successful agtInbox.push (any source)
   last_received_at: null as string | null,
@@ -259,7 +260,7 @@ import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-
 import { delegateToNativeAgent } from "./core/agt-task-delegate.js";
 import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
-import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory } from "./core/agt-heartbeat.js";
+import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
@@ -513,6 +514,19 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           message_type: "security_event",
           timestamp: new Date().toISOString(),
           id: `agt-knock-${Date.now().toString(36)}`,
+        });
+      } else if (type === 'session_desync') {
+        // Vendor patch #11: ratchet desync is recoverable — local session was
+        // cleared, next mesh_send to this peer will trigger a fresh KNOCK.
+        // Do NOT penalize trust (this is a protocol issue, not a security event).
+        log.warn(`AGT session_desync with '${fromName}' (${fromAmid.slice(0, 12)}): ${detail} — session cleared, next send will rekey`);
+        pushInbox({
+          from_amid: fromAmid,
+          from_agent: fromName,
+          content: `⚠️ AGT session with ${fromName} was cleared due to ratchet desync (${detail}). The previous in-flight message was lost. Next mesh_send to this peer will re-establish a fresh encrypted session — please retry the message if it was important.`,
+          message_type: "session_event",
+          timestamp: new Date().toISOString(),
+          id: `agt-desync-${Date.now().toString(36)}`,
         });
       } else {
         log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
@@ -777,7 +791,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         try {
           // In-process tool-calling loop only. See offload path above for why
           // we deliberately skip `delegateToNativeAgent` here.
-          const llmResponse: string = await processTaskWithTools(taskContent, log);
+          //
+          // Heartbeat: send periodic `task_progress` pings to the originator
+          // so its mesh_send wait loop can extend the idle timer as long as
+          // we're making progress. Mirrors the offload path's
+          // `offload_progress` pings (`core/agt-offload.ts`). Cancel in
+          // finally — must run on success, failure, or thrown error.
+          const cancelHeartbeat = startTaskProgressHeartbeat(
+            fromAmid,
+            agtMeshClient,
+            agtSandboxName,
+            log,
+          );
+          let llmResponse: string;
+          try {
+            llmResponse = await processTaskWithTools(taskContent, log);
+          } finally {
+            cancelHeartbeat();
+          }
 
           // Send the response back via E2E encrypted relay
           await agtMeshClient.send(fromAmid, {
@@ -2480,6 +2511,7 @@ const azureClawPlugin = definePluginEntry({
         received_total: inboxStats.received_total,
         consumed_by_send_wait: inboxStats.consumed_by_send_wait,
         consumed_by_protocol_drain: inboxStats.consumed_by_protocol_drain,
+        consumed_by_progress_drain: inboxStats.consumed_by_progress_drain,
         read_total: inboxStats.read_total,
         last_received_at: inboxStats.last_received_at,
         last_read_at: inboxStats.last_read_at,
@@ -2491,6 +2523,7 @@ const azureClawPlugin = definePluginEntry({
       notifyConsumed: (kind, count) => {
         if (kind === "send_wait") inboxStats.consumed_by_send_wait += count;
         else if (kind === "protocol_drain") inboxStats.consumed_by_protocol_drain += count;
+        else if (kind === "progress_drain") inboxStats.consumed_by_progress_drain += count;
       },
       meshClient: () => agtMeshClient,
       identity: () => agtIdentity,
