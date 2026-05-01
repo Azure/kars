@@ -38,6 +38,7 @@ import {
   resolveAmidByName as _resolveAmidByName,
 } from "../amid-cache.js";
 import { safeJson } from "../safe-json.js";
+import { validateMeshPayload } from "../mesh-payload-guard.js";
 import type { HandoffProgress, AgtInboxEntry } from "../agt-handoff.js";
 
 // Re-suppress unused warnings for imports retained for symmetry with plugin.ts.
@@ -67,6 +68,34 @@ export interface AgtToolsDeps {
   log: { info: (m: string) => void; warn: (m: string) => void };
   bannerAlreadyPrinted: boolean;
   inbox: AgtInboxEntry[];
+  /**
+   * Inbox + gateway diagnostics. Surfaced inside `azureclaw_mesh_inbox`
+   * responses so the LLM (and operators triaging "inbox empty"-style
+   * reports) can distinguish a never-arrived message from one that the
+   * agent already received and consumed on a prior turn, vs a gateway
+   * restart that wiped the in-memory buffer. Mutated by sites that
+   * remove entries directly from `inbox` (mesh_send reply waiter,
+   * protocol-message scrubber); read-only here.
+   */
+  diagnostics?: () => {
+    gateway_instance_id: string;
+    gateway_started_at: string;
+    received_total: number;
+    consumed_by_send_wait: number;
+    consumed_by_protocol_drain: number;
+    read_total: number;
+    last_received_at: string | null;
+    last_read_at: string | null;
+  };
+  /** Mark all currently-unread inbox entries as read, bumping read_total. */
+  markRead?: (ids: string[]) => void;
+  /**
+   * Notify diagnostics that entries were removed from the inbox by an
+   * internal consumer (mesh_send reply waiter, protocol scrubber, file
+   * transfer ack handler). Index sites that do `agtInbox.splice(...)`
+   * bypass `pushInbox` so counters would otherwise drift.
+   */
+  notifyConsumed?: (kind: "send_wait" | "protocol_drain", count: number) => void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   meshClient: () => any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -296,7 +325,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   api.registerTool({
     name: "azureclaw_mesh_send",
     label: "Send Mesh Task",
-    description: "Send a task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any file contents the agent needs directly in the message body. Ask the agent to return its output as text in the reply. You can also instruct sub-agents to forward results to each other directly (they have peer-to-peer mesh access). Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
+    description: "Send a TEXT/JSON task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any data the agent needs directly in the message body. To send a FILE / IMAGE / BINARY, use `azureclaw_mesh_transfer_file` instead — peer agents cannot read your /sandbox or /tmp paths, so a hand-crafted file_transfer envelope with placeholder file_data will be rejected by the payload guard. Plain JSON metadata and free-form text are accepted. Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
     parameters: {
       type: "object",
       properties: {
@@ -315,6 +344,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
         log.warn(`azureclaw_mesh_send: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
         agentName = "parent";
+      }
+
+      // Guard: reject malformed file_transfer envelopes / cross-container
+      // path references before they hit the wire. The peer agent runs in a
+      // separate container and cannot read this filesystem.
+      const guardErr = validateMeshPayload(msgContent, { transferToolName: "azureclaw_mesh_transfer_file" });
+      if (guardErr) {
+        log.warn(`azureclaw_mesh_send: payload guard rejected — ${guardErr.slice(0, 160)}`);
+        return { content: [{ type: "text", text: safeJson({
+          error: guardErr,
+          to_agent: agentName,
+        }) }] };
       }
 
       // ── Primary path: AGT SDK relay (E2E encrypted) ──
@@ -474,6 +515,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               });
               if (replyIdx >= 0) {
                 const reply = agtInbox.splice(replyIdx, 1)[0];
+                deps.notifyConsumed?.("send_wait", 1);
                 replyContent = typeof reply.content === "string"
                   ? reply.content
                   : JSON.stringify(reply.content);
@@ -481,13 +523,16 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 break;
               }
               // Drain protocol messages to keep inbox clean
+              let drained = 0;
               for (let i = agtInbox.length - 1; i >= 0; i--) {
                 const m = agtInbox[i];
                 if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
                     (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
                   agtInbox.splice(i, 1);
+                  drained++;
                 }
               }
+              if (drained > 0) deps.notifyConsumed?.("protocol_drain", drained);
               await new Promise((r) => setTimeout(r, pollIntervalMs));
             }
 
@@ -580,15 +625,173 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   api.registerTool({
     name: "azureclaw_mesh_inbox",
     label: "Check Mesh Inbox",
-    description: "Check your AGT mesh inbox for responses from sub-agents. Returns messages received via the E2E encrypted AGT relay and any router-level messages.",
-    parameters: { type: "object", properties: {} },
-    async execute(_id: string, _params: Record<string, unknown>) {
+    description:
+      "Read messages received via the E2E encrypted AGT mesh inbox. ALWAYS call " +
+      "this tool whenever you need to know whether a peer has sent you anything — " +
+      "do NOT rely on what you remember from previous turns, because new messages " +
+      "may have arrived since then. By default the tool is *peek-only* and shows " +
+      "only unread entries; messages stay in the inbox so you can read them again. " +
+      "Pass mark_read=true once you have acted on the contents to flag them as " +
+      "seen, or unread_only=false to also show entries you have already read on " +
+      "earlier turns. The response includes a `diagnostics` block with the " +
+      "gateway instance id and counters so you can tell apart 'no message has " +
+      "ever arrived' from 'I already consumed the message earlier'.",
+    parameters: {
+      type: "object",
+      properties: {
+        mark_read: {
+          type: "boolean",
+          description: "When true, flag the returned entries as read so the next call (with default unread_only=true) won't re-list them. The entries themselves stay in the inbox.",
+        },
+        unread_only: {
+          type: "boolean",
+          description: "Default true — only return entries with no read_at timestamp. Set false to also see entries you already read on earlier turns.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of entries to return. Default 50.",
+        },
+      },
+    },
+    async execute(_id: string, params: Record<string, unknown>) {
       try {
-        // Collect messages from both sources
-        const agtMessages = agtInbox.splice(0, agtInbox.length); // drain AGT buffer
+        const markRead = params.mark_read === true;
+        const unreadOnly = params.unread_only !== false; // default true
+        const limit = typeof params.limit === "number" && params.limit > 0
+          ? Math.floor(params.limit)
+          : 50;
 
-        // Clear the MEMORY.md inbox notification since we've drained messages
-        if (agtMessages.length > 0) {
+        // ── 1. Filter out internal protocol/handshake messages from the
+        //      view. They stay in the array (the mesh_send reply waiter
+        //      and handoff orchestration scrub them on their own cadence)
+        //      but the LLM never needs to see them.
+        const INTERNAL_TYPES = new Set([
+          "handoff_transfer", "handoff_verification", "handoff_ready",
+          "handoff:interrupt", "handoff:interrupt_ack",
+          "handoff:workspace_request", "handoff:workspace_response",
+          "handoff:workspace_inject", "handoff:workspace_inject_ack",
+          "handoff:resume", "handoff:resume_ack",
+          "file_transfer_ack",
+        ]);
+
+        const visible = agtInbox.filter((m) => {
+          try {
+            const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+            if (INTERNAL_TYPES.has(parsed?.type)) return false;
+          } catch { /* not JSON — keep */ }
+          if (m.message_type && INTERNAL_TYPES.has(m.message_type)) return false;
+          return true;
+        });
+
+        const filtered = unreadOnly ? visible.filter((m) => !m.read_at) : visible;
+
+        // Take the most recent `limit` entries (chronological order kept).
+        const slice = filtered.slice(-limit);
+
+        // Auto-decode file_transfer messages so the LLM sees a readable
+        // representation. The original entry retains its raw content.
+        // Two forms are handled:
+        //   (a) Gateway-rewritten: {type, file_name, saved_to, size_bytes, ...}
+        //       — the gateway has already base64-decoded and written the
+        //       file to /sandbox/.openclaw/workspace/incoming/. Lift the
+        //       saved path so the LLM can `cat` it; inline small text.
+        //   (b) Inline file_data: legacy/raw form before gateway rewrite.
+        const decoded = slice.map((m) => {
+          try {
+            const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+            if (parsed?.type === "file_transfer" && parsed?.saved_to && parsed?.file_name) {
+              const sizeBytes = typeof parsed.size_bytes === "number" ? parsed.size_bytes : 0;
+              let inlined: string | null = null;
+              if (sizeBytes > 0 && sizeBytes < 100 * 1024) {
+                try {
+                  // eslint-disable-next-line @typescript-eslint/no-require-imports
+                  const fs = require("node:fs");
+                  const buf = fs.readFileSync(parsed.saved_to);
+                  if (!buf.some((b: number) => b === 0)) {
+                    inlined = buf.toString("utf-8");
+                  }
+                } catch { /* fall through */ }
+              }
+              return {
+                id: m.id,
+                from_amid: m.from_amid,
+                from_agent: m.from_agent,
+                timestamp: m.timestamp,
+                read_at: m.read_at,
+                source: "agt_relay_e2e",
+                message_type: "file_transfer",
+                file_name: parsed.file_name,
+                saved_to: parsed.saved_to,
+                file_size_bytes: sizeBytes,
+                description: parsed.description || "",
+                content: inlined != null
+                  ? inlined
+                  : `[binary or large file: ${parsed.file_name}, ${sizeBytes} bytes — read with: cat ${parsed.saved_to}]`,
+              };
+            }
+            if (parsed?.type === "file_transfer" && parsed?.file_data && parsed?.file_name) {
+              const buf = Buffer.from(parsed.file_data, "base64");
+              const isText = !buf.some((b: number) => b === 0);
+              return {
+                id: m.id,
+                from_amid: m.from_amid,
+                from_agent: m.from_agent,
+                timestamp: m.timestamp,
+                read_at: m.read_at,
+                source: "agt_relay_e2e",
+                message_type: "file_transfer",
+                file_name: parsed.file_name,
+                file_size_bytes: buf.length,
+                content: isText
+                  ? buf.toString("utf-8")
+                  : `[binary file: ${parsed.file_name}, ${buf.length} bytes — auto-save pending; re-check mesh_inbox for saved_to path]`,
+              };
+            }
+          } catch { /* fall through */ }
+          return {
+            id: m.id,
+            from_amid: m.from_amid,
+            from_agent: m.from_agent,
+            timestamp: m.timestamp,
+            read_at: m.read_at,
+            source: "agt_relay_e2e",
+            message_type: m.message_type || "message",
+            content: m.content,
+          };
+        });
+
+        // ── 2. Optional router-level inbox merge (best effort).
+        let routerMessages: any[] = [];
+        try {
+          const routerResult = await routerCall("GET", "/agt/mesh/inbox");
+          routerMessages = routerResult.messages || [];
+        } catch {
+          // router inbox unavailable — AGT-only view is fine
+        }
+
+        // ── 3. Mark returned AGT entries as read (in-place). We only
+        //      flip read_at for entries that were actually returned and
+        //      currently have no read_at, so a subsequent unread_only
+        //      query becomes empty rather than re-listing the same items.
+        if (markRead) {
+          const now = new Date().toISOString();
+          const returnedIds = new Set(decoded.map((d) => d.id));
+          const newlyRead: string[] = [];
+          for (const m of agtInbox) {
+            if (returnedIds.has(m.id) && !m.read_at) {
+              m.read_at = now;
+              newlyRead.push(m.id);
+            }
+          }
+          if (deps.markRead && newlyRead.length > 0) {
+            try { deps.markRead(newlyRead); } catch { /* best effort */ }
+          }
+        }
+
+        // ── 4. Tidy MEMORY.md inbox banner once the LLM has acknowledged
+        //      receipt by calling the tool. Was previously gated on a
+        //      drain-everything path; now also covers peek+mark_read.
+        if (markRead && decoded.length > 0) {
           try {
             const fs = await import("node:fs/promises");
             const memPath = process.env.MEMORY_FILE_PATH || "/home/user/MEMORY.md";
@@ -603,71 +806,26 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           } catch { /* best effort */ }
         }
 
-        // Also get any router-level messages (fallback / auto-reply)
-        let routerMessages: any[] = [];
-        try {
-          const routerResult = await routerCall("GET", "/agt/mesh/inbox");
-          routerMessages = routerResult.messages || [];
-        } catch {
-          // Router inbox unavailable — use AGT only
-        }
-
-        // Merge and deduplicate (prefer AGT source)
-        // Filter out internal protocol messages — only show human-readable content
-        const INTERNAL_TYPES = new Set([
-          "handoff_transfer", "handoff_verification", "handoff_ready",
-          "handoff:interrupt", "handoff:interrupt_ack",
-          "handoff:workspace_request", "handoff:workspace_response",
-          "handoff:workspace_inject", "handoff:workspace_inject_ack",
-          "handoff:resume", "handoff:resume_ack",
-          "file_transfer_ack",
-        ]);
-
-        const userMessages = agtMessages.filter((m: any) => {
-          try {
-            const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
-            return !INTERNAL_TYPES.has(parsed?.type);
-          } catch { return true; } // If can't parse, keep it
-        });
-
-        // Auto-decode file_transfer messages so LLM sees readable content
-        const decoded = userMessages.map((m: any) => {
-          try {
-            const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
-            if (parsed?.type === "file_transfer" && parsed?.file_data && parsed?.file_name) {
-              const buf = Buffer.from(parsed.file_data, "base64");
-              const isText = !buf.some((b: number) => b === 0); // null bytes → binary
-              return {
-                ...m,
-                source: "agt_relay_e2e",
-                message_type: "file_transfer",
-                file_name: parsed.file_name,
-                file_size_bytes: buf.length,
-                content: isText
-                  ? buf.toString("utf-8")
-                  // Binary file still carries raw bytes here, meaning the
-                  // auto-save handler (plugin.ts ~2152) hasn't overwritten
-                  // this entry yet — so we intentionally do NOT claim a
-                  // save path. The next mesh_inbox call will reflect the
-                  // real `saved_to` once the handler finishes.
-                  : `[binary file: ${parsed.file_name}, ${buf.length} bytes — auto-save pending; re-check mesh_inbox for saved_to path]`,
-              };
-            }
-          } catch { /* fall through */ }
-          return { ...m, source: "agt_relay_e2e" };
-        });
+        // Snapshot diagnostics last so counters reflect this call too.
+        const diag = deps.diagnostics ? deps.diagnostics() : undefined;
 
         const allMessages = [
           ...decoded,
           ...routerMessages.map((m: any) => ({ ...m, source: "router_http" })),
         ];
 
+        const unreadCount = visible.filter((m) => !m.read_at).length;
+        const totalVisible = visible.length;
+
         return { content: [{ type: "text", text: JSON.stringify({
           count: allMessages.length,
+          unread_count: unreadCount,
+          total_in_inbox: totalVisible,
           agt_relay_count: decoded.length,
           router_count: routerMessages.length,
-          filtered_protocol_messages: agtMessages.length - userMessages.length,
+          filter: { unread_only: unreadOnly, limit, mark_read: markRead },
           messages: allMessages,
+          diagnostics: diag,
         }, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Inbox check failed: ${e.message}` }] };
@@ -812,6 +970,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 ackError = ackMsg?.error || "";
               } catch { ackReceived = true; }
               agtInbox.splice(ackIdx, 1);
+              deps.notifyConsumed?.("protocol_drain", 1);
               break;
             }
             await new Promise(r => setTimeout(r, 500));
@@ -841,6 +1000,68 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           error: `File transfer failed: ${e.message}`,
         }, null, 2) }] };
       }
+    },
+  });
+
+  api.registerTool({
+    name: "telegram_status",
+    label: "Send Telegram Status",
+    description: "Send a short status update to the user's Telegram chat configured for this sandbox. Use this for live progress pings during long-running multi-agent tasks (e.g. 'analyst done — 8 sources, 4 platforms scored'). Takes only the text — the chat ID is read from the sandbox's TELEGRAM_ALLOW_FROM env var (configured at `azureclaw up` time). No need to specify channel routing or chat IDs. Returns delivery status without leaking the bot token.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The status message to send (≤4096 chars). Plain text or simple emoji are fine." },
+      },
+      required: ["text"],
+    },
+    async execute(_id: string, params: Record<string, unknown>) {
+      const text = String(params.text || "").trim();
+      if (!text) {
+        return { content: [{ type: "text", text: safeJson({ error: "telegram_status: empty text" }) }] };
+      }
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+      const tgAllowFrom = process.env.TELEGRAM_ALLOW_FROM;
+      if (!tgToken || !tgAllowFrom) {
+        return { content: [{ type: "text", text: safeJson({
+          error: "telegram_status: Telegram is not configured for this sandbox",
+          hint: "Run `azureclaw credentials update <name> --telegram-token <token> --telegram-chat-id <id>` to enable.",
+        }) }] };
+      }
+      const chatIds = tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean);
+      if (chatIds.length === 0) {
+        return { content: [{ type: "text", text: safeJson({ error: "telegram_status: TELEGRAM_ALLOW_FROM is empty" }) }] };
+      }
+      const truncated = text.length > 4096 ? text.slice(0, 4093) + "..." : text;
+      const results: Array<{ chat_id: string; ok: boolean; status?: number; error?: string }> = [];
+      for (const chatId of chatIds) {
+        try {
+          const tgResp = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: truncated }),
+          });
+          if (tgResp.ok) {
+            results.push({ chat_id: chatId, ok: true });
+          } else {
+            // Sanitize: strip the token from any echoed body before surfacing.
+            const body = await tgResp.text().catch(() => "");
+            const sanitized = body.replace(tgToken, "[REDACTED]").slice(0, 200);
+            results.push({ chat_id: chatId, ok: false, status: tgResp.status, error: sanitized });
+            log.warn(`telegram_status: HTTP ${tgResp.status} for chat ${chatId}`);
+          }
+        } catch (e: any) {
+          const msg = String(e?.message || e).replace(tgToken, "[REDACTED]");
+          results.push({ chat_id: chatId, ok: false, error: msg });
+          log.warn(`telegram_status: send error for chat ${chatId}: ${msg}`);
+        }
+      }
+      const okCount = results.filter((r) => r.ok).length;
+      return { content: [{ type: "text", text: safeJson({
+        status: okCount === results.length ? "delivered" : okCount > 0 ? "partial" : "failed",
+        delivered: okCount,
+        total: results.length,
+        results,
+      }) }] };
     },
   });
 

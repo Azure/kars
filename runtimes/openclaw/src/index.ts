@@ -139,7 +139,30 @@ let agtIdentity: any = null;
 let agtInitialized = false; // Module-level guard (supplemented by process-level guard below)
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
-const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string }> = [];
+const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string; read_at?: string }> = [];
+
+// Inbox + gateway diagnostics. Surface in azureclaw_mesh_inbox responses so
+// the LLM (and operators triaging "inbox empty" reports) can distinguish:
+//   - never received   → received_total === 0
+//   - already consumed → received_total > 0 && current array is small/empty
+//   - gateway restart  → uptime small but received_total > 0 may be 0 anew
+// gatewayInstanceId regenerates per process; counters reset with it. Receivers
+// upstream (waitForMessage / mesh_send reply loop) MUST increment the
+// matching counter when they remove entries from the array directly.
+const gatewayInstanceId: string = (() => {
+  try { return crypto.randomUUID(); } catch { return `gw-${Date.now().toString(36)}`; }
+})();
+const gatewayStartedAt: string = new Date().toISOString();
+const inboxStats = {
+  received_total: 0,
+  consumed_by_send_wait: 0,
+  consumed_by_protocol_drain: 0,
+  read_total: 0,
+  // ISO timestamp of last successful agtInbox.push (any source)
+  last_received_at: null as string | null,
+  // ISO timestamp of last successful azureclaw_mesh_inbox tool invocation
+  last_read_at: null as string | null,
+};
 
 // AGT reconnect & heartbeat state
 let agtReconnectTimer: ReturnType<typeof setInterval> | null = null;
@@ -147,6 +170,24 @@ let agtInboxNotifyTimer: ReturnType<typeof setInterval> | null = null;
 let agtConnected = false;
 let agtReconnectFailures = 0;
 const AGT_RECONNECT_MAX_BACKOFF = 300_000; // 5 min cap
+
+// Centralised inbox push: keep counters in lockstep with array growth so
+// the inbox tool can report meaningful diagnostics without scanning every
+// entry. All onMessage / error / handoff sites must call this instead of
+// agtInbox.push directly.
+function pushInbox(entry: {
+  from_amid: string;
+  from_agent: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  content: any;
+  timestamp: string;
+  id: string;
+  message_type?: string;
+}): void {
+  agtInbox.push(entry);
+  inboxStats.received_total += 1;
+  inboxStats.last_received_at = entry.timestamp;
+}
 
 // Offload request IDs currently being processed (either env-driven proactive
 // start or inbound offload_task). Prevents double-execution if the external
@@ -247,6 +288,13 @@ async function processTaskWithTools(
     setInterrupt: (req, reason) => {
       handoffInterruptRequested = req;
       handoffInterruptReason = reason;
+    },
+    inbox: agtInbox,
+    markRead: (ids) => {
+      if (ids.length > 0) {
+        inboxStats.read_total += ids.length;
+        inboxStats.last_read_at = new Date().toISOString();
+      }
     },
   }, log);
 }
@@ -458,7 +506,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
       if (type === 'knock_rejected') {
         log.warn(`⛔ Message blocked from '${fromName}': KNOCK not accepted — ${detail}`);
-        agtInbox.push({
+        pushInbox({
           from_amid: fromAmid,
           from_agent: fromName,
           content: `⛔ MESSAGE BLOCKED: ${fromName} attempted to send a message but has no accepted KNOCK session. The message was rejected and not delivered.`,
@@ -469,7 +517,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       } else {
         log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
         pushTrustToRouter(fromName, -0.5);
-        agtInbox.push({
+        pushInbox({
           from_amid: fromAmid,
           from_agent: fromName,
           content: `⚠️ E2E DECRYPTION FAILURE: ${type} — ${detail}. Message was REJECTED (not delivered). This may indicate a session mismatch or tampering.`,
@@ -549,7 +597,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 log.warn(`Ed25519 signature INVALID from '${fromName}' — message accepted but trust penalized`);
                 pushSigningCounter("rejected");
                 pushTrustToRouter(fromName, -0.5);
-                agtInbox.push({
+                pushInbox({
                   from_amid: fromAmid,
                   from_agent: fromName,
                   content: `⚠️ SIGNATURE INVALID: Message from '${fromName}' has invalid Ed25519 signature. Possible tampering.`,
@@ -577,7 +625,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         timestamp: new Date().toISOString(),
         id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
-      agtInbox.push(entry);
+      pushInbox(entry);
       log.info(`AGT relay message from ${sanitizeLog(fromName, 50)} (${fromAmid.slice(0, 12)}...): ${sanitizeLog(JSON.stringify(content), 200)}`);
 
       // ── mesh:ping — lightweight reachability probe used by mesh-plugin
@@ -2426,6 +2474,24 @@ const azureClawPlugin = definePluginEntry({
       log,
       bannerAlreadyPrinted,
       inbox: agtInbox,
+      diagnostics: () => ({
+        gateway_instance_id: gatewayInstanceId,
+        gateway_started_at: gatewayStartedAt,
+        received_total: inboxStats.received_total,
+        consumed_by_send_wait: inboxStats.consumed_by_send_wait,
+        consumed_by_protocol_drain: inboxStats.consumed_by_protocol_drain,
+        read_total: inboxStats.read_total,
+        last_received_at: inboxStats.last_received_at,
+        last_read_at: inboxStats.last_read_at,
+      }),
+      markRead: (ids) => {
+        inboxStats.read_total += ids.length;
+        inboxStats.last_read_at = new Date().toISOString();
+      },
+      notifyConsumed: (kind, count) => {
+        if (kind === "send_wait") inboxStats.consumed_by_send_wait += count;
+        else if (kind === "protocol_drain") inboxStats.consumed_by_protocol_drain += count;
+      },
       meshClient: () => agtMeshClient,
       identity: () => agtIdentity,
       sandboxName: () => agtSandboxName,
