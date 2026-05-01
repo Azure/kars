@@ -1,10 +1,10 @@
 name: OpenSSF Scorecard
 
+# NOTE: OpenSSF Scorecard requires public repository access (the action
+# clones via the public GitHub API and fails with "Repository not found"
+# on private repos). This workflow is manually-triggerable only and is
+# kept for completeness; it is not part of required CI.
 on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions: read-all
