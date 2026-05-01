@@ -95,15 +95,35 @@ ENV OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage
 # Use bash with pipefail so the `openclaw doctor … | tail -40` pipe surfaces
 # a non-zero exit code from doctor instead of being masked by tail's success.
 # Scoped to this RUN only — subsequent stages re-default to /bin/sh.
+COPY sandbox-images/openclaw/stage-extension-deps.sh /usr/local/bin/stage-extension-deps.sh
+RUN chmod +x /usr/local/bin/stage-extension-deps.sh
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN mkdir -p /opt/openclaw-stage && \
     openclaw doctor --fix --non-interactive --yes 2>&1 | tail -40 && \
+    # Belt-and-suspenders: doctor pre-stages deps for *configured* plugins,
+    # but OpenClaw's own bundled chunks (e.g. dist/oauth-*.js, loaded by
+    # memory-core in the node-host) have static require chains into deps
+    # declared only by *unconfigured* extension manifests (e.g. xai →
+    # @mariozechner/pi-ai). Without this step the node-host crashes with
+    # "Cannot find module '@mariozechner/pi-ai/dist/oauth.js'" → no agent
+    # runs in either gateway or webchat. The helper takes the union of
+    # every bundled extension's declared dependencies and force-installs
+    # the missing ones into the stage tree.
+    /usr/local/bin/stage-extension-deps.sh && \
     chmod -R a+rX /opt/openclaw-stage && \
     staged_count=$(find /opt/openclaw-stage -mindepth 2 -maxdepth 2 -type d -name node_modules 2>/dev/null | wc -l) && \
     if [ "$staged_count" -gt 0 ]; then \
       echo "OpenClaw bundled-runtime-deps pre-staged: $(du -sh /opt/openclaw-stage | cut -f1) (${staged_count} version dirs)"; \
     else \
       echo "OpenClaw doctor completed cleanly with no staging required"; \
+    fi && \
+    # Verify the canonical missing-module case so future regressions fail
+    # the build instead of silently breaking the runtime.
+    stage_dir=$(find /opt/openclaw-stage -mindepth 1 -maxdepth 1 -type d | head -n1) && \
+    if [ -n "$stage_dir" ] && [ ! -f "$stage_dir/node_modules/@mariozechner/pi-ai/dist/oauth.js" ]; then \
+      echo "FATAL: @mariozechner/pi-ai/dist/oauth.js missing from stage tree after doctor + extension-deps fill"; \
+      exit 1; \
     fi
 SHELL ["/bin/sh", "-c"]
 

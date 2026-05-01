@@ -39,10 +39,55 @@ import * as crypto from "node:crypto";
 // State
 // ---------------------------------------------------------------------------
 
-let connection: MeshConnection | null = null;
-let meshIdentity: MeshIdentity | null = null;
-let activePairing: StoredPairing | null = null;
-let initialized = false;
+// ---------------------------------------------------------------------------
+// Plugin state — singleton via process-keyed Symbol.
+//
+// OpenClaw's plugin loader runs through this module twice in some setups
+// (tool-registry pass + agent-session pass), and a hot-reload during dev
+// re-imports it again. Without a singleton, each pass would build its own
+// `MeshConnection`, upload its own prekeys, and open its own WebSocket —
+// exactly the duplicate-message / "session already exists" bug pattern
+// documented in `vendor/agentmesh-sdk/README.md` patch #10.
+//
+// `Symbol.for(...)` lookups are process-global so all imports share the
+// same state object. Module-level `let`s mirror the singleton for the
+// common read path; `ensureInitialized()` is the only writer and syncs
+// both sides.
+// ---------------------------------------------------------------------------
+
+interface MeshPluginState {
+  connection: MeshConnection | null;
+  meshIdentity: MeshIdentity | null;
+  activePairing: StoredPairing | null;
+  initialized: boolean;
+  /** In-flight init promise — prevents racey concurrent ensureInitialized calls. */
+  initPromise: Promise<string | null> | null;
+}
+
+const STATE_KEY = Symbol.for("azureclaw.mesh-plugin.state");
+const state: MeshPluginState = (() => {
+  const proc = process as unknown as Record<symbol, MeshPluginState | undefined>;
+  let s = proc[STATE_KEY];
+  if (!s) {
+    s = {
+      connection: null,
+      meshIdentity: null,
+      activePairing: null,
+      initialized: false,
+      initPromise: null,
+    };
+    proc[STATE_KEY] = s;
+  }
+  return s;
+})();
+
+// Local view onto the singleton. Reads only — writes go through `state.*`
+// inside ensureInitialized (and are mirrored back here so legacy reads
+// see the same connection on subsequent invocations).
+let connection: MeshConnection | null = state.connection;
+let meshIdentity: MeshIdentity | null = state.meshIdentity;
+let activePairing: StoredPairing | null = state.activePairing;
+let initialized: boolean = state.initialized;
 
 /**
  * Offload state. Updated by the background orchestrator; read by
@@ -374,18 +419,22 @@ export function definePluginEntry() {
       api.registerTool({
         name: "mesh_inbox",
         description:
-          "Read incoming messages from the E2E encrypted mesh inbox. " +
-          "Call this whenever the user asks you to check the inbox, check " +
-          "for replies, or see if a peer/cloud agent has responded. It is " +
-          "safe to call at any time, including during an active cloud " +
-          "offload — the user may ask you to peek at raw mesh traffic.",
+          "Read messages received via the E2E encrypted AGT mesh. ALWAYS call " +
+          "this tool when the user asks about inbox, replies, or peer messages — " +
+          "do NOT rely on what you remember from earlier turns, because new " +
+          "messages may have arrived since then. Default behaviour is *peek-only* " +
+          "and shows only entries you haven't read yet; messages stay in the " +
+          "inbox so you can re-read them. Pass mark_read=true once you have " +
+          "acted on the contents to flag them as seen, or unread_only=false to " +
+          "also see entries from previous turns. The response includes a " +
+          "`diagnostics` block with lifecycle counters so you can tell apart " +
+          "'never received' from 'already consumed by an offload waiter'.",
         parameters: {
           type: "object",
           properties: {
-            limit: {
-              type: "number",
-              description: "Max messages to return (default: 10)",
-            },
+            limit: { type: "number", description: "Max messages to return (default: 10)" },
+            mark_read: { type: "boolean", description: "When true, flag returned entries as read." },
+            unread_only: { type: "boolean", description: "Default true. Set false to include entries you already read." },
           },
         },
         handler: meshInboxHandler,
@@ -502,32 +551,67 @@ export function definePluginEntry() {
 // ---------------------------------------------------------------------------
 
 async function ensureInitialized(): Promise<string | null> {
-  if (initialized) return null;
-
-  meshIdentity = await loadOrCreateIdentity();
-  activePairing = getDefaultPairing();
-
-  if (activePairing) {
-    try {
-      connection = new MeshConnection({
-        relayUrl: activePairing.relayUrl,
-        registryUrl: activePairing.registryUrl,
-        identity: meshIdentity,
-        // The controller speaks legacy base64(JSON), not Signal E2E — route
-        // its traffic through the plaintext-compat bypass in the SDK.
-        plaintextPeers: activePairing.controllerAmid
-          ? [activePairing.controllerAmid]
-          : undefined,
-      });
-      await connection.connect();
+  // Fast path — singleton already initialized by a prior plugin load.
+  if (state.initialized) {
+    if (!initialized) {
+      // This module copy hasn't synced yet (re-import after hot-reload or
+      // second plugin pass). Mirror the canonical state into our locals.
+      connection = state.connection;
+      meshIdentity = state.meshIdentity;
+      activePairing = state.activePairing;
       initialized = true;
-    } catch (err: any) {
-      return `Failed to connect to mesh: ${err.message}`;
     }
+    return null;
   }
 
-  initialized = true;
-  return null;
+  // Coalesce concurrent callers onto a single in-flight init.
+  if (state.initPromise) return state.initPromise;
+
+  state.initPromise = (async (): Promise<string | null> => {
+    try {
+      const id = await loadOrCreateIdentity();
+      const pairing = getDefaultPairing();
+      let conn: MeshConnection | null = null;
+
+      if (pairing) {
+        try {
+          conn = new MeshConnection({
+            relayUrl: pairing.relayUrl,
+            registryUrl: pairing.registryUrl,
+            identity: id,
+            // The controller speaks legacy base64(JSON), not Signal E2E — route
+            // its traffic through the plaintext-compat bypass in the SDK.
+            plaintextPeers: pairing.controllerAmid
+              ? [pairing.controllerAmid]
+              : undefined,
+          });
+          await conn.connect();
+        } catch (err: any) {
+          // Reset the gate so a later retry can try again instead of
+          // permanently caching a failed init promise.
+          state.initPromise = null;
+          return `Failed to connect to mesh: ${err.message}`;
+        }
+      }
+
+      // Commit to the singleton AND mirror locally.
+      state.meshIdentity = id;
+      state.activePairing = pairing;
+      state.connection = conn;
+      state.initialized = true;
+      meshIdentity = id;
+      activePairing = pairing;
+      connection = conn;
+      initialized = true;
+      return null;
+    } finally {
+      // Drop the promise reference once resolved so reads don't hold it
+      // forever. A failed init already cleared it above before returning.
+      if (state.initialized) state.initPromise = null;
+    }
+  })();
+
+  return state.initPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,25 +1590,56 @@ async function meshSendHandler(...args: any[]): Promise<string> {
 }
 
 async function meshInboxHandler(...args: any[]): Promise<string> {
-  const params = extractParams(args) as { limit?: number };
+  const params = extractParams(args) as {
+    limit?: number;
+    mark_read?: boolean;
+    unread_only?: boolean;
+  };
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
   if (!connection) return "❌ Mesh client not connected.";
 
-  const limit = params.limit || 10;
-  const messages = connection.getInbox(limit);
+  const markRead = params.mark_read === true;
+  const unreadOnly = params.unread_only !== false; // default true
+  const limit = typeof params.limit === "number" && params.limit > 0
+    ? Math.floor(params.limit)
+    : 10;
 
-  if (messages.length === 0) return "📭 Inbox empty.";
+  // getInbox is peek-only — does not mutate the underlying array.
+  // Filtering/limit happens here so the LLM can ask for unread-only or all.
+  const all = connection.getInbox();
+  const visible = unreadOnly ? all.filter((m) => !m.read_at) : all;
+  const slice = visible.slice(-limit);
 
-  const lines = messages.map((m, i) => {
+  if (markRead && slice.length > 0) {
+    connection.markRead(slice.map((m) => m.id));
+  }
+
+  const diag = connection.getDiagnostics();
+  const unreadCount = connection.getUnreadCount();
+  const totalInbox = all.length;
+
+  if (slice.length === 0) {
+    // Empty inbox → still return diagnostics so operators / the LLM can
+    // distinguish "never received" from "already consumed by an offload
+    // waiter / mesh_send reply waiter / earlier mark_read".
+    const summary = unreadOnly && unreadCount === 0 && totalInbox > 0
+      ? `📭 No unread messages (${totalInbox} already read; pass unread_only=false to re-read).`
+      : "📭 Inbox empty.";
+    return `${summary}\n\nDiagnostics: ${JSON.stringify(diag)}`;
+  }
+
+  const lines = slice.map((m, i) => {
     const content =
       typeof m.content === "string"
         ? m.content.slice(0, 200)
         : JSON.stringify(m.content).slice(0, 200);
-    return `  ${i + 1}. [${m.from}] ${content}`;
+    const tag = m.read_at ? "·read" : "·new";
+    return `  ${i + 1}. [${m.from}] (${tag}) ${content}`;
   });
 
-  return `📬 ${messages.length} message(s):\n${lines.join("\n")}`;
+  const header = `📬 ${slice.length} of ${totalInbox} message(s) (${unreadCount} unread${markRead ? `, ${slice.length} now marked read` : ""}):`;
+  return `${header}\n${lines.join("\n")}\n\nDiagnostics: ${JSON.stringify(diag)}`;
 }
 
 async function discoverHandler(...args: any[]): Promise<string> {
