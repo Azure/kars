@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 # Ensure every dependency declared by every bundled OpenClaw extension is
 # resolvable in the pre-staged node_modules tree.
 #

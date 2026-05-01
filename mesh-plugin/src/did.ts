@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 /**
  * DID canonicalization — deterministic derivation of AGT-compatible DIDs
  * from Ed25519 signing keys.
