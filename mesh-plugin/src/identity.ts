@@ -19,6 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { Identity, type IdentityData } from "@agentmesh/sdk";
+import { deriveCanonicalDid } from "./did.js";
 
 const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
 const IDENTITY_FILE = path.join(IDENTITY_DIR, "identity.json");
@@ -37,6 +38,8 @@ interface MeshIdentityEnvelope {
 export interface MeshIdentity {
   /** AgentMesh ID — derived from the Ed25519 signing public key. */
   amid: string;
+  /** AGT-compatible DID — `did:agentmesh:<fingerprint>`, derived from the same key. */
+  did: string;
   /** Ed25519 signing public key (raw 32 bytes). */
   signingPublicKey: Buffer;
   /** Ed25519 signing private key (raw 32 bytes). */
@@ -130,9 +133,11 @@ function rawFromPrefixedB64(value: string, prefix: string): Buffer {
 
 async function buildFacade(sdkIdentity: Identity): Promise<MeshIdentity> {
   const data = await sdkIdentity.toData();
+  const signingPublicKey = rawFromPrefixedB64(data.signing_public_key, "ed25519:");
   return {
     amid: sdkIdentity.amid,
-    signingPublicKey: rawFromPrefixedB64(data.signing_public_key, "ed25519:"),
+    did: deriveCanonicalDid(signingPublicKey),
+    signingPublicKey,
     signingPrivateKey: rawFromPrefixedB64(data.signing_private_key, "ed25519:"),
     sdkIdentity,
   };

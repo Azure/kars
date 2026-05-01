@@ -229,7 +229,8 @@ export class MeshConnection implements IMeshTransport {
 
     console.log(
       `[mesh] Connecting to relay via SDK: ${this.config.relayUrl} ` +
-      `(amid=${this.config.identity.amid}, plaintextPeers=${(this.config.plaintextPeers || []).length})`,
+      `(amid=${this.config.identity.amid}, did=${this.config.identity.did}, ` +
+      `plaintextPeers=${(this.config.plaintextPeers || []).length})`,
     );
 
     await this.client.connect({
@@ -252,7 +253,7 @@ export class MeshConnection implements IMeshTransport {
     }
 
     this.startTransferCleanup();
-    console.log(`[mesh] ✅ Connected — Signal-ready (amid=${this.config.identity.amid.slice(0, 12)}...)`);
+    console.log(`[mesh] ✅ Connected — Signal-ready (amid=${this.config.identity.amid.slice(0, 12)}..., did=${this.config.identity.did})`);
   }
 
   async disconnect(): Promise<void> {
