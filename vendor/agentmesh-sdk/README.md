@@ -103,11 +103,49 @@ The SDK's relay transport `receive` events are not wired to
 
 This is an upstream SDK issue (transport→client message routing not implemented).
 
+## Patch #12 — Registry fetch retry (April 2026)
+
+**Files:** `dist/chunk-NMOWWZKF.js`, `dist/chunk-UBUGIENK.cjs` (dist-only overlay)
+
+`RegistryClient.fetch()` used to do a single `fetch()` call with timeout
+and no retry. Brief 502/503 blips during kubectl port-forward restarts
+(`host.docker.internal:18080`) and AKS ingress rolls caused
+`submitReputation` (and other registry calls) to silently return `false`
+— indistinguishable from "registry rejected the score".
+
+The fix wraps `fetch()` with an endpoint-aware retry policy:
+
+- **GET / HEAD**: always retried (idempotent).
+- **POST on idempotent registry endpoints** — `/registry/register`,
+  `/registry/prekeys`, `/registry/reputation`, `/registry/status`,
+  `/registry/capabilities`, `/registry/revocations/bulk`,
+  `/auth/oauth/authorize`: retried.
+- **All other POSTs**: not retried (caller decides).
+- **Triggers**: status 408/429/502/503/504 or any thrown network error.
+- **Cap**: up to 3 attempts, total elapsed budget 2s, exponential backoff
+  starting at 100 ms; honours `Retry-After` header up to 1.5s.
+
+`submitReputation` (patch #7) already logs final-failure with target
+AMID prefix so operators can correlate "feedback_count stays 0" with
+concrete registry responses.
+
+The router (`inference-router/src/routes/mesh.rs::agt_registry_proxy`)
+mirrors the same retry policy as a defense-in-depth layer because it is
+the single network egress for sandboxes.
+
+> **Maintainer note:** This patch is a **dist-only overlay**, applied
+> directly to the published bundles like patches #5, #7, and #8. **Do
+> not run `npm run build` on this package** — the build regenerates
+> `dist/` from `src/` and silently drops every dist-only patch. To
+> modify any dist-only patch, hand-edit the chunk files and update this
+> README.
+
 ## Build
 
-```sh
-npm ci && npm run build
-```
+> ⚠️ **Do not run `npm run build`.** Several patches (#5, #7, #8, #12)
+> live exclusively in `dist/`. Running the build regenerates `dist/`
+> from `src/` and erases them. The Dockerfile copies `dist/` directly,
+> so the committed bundles are the source of truth for those patches.
 
 TypeScript SDK for AgentMesh - a decentralized, end-to-end encrypted messaging protocol for AI agents.
 

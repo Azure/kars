@@ -168,7 +168,49 @@ pub fn parse_streaming_prompt_filter(chunk_text: &str) -> ContentFlags {
 }
 
 /// Check individual filter results and populate flags.
+///
+/// Two optional env-var knobs (default behaviour unchanged when unset):
+/// * `AZURECLAW_CONTENT_FLAG_MIN_SEVERITY` (`safe|low|medium|high`, default
+///   `low`) — minimum Foundry severity that raises a category flag. `filtered:
+///   true` from Foundry always wins regardless of this threshold.
+/// * `AZURECLAW_SUPPRESS_CONTENT_FLAGS` (comma-separated, e.g.
+///   `violence,sexual`) — listed categories never raise a flag (no trust
+///   penalty, no audit). Useful where Foundry's `violence` heuristic
+///   over-fires on legitimate security/research content (e.g. "exploit",
+///   "attack", "compromise"). Affects only the four severity-graded
+///   categories; `jailbreak` and `indirect_attack` cannot be suppressed.
 fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags) {
+    let min_sev_level: u8 = match std::env::var("AZURECLAW_CONTENT_FLAG_MIN_SEVERITY")
+        .ok()
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("medium") => 2,
+        Some("high") => 3,
+        Some("safe") => 0,
+        _ => 1, // low (default)
+    };
+    let suppressed: std::collections::HashSet<String> =
+        std::env::var("AZURECLAW_SUPPRESS_CONTENT_FLAGS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+    let sev_meets = |sev: Option<&str>| -> bool {
+        let level = match sev {
+            Some("safe") => 0u8,
+            Some("low") => 1,
+            Some("medium") => 2,
+            Some("high") => 3,
+            _ => 0,
+        };
+        level > 0 && level >= min_sev_level
+    };
+
     if let Some(ref jb) = results.jailbreak {
         if jb.detected.unwrap_or(false) || jb.filtered {
             flags.jailbreak_detected = true;
@@ -190,7 +232,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref h) = results.hate {
-        if h.filtered || h.severity.as_deref().is_some_and(|s| s != "safe") {
+        if !suppressed.contains("hate") && (h.filtered || sev_meets(h.severity.as_deref())) {
             flags.hate_detected = true;
             if h.filtered {
                 flags.filtered_categories.push("hate".into());
@@ -200,7 +242,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref sh) = results.self_harm {
-        if sh.filtered || sh.severity.as_deref().is_some_and(|s| s != "safe") {
+        if !suppressed.contains("self_harm") && (sh.filtered || sev_meets(sh.severity.as_deref())) {
             flags.self_harm_detected = true;
             if sh.filtered {
                 flags.filtered_categories.push("self_harm".into());
@@ -210,7 +252,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref sx) = results.sexual {
-        if sx.filtered || sx.severity.as_deref().is_some_and(|s| s != "safe") {
+        if !suppressed.contains("sexual") && (sx.filtered || sev_meets(sx.severity.as_deref())) {
             flags.sexual_detected = true;
             if sx.filtered {
                 flags.filtered_categories.push("sexual".into());
@@ -220,7 +262,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         }
     }
     if let Some(ref vi) = results.violence {
-        if vi.filtered || vi.severity.as_deref().is_some_and(|s| s != "safe") {
+        if !suppressed.contains("violence") && (vi.filtered || sev_meets(vi.severity.as_deref())) {
             flags.violence_detected = true;
             if vi.filtered {
                 flags.filtered_categories.push("violence".into());

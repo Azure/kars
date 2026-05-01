@@ -41,6 +41,21 @@ export interface AgtInboxEntry {
   timestamp: string;
   id: string;
   message_type?: string;
+  /**
+   * ISO timestamp of when this entry was first surfaced to the LLM via
+   * azureclaw_mesh_inbox. Undefined while still unread. Used by the inbox
+   * tool to:
+   *   1. show "📬 N new / M total" diagnostics so the LLM knows which
+   *      messages it has already seen on prior turns;
+   *   2. stop draining on every read — entries persist across calls so a
+   *      later "what's in your inbox?" reply is still grounded in the
+   *      actual receive history (fixes the demo "viz says inbox empty"
+   *      after auto-reply already consumed the splice-based drain).
+   * Internal protocol/handshake messages and entries claimed by the
+   * mesh_send reply-wait loop are removed from the array immediately and
+   * never get a read_at value.
+   */
+  read_at?: string;
 }
 
 export interface HandoffDeps {

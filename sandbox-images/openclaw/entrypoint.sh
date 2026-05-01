@@ -12,26 +12,46 @@
 
 set -e
 
-# Make pre-staged OpenClaw bundled-runtime-deps discoverable. The base image
-# stages all bundled channel/plugin deps into /opt/openclaw-stage at build time
-# (full network); at runtime UID 1000 cannot reach npm registry directly because
-# of egress-guard, so we point OpenClaw's `installBundledRuntimeDeps` resolver at
-# the pre-populated tree. Set BEFORE any `openclaw …` invocation in this script
-# (parent gateway, sub-agent `openclaw agent --local`, doctor checks, etc.) so
-# they all hit the cached deps instead of attempting a 403-prone npm install.
+# Make pre-staged OpenClaw bundled-runtime-deps discoverable at runtime.
 #
-# The image rootfs is read-only, but OpenClaw 2026.4.x writes a
-# `.openclaw-runtime-deps.lock` sentinel inside the version-hash dir on first
-# resolve, so we mirror the staged tree onto the writable /tmp tmpfs and point
-# the env var there. /tmp is a 1GiB tmpfs (see pod spec); the staged tree is
-# ~500MiB so it fits with room to spare. cp -r is ~3-5s on tmpfs and only runs
-# once at container start.
+# Background. The base image bakes all bundled channel/plugin deps into
+# /opt/openclaw-stage at build time (full network); at runtime UID 1000
+# cannot reach npm directly because of egress-guard, so OpenClaw must
+# resolve every `require()` from local disk.
+#
+# Design contract (verified against OpenClaw 2026.4.27
+# dist/bundled-runtime-root-D11Fl_T4.js):
+#
+#   * `OPENCLAW_PLUGIN_STAGE_DIR` is a colon-separated *list* of base
+#     dirs (line ~666 of bundled-runtime-root: splits on `path.delimiter`).
+#   * All entries become NODE_PATH search roots (line ~1743:
+#     `registerBundledRuntimeDependencyNodePath`). Deps resolve from
+#     whichever root has them — read-only is fine.
+#   * The *last* entry is the install root: where the lock dir + retained
+#     manifest are written if (and only if) something is actually
+#     missing from the search roots (line ~1090: `externalRoots.at(-1)`).
+#   * `missingSpecs = deps.filter(dep => !hasDependencySentinel(searchRoots, dep))`
+#     (line ~1455). With everything pre-staged, `missingSpecs = []` and
+#     the install path (lock, npm spawn, manifest write) **never executes**.
+#
+# What this gives us:
+#   * /opt/openclaw-stage stays read-only at runtime — agent UID cannot
+#     tamper with bundled code (security posture: bundled TCB is immutable).
+#   * /tmp/openclaw-cache is a tiny tmpfs scratch area (~27 MiB observed:
+#     symlinks back into /opt + a few small NODE_PATH manifests). Fits in
+#     the 1 GiB /tmp tmpfs with a 36× safety margin.
+#   * No `cp -r` of the staged tree (saves 3-5 s of boot, ~1.8 GiB of
+#     tmpfs, and removes the previous "chmod -R u+w on stage" compromise).
+#
+# Order matters: read-only stage first, writable cache last.
 if [ -z "${OPENCLAW_PLUGIN_STAGE_DIR:-}" ] && [ -d /opt/openclaw-stage ]; then
-  if [ ! -d /tmp/openclaw-stage ]; then
-    cp -r /opt/openclaw-stage /tmp/openclaw-stage
-    chmod -R u+w /tmp/openclaw-stage 2>/dev/null || true
+  mkdir -p /tmp/openclaw-cache 2>/dev/null || true
+  # In dev mode entrypoint starts as root; in AKS it starts as sandbox.
+  # Ensure the cache dir is owned by the agent UID either way.
+  if [ "$(id -u)" = "0" ]; then
+    chown sandbox:sandbox /tmp/openclaw-cache 2>/dev/null || true
   fi
-  export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-stage
+  export OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage:/tmp/openclaw-cache
 fi
 
 # Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)

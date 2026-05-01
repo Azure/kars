@@ -286,56 +286,151 @@ async fn agt_registry_proxy(
         url.push_str(&qs);
     }
 
-    let mut req = state.client.request(
-        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
-        &url,
-    );
+    // Defense-in-depth retry mirror of vendored SDK Patch #12. The plugin's
+    // SDK has a 3-attempt / 2s budget retry, but the router is the
+    // single network egress for sandboxes and benefits from its own retry
+    // for two reasons:
+    //   1. dev port-forward (host.docker.internal:18080) sometimes returns
+    //      502 for the very first connection attempt after a kubectl
+    //      port-forward restart;
+    //   2. the AGT relay's `proxy_relay` path next door already has retry
+    //      semantics, and parity here keeps router behaviour predictable.
+    //
+    // Policy: same as SDK — GET/HEAD always retry; allowlisted POST paths
+    // (idempotent registry endpoints) retry; transient statuses 408/429/
+    // 502/503/504 + network errors. Cap 3 attempts, ~2s elapsed.
+    const RETRY_STATUSES: &[u16] = &[408, 429, 502, 503, 504];
+    const POST_RETRY_PATHS: &[&str] = &[
+        "registry/register",
+        "registry/prekeys",
+        "registry/reputation",
+        "registry/status",
+        "registry/capabilities",
+        "registry/revocations/bulk",
+    ];
+    let is_idempotent = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    let post_retry = method == axum::http::Method::POST
+        && POST_RETRY_PATHS
+            .iter()
+            .any(|p| path == *p || path.starts_with(&format!("{}?", p)));
+    let retry_allowed = is_idempotent || post_retry;
+    let max_attempts: u32 = if retry_allowed { 3 } else { 1 };
+    let total_budget = std::time::Duration::from_millis(2000);
+    let started_at = std::time::Instant::now();
 
-    // Forward Content-Type
-    if let Some(ct) = headers.get("content-type") {
-        req = req.header("content-type", ct);
-    }
+    let body_clone = body.to_vec();
+    let mut last_err: Option<reqwest::Error> = None;
+    let mut last_response: Option<(StatusCode, axum::body::Bytes)> = None;
 
-    if !body.is_empty() {
-        req = req.body(body.to_vec());
-    }
+    for attempt in 1..=max_attempts {
+        let mut req = state.client.request(
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
+            &url,
+        );
+        if let Some(ct) = headers.get("content-type") {
+            req = req.header("content-type", ct);
+        }
+        if !body_clone.is_empty() {
+            req = req.body(body_clone.clone());
+        }
 
-    match req.timeout(std::time::Duration::from_secs(10)).send().await {
-        Ok(resp) => {
-            let status =
-                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let resp_body = resp.bytes().await.unwrap_or_default();
+        match req.timeout(std::time::Duration::from_secs(10)).send().await {
+            Ok(resp) => {
+                let status =
+                    StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let resp_body = resp.bytes().await.unwrap_or_default();
 
-            // Log reputation submission failures so we can diagnose why
-            // feedback_count stays 0 (the SDK silently returns false).
-            if path == "registry/reputation"
-                && method == axum::http::Method::POST
-                && !status.is_success()
-            {
-                let error_text = std::str::from_utf8(&resp_body).unwrap_or("<binary>");
-                tracing::warn!(
-                    status = %status,
-                    error = %error_text,
-                    "AGT reputation submission failed"
-                );
+                let should_retry = retry_allowed
+                    && attempt < max_attempts
+                    && RETRY_STATUSES.contains(&status.as_u16())
+                    && started_at.elapsed() < total_budget;
+
+                if should_retry {
+                    let wait = std::time::Duration::from_millis(
+                        100u64.saturating_mul(1u64 << (attempt - 1)),
+                    );
+                    if started_at.elapsed() + wait > total_budget {
+                        last_response = Some((status, resp_body));
+                        break;
+                    }
+                    tracing::warn!(
+                        url = %url,
+                        status = %status,
+                        attempt,
+                        max_attempts,
+                        "AGT registry proxy: retrying transient status"
+                    );
+                    last_response = Some((status, resp_body));
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+
+                // Log reputation submission failures so we can diagnose why
+                // feedback_count stays 0 (the SDK silently returns false).
+                if path == "registry/reputation"
+                    && method == axum::http::Method::POST
+                    && !status.is_success()
+                {
+                    let error_text = std::str::from_utf8(&resp_body).unwrap_or("<binary>");
+                    tracing::warn!(
+                        status = %status,
+                        error = %error_text,
+                        "AGT reputation submission failed"
+                    );
+                }
+
+                return (
+                    status,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    resp_body,
+                )
+                    .into_response();
             }
-
-            (
-                status,
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                resp_body,
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::warn!(url = %url, error = %e, "AGT registry proxy failed");
-            errors::flat(
-                StatusCode::BAD_GATEWAY,
-                format!("Registry unreachable: {}", e),
-            )
-            .into_response()
+            Err(e) => {
+                let should_retry =
+                    retry_allowed && attempt < max_attempts && started_at.elapsed() < total_budget;
+                if should_retry {
+                    let wait = std::time::Duration::from_millis(
+                        100u64.saturating_mul(1u64 << (attempt - 1)),
+                    );
+                    if started_at.elapsed() + wait > total_budget {
+                        last_err = Some(e);
+                        break;
+                    }
+                    tracing::warn!(
+                        url = %url,
+                        error = %e,
+                        attempt,
+                        max_attempts,
+                        "AGT registry proxy: retrying network error"
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                last_err = Some(e);
+                break;
+            }
         }
     }
+
+    if let Some((status, resp_body)) = last_response {
+        return (
+            status,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            resp_body,
+        )
+            .into_response();
+    }
+    let err_msg = last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    tracing::warn!(url = %url, error = %err_msg, "AGT registry proxy failed");
+    errors::flat(
+        StatusCode::BAD_GATEWAY,
+        format!("Registry unreachable: {}", err_msg),
+    )
+    .into_response()
 }
 
 /// Look up an agent's AMID from the registry by searching for its sandbox name.

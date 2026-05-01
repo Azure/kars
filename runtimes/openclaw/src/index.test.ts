@@ -1307,3 +1307,214 @@ describe("post-handoff sub-agent restore logic", () => {
     expect(toolResponse.display).toContain("Telegram");
   });
 });
+
+// ---------------------------------------------------------------------------
+// N. Mesh-send payload guard (rejects cross-container path references and
+//    placeholder file_transfer envelopes — see mesh-payload-guard.ts)
+// ---------------------------------------------------------------------------
+
+describe("mesh-payload-guard via azureclaw_mesh_send", () => {
+  let plugin: any;
+  let tools: Map<string, any>;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const mod = await import("./index.js");
+    plugin = mod.default;
+    const mock = createMockApi();
+    tools = mock.tools;
+    plugin.register(mock.api);
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    vi.restoreAllMocks();
+  });
+
+  it("rejects file_transfer envelope with placeholder file_data", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const result = await tool.execute("id", {
+      to_agent: "writer",
+      content: JSON.stringify({
+        type: "file_transfer",
+        file_name: "hero.png",
+        file_data: "<base64-image-data>",
+      }),
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("placeholder");
+    expect(parsed.error).toContain("azureclaw_mesh_transfer_file");
+  });
+
+  it("rejects file_transfer envelope with missing file_data", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const result = await tool.execute("id", {
+      to_agent: "writer",
+      content: JSON.stringify({ type: "file_transfer", file_name: "chart.png" }),
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("missing file_data");
+  });
+
+  it("rejects payload referencing /sandbox/ path with no inlined data", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const result = await tool.execute("id", {
+      to_agent: "writer",
+      content: JSON.stringify({ artifact_path: "/sandbox/data.json" }),
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("local container path");
+    expect(parsed.error).toContain("azureclaw_mesh_transfer_file");
+  });
+
+  it("does NOT reject plain text mentioning /sandbox/ path", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    // Plain text — not a JSON object — must be allowed even when it
+    // mentions a /sandbox/... path. The downstream "AGT mesh not
+    // initialized" error proves the guard let the call through.
+    const result = await tool.execute("id", {
+      to_agent: "writer",
+      content: "I saved the chart to /sandbox/.openclaw/workspace/chart.png and will follow up.",
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    // The guard allowed it through — what we get back is the AGT-init
+    // error (no mesh client in this test), NOT a guard rejection.
+    expect(parsed.error).toContain("AGT mesh not initialized");
+  });
+
+  it("does NOT reject plain JSON metadata without local-path artifact keys", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const result = await tool.execute("id", {
+      to_agent: "viz",
+      content: JSON.stringify({ trends: ["a", "b"], metrics: { foo: 1 } }),
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("AGT mesh not initialized");
+  });
+
+  it("accepts a valid file_transfer envelope (real base64)", async () => {
+    const tool = tools.get("azureclaw_mesh_send")!;
+    const realB64 = Buffer.from("hello world", "utf-8").toString("base64");
+    const result = await tool.execute("id", {
+      to_agent: "writer",
+      content: JSON.stringify({
+        type: "file_transfer",
+        file_name: "note.txt",
+        file_data: realB64,
+        size_bytes: 11,
+      }),
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    // Guard allowed it through; the AGT-init error proves we got past.
+    expect(parsed.error).toContain("AGT mesh not initialized");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N+1. telegram_status tool
+// ---------------------------------------------------------------------------
+
+describe("telegram_status tool", () => {
+  let plugin: any;
+  let tools: Map<string, any>;
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    originalFetch = globalThis.fetch;
+    const mod = await import("./index.js");
+    plugin = mod.default;
+    const mock = createMockApi();
+    tools = mock.tools;
+    plugin.register(mock.api);
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  afterEach(() => {
+    delete process.env.AGT_SKIP_INIT;
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_ALLOW_FROM;
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("is registered as a tool", () => {
+    expect(tools.has("telegram_status")).toBe(true);
+    const tool = tools.get("telegram_status")!;
+    expect(tool.parameters.required).toEqual(["text"]);
+  });
+
+  it("returns config error when TELEGRAM_BOT_TOKEN is missing", async () => {
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_ALLOW_FROM;
+    const tool = tools.get("telegram_status")!;
+    const result = await tool.execute("id", { text: "hello" });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("not configured");
+  });
+
+  it("returns empty-text error for blank input", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "T";
+    process.env.TELEGRAM_ALLOW_FROM = "1";
+    const tool = tools.get("telegram_status")!;
+    const result = await tool.execute("id", { text: "  " });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("empty text");
+  });
+
+  it("uses TELEGRAM_ALLOW_FROM as the chat ID and posts to Telegram Bot API", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "BOT_TOKEN_SECRET_123";
+    process.env.TELEGRAM_ALLOW_FROM = "999111";
+    const calls: Array<{ url: string; body: any }> = [];
+    globalThis.fetch = (async (url: string, init: any) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 200 } as any;
+    }) as any;
+
+    const tool = tools.get("telegram_status")!;
+    const result = await tool.execute("id", { text: "🔍 analyst: searching" });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe("delivered");
+    expect(parsed.delivered).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain("/sendMessage");
+    expect(calls[0].body.chat_id).toBe("999111");
+    expect(calls[0].body.text).toBe("🔍 analyst: searching");
+  });
+
+  it("redacts the bot token from error responses", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "BOT_TOKEN_SECRET_456";
+    process.env.TELEGRAM_ALLOW_FROM = "42";
+    globalThis.fetch = (async () => {
+      // Return a body that echoes the token back (Bot API does sometimes do this on 4xx)
+      return {
+        ok: false,
+        status: 401,
+        text: async () => "Unauthorized: token BOT_TOKEN_SECRET_456 invalid",
+      } as any;
+    }) as any;
+
+    const tool = tools.get("telegram_status")!;
+    const result = await tool.execute("id", { text: "test" });
+    const text = result.content[0].text;
+    expect(text).not.toContain("BOT_TOKEN_SECRET_456");
+    expect(text).toContain("[REDACTED]");
+    const parsed = JSON.parse(text);
+    expect(parsed.status).toBe("failed");
+  });
+
+  it("supports multiple chat IDs separated by commas", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "T";
+    process.env.TELEGRAM_ALLOW_FROM = "111,222,333";
+    const calls: any[] = [];
+    globalThis.fetch = (async (_url: string, init: any) => {
+      calls.push(JSON.parse(init.body));
+      return { ok: true, status: 200 } as any;
+    }) as any;
+
+    const tool = tools.get("telegram_status")!;
+    await tool.execute("id", { text: "x" });
+    expect(calls.map((c) => c.chat_id)).toEqual(["111", "222", "333"]);
+  });
+});

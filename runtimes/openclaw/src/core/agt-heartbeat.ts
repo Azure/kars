@@ -117,6 +117,78 @@ export async function agtReconnect(
 }
 
 /**
+ * Start a periodic `task_progress` heartbeat to `originatorAmid` while a
+ * `task_request` is being processed by the in-process LLM tool-call loop.
+ *
+ * Why: the in-process task-loop path (sub-agent receives `task_request`,
+ * runs `processTaskWithTools`, replies with `task_response`) used to leave
+ * the parent silently waiting on a fixed 60s timeout. Long-running tool
+ * sequences (e.g. multiple `foundry_web_search` calls) routinely exceeded
+ * this and the parent gave up *before* the actual reply arrived. The
+ * offload path (`agt-offload.ts`) already solved this with periodic
+ * `offload_progress` pings; this is the in-process equivalent so the
+ * parent's wait loop can extend the idle clock as long as the sub-agent
+ * keeps signalling progress.
+ *
+ * Returns a cancel function that MUST be called from a `finally` block
+ * when the task completes (success, failure, or interrupt). All sends are
+ * fire-and-forget — a transient ratchet failure on the heartbeat must
+ * never crash the wrapper task.
+ */
+export function startTaskProgressHeartbeat(
+  originatorAmid: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  meshClient: { send: (amid: string, msg: any) => Promise<unknown> } | null,
+  fromAgent: string,
+  log: MeshLogger,
+  intervalMs: number = 20_000,
+): () => void {
+  const startedAt = Date.now();
+  let tick = 0;
+  let cancelled = false;
+
+  const fire = (stage: "started" | "executing"): void => {
+    if (cancelled || !meshClient) return;
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    try {
+      meshClient.send(originatorAmid, {
+        type: "task_progress",
+        stage,
+        tick,
+        elapsed_seconds: elapsedSec,
+        from_agent: fromAgent,
+        timestamp: new Date().toISOString(),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }).catch((e: any) => {
+        // Best-effort heartbeat — log once at debug-equivalent then swallow.
+        log.warn(`AGT relay: task_progress heartbeat send failed (tick=${tick}): ${e?.message || e}`);
+      });
+    } catch (e: any) {
+      log.warn(`AGT relay: task_progress heartbeat threw (tick=${tick}): ${e?.message || e}`);
+    }
+  };
+
+  // Initial ping — tells the parent "I started" so its wait loop sees a
+  // progress hit even for fast tasks (avoids the race where the reply
+  // arrives between the "started" tick and the first interval fire).
+  fire("started");
+
+  const timer = setInterval(() => {
+    tick += 1;
+    fire("executing");
+  }, intervalMs);
+  // Don't keep the event loop alive solely for this interval — when the
+  // wrapper task finishes its finally block runs the cancel returned below.
+  if (typeof timer.unref === "function") timer.unref();
+
+  return () => {
+    if (cancelled) return;
+    cancelled = true;
+    clearInterval(timer);
+  };
+}
+
+/**
  * Rewrite the AGT_INBOX_START..AGT_INBOX_END section of MEMORY.md so the
  * wrapped LLM sees pending peer messages without an explicit mesh_inbox
  * call. Best-effort — silently no-ops if the file isn't present.
