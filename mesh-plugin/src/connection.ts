@@ -79,9 +79,28 @@ export interface ConnectionConfig {
 }
 
 interface InboxMessage {
+  /** Stable id for this message — used by mesh_inbox to mark-read and dedupe. */
+  id: string;
   from: string;
   content: unknown;
   timestamp: string;
+  /**
+   * ISO timestamp set when the LLM-facing `mesh_inbox` tool returned this
+   * entry with `mark_read=true`. Untouched by `consumeInbox` / `waitForMessage`
+   * because those paths *remove* the entry from the array entirely.
+   */
+  read_at?: string;
+}
+
+export interface MeshDiagnostics {
+  build_hash: string;
+  received_total: number;
+  consumed_by_waiter: number;
+  consumed_by_predicate: number;
+  fifo_dropped: number;
+  read_total: number;
+  last_received_at: string | null;
+  last_read_at: string | null;
 }
 
 interface PendingTransfer {
@@ -116,6 +135,21 @@ export class MeshConnection implements IMeshTransport {
   private pendingTransfers = new Map<string, PendingTransfer>();
   private transferCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private connectInFlight: Promise<void> | null = null;
+
+  // Inbox + lifecycle counters. Surfaced by `getDiagnostics()` for the
+  // mesh_inbox tool so operators can distinguish "never received" from
+  // "already consumed" without re-running the demo. Bumped from the only
+  // four sites that mutate `inbox`: pushInbox, deliverToWaiters (claimed
+  // path), consumeInbox, waitForMessage.
+  private stats = {
+    received_total: 0,
+    consumed_by_waiter: 0,
+    consumed_by_predicate: 0,
+    fifo_dropped: 0,
+    read_total: 0,
+    last_received_at: null as string | null,
+    last_read_at: null as string | null,
+  };
 
   // Lazily loaded SDK client + the wsFactory's current CONNECT tunnel socket.
   // The SDK owns the WebSocket, auth, prekey upload, Signal E2E, and reconnect.
@@ -379,12 +413,16 @@ export class MeshConnection implements IMeshTransport {
       } catch (err) {
         this.waiters.delete(waiter);
         waiter.resolve(err);
+        if (waiter.consume) this.stats.consumed_by_waiter += 1;
         return waiter.consume;
       }
       if (result !== null && result !== undefined) {
         this.waiters.delete(waiter);
         waiter.resolve(result);
-        if (waiter.consume) return true;
+        if (waiter.consume) {
+          this.stats.consumed_by_waiter += 1;
+          return true;
+        }
       }
     }
     return false;
@@ -392,7 +430,12 @@ export class MeshConnection implements IMeshTransport {
 
   private pushInbox(msg: InboxMessage): void {
     this.inbox.push(msg);
-    while (this.inbox.length > this.maxInboxSize) this.inbox.shift();
+    this.stats.received_total += 1;
+    this.stats.last_received_at = msg.timestamp;
+    while (this.inbox.length > this.maxInboxSize) {
+      this.inbox.shift();
+      this.stats.fifo_dropped += 1;
+    }
   }
 
   /**
@@ -426,7 +469,12 @@ export class MeshConnection implements IMeshTransport {
 
     const claimed = this.deliverToWaiters(from, final);
     if (!claimed) {
-      this.pushInbox({ from, content: final, timestamp: ts });
+      this.pushInbox({
+        id: `mesh-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
+        from,
+        content: final,
+        timestamp: ts,
+      });
     }
   }
 
@@ -744,8 +792,55 @@ export class MeshConnection implements IMeshTransport {
     return msgs;
   }
 
+  /**
+   * Mark the given message ids as read (in-place). Used by the mesh_inbox
+   * tool when called with `mark_read=true` so subsequent `unread_only`
+   * queries don't re-list the same entries. Entries themselves stay in
+   * the inbox until `consumeInbox` / `waitForMessage` claims them or the
+   * FIFO cap evicts them.
+   */
+  markRead(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    const idSet = new Set(ids);
+    const now = new Date().toISOString();
+    let count = 0;
+    for (const m of this.inbox) {
+      if (idSet.has(m.id) && !m.read_at) {
+        m.read_at = now;
+        count += 1;
+      }
+    }
+    if (count > 0) {
+      this.stats.read_total += count;
+      this.stats.last_read_at = now;
+    }
+    return count;
+  }
+
+  /** Number of inbox entries with no `read_at` timestamp. */
+  getUnreadCount(): number {
+    let n = 0;
+    for (const m of this.inbox) if (!m.read_at) n += 1;
+    return n;
+  }
+
+  /** Snapshot of inbox + lifecycle counters for diagnostics. */
+  getDiagnostics(): MeshDiagnostics {
+    return {
+      build_hash: BUILD_HASH,
+      received_total: this.stats.received_total,
+      consumed_by_waiter: this.stats.consumed_by_waiter,
+      consumed_by_predicate: this.stats.consumed_by_predicate,
+      fifo_dropped: this.stats.fifo_dropped,
+      read_total: this.stats.read_total,
+      last_received_at: this.stats.last_received_at,
+      last_read_at: this.stats.last_read_at,
+    };
+  }
+
   drainInbox(): InboxMessage[] {
     const msgs = [...this.inbox];
+    this.stats.consumed_by_predicate += msgs.length;
     this.inbox = [];
     return msgs;
   }
@@ -762,7 +857,10 @@ export class MeshConnection implements IMeshTransport {
       if (predicate(m)) claimed.push(m);
       else kept.push(m);
     }
-    if (claimed.length > 0) this.inbox = kept;
+    if (claimed.length > 0) {
+      this.inbox = kept;
+      this.stats.consumed_by_predicate += claimed.length;
+    }
     return claimed;
   }
 
@@ -779,7 +877,10 @@ export class MeshConnection implements IMeshTransport {
       const msg = this.inbox[i];
       const result = predicate(msg.content, msg.from);
       if (result !== null && result !== undefined) {
-        if (consume) this.inbox.splice(i, 1);
+        if (consume) {
+          this.inbox.splice(i, 1);
+          this.stats.consumed_by_waiter += 1;
+        }
         return result;
       }
     }

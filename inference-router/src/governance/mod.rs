@@ -479,6 +479,15 @@ impl Governance {
 
     /// Scan model response text for threats (prompt injection, exfil URLs, etc.).
     /// Returns the sanitized text and whether any threats were found.
+    ///
+    /// When `AZURECLAW_SUPPRESS_EXFIL_URL=1` is set, the upstream AGT
+    /// `ExfiltrationUrl` finding is downgraded: the threat is still recorded
+    /// (metrics + warn log + audit), but URLs are NOT redacted from the model
+    /// response. Rationale: AGT 3.1.0 / 3.3.0 use a naive substring guard
+    /// (`text.contains("post"|"send"|"upload"|...)`) which over-fires on
+    /// long-form content (e.g. "security posture", "post-mortem") and strips
+    /// legitimate citations. Other threat types (prompt-injection tags,
+    /// imperative phrasing, credential leakage) remain fully enforced.
     pub fn scan_response(&self, text: &str) -> (String, bool) {
         match self.response_scanner.scan_text(text) {
             Ok(result) => {
@@ -517,6 +526,22 @@ impl Governance {
                         &format!("response_threat:{}", types.join(",")),
                         "flagged",
                     );
+
+                    let suppress_exfil = std::env::var("AZURECLAW_SUPPRESS_EXFIL_URL")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                    if suppress_exfil {
+                        let only_exfil = result.findings.iter().all(|f| {
+                            matches!(f.threat_type, McpResponseThreatType::ExfiltrationUrl)
+                        });
+                        if only_exfil {
+                            tracing::warn!(
+                                sandbox = %self.sandbox_name,
+                                "exfiltration_url redaction suppressed (env override); citations retained",
+                            );
+                            return (text.to_string(), false);
+                        }
+                    }
                 }
                 (result.sanitized, !result.findings.is_empty())
             }

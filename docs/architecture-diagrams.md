@@ -402,7 +402,7 @@ sequenceDiagram
         Note over Router,CS: Gate 4: Content Safety Floor
         Router->>CS: Analyze prompt (DefaultV2 policy)<br/>Prompt Shields jailbreak detection
         CS-->>Router: category scores + action
-        Note right of CS: ❌ 400 if threshold breached<br/>(always-on; InferencePolicy can tighten)
+        Note right of CS: ❌ 400 if threshold breached<br/>(always-on — InferencePolicy can tighten)
     end
 
     rect rgb(240, 240, 255)
@@ -972,11 +972,11 @@ stateDiagram-v2
 
     Updated: PolicyEnvelope generation N+1\nNew snapshot (ArcSwap store)\nIn-flight requests hold prior Arc
 
-    Empty --> Loaded: PolicyChange::Upserted\n(first policy)
-    Loaded --> Updated: PolicyChange::Upserted\nor PolicyChange::Deleted
+    Empty --> Loaded: PolicyChange.Upserted\n(first policy)
+    Loaded --> Updated: PolicyChange.Upserted\nor PolicyChange.Deleted
     Updated --> Updated: Additional changes\n(each bumps generation by 1)
-    Loaded --> Empty: PolicyChange::Reset\n(all policies removed)
-    Updated --> Empty: PolicyChange::Reset
+    Loaded --> Empty: PolicyChange.Reset\n(all policies removed)
+    Updated --> Empty: PolicyChange.Reset
 
     note right of Updated
         ArcSwap guarantees:

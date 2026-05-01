@@ -136,14 +136,30 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "mesh_send",
-      description: "Send an E2E encrypted message to any agent in the mesh — siblings, parent, or any discovered agent. Auto-discovers the target by name (no need to call discover first). Use for peer-to-peer communication between agents.",
+      description: "Send an E2E encrypted TEXT/JSON message to any agent in the mesh — siblings, parent, or any discovered agent. Auto-discovers the target by name. Use for peer-to-peer text or JSON. To send a FILE / IMAGE / BINARY, use `mesh_transfer_file` instead — peer agents run in separate containers and cannot read your /sandbox or /tmp paths, so a file_transfer envelope must contain real base64 bytes. Plain JSON metadata is accepted; envelopes with placeholder file_data (e.g. `<base64-image-data>`) are rejected.",
       parameters: {
         type: "object",
         properties: {
           to_agent: { type: "string", description: "Name of the target agent" },
-          message: { type: "string", description: "The message to send" },
+          message: { type: "string", description: "The message body — text or stringified JSON. Do NOT hand-craft `{type:'file_transfer', file_data:'<base64-bytes>'}` here; use `mesh_transfer_file` for files." },
         },
         required: ["to_agent", "message"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "mesh_transfer_file",
+      description: "Send a FILE / IMAGE / BINARY to another mesh agent. Reads the file from your local container, base64-encodes it, and ships it to the recipient via the chunked E2E encrypted transfer protocol (files up to ~30 MB). The recipient's gateway auto-saves it under /sandbox/.openclaw/workspace/incoming/<file_name> and the recipient sees the saved path in their mesh_inbox. Use this for any file you want to ship — never hand-craft a `file_transfer` JSON envelope through `mesh_send`.",
+      parameters: {
+        type: "object",
+        properties: {
+          to_agent: { type: "string", description: "Name of the target agent" },
+          file_path: { type: "string", description: "Path to the file to send (relative to /sandbox/.openclaw/workspace, or absolute under /sandbox)" },
+          description: { type: "string", description: "Optional human-readable description for the recipient" },
+        },
+        required: ["to_agent", "file_path"],
       },
     },
   },
@@ -164,10 +180,14 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "mesh_inbox",
-      description: "Check for incoming messages from other agents via the AGT E2E encrypted mesh relay. Returns pending messages.",
+      description: "Check for incoming messages from peer agents via the AGT E2E encrypted mesh relay. Returns peer messages received since boot. Internal protocol traffic (handoff/file_transfer ack) and the seeding task itself are filtered out — you only see real peer-to-peer payloads. file_transfer messages are auto-decoded: small text files inline; binaries surface `saved_to` (the local path your container has, written by the gateway) plus `file_name` and `size_bytes`. By default returns unread messages only and PEEKS without marking them read so concurrent sessions all see the same data; set mark_read=true to mark returned entries as read.",
       parameters: {
         type: "object",
-        properties: {},
+        properties: {
+          unread_only: { type: "boolean", description: "If true (default) return only entries not yet marked read." },
+          mark_read: { type: "boolean", description: "If true mark returned entries as read so subsequent calls don't repeat them. Defaults to false (peek-only)." },
+          limit: { type: "number", description: "Maximum number of entries to return (default 50, most recent kept)." },
+        },
       },
     },
   },

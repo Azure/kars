@@ -46,6 +46,15 @@ export function getCachedAmid(name: string): string | undefined {
   return nameToAmid.get(name);
 }
 
+// F7: Last-known-good fallback. Returns the cached AMID for `name` even if
+// the TTL has expired. Used by send/transfer paths after the registry retry
+// budget is exhausted: if the peer was reachable recently, try its last AMID
+// rather than failing the tool call. If the peer truly died, meshClient.send
+// will fail fast and the caller surfaces the error to the LLM.
+export function getStaleAmid(name: string): string | undefined {
+  return nameToAmid.get(name);
+}
+
 export function setCachedAmid(name: string, amid: string): void {
   nameToAmid.set(name, amid);
   nameToAmidTs.set(name, Date.now());
