@@ -639,6 +639,13 @@ pub async fn run(client: Client) -> Result<()> {
         Ok(_) => tracing::info!("McpServer CRD found — starting controller"),
         Err(e) => {
             tracing::warn!("McpServer CRD not installed — MCP 2026 reconciler disabled: {e}");
+            // Park forever so the tokio::select! in main() does not see
+            // this reconciler exit cleanly and tear the whole controller
+            // down. The CRD is only optional from the controller's
+            // perspective; its absence is operator config, not a fatal
+            // condition.
+            std::future::pending::<()>().await;
+            #[allow(unreachable_code)]
             return Ok(());
         }
     }
