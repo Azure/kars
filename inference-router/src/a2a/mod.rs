@@ -78,6 +78,7 @@ pub mod ap2;
 pub mod card_server;
 pub mod jsonrpc_dispatch;
 pub mod mandate_signing;
+pub mod mandate_trust_loader;
 pub mod mandate_trust_store;
 pub mod message_send_ap2;
 pub mod snapshot_rebuild;
@@ -112,6 +113,7 @@ pub use mandate_signing::{
 pub use mandate_trust_store::{
     MandateTrustStore, MandateTrustStoreSnapshot, MandateTrustStoreSnapshotView,
 };
+pub use mandate_trust_loader::{MandateTrustLoadError, load_mandate_trust_snapshot};
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
 };
