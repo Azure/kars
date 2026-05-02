@@ -38,7 +38,7 @@ spec:
 3. **`apiVersion`** MUST be the literal `azureclaw.dev/v1alpha1`. Reject any other value at consumer side.
 4. **`kind`** MUST be the literal `EgressAllowlist`.
 5. **`metadata.generation`** MUST be a positive integer, monotonically increasing per logical policy lineage. New seals derived from a prior digest MUST set `generation = previous + 1`. Replay protection: a controller comparing two refs for the same lineage MUST reject a digest whose `generation` is less than the current observed `generation`.
-6. **`spec.endpoints`** is a list of `{host, port}` objects. Other fields (`methods`, `paths`) are deliberately excluded from v1 to keep the canonicalization surface small; future versions bump the `+yaml` suffix.
+6. **`spec.endpoints`** is a list of `{host, port}` objects. This is also the only shape supported by the inline `EndpointConfig` CRD type — the inline schema and the canonical artifact share one source of truth. L7 shapes (methods, paths, wildcards, CIDR ranges) are reserved for v2 (see "Forward compatibility" below) and will be added to both the canonical artifact and the inline CRD shape together so both paths stay equivalent.
 7. **Endpoint hostnames** (`host`):
    - Lowercased ASCII.
    - **IDNA 2008** Punycode-encoded for any non-ASCII characters (use `idna.encode` / `tonic` / `punycode-rs`; never raw Unicode).

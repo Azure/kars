@@ -106,7 +106,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"metadata":{"finalizers":[FINALIZER]}});
+        let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"ToolPolicy","metadata":{"finalizers":[FINALIZER]}});
         api.patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -168,7 +168,11 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         "Ready"
     };
 
+    // SSA requires apiVersion + kind in the patch body — without
+    // them, the API server returns "invalid object type: /, Kind=".
     let status_patch = json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "ToolPolicy",
         "status": ToolPolicyStatus {
             phase: Some(phase.into()),
             observed_generation,
@@ -333,7 +337,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"metadata":{"finalizers": finalizers}});
+    let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"ToolPolicy","metadata":{"finalizers": finalizers}});
     api.patch(
         name,
         &PatchParams::apply(FIELD_MANAGER).force(),
@@ -363,6 +367,13 @@ pub async fn run(client: Client) -> Result<()> {
         Ok(_) => tracing::info!("ToolPolicy CRD found — starting controller"),
         Err(e) => {
             tracing::warn!("ToolPolicy CRD not installed — reconciler disabled: {e}");
+            // Park forever so the tokio::select! in main() does not see
+            // this reconciler exit cleanly and tear the whole controller
+            // down. The CRD is only optional from the controller's
+            // perspective; its absence is operator config, not a fatal
+            // condition.
+            std::future::pending::<()>().await;
+            #[allow(unreachable_code)]
             return Ok(());
         }
     }

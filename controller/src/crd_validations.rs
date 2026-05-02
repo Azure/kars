@@ -92,44 +92,28 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
 
 /// `ToolPolicy.spec` CEL rules.
 ///
-/// 1. `commerce.dailyCap <= commerce.monthlyCap` (Phase 1 §7 entry 12
-///    explicit example).
-/// 2. `commerce.dailyCap >= 0` and `commerce.monthlyCap >= 0` (no
-///    negative caps; CEL `>=` would silently accept them otherwise).
-/// 3. `appliesTo.matchLabels` non-empty (a policy that matches nothing
-///    is almost always an authoring mistake; if truly intended, an
-///    explicit `disabled: true` field is the right escape hatch — not
-///    silently empty selectors).
+/// Note: `commerce.{dailyCap,monthlyCap}` are formatted currency
+/// strings (e.g. `"USD 100.00"`), not integers — the original
+/// numeric comparison rules were ill-typed and the K8s 1.31+ CEL
+/// compiler rejects them outright. Range/ordering validation
+/// happens in the policy compiler at admission time
+/// (`policy_compiler::parse_currency`); the CRD-side guard is
+/// limited to *structural* checks expressible in CEL.
+///
+/// 1. `appliesTo.sandboxMatchLabels` non-empty (a policy that matches
+///    nothing is almost always an authoring mistake; if truly
+///    intended, an explicit `disabled: true` field is the right
+///    escape hatch — not silently empty selectors).
 #[must_use]
 pub fn tool_policy_validations() -> Vec<ValidationRule> {
-    vec![
-        ValidationRule {
-            rule: "!has(self.commerce) || self.commerce.dailyCap <= self.commerce.monthlyCap"
+    vec![ValidationRule {
+        rule:
+            "has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0"
                 .into(),
-            message: Some(
-                "spec.commerce.dailyCap must be <= spec.commerce.monthlyCap".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
-            rule: "!has(self.commerce) || (self.commerce.dailyCap >= 0 && self.commerce.monthlyCap >= 0)"
-                .into(),
-            message: Some(
-                "spec.commerce.{dailyCap,monthlyCap} must be non-negative".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
-            rule: "has(self.appliesTo.matchLabels) && size(self.appliesTo.matchLabels) > 0".into(),
-            message: Some(
-                "spec.appliesTo.matchLabels must contain at least one label".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-    ]
+        message: Some("spec.appliesTo.sandboxMatchLabels must contain at least one label".into()),
+        reason: Some("FieldValueInvalid".into()),
+        ..ValidationRule::default()
+    }]
 }
 
 /// Inject CEL rules onto the `spec` schema node of a generated CRD.
@@ -527,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_policy_rules_mention_daily_le_monthly_cap() {
+    fn tool_policy_rules_enforce_non_empty_match_labels() {
         let rules: Vec<String> = tool_policy_validations()
             .into_iter()
             .map(|r| r.rule)
@@ -535,8 +519,8 @@ mod tests {
         assert!(
             rules
                 .iter()
-                .any(|r| r.contains("dailyCap") && r.contains("monthlyCap")),
-            "must enforce dailyCap <= monthlyCap; got rules: {rules:?}"
+                .any(|r| r.contains("sandboxMatchLabels") && r.contains("size(")),
+            "must require non-empty appliesTo.sandboxMatchLabels; got rules: {rules:?}"
         );
     }
 
@@ -557,7 +541,7 @@ mod tests {
         let crd = tool_policy_crd();
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
-        assert!(y.contains("dailyCap"));
+        assert!(y.contains("sandboxMatchLabels"));
     }
 
     #[test]

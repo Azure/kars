@@ -74,14 +74,11 @@ spec:
       # Telegram Bot API (required for channel)
       - host: "api.telegram.org"
         port: 443
-        methods: ["GET", "POST"]
       # GitHub (common for agent tools)
       - host: "github.com"
         port: 443
-        methods: ["GET"]
       - host: "api.github.com"
         port: 443
-        methods: ["GET"]
 
   azureServices:
     - service: ai-foundry

@@ -79,6 +79,11 @@ proptest = "1"
 # S16 — perf baseline criterion benches. See `inference-router/benches/`.
 criterion = { workspace = true }
 
+# S3 — fake HTTP upstream for platform MCP dispatcher tests. Exercises the
+# self-call path the dispatcher takes against the same router process.
+wiremock = "0.6"
+tempfile = "3.27.0"
+
 [features]
 # S16 — chaos tier. See controller/Cargo.toml for rationale; the feature
 # itself is empty and only exists so `--workspace --features chaos` works.

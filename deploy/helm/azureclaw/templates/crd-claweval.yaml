@@ -71,7 +71,9 @@ spec:
                       Inline list of eval cases. Each entry is a free-form JSON
                       object the runtime path passes through to the suite. Bounded
                       to 64 entries by CEL to keep the CR small.
-                    items: {}
+                    items:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     type: array
                 type: object
               displayName:

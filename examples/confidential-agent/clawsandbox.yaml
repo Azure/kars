@@ -57,10 +57,8 @@ spec:
     allowedEndpoints:
       - host: "github.com"
         port: 443
-        methods: ["GET"]
       - host: "api.github.com"
         port: 443
-        methods: ["GET", "POST", "PATCH"]
 
   resources:
     requests:

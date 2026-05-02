@@ -161,15 +161,9 @@ spec:
             - appliesTo
             type: object
             x-kubernetes-validations:
-            - message: spec.commerce.dailyCap must be <= spec.commerce.monthlyCap
+            - message: spec.appliesTo.sandboxMatchLabels must contain at least one label
               reason: FieldValueInvalid
-              rule: '!has(self.commerce) || self.commerce.dailyCap <= self.commerce.monthlyCap'
-            - message: spec.commerce.{dailyCap,monthlyCap} must be non-negative
-              reason: FieldValueInvalid
-              rule: '!has(self.commerce) || (self.commerce.dailyCap >= 0 && self.commerce.monthlyCap >= 0)'
-            - message: spec.appliesTo.matchLabels must contain at least one label
-              reason: FieldValueInvalid
-              rule: has(self.appliesTo.matchLabels) && size(self.appliesTo.matchLabels) > 0
+              rule: has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0
           status:
             nullable: true
             properties:
