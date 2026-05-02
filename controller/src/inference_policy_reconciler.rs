@@ -116,7 +116,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"metadata":{"finalizers":[FINALIZER]}});
+        let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers":[FINALIZER]}});
         api.patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -173,7 +173,11 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         "Ready"
     };
 
+    // SSA requires apiVersion + kind in the patch body — without
+    // them, the API server returns "invalid object type: /, Kind=".
     let status_patch = json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "InferencePolicy",
         "status": InferencePolicyStatus {
             phase: Some(phase.into()),
             observed_generation,
@@ -340,7 +344,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"metadata":{"finalizers": finalizers}});
+    let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers": finalizers}});
     api.patch(
         name,
         &PatchParams::apply(FIELD_MANAGER).force(),

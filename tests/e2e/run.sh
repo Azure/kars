@@ -77,6 +77,13 @@ install_crds() {
     local extra_set_args=(
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
+        # Without a fake Foundry endpoint, the ClawSandbox reconciler
+        # degrades with "No inference endpoint configured" before it
+        # ever creates the namespace. Use an .invalid TLD so anything
+        # that *did* try to dial out fails closed.
+        --set-string "inferenceRouter.azure.openai.endpoint=https://e2e-fake.invalid/"
+        --set-string "foundry.endpoint=https://e2e-fake.invalid/"
+        --set-string "foundry.projectEndpoint=https://e2e-fake.invalid/"
     )
     if [ "$disable_le" = "1" ] || [ "$disable_le" = "true" ]; then
         # `--set-string` is mandatory here: K8s pod spec requires env
@@ -300,6 +307,8 @@ metadata:
 spec:
   appliesTo:
     tool: "*"
+    sandboxMatchLabels:
+      azureclaw.azure.com/e2e: "true"
   rateLimit:
     rps: 10
     burst: 20
@@ -373,7 +382,7 @@ spec:
   signingKeys:
     - kid: "e2e-key-1"
       alg: "EdDSA"
-      publicKey: "$pk"
+      publicKeyB64u: "$pk"
   capabilities:
     - "tasks/send"
     - "tasks/get"
