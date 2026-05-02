@@ -65,6 +65,28 @@ build_images() {
 
 install_crds() {
     info "Installing Helm chart (CRDs + RBAC only)"
+    # E2E always runs against a single-node Kind cluster. Multi-replica
+    # leader election adds non-determinism (race on lease acquisition,
+    # one replica reconciles while the other waits) without any of the
+    # benefits it provides in production. Force single-replica + no
+    # leader-election lease so each E2E run starts from a clean,
+    # deterministic state. CI may set the same vars explicitly via
+    # AZURECLAW_E2E_* env vars; the defaults here cover local runs.
+    local replicas="${AZURECLAW_E2E_CONTROLLER_REPLICAS:-1}"
+    local disable_le="${AZURECLAW_E2E_DISABLE_LEADER_ELECTION:-1}"
+    local extra_set_args=(
+        --set "controller.replicas=${replicas}"
+        --set "inferenceRouter.replicas=${replicas}"
+    )
+    if [ "$disable_le" = "1" ] || [ "$disable_le" = "true" ]; then
+        # `--set-string` is mandatory here: K8s pod spec requires env
+        # `value` to be a string, but `--set value=false` would render
+        # as a YAML boolean and the API server would reject the pod.
+        extra_set_args+=(
+            --set "controller.extraEnv[0].name=LEADER_ELECTION_ENABLED"
+            --set-string "controller.extraEnv[0].value=false"
+        )
+    fi
     if ! helm upgrade --install azureclaw "$ROOT_DIR/deploy/helm/azureclaw" \
         --namespace azureclaw-system \
         --create-namespace \
@@ -74,6 +96,7 @@ install_crds() {
         --set inferenceRouter.image.repository=azureclaw-inference-router \
         --set inferenceRouter.image.tag=e2e \
         --set inferenceRouter.image.pullPolicy=Never \
+        "${extra_set_args[@]}" \
         --wait --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
         kubectl get all -n azureclaw-system || true
@@ -165,7 +188,17 @@ EOF
         kubectl get clawsandboxes -A -o wide || true
         kubectl describe clawsandbox e2e-test -n azureclaw-system || true
         kubectl get events -n azureclaw-system --sort-by=.lastTimestamp | tail -30 || true
-        kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=200 || true
+        kubectl get pods -n azureclaw-system -o wide || true
+        kubectl get lease -n azureclaw-system -o yaml || true
+        # Per-pod logs: with multiple replicas, `kubectl logs -l ...`
+        # may not include all pods or may truncate. Iterate explicitly
+        # so the leader's log is always captured.
+        for pod in $(kubectl get pods -n azureclaw-system -l app.kubernetes.io/component=controller -o name 2>/dev/null); do
+            echo "── logs from $pod ───────────────────────────"
+            kubectl logs -n azureclaw-system "$pod" --tail=300 || true
+            echo "── previous (if any) ────────────────────────"
+            kubectl logs -n azureclaw-system "$pod" --tail=100 --previous 2>/dev/null || true
+        done
         fail "Sandbox namespace not created"
     fi
 }

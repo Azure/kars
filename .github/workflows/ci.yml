@@ -427,6 +427,11 @@ jobs:
           # the variable is plumbed through for future runtime matrix
           # expansion (Phase 3 S4 follow-up).
           AZURECLAW_E2E_RUNTIME: ${{ vars.AZURECLAW_E2E_RUNTIME || 'openclaw' }}
+          # E2E runs a single-node Kind cluster — multi-replica leader
+          # election adds nothing but flake. Force single-replica + no
+          # leader lease so the test environment is deterministic.
+          AZURECLAW_E2E_CONTROLLER_REPLICAS: "1"
+          AZURECLAW_E2E_DISABLE_LEADER_ELECTION: "1"
         run: |
           set -euo pipefail
           make test-e2e

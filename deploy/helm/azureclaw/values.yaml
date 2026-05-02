@@ -16,6 +16,10 @@ controller:
   # `false` keeps the Phase 2 warn-only behaviour. Recommended `true`
   # in production to fail-closed against operator typos.
   byoStrict: false
+  # Optional list of additional env vars merged into the controller
+  # container — `[ { name: FOO, value: bar }, ... ]`. Used by E2E
+  # harness to disable leader-election in single-node Kind clusters.
+  extraEnv: []
   resources:
     requests:
       cpu: "100m"
