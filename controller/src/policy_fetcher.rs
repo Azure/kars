@@ -333,8 +333,6 @@ fn canonical_to_endpoint_config(
         .map(|e| crate::crd::EndpointConfig {
             host: e.host.clone(),
             port: Some(e.port),
-            methods: None,
-            paths: None,
         })
         .collect()
 }
@@ -1907,8 +1905,6 @@ mod tests {
         crate::crd::EndpointConfig {
             host: host.into(),
             port,
-            methods: None,
-            paths: None,
         }
     }
 
@@ -2154,7 +2150,7 @@ mod tests {
         assert!(
             derived
                 .iter()
-                .all(|e| e.methods.is_none() && e.paths.is_none())
+                .all(|e| !e.host.is_empty() && e.port.is_some())
         );
     }
 

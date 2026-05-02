@@ -148,6 +148,13 @@ pub async fn run(client: Client) -> Result<()> {
         }
         Err(e) => {
             tracing::warn!("ClawPairing CRD not installed — pairing/federation disabled: {e}");
+            // Park forever so the tokio::select! in main() does not see
+            // this reconciler exit cleanly and tear the whole controller
+            // down. The CRD is only optional from the controller's
+            // perspective; its absence is operator config, not a fatal
+            // condition.
+            std::future::pending::<()>().await;
+            #[allow(unreachable_code)]
             return Ok(());
         }
     }

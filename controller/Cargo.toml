@@ -58,6 +58,12 @@ axum = "0.8"
 # See `controller/src/policy_fetcher.rs` and `docs/policy-canonical-format.md`.
 sigstore = { version = "0.13", default-features = false, features = ["cosign", "verify", "rustls-tls"] }
 oci-client = { version = "0.16", default-features = false, features = ["rustls-tls"] }
+# Explicit dep so we can install a process-level CryptoProvider at
+# startup. Multiple transitive deps (kube → ring, reqwest →
+# aws-lc-rs) enable both providers, which makes rustls 0.23.40+
+# refuse to auto-detect and panic on first TLS handshake. Pin to
+# `aws-lc-rs` to align with the rest of the workspace.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 idna = "1"
 
 [features]

@@ -8,8 +8,9 @@
 # operator opts in via an additional NetworkPolicy.
 #
 # This is the *operator* namespace policy, distinct from the
-# per-sandbox default-deny that the controller renders into each
-# `azureclaw-<sandbox>` namespace from `network-policies.yaml`.
+# per-sandbox default-deny that the controller renders inline in
+# Rust (see `controller/src/reconciler/mod.rs::reconcile_sandbox`,
+# Step 3 — "Apply default-deny NetworkPolicy + allowlist").
 {{- $netpol := (((.Values.controller).networkPolicy).enabled) }}
 {{- if or (eq $netpol nil) $netpol }}
 apiVersion: networking.k8s.io/v1

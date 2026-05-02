@@ -56,6 +56,14 @@ spec:
               containerPort: 9090
               protocol: TCP
           env:
+            {{- if .Values.a2aGateway.testMode }}
+            - name: A2A_GATEWAY_TEST_MODE
+              value: "1"
+            {{- end }}
+            {{- if .Values.a2aGateway.anonymousOk }}
+            - name: A2A_GATEWAY_ANONYMOUS_OK
+              value: "1"
+            {{- end }}
             - name: A2A_GATEWAY_TLS_CERT
               value: /etc/azureclaw/a2a-gateway-tls/tls.crt
             - name: A2A_GATEWAY_TLS_KEY

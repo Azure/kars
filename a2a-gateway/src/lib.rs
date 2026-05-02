@@ -47,6 +47,7 @@ pub mod health;
 pub mod metrics;
 pub mod mtls;
 pub mod proxy;
+pub mod proxy_app;
 pub mod rate_limit;
 pub mod tls;
 pub mod verify;

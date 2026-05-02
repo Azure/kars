@@ -1,0 +1,35 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+"""
+AzureClaw in-pod adapter for the Microsoft Agent Framework Python SDK.
+
+Public API mirrors `azureclaw_runtime_openai_agents` so cross-runtime
+helpers can call either adapter the same way.
+"""
+
+from azureclaw_runtime_maf_python.aad import get_token
+from azureclaw_runtime_maf_python.mesh import (
+    MeshClient,
+    receive_messages,
+    send_message,
+)
+from azureclaw_runtime_maf_python.otel import init_telemetry
+from azureclaw_runtime_maf_python.runtime import bootstrap
+from azureclaw_runtime_maf_python.tools import (
+    FOUNDRY_TOOL_NAMES,
+    register_foundry_tools,
+)
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "FOUNDRY_TOOL_NAMES",
+    "MeshClient",
+    "__version__",
+    "bootstrap",
+    "get_token",
+    "init_telemetry",
+    "receive_messages",
+    "register_foundry_tools",
+    "send_message",
+]

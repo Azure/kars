@@ -1,0 +1,10 @@
+# Built AGT-Python wheels (regenerated from upstream by build-agt-wheels.sh)
+wheels/*.whl
+wheels/*.tar.gz
+
+# Python build artifacts
+**/__pycache__/
+**/*.egg-info/
+**/.pytest_cache/
+**/build/
+**/dist/
