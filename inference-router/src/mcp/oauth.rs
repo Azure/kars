@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! OAuth 2.1 access-token verifier for MCP 2025-03-26 / 2026 Streamable HTTP.
+//! OAuth 2.1 access-token verifier for MCP 2025-11-25 Streamable HTTP.
 // ci:loc-ok: The OAuth 2.1 / RFC 9700 / RFC 7517 (JWK) / RFC 7515 (JWS)
 // verifier is one cohesive defence-in-depth pipeline (header parsing,
 // kid lookup, alg allow-list, JWKS-cache, claim validation, replay
@@ -17,7 +17,7 @@
 //! - **RFC 8725** ("JWT Best Current Practices"): explicit `alg`
 //!   allow-list, no `none`, kid-based key selection, iss/aud/exp/nbf
 //!   claim validation, leeway for clock skew.
-//! - **MCP 2025-03-26** transports section: bearer tokens accepted on
+//! - **MCP 2025-11-25** transports section: bearer tokens accepted on
 //!   POST `/mcp` requests; resource-server semantics.
 //!
 //! # Total function
@@ -53,7 +53,7 @@
 //! - <https://www.rfc-editor.org/rfc/rfc8725> (JWT BCP)
 //! - <https://www.rfc-editor.org/rfc/rfc9700> (OAuth 2.0 BCP)
 //! - <https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1>
-//! - MCP transports: <https://modelcontextprotocol.io/specification/2025-03-26>
+//! - MCP transports: <https://modelcontextprotocol.io/specification/2025-11-25>
 
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};

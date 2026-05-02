@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Streamable HTTP transport envelope per
-//! [MCP spec rev. 2025-03-26 §Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports).
+//! [MCP spec rev. 2025-11-25 §Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
 //!
 //! This module covers transport-level concerns:
 //!
@@ -14,6 +14,10 @@
 //!   by future POST handlers before parsing the body.
 //! - [`MCP_PROTOCOL_VERSION`] — pinned protocol version string we
 //!   negotiate during `initialize`.
+//! - [`SUPPORTED_MCP_PROTOCOL_VERSIONS`] — backward-compat list of
+//!   protocol versions the server will accept during initialize
+//!   negotiation. Newest first; the first entry MUST equal
+//!   [`MCP_PROTOCOL_VERSION`].
 //!
 //! Route handlers (POST `/mcp`, GET `/mcp`, DELETE `/mcp`) are NOT in
 //! this PR — see `phase1/mcp-2026-streamable-http-routes`.
@@ -21,8 +25,19 @@
 use std::str::FromStr;
 
 /// MCP protocol version string we advertise during `initialize`.
-/// Pinned to the 2025-03-26 spec revision (see module docs).
-pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+/// Pinned to the 2025-11-25 spec revision (see module docs).
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Backward-compatible set of MCP protocol versions this server will
+/// accept during `initialize` negotiation. Ordered newest-first; the
+/// first entry MUST equal [`MCP_PROTOCOL_VERSION`].
+///
+/// Older clients pinned to the 2025-06-18 or 2025-03-26 revisions
+/// continue to work — negotiation in
+/// [`super::initialize::handle_initialize`] echoes back the client's
+/// requested version when it appears in this list, otherwise falls
+/// back to the newest.
+pub const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 
 /// Default oversize-frame cap (4 MiB).
 ///
@@ -167,7 +182,14 @@ mod tests {
 
     #[test]
     fn protocol_version_pinned() {
-        assert_eq!(MCP_PROTOCOL_VERSION, "2025-03-26");
+        assert_eq!(MCP_PROTOCOL_VERSION, "2025-11-25");
+    }
+
+    #[test]
+    fn supported_versions_newest_first_and_includes_legacy() {
+        assert_eq!(SUPPORTED_MCP_PROTOCOL_VERSIONS[0], MCP_PROTOCOL_VERSION);
+        assert!(SUPPORTED_MCP_PROTOCOL_VERSIONS.contains(&"2025-06-18"));
+        assert!(SUPPORTED_MCP_PROTOCOL_VERSIONS.contains(&"2025-03-26"));
     }
 
     #[test]
