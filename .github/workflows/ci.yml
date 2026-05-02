@@ -426,7 +426,7 @@ jobs:
           # The harness honours this to default to OpenClaw if unset;
           # the variable is plumbed through for future runtime matrix
           # expansion (Phase 3 S4 follow-up).
-          AZURECLAW_E2E_RUNTIME: ${{ vars.AZURECLAW_E2E_RUNTIME || 'openclaw' }}
+          AZURECLAW_E2E_RUNTIME: ${{ vars.AZURECLAW_E2E_RUNTIME || 'all' }}
           # E2E runs a single-node Kind cluster — multi-replica leader
           # election adds nothing but flake. Force single-replica + no
           # leader lease so the test environment is deterministic.

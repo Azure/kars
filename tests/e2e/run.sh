@@ -525,8 +525,9 @@ EOF
 
 test_runtime_oai_agents() {
     # Render a multi-runtime ClawSandbox of kind OpenAIAgents and assert
-    # the controller produces a workload (deployment).
-    cat <<EOF | kubectl apply -f - 2>/dev/null || true
+    # the controller produces a namespace (Phase 2 schema parses; adapter
+    # deploy lands in S10.A3 — namespace creation is the observable).
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
@@ -534,28 +535,32 @@ metadata:
   name: e2e-oai
   namespace: azureclaw-system
 spec:
+  inferenceRef:
+    name: e2e-test-inference
   runtime:
     kind: OpenAIAgents
+    openaiAgents:
+      pythonVersion: "3.12"
+      agentCode:
+        oci:
+          image: ghcr.io/example/oai-agent:e2e
   sandbox:
     isolation: standard
 EOF
-    sleep 3
-    if kubectl get deploy -n azureclaw-e2e-oai e2e-oai &>/dev/null; then
-        pass "OpenAIAgents runtime renders a Deployment"
+    sleep 5
+    if kubectl get ns azureclaw-e2e-oai &>/dev/null; then
+        pass "OpenAIAgents runtime processed (namespace present)"
     else
-        # The controller's ShapeInvalid path is observable too — assert
-        # the namespace exists at minimum (controller did process the CR).
-        if kubectl get ns azureclaw-e2e-oai &>/dev/null; then
-            pass "OpenAIAgents runtime processed (namespace present)"
-        else
-            fail "OpenAIAgents runtime: no namespace nor deploy"
-        fi
+        echo "  [diag] CR status:"
+        kubectl get clawsandbox e2e-oai -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
+        fail "OpenAIAgents runtime: no namespace"
     fi
     kubectl delete clawsandbox e2e-oai -n azureclaw-system 2>/dev/null || true
 }
 
 test_runtime_maf_python() {
-    cat <<EOF | kubectl apply -f - 2>/dev/null || true
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
@@ -563,22 +568,32 @@ metadata:
   name: e2e-maf
   namespace: azureclaw-system
 spec:
+  inferenceRef:
+    name: e2e-test-inference
   runtime:
-    kind: MicrosoftAgentFrameworkPython
+    kind: MicrosoftAgentFramework
+    microsoftAgentFramework:
+      language: python
+      agentCode:
+        oci:
+          image: ghcr.io/example/maf-agent:e2e
   sandbox:
     isolation: standard
 EOF
-    sleep 3
+    sleep 5
     if kubectl get ns azureclaw-e2e-maf &>/dev/null; then
         pass "MAF-Python runtime processed (namespace present)"
     else
+        echo "  [diag] CR status:"
+        kubectl get clawsandbox e2e-maf -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
         fail "MAF-Python runtime: namespace missing"
     fi
     kubectl delete clawsandbox e2e-maf -n azureclaw-system 2>/dev/null || true
 }
 
 test_runtime_byo() {
-    cat <<EOF | kubectl apply -f - 2>/dev/null || true
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
@@ -586,17 +601,23 @@ metadata:
   name: e2e-byo
   namespace: azureclaw-system
 spec:
+  inferenceRef:
+    name: e2e-test-inference
   runtime:
-    kind: BringYourOwn
+    kind: BYO
     byo:
       image: ghcr.io/example/byo-agent:e2e
+      contractVersion: "v1"
   sandbox:
     isolation: standard
 EOF
-    sleep 3
+    sleep 5
     if kubectl get ns azureclaw-e2e-byo &>/dev/null; then
         pass "BYO runtime processed (namespace present)"
     else
+        echo "  [diag] CR status:"
+        kubectl get clawsandbox e2e-byo -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
         fail "BYO runtime: namespace missing"
     fi
     kubectl delete clawsandbox e2e-byo -n azureclaw-system 2>/dev/null || true
