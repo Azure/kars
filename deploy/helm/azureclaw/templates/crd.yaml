@@ -685,9 +685,9 @@ spec:
                         type: integer
                         format: int64
           x-kubernetes-validations:
-            - rule: "self.spec.slotsMax == null || self.spec.slotsMax >= 1"
+            - rule: "!has(self.spec.slotsMax) || self.spec.slotsMax >= 1"
               message: "spec.slotsMax must be >= 1"
-            - rule: "self.spec.tokenBudget == null || self.spec.tokenBudget >= 0"
+            - rule: "!has(self.spec.tokenBudget) || self.spec.tokenBudget >= 0"
               message: "spec.tokenBudget must be >= 0"
       subresources:
         status: {}
