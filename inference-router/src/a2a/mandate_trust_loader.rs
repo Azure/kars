@@ -286,7 +286,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = load_mandate_trust_snapshot(&tmp.path().join("does-not-exist.json"))
             .expect_err("must fail");
-        assert!(matches!(err, MandateTrustLoadError::Io { .. }), "got {err:?}");
+        assert!(
+            matches!(err, MandateTrustLoadError::Io { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]

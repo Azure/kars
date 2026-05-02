@@ -49,9 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::a2a::ap2::InMemoryMandateLedger;
 use crate::a2a::mandate_trust_store::MandateTrustStore;
 use crate::a2a::message_send_ap2::handle_message_send_with_ap2;
-use crate::a2a::{
-    AgentCardConfig, build_signed_card, handle_tasks_cancel, handle_tasks_get,
-};
+use crate::a2a::{AgentCardConfig, build_signed_card, handle_tasks_cancel, handle_tasks_get};
 use crate::a2a::{InMemoryTaskStore, OsRngTaskIdMinter, TaskIdMinter, TaskStore};
 use crate::mcp::error::{ErrorCode, JsonRpcError};
 use crate::mcp::jsonrpc::{

@@ -25,7 +25,9 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{a2a, a2a_mtls, config, forward_proxy, governance, handoff, routes};
+use azureclaw_inference_router::{
+    a2a, a2a_mtls, config, forward_proxy, governance, handoff, routes,
+};
 
 use anyhow::Result;
 use axum::{

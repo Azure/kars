@@ -110,10 +110,10 @@ pub use jsonrpc_dispatch::{
 pub use mandate_signing::{
     MandateSignError, TrustedKeys as MandateTrustedKeys, sign_mandate, verify_mandate,
 };
+pub use mandate_trust_loader::{MandateTrustLoadError, load_mandate_trust_snapshot};
 pub use mandate_trust_store::{
     MandateTrustStore, MandateTrustStoreSnapshot, MandateTrustStoreSnapshotView,
 };
-pub use mandate_trust_loader::{MandateTrustLoadError, load_mandate_trust_snapshot};
 pub use signature::{
     SignatureError, SignatureInput, base64url_decode, base64url_encode, build_signing_input,
 };
