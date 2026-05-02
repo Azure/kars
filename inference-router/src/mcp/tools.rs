@@ -3,7 +3,7 @@
 
 //! MCP `tools/list` and `tools/call` method handlers — pure dispatch.
 //!
-//! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/server/tools>
+//! Spec: <https://modelcontextprotocol.io/specification/2025-11-25/server/tools>
 //!
 //! Defines:
 //!
@@ -41,7 +41,7 @@ use super::jsonrpc::{Request, Response};
 /// [`ToolCatalog::with_page_size`].
 pub const DEFAULT_PAGE_SIZE: usize = 64;
 
-/// One published tool. Wire format follows MCP 2025-03-26 §tools.
+/// One published tool. Wire format follows MCP 2025-11-25 §tools.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {

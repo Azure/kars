@@ -4,8 +4,8 @@
 //! MCP 2026 Streamable HTTP transport — production code path.
 //!
 //! This module is the **router-side** implementation of the Model Context
-//! Protocol's Streamable HTTP transport (spec revision `2025-03-26`,
-//! [transports](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)).
+//! Protocol's Streamable HTTP transport (spec revision `2025-11-25`,
+//! [transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)).
 //!
 //! ## Status: implemented
 //!

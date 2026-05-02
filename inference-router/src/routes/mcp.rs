@@ -3,7 +3,7 @@
 
 //! POST /mcp axum route — thin wrapper around [`crate::mcp::pipeline::process_request`].
 //!
-//! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/basic/transports>
+//! Spec: <https://modelcontextprotocol.io/specification/2025-11-25/basic/transports>
 //!
 //! Per §0.2 principle 8 (no scaffolding) every code path here is real:
 //! body-size 413, Accept-header 406, JSON-RPC parse error, batch
