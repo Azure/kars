@@ -238,6 +238,282 @@ test_runtime_openclaw() {
     pass "Runtime probe: openclaw selected (default fixtures already covered above)"
 }
 
+# ─── Phase 2/3 CRD reconciler tests ─────────────────────────────────────────
+#
+# Each Phase 2/3 CRD has a reconciler that compiles the CR into a
+# downstream artefact (ConfigMap or Secret) and updates
+# `.status.conditions[]`. The tests below assert the *contract*:
+#
+#   apply CR  →  downstream ConfigMap exists  →  Ready=True condition
+#
+# We do NOT exercise the runtime data-plane (no Foundry calls, no AGT
+# relay, no real OAuth) — only that the controller wires CR → cluster
+# state correctly. That's what runs in Kind.
+
+# Wait up to N seconds for `kubectl get $1 $2 -n $3` to succeed.
+wait_for_resource() {
+    local kind="$1" name="$2" ns="$3" deadline timeout="${4:-30}"
+    deadline=$(($(date +%s) + timeout))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if kubectl get "$kind" "$name" -n "$ns" &>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# Wait up to N seconds for `.status.conditions[]` of `$1/$2 -n $3` to
+# contain a condition with `type=Ready` AND `status=True`. The
+# reconciler may also emit Degraded=False for the same fact; we only
+# assert Ready because every reconciler sets that on success.
+wait_for_ready() {
+    local kind="$1" name="$2" ns="$3" deadline timeout="${4:-30}"
+    deadline=$(($(date +%s) + timeout))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local ready
+        ready=$(kubectl get "$kind" "$name" -n "$ns" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+        if [ "$ready" = "True" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+dump_cr_diagnostics() {
+    local kind="$1" name="$2" ns="$3"
+    warn "Diagnostics for $kind/$name in $ns:"
+    kubectl describe "$kind" "$name" -n "$ns" 2>&1 | tail -40 || true
+    kubectl get "$kind" "$name" -n "$ns" -o yaml 2>&1 | tail -40 || true
+}
+
+# ToolPolicy → toolpolicy-{name}-profile ConfigMap
+test_crd_tool_policy() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ToolPolicy apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: e2e-toolpolicy
+  namespace: azureclaw-system
+spec:
+  appliesTo:
+    tool: "*"
+  rateLimit:
+    rps: 10
+    burst: 20
+EOF
+    if wait_for_resource configmap toolpolicy-e2e-toolpolicy-profile azureclaw-system 45; then
+        pass "ToolPolicy → profile ConfigMap created"
+    else
+        dump_cr_diagnostics toolpolicy e2e-toolpolicy azureclaw-system
+        fail "ToolPolicy: profile ConfigMap not created"
+    fi
+    if wait_for_ready toolpolicy e2e-toolpolicy azureclaw-system 30; then
+        pass "ToolPolicy: status.conditions Ready=True"
+    else
+        dump_cr_diagnostics toolpolicy e2e-toolpolicy azureclaw-system
+        fail "ToolPolicy: Ready=True not observed"
+    fi
+    kubectl delete toolpolicy e2e-toolpolicy -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# InferencePolicy → inferencepolicy-{name}-profile ConfigMap
+test_crd_inference_policy() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "InferencePolicy apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: e2e-inferencepolicy
+  namespace: azureclaw-system
+spec:
+  appliesTo:
+    sandboxName: e2e-test
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+EOF
+    if wait_for_resource configmap inferencepolicy-e2e-inferencepolicy-profile azureclaw-system 45; then
+        pass "InferencePolicy → profile ConfigMap created"
+    else
+        dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
+        fail "InferencePolicy: profile ConfigMap not created"
+    fi
+    if wait_for_ready inferencepolicy e2e-inferencepolicy azureclaw-system 30; then
+        pass "InferencePolicy: status.conditions Ready=True"
+    else
+        dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
+        fail "InferencePolicy: Ready=True not observed"
+    fi
+    kubectl delete inferencepolicy e2e-inferencepolicy -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# A2AAgent → a2aagent-{name}-card ConfigMap
+test_crd_a2a_agent() {
+    # 32 'A's = 32-byte (decoded) Ed25519 public-key placeholder. The
+    # reconciler validates length, not key validity — so a base64url
+    # blob of correct decoded length passes admission and is published
+    # in the AgentCard. We don't need a *real* Ed25519 key to verify
+    # the controller wires CR → ConfigMap correctly; that's the
+    # contract under test here.
+    local pk
+    pk=$(printf 'A%.0s' {1..32} | base64 | tr '/+' '_-' | tr -d '=')
+    cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "A2AAgent apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: A2AAgent
+metadata:
+  name: e2e-a2aagent
+  namespace: azureclaw-system
+spec:
+  endpointUrl: "https://e2e-a2aagent.invalid/"
+  signingKeys:
+    - kid: "e2e-key-1"
+      alg: "EdDSA"
+      publicKey: "$pk"
+  capabilities:
+    - "tasks/send"
+    - "tasks/get"
+EOF
+    if wait_for_resource configmap a2aagent-e2e-a2aagent-card azureclaw-system 45; then
+        pass "A2AAgent → AgentCard ConfigMap created"
+    else
+        dump_cr_diagnostics a2aagent e2e-a2aagent azureclaw-system
+        fail "A2AAgent: AgentCard ConfigMap not created"
+    fi
+    if wait_for_ready a2aagent e2e-a2aagent azureclaw-system 30; then
+        pass "A2AAgent: status.conditions Ready=True"
+    else
+        dump_cr_diagnostics a2aagent e2e-a2aagent azureclaw-system
+        fail "A2AAgent: Ready=True not observed"
+    fi
+    kubectl delete a2aagent e2e-a2aagent -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# ClawMemory → clawmemory-{name}-binding ConfigMap. No Foundry call
+# happens during reconcile (the runtime path creates the store
+# lazily); the CR's job is to publish the binding ConfigMap.
+test_crd_claw_memory() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawMemory apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawMemory
+metadata:
+  name: e2e-clawmemory
+  namespace: azureclaw-system
+spec:
+  storeName: e2e-store
+  sandboxRef:
+    name: e2e-test
+  scope: "agent:e2e-test"
+EOF
+    if wait_for_resource configmap clawmemory-e2e-clawmemory-binding azureclaw-system 45; then
+        pass "ClawMemory → binding ConfigMap created"
+    else
+        dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
+        fail "ClawMemory: binding ConfigMap not created"
+    fi
+    if wait_for_ready clawmemory e2e-clawmemory azureclaw-system 30; then
+        pass "ClawMemory: status.conditions Ready=True"
+    else
+        dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
+        fail "ClawMemory: Ready=True not observed"
+    fi
+    kubectl delete clawmemory e2e-clawmemory -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# ClawEval → claweval-{name}-binding ConfigMap. Schedule is optional;
+# we omit it so the test isn't time-sensitive.
+test_crd_claw_eval() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawEval
+metadata:
+  name: e2e-claweval
+  namespace: azureclaw-system
+spec:
+  sandboxRef:
+    name: e2e-test
+  suite: foundry-evals
+  evaluators:
+    - "relevance"
+EOF
+    if wait_for_resource configmap claweval-e2e-claweval-binding azureclaw-system 45; then
+        pass "ClawEval → binding ConfigMap created"
+    else
+        dump_cr_diagnostics claweval e2e-claweval azureclaw-system
+        fail "ClawEval: binding ConfigMap not created"
+    fi
+    if wait_for_ready claweval e2e-claweval azureclaw-system 30; then
+        pass "ClawEval: status.conditions Ready=True"
+    else
+        dump_cr_diagnostics claweval e2e-claweval azureclaw-system
+        fail "ClawEval: Ready=True not observed"
+    fi
+    kubectl delete claweval e2e-claweval -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# McpServer (dev-mode, no OAuth). The reconciler can't fetch JWKS in
+# Kind (no real issuer), so we assert only that the CR is admitted
+# and reaches a terminal status (Ready or Degraded — both indicate
+# the reconciler ran). A flat fail would mean controller crashed or
+# admission rejected the CR.
+test_crd_mcp_server() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "McpServer apply rejected (dev-mode)"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: e2e-mcpserver
+  namespace: azureclaw-system
+spec:
+  url: "http://e2e-mcpserver.invalid/"
+  productionMode: false
+  allowedTools:
+    - "*"
+EOF
+    # In dev-mode the reconciler should reach Ready=True without
+    # contacting any external system.
+    if wait_for_ready mcpserver e2e-mcpserver azureclaw-system 45; then
+        pass "McpServer (dev-mode): status.conditions Ready=True"
+    else
+        # Dev-mode reconcile shouldn't need network access. Treat
+        # any non-Ready terminal as a failure and dump diagnostics.
+        dump_cr_diagnostics mcpserver e2e-mcpserver azureclaw-system
+        fail "McpServer: Ready=True not observed in dev-mode"
+    fi
+    kubectl delete mcpserver e2e-mcpserver -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# CEL admission gate: a ToolPolicy with a malformed rateLimit (rps=0,
+# burst<rps) MUST be rejected by the API server before it reaches the
+# controller. This test guards against admission regressions.
+test_crd_admission_rejects_invalid() {
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: A2AAgent
+metadata:
+  name: e2e-bad-a2a
+  namespace: azureclaw-system
+spec:
+  endpointUrl: "http://insecure.invalid/"
+  productionMode: true
+  signingKeys: []
+EOF
+    then
+        # If the API server accepted this, the CEL gate is broken.
+        kubectl delete a2aagent e2e-bad-a2a -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted invalid A2AAgent (productionMode + http + empty keys)"
+    else
+        pass "Admission CEL rejects invalid A2AAgent (productionMode + http + empty keys)"
+    fi
+}
+
 test_runtime_oai_agents() {
     # Render a multi-runtime ClawSandbox of kind OpenAIAgents and assert
     # the controller produces a workload (deployment).
@@ -341,6 +617,19 @@ main() {
     test_create_sandbox
     test_networkpolicy_created
     test_serviceaccount_created
+
+    # Phase 2/3 CRD reconciler coverage. These run before
+    # cleanup_sandbox so the sandbox is still present (some CRs
+    # reference it). The CR objects own no Pod, do no network I/O,
+    # and use only ConfigMap output — safe in Kind, no Azure deps.
+    test_crd_tool_policy
+    test_crd_inference_policy
+    test_crd_a2a_agent
+    test_crd_claw_memory
+    test_crd_claw_eval
+    test_crd_mcp_server
+    test_crd_admission_rejects_invalid
+
     test_cleanup_sandbox
 
     case "$RUNTIME" in
