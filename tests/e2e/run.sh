@@ -140,21 +140,38 @@ spec:
   inferenceRef:
     name: e2e-test-inference
 EOF
-    sleep 5
 
-    local ns
-    ns=$(kubectl get namespace azureclaw-e2e-test --no-headers 2>/dev/null | wc -l)
-    if [ "$ns" -gt 0 ]; then
+    # Wait up to 60s for the controller to create the sandbox namespace.
+    # Image pull + reconcile in Kind on the GH runner can take 20-30s
+    # cold; the previous 5s sleep was racy and we'd pipefail-die before
+    # the resource showed up.
+    info "Waiting for sandbox namespace azureclaw-e2e-test to appear (up to 60s)..."
+    local deadline=$(($(date +%s) + 60))
+    local seen=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        # `|| true` shields against `set -e`/pipefail when the
+        # namespace isn't there yet (kubectl returns 1).
+        if kubectl get namespace azureclaw-e2e-test --no-headers 2>/dev/null | grep -q azureclaw-e2e-test; then
+            seen=1
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$seen" -eq 1 ]; then
         pass "Sandbox namespace created (azureclaw-e2e-test)"
     else
+        warn "Namespace did not appear within 60s — dumping diagnostics"
+        kubectl get clawsandboxes -A -o wide || true
+        kubectl describe clawsandbox e2e-test -n azureclaw-system || true
+        kubectl get events -n azureclaw-system --sort-by=.lastTimestamp | tail -30 || true
+        kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=200 || true
         fail "Sandbox namespace not created"
     fi
 }
 
 test_networkpolicy_created() {
-    local np
-    np=$(kubectl get networkpolicy -n azureclaw-e2e-test sandbox-policy --no-headers 2>/dev/null | wc -l)
-    if [ "$np" -gt 0 ]; then
+    if kubectl get networkpolicy -n azureclaw-e2e-test sandbox-policy --no-headers 2>/dev/null | grep -q sandbox-policy; then
         pass "NetworkPolicy created in sandbox namespace"
     else
         fail "NetworkPolicy not found"
@@ -162,9 +179,7 @@ test_networkpolicy_created() {
 }
 
 test_serviceaccount_created() {
-    local sa
-    sa=$(kubectl get serviceaccount -n azureclaw-e2e-test sandbox --no-headers 2>/dev/null | wc -l)
-    if [ "$sa" -gt 0 ]; then
+    if kubectl get serviceaccount -n azureclaw-e2e-test sandbox --no-headers 2>/dev/null | grep -q sandbox; then
         pass "ServiceAccount created in sandbox namespace"
     else
         fail "ServiceAccount not found"
@@ -175,13 +190,14 @@ test_cleanup_sandbox() {
     kubectl delete clawsandbox e2e-test -n azureclaw-system 2>/dev/null || true
     sleep 3
 
-    local ns
-    ns=$(kubectl get namespace azureclaw-e2e-test --no-headers 2>/dev/null | wc -l)
-    if [ "$ns" -eq 0 ]; then
-        pass "Sandbox namespace cleaned up after CRD deletion"
-    else
-        # Controller may not have finalizer — namespace cleanup is best-effort
+    # Cleanup is best-effort: the controller may not have a
+    # finalizer, so namespace teardown can be async. Either we see
+    # the namespace gone, or we accept the CRD-deleted state and
+    # move on. Both states are healthy.
+    if kubectl get namespace azureclaw-e2e-test --no-headers 2>/dev/null | grep -q azureclaw-e2e-test; then
         pass "Sandbox CRD deleted (namespace cleanup is async)"
+    else
+        pass "Sandbox namespace cleaned up after CRD deletion"
     fi
 }
 

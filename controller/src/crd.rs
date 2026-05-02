@@ -730,8 +730,6 @@ impl Default for NetworkPolicyConfig {
 pub struct EndpointConfig {
     pub host: String,
     pub port: Option<u16>,
-    pub methods: Option<Vec<String>>,
-    pub paths: Option<Vec<String>>,
 }
 
 /// Reference to a signed OCI artifact (e.g., a sealed policy document).

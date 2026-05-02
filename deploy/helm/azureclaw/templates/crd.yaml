@@ -449,14 +449,7 @@ spec:
                             type: string
                           port:
                             type: integer
-                          methods:
-                            type: array
-                            items:
-                              type: string
-                          paths:
-                            type: array
-                            items:
-                              type: string
+                        required: [host, port]
                     allowlistRef:
                       type: object
                       description: |

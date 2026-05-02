@@ -59,10 +59,8 @@ spec:
     allowedEndpoints:
       - host: "github.com"
         port: 443
-        methods: ["GET"]
       - host: "api.github.com"
         port: 443
-        methods: ["GET"]
     # clawhub.com intentionally excluded — 12% malware rate.
     # Skills must be curated at build time, not downloaded at runtime.
 
