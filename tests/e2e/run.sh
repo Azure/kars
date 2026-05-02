@@ -54,12 +54,25 @@ setup_cluster() {
 }
 
 build_images() {
+    # Retry docker pulls/builds to absorb transient MCR registry flakes
+    # (e.g., 403/404 on pinned digests during MCR rollouts).
+    docker_build_retry() {
+        local tag="$1" df="$2" ctx="$3" attempt
+        for attempt in 1 2 3; do
+            if docker build -t "$tag" -f "$df" "$ctx"; then
+                return 0
+            fi
+            warn "docker build failed (attempt $attempt/3), retrying in 15s"
+            sleep 15
+        done
+        return 1
+    }
     info "Building controller image"
-    docker build -t azureclaw-controller:e2e -f "$ROOT_DIR/controller/Dockerfile" "$ROOT_DIR"
+    docker_build_retry azureclaw-controller:e2e "$ROOT_DIR/controller/Dockerfile" "$ROOT_DIR"
     kind load docker-image azureclaw-controller:e2e --name "$CLUSTER_NAME"
 
     info "Building inference router image"
-    docker build -t azureclaw-inference-router:e2e -f "$ROOT_DIR/inference-router/Dockerfile" "$ROOT_DIR"
+    docker_build_retry azureclaw-inference-router:e2e "$ROOT_DIR/inference-router/Dockerfile" "$ROOT_DIR"
     kind load docker-image azureclaw-inference-router:e2e --name "$CLUSTER_NAME"
 }
 
