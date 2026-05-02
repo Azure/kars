@@ -30,6 +30,8 @@ use tokio::time::Duration;
 use crate::crd::{ClawSandbox, SandboxConfig};
 use crate::fedcred::{FedCredConfig, FedCredManager};
 
+pub(crate) mod governance_mounts;
+
 /// Build pod security context, conditionally including SELinux options and
 /// choosing between RuntimeDefault and Localhost seccomp profiles.
 /// For Kata (confidential), we use RuntimeDefault since the VM provides isolation.
@@ -1349,56 +1351,210 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .insert("runtimeClassName".into(), json!(rc));
         }
 
-        // If AGT governance is enabled, mount the policy ConfigMap into the router
-        if governance_config.enabled {
-            let policy_profile = &tool_policy_profile;
-            let cm_name = format!("agt-policy-{}", policy_profile);
-
-            // Add policy volume
-            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
-                volumes.push(json!({
-                    "name": "agt-policy",
-                    "configMap": {
-                        "name": cm_name
-                    }
-                }));
+        // S7 wiring — mirror governance CRD ConfigMaps/Secrets from the
+        // user namespace into the sandbox namespace, then inject mounts
+        // into the inference-router container.
+        //
+        // ToolPolicy (always, when governance enabled):
+        //   - Source: `toolpolicy-{tp_ref_name}-profile` ConfigMap
+        //     (key `profile.json`) in `sandbox_self_ns`, owned by the
+        //     ToolPolicy reconciler.
+        //   - Destination: same name in `sandbox_ns`.
+        //   - Mount: `/etc/agt/policies` + env `AGT_POLICY_DIR`.
+        //   - Failure: source missing → mount omitted (router falls back
+        //     to empty policy engine, fail-closed at the AGT layer).
+        if governance_config.enabled && !tool_policy_profile.is_empty() {
+            let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
+            match governance_mounts::mirror_configmap(
+                &client,
+                &cm_name,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "ToolPolicy",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    governance_mounts::inject_configmap_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &cm_name,
+                        "agt-policy",
+                        governance_mounts::paths::TOOL_POLICY_DIR,
+                        Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
+                    );
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        cm = %cm_name,
+                        reason = %reason,
+                        "ToolPolicy compiled-profile ConfigMap not mirrored; \
+                         router will start with empty policy engine",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        cm = %cm_name,
+                        "ToolPolicy ConfigMap mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
             }
 
-            // Add volumeMount + AGT_POLICY_DIR env to the router container
-            if let Some(containers) = pod_spec
-                .get_mut("containers")
-                .and_then(|c| c.as_array_mut())
+            // Add writable emptyDir volume for trust store + audit log persistence
+            if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut())
+                && !volumes.iter().any(|v| v.get("name").and_then(|n| n.as_str()) == Some("agt-data"))
             {
-                for container in containers.iter_mut() {
-                    if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
-                        // Add volumeMount
-                        let mounts = container
-                            .as_object_mut()
-                            .unwrap()
-                            .entry("volumeMounts")
-                            .or_insert(json!([]));
-                        if let Some(mounts_arr) = mounts.as_array_mut() {
-                            mounts_arr.push(json!({
-                                "name": "agt-policy",
-                                "mountPath": "/etc/agt/policies",
-                                "readOnly": true
-                            }));
-                        }
-                        // Add AGT_POLICY_DIR env var (router reads policies natively)
-                        if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
-                            env.push(
-                                json!({"name": "AGT_POLICY_DIR", "value": "/etc/agt/policies"}),
-                            );
-                        }
+                volumes.push(json!({
+                    "name": "agt-data",
+                    "emptyDir": {"sizeLimit": "10Mi"}
+                }));
+            }
+        }
+
+        // McpServer (optional): if the sandbox references one, mirror its
+        // JWKS ConfigMap + signing-key Secret and mount them.
+        if let Some(mcp_ref) = governance_config.mcp_server_ref.as_ref() {
+            let mcp_name = mcp_ref.name.trim();
+            if !mcp_name.is_empty() {
+                let jwks_cm = format!("mcp-{mcp_name}-jwks");
+                let signing_secret = format!("mcp-{mcp_name}-signing");
+                match governance_mounts::mirror_configmap(
+                    &client,
+                    &jwks_cm,
+                    &sandbox_self_ns,
+                    &sandbox_ns,
+                    &name,
+                    "McpServer",
+                )
+                .await
+                {
+                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        governance_mounts::inject_configmap_mount(
+                            &mut pod_spec,
+                            "inference-router",
+                            &jwks_cm,
+                            "mcp-jwks",
+                            governance_mounts::paths::MCP_JWKS_DIR,
+                            Some(("MCP_JWKS_PATH", "/etc/azureclaw/mcp/jwks.json")),
+                        );
+                    }
+                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                        tracing::warn!(
+                            sandbox = %name,
+                            cm = %jwks_cm,
+                            reason = %reason,
+                            "McpServer JWKS ConfigMap not mirrored; \
+                             router will not advertise customer MCP",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            sandbox = %name,
+                            cm = %jwks_cm,
+                            "McpServer JWKS mirror failed",
+                        );
+                        return Ok(Action::requeue(Duration::from_secs(15)));
                     }
                 }
+                match governance_mounts::mirror_secret(
+                    &client,
+                    &signing_secret,
+                    &sandbox_self_ns,
+                    &sandbox_ns,
+                    &name,
+                    "McpServer",
+                )
+                .await
+                {
+                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        governance_mounts::inject_secret_mount(
+                            &mut pod_spec,
+                            "inference-router",
+                            &signing_secret,
+                            "mcp-signing",
+                            governance_mounts::paths::MCP_SIGNING_DIR,
+                            Some(("MCP_SIGNING_KEY_DIR", governance_mounts::paths::MCP_SIGNING_DIR)),
+                        );
+                    }
+                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                        tracing::warn!(
+                            sandbox = %name,
+                            secret = %signing_secret,
+                            reason = %reason,
+                            "McpServer signing-key Secret not mirrored",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            sandbox = %name,
+                            secret = %signing_secret,
+                            "McpServer signing Secret mirror failed",
+                        );
+                        return Ok(Action::requeue(Duration::from_secs(15)));
+                    }
+                }
+            }
+        }
 
-                // Add writable emptyDir volume for trust store + audit log persistence
-                if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
-                    volumes.push(json!({
-                        "name": "agt-data",
-                        "emptyDir": {"sizeLimit": "10Mi"}
-                    }));
+        // A2AAgent (optional): when A2A is enabled, mirror the signed
+        // AgentCard ConfigMap so the router can serve `/.well-known/agent.json`.
+        // Defaults to an A2AAgent named after the sandbox itself.
+        let a2a_cfg_opt = spec.a2a.as_ref();
+        if let Some(a2a_cfg) = a2a_cfg_opt
+            && a2a_cfg.enabled
+        {
+            let agent_name = a2a_cfg
+                .agent_ref
+                .as_ref()
+                .map(|r| r.name.as_str())
+                .unwrap_or(name.as_str());
+            if !agent_name.is_empty() {
+                let card_cm = format!("a2aagent-{agent_name}-card");
+                match governance_mounts::mirror_configmap(
+                    &client,
+                    &card_cm,
+                    &sandbox_self_ns,
+                    &sandbox_ns,
+                    &name,
+                    "A2AAgent",
+                )
+                .await
+                {
+                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        governance_mounts::inject_configmap_mount(
+                            &mut pod_spec,
+                            "inference-router",
+                            &card_cm,
+                            "a2a-card",
+                            governance_mounts::paths::A2A_CARD_DIR,
+                            Some(("A2A_CARD_DIR", governance_mounts::paths::A2A_CARD_DIR)),
+                        );
+                    }
+                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                        tracing::warn!(
+                            sandbox = %name,
+                            cm = %card_cm,
+                            reason = %reason,
+                            "A2AAgent card ConfigMap not mirrored; \
+                             /.well-known/agent.json will 404",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            sandbox = %name,
+                            cm = %card_cm,
+                            "A2AAgent card mirror failed",
+                        );
+                        return Ok(Action::requeue(Duration::from_secs(15)));
+                    }
                 }
             }
         }
@@ -1564,39 +1720,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             )
             .await?;
 
-        // Create ConfigMap with the policy YAML matching the requested profile.
-        // Known profiles: "default" (interactive/normal) and "offload" (leaf worker,
-        // no spawn/handoff). Unknown profile names fall back to default to preserve
-        // backward compatibility — the router will still load whatever YAML key we ship.
-        let policy_profile = &tool_policy_profile;
-        let policy_yaml: &str = match policy_profile.as_str() {
-            "offload" => include_str!("../../../cli/policies/azureclaw-offload.yaml"),
-            _ => include_str!("../../../cli/policies/azureclaw-default.yaml"),
-        };
-        let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
-        let cm_name = format!("agt-policy-{}", policy_profile);
-        let cm: ConfigMap = serde_json::from_value(json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {
-                "name": &cm_name,
-                "namespace": &sandbox_ns,
-                "labels": {
-                    "azureclaw.azure.com/sandbox": &name,
-                    "azureclaw.azure.com/component": "agt-policy"
-                }
-            },
-            "data": {
-                format!("azureclaw-{}.yaml", policy_profile): policy_yaml
-            }
-        }))?;
-        cm_api
-            .patch(
-                &cm_name,
-                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-                &Patch::Apply(cm),
-            )
-            .await?;
+        // S7 wiring: the per-CR ToolPolicy compiled-profile ConfigMap is
+        // owned by the ToolPolicy reconciler in the user namespace; the
+        // sandbox reconciler mirrors it into the sandbox namespace
+        // (above, in the pod-spec assembly block). The previous
+        // implementation baked `cli/policies/azureclaw-default.yaml` /
+        // `cli/policies/azureclaw-offload.yaml` into the controller
+        // binary and wrote it to a static `agt-policy-{profile}`
+        // ConfigMap; that path is removed because it bypassed the
+        // ToolPolicy CRD entirely (changes required a controller rebuild).
+        let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
 
         // Patch NetworkPolicy to allow ingress on port 8443 for mesh messages
         // and ports 18789/18791 for the gateway WebUX + WebSocket

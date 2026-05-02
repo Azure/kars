@@ -393,6 +393,22 @@ spec:
                       enum: ["local", "global"]
                       default: "local"
                       description: "Registry mode: global enables cross-cluster mesh communication and handoff."
+                    mcpServerRef:
+                      type: object
+                      description: |
+                        Same-namespace reference to an `McpServer` CR.
+                        When set, the controller mirrors the
+                        `mcp-{name}-jwks` ConfigMap and
+                        `mcp-{name}-signing` Secret from the user namespace
+                        into the sandbox namespace and mounts them into
+                        the inference-router so the sandbox can serve
+                        the customer-facing MCP endpoint.
+                      properties:
+                        name:
+                          type: string
+                          description: "Name of a sibling McpServer CR in the same namespace as this ClawSandbox."
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
                 azureServices:
                   type: array
                   description: "Azure services the sandbox can access via Managed Identity"
