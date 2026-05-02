@@ -1459,7 +1459,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
             // Add writable emptyDir volume for trust store + audit log persistence
             if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut())
-                && !volumes.iter().any(|v| v.get("name").and_then(|n| n.as_str()) == Some("agt-data"))
+                && !volumes
+                    .iter()
+                    .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("agt-data"))
             {
                 volumes.push(json!({
                     "name": "agt-data",
@@ -1531,7 +1533,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             &signing_secret,
                             "mcp-signing",
                             governance_mounts::paths::MCP_SIGNING_DIR,
-                            Some(("MCP_SIGNING_KEY_DIR", governance_mounts::paths::MCP_SIGNING_DIR)),
+                            Some((
+                                "MCP_SIGNING_KEY_DIR",
+                                governance_mounts::paths::MCP_SIGNING_DIR,
+                            )),
                         );
                     }
                     Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {

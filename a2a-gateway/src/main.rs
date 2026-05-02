@@ -117,12 +117,18 @@ async fn main() -> anyhow::Result<()> {
         UpstreamClient::plain(url)
     } else {
         let url = std::env::var("A2A_GATEWAY_UPSTREAM_URL")
-            .or_else(|_| std::env::var("A2A_GATEWAY_ROUTER_HOST").map(|h| {
-                if h.starts_with("http") { h } else { format!("https://{h}") }
-            }))
+            .or_else(|_| {
+                std::env::var("A2A_GATEWAY_ROUTER_HOST").map(|h| {
+                    if h.starts_with("http") {
+                        h
+                    } else {
+                        format!("https://{h}")
+                    }
+                })
+            })
             .unwrap_or_else(|_| {
-            "https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8444".into()
-        });
+                "https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8444".into()
+            });
         let cert: PathBuf = std::env::var("A2A_GATEWAY_MTLS_CERT")
             .unwrap_or_else(|_| "/etc/azureclaw/a2a-gateway-mtls/tls.crt".into())
             .into();
@@ -221,8 +227,7 @@ async fn run_tls_loop(
             let outcome = async {
                 let tls_stream = acceptor.accept(stream).await?;
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
-                let svc =
-                    hyper_util::service::TowerToHyperService::new(app);
+                let svc = hyper_util::service::TowerToHyperService::new(app);
                 hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
                     .await

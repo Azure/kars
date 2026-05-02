@@ -107,8 +107,7 @@ pub fn validate(cfg: &ByoRuntimeConfig, byo_strict: bool) -> Vec<ContractIssue> 
         issues.push(escalate(ContractIssue {
             severity: Severity::Warn,
             field: "byo.image",
-            message: "byo.image is required and must be a fully-qualified image reference"
-                .into(),
+            message: "byo.image is required and must be a fully-qualified image reference".into(),
         }));
     } else if !looks_like_image_reference(&cfg.image) {
         issues.push(escalate(ContractIssue {

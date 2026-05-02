@@ -415,9 +415,9 @@ mod tests {
         McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("platform-session-001")),
-            tools: Arc::new(
-                crate::mcp::PlatformDispatcher::with_base_url("http://127.0.0.1:1"),
-            ),
+            tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
+                "http://127.0.0.1:1",
+            )),
         }
     }
 
@@ -538,8 +538,7 @@ mod tests {
         assert_eq!(v["result"]["isError"], true);
         let content_text = v["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            content_text.contains("transport error")
-                || content_text.contains("foundry.web_search"),
+            content_text.contains("transport error") || content_text.contains("foundry.web_search"),
             "expected transport-layer error message, got: {content_text}"
         );
     }

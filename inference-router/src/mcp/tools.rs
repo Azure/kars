@@ -169,11 +169,7 @@ pub trait AsyncToolDispatcher: Send + Sync {
     fn catalog(&self) -> &ToolCatalog;
     /// Invoke `name` with `arguments`. Async: implementations may make
     /// upstream HTTP calls without blocking the router runtime.
-    async fn invoke(
-        &self,
-        name: &str,
-        arguments: &Value,
-    ) -> Result<ToolCallOutput, DispatchError>;
+    async fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError>;
 }
 
 /// Adapter that lifts any [`ToolDispatcher`] into an
@@ -218,11 +214,7 @@ impl<D: ToolDispatcher> AsyncToolDispatcher for SyncToAsync<D> {
         self.inner.catalog()
     }
 
-    async fn invoke(
-        &self,
-        name: &str,
-        arguments: &Value,
-    ) -> Result<ToolCallOutput, DispatchError> {
+    async fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError> {
         self.inner.invoke(name, arguments)
     }
 }

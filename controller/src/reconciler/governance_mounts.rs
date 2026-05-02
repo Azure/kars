@@ -131,7 +131,10 @@ pub async fn mirror_configmap(
         }
     });
     if let Some(d) = src.data.as_ref() {
-        patch.as_object_mut().unwrap().insert("data".into(), json!(d));
+        patch
+            .as_object_mut()
+            .unwrap()
+            .insert("data".into(), json!(d));
     }
     if let Some(b) = src.binary_data.as_ref() {
         patch
@@ -201,7 +204,10 @@ pub async fn mirror_secret(
     });
     if let Some(d) = src.data.as_ref() {
         // k8s_openapi serialises ByteString as base64 already; pass through.
-        patch.as_object_mut().unwrap().insert("data".into(), json!(d));
+        patch
+            .as_object_mut()
+            .unwrap()
+            .insert("data".into(), json!(d));
     }
     if let Some(s) = src.string_data.as_ref() {
         patch
@@ -402,7 +408,8 @@ mod tests {
         );
         // pre-existing env preserved
         assert!(
-            env.iter().any(|e| e.get("name").and_then(|n| n.as_str()) == Some("EXISTING")),
+            env.iter()
+                .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("EXISTING")),
             "pre-existing env preserved"
         );
 
@@ -430,11 +437,18 @@ mod tests {
         let volumes = spec.get("volumes").unwrap().as_array().unwrap();
         assert_eq!(volumes.len(), 1, "idempotent volumes");
 
-        let mounts = spec.pointer("/containers/0/volumeMounts").unwrap()
-            .as_array().unwrap();
+        let mounts = spec
+            .pointer("/containers/0/volumeMounts")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(mounts.len(), 1, "idempotent mounts");
 
-        let env = spec.pointer("/containers/0/env").unwrap().as_array().unwrap();
+        let env = spec
+            .pointer("/containers/0/env")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let count = env
             .iter()
             .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("X_PATH"))

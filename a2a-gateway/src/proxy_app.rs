@@ -242,7 +242,9 @@ async fn forward(
     let target = format!(
         "{}{}",
         state.upstream.base_url.trim_end_matches('/'),
-        uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path())
+        uri.path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or(uri.path())
     );
 
     let mut req = state
@@ -378,10 +380,7 @@ mod tests {
             assert!(_hop_by_hop_for_tests(h), "{h} should be hop-by-hop");
         }
         for h in ["x-a2a-agent-subject", "authorization", "user-agent"] {
-            assert!(
-                !_hop_by_hop_for_tests(h),
-                "{h} should NOT be hop-by-hop"
-            );
+            assert!(!_hop_by_hop_for_tests(h), "{h} should NOT be hop-by-hop");
         }
     }
 
@@ -436,20 +435,18 @@ mod tests {
         tokio::spawn(async move {
             let app = axum::Router::new().route(
                 "/a2a",
-                axum::routing::post(
-                    move |headers: HeaderMap, body: Bytes| {
-                        let observed = observed_clone.clone();
-                        let c = counter_clone.clone();
-                        async move {
-                            c.fetch_add(1, Ordering::SeqCst);
-                            *observed.lock().unwrap() = headers
-                                .get(SUBJECT_HEADER)
-                                .and_then(|v| v.to_str().ok())
-                                .map(str::to_string);
-                            (StatusCode::OK, body)
-                        }
-                    },
-                ),
+                axum::routing::post(move |headers: HeaderMap, body: Bytes| {
+                    let observed = observed_clone.clone();
+                    let c = counter_clone.clone();
+                    async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        *observed.lock().unwrap() = headers
+                            .get(SUBJECT_HEADER)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        (StatusCode::OK, body)
+                    }
+                }),
             );
             let _ = axum::serve(listener, app).await;
         });
@@ -483,8 +480,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bound = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let app = axum::Router::new()
-                .route("/x", axum::routing::any(|| async { StatusCode::OK }));
+            let app =
+                axum::Router::new().route("/x", axum::routing::any(|| async { StatusCode::OK }));
             let _ = axum::serve(listener, app).await;
         });
 
@@ -512,8 +509,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bound = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let app = axum::Router::new()
-                .route("/x", axum::routing::any(|| async { StatusCode::OK }));
+            let app =
+                axum::Router::new().route("/x", axum::routing::any(|| async { StatusCode::OK }));
             let _ = axum::serve(listener, app).await;
         });
 
@@ -560,10 +557,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            r3.headers().get(RETRY_AFTER_HEADER).unwrap(),
-            "1"
-        );
+        assert_eq!(r3.headers().get(RETRY_AFTER_HEADER).unwrap(), "1");
     }
 
     #[tokio::test]
@@ -571,8 +565,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bound = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let app = axum::Router::new()
-                .route("/x", axum::routing::any(|| async { StatusCode::OK }));
+            let app =
+                axum::Router::new().route("/x", axum::routing::any(|| async { StatusCode::OK }));
             let _ = axum::serve(listener, app).await;
         });
         let upstream = UpstreamClient::plain(format!("http://{bound}"));

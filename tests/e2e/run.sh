@@ -38,6 +38,7 @@ NC='\033[0m'
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; PASS=$((PASS + 1)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; FAIL=$((FAIL + 1)); }
 info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
 
@@ -64,14 +65,21 @@ build_images() {
 
 install_crds() {
     info "Installing Helm chart (CRDs + RBAC only)"
-    helm upgrade --install azureclaw "$ROOT_DIR/deploy/helm/azureclaw" \
+    if ! helm upgrade --install azureclaw "$ROOT_DIR/deploy/helm/azureclaw" \
+        --namespace azureclaw-system \
+        --create-namespace \
         --set controller.image.repository=azureclaw-controller \
         --set controller.image.tag=e2e \
         --set controller.image.pullPolicy=Never \
         --set inferenceRouter.image.repository=azureclaw-inference-router \
         --set inferenceRouter.image.tag=e2e \
         --set inferenceRouter.image.pullPolicy=Never \
-        --wait --timeout 60s 2>/dev/null || true
+        --wait --timeout 5m; then
+        warn "Helm install did not converge within 5m — dumping diagnostics"
+        kubectl get all -n azureclaw-system || true
+        kubectl describe pod -n azureclaw-system -l app.kubernetes.io/component=controller || true
+        kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=200 || true
+    fi
 }
 
 teardown() {

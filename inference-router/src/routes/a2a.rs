@@ -123,7 +123,9 @@ impl A2aRouteState {
         };
         let card_config = AgentCardConfig {
             name: "azureclaw-a2a-agent".into(),
-            description: "Pre-signed card; see /.well-known/agent.json for the authoritative document.".into(),
+            description:
+                "Pre-signed card; see /.well-known/agent.json for the authoritative document."
+                    .into(),
             version: "1.0.0".into(),
             base_url: std::env::var("A2A_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "https://localhost/a2a".to_string()),

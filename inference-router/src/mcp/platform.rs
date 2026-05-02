@@ -88,8 +88,7 @@ const DEFAULT_MEMORY_STORE: &str = "default";
 /// work; calling the sync trait against this dispatcher is always a
 /// configuration mistake — surface it explicitly instead of pretending
 /// success.
-const SYNC_PATH_NOT_SUPPORTED: &str =
-    "PlatformDispatcher does not support synchronous invocation. \
+const SYNC_PATH_NOT_SUPPORTED: &str = "PlatformDispatcher does not support synchronous invocation. \
      Mount the dispatcher via AsyncToolDispatcher (the streamable HTTP \
      /platform/mcp route does this automatically). The 9 Foundry-shim \
      tools self-call upstream HTTP services and cannot run inside a \
@@ -198,8 +197,7 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.conversations".into(),
-            description: "Manage persistent server-side conversations via Azure AI Foundry."
-                .into(),
+            description: "Manage persistent server-side conversations via Azure AI Foundry.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -219,8 +217,7 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.evaluations".into(),
-            description: "Create and run model quality evaluations via Azure AI Foundry."
-                .into(),
+            description: "Create and run model quality evaluations via Azure AI Foundry.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -366,7 +363,12 @@ impl PlatformDispatcher {
         }
     }
 
-    fn require_str<'a>(&self, args: &'a Value, key: &str, tool: &str) -> Result<&'a str, DispatchError> {
+    fn require_str<'a>(
+        &self,
+        args: &'a Value,
+        key: &str,
+        tool: &str,
+    ) -> Result<&'a str, DispatchError> {
         args.get(key)
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
@@ -382,7 +384,8 @@ impl PlatformDispatcher {
             "input": query,
             "tools": [{"type": "web_search"}]
         });
-        self.post_json("foundry.web_search", "/v1/responses", &body).await
+        self.post_json("foundry.web_search", "/v1/responses", &body)
+            .await
     }
 
     async fn code_execute(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
@@ -391,7 +394,8 @@ impl PlatformDispatcher {
             "input": code,
             "tools": [{"type": "code_interpreter"}]
         });
-        self.post_json("foundry.code_execute", "/v1/responses", &body).await
+        self.post_json("foundry.code_execute", "/v1/responses", &body)
+            .await
     }
 
     async fn file_search(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
@@ -411,17 +415,15 @@ impl PlatformDispatcher {
                 "vector_store_ids": ids
             }]
         });
-        self.post_json("foundry.file_search", "/v1/responses", &body).await
+        self.post_json("foundry.file_search", "/v1/responses", &body)
+            .await
     }
 
     async fn memory(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
         let op = self.require_str(args, "operation", "foundry.memory")?;
         let text = self.require_str(args, "text", "foundry.memory")?;
         let (suffix, body) = match op {
-            "search" => (
-                ":search_memories",
-                json!({"query": text, "top_k": 10}),
-            ),
+            "search" => (":search_memories", json!({"query": text, "top_k": 10})),
             "update" => (
                 ":update_memories",
                 json!({"messages": [{"role": "user", "content": text}]}),
@@ -460,7 +462,10 @@ impl PlatformDispatcher {
     async fn conversations(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
         let op = self.require_str(args, "operation", "foundry.conversations")?;
         match op {
-            "list" => self.get("foundry.conversations", "/openai/conversations").await,
+            "list" => {
+                self.get("foundry.conversations", "/openai/conversations")
+                    .await
+            }
             "create" => {
                 let mut body = json!({});
                 if let Some(meta) = args.get("metadata") {
@@ -482,10 +487,7 @@ impl PlatformDispatcher {
             "add_message" => {
                 let id = self.require_str(args, "conversation_id", "foundry.conversations")?;
                 let message = self.require_str(args, "message", "foundry.conversations")?;
-                let role = args
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("user");
+                let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                 let path = format!("/openai/conversations/{id}/items");
                 let body = json!({
                     "items": [{"type": "message", "role": role, "content": message}]
@@ -601,10 +603,12 @@ impl PlatformDispatcher {
             .header("content-type", "application/json")
             .header("x-azureclaw-sandbox", &self.sandbox_name)
             .header("x-azureclaw-platform-mcp", "1")
-            .body(serde_json::to_vec(body).map_err(|e| DispatchError::ExecutionFailed {
-                tool: tool.into(),
-                reason: format!("body serialise: {e}"),
-            })?)
+            .body(
+                serde_json::to_vec(body).map_err(|e| DispatchError::ExecutionFailed {
+                    tool: tool.into(),
+                    reason: format!("body serialise: {e}"),
+                })?,
+            )
             .send()
             .await;
         Ok(self.envelope(tool, resp).await)
@@ -622,7 +626,11 @@ impl PlatformDispatcher {
         Ok(self.envelope(tool, resp).await)
     }
 
-    async fn delete(&self, tool: &'static str, path: &str) -> Result<ToolCallOutput, DispatchError> {
+    async fn delete(
+        &self,
+        tool: &'static str,
+        path: &str,
+    ) -> Result<ToolCallOutput, DispatchError> {
         let url = self.url(path);
         let resp = self
             .http
@@ -702,11 +710,7 @@ impl AsyncToolDispatcher for PlatformDispatcher {
         &self.catalog
     }
 
-    async fn invoke(
-        &self,
-        name: &str,
-        arguments: &Value,
-    ) -> Result<ToolCallOutput, DispatchError> {
+    async fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError> {
         if self.catalog.find(name).is_none() {
             return Err(DispatchError::UnknownTool(name.to_string()));
         }
@@ -747,10 +751,7 @@ mod tests {
     fn every_schema_is_an_object_with_required_array() {
         for tool in foundry_tool_catalog().tools() {
             let schema = &tool.input_schema;
-            assert_eq!(
-                schema.get("type").and_then(|v| v.as_str()),
-                Some("object")
-            );
+            assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
             assert!(schema.get("required").is_some_and(|v| v.is_array()));
             assert!(schema.get("properties").is_some_and(|v| v.is_object()));
         }
@@ -932,7 +933,10 @@ mod tests {
         .unwrap();
         let req = &server.received_requests().await.unwrap()[0];
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body["messages"][0]["content"], json!("user prefers concise replies"));
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!("user prefers concise replies")
+        );
     }
 
     #[tokio::test]
@@ -981,9 +985,10 @@ mod tests {
             .mount(&server)
             .await;
         let d = dispatcher_for(&server);
-        let out = AsyncToolDispatcher::invoke(&d, "foundry.conversations", &json!({"operation": "list"}))
-            .await
-            .unwrap();
+        let out =
+            AsyncToolDispatcher::invoke(&d, "foundry.conversations", &json!({"operation": "list"}))
+                .await
+                .unwrap();
         assert!(!out.is_error);
     }
 
@@ -1107,13 +1112,10 @@ mod tests {
     #[tokio::test]
     async fn deployments_unknown_resource_invalid_arguments() {
         let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
-        let err = AsyncToolDispatcher::invoke(
-            &d,
-            "foundry.deployments",
-            &json!({"resource": "bananas"}),
-        )
-        .await
-        .unwrap_err();
+        let err =
+            AsyncToolDispatcher::invoke(&d, "foundry.deployments", &json!({"resource": "bananas"}))
+                .await
+                .unwrap_err();
         assert!(matches!(err, DispatchError::InvalidArguments { .. }));
     }
 
@@ -1160,13 +1162,9 @@ mod tests {
             .mount(&server)
             .await;
         let d = dispatcher_for(&server);
-        let out = AsyncToolDispatcher::invoke(
-            &d,
-            "foundry.web_search",
-            &json!({"query": "x"}),
-        )
-        .await
-        .unwrap();
+        let out = AsyncToolDispatcher::invoke(&d, "foundry.web_search", &json!({"query": "x"}))
+            .await
+            .unwrap();
         assert!(out.is_error);
         let ToolContent::Text { text } = &out.content[0];
         assert!(text.contains("403"), "expected status 403 in: {text}");
@@ -1182,13 +1180,9 @@ mod tests {
             .mount(&server)
             .await;
         let d = dispatcher_for(&server);
-        let out = AsyncToolDispatcher::invoke(
-            &d,
-            "foundry.web_search",
-            &json!({"query": "x"}),
-        )
-        .await
-        .unwrap();
+        let out = AsyncToolDispatcher::invoke(&d, "foundry.web_search", &json!({"query": "x"}))
+            .await
+            .unwrap();
         assert!(out.is_error);
         let ToolContent::Text { text } = &out.content[0];
         assert!(text.contains("503"));
@@ -1198,13 +1192,10 @@ mod tests {
     async fn transport_error_yields_is_error_with_transport_message() {
         // Unroutable address → reqwest connect error.
         let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
-        let out = AsyncToolDispatcher::invoke(
-            &d,
-            "foundry.deployments",
-            &json!({"resource": "models"}),
-        )
-        .await
-        .unwrap();
+        let out =
+            AsyncToolDispatcher::invoke(&d, "foundry.deployments", &json!({"resource": "models"}))
+                .await
+                .unwrap();
         assert!(out.is_error);
         let ToolContent::Text { text } = &out.content[0];
         assert!(
