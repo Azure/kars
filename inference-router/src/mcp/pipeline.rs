@@ -52,7 +52,10 @@ use super::jsonrpc::{Frame, Id, Notification, ParseError, Request, Response, par
 use super::streamable_http::{
     AcceptNegotiation, MAX_FRAME_BYTES, SessionId, validate_accept_header,
 };
-use super::tools::{ToolDispatcher, handle_tools_call, handle_tools_list};
+use super::tools::{
+    AsyncToolDispatcher, ToolDispatcher, handle_tools_call, handle_tools_call_async,
+    handle_tools_list, handle_tools_list_async,
+};
 
 /// Outcome of `process_request`. Maps directly to an HTTP response.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,7 +85,7 @@ pub fn process_request(
     body: &[u8],
     accept_header: Option<&str>,
     config: &InitializeConfig,
-    minter: &dyn SessionMinter,
+    minter: &(dyn SessionMinter + Send + Sync),
     tools: Option<&dyn ToolDispatcher>,
 ) -> ProcessOutcome {
     // 1. Body size gate.
@@ -128,7 +131,7 @@ pub fn process_request(
 fn dispatch(
     frame: Frame,
     config: &InitializeConfig,
-    minter: &dyn SessionMinter,
+    minter: &(dyn SessionMinter + Send + Sync),
     tools: Option<&dyn ToolDispatcher>,
 ) -> ProcessOutcome {
     match frame {
@@ -206,7 +209,7 @@ fn dispatch(
 fn handle_request(
     req: &Request,
     config: &InitializeConfig,
-    minter: &dyn SessionMinter,
+    minter: &(dyn SessionMinter + Send + Sync),
     tools: Option<&dyn ToolDispatcher>,
 ) -> (Response, Option<SessionId>) {
     match req.method.as_str() {
@@ -254,9 +257,155 @@ fn handle_request(
     }
 }
 
-/// MCP `ping` method — returns an empty result. Spec: pings allow a
-/// peer to verify its counterpart is still responsive. Method handler
-/// does no other work.
+/// Async counterpart to [`process_request`]. Identical pre-dispatch
+/// gates (size, Accept negotiation, JSON-RPC parse), but the
+/// `tools/call` and `tools/list` legs run against an
+/// [`AsyncToolDispatcher`]. The streamable HTTP route uses this entry
+/// point so dispatchers can make upstream HTTP calls without spinning a
+/// runtime inside a sync trait method.
+pub async fn process_request_async(
+    body: &[u8],
+    accept_header: Option<&str>,
+    config: &InitializeConfig,
+    minter: &(dyn SessionMinter + Send + Sync),
+    tools: Option<&dyn AsyncToolDispatcher>,
+) -> ProcessOutcome {
+    if body.len() > MAX_FRAME_BYTES {
+        return ProcessOutcome::PayloadTooLarge;
+    }
+    let neg = match accept_header {
+        Some(h) => validate_accept_header(h),
+        None => AcceptNegotiation::Neither,
+    };
+    if !matches!(neg, AcceptNegotiation::Both) {
+        return ProcessOutcome::NotAcceptable(
+            "Accept must include both application/json and text/event-stream",
+        );
+    }
+    let frame = match parse_frame(body) {
+        Ok(f) => f,
+        Err(e) => {
+            let resp = parse_error_response(&e);
+            return json_rpc_response(vec![resp], None);
+        }
+    };
+    dispatch_async(frame, config, minter, tools).await
+}
+
+async fn dispatch_async(
+    frame: Frame,
+    config: &InitializeConfig,
+    minter: &(dyn SessionMinter + Send + Sync),
+    tools: Option<&dyn AsyncToolDispatcher>,
+) -> ProcessOutcome {
+    match frame {
+        Frame::Request(req) => {
+            let (resp, sid) = handle_request_async(&req, config, minter, tools).await;
+            json_rpc_response(vec![resp], sid)
+        }
+        Frame::Notification(notif) => {
+            handle_notification(&notif);
+            ProcessOutcome::Accepted
+        }
+        Frame::Response(_) => {
+            let resp = error_response(
+                &Id::Null,
+                ErrorCode::InvalidRequest,
+                Some(serde_json::json!({"reason": "server received unsolicited Response frame"})),
+            );
+            json_rpc_response(vec![resp], None)
+        }
+        Frame::Batch(items) => {
+            let mut responses = Vec::new();
+            let mut session_id: Option<SessionId> = None;
+            for item in items {
+                match item {
+                    Frame::Request(req) => {
+                        let (resp, sid) = handle_request_async(&req, config, minter, tools).await;
+                        if session_id.is_none() {
+                            session_id = sid;
+                        }
+                        responses.push(resp);
+                    }
+                    Frame::Notification(notif) => handle_notification(&notif),
+                    Frame::Response(_) => {
+                        responses.push(error_response(
+                            &Id::Null,
+                            ErrorCode::InvalidRequest,
+                            Some(serde_json::json!({
+                                "reason": "server received unsolicited Response frame in batch"
+                            })),
+                        ));
+                    }
+                    Frame::Batch(_) => {
+                        responses.push(error_response(
+                            &Id::Null,
+                            ErrorCode::InternalError,
+                            Some(serde_json::json!({"reason": "nested batch reached dispatch"})),
+                        ));
+                    }
+                }
+            }
+            if responses.is_empty() {
+                ProcessOutcome::Accepted
+            } else {
+                json_rpc_response(responses, session_id)
+            }
+        }
+    }
+}
+
+async fn handle_request_async(
+    req: &Request,
+    config: &InitializeConfig,
+    minter: &(dyn SessionMinter + Send + Sync),
+    tools: Option<&dyn AsyncToolDispatcher>,
+) -> (Response, Option<SessionId>) {
+    match req.method.as_str() {
+        "initialize" => {
+            let outcome = handle_initialize(req, config, minter);
+            (outcome.response, outcome.session_id)
+        }
+        "ping" => (handle_ping(req), None),
+        "tools/list" => match tools {
+            Some(d) => (handle_tools_list_async(req, d), None),
+            None => (
+                error_response(
+                    &req.id,
+                    ErrorCode::MethodNotFound,
+                    Some(serde_json::json!({
+                        "method": req.method,
+                        "reason": "tools dispatcher not configured on this server",
+                    })),
+                ),
+                None,
+            ),
+        },
+        "tools/call" => match tools {
+            Some(d) => (handle_tools_call_async(req, d).await, None),
+            None => (
+                error_response(
+                    &req.id,
+                    ErrorCode::MethodNotFound,
+                    Some(serde_json::json!({
+                        "method": req.method,
+                        "reason": "tools dispatcher not configured on this server",
+                    })),
+                ),
+                None,
+            ),
+        },
+        _ => (
+            error_response(
+                &req.id,
+                ErrorCode::MethodNotFound,
+                Some(serde_json::json!({"method": req.method})),
+            ),
+            None,
+        ),
+    }
+}
+
 fn handle_ping(req: &Request) -> Response {
     Response {
         jsonrpc: "2.0".into(),
