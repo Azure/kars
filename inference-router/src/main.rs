@@ -224,14 +224,59 @@ async fn main() -> Result<()> {
                 handoff::handoff_status_auth_middleware,
             ));
 
-        public
+        // S2 wiring (Phase 3 audit closure): when the controller has
+        // mirrored an `A2AAgent` card ConfigMap into this sandbox at
+        // `/etc/azureclaw/a2a-card/agent.json` (or wherever
+        // `A2A_CARD_DIR` points), mount the A2A route module so
+        // `/.well-known/agent.json` and `POST /a2a` become live.
+        // Absent → routes are not registered (404), preserving the
+        // pre-S2 behavior for sandboxes that do not opt into A2A.
+        let a2a_router_opt = std::env::var("A2A_CARD_DIR")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .and_then(|dir| {
+                if !dir.join("agent.json").is_file() {
+                    tracing::info!(
+                        dir = %dir.display(),
+                        "A2A_CARD_DIR set but agent.json missing; A2A routes not mounted"
+                    );
+                    return None;
+                }
+                match routes::A2aRouteState::from_card_dir(&dir) {
+                    Ok(state) => {
+                        tracing::info!(
+                            dir = %dir.display(),
+                            "A2A routes mounted (agent.json + /a2a)"
+                        );
+                        Some(routes::a2a_routes().with_state(state))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            dir = %dir.display(),
+                            "A2A_CARD_DIR present but failed to load agent.json; A2A routes not mounted"
+                        );
+                        None
+                    }
+                }
+            });
+
+        let merged = public
             .merge(protected)
             .merge(handoff_init)
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
             .merge(build_mcp_router())
-            .merge(build_platform_mcp_router())
+            .merge(build_platform_mcp_router());
+
+        let merged = if let Some(a2a) = a2a_router_opt {
+            merged.merge(a2a)
+        } else {
+            merged
+        };
+
+        merged
             .layer(axum::middleware::from_fn(connection_close_middleware))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
                 std::env::var("ROUTER_CONCURRENCY_LIMIT")
