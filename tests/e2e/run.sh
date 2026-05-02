@@ -1257,6 +1257,128 @@ EOF
     kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
 }
 
+test_mcp_initialize_version_negotiation() {
+    local ns="azureclaw-e2e-mcp"
+    local pod="mcp-init-probe"
+
+    kubectl create namespace "${ns}" >/dev/null 2>&1 || true
+
+    local apply_err
+    apply_err=$(cat <<EOF | kubectl apply -f - 2>&1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  namespace: ${ns}
+  labels:
+    app: mcp-init-probe
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: router
+      image: azureclaw-inference-router:e2e
+      imagePullPolicy: Never
+      env:
+        - {name: ROUTER_PORT, value: "8443"}
+        - {name: CONTENT_SAFETY_ENABLED, value: "false"}
+        - {name: PROMPT_SHIELDS_ENABLED, value: "false"}
+      ports:
+        - containerPort: 8443
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 1000
+    - name: probe
+      image: curlimages/curl:8.10.1
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 100
+EOF
+    )
+    if [ -n "$apply_err" ] && ! echo "$apply_err" | grep -q "created\|configured\|unchanged"; then
+        warn "MCP probe pod apply: $apply_err"
+        fail "MCP probe pod apply failed"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    local deadline=$(($(date +%s) + 90))
+    local ready=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ready=$(kubectl get pod "${pod}" -n "${ns}" \
+            -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
+        if [ "$ready" = "true true" ]; then
+            break
+        fi
+        sleep 2
+    done
+    if [ "$ready" != "true true" ]; then
+        warn "MCP probe pod containers not ready: '$ready'"
+        kubectl describe pod "${pod}" -n "${ns}" 2>&1 | tail -40 || true
+        kubectl logs "${pod}" -n "${ns}" -c router 2>&1 | tail -30 || true
+        fail "MCP probe: router pod did not become ready"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Current 2025-11-25 client → must echo back 2025-11-25.
+    local body_current='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"e2e","version":"0.0.1"}}}'
+    local resp_current
+    resp_current=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data "${body_current}" \
+            http://127.0.0.1:8443/mcp 2>&1 || true)
+    if echo "${resp_current}" | grep -q '"protocolVersion":"2025-11-25"'; then
+        pass "MCP initialize: 2025-11-25 client negotiates to 2025-11-25"
+    else
+        warn "MCP 2025-11-25 response: ${resp_current}"
+        fail "MCP initialize: 2025-11-25 client did not negotiate to 2025-11-25"
+    fi
+
+    # Legacy 2025-03-26 client → must echo back 2025-03-26 (backward compat).
+    local body_legacy='{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"e2e-legacy","version":"0.0.1"}}}'
+    local resp_legacy
+    resp_legacy=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data "${body_legacy}" \
+            http://127.0.0.1:8443/mcp 2>&1 || true)
+    if echo "${resp_legacy}" | grep -q '"protocolVersion":"2025-03-26"'; then
+        pass "MCP initialize: 2025-03-26 legacy client negotiates back to 2025-03-26"
+    else
+        warn "MCP 2025-03-26 response: ${resp_legacy}"
+        fail "MCP initialize: 2025-03-26 client did not negotiate to 2025-03-26"
+    fi
+
+    # Intermediate 2025-06-18 client → must echo back 2025-06-18.
+    local body_mid='{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e-mid","version":"0.0.1"}}}'
+    local resp_mid
+    resp_mid=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data "${body_mid}" \
+            http://127.0.0.1:8443/mcp 2>&1 || true)
+    if echo "${resp_mid}" | grep -q '"protocolVersion":"2025-06-18"'; then
+        pass "MCP initialize: 2025-06-18 client negotiates back to 2025-06-18"
+    else
+        warn "MCP 2025-06-18 response: ${resp_mid}"
+        fail "MCP initialize: 2025-06-18 client did not negotiate to 2025-06-18"
+    fi
+
+    kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+}
+
 test_controller_emits_events() {
     # Reconcilers should emit Kubernetes Events for major lifecycle
     # transitions. A truly silent controller is a debugging nightmare
@@ -1308,6 +1430,7 @@ main() {
     test_sandbox_networkpolicy_denies_ingress || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
+    test_mcp_initialize_version_negotiation || true
     # Phase 2/3 CRD reconciler coverage. These run before
     # cleanup_sandbox so the sandbox is still present (some CRs
     # reference it). The CR objects own no Pod, do no network I/O,

@@ -3,7 +3,7 @@
 
 //! MCP request pipeline — the full body→response transform.
 //!
-//! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/basic/transports>
+//! Spec: <https://modelcontextprotocol.io/specification/2025-11-25/basic/transports>
 //!
 //! This module is the entire MCP Streamable HTTP server logic short
 //! of axum binding. It takes raw HTTP body bytes + the `Accept` header

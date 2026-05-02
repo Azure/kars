@@ -3,7 +3,7 @@
 
 //! MCP `initialize` method handler — Streamable HTTP entry point.
 //!
-//! Spec: <https://modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle>
+//! Spec: <https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle>
 //!
 //! The first request a client makes on a fresh MCP connection is the
 //! `initialize` JSON-RPC request. The server MUST respond with:
@@ -43,7 +43,9 @@ use serde_json::{Value, json};
 
 use super::error::{ErrorCode, JsonRpcError};
 use super::jsonrpc::{Id, Request, Response};
-use super::streamable_http::{MCP_PROTOCOL_VERSION, SessionId};
+#[cfg(test)]
+use super::streamable_http::MCP_PROTOCOL_VERSION;
+use super::streamable_http::{SUPPORTED_MCP_PROTOCOL_VERSIONS, SessionId};
 
 /// Outcome of handling an `initialize` request: the JSON-RPC response
 /// to send to the client *and* the session id the server is assigning.
@@ -105,7 +107,10 @@ impl Default for InitializeConfig {
             },
             capabilities: ServerCapabilities::default(),
             instructions: None,
-            supported_protocol_versions: vec![MCP_PROTOCOL_VERSION.to_string()],
+            supported_protocol_versions: SUPPORTED_MCP_PROTOCOL_VERSIONS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -400,6 +405,45 @@ mod tests {
         let out = handle_initialize(&r, &cfg, &FixedMinter("test-session-003"));
         let result = out.response.result.unwrap();
         assert_eq!(result["protocolVersion"], json!("2024-11-05"));
+    }
+
+    #[test]
+    fn legacy_2025_03_26_client_negotiates_against_default_config() {
+        // Phase B: a client pinned to the 2025-03-26 revision must
+        // continue to negotiate successfully against the default
+        // server configuration (which now advertises 2025-11-25 first
+        // but keeps 2025-06-18 + 2025-03-26 in the supported list).
+        let cfg = InitializeConfig::default();
+        let mut p = ok_init_params();
+        p["protocolVersion"] = json!("2025-03-26");
+        let r = req("initialize", Some(p));
+        let out = handle_initialize(&r, &cfg, &FixedMinter("legacy-session"));
+        let result = out.response.result.unwrap();
+        assert_eq!(result["protocolVersion"], json!("2025-03-26"));
+        assert!(out.session_id.is_some());
+    }
+
+    #[test]
+    fn legacy_2025_06_18_client_negotiates_against_default_config() {
+        let cfg = InitializeConfig::default();
+        let mut p = ok_init_params();
+        p["protocolVersion"] = json!("2025-06-18");
+        let r = req("initialize", Some(p));
+        let out = handle_initialize(&r, &cfg, &FixedMinter("legacy-session-2"));
+        let result = out.response.result.unwrap();
+        assert_eq!(result["protocolVersion"], json!("2025-06-18"));
+    }
+
+    #[test]
+    fn current_2025_11_25_client_negotiates_against_default_config() {
+        let cfg = InitializeConfig::default();
+        let mut p = ok_init_params();
+        p["protocolVersion"] = json!("2025-11-25");
+        let r = req("initialize", Some(p));
+        let out = handle_initialize(&r, &cfg, &FixedMinter("current-session"));
+        let result = out.response.result.unwrap();
+        assert_eq!(result["protocolVersion"], json!("2025-11-25"));
+        assert_eq!(result["protocolVersion"], json!(MCP_PROTOCOL_VERSION));
     }
 
     #[test]
