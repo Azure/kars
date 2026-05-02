@@ -9,6 +9,17 @@ controller:
     tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
+  # Phase 3 S8: when true, BYO sandboxes whose
+  # spec.runtime.byo.contractVersion is missing or unknown, OR whose
+  # byo.image is shape-invalid, are rejected with Degraded=True
+  # (Reason=BYOContractInvalid) instead of reconciling. Default
+  # `false` keeps the Phase 2 warn-only behaviour. Recommended `true`
+  # in production to fail-closed against operator typos.
+  byoStrict: false
+  # Optional list of additional env vars merged into the controller
+  # container — `[ { name: FOO, value: bar }, ... ]`. Used by E2E
+  # harness to disable leader-election in single-node Kind clusters.
+  extraEnv: []
   resources:
     requests:
       cpu: "100m"
@@ -262,6 +273,15 @@ signerPolicy:
 # in lockstep — both halves must agree.
 a2aGateway:
   enabled: false
+  # When true, run the gateway in plain-HTTP test mode (no TLS, no
+  # mTLS upstream). Use only for dev / e2e / CI without PKI infra.
+  # The full proxy chain (replay-cache, rate-limit, subject
+  # propagation) still runs. Production must keep this `false`.
+  testMode: false
+  # When true, requests without `X-A2A-Agent-Subject` are accepted
+  # and bucketed under the synthetic subject "anonymous". Off by
+  # default — fail-closed against unauthenticated traffic.
+  anonymousOk: false
   image:
     repository: azureclaw.azurecr.io/azureclaw-a2a-gateway
     tag: "latest"

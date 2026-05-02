@@ -22,9 +22,12 @@ import { handoffCommand } from "./commands/handoff.js";
 import { meshCommand } from "./commands/mesh.js";
 import { pairCommand } from "./commands/pair.js";
 import { convertCommand } from "./commands/convert.js";
-import { a2aCommand } from "./commands/a2a.js";
+import { a2aCommand, a2aAgentCommand } from "./commands/a2a.js";
 import { attestCommand } from "./commands/attest.js";
 import { migrateCommand } from "./commands/migrate.js";
+import { toolPolicyCommand } from "./commands/toolpolicy.js";
+import { inferencePolicyCommand } from "./commands/inferencepolicy.js";
+import { mcpCommand } from "./commands/mcp.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -68,7 +71,13 @@ export function createCli(): Command {
   // Interop
   program.addCommand(convertCommand());
   program.addCommand(a2aCommand());
+  program.addCommand(a2aAgentCommand());
   program.addCommand(migrateCommand());
+
+  // Governance CRDs (Slice S6)
+  program.addCommand(toolPolicyCommand());
+  program.addCommand(inferencePolicyCommand());
+  program.addCommand(mcpCommand());
 
   // Attestation (Phase 2 read surface; signing lands in Phase 3)
   program.addCommand(attestCommand());

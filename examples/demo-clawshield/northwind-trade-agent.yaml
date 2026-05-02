@@ -67,18 +67,14 @@ spec:
     allowedEndpoints:
       - host: "github.com"
         port: 443
-        methods: ["GET"]
       # Northwind internal APIs only
       - host: "trades.northwind.com"
         port: 443
-        methods: ["GET"]
       - host: "audit.northwind.com"
         port: 443
-        methods: ["GET", "POST"]
       # Trade data feed (read-only)
       - host: "api.trade.gov"
         port: 443
-        methods: ["GET"]
 
   azureServices:
     - service: ai-foundry

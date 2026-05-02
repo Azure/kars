@@ -64,6 +64,14 @@ pub struct A2aRouteState {
     pub signing_key: Arc<SigningKey>,
     pub tasks: Arc<dyn TaskStore>,
     pub minter: Arc<dyn TaskIdMinter>,
+    /// When `Some`, `GET /.well-known/agent.json` returns these bytes
+    /// verbatim instead of rebuilding+signing on every request. This
+    /// is the production path when the controller mirrors a signed
+    /// `A2AAgent` card ConfigMap into the sandbox at
+    /// `/etc/azureclaw/a2a-card/agent.json` — the public signing keys
+    /// live in the A2AAgent CR; the controller has no access to the
+    /// private signing key, so the pre-signed bytes are authoritative.
+    pub pre_signed_card: Option<Arc<Vec<u8>>>,
 }
 
 impl A2aRouteState {
@@ -76,7 +84,70 @@ impl A2aRouteState {
             signing_key: Arc::new(signing_key),
             tasks: Arc::new(InMemoryTaskStore::new()),
             minter: Arc::new(OsRngTaskIdMinter),
+            pre_signed_card: None,
         }
+    }
+
+    /// Construct an `A2aRouteState` whose `/.well-known/agent.json`
+    /// response is served from a pre-signed card on disk (typically
+    /// the controller-mirrored `A2AAgent` card ConfigMap mounted at
+    /// `dir/agent.json`).
+    ///
+    /// `dir` must contain a file named `agent.json` produced by the
+    /// `a2a_agent_reconciler`. The dispatch path (`POST /a2a`) still
+    /// works because we keep an in-memory task store and an ephemeral
+    /// signing key — but anything that actually re-signs the card
+    /// (rebuild path) is unreachable while `pre_signed_card` is set.
+    pub fn from_card_dir(dir: &std::path::Path) -> Result<Self, std::io::Error> {
+        let path = dir.join("agent.json");
+        let bytes = std::fs::read(&path)?;
+        // Validate it parses as JSON before serving — so a malformed
+        // mount fails at startup instead of returning garbage to A2A peers.
+        if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} is not valid JSON", path.display()),
+            ));
+        }
+        // Placeholder card config (never read while pre_signed is set)
+        // but kept consistent so `Debug` and the dispatch path don't panic.
+        let placeholder_skill = crate::a2a::AgentSkill {
+            id: "default".into(),
+            name: "default".into(),
+            description: "placeholder; dispatch via POST /a2a".into(),
+            tags: vec![],
+            input_modes: None,
+            output_modes: None,
+            examples: None,
+            security_requirements: None,
+        };
+        let card_config = AgentCardConfig {
+            name: "azureclaw-a2a-agent".into(),
+            description:
+                "Pre-signed card; see /.well-known/agent.json for the authoritative document."
+                    .into(),
+            version: "1.0.0".into(),
+            base_url: std::env::var("A2A_PUBLIC_BASE_URL")
+                .unwrap_or_else(|_| "https://localhost/a2a".to_string()),
+            kid: "preloaded".into(),
+            skills: vec![placeholder_skill],
+            provider: None,
+            documentation_url: None,
+            icon_url: None,
+            streaming: Some(false),
+            push_notifications: None,
+            default_input_modes: None,
+            default_output_modes: None,
+        };
+        // Ephemeral signing key — never used while pre_signed_card is set.
+        let signing_key = SigningKey::from_bytes(&[0u8; 32]);
+        Ok(Self {
+            card_config: Arc::new(card_config),
+            signing_key: Arc::new(signing_key),
+            tasks: Arc::new(InMemoryTaskStore::new()),
+            minter: Arc::new(OsRngTaskIdMinter),
+            pre_signed_card: Some(Arc::new(bytes)),
+        })
     }
 }
 
@@ -87,6 +158,10 @@ impl std::fmt::Debug for A2aRouteState {
             .field("signing_key", &"<Ed25519 SigningKey>")
             .field("tasks", &"<dyn TaskStore>")
             .field("minter", &"<dyn TaskIdMinter>")
+            .field(
+                "pre_signed_card",
+                &self.pre_signed_card.as_ref().map(|c| c.len()),
+            )
             .finish()
     }
 }
@@ -99,6 +174,14 @@ pub fn a2a_routes() -> Router<A2aRouteState> {
 }
 
 async fn get_agent_card(State(state): State<A2aRouteState>) -> Response {
+    if let Some(pre) = state.pre_signed_card.as_ref() {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            pre.as_ref().clone(),
+        )
+            .into_response();
+    }
     match build_signed_card(&state.card_config, &state.signing_key) {
         Ok(body) => (
             StatusCode::OK,
@@ -577,5 +660,60 @@ mod tests {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(s)
             .unwrap()
+    }
+
+    // ── S2 wiring (Phase 3 audit closure) ──────────────────────────
+    // Tests covering `A2aRouteState::from_card_dir` + pre-signed
+    // `/.well-known/agent.json` serving.
+
+    fn write_card(dir: &std::path::Path, body: &[u8]) {
+        std::fs::write(dir.join("agent.json"), body).unwrap();
+    }
+
+    #[test]
+    fn from_card_dir_loads_valid_signed_card() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = serde_json::to_vec(&json!({"name":"x","skills":[]})).unwrap();
+        write_card(tmp.path(), &body);
+        let state = A2aRouteState::from_card_dir(tmp.path()).expect("loads");
+        assert!(state.pre_signed_card.is_some());
+        assert_eq!(state.pre_signed_card.as_ref().unwrap().as_ref(), &body);
+    }
+
+    #[test]
+    fn from_card_dir_rejects_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_card(tmp.path(), b"this is not json");
+        let err = A2aRouteState::from_card_dir(tmp.path()).expect_err("must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn from_card_dir_missing_file_is_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // do not write agent.json
+        let err = A2aRouteState::from_card_dir(tmp.path()).expect_err("must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn agent_card_route_serves_pre_signed_bytes_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = serde_json::to_vec(&json!({"name":"pre-signed","skills":[]})).unwrap();
+        write_card(tmp.path(), &body);
+        let state = A2aRouteState::from_card_dir(tmp.path()).unwrap();
+        let app = a2a_routes().with_state(state);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/.well-known/agent.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        assert_eq!(bytes.as_ref(), body.as_slice());
     }
 }

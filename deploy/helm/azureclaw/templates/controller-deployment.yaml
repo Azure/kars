@@ -47,6 +47,10 @@ spec:
                   fieldPath: metadata.name
             - name: AZURE_WI_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            {{- if .Values.controller.byoStrict }}
+            - name: BYO_STRICT_MODE
+              value: "1"
+            {{- end }}
             - name: INFERENCE_ROUTER_IMAGE
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE
@@ -91,6 +95,9 @@ spec:
             # registration provisioned.
             - name: AZURECLAW_DISABLE_ENTRA_AUTH
               value: {{ if .Values.azure.entraAuth.enabled }}"0"{{ else }}"1"{{ end }}
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 9091

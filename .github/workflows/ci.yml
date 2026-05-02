@@ -354,6 +354,106 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace --tests --features chaos --no-fail-fast
 
+  e2e-kind:
+    name: E2E (Kind)
+    # Phase 3 S4: closes the audit gap "make test-e2e is not in CI".
+    # Runs on every push to dev/main, manual dispatch, and PRs that
+    # touch the runtime surface area (controller, router, helm chart,
+    # sandbox image, e2e harness itself). Doc-only PRs skip this row
+    # to keep PR signal fast — the path filter is the gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Detect runtime-affecting changes
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          # Fetch enough history to diff.
+          git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
+          if git diff --name-only "$base" "$head" 2>/dev/null \
+             | grep -E '^(controller/|inference-router/|a2a-gateway/|azureclaw-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No runtime-affecting paths changed — skipping e2e"
+          fi
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: steps.paths.outputs.run == 'true'
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.paths.outputs.run == 'true'
+
+      - name: Install kind
+        if: steps.paths.outputs.run == 'true'
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        with:
+          install_only: true
+          version: v0.24.0
+
+      - name: Install kubectl
+        if: steps.paths.outputs.run == 'true'
+        uses: azure/setup-kubectl@901a10e89ea615cf61f57ac05cecdf23e7de06d8 # v4
+        with:
+          version: v1.30.5
+
+      - name: Install Helm
+        if: steps.paths.outputs.run == 'true'
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+
+      - name: Free disk before Docker builds
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af --volumes >/dev/null 2>&1 || true
+          df -h
+
+      - name: Run e2e
+        if: steps.paths.outputs.run == 'true'
+        env:
+          # The harness honours this to default to OpenClaw if unset;
+          # the variable is plumbed through for future runtime matrix
+          # expansion (Phase 3 S4 follow-up).
+          AZURECLAW_E2E_RUNTIME: ${{ vars.AZURECLAW_E2E_RUNTIME || 'all' }}
+          # E2E runs a single-node Kind cluster — multi-replica leader
+          # election adds nothing but flake. Force single-replica + no
+          # leader lease so the test environment is deterministic.
+          AZURECLAW_E2E_CONTROLLER_REPLICAS: "1"
+          AZURECLAW_E2E_DISABLE_LEADER_ELECTION: "1"
+        run: |
+          set -euo pipefail
+          make test-e2e
+
+      - name: Collect cluster diagnostics on failure
+        if: failure() && steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p e2e-diag
+          kubectl get pods -A -o wide > e2e-diag/pods.txt 2>&1 || true
+          kubectl get events -A --sort-by='.lastTimestamp' > e2e-diag/events.txt 2>&1 || true
+          kubectl describe pods -n azureclaw-system > e2e-diag/describe.txt 2>&1 || true
+          kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=500 > e2e-diag/controller.log 2>&1 || true
+          kubectl logs -n azureclaw-system -l app.kubernetes.io/component=inference-router --tail=500 > e2e-diag/router.log 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: e2e-diagnostics-${{ github.run_id }}
+          path: e2e-diag/
+          retention-days: 7
+
   bench-regression:
     name: Bench Regression (criterion)
     runs-on: ubuntu-latest

@@ -167,7 +167,22 @@ pub struct ClawEvalDataset {
     /// object the runtime path passes through to the suite. Bounded
     /// to 64 entries by CEL to keep the CR small.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "inline_dataset_schema")]
     pub inline: Vec<serde_json::Value>,
+}
+
+/// Schemars override: emit `items: { type: object,
+/// x-kubernetes-preserve-unknown-fields: true }` so the resulting CRD
+/// passes Kubernetes 1.25+ validation (which rejects empty `items: {}`).
+fn inline_dataset_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "x-kubernetes-preserve-unknown-fields": true
+        }
+    }))
+    .expect("static inline-dataset schema")
 }
 
 /// Pass/fail threshold over the suite's primary score.

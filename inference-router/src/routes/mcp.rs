@@ -52,8 +52,8 @@ use std::sync::Arc;
 use crate::mcp::initialize::{InitializeConfig, OsRngSessionMinter, SessionMinter};
 use crate::mcp::oauth::OAuthVerifierConfig;
 use crate::mcp::oauth_layer::OAuthLayer;
-use crate::mcp::pipeline::{ProcessOutcome, process_request};
-use crate::mcp::tools::{EchoDispatcher, ToolDispatcher};
+use crate::mcp::pipeline::{ProcessOutcome, process_request_async};
+use crate::mcp::tools::{AsyncToolDispatcher, EchoDispatcher, SyncToAsync};
 
 /// HTTP header name carrying the MCP session id on a successful
 /// `initialize` response and on subsequent client requests.
@@ -64,7 +64,7 @@ pub const MCP_SESSION_HEADER: &str = "Mcp-Session-Id";
 pub struct McpRouteState {
     pub config: Arc<InitializeConfig>,
     pub minter: Arc<dyn SessionMinter + Send + Sync>,
-    pub tools: Arc<dyn ToolDispatcher>,
+    pub tools: Arc<dyn AsyncToolDispatcher>,
 }
 
 impl McpRouteState {
@@ -76,7 +76,7 @@ impl McpRouteState {
         Self {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
-            tools: Arc::new(EchoDispatcher::standard()),
+            tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
         }
     }
 
@@ -102,7 +102,7 @@ impl std::fmt::Debug for McpRouteState {
         f.debug_struct("McpRouteState")
             .field("config", &self.config)
             .field("minter", &"<dyn SessionMinter>")
-            .field("tools", &"<dyn ToolDispatcher>")
+            .field("tools", &"<dyn AsyncToolDispatcher>")
             .finish()
     }
 }
@@ -158,15 +158,19 @@ async fn method_not_allowed() -> impl IntoResponse {
 }
 
 async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: Bytes) -> Response {
-    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
-    let outcome = process_request(
+    let outcome = process_request_async(
         &body,
-        accept,
-        &state.config,
+        accept.as_deref(),
+        state.config.as_ref(),
         state.minter.as_ref(),
         Some(state.tools.as_ref()),
-    );
+    )
+    .await;
 
     outcome_to_response(outcome)
 }
@@ -224,7 +228,7 @@ mod tests {
         McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("test-session-001")),
-            tools: Arc::new(EchoDispatcher::standard()),
+            tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
         }
     }
 
@@ -403,10 +407,17 @@ mod tests {
     // ----------------------------------------------------------------
 
     fn platform_test_state() -> McpRouteState {
+        // Point the dispatcher at an unreachable loopback port so the
+        // route-level tests below exercise the dispatch seam without
+        // needing a fake upstream. Per-tool wiring is covered by
+        // `mcp::platform::tests` (wiremock) and the dedicated
+        // `platform_mcp_dispatch` integration test.
         McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("platform-session-001")),
-            tools: Arc::new(crate::mcp::PlatformDispatcher::standard()),
+            tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
+                "http://127.0.0.1:1",
+            )),
         }
     }
 
@@ -497,7 +508,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn platform_tools_call_returns_deferred_wiring_is_error() {
+    async fn platform_tools_call_real_dispatch_returns_is_error_on_unreachable_upstream() {
+        // The platform dispatcher self-calls back into the router. In
+        // this unit-test harness the dispatcher is pointed at an
+        // unreachable loopback port (see `platform_test_state`), so
+        // the upstream HTTP call collapses to a transport error,
+        // which the dispatcher surfaces as a normal JSON-RPC 200
+        // result with isError:true (the wire shape adapters validate
+        // their MCP client against). End-to-end success is covered
+        // by `tests/platform_mcp_dispatch.rs`.
         let req_body = json!({
             "jsonrpc": "2.0",
             "id": 8,
@@ -515,15 +534,12 @@ mod tests {
         let (status, _, text) = body_text(resp).await;
         assert_eq!(status, StatusCode::OK);
         let v: Value = serde_json::from_str(&text).unwrap();
-        // Per MCP spec, a tool that "ran but errored" returns a normal
-        // JSON-RPC 200 result with isError:true on the content payload —
-        // distinct from a JSON-RPC error envelope.
         assert!(v["error"].is_null(), "no JSON-RPC envelope error: {v}");
         assert_eq!(v["result"]["isError"], true);
         let content_text = v["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            content_text.contains("S10.B"),
-            "content text mentions slice id, got: {content_text}"
+            content_text.contains("transport error") || content_text.contains("foundry.web_search"),
+            "expected transport-layer error message, got: {content_text}"
         );
     }
 

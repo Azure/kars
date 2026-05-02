@@ -1,113 +1,106 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Platform MCP server — Foundry-shim discovery surface.
+//! Platform MCP server — Foundry-shim runtime surface.
 //!
 //! This module ships the **runtime-agnostic platform MCP server** mounted at
-//! `/platform/mcp` (see [`crate::routes::platform_mcp`]). Its sole purpose
-//! at this stage is to publish a stable, runtime-agnostic catalog of the
-//! 9 Foundry-shim tools that today live inside the OpenClaw plugin
-//! (`cli/src/plugin.ts` — `foundry_web_search`, `foundry_code_execute`,
-//! `foundry_memory`, `foundry_file_search`, `foundry_image_generation`,
-//! `foundry_conversations`, `foundry_evaluations`, `foundry_deployments`,
-//! `foundry_agents`).
+//! `/platform/mcp` (see [`crate::routes::platform_mcp`]). It publishes a
+//! stable, runtime-agnostic catalog of the 9 Foundry-shim tools that today
+//! live inside the OpenClaw plugin (`cli/src/plugin.ts` —
+//! `foundry_web_search`, `foundry_code_execute`, `foundry_memory`,
+//! `foundry_file_search`, `foundry_image_generation`, `foundry_conversations`,
+//! `foundry_evaluations`, `foundry_deployments`, `foundry_agents`).
 //!
 //! ## Why a separate dispatcher
 //!
 //! `cli/src/plugin.ts` is a Node.js OpenClaw plugin. By definition, it
-//! cannot serve OpenAI Agents Python (S10.A3) or Microsoft Agent Framework
-//! (S10.A4) runtimes — those agents speak Python, not Node, and load
-//! tools through their own runtime-native mechanisms. The runtime-agnostic
+//! cannot serve OpenAI Agents Python or Microsoft Agent Framework
+//! runtimes — those agents speak Python, not Node, and load tools
+//! through their own runtime-native mechanisms. The runtime-agnostic
 //! way to expose the same affordances is **MCP**: every modern agent
-//! runtime ships an MCP client out of the box. By mounting these tools at
-//! `/platform/mcp` and pointing the adapters' MCP client at
+//! runtime ships an MCP client out of the box. By mounting these tools
+//! at `/platform/mcp` and pointing the adapters' MCP client at
 //! `127.0.0.1:8443/platform/mcp`, every runtime gets the same Foundry
 //! affordances with zero adapter code.
 //!
-//! This is **Class A** of the OpenClaw-plugin three-class survey
-//! (see `docs/internal/agt-upstream-asks.md` §4 and the S10-runtime-
-//! agnostic-rule note in `plan.md` S10): pure HTTP shims with no E2E
-//! concern, no AGT crypto, no per-runtime crypto state. Class B (mesh /
-//! spawn / handoff) explicitly **does not** belong here — those stay
-//! per-runtime, registered natively against the appropriate-language
-//! AgentMesh SDK.
+//! ## How tool calls are wired
 //!
-//! ## Status: discovery surface only
+//! Each `foundry.*` tool routes back into the **same router process**
+//! over loopback (`http://127.0.0.1:{ROUTER_INTERNAL_PORT}/...`,
+//! default port `8443`). The router itself runs as UID 1001 and is
+//! therefore exempt from the egress-guard iptables rules that pin UID
+//! 1000 to localhost. Self-calling reuses every existing governance,
+//! policy, content-safety, and token-budget enforcement layer
+//! automatically — no parallel implementation required.
 //!
-//! This slice (S10.B) ships **catalog + dispatch seam**. Every
-//! `tools/call` returns `is_error: true` with a deferred-wiring message;
-//! `tools/list` returns the full 9-tool catalog with the exact same
-//! input schemas the OpenClaw plugin publishes today. This shape is
-//! deliberately analogous to S10.A2 (controller dispatch seam without
-//! BYO/MAF/OpenAI runtime wiring) — runtime adapters can validate
-//! discovery against this surface immediately while per-tool wiring lands
-//! in follow-up slices `S10.B.{1..9}`.
+//! Per-tool URL mapping (full list in [`PlatformDispatcher::invoke`]'s
+//! tool dispatch arms):
 //!
-//! ## Why discovery-only is the right shape for this slice
-//!
-//! - Each tool's actual upstream call (`POST /openai/responses`,
-//!   `GET /memory_stores/...`, etc.) requires async HTTP. The current
-//!   [`ToolDispatcher::invoke`](crate::mcp::tools::ToolDispatcher::invoke)
-//!   trait method is **synchronous** by design (the trait predates this
-//!   slice; every test and dispatcher in tree relies on it). Migrating
-//!   to async is a separate (worthwhile) refactor that would gate this
-//!   slice on a 30+ test rewrite. Per the slice philosophy, ship the
-//!   architectural seam first; wire up tools after.
-//! - The runtime-adapter validation surface (S10.A3 / S10.A4) needs
-//!   exactly the catalog — adapter authors can confirm their MCP client
-//!   negotiates correctly, sees all 9 tools, and would route calls to
-//!   the right server. They cannot make tool calls succeed yet, but
-//!   that's transparent: any call returns a structured deferred-error
-//!   that the adapter can surface to the user.
+//! | Tool                       | Method | Path                                                |
+//! |----------------------------|--------|-----------------------------------------------------|
+//! | `foundry.web_search`       | POST   | `/v1/responses` with `tools=[{type:"web_search"}]`  |
+//! | `foundry.code_execute`     | POST   | `/v1/responses` with `code_interpreter` tool        |
+//! | `foundry.file_search`      | POST   | `/v1/responses` with `file_search` tool             |
+//! | `foundry.memory`           | POST   | `/memory_stores/{id}:search_memories` / `:update_memories` |
+//! | `foundry.image_generation` | POST   | `/v1/images/generations`                            |
+//! | `foundry.conversations`    | varies | `/openai/conversations[/{id}[/items]]`              |
+//! | `foundry.evaluations`      | varies | `/openai/evals[/{id}/runs[/{run}]]`, `/evaluators`  |
+//! | `foundry.deployments`      | GET    | `/v1/models`, `/connections`, `/indexes`, `/datasets` |
+//! | `foundry.agents`           | GET    | `/agents/v1/assistants[/{id}]`                      |
 //!
 //! ## Security posture
 //!
 //! - **Loopback only.** The `/platform/mcp` endpoint listens on
-//!   `127.0.0.1:8443` like every other router route. The egress-guard
-//!   init container restricts the agent (UID 1000) to `127.0.0.1` plus
-//!   DNS, so this endpoint is reachable by exactly one process: the
-//!   agent in the same pod.
+//!   `127.0.0.1:8443`. The egress-guard init container pins UID 1000
+//!   to localhost + DNS, so the agent in the same pod is the only
+//!   reachable client.
 //! - **No OAuth on the platform endpoint.** Customer-facing MCP servers
 //!   surfaced via the `McpServer` CRD use [`crate::routes::mcp`] which
-//!   wears OAuth 2.1 (production mode) for tenant isolation. The
-//!   platform MCP server has a different threat model — it is
-//!   single-tenant by construction (one agent per pod, loopback only)
-//!   and shares the trust boundary of the router process itself.
-//! - **No per-tool egress.** This slice does not yet make any upstream
-//!   HTTP call. Follow-up slices that wire individual tools will route
-//!   through the existing Foundry-proxy layer that already enforces
-//!   InferencePolicy, Content Safety, token budgets, and audit chain
-//!   emission.
+//!   wears OAuth 2.1 (production mode). The platform MCP server is
+//!   single-tenant by construction and shares the trust boundary of
+//!   the router process itself.
+//! - **Egress is governed.** Self-calls go through the same Foundry
+//!   proxy stack that already enforces InferencePolicy, Content
+//!   Safety, token budgets, and audit-chain emission.
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::tools::{
-    DispatchError, ToolCallOutput, ToolCatalog, ToolContent, ToolDefinition, ToolDispatcher,
+    AsyncToolDispatcher, DispatchError, ToolCallOutput, ToolCatalog, ToolContent, ToolDefinition,
+    ToolDispatcher,
 };
 
-/// Shared "tool wiring deferred" message body. Returned as the text
-/// content of every tool call until follow-up slices wire individual
-/// tools end-to-end. A structured marker lets adapter test assertions
-/// distinguish "the dispatcher fired correctly but the tool wiring is
-/// pending" from "tool was unknown" or "arguments were invalid".
-const DEFERRED_WIRING_MESSAGE: &str = concat!(
-    "Platform MCP server discovery surface (slice S10.B). ",
-    "Tool catalog and dispatch are shipped; per-tool upstream wiring to ",
-    "Azure AI Foundry lands in follow-up slices S10.B.1 through S10.B.9. ",
-    "See docs/internal/phase-2-story.md S10 and ",
-    "docs/internal/agt-upstream-asks.md §4 for the runtime-agnostic ",
-    "platform MCP design."
-);
+/// Default loopback port the router binds in production. Overridable
+/// via `ROUTER_INTERNAL_PORT` so integration tests can target a
+/// `wiremock`/axum fake on a free port.
+const DEFAULT_ROUTER_PORT: u16 = 8443;
+
+/// Default Memory Store id when callers don't pin one explicitly via
+/// `FOUNDRY_MEMORY_STORE_ID`. Foundry projects ship with a
+/// project-default store named `default`; production deployments that
+/// pin a per-tenant store override the env var.
+const DEFAULT_MEMORY_STORE: &str = "default";
+
+/// Sync-path return for any `foundry.*` tool. The async path
+/// ([`PlatformDispatcher`] as `AsyncToolDispatcher`) does the real
+/// work; calling the sync trait against this dispatcher is always a
+/// configuration mistake — surface it explicitly instead of pretending
+/// success.
+const SYNC_PATH_NOT_SUPPORTED: &str = "PlatformDispatcher does not support synchronous invocation. \
+     Mount the dispatcher via AsyncToolDispatcher (the streamable HTTP \
+     /platform/mcp route does this automatically). The 9 Foundry-shim \
+     tools self-call upstream HTTP services and cannot run inside a \
+     synchronous trait method.";
 
 /// Build the canonical Foundry-shim tool catalog. Schemas mirror the
-/// OpenClaw plugin definitions in `cli/src/plugin.ts` (lines 662–735,
-/// 6104–6347) so existing OpenClaw agents migrating to the platform
-/// MCP server do not need to relearn the tool surface.
+/// OpenClaw plugin definitions in `cli/src/plugin.ts` so existing
+/// OpenClaw agents migrating to the platform MCP server do not need to
+/// relearn the tool surface.
 ///
-/// Tools are namespaced as `foundry.<name>` so that follow-up slices
-/// adding mesh / spawn / handoff platform tools (Class B), or
-/// AzureClaw-platform tools (`platform.attest_self`, etc.) sit cleanly
-/// alongside.
+/// Tools are namespaced as `foundry.<name>` so future Class B (mesh /
+/// spawn / handoff) and AzureClaw-platform tools sit cleanly alongside.
 pub fn foundry_tool_catalog() -> ToolCatalog {
     let tools = vec![
         ToolDefinition {
@@ -131,16 +124,12 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         ToolDefinition {
             name: "foundry.code_execute".into(),
             description: "Execute Python code server-side via Azure AI Foundry's \
-                code_interpreter. Has pandas, numpy, matplotlib, scipy pre-installed. \
-                Use for data analysis, charts, complex math, and file processing."
+                code_interpreter. Has pandas, numpy, matplotlib, scipy pre-installed."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Python code to execute."
-                    }
+                    "code": { "type": "string", "description": "Python code to execute." }
                 },
                 "required": ["code"]
             }),
@@ -148,16 +137,12 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         ToolDefinition {
             name: "foundry.file_search".into(),
             description: "Search uploaded documents and knowledge bases via Azure AI \
-                Foundry's file_search. Requires vector_store_ids — use foundry.memory \
-                instead for general memory/knowledge storage."
+                Foundry's file_search. Requires vector_store_ids."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query."
-                    },
+                    "query": { "type": "string", "description": "The search query." },
                     "vector_store_ids": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -169,9 +154,8 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.memory".into(),
-            description: "Persistent agent memory via Azure AI Foundry Memory Store. Store \
-                facts, preferences, and context that persists across sessions. Use 'search' \
-                to recall, 'update' to store new knowledge."
+            description: "Persistent agent memory via Azure AI Foundry Memory Store. Use \
+                'search' to recall, 'update' to store new knowledge."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -179,11 +163,11 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
                     "operation": {
                         "type": "string",
                         "enum": ["search", "update"],
-                        "description": "Operation: 'search' to find relevant memories, 'update' to store new facts."
+                        "description": "Operation: 'search' or 'update'."
                     },
                     "text": {
                         "type": "string",
-                        "description": "For 'update': the fact to remember. For 'search': the query to find relevant memories."
+                        "description": "For 'update': the fact to remember. For 'search': the query."
                     }
                 },
                 "required": ["operation", "text"]
@@ -191,16 +175,12 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.image_generation".into(),
-            description: "Generate images from text prompts via Azure AI Foundry \
-                (gpt-image-1). Returns the saved image as a tool result."
+            description: "Generate images from text prompts via Azure AI Foundry (gpt-image-1)."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Text description of the image to generate."
-                    },
+                    "prompt": { "type": "string", "description": "Text prompt." },
                     "quality": {
                         "type": "string",
                         "enum": ["low", "medium", "high"],
@@ -217,72 +197,40 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.conversations".into(),
-            description: "Manage persistent server-side conversations via Azure AI Foundry. \
-                Use cases: maintain long-running multi-turn dialogues across sessions, \
-                build research threads that survive restarts, keep separate conversation \
-                contexts for different tasks/topics."
-                .into(),
+            description: "Manage persistent server-side conversations via Azure AI Foundry.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["create", "list", "get", "respond", "add_message", "delete"],
-                        "description": "Operation to perform. 'get' retrieves full message history."
+                        "enum": ["create", "list", "get", "respond", "add_message", "delete"]
                     },
-                    "conversation_id": {
-                        "type": "string",
-                        "description": "Conversation ID (for get/respond/add_message/delete)."
-                    },
-                    "input": {
-                        "type": "string",
-                        "description": "User input (for 'respond' — generates AI response in conversation context)."
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Message text to add (for 'add_message')."
-                    },
-                    "role": {
-                        "type": "string",
-                        "description": "Message role: 'user' or 'assistant' (for 'add_message', default: 'user')."
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "Metadata for new conversation (for 'create')."
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Model to use for responses (default: gpt-4.1)."
-                    }
+                    "conversation_id": { "type": "string" },
+                    "input": { "type": "string" },
+                    "message": { "type": "string" },
+                    "role": { "type": "string" },
+                    "metadata": { "type": "object" },
+                    "model": { "type": "string" }
                 },
                 "required": ["operation"]
             }),
         },
         ToolDefinition {
             name: "foundry.evaluations".into(),
-            description: "Create and run model quality evaluations via Azure AI Foundry \
-                Evals API. Use cases: benchmark prompt quality before/after changes, \
-                validate output against golden answers, run regression tests on model \
-                responses, compare different models."
-                .into(),
+            description: "Create and run model quality evaluations via Azure AI Foundry.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["list", "create", "run", "get_run", "list_evaluators"],
-                        "description": "Operation: 'list' evals, 'create' one, 'run' it, 'get_run' status/results, or 'list_evaluators'."
+                        "enum": ["list", "create", "run", "get_run", "list_evaluators"]
                     },
-                    "eval_id": { "type": "string", "description": "Eval ID (for 'run')." },
-                    "run_id": { "type": "string", "description": "Run ID (for 'get_run')." },
-                    "name": { "type": "string", "description": "Eval name (for 'create')." },
-                    "data_source_config": { "type": "object", "description": "Data source config (for 'create')." },
-                    "testing_criteria": {
-                        "type": "array",
-                        "items": { "type": "object" },
-                        "description": "Testing criteria array (for 'create')."
-                    },
-                    "run_config": { "type": "object", "description": "Run configuration (for 'run')." }
+                    "eval_id": { "type": "string" },
+                    "run_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "data_source_config": { "type": "object" },
+                    "testing_criteria": { "type": "array", "items": { "type": "object" } },
+                    "run_config": { "type": "object" }
                 },
                 "required": ["operation"]
             }),
@@ -290,16 +238,14 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         ToolDefinition {
             name: "foundry.deployments".into(),
             description: "Query available Azure AI Foundry resources: models, connections, \
-                search indexes, and datasets. Use 'models' to see all available AI models, \
-                'connections' for data connections, 'indexes' for search indexes."
+                search indexes, and datasets."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "resource": {
                         "type": "string",
-                        "enum": ["models", "connections", "indexes", "datasets"],
-                        "description": "Resource type to query."
+                        "enum": ["models", "connections", "indexes", "datasets"]
                     }
                 },
                 "required": ["resource"]
@@ -307,19 +253,12 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         },
         ToolDefinition {
             name: "foundry.agents".into(),
-            description: "List and query Azure AI Foundry hosted agents. Discover \
-                available agents, their capabilities, and configurations. These are \
-                server-side Foundry agents (different from AzureClaw sub-agent sandboxes)."
-                .into(),
+            description: "List and query Azure AI Foundry hosted agents.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "operation": {
-                        "type": "string",
-                        "enum": ["list", "get"],
-                        "description": "Operation: 'list' all agents or 'get' a specific agent."
-                    },
-                    "agent_id": { "type": "string", "description": "Agent ID (for 'get')." }
+                    "operation": { "type": "string", "enum": ["list", "get"] },
+                    "agent_id": { "type": "string" }
                 },
                 "required": ["operation"]
             }),
@@ -329,24 +268,415 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
 }
 
 /// Dispatcher backing `/platform/mcp`. Publishes the 9-tool Foundry-shim
-/// catalog and returns a structured deferred-wiring response from
-/// `tools/call` for any catalogued tool. Unknown tool names return
-/// [`DispatchError::UnknownTool`] (mapped to JSON-RPC by the caller).
+/// catalog and forwards each tool call into the same router process
+/// over loopback so the existing governance/policy/safety/budget
+/// pipeline applies uniformly.
 #[derive(Debug, Clone)]
 pub struct PlatformDispatcher {
     catalog: ToolCatalog,
+    base_url: String,
+    sandbox_name: String,
+    memory_store_id: String,
+    http: reqwest::Client,
 }
 
 impl PlatformDispatcher {
-    /// Default dispatcher with the canonical 9-tool Foundry catalog.
+    /// Default dispatcher: catalog of 9 tools, base URL derived from
+    /// `ROUTER_INTERNAL_PORT` (default `8443`), sandbox identifier from
+    /// `SANDBOX_NAME` (default `unknown`), memory store id from
+    /// `FOUNDRY_MEMORY_STORE_ID` (default `default`).
     pub fn standard() -> Self {
+        let port = std::env::var("ROUTER_INTERNAL_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_ROUTER_PORT);
+        let base_url = format!("http://127.0.0.1:{port}");
+        let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+        let memory_store_id = std::env::var("FOUNDRY_MEMORY_STORE_ID")
+            .unwrap_or_else(|_| DEFAULT_MEMORY_STORE.into());
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("reqwest client");
         Self {
             catalog: foundry_tool_catalog(),
+            base_url,
+            sandbox_name,
+            memory_store_id,
+            http,
         }
     }
 
-    pub fn with_catalog(catalog: ToolCatalog) -> Self {
-        Self { catalog }
+    /// Custom-base-URL constructor for integration tests that point the
+    /// dispatcher at a fake upstream instead of the live router.
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        let mut d = Self::standard();
+        d.base_url = base_url.into();
+        d
+    }
+
+    /// Override the sandbox name used in the `x-azureclaw-sandbox`
+    /// header on self-calls. Mainly for tests.
+    pub fn with_sandbox_name(mut self, name: impl Into<String>) -> Self {
+        self.sandbox_name = name.into();
+        self
+    }
+
+    /// Override the memory store id used by `foundry.memory`.
+    pub fn with_memory_store_id(mut self, id: impl Into<String>) -> Self {
+        self.memory_store_id = id.into();
+        self
+    }
+
+    pub fn with_catalog(mut self, catalog: ToolCatalog) -> Self {
+        self.catalog = catalog;
+        self
+    }
+
+    /// Direct accessor for tests/inspection — the canonical 9-tool
+    /// catalogue this dispatcher publishes.
+    pub fn catalog_ref(&self) -> &ToolCatalog {
+        &self.catalog
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    /// Dispatch one tool call to the upstream router. Returns a
+    /// `ToolCallOutput` whose `is_error: false` indicates a 2xx
+    /// upstream response, `is_error: true` indicates either an upstream
+    /// 4xx/5xx (mapped with status text) or a transport-layer error
+    /// (`reqwest` failure).
+    async fn dispatch(&self, tool: &str, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        match tool {
+            "foundry.web_search" => self.web_search(args).await,
+            "foundry.code_execute" => self.code_execute(args).await,
+            "foundry.file_search" => self.file_search(args).await,
+            "foundry.memory" => self.memory(args).await,
+            "foundry.image_generation" => self.image_generation(args).await,
+            "foundry.conversations" => self.conversations(args).await,
+            "foundry.evaluations" => self.evaluations(args).await,
+            "foundry.deployments" => self.deployments(args).await,
+            "foundry.agents" => self.agents(args).await,
+            other => Err(DispatchError::UnknownTool(other.to_string())),
+        }
+    }
+
+    fn require_str<'a>(
+        &self,
+        args: &'a Value,
+        key: &str,
+        tool: &str,
+    ) -> Result<&'a str, DispatchError> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| DispatchError::InvalidArguments {
+                tool: tool.to_string(),
+                reason: format!("missing required string argument `{key}`"),
+            })
+    }
+
+    async fn web_search(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let query = self.require_str(args, "query", "foundry.web_search")?;
+        let body = json!({
+            "input": query,
+            "tools": [{"type": "web_search"}]
+        });
+        self.post_json("foundry.web_search", "/v1/responses", &body)
+            .await
+    }
+
+    async fn code_execute(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let code = self.require_str(args, "code", "foundry.code_execute")?;
+        let body = json!({
+            "input": code,
+            "tools": [{"type": "code_interpreter"}]
+        });
+        self.post_json("foundry.code_execute", "/v1/responses", &body)
+            .await
+    }
+
+    async fn file_search(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let query = self.require_str(args, "query", "foundry.file_search")?;
+        let ids = args
+            .get("vector_store_ids")
+            .and_then(|v| v.as_array())
+            .filter(|arr| !arr.is_empty())
+            .ok_or_else(|| DispatchError::InvalidArguments {
+                tool: "foundry.file_search".into(),
+                reason: "missing required non-empty array `vector_store_ids`".into(),
+            })?;
+        let body = json!({
+            "input": query,
+            "tools": [{
+                "type": "file_search",
+                "vector_store_ids": ids
+            }]
+        });
+        self.post_json("foundry.file_search", "/v1/responses", &body)
+            .await
+    }
+
+    async fn memory(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let op = self.require_str(args, "operation", "foundry.memory")?;
+        let text = self.require_str(args, "text", "foundry.memory")?;
+        let (suffix, body) = match op {
+            "search" => (":search_memories", json!({"query": text, "top_k": 10})),
+            "update" => (
+                ":update_memories",
+                json!({"messages": [{"role": "user", "content": text}]}),
+            ),
+            other => {
+                return Err(DispatchError::InvalidArguments {
+                    tool: "foundry.memory".into(),
+                    reason: format!("operation must be 'search' or 'update', got '{other}'"),
+                });
+            }
+        };
+        let path = format!("/memory_stores/{}{}", self.memory_store_id, suffix);
+        self.post_json("foundry.memory", &path, &body).await
+    }
+
+    async fn image_generation(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let prompt = self.require_str(args, "prompt", "foundry.image_generation")?;
+        let quality = args
+            .get("quality")
+            .and_then(|v| v.as_str())
+            .unwrap_or("medium");
+        let size = args
+            .get("size")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1024x1024");
+        let body = json!({
+            "model": "gpt-image-1",
+            "prompt": prompt,
+            "quality": quality,
+            "size": size
+        });
+        self.post_json("foundry.image_generation", "/v1/images/generations", &body)
+            .await
+    }
+
+    async fn conversations(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let op = self.require_str(args, "operation", "foundry.conversations")?;
+        match op {
+            "list" => {
+                self.get("foundry.conversations", "/openai/conversations")
+                    .await
+            }
+            "create" => {
+                let mut body = json!({});
+                if let Some(meta) = args.get("metadata") {
+                    body["metadata"] = meta.clone();
+                }
+                self.post_json("foundry.conversations", "/openai/conversations", &body)
+                    .await
+            }
+            "get" => {
+                let id = self.require_str(args, "conversation_id", "foundry.conversations")?;
+                let path = format!("/openai/conversations/{id}");
+                self.get("foundry.conversations", &path).await
+            }
+            "delete" => {
+                let id = self.require_str(args, "conversation_id", "foundry.conversations")?;
+                let path = format!("/openai/conversations/{id}");
+                self.delete("foundry.conversations", &path).await
+            }
+            "add_message" => {
+                let id = self.require_str(args, "conversation_id", "foundry.conversations")?;
+                let message = self.require_str(args, "message", "foundry.conversations")?;
+                let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                let path = format!("/openai/conversations/{id}/items");
+                let body = json!({
+                    "items": [{"type": "message", "role": role, "content": message}]
+                });
+                self.post_json("foundry.conversations", &path, &body).await
+            }
+            "respond" => {
+                let id = self.require_str(args, "conversation_id", "foundry.conversations")?;
+                let input = self.require_str(args, "input", "foundry.conversations")?;
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gpt-4.1");
+                let body = json!({
+                    "model": model,
+                    "input": input,
+                    "conversation": id
+                });
+                self.post_json("foundry.conversations", "/v1/responses", &body)
+                    .await
+            }
+            other => Err(DispatchError::InvalidArguments {
+                tool: "foundry.conversations".into(),
+                reason: format!("unknown operation '{other}'"),
+            }),
+        }
+    }
+
+    async fn evaluations(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let op = self.require_str(args, "operation", "foundry.evaluations")?;
+        match op {
+            "list" => self.get("foundry.evaluations", "/openai/evals").await,
+            "list_evaluators" => self.get("foundry.evaluations", "/evaluators").await,
+            "create" => {
+                let name = self.require_str(args, "name", "foundry.evaluations")?;
+                let dsc = args.get("data_source_config").cloned().unwrap_or(json!({}));
+                let tc = args
+                    .get("testing_criteria")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                let body = json!({
+                    "name": name,
+                    "data_source_config": dsc,
+                    "testing_criteria": tc
+                });
+                self.post_json("foundry.evaluations", "/openai/evals", &body)
+                    .await
+            }
+            "run" => {
+                let eval_id = self.require_str(args, "eval_id", "foundry.evaluations")?;
+                let run_cfg = args.get("run_config").cloned().unwrap_or(json!({}));
+                let path = format!("/openai/evals/{eval_id}/runs");
+                self.post_json("foundry.evaluations", &path, &run_cfg).await
+            }
+            "get_run" => {
+                let eval_id = self.require_str(args, "eval_id", "foundry.evaluations")?;
+                let run_id = self.require_str(args, "run_id", "foundry.evaluations")?;
+                let path = format!("/openai/evals/{eval_id}/runs/{run_id}");
+                self.get("foundry.evaluations", &path).await
+            }
+            other => Err(DispatchError::InvalidArguments {
+                tool: "foundry.evaluations".into(),
+                reason: format!("unknown operation '{other}'"),
+            }),
+        }
+    }
+
+    async fn deployments(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let resource = self.require_str(args, "resource", "foundry.deployments")?;
+        let path = match resource {
+            "models" => "/v1/models",
+            "connections" => "/connections",
+            "indexes" => "/indexes",
+            "datasets" => "/datasets",
+            other => {
+                return Err(DispatchError::InvalidArguments {
+                    tool: "foundry.deployments".into(),
+                    reason: format!(
+                        "resource must be one of models|connections|indexes|datasets, got '{other}'"
+                    ),
+                });
+            }
+        };
+        self.get("foundry.deployments", path).await
+    }
+
+    async fn agents(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
+        let op = self.require_str(args, "operation", "foundry.agents")?;
+        match op {
+            "list" => self.get("foundry.agents", "/agents/v1/assistants").await,
+            "get" => {
+                let id = self.require_str(args, "agent_id", "foundry.agents")?;
+                let path = format!("/agents/v1/assistants/{id}");
+                self.get("foundry.agents", &path).await
+            }
+            other => Err(DispatchError::InvalidArguments {
+                tool: "foundry.agents".into(),
+                reason: format!("operation must be 'list' or 'get', got '{other}'"),
+            }),
+        }
+    }
+
+    async fn post_json(
+        &self,
+        tool: &'static str,
+        path: &str,
+        body: &Value,
+    ) -> Result<ToolCallOutput, DispatchError> {
+        let url = self.url(path);
+        let resp = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-azureclaw-sandbox", &self.sandbox_name)
+            .header("x-azureclaw-platform-mcp", "1")
+            .body(
+                serde_json::to_vec(body).map_err(|e| DispatchError::ExecutionFailed {
+                    tool: tool.into(),
+                    reason: format!("body serialise: {e}"),
+                })?,
+            )
+            .send()
+            .await;
+        Ok(self.envelope(tool, resp).await)
+    }
+
+    async fn get(&self, tool: &'static str, path: &str) -> Result<ToolCallOutput, DispatchError> {
+        let url = self.url(path);
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-azureclaw-sandbox", &self.sandbox_name)
+            .header("x-azureclaw-platform-mcp", "1")
+            .send()
+            .await;
+        Ok(self.envelope(tool, resp).await)
+    }
+
+    async fn delete(
+        &self,
+        tool: &'static str,
+        path: &str,
+    ) -> Result<ToolCallOutput, DispatchError> {
+        let url = self.url(path);
+        let resp = self
+            .http
+            .delete(&url)
+            .header("x-azureclaw-sandbox", &self.sandbox_name)
+            .header("x-azureclaw-platform-mcp", "1")
+            .send()
+            .await;
+        Ok(self.envelope(tool, resp).await)
+    }
+
+    async fn envelope(
+        &self,
+        tool: &'static str,
+        resp: Result<reqwest::Response, reqwest::Error>,
+    ) -> ToolCallOutput {
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                if status.is_success() {
+                    ToolCallOutput {
+                        content: vec![ToolContent::Text { text }],
+                        is_error: false,
+                    }
+                } else {
+                    ToolCallOutput {
+                        content: vec![ToolContent::Text {
+                            text: format!(
+                                "{} upstream returned HTTP {}: {}",
+                                tool,
+                                status.as_u16(),
+                                text
+                            ),
+                        }],
+                        is_error: true,
+                    }
+                }
+            }
+            Err(e) => ToolCallOutput {
+                content: vec![ToolContent::Text {
+                    text: format!("{tool} transport error: {e}"),
+                }],
+                is_error: true,
+            },
+        }
     }
 }
 
@@ -367,20 +697,34 @@ impl ToolDispatcher for PlatformDispatcher {
         }
         Ok(ToolCallOutput {
             content: vec![ToolContent::Text {
-                text: format!(
-                    "{DEFERRED_WIRING_MESSAGE}\n\n\
-                     Tool: {name}\n\
-                     Status: catalogued, wiring deferred"
-                ),
+                text: format!("{SYNC_PATH_NOT_SUPPORTED}\n\nTool: {name}"),
             }],
             is_error: true,
         })
     }
 }
 
+#[async_trait::async_trait]
+impl AsyncToolDispatcher for PlatformDispatcher {
+    fn catalog(&self) -> &ToolCatalog {
+        &self.catalog
+    }
+
+    async fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError> {
+        if self.catalog.find(name).is_none() {
+            return Err(DispatchError::UnknownTool(name.to_string()));
+        }
+        self.dispatch(name, arguments).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // ----- catalog shape -----
 
     #[test]
     fn standard_catalog_contains_all_nine_foundry_tools() {
@@ -398,102 +742,482 @@ mod tests {
             "foundry.agents",
         ];
         for name in expected {
-            assert!(
-                names.contains(&name),
-                "expected {name} in catalog, got {names:?}"
-            );
+            assert!(names.contains(&name), "expected {name} in catalog");
         }
-        assert_eq!(
-            names.len(),
-            expected.len(),
-            "no extra tools beyond the 9 Foundry shims"
-        );
+        assert_eq!(names.len(), expected.len());
     }
 
     #[test]
     fn every_schema_is_an_object_with_required_array() {
         for tool in foundry_tool_catalog().tools() {
             let schema = &tool.input_schema;
-            assert_eq!(
-                schema.get("type").and_then(|v| v.as_str()),
-                Some("object"),
-                "tool {} input_schema must be of type=object",
-                tool.name
-            );
-            assert!(
-                schema.get("required").is_some_and(|v| v.is_array()),
-                "tool {} input_schema must declare a required array",
-                tool.name
-            );
-            assert!(
-                schema.get("properties").is_some_and(|v| v.is_object()),
-                "tool {} input_schema must declare a properties object",
-                tool.name
-            );
+            assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
+            assert!(schema.get("required").is_some_and(|v| v.is_array()));
+            assert!(schema.get("properties").is_some_and(|v| v.is_object()));
         }
     }
 
+    // ----- sync path: returns a clear "use async" error, not silent success -----
+
     #[test]
-    fn invoke_known_tool_returns_deferred_wiring_error() {
-        let d = PlatformDispatcher::standard();
-        let out = d
-            .invoke("foundry.web_search", &json!({"query": "anything"}))
-            .expect("known tool dispatches successfully");
-        assert!(out.is_error, "deferred-wiring response is_error=true");
-        let first = out.content.first().expect("at least one content item");
-        let ToolContent::Text { text } = first;
+    fn sync_invoke_returns_use_async_path_error() {
+        let d = PlatformDispatcher::with_base_url("http://example.invalid");
+        let out = ToolDispatcher::invoke(&d, "foundry.web_search", &json!({"query": "x"}))
+            .expect("known tool dispatches");
+        assert!(out.is_error, "sync path must surface is_error=true");
+        let ToolContent::Text { text } = &out.content[0];
         assert!(
-            text.contains("S10.B"),
-            "deferred-wiring text mentions slice id, got {text:?}"
+            text.contains("does not support synchronous"),
+            "sync error must mention async path requirement, got: {text}"
         );
-        assert!(
-            text.contains("foundry.web_search"),
-            "deferred-wiring text echoes tool name, got {text:?}"
-        );
+        assert!(text.contains("foundry.web_search"));
     }
 
     #[test]
-    fn invoke_unknown_tool_returns_unknown_tool_error() {
-        let d = PlatformDispatcher::standard();
-        let err = d
-            .invoke("foundry.nonexistent", &json!({}))
-            .expect_err("unknown tool returns error");
-        match err {
-            DispatchError::UnknownTool(name) => assert_eq!(name, "foundry.nonexistent"),
-            other => panic!("expected UnknownTool, got {other:?}"),
-        }
+    fn sync_invoke_unknown_tool_returns_unknown_tool_error() {
+        let d = PlatformDispatcher::with_base_url("http://example.invalid");
+        let err = ToolDispatcher::invoke(&d, "foundry.does_not_exist", &json!({})).unwrap_err();
+        assert!(matches!(err, DispatchError::UnknownTool(ref n) if n == "foundry.does_not_exist"));
     }
 
-    #[test]
-    fn invoke_does_not_touch_arguments() {
-        // Defensive: deferred-wiring response must be argument-agnostic
-        // until upstream wiring lands. If a future patch starts
-        // validating arguments here, it should bump the catalog version
-        // first.
-        let d = PlatformDispatcher::standard();
-        let out_with_args = d
-            .invoke(
-                "foundry.memory",
-                &json!({"operation": "search", "text": "hi"}),
-            )
+    #[tokio::test]
+    async fn async_invoke_unknown_tool_returns_unknown_tool_error() {
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let err = AsyncToolDispatcher::invoke(&d, "foundry.does_not_exist", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DispatchError::UnknownTool(_)));
+    }
+
+    // ----- helpers for HTTP-driven tests -----
+
+    fn dispatcher_for(server: &MockServer) -> PlatformDispatcher {
+        PlatformDispatcher::with_base_url(server.uri())
+            .with_sandbox_name("test-sandbox")
+            .with_memory_store_id("memstore-test")
+    }
+
+    async fn assert_ok_text(out: ToolCallOutput, expected_substr: &str) {
+        assert!(!out.is_error, "expected success, got error: {out:?}");
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(
+            text.contains(expected_substr),
+            "missing {expected_substr:?} in {text:?}"
+        );
+    }
+
+    // ----- per-tool real dispatch tests -----
+
+    #[tokio::test]
+    async fn web_search_posts_to_v1_responses_with_web_search_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("x-azureclaw-sandbox", "test-sandbox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": "websearch"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.web_search",
+            &json!({"query": "weather in Seattle"}),
+        )
+        .await
+        .unwrap();
+        assert_ok_text(out, "websearch").await;
+
+        // body shape verification
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["input"], json!("weather in Seattle"));
+        assert_eq!(body["tools"][0]["type"], json!("web_search"));
+    }
+
+    #[tokio::test]
+    async fn web_search_missing_query_invalid_arguments() {
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let err = AsyncToolDispatcher::invoke(&d, "foundry.web_search", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn code_execute_posts_to_v1_responses_with_code_interpreter() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": "code"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(&d, "foundry.code_execute", &json!({"code": "1+1"}))
+            .await
             .unwrap();
-        let out_without_args = d.invoke("foundry.memory", &json!({})).unwrap();
-        assert!(out_with_args.is_error);
-        assert!(out_without_args.is_error);
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["input"], json!("1+1"));
+        assert_eq!(body["tools"][0]["type"], json!("code_interpreter"));
     }
 
+    #[tokio::test]
+    async fn file_search_requires_non_empty_vector_store_ids() {
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let err = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.file_search",
+            &json!({"query": "q", "vector_store_ids": []}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn file_search_posts_with_file_search_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": "fs"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.file_search",
+            &json!({"query": "policies", "vector_store_ids": ["vs_1"]}),
+        )
+        .await
+        .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["tools"][0]["type"], json!("file_search"));
+        assert_eq!(body["tools"][0]["vector_store_ids"], json!(["vs_1"]));
+    }
+
+    #[tokio::test]
+    async fn memory_search_targets_memory_stores_search_memories() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/memstore-test:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "what did I say"}),
+        )
+        .await
+        .unwrap();
+        assert!(!out.is_error);
+    }
+
+    #[tokio::test]
+    async fn memory_update_targets_update_memories_with_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/memstore-test:update_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updated": 1})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "update", "text": "user prefers concise replies"}),
+        )
+        .await
+        .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!("user prefers concise replies")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_unknown_operation_invalid_arguments() {
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let err = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "wipe", "text": "x"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn image_generation_posts_to_v1_images_generations_with_defaults() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.image_generation",
+            &json!({"prompt": "a red square"}),
+        )
+        .await
+        .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["prompt"], json!("a red square"));
+        assert_eq!(body["model"], json!("gpt-image-1"));
+        assert_eq!(body["size"], json!("1024x1024"));
+        assert_eq!(body["quality"], json!("medium"));
+    }
+
+    #[tokio::test]
+    async fn conversations_list_uses_get() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/openai/conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        let out =
+            AsyncToolDispatcher::invoke(&d, "foundry.conversations", &json!({"operation": "list"}))
+                .await
+                .unwrap();
+        assert!(!out.is_error);
+    }
+
+    #[tokio::test]
+    async fn conversations_respond_routes_to_responses_with_conversation_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output_text": "hi"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.conversations",
+            &json!({"operation": "respond", "conversation_id": "conv_1", "input": "hello"}),
+        )
+        .await
+        .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["conversation"], json!("conv_1"));
+        assert_eq!(body["input"], json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn conversations_add_message_targets_items_subpath() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openai/conversations/conv_xyz/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.conversations",
+            &json!({"operation": "add_message", "conversation_id": "conv_xyz", "message": "ping"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversations_unknown_operation_invalid_arguments() {
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let err = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.conversations",
+            &json!({"operation": "telepathy"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn evaluations_list_uses_openai_evals() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/openai/evals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(&d, "foundry.evaluations", &json!({"operation": "list"}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn evaluations_run_targets_runs_subpath() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openai/evals/eval_42/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "run_1"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.evaluations",
+            &json!({"operation": "run", "eval_id": "eval_42"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn evaluations_get_run_targets_runs_run_id_subpath() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/openai/evals/eval_42/runs/run_7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.evaluations",
+            &json!({"operation": "get_run", "eval_id": "eval_42", "run_id": "run_7"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deployments_models_uses_v1_models() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(&d, "foundry.deployments", &json!({"resource": "models"}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deployments_unknown_resource_invalid_arguments() {
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let err =
+            AsyncToolDispatcher::invoke(&d, "foundry.deployments", &json!({"resource": "bananas"}))
+                .await
+                .unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn agents_list_uses_assistants_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/agents/v1/assistants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(&d, "foundry.agents", &json!({"operation": "list"}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn agents_get_uses_assistants_id_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/agents/v1/assistants/asst_99"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "asst_99"})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.agents",
+            &json!({"operation": "get", "agent_id": "asst_99"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    // ----- error mapping -----
+
+    #[tokio::test]
+    async fn upstream_4xx_yields_is_error_with_status_in_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        let out = AsyncToolDispatcher::invoke(&d, "foundry.web_search", &json!({"query": "x"}))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("403"), "expected status 403 in: {text}");
+        assert!(text.contains("forbidden"));
+    }
+
+    #[tokio::test]
+    async fn upstream_5xx_yields_is_error_with_status_in_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        let out = AsyncToolDispatcher::invoke(&d, "foundry.web_search", &json!({"query": "x"}))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("503"));
+    }
+
+    #[tokio::test]
+    async fn transport_error_yields_is_error_with_transport_message() {
+        // Unroutable address → reqwest connect error.
+        let d = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
+        let out =
+            AsyncToolDispatcher::invoke(&d, "foundry.deployments", &json!({"resource": "models"}))
+                .await
+                .unwrap();
+        assert!(out.is_error);
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(
+            text.contains("transport error"),
+            "expected transport error in: {text}"
+        );
+    }
+
+    // ----- dyn-safety guard -----
+
     #[test]
-    fn dispatcher_implements_tool_dispatcher_trait_object_safe() {
-        // Guards against a future refactor accidentally adding a
-        // generic method that breaks dyn ToolDispatcher.
-        let d: Box<dyn ToolDispatcher> = Box::new(PlatformDispatcher::standard());
+    fn dispatcher_implements_async_tool_dispatcher_trait_object_safe() {
+        let d: Box<dyn AsyncToolDispatcher> =
+            Box::new(PlatformDispatcher::with_base_url("http://example.invalid"));
         assert_eq!(d.catalog().tools().len(), 9);
     }
 
     #[test]
-    fn default_matches_standard() {
-        let d1 = PlatformDispatcher::default();
-        let d2 = PlatformDispatcher::standard();
-        assert_eq!(d1.catalog().tools().len(), d2.catalog().tools().len());
+    fn default_matches_standard_catalog_size() {
+        // Default reads SANDBOX_NAME / ROUTER_INTERNAL_PORT env, which
+        // may be unset; we only assert the catalog shape is intact.
+        let d = PlatformDispatcher::default();
+        assert_eq!(d.catalog_ref().tools().len(), 9);
     }
 }
