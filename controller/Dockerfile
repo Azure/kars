@@ -1,6 +1,6 @@
 # AzureClaw Controller — multi-stage Rust build (Azure Linux)
 
-ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
+ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:b815d015a358c2ba25b7ba6bc74dd9fcc5f10860b54cd677d9261189ec4a84af
 ARG VERSION=0.1.0
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
