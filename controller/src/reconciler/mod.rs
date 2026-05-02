@@ -30,6 +30,7 @@ use tokio::time::Duration;
 use crate::crd::{ClawSandbox, SandboxConfig};
 use crate::fedcred::{FedCredConfig, FedCredManager};
 
+pub(crate) mod byo_contract;
 pub(crate) mod governance_mounts;
 
 /// Build pod security context, conditionally including SELinux options and
@@ -116,6 +117,13 @@ struct Context {
     /// Federated credential manager — creates Azure AD fedcreds for sub-agent namespaces.
     /// None if required env vars (AZURE_SUBSCRIPTION_ID, IDENTITY_NAME, etc.) are missing.
     fedcred: Option<FedCredManager>,
+    /// Phase 3 S8: when true, BYO sandboxes whose `byo.contractVersion`
+    /// does not match a supported version (or whose `image` is shape-
+    /// invalid) are rejected with `Degraded=True / Reason=BYOContractInvalid`
+    /// instead of reconciling. Default `false` keeps Phase 2 warn-only
+    /// behaviour. Wired via `BYO_STRICT_MODE=1` env var (Helm value
+    /// `controller.byoStrict`).
+    byo_strict: bool,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -275,6 +283,50 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         };
     let agent_config = spec.agent.unwrap_or_default();
+
+    // ── Phase 3 S8: BYO contract validation ──────────────────────────────
+    // For BYO sandboxes, validate `spec.runtime.byo` against the
+    // contract documented in `docs/byo-runtime-contract.md`. Behaviour
+    // depends on the controller-level `BYO_STRICT_MODE` flag:
+    //
+    //   * loose (default): warn-only, a `RuntimeReady` condition is
+    //     stamped with reason `BYOContractAdvisory` and reconciliation
+    //     proceeds.
+    //   * strict: any violation degrades the CR with reason
+    //     `BYOContractInvalid` and the Deployment is NOT created.
+    if let Some(byo_cfg) = runtime_spec.byo.as_ref() {
+        let issues = byo_contract::validate(byo_cfg, ctx.byo_strict);
+        if !issues.is_empty() {
+            let summary = issues
+                .iter()
+                .map(|i| format!("{}: {}", i.field, i.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            match byo_contract::worst_severity(&issues) {
+                Some(byo_contract::Severity::Strict) => {
+                    tracing::error!(
+                        sandbox = %name,
+                        "BYO strict-mode rejection: {summary}"
+                    );
+                    crate::status::stamp_degraded(
+                        client,
+                        &sandbox,
+                        &name,
+                        "BYOContractInvalid",
+                        &summary,
+                    )
+                    .await;
+                    return Ok(Action::requeue(Duration::from_secs(300)));
+                }
+                Some(byo_contract::Severity::Warn) | None => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        "BYO contract advisory (warn-only): {summary}"
+                    );
+                }
+            }
+        }
+    }
 
     // ── Validate CRD inputs ──────────────────────────────────────────────
     let isolation = &sandbox_config.isolation;
@@ -1366,7 +1418,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         if governance_config.enabled && !tool_policy_profile.is_empty() {
             let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
             match governance_mounts::mirror_configmap(
-                &client,
+                client,
                 &cm_name,
                 &sandbox_self_ns,
                 &sandbox_ns,
@@ -1424,7 +1476,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 let jwks_cm = format!("mcp-{mcp_name}-jwks");
                 let signing_secret = format!("mcp-{mcp_name}-signing");
                 match governance_mounts::mirror_configmap(
-                    &client,
+                    client,
                     &jwks_cm,
                     &sandbox_self_ns,
                     &sandbox_ns,
@@ -1463,7 +1515,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     }
                 }
                 match governance_mounts::mirror_secret(
-                    &client,
+                    client,
                     &signing_secret,
                     &sandbox_self_ns,
                     &sandbox_ns,
@@ -1518,7 +1570,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             if !agent_name.is_empty() {
                 let card_cm = format!("a2aagent-{agent_name}-card");
                 match governance_mounts::mirror_configmap(
-                    &client,
+                    client,
                     &card_cm,
                     &sandbox_self_ns,
                     &sandbox_ns,
@@ -2072,6 +2124,14 @@ pub async fn run(client: Client) -> Result<()> {
         );
     }
 
+    let byo_strict = matches!(
+        std::env::var("BYO_STRICT_MODE").as_deref(),
+        Ok("1" | "true" | "True" | "TRUE" | "yes")
+    );
+    if byo_strict {
+        tracing::info!("BYO strict-mode enabled — invalid BYO contracts will be rejected");
+    }
+
     let ctx = Arc::new(Context {
         client,
         wi_client_id,
@@ -2084,6 +2144,7 @@ pub async fn run(client: Client) -> Result<()> {
         imds_client_id,
         content_safety_endpoint,
         fedcred,
+        byo_strict,
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

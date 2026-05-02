@@ -9,6 +9,13 @@ controller:
     tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
+  # Phase 3 S8: when true, BYO sandboxes whose
+  # spec.runtime.byo.contractVersion is missing or unknown, OR whose
+  # byo.image is shape-invalid, are rejected with Degraded=True
+  # (Reason=BYOContractInvalid) instead of reconciling. Default
+  # `false` keeps the Phase 2 warn-only behaviour. Recommended `true`
+  # in production to fail-closed against operator typos.
+  byoStrict: false
   resources:
     requests:
       cpu: "100m"
