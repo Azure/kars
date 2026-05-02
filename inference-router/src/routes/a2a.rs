@@ -33,8 +33,6 @@
 //!   when the streaming session manager lands.
 //! - Inbound card verification — that's the verifier path, called by
 //!   *outbound* code (router-to-peer-agent), not this server.
-//! - AP2 commerce enforcement — kernel exists in `a2a::ap2`; binding into
-//!   `message/send` happens once `MandateLedger` is wired into `A2aRouteState`.
 
 use axum::{
     Router,
@@ -45,11 +43,13 @@ use axum::{
     routing::{get, post},
 };
 use ed25519_dalek::SigningKey;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::a2a::{
-    AgentCardConfig, build_signed_card, handle_message_send, handle_tasks_cancel, handle_tasks_get,
-};
+use crate::a2a::ap2::InMemoryMandateLedger;
+use crate::a2a::mandate_trust_store::MandateTrustStore;
+use crate::a2a::message_send_ap2::handle_message_send_with_ap2;
+use crate::a2a::{AgentCardConfig, build_signed_card, handle_tasks_cancel, handle_tasks_get};
 use crate::a2a::{InMemoryTaskStore, OsRngTaskIdMinter, TaskIdMinter, TaskStore};
 use crate::mcp::error::{ErrorCode, JsonRpcError};
 use crate::mcp::jsonrpc::{
@@ -72,6 +72,26 @@ pub struct A2aRouteState {
     /// live in the A2AAgent CR; the controller has no access to the
     /// private signing key, so the pre-signed bytes are authoritative.
     pub pre_signed_card: Option<Arc<Vec<u8>>>,
+    /// AP2 mandate-issuer trust anchors. Populated either from a
+    /// boot-time file via [`crate::a2a::load_mandate_trust_snapshot`]
+    /// or by a future `MandateIssuer` informer reconciler. An empty
+    /// store fails-closed: every AP2-bearing message is rejected.
+    pub mandate_trust: Arc<MandateTrustStore>,
+    /// AP2 mandate ledger — replay / window enforcement state.
+    /// `Mutex` because [`crate::a2a::ap2::MandateLedgerMut::record`]
+    /// requires `&mut self` and the route state is shared across
+    /// all concurrent `POST /a2a` handlers. Held only for the
+    /// post-validation append (microseconds).
+    pub mandate_ledger: Arc<Mutex<InMemoryMandateLedger>>,
+    /// When `true`, every `message/send` request must carry an AP2
+    /// mandate (`metadata.ap2`) — AP2-free messages are rejected
+    /// with `Ap2Denied`. Sourced from `AP2_COMMERCE_REQUIRED=1` at
+    /// router boot. The intended controller-side path is for
+    /// `ToolPolicy.spec.commerce` (presence) on the bound policy to
+    /// drive this flag at sandbox provisioning time. When `false`
+    /// (default), AP2-free traffic flows through unchanged and AP2
+    /// metadata, when present, is still validated.
+    pub commerce_required: bool,
 }
 
 impl A2aRouteState {
@@ -85,6 +105,9 @@ impl A2aRouteState {
             tasks: Arc::new(InMemoryTaskStore::new()),
             minter: Arc::new(OsRngTaskIdMinter),
             pre_signed_card: None,
+            mandate_trust: Arc::new(MandateTrustStore::new()),
+            mandate_ledger: Arc::new(Mutex::new(InMemoryMandateLedger::new())),
+            commerce_required: false,
         }
     }
 
@@ -109,12 +132,14 @@ impl A2aRouteState {
                 format!("{} is not valid JSON", path.display()),
             ));
         }
-        // Placeholder card config (never read while pre_signed is set)
-        // but kept consistent so `Debug` and the dispatch path don't panic.
-        let placeholder_skill = crate::a2a::AgentSkill {
+        // Synthetic minimum-viable skill required by AgentCardConfig
+        // (skills is `Vec<AgentSkill>`, not Option). Never serialised
+        // while pre_signed_card is Some — `get_agent_card` returns the
+        // pre-signed bytes verbatim and never reaches `build_signed_card`.
+        let unused_skill = crate::a2a::AgentSkill {
             id: "default".into(),
             name: "default".into(),
-            description: "placeholder; dispatch via POST /a2a".into(),
+            description: "unused; pre-signed card path is authoritative".into(),
             tags: vec![],
             input_modes: None,
             output_modes: None,
@@ -130,7 +155,7 @@ impl A2aRouteState {
             base_url: std::env::var("A2A_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "https://localhost/a2a".to_string()),
             kid: "preloaded".into(),
-            skills: vec![placeholder_skill],
+            skills: vec![unused_skill],
             provider: None,
             documentation_url: None,
             icon_url: None,
@@ -147,6 +172,9 @@ impl A2aRouteState {
             tasks: Arc::new(InMemoryTaskStore::new()),
             minter: Arc::new(OsRngTaskIdMinter),
             pre_signed_card: Some(Arc::new(bytes)),
+            mandate_trust: Arc::new(MandateTrustStore::new()),
+            mandate_ledger: Arc::new(Mutex::new(InMemoryMandateLedger::new())),
+            commerce_required: false,
         })
     }
 }
@@ -162,6 +190,9 @@ impl std::fmt::Debug for A2aRouteState {
                 "pre_signed_card",
                 &self.pre_signed_card.as_ref().map(|c| c.len()),
             )
+            .field("mandate_trust", &"<MandateTrustStore>")
+            .field("mandate_ledger", &"<InMemoryMandateLedger>")
+            .field("commerce_required", &self.commerce_required)
             .finish()
     }
 }
@@ -238,13 +269,81 @@ async fn post_a2a(State(state): State<A2aRouteState>, headers: HeaderMap, body: 
 
 /// Dispatch a parsed `Request` to the appropriate A2A handler.
 ///
+/// `message/send` runs through the AP2-aware
+/// [`handle_message_send_with_ap2`] wrapper:
+///
+/// - When `params.message.metadata.ap2` is **absent** the wrapper
+///   delegates straight to [`handle_message_send`] (zero overhead).
+/// - When **present** the mandate is verified against
+///   `state.mandate_trust`, the policy envelope is checked, and the
+///   ledger is appended to before the task is created.
+///
+/// When `state.commerce_required` is `true`, AP2-free `message/send`
+/// requests are rejected up front with `Ap2Denied` so the operator's
+/// `ToolPolicy.spec.commerce` requirement is honoured even if the
+/// caller forgets to attach a mandate.
+///
 /// Unknown methods produce a JSON-RPC `-32601` envelope.
 fn dispatch_request(req: Request, state: &A2aRouteState) -> JRpcResponse {
     match req.method.as_str() {
-        "message/send" => handle_message_send(&req, state.tasks.as_ref(), state.minter.as_ref()),
+        "message/send" => {
+            if state.commerce_required && !request_has_ap2_metadata(&req) {
+                return commerce_required_response(&req);
+            }
+            // Acquire the ledger lock for the duration of validate-
+            // and-record. The validator reads ledger state for
+            // window/replay checks; record() appends iff validation
+            // passed. Holding the lock across both calls keeps the
+            // check-then-write atomic.
+            let mut ledger = match state.mandate_ledger.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            handle_message_send_with_ap2(
+                &req,
+                state.tasks.as_ref(),
+                state.minter.as_ref(),
+                state.mandate_trust.as_ref(),
+                &mut *ledger,
+                now,
+            )
+        }
         "tasks/get" => handle_tasks_get(&req, state.tasks.as_ref()),
         "tasks/cancel" => handle_tasks_cancel(&req, state.tasks.as_ref()),
         other => method_not_found(&req, other),
+    }
+}
+
+/// Cheap pre-check: does `params.message.metadata.ap2` exist?
+/// Used only by the `commerce_required` gate; full parsing happens
+/// inside [`handle_message_send_with_ap2`].
+fn request_has_ap2_metadata(req: &Request) -> bool {
+    req.params
+        .as_ref()
+        .and_then(|p| p.get("message"))
+        .and_then(|m| m.get("metadata"))
+        .and_then(|md| md.get("ap2"))
+        .is_some()
+}
+
+fn commerce_required_response(req: &Request) -> JRpcResponse {
+    use crate::a2a::A2aErrorCode;
+    JRpcResponse {
+        jsonrpc: "2.0".into(),
+        result: None,
+        error: Some(JsonRpcError {
+            code: A2aErrorCode::Ap2Denied.into(),
+            message: A2aErrorCode::Ap2Denied.default_message().into(),
+            data: Some(serde_json::json!({
+                "reason": "ToolPolicy.commerce requires an AP2 mandate; metadata.ap2 absent",
+                "kind": "commerceMandateRequired",
+            })),
+        }),
+        id: req.id.clone(),
     }
 }
 
@@ -694,6 +793,63 @@ mod tests {
         // do not write agent.json
         let err = A2aRouteState::from_card_dir(tmp.path()).expect_err("must fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn commerce_required_rejects_ap2_free_message_send() {
+        let mut state = test_state();
+        state.commerce_required = true;
+        let app = a2a_routes().with_state(state);
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "message/send",
+            "params": {"message": {"role": "user", "parts": [{"kind":"text","text":"hi"}]}}
+        });
+        let req = post_body(req_body.to_string().as_bytes(), Some("application/json"));
+        let (status, _, text) = body_text(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["error"]["code"], i32::from(A2aErrorCode::Ap2Denied));
+        assert_eq!(v["error"]["data"]["kind"], "commerceMandateRequired");
+    }
+
+    #[tokio::test]
+    async fn commerce_required_off_by_default_allows_plain_message_send() {
+        let state = test_state();
+        assert!(!state.commerce_required, "default must be false");
+        let app = a2a_routes().with_state(state);
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "message/send",
+            "params": {"message": {"role": "user", "parts": [{"kind":"text","text":"hi"}]}}
+        });
+        let req = post_body(req_body.to_string().as_bytes(), Some("application/json"));
+        let (status, _, text) = body_text(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["result"]["state"], "submitted");
+    }
+
+    #[test]
+    fn request_has_ap2_metadata_detects_present_and_absent() {
+        let with_ap2 = Request {
+            jsonrpc: "2.0".into(),
+            id: Id::Number(1),
+            method: "message/send".into(),
+            params: Some(serde_json::json!({
+                "message": {"metadata": {"ap2": {"version": "0.1"}}}
+            })),
+        };
+        assert!(request_has_ap2_metadata(&with_ap2));
+        let without = Request {
+            jsonrpc: "2.0".into(),
+            id: Id::Number(1),
+            method: "message/send".into(),
+            params: Some(serde_json::json!({"message": {"role": "user"}})),
+        };
+        assert!(!request_has_ap2_metadata(&without));
     }
 
     #[tokio::test]

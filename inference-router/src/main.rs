@@ -25,7 +25,9 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{a2a_mtls, config, forward_proxy, governance, handoff, routes};
+use azureclaw_inference_router::{
+    a2a, a2a_mtls, config, forward_proxy, governance, handoff, routes,
+};
 
 use anyhow::Result;
 use axum::{
@@ -243,9 +245,42 @@ async fn main() -> Result<()> {
                     return None;
                 }
                 match routes::A2aRouteState::from_card_dir(&dir) {
-                    Ok(state) => {
+                    Ok(mut state) => {
+                        // AP2 wiring: optionally load mandate-issuer trust
+                        // anchors from a mounted JSON file. Format mirrors
+                        // `A2aAgentSpec` so the future `MandateIssuer`
+                        // CRD reconciler can write the same shape.
+                        if let Ok(trust_path) = std::env::var("MANDATE_TRUST_FILE") {
+                            let p = std::path::PathBuf::from(&trust_path);
+                            match a2a::load_mandate_trust_snapshot(&p) {
+                                Ok(snapshot) => {
+                                    state.mandate_trust.replace_snapshot(snapshot);
+                                    tracing::info!(
+                                        path = %p.display(),
+                                        "AP2 mandate trust anchors loaded"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %p.display(),
+                                        error = %e,
+                                        "AP2 mandate trust file load failed; mandate-bearing messages will be denied (fail-closed)"
+                                    );
+                                }
+                            }
+                        }
+                        // Operator-side commerce gate: when bound
+                        // ToolPolicy carries `spec.commerce`, the
+                        // controller sets AP2_COMMERCE_REQUIRED=1 so
+                        // AP2-free `message/send` is rejected.
+                        let commerce_required = std::env::var("AP2_COMMERCE_REQUIRED")
+                            .ok()
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        state.commerce_required = commerce_required;
                         tracing::info!(
                             dir = %dir.display(),
+                            commerce_required,
                             "A2A routes mounted (agent.json + /a2a)"
                         );
                         Some(routes::a2a_routes().with_state(state))

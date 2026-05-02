@@ -1097,6 +1097,166 @@ test_controller_metrics_endpoint() {
     fi
 }
 
+# ─── AP2 route wiring (Phase A — competitive §14.6) ──────────────────────────
+#
+# Verifies the inference-router's A2A route honours the
+# `AP2_COMMERCE_REQUIRED` env: an `message/send` request without
+# `metadata.ap2` must be rejected with JSON-RPC error -32011
+# (`A2aErrorCode::Ap2Denied`) and `data.kind == "commerceMandateRequired"`.
+#
+# This exercises the production binary end-to-end on Kind:
+# - The router image (already loaded) starts as a standalone Pod.
+# - An `agent.json` is mounted via ConfigMap so A2A routes mount.
+# - `AP2_COMMERCE_REQUIRED=1` is set so the gate fires.
+# - We `kubectl exec` curl from a sidecar busybox container into the
+#   pod-local router and assert the error body.
+#
+# No Foundry / no Azure credentials. Runs entirely on Kind.
+test_ap2_commerce_required_route_gate() {
+    local ns="azureclaw-e2e-ap2"
+    local pod="ap2-route-probe"
+
+    # Dedicated namespace — `azureclaw-system` enforces PodSecurity
+    # `restricted` and would reject our probe Pod. Our own namespace
+    # gets `baseline` so the probe Pod (which already complies with
+    # `restricted` via securityContext below, but ConfigMap-only
+    # mounts don't require it) lands cleanly. The namespace is
+    # cleaned up at the end of the test.
+    kubectl create namespace "${ns}" >/dev/null 2>&1 || true
+
+    cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "AP2 probe configmap apply failed"; return; }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ap2-probe-card
+  namespace: ${ns}
+data:
+  agent.json: |
+    {"name":"ap2-probe","skills":[]}
+EOF
+
+    # Pod spec compliant with PSS `restricted`: runAsNonRoot, dropped
+    # capabilities, RuntimeDefault seccomp, no privilege escalation.
+    # The router image already runs as UID 1000 (`router` user) from
+    # the Dockerfile, so runAsNonRoot=true is satisfied without
+    # explicit runAsUser.
+    local apply_err
+    apply_err=$(cat <<EOF | kubectl apply -f - 2>&1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  namespace: ${ns}
+  labels:
+    app: ap2-route-probe
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: router
+      image: azureclaw-inference-router:e2e
+      imagePullPolicy: Never
+      env:
+        - {name: ROUTER_PORT, value: "8443"}
+        - {name: A2A_CARD_DIR, value: "/etc/azureclaw/a2a-card"}
+        - {name: AP2_COMMERCE_REQUIRED, value: "1"}
+        - {name: CONTENT_SAFETY_ENABLED, value: "false"}
+        - {name: PROMPT_SHIELDS_ENABLED, value: "false"}
+      ports:
+        - containerPort: 8443
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 1000
+      volumeMounts:
+        - {name: card, mountPath: /etc/azureclaw/a2a-card, readOnly: true}
+    - name: probe
+      image: curlimages/curl:8.10.1
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 100
+  volumes:
+    - name: card
+      configMap:
+        name: ap2-probe-card
+EOF
+    )
+    if [ -n "$apply_err" ] && ! echo "$apply_err" | grep -q "created\|configured\|unchanged"; then
+        warn "AP2 probe pod apply: $apply_err"
+        fail "AP2 probe pod apply failed"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Wait for both containers to become ready.
+    local deadline=$(($(date +%s) + 90))
+    local ready=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ready=$(kubectl get pod "${pod}" -n "${ns}" \
+            -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
+        if [ "$ready" = "true true" ]; then
+            break
+        fi
+        sleep 2
+    done
+    if [ "$ready" != "true true" ]; then
+        warn "AP2 probe pod containers not ready: '$ready'"
+        kubectl describe pod "${pod}" -n "${ns}" 2>&1 | tail -40 || true
+        kubectl logs "${pod}" -n "${ns}" -c router 2>&1 | tail -30 || true
+        fail "AP2 probe: router pod did not become ready"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Plain message/send (no metadata.ap2) — must be rejected with -32011.
+    local body='{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}'
+    local resp
+    resp=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            --data "${body}" \
+            http://127.0.0.1:8443/a2a 2>&1 || true)
+
+    if echo "${resp}" | grep -q '"code":-32011'; then
+        pass "AP2 commerce_required: AP2-free message/send rejected with -32011"
+    else
+        warn "AP2 probe response: ${resp}"
+        fail "AP2 commerce_required: did not return -32011"
+    fi
+
+    if echo "${resp}" | grep -q '"kind":"commerceMandateRequired"'; then
+        pass "AP2 commerce_required: error.data.kind == commerceMandateRequired"
+    else
+        fail "AP2 commerce_required: data.kind not set as expected"
+    fi
+
+    # Sanity: tasks/get must not be gated (only message/send is).
+    local body2='{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"id":"nope"}}'
+    local resp2
+    resp2=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            --data "${body2}" \
+            http://127.0.0.1:8443/a2a 2>&1 || true)
+    if echo "${resp2}" | grep -q '"code":-32001'; then
+        pass "AP2 commerce_required: tasks/get unaffected (TaskNotFound returned)"
+    else
+        warn "tasks/get response: ${resp2}"
+        fail "AP2 commerce_required: tasks/get gated unexpectedly"
+    fi
+
+    kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+}
+
 test_controller_emits_events() {
     # Reconcilers should emit Kubernetes Events for major lifecycle
     # transitions. A truly silent controller is a debugging nightmare
@@ -1147,6 +1307,7 @@ main() {
     test_sandbox_deployment_exists || true
     test_sandbox_networkpolicy_denies_ingress || true
     test_controller_emits_events || true
+    test_ap2_commerce_required_route_gate || true
     # Phase 2/3 CRD reconciler coverage. These run before
     # cleanup_sandbox so the sandbox is still present (some CRs
     # reference it). The CR objects own no Pod, do no network I/O,

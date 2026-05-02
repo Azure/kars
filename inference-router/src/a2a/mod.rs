@@ -78,6 +78,7 @@ pub mod ap2;
 pub mod card_server;
 pub mod jsonrpc_dispatch;
 pub mod mandate_signing;
+pub mod mandate_trust_loader;
 pub mod mandate_trust_store;
 pub mod message_send_ap2;
 pub mod snapshot_rebuild;
@@ -109,6 +110,7 @@ pub use jsonrpc_dispatch::{
 pub use mandate_signing::{
     MandateSignError, TrustedKeys as MandateTrustedKeys, sign_mandate, verify_mandate,
 };
+pub use mandate_trust_loader::{MandateTrustLoadError, load_mandate_trust_snapshot};
 pub use mandate_trust_store::{
     MandateTrustStore, MandateTrustStoreSnapshot, MandateTrustStoreSnapshotView,
 };
