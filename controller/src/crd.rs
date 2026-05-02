@@ -298,6 +298,27 @@ pub struct A2aIngressConfig {
     /// per ADR-0001 D8).
     #[serde(default)]
     pub allow_streaming: bool,
+
+    /// Reference to an `A2AAgent` CR in the **same namespace** whose
+    /// compiled signed AgentCard the inference-router should serve at
+    /// `/.well-known/agent.json`. When omitted, the controller falls
+    /// back to looking for an `A2AAgent` named after the sandbox itself.
+    ///
+    /// Phase 3 S7 — wires the consumer side of the A2AAgent CRD. The
+    /// reconciler mirrors `a2aagent-{name}-card` from the user namespace
+    /// into the sandbox namespace and mounts it into the inference-router
+    /// container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<AgentLocalRef>,
+}
+
+/// Local-namespace reference for `A2aIngressConfig.agentRef`. Mirrors the
+/// shape of `crate::mcp_server::LocalObjectRef` but kept distinct so
+/// the public CRD schema can evolve independently.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLocalRef {
+    pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -709,8 +730,6 @@ impl Default for NetworkPolicyConfig {
 pub struct EndpointConfig {
     pub host: String,
     pub port: Option<u16>,
-    pub methods: Option<Vec<String>>,
-    pub paths: Option<Vec<String>>,
 }
 
 /// Reference to a signed OCI artifact (e.g., a sealed policy document).
@@ -801,6 +820,18 @@ pub struct GovernanceConfig {
     /// Registry mode: "global" or "local" (default: "local").
     /// Global mode enables cross-cluster mesh communication and handoff tools.
     pub registry_mode: Option<String>,
+    /// Reference to an `McpServer` CR in the **same namespace** that
+    /// publishes the OAuth-protected MCP endpoint this sandbox should
+    /// expose. When set, the controller mirrors the
+    /// `mcp-{name}-jwks` ConfigMap and `mcp-{name}-signing` Secret
+    /// produced by the McpServer reconciler into the sandbox namespace
+    /// and mounts them into the inference-router container.
+    ///
+    /// Phase 3 S7 — wires the consumer side of the McpServer CRD.
+    /// Optional: when omitted, the sandbox does not expose a
+    /// customer-facing MCP endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_ref: Option<LocalObjectRef>,
 }
 
 fn default_trust_threshold() -> i32 {
@@ -1062,6 +1093,7 @@ mod tests {
             trust_threshold: 500,
             trusted_peers: None,
             registry_mode: None,
+            mcp_server_ref: None,
         };
         let v = serde_json::to_value(&g).unwrap();
         assert!(

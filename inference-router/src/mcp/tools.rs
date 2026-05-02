@@ -155,6 +155,70 @@ pub trait ToolDispatcher: Send + Sync {
     fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError>;
 }
 
+/// Async strategy injected by the streamable HTTP MCP route. Tools that
+/// fan out to upstream HTTP services (Foundry shim catalogue, governed
+/// proxy callbacks, etc.) implement this directly so they don't have
+/// to spin a runtime inside a sync trait method.
+///
+/// Sync dispatchers (the in-tree [`EchoDispatcher`], the customer-facing
+/// `McpServer` dispatcher, and any future synchronous one) compose by
+/// wrapping in [`SyncToAsync`] — no rewriting required.
+#[async_trait::async_trait]
+pub trait AsyncToolDispatcher: Send + Sync {
+    /// The catalog this dispatcher publishes.
+    fn catalog(&self) -> &ToolCatalog;
+    /// Invoke `name` with `arguments`. Async: implementations may make
+    /// upstream HTTP calls without blocking the router runtime.
+    async fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError>;
+}
+
+/// Adapter that lifts any [`ToolDispatcher`] into an
+/// [`AsyncToolDispatcher`] by delegating to the synchronous `invoke`
+/// without spawning a blocking task. The sync dispatchers in tree
+/// (`EchoDispatcher`, customer `McpServer` dispatchers) do not perform
+/// I/O, so the adapter is essentially free.
+///
+/// Why a wrapper instead of a blanket impl? `PlatformDispatcher`
+/// implements **both** trait flavours directly — sync returns a clear
+/// "use the async path" error, async does the real upstream call.
+/// A blanket impl would conflict with that explicit async impl. The
+/// wrapper makes the lift opt-in at the route-construction site, which
+/// also keeps the trait contract honest: anything plugged in as
+/// `AsyncToolDispatcher` is genuinely async-capable, not silently
+/// downgrading to sync at runtime.
+pub struct SyncToAsync<D: ToolDispatcher> {
+    inner: D,
+}
+
+impl<D: ToolDispatcher> SyncToAsync<D> {
+    pub fn new(inner: D) -> Self {
+        Self { inner }
+    }
+
+    pub fn into_inner(self) -> D {
+        self.inner
+    }
+}
+
+impl<D: ToolDispatcher + std::fmt::Debug> std::fmt::Debug for SyncToAsync<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncToAsync")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl<D: ToolDispatcher> AsyncToolDispatcher for SyncToAsync<D> {
+    fn catalog(&self) -> &ToolCatalog {
+        self.inner.catalog()
+    }
+
+    async fn invoke(&self, name: &str, arguments: &Value) -> Result<ToolCallOutput, DispatchError> {
+        self.inner.invoke(name, arguments)
+    }
+}
+
 /// Minimal real dispatcher used as the dev / smoke-test default.
 ///
 /// Echoes the arguments back as a single text content item. Wired
@@ -323,6 +387,107 @@ fn invalid_params(req: &Request, reason: &str) -> Response {
             data: None,
         }),
         id: req.id.clone(),
+    }
+}
+
+/// Async counterpart to [`handle_tools_list`]. `tools/list` doesn't
+/// invoke the dispatcher — it only walks the catalog — but routing
+/// through [`AsyncToolDispatcher`] keeps the type story consistent on
+/// the streamable HTTP path.
+pub fn handle_tools_list_async(req: &Request, dispatcher: &dyn AsyncToolDispatcher) -> Response {
+    let cursor = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("cursor"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    let catalog = dispatcher.catalog();
+    let start = parse_cursor(cursor);
+    let page_size = catalog.page_size;
+    let end = (start + page_size).min(catalog.tools.len());
+
+    let page = if start >= catalog.tools.len() {
+        Vec::new()
+    } else {
+        catalog.tools[start..end].to_vec()
+    };
+
+    let mut result = serde_json::json!({ "tools": page });
+    if end < catalog.tools.len() {
+        result["nextCursor"] = serde_json::Value::String(format_cursor(end));
+    }
+
+    Response {
+        jsonrpc: "2.0".into(),
+        result: Some(result),
+        error: None,
+        id: req.id.clone(),
+    }
+}
+
+/// Async counterpart to [`handle_tools_call`]. Awaits the dispatcher's
+/// invocation (which may make upstream HTTP calls) and maps errors to
+/// JSON-RPC envelopes the same way as the sync variant.
+pub async fn handle_tools_call_async(
+    req: &Request,
+    dispatcher: &dyn AsyncToolDispatcher,
+) -> Response {
+    let params = match req.params.as_ref() {
+        Some(p) => p,
+        None => return invalid_params(req, "params required for tools/call"),
+    };
+
+    let name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return invalid_params(req, "params.name required (string)"),
+    };
+
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    if !arguments.is_object() {
+        return invalid_params(req, "params.arguments must be an object");
+    }
+
+    match dispatcher.invoke(&name, &arguments).await {
+        Ok(output) => Response {
+            jsonrpc: "2.0".into(),
+            result: Some(serde_json::to_value(output).unwrap_or(Value::Null)),
+            error: None,
+            id: req.id.clone(),
+        },
+        Err(DispatchError::UnknownTool(t)) => Response {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: ErrorCode::MethodNotFound.code(),
+                message: format!("tool not found: {t}"),
+                data: Some(serde_json::json!({"tool": t})),
+            }),
+            id: req.id.clone(),
+        },
+        Err(DispatchError::InvalidArguments { tool, reason }) => Response {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: ErrorCode::InvalidParams.code(),
+                message: format!("invalid arguments for {tool}: {reason}"),
+                data: Some(serde_json::json!({"tool": tool, "reason": reason})),
+            }),
+            id: req.id.clone(),
+        },
+        Err(DispatchError::ExecutionFailed { tool, reason }) => Response {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: ErrorCode::InternalError.code(),
+                message: format!("tool execution failed: {tool}"),
+                data: Some(serde_json::json!({"tool": tool, "reason": reason})),
+            }),
+            id: req.id.clone(),
+        },
     }
 }
 

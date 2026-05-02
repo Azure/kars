@@ -393,6 +393,22 @@ spec:
                       enum: ["local", "global"]
                       default: "local"
                       description: "Registry mode: global enables cross-cluster mesh communication and handoff."
+                    mcpServerRef:
+                      type: object
+                      description: |
+                        Same-namespace reference to an `McpServer` CR.
+                        When set, the controller mirrors the
+                        `mcp-{name}-jwks` ConfigMap and
+                        `mcp-{name}-signing` Secret from the user namespace
+                        into the sandbox namespace and mounts them into
+                        the inference-router so the sandbox can serve
+                        the customer-facing MCP endpoint.
+                      properties:
+                        name:
+                          type: string
+                          description: "Name of a sibling McpServer CR in the same namespace as this ClawSandbox."
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
                 azureServices:
                   type: array
                   description: "Azure services the sandbox can access via Managed Identity"
@@ -433,14 +449,7 @@ spec:
                             type: string
                           port:
                             type: integer
-                          methods:
-                            type: array
-                            items:
-                              type: string
-                          paths:
-                            type: array
-                            items:
-                              type: string
+                        required: [host, port]
                     allowlistRef:
                       type: object
                       description: |
@@ -494,7 +503,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: ["Pending", "Creating", "Running", "Failed", "Terminating"]
+                  enum: ["Pending", "Creating", "Running", "Failed", "Terminating", "Degraded"]
                 conditions:
                   type: array
                   items:
@@ -669,9 +678,9 @@ spec:
                         type: integer
                         format: int64
           x-kubernetes-validations:
-            - rule: "self.spec.slotsMax == null || self.spec.slotsMax >= 1"
+            - rule: "!has(self.spec.slotsMax) || self.spec.slotsMax >= 1"
               message: "spec.slotsMax must be >= 1"
-            - rule: "self.spec.tokenBudget == null || self.spec.tokenBudget >= 0"
+            - rule: "!has(self.spec.tokenBudget) || self.spec.tokenBudget >= 0"
               message: "spec.tokenBudget must be >= 0"
       subresources:
         status: {}

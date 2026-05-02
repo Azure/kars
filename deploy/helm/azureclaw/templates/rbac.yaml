@@ -27,6 +27,24 @@ rules:
   - apiGroups: ["azureclaw.azure.com"]
     resources: ["clawpairings", "clawpairings/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage governance/runtime CRDs (Phase 2/3)
+  - apiGroups: ["azureclaw.azure.com"]
+    resources:
+      - "toolpolicies"
+      - "toolpolicies/status"
+      - "inferencepolicies"
+      - "inferencepolicies/status"
+      - "mcpservers"
+      - "mcpservers/status"
+      - "a2aagents"
+      - "a2aagents/status"
+      - "clawmemories"
+      - "clawmemories/status"
+      - "clawevals"
+      - "clawevals/status"
+      - "signerpolicies"
+      - "signerpolicies/status"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]
     resources: ["namespaces"]

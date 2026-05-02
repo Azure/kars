@@ -63,12 +63,13 @@ pub use initialize::{
 pub use jsonrpc::{Frame, Id, Notification, Request, Response, parse_frame};
 pub use oauth::{OAuthError, OAuthVerifierConfig, VerifiedToken, verify_access_token};
 pub use oauth_layer::{OAuthLayer, OAuthService, verified_token};
-pub use pipeline::{ProcessOutcome, process_request};
+pub use pipeline::{ProcessOutcome, process_request, process_request_async};
 pub use platform::{PlatformDispatcher, foundry_tool_catalog};
 pub use streamable_http::{
     AcceptNegotiation, MAX_FRAME_BYTES, MCP_PROTOCOL_VERSION, SessionId, validate_accept_header,
 };
 pub use tools::{
-    CatalogError, DispatchError, EchoDispatcher, ToolCallOutput, ToolCatalog, ToolContent,
-    ToolDefinition, ToolDispatcher, handle_tools_call, handle_tools_list,
+    AsyncToolDispatcher, CatalogError, DispatchError, EchoDispatcher, SyncToAsync, ToolCallOutput,
+    ToolCatalog, ToolContent, ToolDefinition, ToolDispatcher, handle_tools_call,
+    handle_tools_call_async, handle_tools_list, handle_tools_list_async,
 };

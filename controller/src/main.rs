@@ -61,6 +61,17 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Multiple transitive deps enable both `ring` and `aws-lc-rs`
+    // rustls providers. rustls 0.23.40+ refuses to auto-detect when
+    // both are available, so pick one explicitly before any TLS
+    // work. `aws_lc_rs` matches the workspace default.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("rustls CryptoProvider already installed");
+    }
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
