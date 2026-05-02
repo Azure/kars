@@ -2,22 +2,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AzureClaw MAF Python runtime entrypoint (S10.A4 scaffolding).
+# AzureClaw MAF Python runtime entrypoint.
 #
-# This script is the in-pod adapter's bootstrap. It sets the env the
-# `agent-framework` Python SDK needs to route LLM traffic through the
-# AzureClaw router sidecar (so InferencePolicy + Content Safety + token
-# budgets apply), points MCP-aware tools at the platform MCP server
-# (S10.B), then execs the user agent code.
+# Pins the LLM endpoints to the router sidecar, points MCP-aware tools
+# at the platform MCP server, then invokes the in-pod adapter's
+# `bootstrap()` (AAD broker, OTel auto-init, signal handlers) before
+# `exec`-ing the user agent code.
 #
 # Hard rules:
 #   - Process must already be running as UID 1000 (Dockerfile USER 1000).
 #   - No direct LLM endpoint variables: only `127.0.0.1:8443` is allowed.
 #     The egress-guard iptables init container blocks every other path.
-#
-# Status: scaffolding. AAD token shim (DefaultAzureCredential ->
-# bearer-on-router) + Azure OpenAI rewrite + AGT-init compat land with
-# the real `azureclaw-runtime-maf-python` adapter package.
 
 set -eu
 
@@ -27,18 +22,27 @@ set -eu
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/openai/v1}"
 export AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-http://127.0.0.1:8443/openai}"
 
-# Platform MCP server (S10.B): Foundry-shim tools every runtime gets
-# for free. MAF MCP client points here.
+# Platform MCP server: 9 Foundry-shim tools every runtime gets for
+# free. MAF MCP client points here.
 export AZURECLAW_PLATFORM_MCP_URL="${AZURECLAW_PLATFORM_MCP_URL:-http://127.0.0.1:8443/platform/mcp}"
+
+# AGT relay/registry — reverse-proxied by the router so AgentMesh
+# traffic shares the same governance gate as LLM traffic.
+export AZURECLAW_AGT_RELAY_URL="${AZURECLAW_AGT_RELAY_URL:-http://127.0.0.1:8443/agt/relay/}"
+export AZURECLAW_AGT_REGISTRY_URL="${AZURECLAW_AGT_REGISTRY_URL:-http://127.0.0.1:8443/agt/registry/}"
+
+# OTel collector — the router exposes `/v1/traces` and `/v1/metrics`.
+export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:8443/v1/traces}"
 
 # Surface the controller-supplied language label (for diagnostics).
 if [ -n "${RUNTIME_MAF_LANGUAGE:-}" ]; then
     echo "[azureclaw-maf] language: ${RUNTIME_MAF_LANGUAGE}" >&2
 fi
 
-# AGT relay — Class B (mesh / spawn / handoff) is per-runtime and
-# blocked on AgentMesh-Python availability (see
-# `docs/internal/agt-upstream-asks.md` §3). Until then, S10.A4 ships
-# Foundry-shim access only via S10.B; mesh tools are placeholders.
+# In-pod adapter bootstrap: AAD broker, OTel init, signal handlers,
+# `OPENAI_BASE_URL` + `AZURE_OPENAI_ENDPOINT` pin. Idempotent (guarded
+# by `__AZURECLAW_RUNTIME_INITIALIZED__`). Non-fatal if telemetry init
+# fails — the adapter logs and continues.
+python -c "from azureclaw_runtime_maf_python.runtime import bootstrap; bootstrap()"
 
 exec "$@"
