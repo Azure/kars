@@ -417,6 +417,7 @@ pub enum RuntimeKind {
     SemanticKernel,
     LangGraph,
     Anthropic,
+    PydanticAi,
     BYO,
 }
 
@@ -462,6 +463,11 @@ pub struct RuntimeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<AnthropicConfig>,
 
+    /// Pydantic-AI runtime configuration. Required iff
+    /// `kind == PydanticAi`. Adapter ships in Phase H#3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pydantic_ai: Option<PydanticAiConfig>,
+
     /// Bring-your-own runtime. Required iff `kind == BYO`. Image must
     /// honor the BYO contract (UID 1000, inference via `127.0.0.1:8443`,
     /// `AZURECLAW_*` env, no privileged caps). Phase 2 enforcement is
@@ -481,6 +487,7 @@ impl Default for RuntimeSpec {
             semantic_kernel: None,
             lang_graph: None,
             anthropic: None,
+            pydantic_ai: None,
             byo: None,
         }
     }
@@ -589,6 +596,25 @@ pub enum LangGraphLanguage {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AnthropicConfig {
+    /// Python interpreter version (e.g. `"3.12"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Pydantic-AI runtime variant (Phase H#3).
+///
+/// [Pydantic-AI](https://ai.pydantic.dev/) is the type-safe Python
+/// agent framework from the Pydantic team. Python-only by design.
+/// Wire field shape mirrors `AnthropicConfig` / `OpenAIAgentsConfig`.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PydanticAiConfig {
     /// Python interpreter version (e.g. `"3.12"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_version: Option<String>,
