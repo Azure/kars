@@ -148,6 +148,15 @@ pub mod reason {
     /// to create a Deployment rather than silently fall through to the
     /// OpenClaw image.
     pub const ADAPTER_MISSING: &str = "AdapterMissing";
+    /// Phase G P1 #4 — `SuspendedBySpec`: the operator set
+    /// `spec.suspended: true`. Reconciler scales the Deployment to
+    /// `replicas: 0` while preserving namespace + governance overlay.
+    pub const SUSPENDED_BY_SPEC: &str = "SuspendedBySpec";
+    /// Phase G P1 #4 — `Active`: paired with `Suspended=False`. Used
+    /// only to clear a prior `Suspended=True/SuspendedBySpec` so
+    /// operators see the un-suspend transition; never stamped on CRs
+    /// that have not previously been suspended.
+    pub const ACTIVE: &str = "Active";
     /// Phase 2 S12.b — `Verified`: signed allowlist artifact fetched,
     /// cosign signature passed, signer identity matched cluster
     /// SignerPolicy, canonical form re-validated.

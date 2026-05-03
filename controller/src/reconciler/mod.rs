@@ -907,6 +907,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         if overlay_mode {
             break 'deployment_block;
         }
+        // Phase G P1 #4: spec.suspended scales the Deployment to 0
+        // replicas without removing it, preserving cluster state for
+        // a graceful resume. We still walk the rest of this block so
+        // image / env / volume drift is reflected on the suspended
+        // Deployment (so resume picks up the latest spec).
+        let suspended_by_spec = spec.suspended.unwrap_or(false);
+        let desired_replicas: i64 = if suspended_by_spec { 0 } else { 1 };
+
         // S10.A2: image now comes from the runtime plan (already
         // resolved against the controller default fallback). The
         // deployment builder must not re-derive the image from
@@ -1660,7 +1668,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             },
             "spec": {
-                "replicas": 1,
+                "replicas": desired_replicas,
                 "selector": {
                     "matchLabels": {"azureclaw.azure.com/sandbox": name}
                 },
@@ -2009,7 +2017,45 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // single AllowlistAuthoritative=False/Inline condition (or an
         // empty list when `networkPolicy` itself is unset). The
         // fetcher itself short-circuits before any network IO.
-        let extras: Vec<_> = allowlist_resolution.conditions.clone();
+        let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
+
+        // Phase G P1 #4: stamp Suspended condition when spec.suspended
+        // is true, or clear a prior SuspendedBySpec when it is false.
+        // We deliberately do NOT stamp Suspended=False on CRs that
+        // were never suspended — that would add a new condition
+        // retroactively to every existing sandbox.
+        let suspended_by_spec = spec.suspended.unwrap_or(false);
+        let prior_conditions_for_susp = sandbox
+            .status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or(&[]);
+        let prior_suspended = crate::status::conditions::find(
+            prior_conditions_for_susp,
+            crate::status::conditions::TYPE_SUSPENDED,
+        );
+        let prior_was_spec_suspended = prior_suspended
+            .is_some_and(|c| c.reason == crate::status::conditions::reason::SUSPENDED_BY_SPEC);
+        if suspended_by_spec {
+            extras.push(crate::status::conditions::preserve_transition_time(
+                prior_suspended,
+                crate::status::conditions::TYPE_SUSPENDED,
+                crate::status::conditions::status::TRUE,
+                crate::status::conditions::reason::SUSPENDED_BY_SPEC,
+                "spec.suspended=true; Deployment scaled to replicas=0",
+                sandbox.metadata.generation,
+            ));
+        } else if prior_was_spec_suspended {
+            extras.push(crate::status::conditions::preserve_transition_time(
+                prior_suspended,
+                crate::status::conditions::TYPE_SUSPENDED,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::ACTIVE,
+                "spec.suspended cleared; Deployment scaled back to replicas=1",
+                sandbox.metadata.generation,
+            ));
+        }
+
         if !crate::status::running_status_matches_with_extras(
             &sandbox,
             &sandbox_ns,
