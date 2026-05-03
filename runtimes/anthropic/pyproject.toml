@@ -1,0 +1,66 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "azureclaw_runtime_anthropic"
+version = "0.1.0"
+description = "AzureClaw in-pod adapter for the Anthropic Claude Agent SDK — AAD shim, OTel auto-init, AgentMesh bridge, and router-managed credentials out of the box."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Microsoft Corporation", email = "azureclaw@microsoft.com"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    # Anthropic Claude Agent SDK (Python). Pinned conservatively; the
+    # adapter only depends on the public client surface (Anthropic()
+    # constructor + tool/MCP wiring), so minor SDK churn is tolerable.
+    "anthropic>=0.39,<1",
+    "claude-agent-sdk>=0.1,<1",
+    "azure-identity>=1.17,<2",
+    "opentelemetry-api>=1.27,<2",
+    "opentelemetry-sdk>=1.27,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.27,<2",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    "httpx>=0.27,<1",
+    # AGT-Python packages (built from upstream by runtimes/build-agt-wheels.sh
+    # and `pip install`-ed from runtimes/wheels/ in the Dockerfile).
+    "a2a_agentmesh>=3.3.0,<4",
+    "agent_sandbox>=3.3.0,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.12",
+    "respx>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/Azure/azureclaw"
+Repository = "https://github.com/Azure/azureclaw"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/azureclaw_runtime_anthropic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

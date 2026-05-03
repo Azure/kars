@@ -34,8 +34,8 @@
 use std::collections::BTreeMap;
 
 use crate::crd::{
-    AgentCodeRef, ByoRuntimeConfig, MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig,
-    OpenClawConfig, RuntimeKind, RuntimeSpec,
+    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, MafLanguage, MicrosoftAgentFrameworkConfig,
+    OpenAIAgentsConfig, OpenClawConfig, RuntimeKind, RuntimeSpec,
 };
 
 /// Default container image for the OpenAI Agents Python runtime
@@ -79,6 +79,28 @@ pub fn maf_python_default_image() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MAF_PYTHON_IMAGE.to_string())
+}
+
+/// Default container image for the Anthropic Claude Agent SDK Python
+/// runtime (Phase H#1). Stays `:latest`; operators pin via the
+/// `ANTHROPIC_RUNTIME_IMAGE` env var.
+///
+/// Why a dedicated adapter (vs BYO): pins ANTHROPIC_BASE_URL to the
+/// router sidecar so the SDK cannot reach api.anthropic.com directly,
+/// substitutes ANTHROPIC_API_KEY with a sentinel (router brokers the
+/// real credential on egress), and inherits the standard AAD broker /
+/// OTel / AgentMesh wiring.
+pub const DEFAULT_ANTHROPIC_IMAGE: &str =
+    "azureclawacr.azurecr.io/azureclaw-runtime-anthropic:latest";
+
+/// Resolve the Anthropic adapter image, honouring an operator
+/// override via `ANTHROPIC_RUNTIME_IMAGE`. Falls back to
+/// [`DEFAULT_ANTHROPIC_IMAGE`].
+pub fn anthropic_default_image() -> String {
+    std::env::var("ANTHROPIC_RUNTIME_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_ANTHROPIC_IMAGE.to_string())
 }
 
 /// Concrete deployment intent for a single reconcile pass.
@@ -290,7 +312,18 @@ pub fn build_runtime_plan(
         }
         RuntimeKind::SemanticKernel => Err(RuntimePlanError::AdapterMissing("SemanticKernel")),
         RuntimeKind::LangGraph => Err(RuntimePlanError::AdapterMissing("LangGraph")),
-        RuntimeKind::Anthropic => Err(RuntimePlanError::AdapterMissing("Anthropic")),
+        RuntimeKind::Anthropic => {
+            // Phase H#1: Anthropic Claude Agent SDK adapter wired
+            // end-to-end. Adapter image bundles Python 3.12 +
+            // `anthropic` SDK + `claude-agent-sdk` + a stock
+            // entrypoint that pins ANTHROPIC_BASE_URL to the router
+            // sidecar and replaces ANTHROPIC_API_KEY with a sentinel.
+            // Foundry tools reachable via the platform MCP server at
+            // `/platform/mcp` (Claude SDK supports MCP natively via
+            // `mcp_servers=[...]`).
+            let cfg = runtime.anthropic.as_ref().expect("validated above");
+            Ok(plan_anthropic(cfg))
+        }
     }
 }
 
@@ -458,6 +491,46 @@ fn plan_microsoft_agent_framework(
         agent_code: cfg.agent_code.clone(),
         byo_contract_version: None,
     })
+}
+
+/// Producer for [`RuntimeKind::Anthropic`] (Phase H#1).
+///
+/// The Anthropic Claude Agent SDK is currently Python-first. The
+/// adapter pins `ANTHROPIC_BASE_URL` to the router sidecar and sets
+/// `ANTHROPIC_API_KEY` to a sentinel — the router brokers the real
+/// credential on egress so no Anthropic key ever lives inside the
+/// sandbox pod. Foundry tools are reachable via the platform MCP
+/// server at `/platform/mcp` (Claude SDK supports MCP natively via
+/// `mcp_servers=[...]`).
+fn plan_anthropic(cfg: &AnthropicConfig) -> RuntimeDeploymentPlan {
+    let image = anthropic_default_image();
+
+    // Same merge contract as `plan_openai_agents`: producer-supplied
+    // defaults first, user `extra_env` on top. Reserved-prefix
+    // filtering happens in the deployment builder; keep producer
+    // defaults on non-reserved (`RUNTIME_*`) keys.
+    let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(v) = cfg.python_version.as_ref() {
+        runtime_extra_env.insert("RUNTIME_PYTHON_VERSION".to_string(), v.clone());
+    }
+    if let Some(user_env) = cfg.extra_env.as_ref() {
+        for (k, v) in user_env {
+            runtime_extra_env.insert(k.clone(), v.clone());
+        }
+    }
+
+    let command = cfg.entrypoint.clone();
+
+    RuntimeDeploymentPlan {
+        kind_str: "Anthropic",
+        image,
+        command,
+        args: None,
+        runtime_extra_env,
+        raw_env: Vec::new(),
+        agent_code: cfg.agent_code.clone(),
+        byo_contract_version: None,
+    }
 }
 
 #[cfg(test)]
@@ -655,8 +728,8 @@ mod tests {
     // surfaces `AdapterMissing(<kind>)`. BYO is a known short-circuit
     // until A2.b lands the contract-verifier path.
 
-    /// S10.A4: MAF is now wired (S10.A3: OpenAIAgents, S10.A2.b: BYO).
-    /// Only the three Tier-2 placeholders short-circuit through
+    /// Anthropic was wired in Phase H#1 (joining OpenAIAgents/MAF/BYO).
+    /// Only the two remaining Tier-2 placeholders short-circuit through
     /// AdapterMissing.
     #[test]
     fn plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind() {
@@ -681,16 +754,6 @@ mod tests {
                 },
                 "LangGraph",
             ),
-            (
-                RuntimeKind::Anthropic,
-                RuntimeSpec {
-                    kind: RuntimeKind::Anthropic,
-                    openclaw: None,
-                    anthropic: Some(AnthropicConfig::default()),
-                    ..Default::default()
-                },
-                "Anthropic",
-            ),
         ];
         for (kind, rt, expected_label) in cases {
             let err = build_runtime_plan(&rt, "default-image").expect_err("must short-circuit");
@@ -701,6 +764,92 @@ mod tests {
                 kind_str(&kind)
             );
         }
+    }
+
+    // ── Anthropic adapter (Phase H#1) ────────────────────────────────
+
+    #[test]
+    fn anthropic_default_image_falls_back_when_env_unset() {
+        // SAFETY: this test does not run in parallel with env writers
+        // (no other test sets ANTHROPIC_RUNTIME_IMAGE).
+        unsafe {
+            std::env::remove_var("ANTHROPIC_RUNTIME_IMAGE");
+        }
+        assert_eq!(anthropic_default_image(), DEFAULT_ANTHROPIC_IMAGE);
+    }
+
+    #[test]
+    fn plan_anthropic_emits_anthropic_kind_str_and_default_image() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Anthropic,
+            openclaw: None,
+            anthropic: Some(AnthropicConfig::default()),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("anthropic plan ok");
+        assert_eq!(plan.kind_str, "Anthropic");
+        assert!(plan.image.contains("azureclaw-runtime-anthropic"));
+        // No reserved AZURECLAW_/ANTHROPIC_ leak from the producer —
+        // the deployment builder owns those.
+        for k in plan.runtime_extra_env.keys() {
+            assert!(
+                !k.starts_with("ANTHROPIC_"),
+                "producer must not emit ANTHROPIC_* keys: {k}"
+            );
+            assert!(
+                !k.starts_with("AZURECLAW_"),
+                "producer must not emit AZURECLAW_* keys: {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_anthropic_threads_python_version_and_user_extra_env() {
+        let mut user_env = BTreeMap::new();
+        user_env.insert("MY_FLAG".to_string(), "on".to_string());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Anthropic,
+            openclaw: None,
+            anthropic: Some(AnthropicConfig {
+                python_version: Some("3.13".into()),
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("RUNTIME_PYTHON_VERSION"),
+            Some(&"3.13".to_string())
+        );
+        assert_eq!(
+            plan.runtime_extra_env.get("MY_FLAG"),
+            Some(&"on".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_anthropic_user_extra_env_overrides_producer_default() {
+        // User explicitly pinning RUNTIME_PYTHON_VERSION via extra_env
+        // wins over the python_version field. Mirrors the merge order
+        // in `plan_openai_agents`.
+        let mut user_env = BTreeMap::new();
+        user_env.insert("RUNTIME_PYTHON_VERSION".to_string(), "3.11".into());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Anthropic,
+            openclaw: None,
+            anthropic: Some(AnthropicConfig {
+                python_version: Some("3.13".into()),
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("RUNTIME_PYTHON_VERSION"),
+            Some(&"3.11".to_string())
+        );
     }
 
     // ── build_runtime_plan() rejects shape-invalid input ─────────────
