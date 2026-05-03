@@ -24,6 +24,7 @@ mod claw_eval_reconciler;
 mod claw_memory;
 mod claw_memory_compile;
 mod claw_memory_reconciler;
+mod config_hash;
 mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
@@ -81,6 +82,16 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("AzureClaw Controller starting");
+
+    // P2 #12: stamp the controller config hash early so it appears
+    // in the very first log line operators look at and is exposed
+    // on /metrics before any reconciler fires.
+    let config_hash = config_hash::compute_from_env();
+    config_hash::record_config_hash(&config_hash);
+    tracing::info!(
+        controller_config_hash = %config_hash,
+        "controller config hash computed; surfaced as azureclaw_controller_config_info"
+    );
 
     let client = Client::try_default().await?;
 
