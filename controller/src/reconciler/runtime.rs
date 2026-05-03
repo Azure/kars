@@ -375,9 +375,10 @@ pub fn build_runtime_plan(
         }
         RuntimeKind::SemanticKernel => Err(RuntimePlanError::AdapterMissing("SemanticKernel")),
         RuntimeKind::LangGraph => {
-            // Phase H#2: LangGraph Python adapter wired end-to-end.
-            // TypeScript flavour is gated as ShapeInvalid until the
-            // TS adapter image ships (mirrors the MAF .NET strategy).
+            // LangGraph adapters wired end-to-end for both Python
+            // (`runtimes/langgraph/`) and TypeScript / Node 22
+            // (`runtimes/langgraph-ts/`). `plan_langgraph` matches on
+            // `language` and selects the matching image.
             let cfg = runtime.lang_graph.as_ref().expect("validated above");
             plan_langgraph(cfg)
         }

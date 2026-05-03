@@ -680,16 +680,21 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     name: "azureclaw_mesh_inbox",
     label: "Check Mesh Inbox",
     description:
-      "Read messages received via the E2E encrypted AGT mesh inbox. ALWAYS call " +
-      "this tool whenever you need to know whether a peer has sent you anything — " +
-      "do NOT rely on what you remember from previous turns, because new messages " +
-      "may have arrived since then. By default the tool is *peek-only* and shows " +
-      "only unread entries; messages stay in the inbox so you can read them again. " +
-      "Pass mark_read=true once you have acted on the contents to flag them as " +
-      "seen, or unread_only=false to also show entries you have already read on " +
-      "earlier turns. The response includes a `diagnostics` block with the " +
-      "gateway instance id and counters so you can tell apart 'no message has " +
-      "ever arrived' from 'I already consumed the message earlier'.",
+      "Read messages received via the E2E encrypted AGT mesh inbox. ALWAYS " +
+      "call this tool FIRST whenever your task description says a peer agent " +
+      "has sent you data, output, or a reply — peer messages always arrive " +
+      "before you process them, so checking the inbox is your default opening " +
+      "move whenever you're told to consume something from another agent. " +
+      "Also call it whenever you need to know whether a peer has sent you " +
+      "anything at all — do NOT rely on what you remember from previous " +
+      "turns, because new messages may have arrived since then. By default " +
+      "the tool is *peek-only* and shows only unread entries; messages stay " +
+      "in the inbox so you can read them again. Pass mark_read=true once you " +
+      "have acted on the contents to flag them as seen, or unread_only=false " +
+      "to also show entries you have already read on earlier turns. The " +
+      "response includes a `diagnostics` block with the gateway instance id " +
+      "and counters so you can tell apart 'no message has ever arrived' from " +
+      "'I already consumed the message earlier'.",
     parameters: {
       type: "object",
       properties: {

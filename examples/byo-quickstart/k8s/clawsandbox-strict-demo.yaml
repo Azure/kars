@@ -1,0 +1,51 @@
+# Strict-mode demo: this CR is INTENTIONALLY invalid.
+#
+# When the controller is rolled out with `controller.byoStrict=true`,
+# applying this manifest must NOT produce a half-rendered Deployment.
+# Instead the ClawSandbox is stamped:
+#
+#   status.conditions:
+#     - type: Degraded
+#       status: "True"
+#       reason: BYOContractInvalid
+#       message: "byo.contractVersion=`v999` is not in the supported set ..."
+#
+# Use this to verify strict-mode admission end-to-end before deploying
+# real workloads. With `byoStrict=false` (default) the same manifest is
+# accepted with a `WARN` advisory in controller logs — strict mode is
+# what gives the rejection teeth.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: byo-strict-demo
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: byo-strict-demo
+spec:
+  appliesTo:
+    sandboxName: byo-strict-demo
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  tokenBudget:
+    perRequestMax: 4000
+    perDayMax: 200000
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: byo-strict-demo
+  namespace: azureclaw-system
+spec:
+  runtime:
+    kind: BYO
+    byo:
+      # Intentionally bogus contract version. Strict mode rejects.
+      image: ghcr.io/example/byo-quickstart:v1
+      contractVersion: v999
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: byo-strict-demo

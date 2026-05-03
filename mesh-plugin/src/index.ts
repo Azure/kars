@@ -420,15 +420,19 @@ export function definePluginEntry() {
         name: "mesh_inbox",
         description:
           "Read messages received via the E2E encrypted AGT mesh. ALWAYS call " +
-          "this tool when the user asks about inbox, replies, or peer messages — " +
-          "do NOT rely on what you remember from earlier turns, because new " +
-          "messages may have arrived since then. Default behaviour is *peek-only* " +
-          "and shows only entries you haven't read yet; messages stay in the " +
-          "inbox so you can re-read them. Pass mark_read=true once you have " +
-          "acted on the contents to flag them as seen, or unread_only=false to " +
-          "also see entries from previous turns. The response includes a " +
-          "`diagnostics` block with lifecycle counters so you can tell apart " +
-          "'never received' from 'already consumed by an offload waiter'.",
+          "this tool FIRST whenever your task description says a peer agent " +
+          "has sent you data, output, or a reply — peer messages always " +
+          "arrive before you process them, so checking the inbox is your " +
+          "default opening move whenever you're told to consume something " +
+          "from another agent. Do NOT rely on what you remember from earlier " +
+          "turns, because new messages may have arrived since then. Default " +
+          "behaviour is *peek-only* and shows only entries you haven't read " +
+          "yet; messages stay in the inbox so you can re-read them. Pass " +
+          "mark_read=true once you have acted on the contents to flag them " +
+          "as seen, or unread_only=false to also see entries from previous " +
+          "turns. The response includes a `diagnostics` block with lifecycle " +
+          "counters so you can tell apart 'never received' from 'already " +
+          "consumed by an offload waiter'.",
         parameters: {
           type: "object",
           properties: {
