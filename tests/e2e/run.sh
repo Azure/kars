@@ -990,7 +990,94 @@ EOF
     kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
 }
 
-# ─── Reconciler update / delete flow ────────────────────────────────────────
+test_secondary_resource_watch() {
+    # Phase G P1 #5: the controller watches child Deployments via a
+    # label-based mapper. Manual mutations to the Deployment must be
+    # reverted within seconds (well under the 5-min periodic requeue
+    # interval) — proof that the .watches() chain is firing.
+    local sandbox=watch-test
+    cat <<EOF | kubectl apply -f - >/dev/null
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: ${sandbox}-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: ${sandbox}
+spec:
+  appliesTo:
+    sandboxName: ${sandbox}
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: ${sandbox}
+  namespace: azureclaw-system
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: ${sandbox}-inference
+EOF
+
+    # Wait until Deployment exists with desired replicas=1.
+    local replicas=""
+    local i
+    for i in $(seq 1 30); do
+        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+        if [[ "$replicas" == "1" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$replicas" != "1" ]]; then
+        fail "Initial Deployment never reached replicas=1 (got $replicas)"
+        kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        return
+    fi
+
+    # Verify the parent-namespace label is stamped (the mapper depends on it).
+    local parent_ns_label
+    parent_ns_label=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+        -o jsonpath='{.metadata.labels.azureclaw\.azure\.com/parent-namespace}' 2>/dev/null)
+    if [[ "$parent_ns_label" == "azureclaw-system" ]]; then
+        pass "Deployment carries azureclaw.azure.com/parent-namespace label"
+    else
+        fail "parent-namespace label missing or wrong (got '$parent_ns_label')"
+    fi
+
+    # Mutate replicas out-of-band → controller must restore quickly.
+    kubectl scale deploy -n "azureclaw-${sandbox}" "${sandbox}" --replicas=5 >/dev/null
+    local restored=0
+    for i in $(seq 1 20); do
+        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+        if [[ "$replicas" == "1" ]]; then
+            restored=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$restored" == "1" ]]; then
+        pass "Secondary watch restored replicas=1 after manual scale=5 (within ${i}*2s)"
+    else
+        fail "Secondary watch did NOT restore replicas (still $replicas after 40s)"
+    fi
+
+    kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+}
 
 test_tool_policy_update_flow() {
     # Apply ToolPolicy → record ConfigMap content → update the spec
@@ -1678,6 +1765,7 @@ main() {
     test_sandbox_deployment_exists || true
     test_sandbox_networkpolicy_denies_ingress || true
     test_sandbox_suspended_lifecycle || true
+    test_secondary_resource_watch || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
     test_mcp_initialize_version_negotiation || true
