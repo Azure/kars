@@ -14,11 +14,14 @@
 
 - [Security Model](security.md) — Defense-in-depth (infra + AGT governance + E2E mesh + protocol-layer controls)
 - [Threat Model — Routes](threat-model.md) — Per-route auth tier, input validation, blast-radius
+- [STRIDE Threat Model](security/stride.md) — Per-trust-boundary STRIDE matrix
+- [AGT Boundary](architecture/agt-boundary.md) — What AzureClaw consumes vs builds, four provider contracts
 - [AGT Vendored-Patch Audit](agt-vendored-patch-audit.md) — Vendored AgentMesh fixes pending AGT mesh shipping
 - [`sigs/agent-sandbox` Compat](sigs-agent-sandbox-compat.md) — Optional Translate / Overlay mode design
 - [OWASP MCP Top 10 (2025)](security-mcp-top10.md) — Controls matrix for the new MCP 2026 surface
 - [ADR-0001 — A2A ingress front-edge](adr/0001-a2a-ingress-front-edge.md) — Gateway-only, surgical opt-in
 - [Security Audits](security-audits/) — Per-capability audit docs (Phase 0 + Phase 1 + Phase 2)
+- [Red-Team Findings Log](security/red-team.md) — Internal adversarial-test history
 - [Network Egress & Proxy](egress-proxy.md) — Blocklist, allowlist, approval flow, learn mode
 - [E2E Encryption Proof](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging with traffic capture evidence
 - [Security Validation](security-validation.md) — Live cluster evidence for every security layer
@@ -34,7 +37,9 @@
 ## Architecture deep-dives
 
 - [A2A Gateway](architecture/a2a-gateway.md) — Front-edge gateway design and component split
+- [AGT Boundary](architecture/agt-boundary.md) — Responsibility split, provider contracts, outage modes
 - [CRD Versioning Policy](architecture/crd-versioning.md) — `v1alpha1` freeze + `v1alpha2` + conversion-webhook plan
+- [Backwards-Compatibility Commitment](api/backwards-compatibility.md) — SemVer surface, deprecation policy
 
 ## Operations
 
@@ -46,7 +51,12 @@
 - [Supply Chain](operations/supply-chain.md) — Cosign, SBOM, attestations
 - [GitOps](operations/gitops.md) — Reconciler in a GitOps fleet
 - [Image Versioning](operations/image-versioning.md) — Tag policy and runtime image overrides
+- [Secret Rotation Runbook](operations/secret-rotation.md) — Per-sandbox creds, TLS, AgentMesh identity, Azure
 - [Chaos Tier](operations/chaos-tier.md) — Fault-injection test surface
+
+## Roadmap
+
+- [Roadmap](roadmap.md) — v1.0 capabilities, v1.1 targets, v1.2 directions, backlog
 
 ## Demos & Examples
 
