@@ -238,13 +238,18 @@ pub fn preserve_transition_time(
             last_transition_time: p.last_transition_time.clone(),
             observed_generation,
         },
-        _ => new_condition(
-            type_,
-            status_value,
-            reason_value,
-            message,
-            observed_generation,
-        ),
+        _ => {
+            // Status flipped (or no prior) — record the transition so
+            // operators can alert on flap rate without parsing CR yaml.
+            crate::metrics::record_condition_transition(type_, status_value);
+            new_condition(
+                type_,
+                status_value,
+                reason_value,
+                message,
+                observed_generation,
+            )
+        }
     }
 }
 
