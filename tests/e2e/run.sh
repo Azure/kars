@@ -1003,13 +1003,11 @@ EOF
         pass "Suspended=False/Active condition stamped after un-suspend"
     else
         fail "Suspended condition after un-suspend wrong (status=$cond_status reason=$cond_reason)"
-        echo "[DEBUG] full status.conditions:"
-        kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-            -o jsonpath='{.status.conditions}' 2>/dev/null | head -c 2000
-        echo ""
-        echo "[DEBUG] controller logs (last 100 lines):"
+        echo "[DEBUG] full CR (-o yaml):"
+        kubectl get clawsandbox "${sandbox}" -n azureclaw-system -o yaml 2>/dev/null | tail -80
+        echo "[DEBUG] controller logs (last 200 lines, suspend-related):"
         kubectl logs -n azureclaw-system -l app.kubernetes.io/name=azureclaw-controller \
-            --tail=100 2>/dev/null | grep -i "suspend" || true
+            --tail=200 --all-containers 2>/dev/null | grep -iE "suspend|reconcile|patch_status|${sandbox}" | tail -50 || true
     fi
 
     kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
