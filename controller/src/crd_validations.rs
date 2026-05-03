@@ -438,6 +438,64 @@ pub fn claw_eval_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on ClawEval")
 }
 
+/// `TrustGraph.spec` CEL rules. Phase F1.
+///
+/// 1. `vertices` must be non-empty (an empty graph yields a useless
+///    projection — the operator likely meant to delete the CR).
+/// 2. Every `vertices[*].alg` must be `"EdDSA"` — only supported.
+/// 3. Every `edges[*].score` must be in `[0, 1000]` (the AGT
+///    trust-score domain — same range as
+///    `ClawSandbox.spec.governance.trustThreshold`).
+/// 4. Every `edges[*].notAfter`, when set, must be `>= issuedAt`
+///    (an inverted-expiry edge cannot represent a meaningful
+///    attestation lifetime).
+#[must_use]
+pub fn trust_graph_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.vertices) > 0".into(),
+            message: Some("spec.vertices must contain at least one entry".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.vertices.all(v, v.alg == 'EdDSA')".into(),
+            message: Some(
+                "spec.vertices[*].alg must be 'EdDSA' (only supported algorithm)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.edges) || self.edges.all(e, e.score >= 0 && e.score <= 1000)"
+                .into(),
+            message: Some("spec.edges[*].score must be in [0, 1000]".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.edges) || self.edges.all(e, !has(e.notAfter) || e.notAfter >= e.issuedAt)".into(),
+            message: Some(
+                "spec.edges[*].notAfter, when set, must be >= issuedAt".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `TrustGraph` CRD with [`trust_graph_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn trust_graph_crd() -> CustomResourceDefinition {
+    inject_spec_validations(
+        crate::trust_graph::TrustGraph::crd(),
+        trust_graph_validations(),
+    )
+    .expect("kube-rs derive must produce a spec property on TrustGraph")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
