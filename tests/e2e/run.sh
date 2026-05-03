@@ -949,14 +949,27 @@ EOF
 
     # Suspended=True/SuspendedBySpec must be stamped.
     local cond_status cond_reason
-    cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
-    cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
-    if [[ "$cond_status" == "True" && "$cond_reason" == "SuspendedBySpec" ]]; then
+    # Poll for Suspended=True/SuspendedBySpec convergence (same race as
+    # the un-suspend side: replicas=0 may land before the status patch).
+    local converged_susp=0
+    local cond_status="" cond_reason=""
+    for i in $(seq 1 30); do
+        cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
+        cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
+        if [[ "$cond_status" == "True" && "$cond_reason" == "SuspendedBySpec" ]]; then
+            converged_susp=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$converged_susp" == "1" ]]; then
         pass "Suspended=True/SuspendedBySpec condition stamped"
     else
         fail "Suspended condition wrong (status=$cond_status reason=$cond_reason)"
+        echo "[DEBUG] full CR (-o yaml):"
+        kubectl get clawsandbox "${sandbox}" -n azureclaw-system -o yaml 2>/dev/null | tail -60
     fi
 
     # Un-suspend → replicas=1, Suspended=False/Active.
@@ -976,21 +989,128 @@ EOF
         fail "Un-suspended Deployment replicas=$replicas (expected 1)"
     fi
 
-    cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
-    cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
-    if [[ "$cond_status" == "False" && "$cond_reason" == "Active" ]]; then
+    # Poll for condition convergence to Suspended=False/Active. The
+    # controller patches Deployment.replicas and .status.conditions in
+    # a single reconcile pass, but they land via two separate API
+    # calls. Polling avoids a race where the test reads the
+    # condition slot before the status patch has been applied (or
+    # while a concurrent reconcile triggered by the new Deployment
+    # watch is still in-flight).
+    local converged=0
+    for i in $(seq 1 30); do
+        cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
+        cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
+        if [[ "$cond_status" == "False" && "$cond_reason" == "Active" ]]; then
+            converged=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$converged" == "1" ]]; then
         pass "Suspended=False/Active condition stamped after un-suspend"
     else
         fail "Suspended condition after un-suspend wrong (status=$cond_status reason=$cond_reason)"
+        echo "[DEBUG] full CR (-o yaml):"
+        kubectl get clawsandbox "${sandbox}" -n azureclaw-system -o yaml 2>/dev/null | tail -80
+        echo "[DEBUG] controller logs (last 200 lines, suspend-related):"
+        kubectl logs -n azureclaw-system -l app.kubernetes.io/name=azureclaw-controller \
+            --tail=200 --all-containers 2>/dev/null | grep -iE "suspend|reconcile|patch_status|${sandbox}" | tail -50 || true
     fi
 
     kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
     kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
 }
 
-# ─── Reconciler update / delete flow ────────────────────────────────────────
+test_secondary_resource_watch() {
+    # Phase G P1 #5: the controller watches child Deployments via a
+    # label-based mapper. Manual mutations to the Deployment must be
+    # reverted within seconds (well under the 5-min periodic requeue
+    # interval) — proof that the .watches() chain is firing.
+    local sandbox=watch-test
+    cat <<EOF | kubectl apply -f - >/dev/null
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: ${sandbox}-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: ${sandbox}
+spec:
+  appliesTo:
+    sandboxName: ${sandbox}
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: ${sandbox}
+  namespace: azureclaw-system
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: ${sandbox}-inference
+EOF
+
+    # Wait until Deployment exists with desired replicas=1.
+    local replicas=""
+    local i
+    for i in $(seq 1 30); do
+        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+        if [[ "$replicas" == "1" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$replicas" != "1" ]]; then
+        fail "Initial Deployment never reached replicas=1 (got $replicas)"
+        kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        return
+    fi
+
+    # Verify the parent-namespace label is stamped (the mapper depends on it).
+    local parent_ns_label
+    parent_ns_label=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+        -o jsonpath='{.metadata.labels.azureclaw\.azure\.com/parent-namespace}' 2>/dev/null)
+    if [[ "$parent_ns_label" == "azureclaw-system" ]]; then
+        pass "Deployment carries azureclaw.azure.com/parent-namespace label"
+    else
+        fail "parent-namespace label missing or wrong (got '$parent_ns_label')"
+    fi
+
+    # Mutate replicas out-of-band → controller must restore quickly.
+    kubectl scale deploy -n "azureclaw-${sandbox}" "${sandbox}" --replicas=5 >/dev/null
+    local restored=0
+    for i in $(seq 1 20); do
+        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+        if [[ "$replicas" == "1" ]]; then
+            restored=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$restored" == "1" ]]; then
+        pass "Secondary watch restored replicas=1 after manual scale=5 (within ${i}*2s)"
+    else
+        fail "Secondary watch did NOT restore replicas (still $replicas after 40s)"
+    fi
+
+    kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+}
 
 test_tool_policy_update_flow() {
     # Apply ToolPolicy → record ConfigMap content → update the spec
@@ -1678,6 +1798,7 @@ main() {
     test_sandbox_deployment_exists || true
     test_sandbox_networkpolicy_denies_ingress || true
     test_sandbox_suspended_lifecycle || true
+    test_secondary_resource_watch || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
     test_mcp_initialize_version_negotiation || true

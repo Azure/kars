@@ -21,7 +21,10 @@ use k8s_openapi::api::{
 use kube::{
     Client, ResourceExt,
     api::{Api, DeleteParams, ListParams, Patch, PatchParams},
-    runtime::controller::{Action, Controller},
+    runtime::{
+        controller::{Action, Controller},
+        reflector::ObjectRef,
+    },
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -1664,7 +1667,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "namespace": sandbox_ns,
                 "labels": {
                     "azureclaw.azure.com/sandbox": name,
-                    "azureclaw.azure.com/component": "sandbox"
+                    "azureclaw.azure.com/component": "sandbox",
+                    "azureclaw.azure.com/parent-namespace":
+                        sandbox.namespace().unwrap_or_default(),
                 }
             },
             "spec": {
@@ -2020,10 +2025,20 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
 
         // Phase G P1 #4: stamp Suspended condition when spec.suspended
-        // is true, or clear a prior SuspendedBySpec when it is false.
-        // We deliberately do NOT stamp Suspended=False on CRs that
+        // is true, or surface Suspended=False/Active when there is a
+        // prior Suspended condition that was operator-driven. We
+        // deliberately do NOT stamp Suspended=False on CRs that
         // were never suspended — that would add a new condition
         // retroactively to every existing sandbox.
+        //
+        // Once a CR has been suspended at least once, the Suspended
+        // condition must persist (False/Active after un-suspend) so
+        // dashboards / `kubectl wait` can rely on its presence. If we
+        // only stamped on the *transition* (prior reason=SuspendedBySpec
+        // → now Active), the next no-op reconcile would observe
+        // prior reason=Active and drop the condition from extras,
+        // which causes the next status patch to omit it — silently
+        // erasing the operator's view of "this CR was un-suspended".
         let suspended_by_spec = spec.suspended.unwrap_or(false);
         let prior_conditions_for_susp = sandbox
             .status
@@ -2034,8 +2049,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             prior_conditions_for_susp,
             crate::status::conditions::TYPE_SUSPENDED,
         );
-        let prior_was_spec_suspended = prior_suspended
-            .is_some_and(|c| c.reason == crate::status::conditions::reason::SUSPENDED_BY_SPEC);
+        let has_prior_spec_suspension = prior_suspended.is_some_and(|c| {
+            c.reason == crate::status::conditions::reason::SUSPENDED_BY_SPEC
+                || c.reason == crate::status::conditions::reason::ACTIVE
+        });
         if suspended_by_spec {
             extras.push(crate::status::conditions::preserve_transition_time(
                 prior_suspended,
@@ -2045,7 +2062,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "spec.suspended=true; Deployment scaled to replicas=0",
                 sandbox.metadata.generation,
             ));
-        } else if prior_was_spec_suspended {
+        } else if has_prior_spec_suspension {
             extras.push(crate::status::conditions::preserve_transition_time(
                 prior_suspended,
                 crate::status::conditions::TYPE_SUSPENDED,
@@ -2199,6 +2216,11 @@ pub async fn run(client: Client) -> Result<()> {
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())
+        .watches(
+            Api::<Deployment>::all(ctx.client.clone()),
+            kube::runtime::watcher::Config::default(),
+            deployment_to_sandbox_ref,
+        )
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("ClawSandbox", reconcile(x, ctx)).await
@@ -2221,3 +2243,137 @@ pub async fn run(client: Client) -> Result<()> {
 mod tests;
 
 pub mod runtime;
+
+/// Phase G P1 #5 — Deployment-to-ClawSandbox parent mapper.
+///
+/// Triggers a reconcile on the parent ClawSandbox whenever a child
+/// Deployment is created, updated, or deleted. Combined with
+/// `Controller::watches`, this closes the gap that previously let
+/// manual `kubectl edit deploy` / `kubectl scale` mutations linger
+/// for up to 5 minutes (the periodic requeue interval) before the
+/// reconciler restored the desired state.
+///
+/// Cross-namespace constraint: K8s does not allow ownerReferences
+/// across namespaces, and the Deployment lives in `azureclaw-{name}`
+/// while the parent ClawSandbox can live in any namespace. We
+/// therefore identify the parent by the labels we stamp at
+/// Deployment-creation time:
+///
+/// * `azureclaw.azure.com/component=sandbox` — required (filters
+///   out unrelated Deployments).
+/// * `azureclaw.azure.com/sandbox=<name>` — parent CR name.
+/// * `azureclaw.azure.com/parent-namespace=<ns>` — parent CR
+///   namespace.
+///
+/// Deployments that pre-date this PR carry the first two labels but
+/// not the third. They are silently skipped by the mapper; the next
+/// periodic 5-minute requeue re-applies the Deployment with the new
+/// label, after which subsequent edits trigger this watch.
+fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<ClawSandbox>> {
+    let labels = d.metadata.labels.as_ref()?;
+    if labels
+        .get("azureclaw.azure.com/component")
+        .map(|s| s.as_str())
+        != Some("sandbox")
+    {
+        return None;
+    }
+    let sandbox_name = labels.get("azureclaw.azure.com/sandbox")?;
+    let parent_ns = labels.get("azureclaw.azure.com/parent-namespace")?;
+    if sandbox_name.is_empty() || parent_ns.is_empty() {
+        return None;
+    }
+    Some(ObjectRef::<ClawSandbox>::new(sandbox_name).within(parent_ns))
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn deploy_with_labels(labels: BTreeMap<String, String>) -> Deployment {
+        Deployment {
+            metadata: kube::api::ObjectMeta {
+                labels: Some(labels),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mapper_returns_ref_for_well_labeled_deployment() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "azureclaw.azure.com/component".to_string(),
+            "sandbox".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/sandbox".to_string(),
+            "my-agent".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/parent-namespace".to_string(),
+            "azureclaw-system".to_string(),
+        );
+        let r = deployment_to_sandbox_ref(deploy_with_labels(labels)).expect("ref");
+        assert_eq!(r.name, "my-agent");
+        assert_eq!(r.namespace.as_deref(), Some("azureclaw-system"));
+    }
+
+    #[test]
+    fn mapper_skips_unlabeled_deployment() {
+        assert!(deployment_to_sandbox_ref(deploy_with_labels(BTreeMap::new())).is_none());
+    }
+
+    #[test]
+    fn mapper_skips_wrong_component() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "azureclaw.azure.com/component".to_string(),
+            "router".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/sandbox".to_string(),
+            "my-agent".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/parent-namespace".to_string(),
+            "azureclaw-system".to_string(),
+        );
+        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
+    }
+
+    #[test]
+    fn mapper_skips_pre_pr_deployment_without_parent_namespace() {
+        // Deployments created before this PR have component+sandbox
+        // labels but lack parent-namespace. They MUST be skipped (the
+        // periodic requeue re-applies them with the new label, then
+        // subsequent edits start triggering this watch).
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "azureclaw.azure.com/component".to_string(),
+            "sandbox".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/sandbox".to_string(),
+            "my-agent".to_string(),
+        );
+        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
+    }
+
+    #[test]
+    fn mapper_skips_empty_label_values() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "azureclaw.azure.com/component".to_string(),
+            "sandbox".to_string(),
+        );
+        labels.insert("azureclaw.azure.com/sandbox".to_string(), "".to_string());
+        labels.insert(
+            "azureclaw.azure.com/parent-namespace".to_string(),
+            "azureclaw-system".to_string(),
+        );
+        assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
+    }
+}
