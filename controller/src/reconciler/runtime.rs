@@ -112,11 +112,15 @@ pub fn anthropic_default_image() -> String {
 /// Why a dedicated adapter (vs BYO): LangGraph relies on LangChain
 /// model factories that read `OPENAI_BASE_URL` (and provider-specific
 /// equivalents) at construction time. The adapter pins those to the
-/// router sidecar and wires AGT/OTel/AAD broker on bootstrap. The
-/// TypeScript flavour is **deferred** — see `plan_langgraph` for the
-/// gating error.
+/// router sidecar and wires AGT/OTel/AAD broker on bootstrap.
 pub const DEFAULT_LANGGRAPH_PYTHON_IMAGE: &str =
     "azureclawacr.azurecr.io/azureclaw-runtime-langgraph:latest";
+
+/// Default container image for the LangGraph **TypeScript** runtime
+/// (LangGraph.js). Mirrors the Python adapter via a Node 22 sandbox
+/// image. Operators pin via `LANGGRAPH_TS_RUNTIME_IMAGE`.
+pub const DEFAULT_LANGGRAPH_TS_IMAGE: &str =
+    "azureclawacr.azurecr.io/azureclaw-runtime-langgraph-ts:latest";
 
 /// Resolve the LangGraph Python adapter image, honouring an operator
 /// override via `LANGGRAPH_RUNTIME_IMAGE`. Falls back to
@@ -126,6 +130,16 @@ pub fn langgraph_default_image() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_LANGGRAPH_PYTHON_IMAGE.to_string())
+}
+
+/// Resolve the LangGraph TypeScript adapter image, honouring
+/// `LANGGRAPH_TS_RUNTIME_IMAGE`. Falls back to
+/// [`DEFAULT_LANGGRAPH_TS_IMAGE`].
+pub fn langgraph_ts_default_image() -> String {
+    std::env::var("LANGGRAPH_TS_RUNTIME_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_LANGGRAPH_TS_IMAGE.to_string())
 }
 
 /// Default container image for the Pydantic-AI Python runtime
@@ -505,36 +519,23 @@ fn plan_openai_agents(cfg: &OpenAIAgentsConfig) -> RuntimeDeploymentPlan {
 
 /// Producer for [`RuntimeKind::MicrosoftAgentFramework`] (S10.A4).
 ///
-/// MAF Python is wired in this build; MAF .NET is deferred to Phase 3
-/// (AgentMesh.Sdk .NET upstream gap). When `language: dotnet` is
-/// requested we surface a [`RuntimePlanError::ShapeInvalid`] so the
-/// reconciler stamps `Degraded / SpecInvalid` rather than silently
-/// running a Python image against a .NET agent.
+/// MAF Python is wired in this build. .NET MAF is `[GAP-V1]`: blocked
+/// upstream on the absence of an `AgentMesh` client class in the
+/// `Microsoft.AgentGovernance` .NET package (it ships trust /
+/// identity / policy / audit only). The CRD enum has been narrowed
+/// to `["python"]` for v1.0; .NET will be re-introduced in v1.1 once
+/// either the upstream package adds a relay client or we ship our
+/// own .NET HTTP/WS bridge. See `docs/internal/agt-upstream-asks.md`.
 fn plan_microsoft_agent_framework(
     cfg: &MicrosoftAgentFrameworkConfig,
 ) -> Result<RuntimeDeploymentPlan, RuntimePlanError> {
-    // Language gate: only Python is wired this slice.
     let lang = cfg.language.clone().unwrap_or_default();
-    if !matches!(lang, MafLanguage::Python) {
-        return Err(RuntimePlanError::ShapeInvalid(
-            "spec.runtime.microsoftAgentFramework.language=dotnet is not yet wired \
-             (blocked on AgentMesh.Sdk .NET upstream availability — see \
-             docs/internal/agt-upstream-asks.md §3); use `language: python` \
-             or wait for Phase 3"
-                .to_string(),
-        ));
-    }
+    let (image, lang_str) = match lang {
+        MafLanguage::Python => (maf_python_default_image(), "python"),
+    };
 
-    let image = maf_python_default_image();
-
-    // Same merge contract as `plan_openai_agents`: producer-supplied
-    // defaults first, user `extra_env` on top. Reserved-prefix
-    // filtering (which would strip `AZURECLAW_*`) happens in the
-    // deployment builder; the producer must use non-reserved keys for
-    // its defaults. None for MAF today (no python_version pin in the
-    // CRD); reserved here as a hook.
     let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
-    runtime_extra_env.insert("RUNTIME_MAF_LANGUAGE".to_string(), "python".to_string());
+    runtime_extra_env.insert("RUNTIME_MAF_LANGUAGE".to_string(), lang_str.to_string());
     if let Some(user_env) = cfg.extra_env.as_ref() {
         for (k, v) in user_env {
             runtime_extra_env.insert(k.clone(), v.clone());
@@ -610,22 +611,15 @@ fn plan_anthropic(cfg: &AnthropicConfig) -> RuntimeDeploymentPlan {
 /// egress.
 fn plan_langgraph(cfg: &LangGraphConfig) -> Result<RuntimeDeploymentPlan, RuntimePlanError> {
     let lang = cfg.language.clone().unwrap_or_default();
-    if !matches!(lang, LangGraphLanguage::Python) {
-        return Err(RuntimePlanError::ShapeInvalid(
-            "spec.runtime.langGraph.language=typescript is not yet wired \
-             (Python adapter ships first; TS adapter is deferred to a \
-             follow-up phase). Use `language: python` or wait for the \
-             TypeScript adapter image."
-                .to_string(),
-        ));
-    }
-
-    let image = langgraph_default_image();
+    let (image, lang_str) = match lang {
+        LangGraphLanguage::Python => (langgraph_default_image(), "python"),
+        LangGraphLanguage::Typescript => (langgraph_ts_default_image(), "typescript"),
+    };
 
     let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
     runtime_extra_env.insert(
         "RUNTIME_LANGGRAPH_LANGUAGE".to_string(),
-        "python".to_string(),
+        lang_str.to_string(),
     );
     if let Some(user_env) = cfg.extra_env.as_ref() {
         for (k, v) in user_env {
@@ -1043,7 +1037,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_langgraph_typescript_is_shape_invalid() {
+    fn plan_langgraph_typescript_dispatches_to_ts_image() {
+        unsafe {
+            std::env::remove_var("LANGGRAPH_TS_RUNTIME_IMAGE");
+        }
         let rt = RuntimeSpec {
             kind: RuntimeKind::LangGraph,
             openclaw: None,
@@ -1053,10 +1050,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        let err = build_runtime_plan(&rt, "ignored").expect_err("typescript must be gated");
-        assert!(
-            matches!(err, RuntimePlanError::ShapeInvalid(ref m) if m.contains("typescript")),
-            "expected ShapeInvalid mentioning typescript, got: {err}"
+        let plan =
+            build_runtime_plan(&rt, "ignored").expect("typescript must dispatch to ts image");
+        assert_eq!(plan.kind_str, "LangGraph");
+        assert_eq!(plan.image, DEFAULT_LANGGRAPH_TS_IMAGE);
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_LANGGRAPH_LANGUAGE")
+                .map(|s| s.as_str()),
+            Some("typescript")
         );
     }
 
@@ -1491,25 +1493,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_maf_dotnet_returns_shape_invalid_pending_phase3() {
-        let cfg = MicrosoftAgentFrameworkConfig {
-            language: Some(MafLanguage::Dotnet),
-            ..Default::default()
-        };
-        let err = plan_microsoft_agent_framework(&cfg).expect_err("dotnet must short-circuit");
-        match err {
-            RuntimePlanError::ShapeInvalid(msg) => {
-                assert!(
-                    msg.contains("dotnet"),
-                    "ShapeInvalid msg should name the offending language: {msg}"
-                );
-                assert!(
-                    msg.contains("Phase 3") || msg.contains("AgentMesh.Sdk .NET"),
-                    "ShapeInvalid msg should cite the upstream blocker / phase: {msg}"
-                );
-            }
-            other => panic!("expected ShapeInvalid for dotnet, got {other:?}"),
+    fn plan_maf_default_language_is_python() {
+        unsafe {
+            std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
+        let cfg = MicrosoftAgentFrameworkConfig::default();
+        let plan = plan_microsoft_agent_framework(&cfg).expect("default must succeed");
+        assert_eq!(plan.image, DEFAULT_MAF_PYTHON_IMAGE);
+        assert_eq!(
+            plan.runtime_extra_env
+                .get("RUNTIME_MAF_LANGUAGE")
+                .map(|s| s.as_str()),
+            Some("python")
+        );
     }
 
     #[test]
@@ -1618,20 +1614,5 @@ mod tests {
             .expect("MAF Python must produce a plan");
         assert_eq!(plan.kind_str, "MicrosoftAgentFramework");
         assert_eq!(plan.image, DEFAULT_MAF_PYTHON_IMAGE);
-    }
-
-    #[test]
-    fn build_runtime_plan_surfaces_shape_invalid_for_maf_dotnet() {
-        let rt = RuntimeSpec {
-            kind: RuntimeKind::MicrosoftAgentFramework,
-            openclaw: None,
-            microsoft_agent_framework: Some(MicrosoftAgentFrameworkConfig {
-                language: Some(MafLanguage::Dotnet),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let err = build_runtime_plan(&rt, "x").expect_err("dotnet must short-circuit");
-        assert!(matches!(err, RuntimePlanError::ShapeInvalid(_)));
     }
 }
