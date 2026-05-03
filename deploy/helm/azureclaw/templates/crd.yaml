@@ -52,13 +52,14 @@ spec:
                     Agent runtime selector (S10.A1 multi-runtime hosting).
                     The `kind` discriminator selects which sibling struct
                     (`openclaw` / `openaiAgents` / `microsoftAgentFramework`
-                    / `semanticKernel` / `langGraph` / `anthropic` / `byo`)
+                    / `semanticKernel` / `langGraph` / `anthropic`
+                    / `pydanticAi` / `byo`)
                     is required; the others must be absent.
                     Replaces the legacy `spec.openclaw` field — the
                     AzureClaw v1alpha1 schema is in-place edited (no
                     conversion webhook; pre-release simplification).
-                    Tier-2 placeholders (`semanticKernel`, `langGraph`,
-                    `anthropic`) parse but the controller stamps
+                    Tier-2 placeholders (`semanticKernel`) parse but the
+                    controller stamps
                     `RuntimeReady=False / AdapterMissing` until the
                     respective adapter image ships.
                   x-kubernetes-validations:
@@ -74,12 +75,14 @@ spec:
                       message: "spec.runtime.langGraph must be set iff kind is LangGraph"
                     - rule: "(self.kind == 'Anthropic') == has(self.anthropic)"
                       message: "spec.runtime.anthropic must be set iff kind is Anthropic"
+                    - rule: "(self.kind == 'PydanticAi') == has(self.pydanticAi)"
+                      message: "spec.runtime.pydanticAi must be set iff kind is PydanticAi"
                     - rule: "(self.kind == 'BYO') == has(self.byo)"
                       message: "spec.runtime.byo must be set iff kind is BYO"
                   properties:
                     kind:
                       type: string
-                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "BYO"]
+                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
                       description: "Variant discriminator. PascalCase wire values."
                     openclaw:
                       type: object
@@ -262,6 +265,42 @@ spec:
                           x-kubernetes-validations:
                             - rule: "has(self.oci) != has(self.git)"
                               message: "spec.runtime.anthropic.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    pydanticAi:
+                      type: object
+                      description: "Pydantic-AI runtime variant (Phase H#3). Type-safe Python agent framework with native multi-provider support."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.pydanticAi.agentCode must set exactly one of `oci` or `git`"
                           properties:
                             oci:
                               type: object
@@ -594,7 +633,7 @@ spec:
                   description: "Foundry Agent Service agent ID (created by controller)"
                 runtimeKind:
                   type: string
-                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "BYO"]
+                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
                   description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
       subresources:
         status: {}

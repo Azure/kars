@@ -35,8 +35,8 @@ use std::collections::BTreeMap;
 
 use crate::crd::{
     AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, LangGraphLanguage,
-    MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig, OpenClawConfig, RuntimeKind,
-    RuntimeSpec,
+    MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig, OpenClawConfig,
+    PydanticAiConfig, RuntimeKind, RuntimeSpec,
 };
 
 /// Default container image for the OpenAI Agents Python runtime
@@ -126,6 +126,28 @@ pub fn langgraph_default_image() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_LANGGRAPH_PYTHON_IMAGE.to_string())
+}
+
+/// Default container image for the Pydantic-AI Python runtime
+/// (Phase H#3). Stays `:latest`; operators pin via the
+/// `PYDANTIC_AI_RUNTIME_IMAGE` env var.
+///
+/// Why a dedicated adapter (vs BYO): Pydantic-AI is provider-agnostic
+/// (the same agent can call OpenAI, Anthropic, Gemini, ...). The
+/// adapter pins each known provider base URL to the router sidecar
+/// at bootstrap and substitutes API keys with router-managed
+/// sentinels — same defence pattern as LangGraph.
+pub const DEFAULT_PYDANTIC_AI_IMAGE: &str =
+    "azureclawacr.azurecr.io/azureclaw-runtime-pydantic-ai:latest";
+
+/// Resolve the Pydantic-AI adapter image, honouring an operator
+/// override via `PYDANTIC_AI_RUNTIME_IMAGE`. Falls back to
+/// [`DEFAULT_PYDANTIC_AI_IMAGE`].
+pub fn pydantic_ai_default_image() -> String {
+    std::env::var("PYDANTIC_AI_RUNTIME_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_PYDANTIC_AI_IMAGE.to_string())
 }
 
 /// Concrete deployment intent for a single reconcile pass.
@@ -218,6 +240,7 @@ pub fn kind_str(kind: &RuntimeKind) -> &'static str {
         RuntimeKind::SemanticKernel => "SemanticKernel",
         RuntimeKind::LangGraph => "LangGraph",
         RuntimeKind::Anthropic => "Anthropic",
+        RuntimeKind::PydanticAi => "PydanticAi",
         RuntimeKind::BYO => "BYO",
     }
 }
@@ -253,6 +276,7 @@ pub fn validate_runtime_shape(runtime: &RuntimeSpec) -> Result<(), RuntimePlanEr
         ),
         ("LangGraph", "langGraph", runtime.lang_graph.is_some()),
         ("Anthropic", "anthropic", runtime.anthropic.is_some()),
+        ("PydanticAi", "pydanticAi", runtime.pydantic_ai.is_some()),
         ("BYO", "byo", runtime.byo.is_some()),
     ];
     for (cel_kind, field, present) in pairs {
@@ -354,6 +378,13 @@ pub fn build_runtime_plan(
             // `mcp_servers=[...]`).
             let cfg = runtime.anthropic.as_ref().expect("validated above");
             Ok(plan_anthropic(cfg))
+        }
+        RuntimeKind::PydanticAi => {
+            // Phase H#3: Pydantic-AI adapter wired end-to-end.
+            // Provider-agnostic — adapter pins multiple LLM provider
+            // base URLs to the router sidecar at bootstrap.
+            let cfg = runtime.pydantic_ai.as_ref().expect("validated above");
+            Ok(plan_pydantic_ai(cfg))
         }
     }
 }
@@ -616,13 +647,48 @@ fn plan_langgraph(cfg: &LangGraphConfig) -> Result<RuntimeDeploymentPlan, Runtim
     })
 }
 
+/// Producer for [`RuntimeKind::PydanticAi`] (Phase H#3).
+///
+/// [Pydantic-AI](https://ai.pydantic.dev/) is the type-safe Python
+/// agent framework from the Pydantic team. Provider-agnostic: a
+/// single `Agent` definition can target OpenAI, Anthropic, Gemini,
+/// or Azure OpenAI. The adapter pins each known provider base URL
+/// to the router sidecar at bootstrap and substitutes API keys with
+/// router-managed sentinels — same defence pattern as LangGraph.
+fn plan_pydantic_ai(cfg: &PydanticAiConfig) -> RuntimeDeploymentPlan {
+    let image = pydantic_ai_default_image();
+
+    let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(v) = cfg.python_version.as_ref() {
+        runtime_extra_env.insert("RUNTIME_PYTHON_VERSION".to_string(), v.clone());
+    }
+    if let Some(user_env) = cfg.extra_env.as_ref() {
+        for (k, v) in user_env {
+            runtime_extra_env.insert(k.clone(), v.clone());
+        }
+    }
+
+    let command = cfg.entrypoint.clone();
+
+    RuntimeDeploymentPlan {
+        kind_str: "PydanticAi",
+        image,
+        command,
+        args: None,
+        runtime_extra_env,
+        raw_env: Vec::new(),
+        agent_code: cfg.agent_code.clone(),
+        byo_contract_version: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::{
         AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, LangGraphLanguage,
         MafLanguage, MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig,
-        OpenClawConfig, SemanticKernelConfig,
+        OpenClawConfig, PydanticAiConfig, SemanticKernelConfig,
     };
 
     fn rt_openclaw(image: Option<&str>) -> RuntimeSpec {
@@ -645,6 +711,7 @@ mod tests {
             semantic_kernel: None,
             lang_graph: None,
             anthropic: None,
+            pydantic_ai: None,
             byo: None,
         }
     }
@@ -662,6 +729,7 @@ mod tests {
         assert_eq!(kind_str(&RuntimeKind::SemanticKernel), "SemanticKernel");
         assert_eq!(kind_str(&RuntimeKind::LangGraph), "LangGraph");
         assert_eq!(kind_str(&RuntimeKind::Anthropic), "Anthropic");
+        assert_eq!(kind_str(&RuntimeKind::PydanticAi), "PydanticAi");
         assert_eq!(kind_str(&RuntimeKind::BYO), "BYO");
     }
 
@@ -716,6 +784,7 @@ mod tests {
             (RuntimeKind::SemanticKernel, "semanticKernel"),
             (RuntimeKind::LangGraph, "langGraph"),
             (RuntimeKind::Anthropic, "anthropic"),
+            (RuntimeKind::PydanticAi, "pydanticAi"),
         ] {
             let rt = rt_only_kind(kind);
             let err = validate_runtime_shape(&rt).expect_err("must reject");
@@ -753,6 +822,15 @@ mod tests {
                     kind: RuntimeKind::Anthropic,
                     openclaw: None,
                     anthropic: Some(AnthropicConfig::default()),
+                    ..Default::default()
+                },
+            ),
+            (
+                RuntimeKind::PydanticAi,
+                RuntimeSpec {
+                    kind: RuntimeKind::PydanticAi,
+                    openclaw: None,
+                    pydantic_ai: Some(PydanticAiConfig::default()),
                     ..Default::default()
                 },
             ),
@@ -1007,6 +1085,81 @@ mod tests {
         assert_eq!(
             plan.runtime_extra_env.get("RUNTIME_LANGGRAPH_LANGUAGE"),
             Some(&"python".to_string())
+        );
+    }
+
+    // ── Pydantic-AI adapter (Phase H#3) ──────────────────────────────
+
+    #[test]
+    fn pydantic_ai_default_image_falls_back_when_env_unset() {
+        unsafe {
+            std::env::remove_var("PYDANTIC_AI_RUNTIME_IMAGE");
+        }
+        assert_eq!(pydantic_ai_default_image(), DEFAULT_PYDANTIC_AI_IMAGE);
+    }
+
+    #[test]
+    fn plan_pydantic_ai_emits_pydanticai_kind_str_and_default_image() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::PydanticAi,
+            openclaw: None,
+            pydantic_ai: Some(PydanticAiConfig::default()),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("pydantic_ai plan ok");
+        assert_eq!(plan.kind_str, "PydanticAi");
+        assert!(plan.image.contains("azureclaw-runtime-pydantic-ai"));
+        for k in plan.runtime_extra_env.keys() {
+            assert!(
+                !k.starts_with("AZURECLAW_"),
+                "producer must not emit AZURECLAW_* keys: {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_pydantic_ai_threads_python_version_and_user_extra_env() {
+        let mut user_env = BTreeMap::new();
+        user_env.insert("MY_FLAG".to_string(), "on".to_string());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::PydanticAi,
+            openclaw: None,
+            pydantic_ai: Some(PydanticAiConfig {
+                python_version: Some("3.13".into()),
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("RUNTIME_PYTHON_VERSION"),
+            Some(&"3.13".to_string())
+        );
+        assert_eq!(
+            plan.runtime_extra_env.get("MY_FLAG"),
+            Some(&"on".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_pydantic_ai_user_extra_env_overrides_producer_default() {
+        let mut user_env = BTreeMap::new();
+        user_env.insert("RUNTIME_PYTHON_VERSION".to_string(), "3.11".into());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::PydanticAi,
+            openclaw: None,
+            pydantic_ai: Some(PydanticAiConfig {
+                python_version: Some("3.13".into()),
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("RUNTIME_PYTHON_VERSION"),
+            Some(&"3.11".to_string())
         );
     }
 
