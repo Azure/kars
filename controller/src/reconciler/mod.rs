@@ -182,11 +182,38 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             Err(e) => tracing::warn!(error = %e, "Failed to delete ClusterRoleBinding {crb_name}"),
         }
 
-        // Clean up the Azure federated identity credential
-        if let Some(ref fedcred) = ctx.fedcred
-            && let Err(e) = fedcred.delete_federated_credential(&name).await
-        {
-            tracing::warn!(sandbox = %name, "Federated credential cleanup failed (non-fatal): {e}");
+        // Clean up the Azure federated identity credential.
+        //
+        // Phase G P1 #6: previously this was non-fatal — a transient
+        // Graph API failure would let the finalizer be removed and
+        // orphan the federated credential. The orphan is eventually
+        // collected by `fedcred_reaper`, but that path is *backstop*
+        // for force-delete / pre-finalizer CRs; the steady-state
+        // delete should deprovision Azure-side state synchronously.
+        //
+        // Now: requeue with backoff on transient failure. A 404
+        // (already gone) is treated as success. The reaper still
+        // covers force-delete / orphaned cases that bypass this
+        // path entirely.
+        if let Some(ref fedcred) = ctx.fedcred {
+            match fedcred.delete_federated_credential(&name).await {
+                Ok(()) => {
+                    tracing::info!(
+                        sandbox = %name,
+                        "federated credential deprovisioned"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        error = %e,
+                        "federated credential deprovisioning failed; requeueing finalizer"
+                    );
+                    return Ok(Action::requeue(crate::backoff::requeue_secs_with_jitter(
+                        30,
+                    )));
+                }
+            }
         }
 
         // Offload sandbox slot cleanup: decrement slotsUsed on the parent ClawPairing
