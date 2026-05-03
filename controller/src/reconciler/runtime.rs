@@ -535,10 +535,7 @@ fn plan_microsoft_agent_framework(
     };
 
     let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
-    runtime_extra_env.insert(
-        "RUNTIME_MAF_LANGUAGE".to_string(),
-        lang_str.to_string(),
-    );
+    runtime_extra_env.insert("RUNTIME_MAF_LANGUAGE".to_string(), lang_str.to_string());
     if let Some(user_env) = cfg.extra_env.as_ref() {
         for (k, v) in user_env {
             runtime_extra_env.insert(k.clone(), v.clone());
