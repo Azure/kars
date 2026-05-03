@@ -2117,6 +2117,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             let _ = sandbox_api
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
                 .await;
+        } else {
+            crate::metrics::record_status_patch_skip("ClawSandbox");
         }
     }
 
