@@ -531,13 +531,16 @@ pub struct MicrosoftAgentFrameworkConfig {
     pub extra_env: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// Microsoft Agent Framework adapter language flavour.
+///
+/// Only `python` ships in v1.0 — the .NET flavour is a roadmap item
+/// (see `docs/roadmap.md`). The single-variant enum stays in the
+/// schema so adding new flavours later is a non-breaking change.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 pub enum MafLanguage {
     #[default]
     #[serde(rename = "python")]
     Python,
-    #[serde(rename = "dotnet")]
-    Dotnet,
 }
 
 /// Semantic Kernel runtime variant (Tier-2 placeholder).  // ci:stub-ok: Tier-2 roadmap stake — declared CRD variant per Phase 2 plan §S10
@@ -581,6 +584,11 @@ pub struct LangGraphConfig {
     pub extra_env: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// LangGraph adapter language flavour.
+///
+/// Both `python` and `typescript` ship as first-class v1.0 runtimes
+/// (LangGraph.js for the TypeScript flavour). The image dispatched
+/// is selected by `plan_langgraph` based on this field.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 pub enum LangGraphLanguage {
     #[default]
@@ -1237,11 +1245,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_microsoft_agent_framework_dotnet_round_trip() {
+    fn runtime_microsoft_agent_framework_python_round_trip() {
         let rt: RuntimeSpec = serde_json::from_value(serde_json::json!({
             "kind": "MicrosoftAgentFramework",
             "microsoftAgentFramework": {
-                "language": "dotnet",
+                "language": "python",
                 "agentCode": {
                     "git": { "url": "https://github.com/contoso/agent.git", "ref": "main" }
                 }
@@ -1250,7 +1258,7 @@ mod tests {
         .unwrap();
         assert_eq!(rt.kind, RuntimeKind::MicrosoftAgentFramework);
         let cfg = rt.microsoft_agent_framework.as_ref().unwrap();
-        assert_eq!(cfg.language, Some(MafLanguage::Dotnet));
+        assert_eq!(cfg.language, Some(MafLanguage::Python));
         let code = cfg.agent_code.as_ref().unwrap();
         assert!(code.git.is_some());
         assert_eq!(

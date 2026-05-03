@@ -709,11 +709,12 @@ EOF
     kubectl delete clawsandbox e2e-langgraph -n azureclaw-system 2>/dev/null || true
 }
 
-# Phase H#2: LangGraph TypeScript flavour is gated as ShapeInvalid in
-# `plan_langgraph` until the TS adapter image ships. The CRD admission
-# accepts the value (it's a valid enum variant); the controller stamps
-# RuntimeReady=False / ShapeInvalid in Conditions instead.
-test_runtime_langgraph_typescript_gated() {
+# LangGraph TypeScript flavour ships as a first-class adapter in
+# v1.0 (runtimes/langgraph-ts/, sandbox-images/langgraph-ts/). The
+# controller dispatches `language: typescript` to the Node.js 22
+# image; the deployment should reach a Running status without being
+# stamped ShapeInvalid.
+test_runtime_langgraph_typescript() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -735,18 +736,17 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    # The controller should refuse to plan, surfacing ShapeInvalid in
-    # the Conditions chain. Namespace may or may not exist depending
-    # on reconciler ordering — the diagnostic signal is the Conditions.
+    # The controller should plan a Deployment using the langgraph-ts
+    # image (no ShapeInvalid). We don't pin the exact image string here
+    # because operators may override via LANGGRAPH_TS_RUNTIME_IMAGE; we
+    # only assert that ShapeInvalid is NOT in the Conditions chain.
     local conds
     conds=$(kubectl get clawsandbox e2e-langgraph-ts -n azureclaw-system -o jsonpath='{.status.conditions[*].reason}' 2>/dev/null || true)
     if echo "$conds" | grep -qi "ShapeInvalid\|SpecInvalid"; then
-        pass "LangGraph typescript correctly gated (reason in conditions)"
-    else
         echo "  [diag] conditions: $conds"
-        # Don't fail the lane — controller may not have reconciled yet
-        # in this fast E2E run. Surface as diagnostic only.
-        echo "  [diag] LangGraph TS gate: condition not yet observed"
+        fail "LangGraph typescript should NOT be ShapeInvalid in v1.0"
+    else
+        pass "LangGraph typescript dispatched (no ShapeInvalid)"
     fi
     kubectl delete clawsandbox e2e-langgraph-ts -n azureclaw-system 2>/dev/null || true
 }
@@ -2381,7 +2381,7 @@ main() {
         oai-agents)      test_runtime_oai_agents ;;
         maf-python)      test_runtime_maf_python ;;
         anthropic)       test_runtime_anthropic ;;
-        langgraph)       test_runtime_langgraph ; test_runtime_langgraph_typescript_gated ;;
+        langgraph)       test_runtime_langgraph ; test_runtime_langgraph_typescript ;;
         pydantic-ai)     test_runtime_pydantic_ai ;;
         byo)             test_runtime_byo ;;
         all)
@@ -2390,7 +2390,7 @@ main() {
             test_runtime_maf_python || true
             test_runtime_anthropic || true
             test_runtime_langgraph || true
-            test_runtime_langgraph_typescript_gated || true
+            test_runtime_langgraph_typescript || true
             test_runtime_pydantic_ai || true
             test_runtime_byo || true
             ;;

@@ -144,12 +144,12 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                     microsoftAgentFramework:
                       type: object
-                      description: "Microsoft Agent Framework runtime variant. Phase 2 parses but does not deploy until S10.A4 lands the adapter image."
+                      description: "Microsoft Agent Framework runtime variant. Python is wired (S10.A4). .NET is `[GAP-V1]`: blocked upstream on a `Microsoft.AgentGovernance` .NET package that exposes an `AgentMesh` relay client (the package today ships trust/identity/policy/audit only). Re-introduced in v1.1 once upstream lands."
                       properties:
                         language:
                           type: string
-                          enum: ["python", "dotnet"]
-                          description: "Adapter image flavour."
+                          enum: ["python"]
+                          description: "Adapter image flavour. v1.0 ships Python only; .NET tracked for v1.1."
                         agentCode:
                           type: object
                           x-kubernetes-validations:
@@ -218,12 +218,12 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                     langGraph:
                       type: object
-                      description: "LangGraph runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the LangGraph adapter image ships."
+                      description: "LangGraph (LangChain) runtime variant. Both Python (`runtimes/langgraph/`) and TypeScript / Node.js 22 (`runtimes/langgraph-ts/`) ship as first-class adapters in v1.0."
                       properties:
                         language:
                           type: string
                           enum: ["python", "typescript"]
-                          description: "Adapter image flavour. Defaults to `python`."
+                          description: "Adapter image flavour. Defaults to `python`. `typescript` selects the Node.js 22 (LangChain.js) image."
                         agentCode:
                           type: object
                           x-kubernetes-validations:
@@ -255,7 +255,7 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                     anthropic:
                       type: object
-                      description: "Anthropic Claude Agents SDK runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the Anthropic adapter image ships."
+                      description: "Anthropic Claude Agents SDK runtime variant. Ships in v1.0 (Phase H#1)."
                       properties:
                         pythonVersion:
                           type: string

@@ -477,3 +477,6 @@ nohup.out
 docs/implementation-plan.md
 *.code-workspace
 docs/internal/
+
+# LangGraph TS adapter — built in Docker stage, not committed
+runtimes/langgraph-ts/dist/
