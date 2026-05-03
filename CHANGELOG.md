@@ -5,6 +5,55 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.1] — Release candidate (release engineering pass)
+
+First release candidate cut for the v1.0.0 line. No new feature surface beyond what shipped in `[Unreleased] — Phase 2`; this entry tracks the release-engineering, documentation, and hygiene work performed on `dev` before promoting to `main`.
+
+### Highlights
+
+- All six first-class agent runtimes shipped and exercised: OpenClaw, OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python + TypeScript), Pydantic-AI.
+- BYO runtime path with strict-mode admission gating documented end-to-end.
+- AgentMesh first-class tool wrappers (`mesh_inbox` + `mesh_send`) shipped across all five Python runtime adapters.
+- Documentation tree consolidated: `docs/README.md` index covers getting-started, security, agent capabilities, architecture deep-dives, operations, roadmap, demos, migration.
+
+### Added
+
+- `runtimes/{anthropic,langgraph,maf-python,openai-agents,pydantic-ai}/src/.../mesh_tools.py` — first-class AgentMesh tool wrappers per adapter.
+- `runtimes/langgraph-ts/` — full TypeScript LangGraph adapter (mirrors Python adapter).
+- `sandbox-images/langgraph-ts/` — Dockerfile + entrypoint for the TS adapter.
+- `examples/byo-quickstart/k8s/clawsandbox-strict-demo.yaml` — strict-mode demo CR.
+- Makefile targets: per-runtime image build/push (`image-langgraph`, `image-anthropic`, `image-maf-python`, `image-pydantic-ai`, `image-langgraph-ts`) plus aggregators (`image-runtimes`, `push-runtimes`).
+- `docs/operations/image-versioning.md` — tag policy, runtime image overrides, dual-tag immutability rule.
+- `docs/architecture/crd-versioning.md` — `v1alpha1` freeze policy + `v1alpha2` + conversion-webhook plan.
+- `docs/architecture/agt-boundary.md` — responsibility split between AGT and AzureClaw, four provider contracts, outage modes.
+- `docs/operations/secret-rotation.md` — runbook for sandbox credentials, TLS, AgentMesh identities, Azure creds, cosign keys.
+- `docs/security/stride.md` — STRIDE × trust-boundary matrix (T1–T4).
+- `docs/security/red-team.md` — internal red-team findings log.
+- `docs/api/backwards-compatibility.md` — SemVer commitment for CRD / CLI / Helm / router routes.
+- `docs/roadmap.md` — v1.0 / v1.1 / v1.2 / backlog.
+- INBOX-FIRST nudge in `mesh_inbox` tool description (mesh-plugin and OpenClaw agt-tools).
+
+### Changed
+
+- `docs/README.md` rewritten as the canonical index for the public-facing tree.
+- `CRD `ClawSandbox.spec.runtime.maf.language` enum narrowed: `Dotnet` removed (no `AgentMeshClient` in `Microsoft.AgentGovernance` 3.3.0). `[GAP-V1]` recorded.
+
+### Fixed
+
+- `controller/src/reconciler/runtime.rs` — env-var-mutating tests now serialise on a module-local `ENV_LOCK: Mutex<()>` so the multi-threaded harness no longer races across `*_RUNTIME_IMAGE` overrides. Closes a flaky-test failure that bit early CI passes (e.g. PR #184 first run).
+
+### Internal / docs
+
+- `docs/backlog.md`, `docs/phase-0-1-capabilities.md`, `docs/security-reviewers.md` moved to `docs/internal/`. Stale link in `README.md` to a gitignored `implementation-plan.md` removed; lingering reference in `docs/security.md` reworded.
+
+### `[GAP-V1]` markers (accepted for v1.0)
+
+- Cosign-on-admission gating (read surface shipped; admission enforcement is v1.1).
+- TrustGraph live updates (projection captured at sandbox creation; v1.1).
+- Microsoft Agent Framework **.NET** adapter (returns when AGT lands `AgentMeshClient` for .NET).
+
+---
+
 ## [Unreleased] — Phase 2
 
 ### S17 `phase2-cncf-conformance` — K8s AI conformance + permanent supply-chain rows
