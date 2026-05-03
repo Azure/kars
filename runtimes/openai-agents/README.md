@@ -21,11 +21,15 @@ into the AzureClaw sandbox. It ships inside the
    `a2a_agentmesh` types (`AgentCard`, `TaskEnvelope`, `TrustGate`).
    Sends and receives messages over the router's `/agt/relay` and
    `/agt/registry` reverse-proxy endpoints.
-4. **Foundry tools** (`tools.py`) — registers the 9 platform Foundry
+4. **AgentMesh tools** (`mesh_tools.py`) — registers `mesh_send` and
+   `mesh_inbox` as `function_tool`s on a user-supplied `Agent`. The
+   `mesh_inbox` description includes an explicit "INBOX-FIRST" nudge so
+   models reliably pick up parent messages on resume.
+5. **Foundry tools** (`tools.py`) — registers the 9 platform Foundry
    tools as `function_tool`s on a user-supplied `Agent` instance. Each
    tool fans out to the platform MCP server at `/platform/mcp` over
    streamable-HTTP MCP.
-5. **Router base URL** — sets `OPENAI_BASE_URL` to the local router so
+6. **Router base URL** — sets `OPENAI_BASE_URL` to the local router so
    the vanilla `openai` SDK (used by `openai-agents`) routes everything
    through the AzureClaw governance gate.
 
@@ -37,12 +41,17 @@ already set in the environment it is a no-op.
 ```python
 # main.py — user agent code
 from agents import Agent, Runner
-from azureclaw_runtime_openai_agents import bootstrap, register_foundry_tools
+from azureclaw_runtime_openai_agents import (
+    bootstrap,
+    register_foundry_tools,
+    register_mesh_tools,
+)
 
 bootstrap()  # invoked from entrypoint.sh in production; here for local dev
 
 agent = Agent(name="Researcher", instructions="...")
 register_foundry_tools(agent)
+register_mesh_tools(agent)  # mesh_send + mesh_inbox first-class tools
 
 result = Runner.run_sync(agent, "What is the weather in Seattle?")
 print(result.final_output)

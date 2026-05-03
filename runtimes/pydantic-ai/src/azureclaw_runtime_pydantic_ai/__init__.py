@@ -22,6 +22,7 @@ from azureclaw_runtime_pydantic_ai.mesh import (
     receive_messages,
     send_message,
 )
+from azureclaw_runtime_pydantic_ai.mesh_tools import build_mesh_tools
 from azureclaw_runtime_pydantic_ai.otel import init_telemetry
 from azureclaw_runtime_pydantic_ai.runtime import bootstrap
 
@@ -34,6 +35,7 @@ __all__ = [
     "PLATFORM_MCP_URL",
     "__version__",
     "bootstrap",
+    "build_mesh_tools",
     "get_token",
     "init_telemetry",
     "receive_messages",
