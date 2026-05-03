@@ -55,6 +55,7 @@ ALLOW_PATHS=(
   'controller/src/inference_policy_compile.rs' # InferencePolicy → AGT-profile compile (S4)
   'controller/src/claw_memory_compile.rs'      # ClawMemory binding compile (S5)
   'controller/src/claw_eval_compile.rs'        # ClawEval suite compile (S6)
+  'controller/src/trust_graph_compile.rs'      # Phase F1: TrustGraph edge signature verifier — pure conduit to ed25519-dalek::{Signature, Verifier, VerifyingKey} + sha2 for the version-hash; no hand-rolled crypto math, domain-separated canonical payload defined in PAYLOAD_DOMAIN constant
   'vendor/'
   'tests/'
 )

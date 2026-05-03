@@ -42,6 +42,8 @@ rules:
       - "clawmemories/status"
       - "clawevals"
       - "clawevals/status"
+      - "trustgraphs"
+      - "trustgraphs/status"
       - "signerpolicies"
       - "signerpolicies/status"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
