@@ -53,6 +53,9 @@ mod status;
 mod tool_policy;
 mod tool_policy_compile;
 mod tool_policy_reconciler;
+mod trust_graph;
+mod trust_graph_compile;
+mod trust_graph_reconciler;
 
 use anyhow::Result;
 use kube::Client;
@@ -195,6 +198,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { claw_eval_reconciler::run(client).await })
     };
+    let trust_graph_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { trust_graph_reconciler::run(client).await })
+    };
 
     // S12.d: SignerPolicy ConfigMap watcher. Installs a process-global
     // handle so `policy_fetcher::maybe_verify_allowlist` resolves
@@ -330,6 +337,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = claw_eval_handle => {
+            res??;
+        }
+        res = trust_graph_handle => {
             res??;
         }
         res = mesh_peer_handle => {

@@ -53,6 +53,10 @@ pub const CLAW_MEMORY: &str = "azureclaw-controller/clawmemory";
 /// `ClawEval` reconciler — eval bundle ConfigMap + Job emission.
 pub const CLAW_EVAL: &str = "azureclaw-controller/claweval";
 
+/// `TrustGraph` reconciler (Phase F1) — verifies signed trust edges
+/// and publishes a `ConfigMap` projection to `azureclaw-system`.
+pub const TRUST_GRAPH: &str = "azureclaw-controller/trustgraph";
+
 /// Reserved for the in-pod inference router so its writes don't collide
 /// with the controller's. Not used by the controller itself; exposed as a
 /// constant so the uniqueness invariant is enforceable across crates.
@@ -85,6 +89,7 @@ pub const ALL_FIELD_MANAGERS: &[&str] = &[
     INFERENCE_POLICY,
     CLAW_MEMORY,
     CLAW_EVAL,
+    TRUST_GRAPH,
     ROUTER_RECONCILER,
     PROVIDER_BRIDGE,
     MESH,

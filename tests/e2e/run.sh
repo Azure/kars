@@ -1868,6 +1868,158 @@ test_controller_emits_events() {
     fi
 }
 
+test_crd_trustgraph_reconcile() {
+    # Phase F1: TrustGraph CR (cluster-scoped) → projection ConfigMap
+    # in azureclaw-system. Asserts:
+    #   1. Valid signed edge appears in the projection (validEdges=1).
+    #   2. Tampered-signature edge is rejected (invalidEdges=1).
+    #   3. Status is Ready=True with the expected counts.
+    #   4. Projection ConfigMap carries the version-hash annotation.
+    #   5. Finalizer cleans up the projection on CR delete.
+    #
+    # Fixture keys + signature deterministically generated from seeded
+    # Ed25519 keys [0x11;32] (alpha) and [0x22;32] (beta). The
+    # canonical signing payload is locked in
+    # `controller/src/trust_graph_compile.rs::canonical_payload` —
+    # changing it requires regenerating these fixtures.
+    local pk_a="0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc"
+    local pk_b="oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA"
+    local sig_ab="5-Esp-uk11u_cGsCRdUXwxbxtCzSQsNaEzIBeFUBPZFWz9cUtr9PBw6eWFIBAAprz9kGwH2wTk3xaSnbJVQzAw"
+    # Tampered-signature: same length (64 bytes / 86 chars b64u-no-pad)
+    # but cryptographically wrong → must be rejected by the verifier.
+    local sig_bad="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+    cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "TrustGraph apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: TrustGraph
+metadata:
+  name: e2e-trustgraph
+spec:
+  vertices:
+    - id: alpha
+      alg: EdDSA
+      publicKeyB64u: "${pk_a}"
+      label: "auditor"
+    - id: beta
+      alg: EdDSA
+      publicKeyB64u: "${pk_b}"
+  edges:
+    - from: alpha
+      to: beta
+      score: 750
+      issuedAt: 1700000000
+      signature: "${sig_ab}"
+      reason: "auditor-attested"
+    - from: alpha
+      to: beta
+      score: 999
+      issuedAt: 1700000000
+      signature: "${sig_bad}"
+EOF
+
+    if wait_for_resource configmap trustgraph-e2e-trustgraph-projection azureclaw-system 45; then
+        pass "TrustGraph → projection ConfigMap created"
+    else
+        kubectl describe trustgraph e2e-trustgraph 2>&1 | tail -40 || true
+        fail "TrustGraph: projection ConfigMap not created"
+        kubectl delete trustgraph e2e-trustgraph --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Wait for status to be populated, then assert counts.
+    local deadline=$(($(date +%s) + 30))
+    local valid_v="" valid_e="" invalid_e=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        valid_v=$(kubectl get trustgraph e2e-trustgraph -o jsonpath='{.status.validVertices}' 2>/dev/null || echo "")
+        valid_e=$(kubectl get trustgraph e2e-trustgraph -o jsonpath='{.status.validEdges}' 2>/dev/null || echo "")
+        invalid_e=$(kubectl get trustgraph e2e-trustgraph -o jsonpath='{.status.invalidEdges}' 2>/dev/null || echo "")
+        if [ -n "$valid_v" ] && [ -n "$valid_e" ] && [ -n "$invalid_e" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$valid_v" = "2" ]; then
+        pass "TrustGraph: status.validVertices=2"
+    else
+        fail "TrustGraph: validVertices='$valid_v' (want 2)"
+    fi
+    if [ "$valid_e" = "1" ]; then
+        pass "TrustGraph: status.validEdges=1 (signed edge accepted)"
+    else
+        fail "TrustGraph: validEdges='$valid_e' (want 1)"
+    fi
+    if [ "$invalid_e" = "1" ]; then
+        pass "TrustGraph: status.invalidEdges=1 (tampered edge rejected)"
+    else
+        fail "TrustGraph: invalidEdges='$invalid_e' (want 1)"
+    fi
+
+    if wait_for_ready trustgraph e2e-trustgraph azureclaw-system 30; then
+        pass "TrustGraph: status.conditions Ready=True"
+    else
+        kubectl describe trustgraph e2e-trustgraph 2>&1 | tail -20 || true
+        fail "TrustGraph: Ready=True not observed"
+    fi
+
+    # Projection ConfigMap must carry the version-hash annotation.
+    local vhash
+    vhash=$(kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system \
+        -o jsonpath='{.metadata.annotations.azureclaw\.azure\.com/trustgraph-version-hash}' 2>/dev/null || echo "")
+    if [ -n "$vhash" ] && [ "${#vhash}" = "16" ]; then
+        pass "TrustGraph: projection carries version-hash annotation (${vhash})"
+    else
+        fail "TrustGraph: version-hash annotation missing or wrong length ('${vhash}')"
+    fi
+
+    # Projection JSON must contain the valid edge but not the tampered one.
+    local proj
+    proj=$(kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system \
+        -o jsonpath='{.data.graph\.json}' 2>/dev/null || echo "")
+    if echo "$proj" | grep -q "\"score\": 750"; then
+        pass "TrustGraph: projection contains accepted edge (score=750)"
+    else
+        warn "Projection: $(echo "$proj" | head -c 500)"
+        fail "TrustGraph: projection missing accepted edge"
+    fi
+    if echo "$proj" | grep -q "\"score\": 999"; then
+        warn "Projection: $(echo "$proj" | head -c 500)"
+        fail "TrustGraph: projection leaked rejected edge (score=999)"
+    else
+        pass "TrustGraph: projection excludes rejected edge (score=999)"
+    fi
+
+    # CEL admission negative: empty vertices must be rejected.
+    local cel_err
+    cel_err=$(cat <<EOF | kubectl apply -f - 2>&1 || true
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: TrustGraph
+metadata:
+  name: e2e-trustgraph-empty
+spec:
+  vertices: []
+  edges: []
+EOF
+    )
+    if echo "$cel_err" | grep -q "vertices must contain at least one entry"; then
+        pass "TrustGraph CEL: empty vertices rejected at admission"
+    else
+        warn "Empty-vertices apply output: $cel_err"
+        fail "TrustGraph CEL: empty-vertices CR was not rejected"
+        kubectl delete trustgraph e2e-trustgraph-empty --wait=false >/dev/null 2>&1 || true
+    fi
+
+    # Finalizer cleans up projection on CR delete.
+    kubectl delete trustgraph e2e-trustgraph --wait=true --timeout=30s >/dev/null 2>&1 || true
+    if kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system >/dev/null 2>&1; then
+        fail "TrustGraph: projection ConfigMap leaked after CR delete"
+    else
+        pass "TrustGraph: projection ConfigMap cleaned up by finalizer"
+    fi
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -1917,6 +2069,7 @@ main() {
     test_crd_claw_memory || true
     test_crd_claw_eval || true
     test_crd_mcp_server || true
+    test_crd_trustgraph_reconcile || true
     test_crd_clawpairing_lifecycle || true
     test_crd_admission_rejects_invalid || true
     # Reconciler update / delete flow (separate fixtures so they
