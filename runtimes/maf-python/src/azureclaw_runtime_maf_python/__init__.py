@@ -15,6 +15,10 @@ from azureclaw_runtime_maf_python.mesh import (
 )
 from azureclaw_runtime_maf_python.otel import init_telemetry
 from azureclaw_runtime_maf_python.runtime import bootstrap
+from azureclaw_runtime_maf_python.mesh_tools import (
+    build_mesh_tools,
+    register_mesh_tools,
+)
 from azureclaw_runtime_maf_python.tools import (
     FOUNDRY_TOOL_NAMES,
     register_foundry_tools,
@@ -27,9 +31,11 @@ __all__ = [
     "MeshClient",
     "__version__",
     "bootstrap",
+    "build_mesh_tools",
     "get_token",
     "init_telemetry",
     "receive_messages",
     "register_foundry_tools",
+    "register_mesh_tools",
     "send_message",
 ]
