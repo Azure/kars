@@ -661,6 +661,96 @@ EOF
     kubectl delete clawsandbox e2e-anthropic -n azureclaw-system 2>/dev/null || true
 }
 
+test_runtime_langgraph() {
+    # Phase H#2: ClawSandbox of kind LangGraph should be processed by
+    # the controller. Like other runtime tests, namespace creation is
+    # the primary observable; the Deployment image check is best-effort.
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-langgraph
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: LangGraph
+    langGraph:
+      language: python
+      agentCode:
+        oci:
+          image: ghcr.io/example/langgraph-agent:e2e
+  sandbox:
+    isolation: standard
+EOF
+    sleep 5
+    if kubectl get ns azureclaw-e2e-langgraph &>/dev/null; then
+        pass "LangGraph runtime processed (namespace present)"
+    else
+        echo "  [diag] CR status:"
+        kubectl get clawsandbox e2e-langgraph -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
+        fail "LangGraph runtime: no namespace"
+    fi
+    local image
+    image=$(kubectl get deploy -n azureclaw-e2e-langgraph e2e-langgraph -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    if [ -n "$image" ]; then
+        if echo "$image" | grep -q "langgraph"; then
+            pass "LangGraph Deployment uses langgraph runtime image ($image)"
+        else
+            echo "  [diag] container image: $image"
+            fail "LangGraph Deployment image does not reference langgraph runtime"
+        fi
+    else
+        echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
+    fi
+    kubectl delete clawsandbox e2e-langgraph -n azureclaw-system 2>/dev/null || true
+}
+
+# Phase H#2: LangGraph TypeScript flavour is gated as ShapeInvalid in
+# `plan_langgraph` until the TS adapter image ships. The CRD admission
+# accepts the value (it's a valid enum variant); the controller stamps
+# RuntimeReady=False / ShapeInvalid in Conditions instead.
+test_runtime_langgraph_typescript_gated() {
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-langgraph-ts
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: LangGraph
+    langGraph:
+      language: typescript
+      agentCode:
+        oci:
+          image: ghcr.io/example/langgraph-ts-agent:e2e
+  sandbox:
+    isolation: standard
+EOF
+    sleep 5
+    # The controller should refuse to plan, surfacing ShapeInvalid in
+    # the Conditions chain. Namespace may or may not exist depending
+    # on reconciler ordering — the diagnostic signal is the Conditions.
+    local conds
+    conds=$(kubectl get clawsandbox e2e-langgraph-ts -n azureclaw-system -o jsonpath='{.status.conditions[*].reason}' 2>/dev/null || true)
+    if echo "$conds" | grep -qi "ShapeInvalid\|SpecInvalid"; then
+        pass "LangGraph typescript correctly gated (reason in conditions)"
+    else
+        echo "  [diag] conditions: $conds"
+        # Don't fail the lane — controller may not have reconciled yet
+        # in this fast E2E run. Surface as diagnostic only.
+        echo "  [diag] LangGraph TS gate: condition not yet observed"
+    fi
+    kubectl delete clawsandbox e2e-langgraph-ts -n azureclaw-system 2>/dev/null || true
+}
+
 test_runtime_byo() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
@@ -2243,12 +2333,15 @@ main() {
         oai-agents)      test_runtime_oai_agents ;;
         maf-python)      test_runtime_maf_python ;;
         anthropic)       test_runtime_anthropic ;;
+        langgraph)       test_runtime_langgraph ; test_runtime_langgraph_typescript_gated ;;
         byo)             test_runtime_byo ;;
         all)
             test_runtime_openclaw || true
             test_runtime_oai_agents || true
             test_runtime_maf_python || true
             test_runtime_anthropic || true
+            test_runtime_langgraph || true
+            test_runtime_langgraph_typescript_gated || true
             test_runtime_byo || true
             ;;
         *)

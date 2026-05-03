@@ -34,8 +34,9 @@
 use std::collections::BTreeMap;
 
 use crate::crd::{
-    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, MafLanguage, MicrosoftAgentFrameworkConfig,
-    OpenAIAgentsConfig, OpenClawConfig, RuntimeKind, RuntimeSpec,
+    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, LangGraphLanguage,
+    MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig, OpenClawConfig, RuntimeKind,
+    RuntimeSpec,
 };
 
 /// Default container image for the OpenAI Agents Python runtime
@@ -101,6 +102,30 @@ pub fn anthropic_default_image() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_ANTHROPIC_IMAGE.to_string())
+}
+
+/// Default container image for the LangGraph Python runtime
+/// (Phase H#2). LangGraph is the most-deployed OSS agent stack
+/// (LangChain ecosystem). Stays `:latest`; operators pin via the
+/// `LANGGRAPH_RUNTIME_IMAGE` env var.
+///
+/// Why a dedicated adapter (vs BYO): LangGraph relies on LangChain
+/// model factories that read `OPENAI_BASE_URL` (and provider-specific
+/// equivalents) at construction time. The adapter pins those to the
+/// router sidecar and wires AGT/OTel/AAD broker on bootstrap. The
+/// TypeScript flavour is **deferred** — see `plan_langgraph` for the
+/// gating error.
+pub const DEFAULT_LANGGRAPH_PYTHON_IMAGE: &str =
+    "azureclawacr.azurecr.io/azureclaw-runtime-langgraph:latest";
+
+/// Resolve the LangGraph Python adapter image, honouring an operator
+/// override via `LANGGRAPH_RUNTIME_IMAGE`. Falls back to
+/// [`DEFAULT_LANGGRAPH_PYTHON_IMAGE`].
+pub fn langgraph_default_image() -> String {
+    std::env::var("LANGGRAPH_RUNTIME_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_LANGGRAPH_PYTHON_IMAGE.to_string())
 }
 
 /// Concrete deployment intent for a single reconcile pass.
@@ -311,7 +336,13 @@ pub fn build_runtime_plan(
             plan_microsoft_agent_framework(cfg)
         }
         RuntimeKind::SemanticKernel => Err(RuntimePlanError::AdapterMissing("SemanticKernel")),
-        RuntimeKind::LangGraph => Err(RuntimePlanError::AdapterMissing("LangGraph")),
+        RuntimeKind::LangGraph => {
+            // Phase H#2: LangGraph Python adapter wired end-to-end.
+            // TypeScript flavour is gated as ShapeInvalid until the
+            // TS adapter image ships (mirrors the MAF .NET strategy).
+            let cfg = runtime.lang_graph.as_ref().expect("validated above");
+            plan_langgraph(cfg)
+        }
         RuntimeKind::Anthropic => {
             // Phase H#1: Anthropic Claude Agent SDK adapter wired
             // end-to-end. Adapter image bundles Python 3.12 +
@@ -533,13 +564,65 @@ fn plan_anthropic(cfg: &AnthropicConfig) -> RuntimeDeploymentPlan {
     }
 }
 
+/// Producer for [`RuntimeKind::LangGraph`] (Phase H#2).
+///
+/// LangGraph (LangChain's graph-orchestration agent framework) ships
+/// in Python and TypeScript. This producer wires the **Python**
+/// flavour. TypeScript is **deferred** — `language: typescript` is
+/// rejected with `ShapeInvalid` so the operator gets a clear error
+/// rather than a silently mis-imaged pod (mirrors the MAF .NET gate).
+///
+/// The adapter image pins the LangChain provider base URLs
+/// (`OPENAI_BASE_URL`, etc.) to the router sidecar at bootstrap time
+/// so model calls cannot egress directly. No third-party API key
+/// ever lives in the sandbox pod — the router brokers credentials on
+/// egress.
+fn plan_langgraph(cfg: &LangGraphConfig) -> Result<RuntimeDeploymentPlan, RuntimePlanError> {
+    let lang = cfg.language.clone().unwrap_or_default();
+    if !matches!(lang, LangGraphLanguage::Python) {
+        return Err(RuntimePlanError::ShapeInvalid(
+            "spec.runtime.langGraph.language=typescript is not yet wired \
+             (Python adapter ships first; TS adapter is deferred to a \
+             follow-up phase). Use `language: python` or wait for the \
+             TypeScript adapter image."
+                .to_string(),
+        ));
+    }
+
+    let image = langgraph_default_image();
+
+    let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
+    runtime_extra_env.insert(
+        "RUNTIME_LANGGRAPH_LANGUAGE".to_string(),
+        "python".to_string(),
+    );
+    if let Some(user_env) = cfg.extra_env.as_ref() {
+        for (k, v) in user_env {
+            runtime_extra_env.insert(k.clone(), v.clone());
+        }
+    }
+
+    let command = cfg.entrypoint.clone();
+
+    Ok(RuntimeDeploymentPlan {
+        kind_str: "LangGraph",
+        image,
+        command,
+        args: None,
+        runtime_extra_env,
+        raw_env: Vec::new(),
+        agent_code: cfg.agent_code.clone(),
+        byo_contract_version: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::{
-        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, MafLanguage,
-        MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig, OpenClawConfig,
-        SemanticKernelConfig,
+        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, LangGraphLanguage,
+        MafLanguage, MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig,
+        OpenClawConfig, SemanticKernelConfig,
     };
 
     fn rt_openclaw(image: Option<&str>) -> RuntimeSpec {
@@ -728,33 +811,20 @@ mod tests {
     // surfaces `AdapterMissing(<kind>)`. BYO is a known short-circuit
     // until A2.b lands the contract-verifier path.
 
-    /// Anthropic was wired in Phase H#1 (joining OpenAIAgents/MAF/BYO).
-    /// Only the two remaining Tier-2 placeholders short-circuit through
-    /// AdapterMissing.
+    /// LangGraph wired in Phase H#2 (joining Anthropic/OpenAIAgents/MAF/BYO).
+    /// Only SemanticKernel remains as Tier-2 placeholder.
     #[test]
     fn plan_returns_adapter_missing_for_each_unwired_non_openclaw_kind() {
-        let cases: Vec<(RuntimeKind, RuntimeSpec, &str)> = vec![
-            (
-                RuntimeKind::SemanticKernel,
-                RuntimeSpec {
-                    kind: RuntimeKind::SemanticKernel,
-                    openclaw: None,
-                    semantic_kernel: Some(SemanticKernelConfig::default()),
-                    ..Default::default()
-                },
-                "SemanticKernel",
-            ),
-            (
-                RuntimeKind::LangGraph,
-                RuntimeSpec {
-                    kind: RuntimeKind::LangGraph,
-                    openclaw: None,
-                    lang_graph: Some(LangGraphConfig::default()),
-                    ..Default::default()
-                },
-                "LangGraph",
-            ),
-        ];
+        let cases: Vec<(RuntimeKind, RuntimeSpec, &str)> = vec![(
+            RuntimeKind::SemanticKernel,
+            RuntimeSpec {
+                kind: RuntimeKind::SemanticKernel,
+                openclaw: None,
+                semantic_kernel: Some(SemanticKernelConfig::default()),
+                ..Default::default()
+            },
+            "SemanticKernel",
+        )];
         for (kind, rt, expected_label) in cases {
             let err = build_runtime_plan(&rt, "default-image").expect_err("must short-circuit");
             assert_eq!(
@@ -849,6 +919,94 @@ mod tests {
         assert_eq!(
             plan.runtime_extra_env.get("RUNTIME_PYTHON_VERSION"),
             Some(&"3.11".to_string())
+        );
+    }
+
+    // ── LangGraph adapter (Phase H#2) ────────────────────────────────
+
+    #[test]
+    fn langgraph_default_image_falls_back_when_env_unset() {
+        unsafe {
+            std::env::remove_var("LANGGRAPH_RUNTIME_IMAGE");
+        }
+        assert_eq!(langgraph_default_image(), DEFAULT_LANGGRAPH_PYTHON_IMAGE);
+    }
+
+    #[test]
+    fn plan_langgraph_python_default_succeeds() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::LangGraph,
+            openclaw: None,
+            lang_graph: Some(LangGraphConfig::default()),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("default (Python) must plan");
+        assert_eq!(plan.kind_str, "LangGraph");
+        assert!(plan.image.contains("azureclaw-runtime-langgraph"));
+        assert_eq!(
+            plan.runtime_extra_env.get("RUNTIME_LANGGRAPH_LANGUAGE"),
+            Some(&"python".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_langgraph_explicit_python_succeeds() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::LangGraph,
+            openclaw: None,
+            lang_graph: Some(LangGraphConfig {
+                language: Some(LangGraphLanguage::Python),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("explicit Python must plan");
+        assert_eq!(plan.kind_str, "LangGraph");
+    }
+
+    #[test]
+    fn plan_langgraph_typescript_is_shape_invalid() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::LangGraph,
+            openclaw: None,
+            lang_graph: Some(LangGraphConfig {
+                language: Some(LangGraphLanguage::Typescript),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = build_runtime_plan(&rt, "ignored").expect_err("typescript must be gated");
+        assert!(
+            matches!(err, RuntimePlanError::ShapeInvalid(ref m) if m.contains("typescript")),
+            "expected ShapeInvalid mentioning typescript, got: {err}"
+        );
+    }
+
+    #[test]
+    fn plan_langgraph_user_extra_env_overrides_runtime_default() {
+        // User can override RUNTIME_LANGGRAPH_LANGUAGE (no-op effect
+        // since image is python-only, but the merge order must match
+        // the contract of every other producer).
+        let mut user_env = BTreeMap::new();
+        user_env.insert("MY_FLAG".to_string(), "on".to_string());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::LangGraph,
+            openclaw: None,
+            lang_graph: Some(LangGraphConfig {
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("MY_FLAG"),
+            Some(&"on".to_string())
+        );
+        // Producer default still present
+        assert_eq!(
+            plan.runtime_extra_env.get("RUNTIME_LANGGRAPH_LANGUAGE"),
+            Some(&"python".to_string())
         );
     }
 
