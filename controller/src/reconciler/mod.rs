@@ -2025,10 +2025,20 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
 
         // Phase G P1 #4: stamp Suspended condition when spec.suspended
-        // is true, or clear a prior SuspendedBySpec when it is false.
-        // We deliberately do NOT stamp Suspended=False on CRs that
+        // is true, or surface Suspended=False/Active when there is a
+        // prior Suspended condition that was operator-driven. We
+        // deliberately do NOT stamp Suspended=False on CRs that
         // were never suspended — that would add a new condition
         // retroactively to every existing sandbox.
+        //
+        // Once a CR has been suspended at least once, the Suspended
+        // condition must persist (False/Active after un-suspend) so
+        // dashboards / `kubectl wait` can rely on its presence. If we
+        // only stamped on the *transition* (prior reason=SuspendedBySpec
+        // → now Active), the next no-op reconcile would observe
+        // prior reason=Active and drop the condition from extras,
+        // which causes the next status patch to omit it — silently
+        // erasing the operator's view of "this CR was un-suspended".
         let suspended_by_spec = spec.suspended.unwrap_or(false);
         let prior_conditions_for_susp = sandbox
             .status
@@ -2039,8 +2049,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             prior_conditions_for_susp,
             crate::status::conditions::TYPE_SUSPENDED,
         );
-        let prior_was_spec_suspended = prior_suspended
-            .is_some_and(|c| c.reason == crate::status::conditions::reason::SUSPENDED_BY_SPEC);
+        let has_prior_spec_suspension = prior_suspended.is_some_and(|c| {
+            c.reason == crate::status::conditions::reason::SUSPENDED_BY_SPEC
+                || c.reason == crate::status::conditions::reason::ACTIVE
+        });
         if suspended_by_spec {
             extras.push(crate::status::conditions::preserve_transition_time(
                 prior_suspended,
@@ -2050,7 +2062,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "spec.suspended=true; Deployment scaled to replicas=0",
                 sandbox.metadata.generation,
             ));
-        } else if prior_was_spec_suspended {
+        } else if has_prior_spec_suspension {
             extras.push(crate::status::conditions::preserve_transition_time(
                 prior_suspended,
                 crate::status::conditions::TYPE_SUSPENDED,
