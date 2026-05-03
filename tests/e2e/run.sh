@@ -949,18 +949,27 @@ EOF
 
     # Suspended=True/SuspendedBySpec must be stamped.
     local cond_status cond_reason
-    cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
-    cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
-    if [[ "$cond_status" == "True" && "$cond_reason" == "SuspendedBySpec" ]]; then
+    # Poll for Suspended=True/SuspendedBySpec convergence (same race as
+    # the un-suspend side: replicas=0 may land before the status patch).
+    local converged_susp=0
+    local cond_status="" cond_reason=""
+    for i in $(seq 1 30); do
+        cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
+        cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
+        if [[ "$cond_status" == "True" && "$cond_reason" == "SuspendedBySpec" ]]; then
+            converged_susp=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$converged_susp" == "1" ]]; then
         pass "Suspended=True/SuspendedBySpec condition stamped"
     else
         fail "Suspended condition wrong (status=$cond_status reason=$cond_reason)"
-        echo "[DEBUG] full status.conditions:"
-        kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-            -o jsonpath='{.status.conditions}' 2>/dev/null | head -c 2000
-        echo ""
+        echo "[DEBUG] full CR (-o yaml):"
+        kubectl get clawsandbox "${sandbox}" -n azureclaw-system -o yaml 2>/dev/null | tail -60
     fi
 
     # Un-suspend → replicas=1, Suspended=False/Active.
