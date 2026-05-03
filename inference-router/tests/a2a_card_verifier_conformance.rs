@@ -161,6 +161,7 @@ fn assert_reject(err: &CardVerifyError, kind: &str) {
         CardVerifyError::NotYetValid { .. } => "NotYetValid",
         CardVerifyError::Expired { .. } => "Expired",
         CardVerifyError::MalformedFreshness { .. } => "MalformedFreshness",
+        CardVerifyError::ForbiddenOauthFlow { .. } => "ForbiddenOauthFlow",
     };
     assert_eq!(actual, kind, "expected {kind}, got {actual}: {err:?}",);
 }
