@@ -608,6 +608,59 @@ EOF
     kubectl delete clawsandbox e2e-maf -n azureclaw-system 2>/dev/null || true
 }
 
+test_runtime_anthropic() {
+    # Phase H#1: ClawSandbox of kind Anthropic should be processed by
+    # the controller — namespace creation is the observable signal that
+    # plan_anthropic dispatched (vs the legacy AdapterMissing path).
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-anthropic
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: Anthropic
+    anthropic:
+      pythonVersion: "3.12"
+      agentCode:
+        oci:
+          image: ghcr.io/example/anthropic-agent:e2e
+  sandbox:
+    isolation: standard
+EOF
+    sleep 5
+    if kubectl get ns azureclaw-e2e-anthropic &>/dev/null; then
+        pass "Anthropic runtime processed (namespace present)"
+    else
+        echo "  [diag] CR status:"
+        kubectl get clawsandbox e2e-anthropic -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
+        fail "Anthropic runtime: no namespace"
+    fi
+    # Verify the Deployment image carries the Anthropic runtime tag
+    # rather than the OpenClaw default — proves the planner dispatched.
+    # Tolerant: if Deployment hasn't materialized yet (no real
+    # InferencePolicy provider in this E2E lane), surface a diag-only
+    # signal rather than failing the lane.
+    local image
+    image=$(kubectl get deploy -n azureclaw-e2e-anthropic e2e-anthropic -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    if [ -n "$image" ]; then
+        if echo "$image" | grep -q "anthropic"; then
+            pass "Anthropic Deployment uses anthropic runtime image ($image)"
+        else
+            echo "  [diag] container image: $image"
+            fail "Anthropic Deployment image does not reference anthropic runtime"
+        fi
+    else
+        echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
+    fi
+    kubectl delete clawsandbox e2e-anthropic -n azureclaw-system 2>/dev/null || true
+}
+
 test_runtime_byo() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
@@ -2189,11 +2242,13 @@ main() {
         openclaw)        test_runtime_openclaw ;;
         oai-agents)      test_runtime_oai_agents ;;
         maf-python)      test_runtime_maf_python ;;
+        anthropic)       test_runtime_anthropic ;;
         byo)             test_runtime_byo ;;
         all)
             test_runtime_openclaw || true
             test_runtime_oai_agents || true
             test_runtime_maf_python || true
+            test_runtime_anthropic || true
             test_runtime_byo || true
             ;;
         *)
