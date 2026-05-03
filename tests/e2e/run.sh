@@ -976,11 +976,26 @@ EOF
         fail "Un-suspended Deployment replicas=$replicas (expected 1)"
     fi
 
-    cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
-    cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
-        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
-    if [[ "$cond_status" == "False" && "$cond_reason" == "Active" ]]; then
+    # Poll for condition convergence to Suspended=False/Active. The
+    # controller patches Deployment.replicas and .status.conditions in
+    # a single reconcile pass, but they land via two separate API
+    # calls. Polling avoids a race where the test reads the
+    # condition slot before the status patch has been applied (or
+    # while a concurrent reconcile triggered by the new Deployment
+    # watch is still in-flight).
+    local converged=0
+    for i in $(seq 1 30); do
+        cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
+        cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
+        if [[ "$cond_status" == "False" && "$cond_reason" == "Active" ]]; then
+            converged=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$converged" == "1" ]]; then
         pass "Suspended=False/Active condition stamped after un-suspend"
     else
         fail "Suspended condition after un-suspend wrong (status=$cond_status reason=$cond_reason)"
