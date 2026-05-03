@@ -1112,6 +1112,107 @@ EOF
     kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
 }
 
+test_clawsandbox_cel_rejects_byo_with_agent() {
+    # P2 #13: spec-level CEL must reject BYO runtime + Foundry agent
+    # combination — they are architecturally incompatible (BYO
+    # containers own their own inference + agent loop).
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-cel-byo-with-agent
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: BYO
+    byo:
+      image: ghcr.io/example/byo:e2e
+      contractVersion: v1
+  agent:
+    instructions: "this should be rejected"
+  sandbox:
+    isolation: standard
+EOF
+    then
+        kubectl delete clawsandbox e2e-cel-byo-with-agent -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "CEL did NOT reject ClawSandbox with runtime.kind=BYO + spec.agent set"
+    else
+        pass "CEL rejects ClawSandbox with runtime.kind=BYO + spec.agent set"
+    fi
+}
+
+test_clawsandbox_cel_rejects_trust_threshold_out_of_range() {
+    # P2 #13: governance.trustThreshold must be in [0, 1000]. The
+    # docstring says so; this CEL guards the operator's first-apply
+    # against a typo (e.g. 9999 → silently clamped before this rule).
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-cel-trust-overflow
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: OpenClaw
+    openclaw: {}
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: e2e-tool-policy
+    trustThreshold: 9999
+  sandbox:
+    isolation: standard
+EOF
+    then
+        kubectl delete clawsandbox e2e-cel-trust-overflow -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "CEL did NOT reject ClawSandbox with governance.trustThreshold=9999"
+    else
+        pass "CEL rejects ClawSandbox with governance.trustThreshold out of [0,1000]"
+    fi
+}
+
+test_clawsandbox_cel_rejects_cross_namespace_toolpolicy_ref() {
+    # P2 #13: cross-namespace refs are forbidden by
+    # docs/crd-precedence.md. The CRD-side pattern already guards
+    # the regex but would silently accept "ns/name" (no slash) by
+    # rejecting the whole field. The new CEL rule rejects the
+    # common "ns/name" / "ns:name" authoring mistakes explicitly
+    # so the operator gets a precise error message.
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-cel-xns-ref
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: OpenClaw
+    openclaw: {}
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: "other-ns:e2e-tool-policy"
+    trustThreshold: 500
+  sandbox:
+    isolation: standard
+EOF
+    then
+        kubectl delete clawsandbox e2e-cel-xns-ref -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "CEL did NOT reject cross-namespace toolPolicyRef.name"
+    else
+        pass "CEL rejects cross-namespace toolPolicyRef.name"
+    fi
+}
+
 test_tool_policy_update_flow() {
     # Apply ToolPolicy → record ConfigMap content → update the spec
     # → assert the ConfigMap content changed. This exercises the
@@ -1799,6 +1900,9 @@ main() {
     test_sandbox_networkpolicy_denies_ingress || true
     test_sandbox_suspended_lifecycle || true
     test_secondary_resource_watch || true
+    test_clawsandbox_cel_rejects_byo_with_agent || true
+    test_clawsandbox_cel_rejects_trust_threshold_out_of_range || true
+    test_clawsandbox_cel_rejects_cross_namespace_toolpolicy_ref || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
     test_mcp_initialize_version_negotiation || true

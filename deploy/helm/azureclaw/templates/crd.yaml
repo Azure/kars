@@ -19,6 +19,31 @@ spec:
             spec:
               type: object
               required: ["runtime", "sandbox", "inferenceRef"]
+              x-kubernetes-validations:
+                # P2 #13: top-level cross-field invariants.
+                #
+                # 1. BYO runtime is mutually exclusive with the
+                #    Foundry-agent path. BYO containers bring their
+                #    own inference + agent loop and don't go through
+                #    the controller-managed Foundry prompt agent
+                #    (see crd.rs ClawSandboxSpec docs and
+                #    reconciler/mod.rs ~line 1017). Without this CEL
+                #    the controller silently no-ops the agent block
+                #    on BYO; the rule turns it into an immediate
+                #    `kubectl apply` error.
+                - rule: "self.runtime.kind != 'BYO' || !has(self.agent)"
+                  message: "spec.agent (Foundry agent) is incompatible with spec.runtime.kind=BYO; BYO runtimes own their own inference + agent loop"
+                  reason: "FieldValueInvalid"
+                # 2. governance.toolPolicyRef is in the same
+                #    namespace as the ClawSandbox (cross-namespace
+                #    refs are forbidden by docs/crd-precedence.md).
+                #    The schema-level pattern already enforces a
+                #    valid DNS label; this rule guards against the
+                #    common authoring mistake of pasting
+                #    "ns/name" or "ns:name".
+                - rule: "!has(self.governance) || !has(self.governance.toolPolicyRef) || !has(self.governance.toolPolicyRef.name) || (!self.governance.toolPolicyRef.name.contains('/') && !self.governance.toolPolicyRef.name.contains(':'))"
+                  message: "spec.governance.toolPolicyRef.name must be a same-namespace name (no '/' or ':' separators); cross-namespace refs are forbidden"
+                  reason: "FieldValueInvalid"
               properties:
                 runtime:
                   type: object
@@ -357,6 +382,13 @@ spec:
                   x-kubernetes-validations:
                     - rule: "!has(self.enabled) || !self.enabled || (has(self.toolPolicyRef) && self.toolPolicyRef.name.size() > 0)"
                       message: "spec.governance.toolPolicyRef.name must be set when governance.enabled=true"
+                    # P2 #13: trust score domain is 0-1000 (see crd.rs
+                    # GovernanceConfig docstring). Values outside this
+                    # range are silently clamped by the inference router
+                    # but the authoring intent is almost always a typo.
+                    - rule: "!has(self.trustThreshold) || (self.trustThreshold >= 0 && self.trustThreshold <= 1000)"
+                      message: "spec.governance.trustThreshold must be in the range [0, 1000]"
+                      reason: "FieldValueInvalid"
                   properties:
                     enabled:
                       type: boolean
