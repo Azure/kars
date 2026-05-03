@@ -230,7 +230,7 @@ AzureClaw started as a secure runtime for OpenClaw agents. Phase 2 generalised t
 | **Sigs/agent-sandbox compat** | ✅ shipped | `ClawSandbox.spec.upstreamCompatibility ∈ { Native, Translate, Overlay }`; `azureclaw convert` translates ClawSandbox ↔ upstream `Sandbox` CR; `azureclaw migrate from-kagent` ports kagent CRs |
 | **Pluggable governance providers** | ✅ shipped | `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider` traits; in-tree implementations are the production path; native AGT-Rust 3.x compiled in |
 
-What is *not* in the box (deferred to Phase 3 — see [`docs/implementation-plan.md`](docs/implementation-plan.md)):
+What is *not* in the box for v1.0 (some of these are tracked as `[GAP-V1]` in source for reviewer visibility):
 
 - Cosign-on-admission for pod images, SLSA-on-CRs, signed reconcile audit chain *emission* (Phase 2 ships only the read surface).
 - Confidential controller; router-mediated controller egress.
