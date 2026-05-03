@@ -105,6 +105,11 @@ pub struct Governance {
     /// recency of mesh peers — without it, peers whose name doesn't match
     /// a known sandbox CR (e.g. cloud-offload parents identified only by AMID) are filtered out of the peer panel.
     peer_last_seen: std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>,
+    /// Read-only TrustGraph projection consulted by the bootstrap path
+    /// in `update_trust` to seed AGT scores for brand-new peers.
+    /// Always present; an absent / unconfigured projection is
+    /// represented by [`crate::a2a::trust_graph_projection::TrustGraphProjection::empty`].
+    pub(crate) trust_graph: crate::a2a::trust_graph_projection::TrustGraphProjection,
     start_time: Instant,
     policy_rule_count: AtomicU64,
 }
@@ -219,8 +224,29 @@ impl Governance {
             trust_threshold,
             policy_rule_count,
             peer_last_seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+            trust_graph: {
+                let p = crate::a2a::trust_graph_loader::load_or_empty();
+                if !p.version_hash().is_empty() {
+                    metrics::AGT_TRUSTGRAPH_PROJECTION_VERSION
+                        .with_label_values(&[p.version_hash()])
+                        .set(1);
+                }
+                p
+            },
             start_time: Instant::now(),
         }
+    }
+
+    /// Test-only: replace the trust-graph projection. Lives behind
+    /// `#[cfg(test)]` so the field stays effectively private in
+    /// production — bootstrap data flows through the file-mount
+    /// loader only.
+    #[cfg(test)]
+    pub(crate) fn set_trust_graph_for_test(
+        &mut self,
+        projection: crate::a2a::trust_graph_projection::TrustGraphProjection,
+    ) {
+        self.trust_graph = projection;
     }
 
     /// Load all YAML policy files from a directory.  Returns rule count.
@@ -869,5 +895,130 @@ mod tests {
         );
         let after = gov.trust.get_trust_score("bad-agent").score;
         assert!(after < before, "Content flag should apply trust penalty");
+    }
+
+    #[test]
+    fn trustgraph_bootstrap_overrides_requested_for_new_peer() {
+        const PK_A: &str = "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc";
+        const PK_B: &str = "oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA";
+        const SIG_AB: &str = "5-Esp-uk11u_cGsCRdUXwxbxtCzSQsNaEzIBeFUBPZFWz9cUtr9PBw6eWFIBAAprz9kGwH2wTk3xaSnbJVQzAw";
+
+        let alpha = format!("alpha-tg-bs-{}", std::process::id());
+        let beta = format!("beta-tg-bs-{}", std::process::id());
+        let gamma = format!("gamma-tg-bs-{}", std::process::id());
+
+        let raw = format!(
+            r#"{{
+              "vertices": [
+                {{"id": "{alpha}", "alg": "EdDSA", "publicKeyB64u": "{PK_A}"}},
+                {{"id": "{beta}",  "alg": "EdDSA", "publicKeyB64u": "{PK_B}"}}
+              ],
+              "edges": [
+                {{"from": "{alpha}", "to": "{beta}", "score": 750,
+                  "issuedAt": 1700000000, "signature": "{SIG_AB}"}}
+              ],
+              "versionHash": "abc123def4567890",
+              "inputEdgeCount": 1
+            }}"#
+        );
+        let projection =
+            crate::a2a::trust_graph_projection::TrustGraphProjection::from_json(&raw).unwrap();
+
+        let mut gov = Governance::new(&alpha);
+        gov.set_trust_graph_for_test(projection);
+
+        let res = gov.update_trust(&beta, 0, 0);
+        assert!(res.is_ok());
+        let score = gov.trust.get_trust_score(&beta).score;
+        assert!(
+            score >= 500,
+            "expected bootstrap-from-edge >= 500, got {score}"
+        );
+
+        let _ = gov.update_trust(&gamma, 0, 0);
+        let no_edge_score = gov.trust.get_trust_score(&gamma).score;
+        assert!(
+            no_edge_score < score,
+            "no-edge peer ({no_edge_score}) must not exceed edge-bootstrapped peer ({score})"
+        );
+    }
+
+    #[test]
+    fn trustgraph_does_not_override_existing_peer_score() {
+        const PK_A: &str = "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc";
+        const PK_B: &str = "oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA";
+        const SIG_AB: &str = "5-Esp-uk11u_cGsCRdUXwxbxtCzSQsNaEzIBeFUBPZFWz9cUtr9PBw6eWFIBAAprz9kGwH2wTk3xaSnbJVQzAw";
+
+        let alpha = format!("alpha-tg-stable-{}", std::process::id());
+        let beta = format!("beta-tg-stable-{}", std::process::id());
+
+        let raw = format!(
+            r#"{{
+              "vertices": [
+                {{"id": "{alpha}", "alg": "EdDSA", "publicKeyB64u": "{PK_A}"}},
+                {{"id": "{beta}",  "alg": "EdDSA", "publicKeyB64u": "{PK_B}"}}
+              ],
+              "edges": [
+                {{"from": "{alpha}", "to": "{beta}", "score": 750,
+                  "issuedAt": 1700000000, "signature": "{SIG_AB}"}}
+              ],
+              "versionHash": "abc123def4567890",
+              "inputEdgeCount": 1
+            }}"#
+        );
+        let projection =
+            crate::a2a::trust_graph_projection::TrustGraphProjection::from_json(&raw).unwrap();
+
+        let mut gov = Governance::new(&alpha);
+        gov.set_trust_graph_for_test(projection);
+
+        let _ = gov.update_trust(&beta, 0, 0);
+        let after_bootstrap = gov.trust.get_trust_score(&beta).score;
+
+        let _ = gov.update_trust(&beta, 0, 0);
+        let after_negative = gov.trust.get_trust_score(&beta).score;
+        assert!(
+            after_negative <= after_bootstrap,
+            "negative interaction must not be re-bootstrapped (was {after_bootstrap}, now {after_negative})"
+        );
+    }
+
+    #[test]
+    fn trustgraph_no_projection_is_no_op() {
+        let sandbox = format!("standalone-tg-{}", std::process::id());
+        let peer = format!("peer-tg-noop-{}", std::process::id());
+        let gov = Governance::new(&sandbox);
+        assert!(gov.trust_graph.is_empty());
+
+        let _ = gov.update_trust(&peer, 200, 0);
+        let s = gov.trust.get_trust_score(&peer).score;
+        assert!(
+            (200..=220).contains(&s),
+            "expected bootstrap near 200 with no projection, got {s}"
+        );
+    }
+
+    #[test]
+    fn trustgraph_self_edge_does_not_bootstrap() {
+        const PK_A: &str = "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc";
+        const SIG_AB: &str = "5-Esp-uk11u_cGsCRdUXwxbxtCzSQsNaEzIBeFUBPZFWz9cUtr9PBw6eWFIBAAprz9kGwH2wTk3xaSnbJVQzAw";
+
+        let alpha = format!("alpha-tg-self-{}", std::process::id());
+        let raw = format!(
+            r#"{{
+              "vertices": [{{"id": "{alpha}", "alg": "EdDSA", "publicKeyB64u": "{PK_A}"}}],
+              "edges": [{{"from": "{alpha}", "to": "{alpha}", "score": 1000,
+                          "issuedAt": 1700000000, "signature": "{SIG_AB}"}}],
+              "versionHash": "0000000000000000",
+              "inputEdgeCount": 1
+            }}"#
+        );
+        let projection =
+            crate::a2a::trust_graph_projection::TrustGraphProjection::from_json(&raw).unwrap();
+        let mut gov = Governance::new(&alpha);
+        gov.set_trust_graph_for_test(projection);
+
+        let res = gov.update_trust(&alpha, 0, 0);
+        assert!(res.is_err());
     }
 }

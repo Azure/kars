@@ -95,6 +95,34 @@ pub static AGT_CONTENT_FLAGS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Total TrustGraph-projection-driven trust bootstraps. Incremented
+/// once per peer whose initial AGT trust score was seeded from a
+/// controller-verified TrustGraph edge (Phase F2). Never incremented
+/// on subsequent updates — bootstrap is a one-time event per peer.
+pub static AGT_TRUSTGRAPH_BOOTSTRAPS: LazyLock<prometheus::IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(opts!(
+        "azureclaw_agt_trustgraph_bootstraps_total",
+        "Brand-new peers seeded with an AGT trust score derived from a TrustGraph projection edge"
+    ))
+    .unwrap()
+});
+
+/// Last loaded TrustGraph projection version-hash (gauge with the
+/// hash as a label). One series per (sandbox, version_hash) pair.
+/// Used to confirm in operator dashboards that all sandboxes are
+/// observing the same controller-published projection.
+pub static AGT_TRUSTGRAPH_PROJECTION_VERSION: LazyLock<prometheus::IntGaugeVec> =
+    LazyLock::new(|| {
+        prometheus::register_int_gauge_vec!(
+            opts!(
+                "azureclaw_agt_trustgraph_projection_version",
+                "Constant 1 — labeled with the loaded TrustGraph projection version-hash"
+            ),
+            &["version_hash"]
+        )
+        .unwrap()
+    });
+
 /// Total behavior anomaly alerts.
 pub static AGT_BEHAVIOR_ALERTS: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(opts!(
