@@ -57,6 +57,12 @@ pub const CLAW_EVAL: &str = "azureclaw-controller/claweval";
 /// and publishes a `ConfigMap` projection to `azureclaw-system`.
 pub const TRUST_GRAPH: &str = "azureclaw-controller/trustgraph";
 
+/// Per-sandbox TrustGraph projection mount (Phase F2b) — applies the
+/// filtered slice ConfigMap into each sandbox namespace. Distinct
+/// from `TRUST_GRAPH` so SSA ownership of cluster-wide projections
+/// vs per-sandbox slices stays separable.
+pub const TRUSTGRAPH_MOUNT: &str = "azureclaw-controller/trustgraph-mount";
+
 /// Reserved for the in-pod inference router so its writes don't collide
 /// with the controller's. Not used by the controller itself; exposed as a
 /// constant so the uniqueness invariant is enforceable across crates.
@@ -90,6 +96,7 @@ pub const ALL_FIELD_MANAGERS: &[&str] = &[
     CLAW_MEMORY,
     CLAW_EVAL,
     TRUST_GRAPH,
+    TRUSTGRAPH_MOUNT,
     ROUTER_RECONCILER,
     PROVIDER_BRIDGE,
     MESH,

@@ -35,6 +35,7 @@ use crate::fedcred::{FedCredConfig, FedCredManager};
 
 pub(crate) mod byo_contract;
 pub(crate) mod governance_mounts;
+pub(crate) mod trustgraph_mount;
 
 /// Build pod security context, conditionally including SELinux options and
 /// choosing between RuntimeDefault and Localhost seccomp profiles.
@@ -1651,6 +1652,46 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         return Ok(Action::requeue(Duration::from_secs(15)));
                     }
                 }
+            }
+        }
+
+        // Phase F2b: per-sandbox TrustGraph projection mount.
+        // Filters cluster-wide projections to outbound edges only,
+        // publishes a per-sandbox ConfigMap, and mounts it into the
+        // inference-router. Errors are logged but non-fatal — the
+        // F2a router-side loader fail-closes to an empty projection.
+        match trustgraph_mount::ensure_trustgraph_mount(client, &sandbox_ns, &name, &mut pod_spec)
+            .await
+        {
+            Ok(trustgraph_mount::MountOutcome::Mounted {
+                version_hash,
+                edges,
+            }) => {
+                tracing::info!(
+                    sandbox = %name,
+                    edges = edges,
+                    version_hash = %version_hash,
+                    "TrustGraph per-sandbox projection mounted"
+                );
+            }
+            Ok(trustgraph_mount::MountOutcome::EmptySlice) => {
+                tracing::debug!(
+                    sandbox = %name,
+                    "TrustGraph projection contains no outbound edges for this sandbox"
+                );
+            }
+            Ok(trustgraph_mount::MountOutcome::NoSource) => {
+                tracing::debug!(
+                    sandbox = %name,
+                    "No TrustGraph projections present in azureclaw-system"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    sandbox = %name,
+                    "TrustGraph mount failed; router will start without projection"
+                );
             }
         }
 
