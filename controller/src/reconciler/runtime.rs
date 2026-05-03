@@ -685,6 +685,17 @@ mod tests {
         MafLanguage, MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig,
         OpenClawConfig, PydanticAiConfig, SemanticKernelConfig,
     };
+    use std::sync::Mutex;
+
+    /// Serialises tests that mutate process-wide image-override env vars
+    /// (e.g. `OPENAI_AGENTS_RUNTIME_IMAGE`). Without this guard, the
+    /// default multi-threaded test harness lets one test's `set_var`
+    /// leak into another test's `*_default_image()` call, producing
+    /// flaky failures of the shape:
+    ///   left: "myacr.azurecr.io/openai-agents:pinned"
+    ///   right: "azureclawacr.azurecr.io/azureclaw-runtime-openai-agents:latest"
+    /// All env-mutating tests in this module take the lock at the top.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn rt_openclaw(image: Option<&str>) -> RuntimeSpec {
         RuntimeSpec {
@@ -913,6 +924,7 @@ mod tests {
 
     #[test]
     fn anthropic_default_image_falls_back_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // SAFETY: this test does not run in parallel with env writers
         // (no other test sets ANTHROPIC_RUNTIME_IMAGE).
         unsafe {
@@ -999,6 +1011,7 @@ mod tests {
 
     #[test]
     fn langgraph_default_image_falls_back_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("LANGGRAPH_RUNTIME_IMAGE");
         }
@@ -1039,6 +1052,7 @@ mod tests {
 
     #[test]
     fn plan_langgraph_typescript_dispatches_to_ts_image() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("LANGGRAPH_TS_RUNTIME_IMAGE");
         }
@@ -1095,6 +1109,7 @@ mod tests {
 
     #[test]
     fn pydantic_ai_default_image_falls_back_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("PYDANTIC_AI_RUNTIME_IMAGE");
         }
@@ -1281,6 +1296,7 @@ mod tests {
 
     #[test]
     fn plan_openai_agents_uses_default_adapter_image_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Defensive: clear the env var so the test isn't influenced by
         // an operator-side override leaking from the dev shell.
         // SAFETY: serial-test is not on this crate; tests in the same
@@ -1308,6 +1324,7 @@ mod tests {
 
     #[test]
     fn plan_openai_agents_passes_through_python_version_and_extra_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
         }
@@ -1333,6 +1350,7 @@ mod tests {
 
     #[test]
     fn plan_openai_agents_user_extra_env_overrides_python_version_key_when_explicitly_set() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Defensive: if a user explicitly puts RUNTIME_PYTHON_VERSION in
         // extra_env, their value wins over the producer's
         // python_version-derived default. The merge order
@@ -1359,6 +1377,7 @@ mod tests {
 
     #[test]
     fn plan_openai_agents_carries_user_entrypoint_into_command() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
         }
@@ -1381,6 +1400,7 @@ mod tests {
 
     #[test]
     fn plan_openai_agents_propagates_agent_code() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
         }
@@ -1403,6 +1423,7 @@ mod tests {
 
     #[test]
     fn openai_agents_default_image_honours_env_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var(
                 "OPENAI_AGENTS_RUNTIME_IMAGE",
@@ -1420,6 +1441,7 @@ mod tests {
 
     #[test]
     fn openai_agents_default_image_treats_blank_env_as_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("OPENAI_AGENTS_RUNTIME_IMAGE", "   ");
         }
@@ -1432,6 +1454,7 @@ mod tests {
 
     #[test]
     fn build_runtime_plan_dispatches_openai_agents_to_producer() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("OPENAI_AGENTS_RUNTIME_IMAGE");
         }
@@ -1460,6 +1483,7 @@ mod tests {
 
     #[test]
     fn plan_maf_uses_default_python_image_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
@@ -1482,6 +1506,7 @@ mod tests {
 
     #[test]
     fn plan_maf_explicit_python_language_succeeds() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
@@ -1495,6 +1520,7 @@ mod tests {
 
     #[test]
     fn plan_maf_default_language_is_python() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
@@ -1511,6 +1537,7 @@ mod tests {
 
     #[test]
     fn plan_maf_passes_entrypoint_and_extra_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
@@ -1548,6 +1575,7 @@ mod tests {
 
     #[test]
     fn plan_maf_user_extra_env_overrides_controller_default() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
@@ -1574,6 +1602,7 @@ mod tests {
 
     #[test]
     fn maf_python_default_image_honours_env_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("MAF_RUNTIME_IMAGE", "myacr.azurecr.io/maf-python:pinned");
         }
@@ -1587,6 +1616,7 @@ mod tests {
 
     #[test]
     fn maf_python_default_image_treats_blank_env_as_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("MAF_RUNTIME_IMAGE", "  ");
         }
@@ -1599,6 +1629,7 @@ mod tests {
 
     #[test]
     fn build_runtime_plan_dispatches_maf_python_to_producer() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MAF_RUNTIME_IMAGE");
         }
