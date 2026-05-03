@@ -43,10 +43,52 @@ impl Governance {
         let is_new = existing.interactions == 0;
 
         if is_new {
-            // Bootstrap: set initial score (capped at 500) then record first interaction.
-            let initial = requested_score.min(500);
+            // Phase F2 — TrustGraph bootstrap.
+            //
+            // For brand-new peers (zero AGT interactions), opportunistically
+            // consult the controller-published TrustGraph projection for a
+            // signed edge `sandbox_name → agent_id`. If one exists and is
+            // not expired, use its score (still subject to the AGT 500 cap
+            // applied below) instead of the caller-supplied requested_score.
+            //
+            // Hard invariants:
+            //   • Never overrides an existing AGT score (interactions > 0).
+            //   • Never exceeds the AGT bootstrap cap of 500 (matches the
+            //     existing `requested_score.min(500)` semantics).
+            //   • Self-edges are pre-filtered by the projection lookup —
+            //     defence in depth against a tampered ConfigMap.
+            //   • An empty / absent projection is a no-op (identical to
+            //     pre-F2 behaviour).
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let bootstrap_score = self
+                .trust_graph
+                .direct_edge(&self.sandbox_name, agent_id, now_unix)
+                .map(|e| e.score);
+
+            let initial = bootstrap_score.unwrap_or(requested_score).min(500);
+
             self.trust.set_trust(agent_id, initial);
             self.trust.record_success(agent_id);
+
+            if let Some(score) = bootstrap_score {
+                metrics::AGT_TRUSTGRAPH_BOOTSTRAPS.inc();
+                tracing::info!(
+                    peer = agent_id,
+                    bootstrap_score = score,
+                    capped_initial = initial,
+                    sandbox = %self.sandbox_name,
+                    projection_version = %self.trust_graph.version_hash(),
+                    "AGT trust bootstrapped from TrustGraph projection edge"
+                );
+                self.audit.log(
+                    agent_id,
+                    &format!("trustgraph_bootstrap:{}", score),
+                    "success",
+                );
+            }
         } else if requested_score >= old_score {
             // Positive interaction — use SDK's built-in reward + decay + interaction bump.
             self.trust.record_success(agent_id);

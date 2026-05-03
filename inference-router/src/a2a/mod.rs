@@ -82,6 +82,8 @@ pub mod mandate_trust_loader;
 pub mod mandate_trust_store;
 pub mod message_send_ap2;
 pub mod snapshot_rebuild;
+pub mod trust_graph_loader;
+pub mod trust_graph_projection;
 pub mod trust_store;
 
 pub use agent_card::{
