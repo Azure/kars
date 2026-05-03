@@ -751,6 +751,54 @@ EOF
     kubectl delete clawsandbox e2e-langgraph-ts -n azureclaw-system 2>/dev/null || true
 }
 
+test_runtime_pydantic_ai() {
+    # Phase H#3: ClawSandbox of kind PydanticAi should be processed by
+    # the controller. Like other runtime tests, namespace creation is
+    # the primary observable; the Deployment image check is best-effort.
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: e2e-pydantic-ai
+  namespace: azureclaw-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: PydanticAi
+    pydanticAi:
+      pythonVersion: "3.12"
+      agentCode:
+        oci:
+          image: ghcr.io/example/pydantic-ai-agent:e2e
+  sandbox:
+    isolation: standard
+EOF
+    sleep 5
+    if kubectl get ns azureclaw-e2e-pydantic-ai &>/dev/null; then
+        pass "PydanticAi runtime processed (namespace present)"
+    else
+        echo "  [diag] CR status:"
+        kubectl get clawsandbox e2e-pydantic-ai -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
+        fail "PydanticAi runtime: no namespace"
+    fi
+    local image
+    image=$(kubectl get deploy -n azureclaw-e2e-pydantic-ai e2e-pydantic-ai -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    if [ -n "$image" ]; then
+        if echo "$image" | grep -q "pydantic-ai"; then
+            pass "PydanticAi Deployment uses pydantic-ai runtime image ($image)"
+        else
+            echo "  [diag] container image: $image"
+            fail "PydanticAi Deployment image does not reference pydantic-ai runtime"
+        fi
+    else
+        echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
+    fi
+    kubectl delete clawsandbox e2e-pydantic-ai -n azureclaw-system 2>/dev/null || true
+}
+
 test_runtime_byo() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
@@ -2334,6 +2382,7 @@ main() {
         maf-python)      test_runtime_maf_python ;;
         anthropic)       test_runtime_anthropic ;;
         langgraph)       test_runtime_langgraph ; test_runtime_langgraph_typescript_gated ;;
+        pydantic-ai)     test_runtime_pydantic_ai ;;
         byo)             test_runtime_byo ;;
         all)
             test_runtime_openclaw || true
@@ -2342,6 +2391,7 @@ main() {
             test_runtime_anthropic || true
             test_runtime_langgraph || true
             test_runtime_langgraph_typescript_gated || true
+            test_runtime_pydantic_ai || true
             test_runtime_byo || true
             ;;
         *)
