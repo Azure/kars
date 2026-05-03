@@ -2011,7 +2011,7 @@ EOF
         kubectl delete trustgraph e2e-trustgraph-empty --wait=false >/dev/null 2>&1 || true
     fi
 
-    # ── Phase F2b: per-sandbox projection mount ──────────────────────────
+    # Phase F2b: per-sandbox projection mount
     # Create a sandbox whose name matches the outbound-edge `from`
     # (alpha→beta in the fixture above). The controller must publish
     # a per-sandbox ConfigMap containing only outbound edges.
@@ -2022,9 +2022,13 @@ kind: InferencePolicy
 metadata:
   name: alpha-inference
   namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: alpha
 spec:
-  endpoints:
-    - name: default
+  appliesTo:
+    sandboxName: alpha
+  modelPreference:
+    primary:
       provider: azure-openai
       deployment: gpt-4.1
 ---
