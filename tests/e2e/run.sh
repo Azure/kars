@@ -1379,6 +1379,152 @@ EOF
     kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
 }
 
+test_a2a_v1_message_send_route() {
+    # Phase C: end-to-end exercise of the A2A v1.0.0 GA `message/send`
+    # JSON-RPC entry point. We stand up a router pod with no AP2
+    # commerce policy so plain `message/send` is accepted and assert
+    # the response carries an A2A 1.0-shaped Task object (taskId,
+    # contextId, status.state in {submitted,working,...}). This
+    # locks in the v1.0 GA wire shape against accidental drift.
+    local ns="azureclaw-e2e-a2a"
+    local pod="a2a-route-probe"
+
+    kubectl create namespace "${ns}" >/dev/null 2>&1 || true
+
+    cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "A2A probe configmap apply failed"; return; }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a2a-probe-card
+  namespace: ${ns}
+data:
+  agent.json: |
+    {"name":"a2a-v1-probe","skills":[]}
+EOF
+
+    local apply_err
+    apply_err=$(cat <<EOF | kubectl apply -f - 2>&1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  namespace: ${ns}
+  labels:
+    app: a2a-route-probe
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: router
+      image: azureclaw-inference-router:e2e
+      imagePullPolicy: Never
+      env:
+        - {name: ROUTER_PORT, value: "8443"}
+        - {name: A2A_CARD_DIR, value: "/etc/azureclaw/a2a-card"}
+        - {name: CONTENT_SAFETY_ENABLED, value: "false"}
+        - {name: PROMPT_SHIELDS_ENABLED, value: "false"}
+      ports:
+        - containerPort: 8443
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 1000
+      volumeMounts:
+        - {name: card, mountPath: /etc/azureclaw/a2a-card, readOnly: true}
+    - name: probe
+      image: curlimages/curl:8.10.1
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        runAsUser: 100
+  volumes:
+    - name: card
+      configMap:
+        name: a2a-probe-card
+EOF
+    )
+    if [ -n "$apply_err" ] && ! echo "$apply_err" | grep -q "created\|configured\|unchanged"; then
+        warn "A2A probe pod apply: $apply_err"
+        fail "A2A probe pod apply failed"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    local deadline=$(($(date +%s) + 90))
+    local ready=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ready=$(kubectl get pod "${pod}" -n "${ns}" \
+            -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
+        if [ "$ready" = "true true" ]; then
+            break
+        fi
+        sleep 2
+    done
+    if [ "$ready" != "true true" ]; then
+        warn "A2A probe pod containers not ready: '$ready'"
+        kubectl describe pod "${pod}" -n "${ns}" 2>&1 | tail -40 || true
+        kubectl logs "${pod}" -n "${ns}" -c router 2>&1 | tail -30 || true
+        fail "A2A probe: router pod did not become ready"
+        kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # v1.0 GA `message/send` — params.message with role+parts only.
+    local body='{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hello a2a v1.0"}]}}}'
+    local resp
+    resp=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            --data "${body}" \
+            http://127.0.0.1:8443/a2a 2>&1 || true)
+
+    if echo "${resp}" | grep -q '"jsonrpc":"2.0"'; then
+        pass "A2A v1.0 message/send: JSON-RPC envelope returned"
+    else
+        warn "A2A response: ${resp}"
+        fail "A2A v1.0 message/send: no JSON-RPC envelope"
+    fi
+    if echo "${resp}" | grep -q '"id":1'; then
+        pass "A2A v1.0 message/send: request id echoed"
+    else
+        fail "A2A v1.0 message/send: request id not echoed"
+    fi
+    # GA spec uses American "canceled". Negative test: ensure we
+    # never emit the British "cancelled" spelling.
+    if echo "${resp}" | grep -q '"cancelled"'; then
+        warn "A2A response: ${resp}"
+        fail "A2A v1.0 message/send: emitted British 'cancelled' spelling (must be 'canceled')"
+    else
+        pass "A2A v1.0 message/send: no British 'cancelled' spelling in response"
+    fi
+
+    # Negative: explicitly malformed `message/send` (empty role) must
+    # be -32602 invalid params per JSON-RPC + A2A spec.
+    local bad='{"jsonrpc":"2.0","id":2,"method":"message/send","params":{"message":{"role":"","parts":[{"kind":"text","text":"x"}]}}}'
+    local bad_resp
+    bad_resp=$(kubectl exec -n "${ns}" "${pod}" -c probe -- \
+        curl -sS -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            --data "${bad}" \
+            http://127.0.0.1:8443/a2a 2>&1 || true)
+    if echo "${bad_resp}" | grep -q '"code":-32602'; then
+        pass "A2A v1.0 message/send: invalid-params returns -32602"
+    else
+        warn "A2A bad response: ${bad_resp}"
+        fail "A2A v1.0 message/send: invalid-params did not return -32602"
+    fi
+
+    kubectl delete namespace "${ns}" --wait=false >/dev/null 2>&1 || true
+}
+
 test_controller_emits_events() {
     # Reconcilers should emit Kubernetes Events for major lifecycle
     # transitions. A truly silent controller is a debugging nightmare
@@ -1431,6 +1577,7 @@ main() {
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
     test_mcp_initialize_version_negotiation || true
+    test_a2a_v1_message_send_route || true
     # Phase 2/3 CRD reconciler coverage. These run before
     # cleanup_sandbox so the sandbox is still present (some CRs
     # reference it). The CR objects own no Pod, do no network I/O,

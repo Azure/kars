@@ -122,6 +122,13 @@ pub enum CardVerifyError {
     /// Card claimed a freshness field but it didn't parse as RFC 3339.
     #[error("malformed freshness field `{field}`: {reason}")]
     MalformedFreshness { field: &'static str, reason: String },
+
+    /// Card declared an OAuth 2.0 flow that A2A v1.0.0 GA forbids
+    /// (`implicit` or `password`). Per spec change #1303 (modernize
+    /// OAuth 2.0 flows), only `authorizationCode`, `clientCredentials`,
+    /// and `deviceCode` (with PKCE) are permitted. We fail closed.
+    #[error("agent card declared forbidden OAuth flow `{flow}` in scheme `{scheme}`")]
+    ForbiddenOauthFlow { scheme: String, flow: String },
 }
 
 /// Configuration for the inbound verifier. Each field carries a doc-
@@ -251,6 +258,16 @@ pub fn verify_inbound_card(
     }
     let kid = card_signing::verify_card(&card, &config.trusted_keys)?;
 
+    // 5b. OAuth-flow allow-list (A2A v1.0.0 GA, spec change #1303).
+    //     The GA spec REMOVED `implicit` and `password` flows from
+    //     securitySchemes; legitimate v1.0 peers MUST NOT advertise
+    //     them. Reject as a downgrade-defence — a peer asking us to
+    //     trust an `implicit`-flow OAuth scheme is either pre-GA,
+    //     misconfigured, or hostile.
+    if let Some(schemes) = card.security_schemes.as_ref() {
+        validate_oauth_flows_against_v1_ga(schemes)?;
+    }
+
     // 6. URL binding (optional). Prefer provider.url, fall back to
     //    top-level url (peek.url) when no provider.
     let provider_url = card.provider.as_ref().map(|p| p.url.clone()).or(peek.url);
@@ -270,6 +287,42 @@ pub fn verify_inbound_card(
         version: card.version,
         provider_url,
     })
+}
+
+/// Walks `securitySchemes` and rejects any OAuth 2.0 scheme whose
+/// `flows` map declares a key removed by A2A v1.0.0 GA (`implicit`
+/// or `password`). The spec only permits `authorizationCode`,
+/// `clientCredentials`, and `deviceCode`. We do **not** require
+/// `flows` to be present (some schemes are non-oauth2); we only
+/// reject when the forbidden keys are explicitly present.
+///
+/// Spec: <https://a2a-protocol.org/v1.0.0/specification> change
+/// #1303 (modernize OAuth 2.0 flows: remove implicit/password,
+/// add device code / PKCE).
+fn validate_oauth_flows_against_v1_ga(schemes: &serde_json::Value) -> Result<(), CardVerifyError> {
+    let Some(map) = schemes.as_object() else {
+        // Non-object securitySchemes is malformed but the strict
+        // typed parse layer is not enforcing it (Value is opaque).
+        // Permit and let downstream handle.
+        return Ok(());
+    };
+    for (scheme_name, scheme_val) in map {
+        let Some(scheme_obj) = scheme_val.as_object() else {
+            continue;
+        };
+        let Some(flows) = scheme_obj.get("flows").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for forbidden in ["implicit", "password"] {
+            if flows.contains_key(forbidden) {
+                return Err(CardVerifyError::ForbiddenOauthFlow {
+                    scheme: scheme_name.clone(),
+                    flow: forbidden.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Tiny RFC 3339 → unix-seconds parser. We don't pull in `chrono` for
@@ -731,5 +784,112 @@ mod tests {
         keys.insert("k1", &vk);
         let far_future = SystemTime::UNIX_EPOCH + Duration::from_secs(99_999_999_999);
         verify_inbound_card(&raw, &cfg(keys, None, far_future)).unwrap();
+    }
+
+    #[test]
+    fn rejects_card_declaring_implicit_oauth_flow() {
+        // A2A v1.0.0 GA forbade the `implicit` flow (#1303). A peer
+        // sending us a card with `flows.implicit` is non-conformant
+        // and must be rejected before its task is enqueued.
+        let (sk, vk) = fresh_kp();
+        let mut card = base_card();
+        card.security_schemes = Some(serde_json::json!({
+            "legacyOauth": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://idp.example.com/auth",
+                        "scopes": {}
+                    }
+                }
+            }
+        }));
+        let signed = sign_card(card, &sk, "k1").unwrap();
+        let raw = serde_json::to_vec(&signed).unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("k1", &vk);
+        let err = verify_inbound_card(&raw, &cfg(keys, None, SystemTime::now())).unwrap_err();
+        match err {
+            CardVerifyError::ForbiddenOauthFlow { scheme, flow } => {
+                assert_eq!(scheme, "legacyOauth");
+                assert_eq!(flow, "implicit");
+            }
+            other => panic!("expected ForbiddenOauthFlow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_card_declaring_password_oauth_flow() {
+        let (sk, vk) = fresh_kp();
+        let mut card = base_card();
+        card.security_schemes = Some(serde_json::json!({
+            "legacyPasswordOauth": {
+                "type": "oauth2",
+                "flows": { "password": { "tokenUrl": "https://idp.example.com/t", "scopes": {} } }
+            }
+        }));
+        let signed = sign_card(card, &sk, "k1").unwrap();
+        let raw = serde_json::to_vec(&signed).unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("k1", &vk);
+        let err = verify_inbound_card(&raw, &cfg(keys, None, SystemTime::now())).unwrap_err();
+        assert!(matches!(err, CardVerifyError::ForbiddenOauthFlow { .. }));
+    }
+
+    #[test]
+    fn accepts_card_with_authorization_code_flow() {
+        // Spec-conformant flow per v1.0 GA: must pass.
+        let (sk, vk) = fresh_kp();
+        let mut card = base_card();
+        card.security_schemes = Some(serde_json::json!({
+            "modernOauth": {
+                "type": "oauth2",
+                "flows": {
+                    "authorizationCode": {
+                        "authorizationUrl": "https://idp.example.com/auth",
+                        "tokenUrl": "https://idp.example.com/token",
+                        "scopes": {}
+                    }
+                }
+            }
+        }));
+        let signed = sign_card(card, &sk, "k1").unwrap();
+        let raw = serde_json::to_vec(&signed).unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("k1", &vk);
+        verify_inbound_card(&raw, &cfg(keys, None, SystemTime::now())).unwrap();
+    }
+
+    #[test]
+    fn accepts_card_with_device_code_flow() {
+        let (sk, vk) = fresh_kp();
+        let mut card = base_card();
+        card.security_schemes = Some(serde_json::json!({
+            "modernOauthDevice": {
+                "type": "oauth2",
+                "flows": {
+                    "deviceCode": {
+                        "deviceAuthorizationUrl": "https://idp.example.com/device",
+                        "tokenUrl": "https://idp.example.com/token",
+                        "scopes": {}
+                    }
+                }
+            }
+        }));
+        let signed = sign_card(card, &sk, "k1").unwrap();
+        let raw = serde_json::to_vec(&signed).unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("k1", &vk);
+        verify_inbound_card(&raw, &cfg(keys, None, SystemTime::now())).unwrap();
+    }
+
+    #[test]
+    fn accepts_card_with_no_security_schemes() {
+        // Most real cards omit securitySchemes entirely; validator
+        // must be a no-op in that case.
+        let (raw, vk) = signed_card_bytes("k1");
+        let mut keys = HashMap::new();
+        keys.insert("k1", &vk);
+        verify_inbound_card(&raw, &cfg(keys, None, SystemTime::now())).unwrap();
     }
 }
