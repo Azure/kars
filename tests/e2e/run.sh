@@ -887,6 +887,109 @@ test_sandbox_networkpolicy_denies_ingress() {
     fi
 }
 
+test_sandbox_suspended_lifecycle() {
+    # Phase G P1 #4: spec.suspended scales the Deployment to
+    # replicas=0 without removing it, and stamps
+    # Suspended=True/SuspendedBySpec on .status.conditions.
+    # Un-setting (or flipping to false) restores replicas=1 and
+    # stamps Suspended=False/Active.
+    local sandbox=suspend-test
+    cat <<EOF | kubectl apply -f - >/dev/null
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: ${sandbox}-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: ${sandbox}
+spec:
+  appliesTo:
+    sandboxName: ${sandbox}
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: ${sandbox}
+  namespace: azureclaw-system
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: ${sandbox}-inference
+  suspended: true
+EOF
+    # Wait up to 60s for the controller to reconcile + scale down.
+    local replicas=""
+    local i
+    for i in $(seq 1 30); do
+        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+        if [[ "$replicas" == "0" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$replicas" == "0" ]]; then
+        pass "Suspended sandbox Deployment scaled to replicas=0"
+    else
+        fail "Suspended Deployment replicas=$replicas (expected 0)"
+        kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        return
+    fi
+
+    # Suspended=True/SuspendedBySpec must be stamped.
+    local cond_status cond_reason
+    cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
+    cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
+    if [[ "$cond_status" == "True" && "$cond_reason" == "SuspendedBySpec" ]]; then
+        pass "Suspended=True/SuspendedBySpec condition stamped"
+    else
+        fail "Suspended condition wrong (status=$cond_status reason=$cond_reason)"
+    fi
+
+    # Un-suspend → replicas=1, Suspended=False/Active.
+    kubectl patch clawsandbox "${sandbox}" -n azureclaw-system --type merge \
+        -p '{"spec":{"suspended":false}}' >/dev/null
+    for i in $(seq 1 30); do
+        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+        if [[ "$replicas" == "1" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$replicas" == "1" ]]; then
+        pass "Un-suspended sandbox Deployment restored to replicas=1"
+    else
+        fail "Un-suspended Deployment replicas=$replicas (expected 1)"
+    fi
+
+    cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
+    cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
+    if [[ "$cond_status" == "False" && "$cond_reason" == "Active" ]]; then
+        pass "Suspended=False/Active condition stamped after un-suspend"
+    else
+        fail "Suspended condition after un-suspend wrong (status=$cond_status reason=$cond_reason)"
+    fi
+
+    kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+}
+
 # ─── Reconciler update / delete flow ────────────────────────────────────────
 
 test_tool_policy_update_flow() {
@@ -1574,6 +1677,7 @@ main() {
     test_sandbox_namespace_labels || true
     test_sandbox_deployment_exists || true
     test_sandbox_networkpolicy_denies_ingress || true
+    test_sandbox_suspended_lifecycle || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
     test_mcp_initialize_version_negotiation || true

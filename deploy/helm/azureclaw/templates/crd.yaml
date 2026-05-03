@@ -498,6 +498,26 @@ spec:
                     limits:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
+                suspended:
+                  type: boolean
+                  description: |
+                    When `true`, the controller scales the sandbox
+                    Deployment to `replicas: 0` and stamps
+                    `Suspended=True / Reason=SuspendedBySpec`. The
+                    namespace, NetworkPolicy, ServiceAccount, and all
+                    governance overlay objects are preserved
+                    byte-identical, so flipping this field back to
+                    `false` (or removing it) restores the agent
+                    in-place. Default `false`.
+
+                    Distinct from the `Suspended=True / Reason=OverlayMode`
+                    transition, which is induced by
+                    `spec.upstreamCompatibility.sigsAgentSandbox=overlay`
+                    (operator delegates Pod ownership to an upstream
+                    `Sandbox` CR). Spec-level suspension is the
+                    operator-driven graceful pause; OverlayMode is the
+                    architectural reason the controller doesn't own
+                    the Pod at all.
             status:
               type: object
               properties:

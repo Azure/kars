@@ -109,6 +109,26 @@ pub struct ClawSandboxSpec {
     /// **Default OFF.** Schema lands now so future reconciler branches are
     /// pure wiring. No code path consumes this field yet.
     pub upstream_compatibility: Option<UpstreamCompatibilityConfig>,
+
+    /// Operator-driven graceful pause (Phase G P1 #4).
+    ///
+    /// When `Some(true)`, the controller scales the sandbox Deployment
+    /// to `replicas: 0` and stamps the K8s `Suspended=True` Condition
+    /// with reason `SuspendedBySpec`. The namespace, NetworkPolicy,
+    /// ServiceAccount, governance ConfigMaps, and any Azure
+    /// federated-identity binding are preserved byte-identical, so
+    /// flipping back to `Some(false)` (or unsetting) restores the
+    /// agent in-place without losing state.
+    ///
+    /// Distinct from `Suspended=True / Reason=OverlayMode` (induced by
+    /// `spec.upstreamCompatibility.sigsAgentSandbox=overlay`), which
+    /// signals that an upstream CR owns the Pod entirely. Spec-level
+    /// suspension is the operator-driven graceful pause; OverlayMode
+    /// is the architectural reason the controller never owns the Pod
+    /// at all. When both apply, OverlayMode wins (its reason is
+    /// stamped, no Deployment is created either way).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended: Option<bool>,
 }
 
 /// Upstream-protocol compatibility (Phase 1 scaffold extended in Phase 2 S8).
