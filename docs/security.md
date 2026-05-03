@@ -431,7 +431,7 @@ The following controls live above any individual layer — they apply to **every
 
 ### Security-audit framework
 
-Every capability-introducing PR carries `docs/security-audits/YYYY-MM-DD-<slug>.md` from the `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z path, secret + key custody, egress-surface delta, audit events emitted, failure mode (fail-closed default), negative-test coverage, vendored / 3rd-party dependency delta, two sign-offs from `docs/security-reviewers.md`. **75 docs** are present in `docs/security-audits/` as of PR #44.
+Every capability-introducing PR carries `docs/security-audits/YYYY-MM-DD-<slug>.md` from the `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z path, secret + key custody, egress-surface delta, audit events emitted, failure mode (fail-closed default), negative-test coverage, vendored / 3rd-party dependency delta, two sign-offs from named reviewers. See `docs/security-audits/` for the full archive of per-capability sign-offs.
 
 ### Conformance corpus
 
