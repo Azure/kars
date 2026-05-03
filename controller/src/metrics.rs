@@ -103,6 +103,60 @@ pub static RECONCILE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("failed to register azureclaw_controller_reconcile_total")
 });
 
+/// Total status-patch skips (idempotency cache hits) by CRD kind.
+///
+/// P2 #10: each reconcile pass diffs the desired status against the
+/// observed `.status` and skips the API patch when they match
+/// (`running_status_matches_with_extras` etc.). This counter
+/// surfaces how often that fast path fires; a sudden drop indicates
+/// a regression where every pass re-patches and the controller
+/// burns API quota.
+pub static STATUS_PATCH_SKIPS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_controller_skip_cache_hits_total",
+            "Total status-patch skips (idempotency cache hits) by CRD kind"
+        ),
+        &["crd_kind"]
+    )
+    .expect("failed to register azureclaw_controller_skip_cache_hits_total")
+});
+
+/// Increment the skip-cache counter for a CRD kind.
+pub fn record_status_patch_skip(crd_kind: &str) {
+    STATUS_PATCH_SKIPS.with_label_values(&[crd_kind]).inc();
+}
+
+/// Total condition status-flips by condition type and the new
+/// status value.
+///
+/// P2 #10: incremented inside [`crate::status::conditions::preserve_transition_time`]
+/// whenever a condition transitions (i.e. a fresh
+/// `last_transition_time` is stamped). Lets operators alert on
+/// e.g. a `Ready -> False` flap rate without parsing CR yaml.
+///
+/// Labels:
+/// - `condition_type`: e.g. `Ready` / `Progressing` / `Suspended` /
+///   `RuntimeReady` / `AuditIntegrity`.
+/// - `new_status`: `True` / `False` / `Unknown`.
+pub static CONDITION_TRANSITIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_controller_conditions_transitions_total",
+            "Total condition status-flips by condition type and new status value"
+        ),
+        &["condition_type", "new_status"]
+    )
+    .expect("failed to register azureclaw_controller_conditions_transitions_total")
+});
+
+/// Increment the condition-transition counter.
+pub fn record_condition_transition(condition_type: &str, new_status: &str) {
+    CONDITION_TRANSITIONS
+        .with_label_values(&[condition_type, new_status])
+        .inc();
+}
+
 /// Wraps a reconcile future, recording its duration + outcome on
 /// completion. Generic over the `Result` so each reconciler keeps
 /// its own `ReconcileError` type; we only need `is_ok()`.
@@ -256,5 +310,56 @@ mod tests {
         assert!(rendered.contains("azureclaw_controller_reconcile_duration_seconds"));
         assert!(rendered.contains("azureclaw_controller_reconcile_total"));
         assert!(rendered.contains("RenderDurKind"));
+    }
+
+    #[test]
+    fn record_status_patch_skip_increments_counter() {
+        let before = STATUS_PATCH_SKIPS.with_label_values(&["SkipKind"]).get();
+        record_status_patch_skip("SkipKind");
+        record_status_patch_skip("SkipKind");
+        assert_eq!(
+            STATUS_PATCH_SKIPS.with_label_values(&["SkipKind"]).get(),
+            before + 2
+        );
+    }
+
+    #[test]
+    fn record_condition_transition_uses_independent_label_pairs() {
+        let before_true = CONDITION_TRANSITIONS
+            .with_label_values(&["FlapKind", "True"])
+            .get();
+        let before_false = CONDITION_TRANSITIONS
+            .with_label_values(&["FlapKind", "False"])
+            .get();
+        record_condition_transition("FlapKind", "True");
+        record_condition_transition("FlapKind", "False");
+        record_condition_transition("FlapKind", "False");
+        assert_eq!(
+            CONDITION_TRANSITIONS
+                .with_label_values(&["FlapKind", "True"])
+                .get(),
+            before_true + 1
+        );
+        assert_eq!(
+            CONDITION_TRANSITIONS
+                .with_label_values(&["FlapKind", "False"])
+                .get(),
+            before_false + 2
+        );
+    }
+
+    #[test]
+    fn skip_and_transition_metrics_render_in_text_format() {
+        record_status_patch_skip("RenderSkipKind");
+        record_condition_transition("RenderTransKind", "True");
+        let mut buf = Vec::new();
+        let encoder = prometheus::TextEncoder::new();
+        let families = prometheus::gather();
+        prometheus::Encoder::encode(&encoder, &families, &mut buf).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(rendered.contains("azureclaw_controller_skip_cache_hits_total"));
+        assert!(rendered.contains("azureclaw_controller_conditions_transitions_total"));
+        assert!(rendered.contains("RenderSkipKind"));
+        assert!(rendered.contains("RenderTransKind"));
     }
 }
