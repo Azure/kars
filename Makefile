@@ -48,7 +48,57 @@ fmt: ## Format code
 
 # ─── Container Images ────────────────────────────────────────────────────────
 
-images: image-controller image-router image-sandbox image-relay image-registry ## Build all container images
+images: image-controller image-router image-sandbox image-relay image-registry image-runtimes ## Build all container images
+
+image-runtimes: image-runtime-anthropic image-runtime-langgraph image-runtime-maf-python image-runtime-openai-agents image-runtime-pydantic-ai ## Build all runtime adapter images
+
+image-runtime-anthropic: ## Build Anthropic Claude Agent SDK runtime image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-runtime-anthropic:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-runtime-anthropic:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/anthropic/Dockerfile .
+
+image-runtime-langgraph: ## Build LangGraph (Python) runtime image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-runtime-langgraph:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-runtime-langgraph:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/langgraph/Dockerfile .
+
+image-runtime-langgraph-ts: ## Build LangGraph (TypeScript) runtime image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-runtime-langgraph-ts:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-runtime-langgraph-ts:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/langgraph-ts/Dockerfile .
+
+image-runtime-maf-python: ## Build Microsoft Agent Framework (Python) runtime image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-runtime-maf-python:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-runtime-maf-python:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/maf-python/Dockerfile .
+
+image-runtime-openai-agents: ## Build OpenAI Agents SDK runtime image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-runtime-openai-agents:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-runtime-openai-agents:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/openai-agents/Dockerfile .
+
+image-runtime-pydantic-ai: ## Build Pydantic-AI runtime image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/azureclaw-runtime-pydantic-ai:$(IMAGE_TAG) \
+		-t $(REGISTRY)/azureclaw-runtime-pydantic-ai:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/pydantic-ai/Dockerfile .
 
 image-controller: ## Build controller Docker image
 	docker build --platform linux/amd64 \
@@ -93,7 +143,7 @@ image-registry: ## Build AgentMesh registry image
 		-t $(REGISTRY)/agentmesh-registry:latest \
 		-f vendor/agentmesh-registry/Dockerfile vendor/agentmesh-registry
 
-push: ## Push all images to ACR
+push: ## Push all images to ACR (controller + router + sandbox-base + sandbox + relay + registry + runtimes)
 	docker push $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG)
 	docker push $(REGISTRY)/azureclaw-controller:latest
 	docker push $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG)
@@ -106,6 +156,18 @@ push: ## Push all images to ACR
 	docker push $(REGISTRY)/agentmesh-relay:latest
 	docker push $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG)
 	docker push $(REGISTRY)/agentmesh-registry:latest
+
+push-runtimes: ## Push all runtime adapter images to ACR
+	docker push $(REGISTRY)/azureclaw-runtime-anthropic:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-runtime-anthropic:latest
+	docker push $(REGISTRY)/azureclaw-runtime-langgraph:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-runtime-langgraph:latest
+	docker push $(REGISTRY)/azureclaw-runtime-maf-python:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-runtime-maf-python:latest
+	docker push $(REGISTRY)/azureclaw-runtime-openai-agents:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-runtime-openai-agents:latest
+	docker push $(REGISTRY)/azureclaw-runtime-pydantic-ai:$(IMAGE_TAG)
+	docker push $(REGISTRY)/azureclaw-runtime-pydantic-ai:latest
 
 apply: ## Apply Helm chart to AKS (fast upgrade)
 	azureclaw up --upgrade
