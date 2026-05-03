@@ -2011,6 +2011,102 @@ EOF
         kubectl delete trustgraph e2e-trustgraph-empty --wait=false >/dev/null 2>&1 || true
     fi
 
+    # Phase F2b: per-sandbox projection mount
+    # Create a sandbox whose name matches the outbound-edge `from`
+    # (alpha→beta in the fixture above). The controller must publish
+    # a per-sandbox ConfigMap containing only outbound edges.
+    cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "alpha sandbox apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: alpha-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: alpha
+spec:
+  appliesTo:
+    sandboxName: alpha
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: alpha
+  namespace: azureclaw-system
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: alpha-inference
+EOF
+
+    # Wait for the per-sandbox projection ConfigMap to appear (controller
+    # writes it during the same reconcile that creates the Deployment).
+    if wait_for_resource configmap alpha-trustgraph-projection azureclaw-alpha 60; then
+        pass "F2b: per-sandbox projection ConfigMap created"
+    else
+        kubectl get configmaps -n azureclaw-alpha 2>&1 | tail -10 || true
+        kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=50 2>&1 | grep -i trustgraph || true
+        fail "F2b: per-sandbox projection ConfigMap not created"
+    fi
+
+    # Slice must contain the outbound edge alpha→beta (score 750).
+    local slice
+    slice=$(kubectl get configmap alpha-trustgraph-projection -n azureclaw-alpha \
+        -o jsonpath='{.data.graph\.json}' 2>/dev/null || echo "")
+    if echo "$slice" | grep -q '"score": 750'; then
+        pass "F2b: slice contains outbound alpha→beta edge"
+    else
+        warn "Slice: $(echo "$slice" | head -c 500)"
+        fail "F2b: slice missing outbound edge"
+    fi
+    if echo "$slice" | grep -q '"from": "alpha"'; then
+        pass "F2b: slice from-field is alpha (sandbox identity)"
+    else
+        fail "F2b: slice from-field mismatch"
+    fi
+
+    # Sandbox alpha is not the `to` of any edge in the fixture — the
+    # filtered slice must NOT include the rejected (score=999) edge.
+    if echo "$slice" | grep -q '"score": 999'; then
+        fail "F2b: slice leaked rejected edge"
+    else
+        pass "F2b: slice excludes invalid edges (defence in depth)"
+    fi
+
+    # Deployment must mount the projection ConfigMap into inference-router
+    # at TRUSTGRAPH_PROJECTION_PATH so the F2a loader picks it up.
+    local env_path
+    env_path=$(kubectl get deploy alpha -n azureclaw-alpha \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="inference-router")].env[?(@.name=="TRUSTGRAPH_PROJECTION_PATH")].value}' 2>/dev/null || echo "")
+    if [ "$env_path" = "/etc/azureclaw/trustgraph/graph.json" ]; then
+        pass "F2b: TRUSTGRAPH_PROJECTION_PATH env var injected on inference-router"
+    else
+        kubectl get deploy alpha -n azureclaw-alpha -o yaml 2>&1 | grep -A2 -B2 -i trustgraph || true
+        fail "F2b: TRUSTGRAPH_PROJECTION_PATH env var not injected ('$env_path')"
+    fi
+
+    local mount_path
+    mount_path=$(kubectl get deploy alpha -n azureclaw-alpha \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="inference-router")].volumeMounts[?(@.name=="trustgraph-projection")].mountPath}' 2>/dev/null || echo "")
+    if [ "$mount_path" = "/etc/azureclaw/trustgraph" ]; then
+        pass "F2b: trustgraph-projection volume mounted at /etc/azureclaw/trustgraph"
+    else
+        fail "F2b: volume mount missing ('$mount_path')"
+    fi
+
+    # Cleanup the F2b sandbox (idempotent — failures don't fail the test).
+    kubectl delete clawsandbox alpha -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete inferencepolicy alpha-inference -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+
     # Finalizer cleans up projection on CR delete.
     kubectl delete trustgraph e2e-trustgraph --wait=true --timeout=30s >/dev/null 2>&1 || true
     if kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system >/dev/null 2>&1; then
