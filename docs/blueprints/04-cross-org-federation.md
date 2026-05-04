@@ -163,7 +163,7 @@ azureclaw mesh peer add \
 
 ## A2A gateway — cross-org public A2A path
 
-The AgentMesh relay handles authenticated cross-org traffic between AzureClaw clusters. For interoperability with non-AzureClaw agents that speak only **A2A 1.2 HTTP**, Phase 2 ships the `azureclaw-a2a-gateway` — a Rust axum binary with distroless static image that sits in front of your sandboxes.
+The AgentMesh relay handles authenticated cross-org traffic between AzureClaw clusters. For interoperability with non-AzureClaw agents that speak only **A2A 1.2 HTTP**, the `azureclaw-a2a-gateway` is a Rust axum binary (distroless static image) that sits in front of your sandboxes.
 
 ### Architecture
 

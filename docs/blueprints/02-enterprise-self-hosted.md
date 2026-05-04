@@ -132,7 +132,7 @@ sequenceDiagram
 
 ### CRDs in use
 
-Blueprint 02 uses the full Phase 2 CRD stack. Apply these in the sandbox namespace (`azureclaw-<name>`) before creating the `ClawSandbox`:
+Blueprint 02 uses the full v1.0 CRD stack. Apply these in the sandbox namespace (`azureclaw-<name>`) before creating the `ClawSandbox`:
 
 | CRD | Role in this blueprint |
 |---|---|
@@ -147,13 +147,16 @@ Blueprint 02 uses the full Phase 2 CRD stack. Apply these in the sandbox namespa
 
 Enterprise teams often have existing agent code in Python or .NET. `spec.runtime.kind` selects the adapter without changing the router, governance, or audit chain:
 
-| `kind` | Use case | Tier |
+| `kind` | Use case | Status |
 |---|---|---|
-| `OpenClaw` | Default. AzureClaw plugin + OpenClaw framework. | Tier-1 |
-| `OpenAIAgents` | Python teams using the OpenAI Agents SDK. Bring OCI image or git URL. | Tier-1 |
-| `MicrosoftAgentFramework` | Python or .NET teams on the Microsoft Agent Framework. | Tier-1 |
-| `SemanticKernel`, `LangGraph`, `Anthropic` | Schema shipped; adapters landing in a future phase (`RuntimeReady=False/AdapterMissing` until then). | Tier-2 |
-| `BYO` | Any container declaring the `org.azureclaw.runtime.contract` OCI label. | Tier-1 |
+| `OpenClaw` | Default. AzureClaw plugin + OpenClaw framework. | ✅ |
+| `OpenAIAgents` | Python teams on the OpenAI Agents SDK. | ✅ |
+| `MicrosoftAgentFramework` | Microsoft Agent Framework (Python). `.NET` is `ShapeInvalid` until the .NET AgentMesh SDK ships. | ✅ Python |
+| `LangGraph` | LangChain's stateful agent framework — Python or TypeScript via `language`. | ✅ |
+| `Anthropic` | Claude Agent SDK. | ✅ |
+| `PydanticAi` | Pydantic-AI (provider-agnostic). | ✅ |
+| `SemanticKernel` | Reserved in the CRD enum; adapter image not yet built — emits `AdapterMissing`. | 🚧 |
+| `BYO` | Any container that satisfies the [BYO contract](../runtimes.md#the-contract-your-image-must-satisfy). | ✅ |
 
 ```yaml
 # Example: enterprise team migrating from Python OpenAI Agents SDK
@@ -182,7 +185,7 @@ spec:
         oci:
           image: myacr.azurecr.io/research-agent:latest
   inferenceRef:
-    name: research-bot-policy   # ref form (S13); never inline
+    name: research-bot-policy   # InferencePolicy ref (inline model config was removed)
   governance:
     enabled: true
     toolPolicyRef:
@@ -286,7 +289,7 @@ azureclaw trace research-bot --network
 
 ## Operator polish
 
-The Phase 2 controller ships production-grade operator hygiene relevant to enterprise deployments:
+The v1.0 controller ships production-grade operator hygiene relevant to enterprise deployments:
 
 - **Leader election.** The controller Deployment runs two replicas (`replicas: 2`) with a `coordination.k8s.io/v1` Lease (`azureclaw-leader-election`). Exactly one pod reconciles at a time; leadership loss triggers a pod restart and immediate re-election. Opt out with `LEADER_ELECTION_ENABLED=false` for single-replica dev clusters.
 - **Jittered requeue.** Every error-requeue duration carries ±20% multiplicative jitter (module `controller::backoff`). This prevents thundering-herd API-server bursts when many CRs fail simultaneously (e.g., after a Foundry outage).

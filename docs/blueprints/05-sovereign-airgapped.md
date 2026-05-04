@@ -9,7 +9,7 @@
 - **You are:** a defence, intelligence, regulator, financial-services, or sovereign-cloud operator. Or an enterprise that has chosen to self-host LLMs.
 - **You want:** AzureClaw's threat model, but with the model running on private hardware (e.g. Foundry-Edge, vLLM, llama.cpp, ONNX Runtime, an on-prem Triton) and zero traffic crossing the network island.
 - **You do not want:** any default outbound destination — every domain in the blocklist, the Foundry SDK, Application Insights, and the audit sink — to be assumed reachable.
-- **Runtime:** choose `spec.runtime.kind: OpenClaw` (default, Tier-1) for zero agent-code changes, or `BYO` for a custom container image that declares the `org.azureclaw.runtime.contract` OCI label. Python teams using the OpenAI Agents SDK or Microsoft Agent Framework can set `OpenAIAgents` or `MicrosoftAgentFramework` (Tier-1) — the same isolation and governance apply. Tier-2 runtimes (`SemanticKernel`, `LangGraph`, `Anthropic`) carry `RuntimeReady=False/AdapterMissing` until adapters ship.
+- **Runtime:** choose `spec.runtime.kind: OpenClaw` (default) for zero agent-code changes, or `BYO` for a custom container that satisfies the [BYO contract](../runtimes.md#the-contract-your-image-must-satisfy). Python teams using the OpenAI Agents SDK, Microsoft Agent Framework (Python), LangGraph (Python or TypeScript), Anthropic Claude SDK, or Pydantic-AI can use the matching first-class adapter — same isolation and governance apply. `SemanticKernel` is reserved in the CRD enum but the adapter image is not yet built (emits `AdapterMissing`).
 
 ## Topology
 
@@ -119,7 +119,7 @@ All eight CRDs work offline. The runtime adapter and model connection are config
 
 | CRD | Air-gap role |
 |---|---|
-| `InferencePolicy` | Token budget (daily/monthly) + content safety against the local model. Referenced by `ClawSandbox.spec.inferenceRef.name` (S13 ref form; omitting it → `Degraded/InferencePolicyNotFound`). |
+| `InferencePolicy` | Token budget (daily/monthly) + content safety against the local model. Referenced by `ClawSandbox.spec.inferenceRef.name` (omitting it → `Degraded/InferencePolicyNotFound`). |
 | `ToolPolicy` | Per-tool rate limits and spend caps for local tool servers (e.g., code search over cluster-local MCP). |
 | `McpServer` | Declare cluster-local private MCP servers. No OAuth unless you run an on-prem IdP. |
 | `ClawMemory` | Bind to an on-prem Foundry-Edge or compatible memory-store endpoint. |
@@ -147,7 +147,7 @@ spec:
   runtime:
     kind: OpenClaw               # or BYO if you supply your own container
   inferenceRef:
-    name: analyst-policy         # S13 ref form; required
+    name: analyst-policy         # InferencePolicy ref
   networkPolicy:
     allowlistRef:                # signed OCI artifact bundled offline (see below)
       registry: private-registry.local
