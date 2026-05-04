@@ -3,7 +3,7 @@
 This walkthrough covers the **sign-by-default** + **`--emit-manifest`**
 GitOps workflow shipped in slice S12.g (the close-out for S12). It
 assumes you have already followed
-[`docs/policy-canonical-format.md`](../policy-canonical-format.md) for
+[`docs/internal/policy-canonical-format.md`](../policy-canonical-format.md) for
 the v1 canonical egress allowlist format and that your cluster has a
 `SignerPolicy` ConfigMap installed (S12.d).
 
@@ -195,4 +195,4 @@ flow needed in CI.
 `azureclaw migrate from-kagent` now emits a one-line "Next step" hint
 when the translated bundle includes an egress allowlist, pointing
 operators directly at the GitOps `--emit-manifest` flow. See
-[`docs/policy-canonical-format.md`](../policy-canonical-format.md).
+[`docs/internal/policy-canonical-format.md`](../policy-canonical-format.md).

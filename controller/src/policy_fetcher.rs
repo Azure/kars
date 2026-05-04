@@ -8,7 +8,7 @@
 //! [`crate::crd::OciArtifactRef`], verifies the cosign signature against a
 //! cluster [`SignerPolicyConfig`] (Fulcio issuer + SAN patterns), and
 //! re-validates the byte-stable canonical-form rules from
-//! `docs/policy-canonical-format.md`.
+//! `docs/internal/policy-canonical-format.md`.
 //!
 //! ## Authoritative mode (S12.e)
 //!
@@ -272,7 +272,7 @@ fn cache_clear() {
 // the LKG so the first post-restart reconcile of a verify-failing
 // sandbox fails closed (no broad egress) instead of carrying a stale
 // allowlist across operator-visible controller events. See audit doc
-// `docs/security-audits/2026-04-30-phase2-s12-e-authoritative.md`.
+// `docs/internal/security-audits/2026-04-30-phase2-s12-e-authoritative.md`.
 
 /// Per-sandbox state remembered across reconciles to support
 /// fail-closed degradation and drift-cleared debouncing.
@@ -757,7 +757,7 @@ pub mod canonical {
     //! Canonical YAML parser for
     //! `application/vnd.azureclaw.egress-allowlist.v1+yaml`.
     //!
-    //! Implements the byte-stable rules in `docs/policy-canonical-format.md`.
+    //! Implements the byte-stable rules in `docs/internal/policy-canonical-format.md`.
     //! Invoked **after** cosign signature verification — re-validates that
     //! the bytes are canonical (sorted, IDNA-normalized, deduplicated,
     //! generation present). Any deviation returns

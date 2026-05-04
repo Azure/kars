@@ -435,8 +435,8 @@ sandbox has no inbound A2A path.
 ## 8. AgentMesh Integration
 
 Inter-agent messaging uses the AgentMesh relay/registry (Signal Protocol, E2E
-encrypted). See [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) and
-[`docs/agt-vendored-patch-audit.md`](agt-vendored-patch-audit.md) for
+encrypted). See [`docs/internal/e2e-encryption-proof.md`](e2e-encryption-proof.md) and
+[`docs/internal/agt-vendored-patch-audit.md`](agt-vendored-patch-audit.md) for
 cryptographic details.
 
 ### Vendored patches
@@ -507,7 +507,7 @@ label is present.
 ## 10. Security Posture
 
 AzureClaw uses a defence-in-depth model with nine distinct enforcement layers.
-Full documentation: [`docs/security.md`](security.md), [`docs/threat-model.md`](threat-model.md).
+Full documentation: [`docs/security.md`](security.md), [`docs/internal/threat-model.md`](threat-model.md).
 
 | Layer | Mechanism | What it stops |
 |-------|-----------|--------------|

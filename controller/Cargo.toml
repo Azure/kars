@@ -55,7 +55,7 @@ axum = "0.8"
 
 # Sigstore cosign verification + OCI fetch (S12.b: signed egress allowlist artifacts).
 # Status-only fetcher; actual NetworkPolicy still derives from inline allowedEndpoints.
-# See `controller/src/policy_fetcher.rs` and `docs/policy-canonical-format.md`.
+# See `controller/src/policy_fetcher.rs` and `docs/internal/policy-canonical-format.md`.
 sigstore = { version = "0.13", default-features = false, features = ["cosign", "verify", "rustls-tls"] }
 oci-client = { version = "0.16", default-features = false, features = ["rustls-tls"] }
 # Explicit dep so we can install a process-level CryptoProvider at

@@ -534,7 +534,7 @@ spec:
                         of truth for NetworkPolicy egress; on verify
                         failure the controller fails closed (last-known
                         good cache fallback, then no-broad-egress).
-                        See docs/policy-canonical-format.md.
+                        See docs/internal/policy-canonical-format.md.
                       required:
                         - registry
                         - repository
@@ -553,7 +553,7 @@ spec:
                           description: |
                             Content-addressed digest including algorithm
                             prefix. Covers the canonical artifact bytes
-                            per docs/policy-canonical-format.md.
+                            per docs/internal/policy-canonical-format.md.
                         artifactType:
                           type: string
                           description: |

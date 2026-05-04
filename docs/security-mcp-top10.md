@@ -95,7 +95,7 @@ dropped patch integrity.
 **Today.** `vendor/agentmesh-sdk/`, `vendor/agentmesh-relay/`,
 `vendor/agentmesh-registry/` each carry a `README.md` enumerating the
 vendored fork. `ci/vendored-patch-audit.sh` forces a
-re-confirmation row in `docs/agt-vendored-patch-audit.md` on every
+re-confirmation row in `docs/internal/agt-vendored-patch-audit.md` on every
 AGT SDK version bump — patches that become upstream-absorbed are
 documented as such rather than silently dropped.
 
@@ -209,6 +209,6 @@ confusion attacks fail closed.
 
 * `docs/security.md` — the live security posture (§9 layers, syscall
   counts, component names).
-* `docs/threat-model.md` — STRIDE per surface.
-* `docs/security-audits/` — per-capability audit docs.
+* `docs/internal/threat-model.md` — STRIDE per surface.
+* `docs/internal/security-audits/` — per-capability audit docs.
 * Internal Phase 1 plan §§0.2, 7 — principles and Phase 1 scope.

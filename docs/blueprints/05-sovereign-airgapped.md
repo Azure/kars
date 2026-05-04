@@ -279,5 +279,5 @@ bundle.tar.gz
 - `controller/src/policy_fetcher.rs` (allowlist fetch + offline KMS verify)
 - `Makefile` `bundle` target (🚧 to be added)
 - `docs/api/crd-reference.md` (all 8 CRDs; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
-- `docs/policy-canonical-format.md` (signed OCI egress allowlist format + signing modes)
+- `docs/internal/policy-canonical-format.md` (signed OCI egress allowlist format + signing modes)
 - `docs/security.md` § "Air-gapped operating mode"

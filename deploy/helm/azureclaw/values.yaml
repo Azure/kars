@@ -218,7 +218,7 @@ azure:
   # anonymous tier. This avoids a ~123-second startup timeout on clusters
   # where the `api://agentmesh` Entra app registration is not provisioned.
   # Flip to `enabled: true` once Entra Agent ID provisioning has been
-  # completed end-to-end (see docs/security-audits/2026-04-26-entra-auth-toggle.md).
+  # completed end-to-end (see docs/internal/security-audits/2026-04-26-entra-auth-toggle.md).
   entraAuth:
     enabled: false
 
@@ -233,7 +233,7 @@ cilium:
 #
 # Watched by the controller (filtered to the `azureclaw-signer-policy`
 # ConfigMap in this namespace). Defines who is permitted to sign egress
-# allowlist OCI artifacts (see `docs/policy-canonical-format.md`).
+# allowlist OCI artifacts (see `docs/internal/policy-canonical-format.md`).
 #
 # Both lists are required when `enabled: true`. Either list empty → the
 # controller surfaces `SignerPolicyMalformed` on affected ClawSandbox

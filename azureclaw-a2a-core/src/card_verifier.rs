@@ -50,7 +50,7 @@
 //!
 //! ## Threat model
 //!
-//! See `docs/security-audits/2026-04-25-phase1-a2a-card-verifier.md`.
+//! See `docs/internal/security-audits/2026-04-25-phase1-a2a-card-verifier.md`.
 
 use std::collections::HashMap;
 use std::time::SystemTime;

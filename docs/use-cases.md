@@ -7,11 +7,11 @@ Six fully-shipped use cases covering every deployment pattern from laptop inner-
 | # | Scenario | Where the user runs | Network shape | Status | Reference |
 |---|---|---|---|---|---|
 | 1 | **AzureClaw-native agents (OpenClaw)** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
-| 2 | **Any-OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
-| 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
+| 2 | **Any-OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/internal/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
+| 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/internal/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
 | 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (Tier-1: OpenClaw, OpenAIAgents, MAF, BYO) | [`docs/api/crd-reference.md#spec.runtime`](api/crd-reference.md) |
 | 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
-| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → AzureClaw cluster | Translate + apply | ✅ Shipping | [`docs/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
+| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → AzureClaw cluster | Translate + apply | ✅ Shipping | [`docs/internal/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
 
 All use cases share the same trust boundary:
 
@@ -168,7 +168,7 @@ spec:
 
 ### What the operator wants
 
-The defining property of this scenario is that **the plugin user does not install AzureClaw**. They install the `azureclaw-mesh` plugin into their existing OpenClaw host. An AzureClaw operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. See [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) for the full walkthrough.
+The defining property of this scenario is that **the plugin user does not install AzureClaw**. They install the `azureclaw-mesh` plugin into their existing OpenClaw host. An AzureClaw operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. See [`docs/internal/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) for the full walkthrough.
 
 ### Topology
 
@@ -267,10 +267,10 @@ spec:
 | Resource | Reference |
 |---|---|
 | Blueprint | [Blueprint 03 — Managed public offload](blueprints/03-managed-public-offload.md) |
-| Full walkthrough | [`docs/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
+| Full walkthrough | [`docs/internal/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
 | CLI commands | [`azureclaw mesh`](cli-reference.md#azureclaw-mesh), [`azureclaw pair`](cli-reference.md#azureclaw-pair) |
 | CRD fields | [`ClawPairing`](api/crd-reference.md#clawpairing), [`spec.governance`](api/crd-reference.md#spec-fields--specgovernance) |
-| E2E proof | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
+| E2E proof | [`docs/internal/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
 
 ---
 
@@ -383,7 +383,7 @@ spec:
 | Blueprint | [Blueprint 04 — Cross-org federation](blueprints/04-cross-org-federation.md) |
 | CLI commands | [`azureclaw mesh`](cli-reference.md#azureclaw-mesh), [`azureclaw pair`](cli-reference.md#azureclaw-pair), [`azureclaw up --expose-registry`](cli-reference.md#azureclaw-up) |
 | CRD fields | [`ClawPairing`](api/crd-reference.md#clawpairing), [`spec.governance.registryMode`](api/crd-reference.md#spec-fields--specgovernance) |
-| E2E proof | [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
+| E2E proof | [`docs/internal/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
 | ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
 
 ---
@@ -739,7 +739,7 @@ spec:
 
 ### What the operator wants
 
-A translator that converts existing agent manifests into AzureClaw resource bundles, with explicit warnings for lossy fields and a dry-run path. See [`docs/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) for the full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`).
+A translator that converts existing agent manifests into AzureClaw resource bundles, with explicit warnings for lossy fields and a dry-run path. See [`docs/internal/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) for the full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`).
 
 ### Topology — migration flow
 
@@ -871,7 +871,7 @@ All dropped fields default to `disabled` (dev-only label applied automatically) 
 
 | Resource | Reference |
 |---|---|
-| Compat design | [`docs/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
+| Compat design | [`docs/internal/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
 | CLI commands | [`azureclaw migrate from-kagent`](cli-reference.md#azureclaw-migrate), [`azureclaw migrate to-overlay`](cli-reference.md#azureclaw-migrate), [`azureclaw convert`](cli-reference.md#azureclaw-convert) |
 | CRD fields | [`spec.upstreamCompatibility`](api/crd-reference.md#spec-fields--specupstreamcompatibility) |
 | Blueprint | [Blueprint 02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md) |

@@ -141,7 +141,7 @@ Full instructions, prerequisites, and the **Path A (local Docker)** vs **Path B 
 `sandbox-base` image is built only when `--include-base` is passed. A separate
 `sandbox-images/nemoclaw/` image exists for any-OpenClaw-host clients (laptop,
 NemoClaw, etc.) that want to offload to AzureClaw — see
-[`docs/any-openclaw-cloud-offload.md`](docs/any-openclaw-cloud-offload.md).
+[`docs/internal/any-openclaw-cloud-offload.md`](docs/internal/any-openclaw-cloud-offload.md).
 
 All images build on Azure Linux 3 (`mcr.microsoft.com/azurelinux/base/core:3.0`).
 
@@ -241,7 +241,7 @@ What is *not* in the box for v1.0 (some of these are tracked as `[GAP-V1]` in so
 
 ## AgentMesh & vendoring (transitional)
 
-Inter-agent messaging today runs on a vendored fork of [AgentMesh](https://github.com/amitayks/agentmesh) (relay + registry + SDK). AgentMesh is pre-release; while integrating it we contributed bug fixes and protocol corrections that are tracked in this tree until they land upstream. Each fix is documented in `vendor/<component>/README.md`, and an index lives at [`docs/agt-vendored-patch-audit.md`](docs/agt-vendored-patch-audit.md).
+Inter-agent messaging today runs on a vendored fork of [AgentMesh](https://github.com/amitayks/agentmesh) (relay + registry + SDK). AgentMesh is pre-release; while integrating it we contributed bug fixes and protocol corrections that are tracked in this tree until they land upstream. Each fix is documented in `vendor/<component>/README.md`, and an index lives at [`docs/internal/agt-vendored-patch-audit.md`](docs/internal/agt-vendored-patch-audit.md).
 
 **Direction of travel:** Microsoft's Agent Governance Toolkit (AGT) is shipping a first-party AgentMesh transport. Once it stabilises, AzureClaw's `MeshProvider` seam (defined plugin-side; the router has no in-tree mesh implementation) will allow operators to switch to the AGT mesh per-tenant without breaking existing deployments. Until then, the vendored stack is the supported production path.
 
@@ -252,12 +252,12 @@ Inter-agent messaging today runs on a vendored fork of [AgentMesh](https://githu
 We treat security and code health as product-grade concerns:
 
 - **Six blocking CI gates** — LOC budget, anti-stub (no `TODO`/`unimplemented!` on production paths), no custom crypto outside provider seams, no `Null*` providers in production, mandatory security-audit document per capability-introducing PR, vendored-patch re-audit on every AGT SDK bump.
-- **Per-capability security audits** — every PR that introduces a new CRD, router route, admission policy, or sandbox-image change ships a `docs/security-audits/<date>-<slug>.md` with threat-model delta, OWASP mapping, AuthN/Z path, secret custody, audit events, failure mode, and two engineer sign-offs.
+- **Per-capability security audits** — every PR that introduces a new CRD, router route, admission policy, or sandbox-image change ships a `docs/internal/security-audits/<date>-<slug>.md` with threat-model delta, OWASP mapping, AuthN/Z path, secret custody, audit events, failure mode, and two engineer sign-offs.
 - **Behavioral conformance corpus** — `tests/conformance/` covers Signal Protocol (X3DH / KNOCK / negative cases), sandbox isolation, and the protocol scaffolding above with mandatory negative tests (tampered ciphertext, replayed message, expired mandate).
 - **Compat suite** — `tests/compat/` regression-tests user-visible flows (today: the operator TUI; growing per phase).
 - **Fuzz targets** — cargo-fuzz coverage for handoff state deserialization, chat sanitisation, JWS parsing, base64url decoding, streaming response parsing.
 
-A complete inventory of these controls is in [`docs/architecture.md`](docs/architecture.md) and the per-slice security audits under [`docs/security-audits/`](docs/security-audits/).
+A complete inventory of these controls is in [`docs/architecture.md`](docs/architecture.md) and the per-slice security audits under [`docs/internal/security-audits/`](docs/internal/security-audits/).
 
 ---
 
@@ -518,18 +518,18 @@ See [docs/channels-plugins.md](docs/channels-plugins.md) for setup and details.
 | [Runtime Contract](docs/runtime-contract.md) | The `org.azureclaw.runtime.contract=v1` BYO contract — what any custom runtime image must satisfy |
 | [Blueprints](docs/blueprints/00-index.md) | Five deployment shapes: developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped |
 | [Security](docs/security.md) | Defense-in-depth model, OWASP coverage, threat mitigations, CI gates, security-audit framework |
-| [Threat Model — Routes](docs/threat-model.md) | Per-route auth tier, input validation, blast-radius analysis |
-| [AGT Vendored-Patch Audit](docs/agt-vendored-patch-audit.md) | Index of fixes applied to the vendored AgentMesh stack pending AGT mesh shipping |
-| [`sigs/agent-sandbox` Compat](docs/sigs-agent-sandbox-compat.md) | Native / Translate / Overlay modes; `azureclaw convert` and `azureclaw migrate` |
+| [Threat Model — Routes](docs/internal/threat-model.md) | Per-route auth tier, input validation, blast-radius analysis |
+| [AGT Vendored-Patch Audit](docs/internal/agt-vendored-patch-audit.md) | Index of fixes applied to the vendored AgentMesh stack pending AGT mesh shipping |
+| [`sigs/agent-sandbox` Compat](docs/internal/sigs-agent-sandbox-compat.md) | Native / Translate / Overlay modes; `azureclaw convert` and `azureclaw migrate` |
 | [OWASP MCP Top 10 (2025)](docs/security-mcp-top10.md) | Controls matrix for the MCP 2026 surface |
 | [ADR-0001 — A2A ingress front-edge](docs/adr/0001-a2a-ingress-front-edge.md) | Gateway-only, surgical opt-in posture for inbound A2A |
 | [Channels & Plugins](docs/channels-plugins.md) | Telegram, Slack, Discord, search plugins, Foundry Bing |
 | [Egress Proxy](docs/egress-proxy.md) | Blocklist, allowlist, learn mode, approval flow, signed-OCI allowlist refs |
-| [E2E Encryption](docs/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
+| [E2E Encryption](docs/internal/e2e-encryption-proof.md) | Signal Protocol inter-agent encryption proof |
 | [Multi-Tenant](docs/multi-tenant.md) | Namespace isolation, credential and channel separation |
 | [Security Validation](docs/security-validation.md) | Live cluster evidence for every security layer |
 | [Permissions](docs/permissions.md) | Required Azure RBAC for `azureclaw up` |
-| [Demo](docs/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
+| [Demo](docs/internal/DEMO.md) | "Operation Claw Shield" — multi-tenant attack simulation |
 
 ---
 
@@ -559,7 +559,7 @@ azureclaw/
 └── vendor/               # AgentMesh SDK (21 patches), registry (4), relay (transitional fixes)
 ```
 
-> **About `vendor/`:** AzureClaw is *not* a fork of OpenClaw. The `vendor/` directory only carries our patched copies of the pre-release AgentMesh stack (relay, registry, SDK) — see *AgentMesh & vendoring* above. Each patch is documented in `vendor/<component>/README.md`, indexed in [`docs/agt-vendored-patch-audit.md`](docs/agt-vendored-patch-audit.md), and re-validated on every AGT SDK version bump.
+> **About `vendor/`:** AzureClaw is *not* a fork of OpenClaw. The `vendor/` directory only carries our patched copies of the pre-release AgentMesh stack (relay, registry, SDK) — see *AgentMesh & vendoring* above. Each patch is documented in `vendor/<component>/README.md`, indexed in [`docs/internal/agt-vendored-patch-audit.md`](docs/internal/agt-vendored-patch-audit.md), and re-validated on every AGT SDK version bump.
 
 ---
 
