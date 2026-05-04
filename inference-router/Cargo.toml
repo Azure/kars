@@ -12,8 +12,6 @@ rust-version.workspace = true
 axum.workspace = true
 reqwest.workspace = true
 tower.workspace = true
-tower-http.workspace = true
-hyper.workspace = true
 bytes = "1"
 
 # Async
