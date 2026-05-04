@@ -9,7 +9,7 @@ For capabilities overview see [README.md §capabilities](../../README.md#capabil
 For controller and router architecture see [docs/architecture.md](../architecture.md).
 For the BYO runtime contract see [docs/runtime-contract.md](../runtime-contract.md).
 For security threat model see [docs/security.md](../security.md).
-For CNCF Agent Sandbox compatibility see [docs/sigs-agent-sandbox-compat.md](../sigs-agent-sandbox-compat.md).
+For CNCF Agent Sandbox compatibility see [docs/internal/sigs-agent-sandbox-compat.md](../sigs-agent-sandbox-compat.md).
 For the A2A ingress design rationale see [docs/adr/0001-a2a-ingress-front-edge.md](../adr/0001-a2a-ingress-front-edge.md).
 
 ---

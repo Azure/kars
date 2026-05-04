@@ -3,7 +3,7 @@ S12.d — SignerPolicy ConfigMap.
 
 Cluster-scoped trust roots for cosign-signed egress allowlist artifacts
 (see `controller/src/policy_fetcher.rs` and
-`docs/policy-canonical-format.md`). The controller watches this single
+`docs/internal/policy-canonical-format.md`). The controller watches this single
 ConfigMap (filtered by name + controller-namespace) and rebuilds its
 in-memory `SignerPolicy` on every Apply / Delete event.
 

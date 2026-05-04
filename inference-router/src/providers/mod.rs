@@ -46,7 +46,7 @@
 //! * `DegradedDev` (`azureclaw dev` only) — fail-open with warning label.
 //!
 //! Every new implementation of any contract below MUST land with a
-//! `docs/security-audits/YYYY-MM-DD-<slug>.md` covering the §0.2 #9 scope.
+//! `docs/internal/security-audits/YYYY-MM-DD-<slug>.md` covering the §0.2 #9 scope.
 
 // Scaffolding for Phase 1 — see internal Phase 1 plan §7. Dead-code
 // lints are silenced at the module level until call-sites land.

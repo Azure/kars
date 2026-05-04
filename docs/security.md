@@ -1,6 +1,6 @@
 # AzureClaw Security
 
-AzureClaw implements defense-in-depth: layered controls covering infrastructure (Layers 0–6), behavioural governance + protocol-layer controls (Layer 7), E2E encrypted communications (Layer 8), and engineering controls — CI gates, security-audit framework, conformance corpus, fedcred reaper — that gate every PR (Layer 9). PR #44 ships **26 vendored AgentMesh patches**, **75 security-audit docs**, **6 blocking CI gates**, **8 conformance specs**, and **5 cargo-fuzz targets**. See [`docs/threat-model.md`](threat-model.md) for the per-route auth-tier walkthrough and [`docs/security-mcp-top10.md`](security-mcp-top10.md) for the OWASP MCP Top 10 controls matrix.
+AzureClaw implements defense-in-depth: layered controls covering infrastructure (Layers 0–6), behavioural governance + protocol-layer controls (Layer 7), E2E encrypted communications (Layer 8), and engineering controls — CI gates, security-audit framework, conformance corpus, fedcred reaper — that gate every PR (Layer 9). PR #44 ships **26 vendored AgentMesh patches**, **75 security-audit docs**, **6 blocking CI gates**, **8 conformance specs**, and **5 cargo-fuzz targets**. See [`docs/internal/threat-model.md`](threat-model.md) for the per-route auth-tier walkthrough and [`docs/security-mcp-top10.md`](security-mcp-top10.md) for the OWASP MCP Top 10 controls matrix.
 
 ---
 
@@ -206,7 +206,7 @@ When `spec.governance.enabled: true`, AGT governance runs **natively inside the 
 | **Trace-id sanitization** | Inbound `X-Azureclaw-Trace-Id` rejected if it contains CRLF / ANSI / path traversal; otherwise propagated to upstream Azure calls and stamped onto every audit-chain entry. | `main.rs:~440` (`is_safe_trace_id`) |
 | **Test-only endpoint overrides — controller-set only** | `AZURE_IMDS_ENDPOINT` and `AZURE_AD_ENDPOINT` can redirect IMDS / AAD calls to test fakes. They are read once at startup from the controller-injected env; the threat model assumes anyone who can mutate the pod env has already escaped, so this is not a new attack surface. | `inference-router/src/auth.rs` |
 
-For a per-route auth-tier and blast-radius walkthrough, see [`docs/threat-model.md`](threat-model.md).
+For a per-route auth-tier and blast-radius walkthrough, see [`docs/internal/threat-model.md`](threat-model.md).
 
 **Mesh & Communication Layer** (E2E encryption via `@agentmesh/sdk`):
 
@@ -293,7 +293,7 @@ This log is the definitive proof that encryption is working end-to-end.
 With the default `AGT_TRUST_THRESHOLD=500`, all tiers pass. Raising it to `600` would require either OAuth verification or spawner affinity for anonymous agents.
 
 **Traffic capture proof:** A full hex-dump analysis of a live inter-agent exchange
-is documented in [`docs/e2e-encryption-proof.md`](e2e-encryption-proof.md), showing that
+is documented in [`docs/internal/e2e-encryption-proof.md`](e2e-encryption-proof.md), showing that
 the relay sees only encrypted payloads while endpoints see plaintext.
 
 ---
@@ -409,7 +409,7 @@ The operator-facing TypeScript CLI and the OpenClaw plugin run *outside* the san
 | **Sandbox Go toolchain** | `sandbox-images/openclaw/Dockerfile.base` | `golang:1.23-alpine` → `1.24-alpine` to pick up Go stdlib patches for the bundled CLIs. |
 | **Vendored AgentMesh `Cargo.lock` bumps** | `vendor/agentmesh-{relay,registry}/Cargo.lock` | `openssl` 0.10.76 → 0.10.78 (GHSA-hppc-g8h3-xhp3), `tokio` 1.50 → 1.52.1, `mio` 1.1.1 → 1.2.0. |
 | **Fuzz + proptest coverage** | `cargo +nightly fuzz` | Targets: handoff blob parser, blocklist domain parser, AGT policy evaluator, safety-response parser. `proptest`: handoff-chunking, Double-Ratchet state transitions, K8s name validation. |
-| **Vendored AgentMesh patch index** | `docs/agt-vendored-patch-audit.md` + `ci/vendored-patch-audit.sh` | **26 patches** (SDK 21 + relay 4 + registry 1) tracked with reasons; CI gate forces re-audit on every AGT SDK pin bump (catches "patch quietly absorbed upstream — drop ours"). |
+| **Vendored AgentMesh patch index** | `docs/internal/agt-vendored-patch-audit.md` + `ci/vendored-patch-audit.sh` | **26 patches** (SDK 21 + relay 4 + registry 1) tracked with reasons; CI gate forces re-audit on every AGT SDK pin bump (catches "patch quietly absorbed upstream — drop ours"). |
 
 ---
 
@@ -425,13 +425,13 @@ The following controls live above any individual layer — they apply to **every
 | Anti-stub | `ci/no-stubs.sh` | No `TODO/FIXME/unimplemented!/todo!/panic!("not impl")` on production paths |
 | No custom crypto | `ci/no-custom-crypto.sh` | Forbids hand-rolled crypto (`sha2::`, `hmac::`, `curve25519_dalek::`, …) outside `providers/signing.rs` + `providers/mesh.rs` (vendored path only) + `vendor/agentmesh-sdk/` |
 | No `Null*` provider in prod | `ci/no-null-provider-prod.sh` | Static + admission mirror — `provider: null/noop/disabled` requires `azureclaw.azure.com/dev-only: "true"` label |
-| Security audit required | `ci/security-audit-required.sh` | If PR touches CRDs / reconcilers / admission / router providers / MCP / A2A / CLI commands / sandbox image — requires a matching `docs/security-audits/<date>-<slug>.md` with two distinct sign-offs |
-| Vendored patch audit | `ci/vendored-patch-audit.sh` | If AGT SDK pin bumped — requires `docs/agt-vendored-patch-audit.md` re-confirmation row per patch |
+| Security audit required | `ci/security-audit-required.sh` | If PR touches CRDs / reconcilers / admission / router providers / MCP / A2A / CLI commands / sandbox image — requires a matching `docs/internal/security-audits/<date>-<slug>.md` with two distinct sign-offs |
+| Vendored patch audit | `ci/vendored-patch-audit.sh` | If AGT SDK pin bumped — requires `docs/internal/agt-vendored-patch-audit.md` re-confirmation row per patch |
 | A2A module isolation | `ci/a2a-module-isolation.sh` | Keeps the A2A 1.0.0 module surface from leaking back into `routes/` |
 
 ### Security-audit framework
 
-Every capability-introducing PR carries `docs/security-audits/YYYY-MM-DD-<slug>.md` from the `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z path, secret + key custody, egress-surface delta, audit events emitted, failure mode (fail-closed default), negative-test coverage, vendored / 3rd-party dependency delta, two sign-offs from named reviewers. See `docs/security-audits/` for the full archive of per-capability sign-offs.
+Every capability-introducing PR carries `docs/internal/security-audits/YYYY-MM-DD-<slug>.md` from the `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z path, secret + key custody, egress-surface delta, audit events emitted, failure mode (fail-closed default), negative-test coverage, vendored / 3rd-party dependency delta, two sign-offs from named reviewers. See `docs/internal/security-audits/` for the full archive of per-capability sign-offs.
 
 ### Conformance corpus
 

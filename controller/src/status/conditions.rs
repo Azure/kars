@@ -77,7 +77,7 @@ pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
 /// signed OCI artifact referenced by
 /// `spec.networkPolicy.allowlistRef`, verified its cosign signature
 /// against the cluster `SignerPolicy` (S12.d), and re-validated the
-/// canonical-form rules from `docs/policy-canonical-format.md`.
+/// canonical-form rules from `docs/internal/policy-canonical-format.md`.
 ///
 /// Emitted whenever `allowlistRef` is set on the CR. The S12.b
 /// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in S12.e —

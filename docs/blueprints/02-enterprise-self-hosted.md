@@ -309,6 +309,6 @@ The Phase 2 controller ships production-grade operator hygiene relevant to enter
 - `inference-router/src/auth.rs` (Workload Identity OIDC exchange)
 - `deploy/helm/azureclaw/values.yaml` (Helm contract)
 - `docs/api/crd-reference.md` (all 8 CRDs)
-- `docs/policy-canonical-format.md` (egress allowlist format + signing modes)
-- `docs/sigs-agent-sandbox-compat.md` (CNCF K8s AI Conformance v1.35+)
+- `docs/internal/policy-canonical-format.md` (egress allowlist format + signing modes)
+- `docs/internal/sigs-agent-sandbox-compat.md` (CNCF K8s AI Conformance v1.35+)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)

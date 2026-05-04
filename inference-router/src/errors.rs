@@ -26,7 +26,7 @@
 //! few of them to justify a builder, and making the helpers extensible
 //! would defeat the "one obvious shape per call" goal.
 //!
-//! See `docs/threat-model.md` for the list of endpoints per shape.
+//! See `docs/internal/threat-model.md` for the list of endpoints per shape.
 
 use axum::{Json, http::StatusCode};
 use serde_json::{Value, json};

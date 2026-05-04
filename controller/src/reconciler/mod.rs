@@ -1054,7 +1054,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // falling back to anonymous tier — long enough that parent→sub-agent
         // spawn-and-message workflows fail because the parent's tool-call
         // timeout fires before the sub-agent finishes booting. See
-        // docs/security-audits/2026-04-26-entra-auth-toggle.md for the full
+        // docs/internal/security-audits/2026-04-26-entra-auth-toggle.md for the full
         // analysis.
         //
         // Default is "skip" until the operator explicitly opts in by unsetting

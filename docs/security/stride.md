@@ -1,6 +1,6 @@
 # STRIDE Threat Model — AzureClaw
 
-> Companion to [`docs/threat-model.md`](../threat-model.md) (per-route inference-router model) and [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats AzureClaw mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.
+> Companion to [`docs/internal/threat-model.md`](../threat-model.md) (per-route inference-router model) and [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats AzureClaw mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.
 
 ## Trust boundaries
 

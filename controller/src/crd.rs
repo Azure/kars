@@ -763,7 +763,7 @@ pub struct NetworkPolicyConfig {
     /// inline `allowed_endpoints` is ignored (a non-empty inline that
     /// differs surfaces as `AllowlistDrift=True`).
     ///
-    /// Canonical format documented at `docs/policy-canonical-format.md`.
+    /// Canonical format documented at `docs/internal/policy-canonical-format.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowlist_ref: Option<OciArtifactRef>,
 }
@@ -807,7 +807,7 @@ pub struct OciArtifactRef {
     pub repository: String,
     /// Content-addressed digest, including the algorithm prefix
     /// (`sha256:abc…`). The digest covers the canonical artifact bytes —
-    /// see `docs/policy-canonical-format.md` for the egress-allowlist
+    /// see `docs/internal/policy-canonical-format.md` for the egress-allowlist
     /// canonicalization rules.
     pub digest: String,
     /// OCI artifactType media-type, e.g.

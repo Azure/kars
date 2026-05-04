@@ -167,7 +167,7 @@ What landed:
     hosted-runner network behaviour is too noisy).
 
 - **Docs:** `docs/operations/chaos-tier.md` (operations guide, when each
-  job runs, how to add new cases) and `docs/security-audits/2026-04-30-
+  job runs, how to add new cases) and `docs/internal/security-audits/2026-04-30-
   phase2-chaos-tier.md` (Phase-2 §15 success-gate close).
 
 Default `cargo test --all` still passes 1096 tests; `cargo test
@@ -248,7 +248,7 @@ Docs:
 - `docs/architecture/a2a-gateway.md` — data flow + threat model.
 - `docs/operations/a2a-gateway.md` — enable, cert rotation,
   rate-limit tuning, observability.
-- `docs/security-audits/2026-04-30-phase2-a2a-gateway.md` — audit
+- `docs/internal/security-audits/2026-04-30-phase2-a2a-gateway.md` — audit
   with the surveyed-existing-implementation extraction map.
 
 ### S12.g — Sign-by-default + emit-manifest GitOps mode (S12 close-out)
@@ -286,10 +286,10 @@ Docs:
   runs against the same allowlist is empty unless the digest
   changes.
 - New audit doc:
-  `docs/security-audits/2026-04-30-phase2-s12-g-gitops.md`.
+  `docs/internal/security-audits/2026-04-30-phase2-s12-g-gitops.md`.
 - New operator walkthrough: `docs/operations/gitops.md` (workflow
   diagram + GitHub Actions snippet + failure-mode table).
-- `docs/policy-canonical-format.md` Producer section updated to call
+- `docs/internal/policy-canonical-format.md` Producer section updated to call
   out sign-by-default.
 - +17 CLI unit tests (CLI total 434 → 451 passing).
 - **Migration**: operators running `--enforce` / `--approve` in CI
@@ -335,7 +335,7 @@ Docs:
   A network blip cannot collapse a working sandbox.
 - **New printer column** `Allowlist` (`priority: 1`) — surfaces the
   `AllowlistAuthoritative` status at the column level (`-o wide`).
-- New audit doc: `docs/security-audits/2026-04-30-phase2-s12-e-authoritative.md`.
+- New audit doc: `docs/internal/security-audits/2026-04-30-phase2-s12-e-authoritative.md`.
 - ~16 new resolver / LKG / drift unit tests in
   `controller/src/policy_fetcher.rs` (controller suite: 401 → 412
   passing — net +11 after dropping 5 feature-gate-specific tests
@@ -375,7 +375,7 @@ Docs:
   wiring, provider-`unknown` reason rendering, redaction. CLI test
   total: 395 → 434 (+39).
 - Docs: `docs/operator-tui.md`, security audit
-  `docs/security-audits/2026-04-30-phase2-tui-redesign.md` (closes the
+  `docs/internal/security-audits/2026-04-30-phase2-tui-redesign.md` (closes the
   §15 success-gate item "Operator TUI renders all five CRDs + provider
   status per sandbox").
 
@@ -483,7 +483,7 @@ two-doc-per-sandbox shape.
 - New `controller/src/policy_fetcher.rs` — pulls signed OCI egress-allowlist
   artifacts via `oci-client`, verifies cosign signature + signer identity via
   `sigstore-rs`, re-validates canonical-form rules from
-  `docs/policy-canonical-format.md`. Result cached by digest with 1h TTL.
+  `docs/internal/policy-canonical-format.md`. Result cached by digest with 1h TTL.
 - `AllowlistVerified` condition surfaced on `ClawSandbox` status when
   `spec.networkPolicy.allowlistRef` is set and
   `AZURECLAW_FEATURE_SIGNED_ALLOWLIST=1`. Reasons: `Verified`,
@@ -509,7 +509,7 @@ two-doc-per-sandbox shape.
 
 ### S12.c — CLI `--sign` flag (egress allowlist artifact producer)
 
-- New `cli/src/commands/egress/sign.ts` — canonical YAML serializer (matches `docs/policy-canonical-format.md` byte-for-byte), `oras push` artifact uploader, `cosign sign` orchestrator (keyless / identity-token / keyed), `kubectl patch` of `ClawSandbox.spec.networkPolicy.allowlistRef`.
+- New `cli/src/commands/egress/sign.ts` — canonical YAML serializer (matches `docs/internal/policy-canonical-format.md` byte-for-byte), `oras push` artifact uploader, `cosign sign` orchestrator (keyless / identity-token / keyed), `kubectl patch` of `ClawSandbox.spec.networkPolicy.allowlistRef`.
 - New flags on `azureclaw egress`: `--sign`, `--sign-mode <keyless|identity-token|keyed>`, `--sign-key <ref>`, `--registry`, `--repository`, `--no-sign`.
 - Status: **non-authoritative** — inline `allowedEndpoints` remains the source of truth in this slice. The controller-side fetcher (S12.b) verifies the artifact and surfaces `AllowlistVerified`. The flip to authoritative ships in S12.e.
 - Auto-mode-detection: keyless when TTY + no token; identity-token when `SIGSTORE_ID_TOKEN`/`OIDC_TOKEN` env present; keyed when `--sign-mode keyed`+`--sign-key` set.
@@ -533,7 +533,7 @@ runtime/CLI/controller behavior change yet; existing CRs round-trip unchanged.
   field. Audit-only in S12.a — no consumer reads it yet. Becomes
   status-surfaced in S12.b behind `AZURECLAW_FEATURE_SIGNED_ALLOWLIST`,
   authoritative in S12.e.
-- `docs/policy-canonical-format.md` — byte-stable canonicalization rules
+- `docs/internal/policy-canonical-format.md` — byte-stable canonicalization rules
   for the v1 egress allowlist artifact (artifactType
   `application/vnd.azureclaw.egress-allowlist.v1+yaml`). Locks down: IDNA
   2008 host normalization, explicit ports, `(host, port)` deduplication,
@@ -715,7 +715,7 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
   regexes (`security-audit-required.sh`, `no-stubs.sh`,
   `no-custom-crypto.sh`) and docs (`README.md`,
   `docs/blueprints/05-sovereign-airgapped.md`,
-  `docs/security-reviewers.md`, `docs/security-audits/README.md`,
+  `docs/security-reviewers.md`, `docs/internal/security-audits/README.md`,
   `docs/competitive.md`, `docs/implementation-plan.md`,
   `docs/security.md`, `tests/conformance/specs/sandbox-isolation.spec.ts`,
   `tests/conformance/fixtures/README.md`) updated accordingly.
@@ -865,7 +865,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-plugin-cli-f9.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-plugin-cli-f9.md`
   documents the tool-by-tool extraction, the holder-object pattern
   for `handoffProgress`, and confirms zero attack surface change.
 
@@ -919,7 +919,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-plugin-cli-f8.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-plugin-cli-f8.md`
   documents the tool-by-tool extraction and confirms zero attack
   surface change (same router endpoints, same parameters, same
   egress posture).
@@ -1131,7 +1131,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-operator-cli-e3.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-operator-cli-e3.md`
 
 ### S15.e.2 `phase2-hotspot-operator-cli-e2` — operator.ts sandbox-list fetcher extraction
 
@@ -1153,7 +1153,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-operator-cli-e2.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-operator-cli-e2.md`
 
 ### S15.e.1 `phase2-hotspot-operator-cli-e1` — operator.ts type + helper extraction
 
@@ -1175,7 +1175,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-operator-cli-e1.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-operator-cli-e1.md`
 
 ### S15.d.4 `phase2-hotspot-up-cli-d4` — up.ts sandbox bring-up extraction (caps S15.d at 766 ✅)
 
@@ -1199,7 +1199,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli-d4.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-up-cli-d4.md`
   (sign-offs: Core ✅, Security ✅).
 
 ### S15.d.3 `phase2-hotspot-up-cli-d3` — up.ts AgentMesh deploy extraction
@@ -1223,7 +1223,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli-d3.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-up-cli-d3.md`
   (sign-offs: Core ✅, Security ✅).
 
 ### S15.d.2 `phase2-hotspot-up-cli-d2` — up.ts preflight extraction
@@ -1248,7 +1248,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli-d2.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-up-cli-d2.md`
   (sign-offs: Core ✅, Security ✅).
 
 ### S15.d.1 `phase2-hotspot-up-cli` — up.ts fast-upgrade extraction
@@ -1271,7 +1271,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-up-cli.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-up-cli.md`
   (sign-offs: Core ✅, Security ✅).
 
 ### S15.c `phase2-hotspot-inference-router-routes` — inference.rs hotspot decomposition
@@ -1299,7 +1299,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-inference-router-routes.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-inference-router-routes.md`
   (sign-offs: Core ✅, Security ✅).
 
 ### S15.b `phase2-hotspot-mesh-cli` — mesh CLI hotspot decomposition
@@ -1333,7 +1333,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-mesh-cli.md`
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-mesh-cli.md`
   (sign-offs: Core ✅, Security ✅).
 
 ### S15.a `phase2-hotspot-handoff-cli` — handoff CLI hotspot decomposition
@@ -1357,7 +1357,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-hotspot-handoff-cli.md`.
+- `docs/internal/security-audits/2026-04-29-phase2-hotspot-handoff-cli.md`.
 
 ### S7.E.2 `phase2-reconcile-duration-histograms` — reconcile latency + outcome counter
 
@@ -1390,7 +1390,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-reconcile-duration-histograms.md`.
+- `docs/internal/security-audits/2026-04-29-phase2-reconcile-duration-histograms.md`.
 
 ### S17.A `phase2-sca-permanent-rows` — npm audit as permanent CI gate
 
@@ -1410,7 +1410,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-sca-permanent-rows.md` —
+- `docs/internal/security-audits/2026-04-29-phase2-sca-permanent-rows.md` —
   partial closure of §11.1 ("trivy + cosign-verify + SCA →
   permanent CI rows"). Cosign-verify deferred to S17.B once a
   direct dep starts publishing Sigstore signatures.
@@ -1436,7 +1436,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-content-safety-floor.md`.
+- `docs/internal/security-audits/2026-04-29-phase2-content-safety-floor.md`.
 
 ### S7.E `phase2-controller-metrics` — controller workqueue metrics
 
@@ -1469,7 +1469,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-controller-metrics.md`.
+- `docs/internal/security-audits/2026-04-29-phase2-controller-metrics.md`.
 
 ### S7.D `phase2-requeue-jitter` — bounded jitter on reconcile-error requeues
 
@@ -1500,7 +1500,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-requeue-jitter.md` — single
+- `docs/internal/security-audits/2026-04-29-phase2-requeue-jitter.md` — single
   sub-slice in S7 craftsmanship train.
 
 ### S7.C `phase2-leader-election` — controller-wide leader election
@@ -1541,7 +1541,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-leader-election.md`.
+- `docs/internal/security-audits/2026-04-29-phase2-leader-election.md`.
 
 ### S7.B `phase2-conditions-ssa-leader-b` — Conditions matrix `Progressing` emission
 
@@ -1574,7 +1574,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-- `docs/security-audits/2026-04-29-phase2-conditions-progressing.md`.
+- `docs/internal/security-audits/2026-04-29-phase2-conditions-progressing.md`.
 
 ### S7.A `phase2-conditions-ssa-leader` — stable SSA field managers (first sub-slice)
 
@@ -1620,7 +1620,7 @@ session — e.g. on re-init or reconnect).
 
 #### Audit
 
-`docs/security-audits/2026-04-28-phase2-conditions-ssa-leader.md`
+`docs/internal/security-audits/2026-04-28-phase2-conditions-ssa-leader.md`
 
 ---
 
@@ -1731,7 +1731,7 @@ S10.A4 closes the column-11 bar:
 
 #### Audit doc
 
-- `docs/security-audits/2026-04-28-phase2-runtime-microsoft-agent-framework.md` —
+- `docs/internal/security-audits/2026-04-28-phase2-runtime-microsoft-agent-framework.md` —
   scope, threat model, hard-rule checklist, column-11 closure proof,
   AGT upstream-dependency note, two sign-off slots.
 
@@ -1803,7 +1803,7 @@ S10.A4 closes the column-11 bar:
 
 #### Audit doc
 
-- `docs/security-audits/2026-04-28-phase2-runtime-openai-agents.md` —
+- `docs/internal/security-audits/2026-04-28-phase2-runtime-openai-agents.md` —
   scope, threat model, hard-rule checklist, AGT upstream dependency
   note, two sign-off slots.
 
@@ -1891,7 +1891,7 @@ OpenClaw-only.
 
 #### Audit doc
 
-- `docs/security-audits/2026-04-28-phase2-platform-mcp-server.md`
+- `docs/internal/security-audits/2026-04-28-phase2-platform-mcp-server.md`
   (existing-implementation survey, threat model, OAuth-rationale,
   test inventory, §0.2 hard-rule checklist).
 
@@ -1943,7 +1943,7 @@ OpenClaw-only.
 - `cargo fmt --all -- --check` clean.
 
 #### Audit
-- `docs/security-audits/2026-04-28-phase2-multi-runtime-byo.md`
+- `docs/internal/security-audits/2026-04-28-phase2-multi-runtime-byo.md`
   (threat model: gateway-token escape attempt, container-name
   divergence, raw_env reserved-prefix coverage, post-deploy patch
   compatibility).
@@ -2115,7 +2115,7 @@ OpenClaw-only.
 - **`OAuthVerifierConfig::from_jwks_file`** — new constructor on the Phase 1
   OAuth 2.1 verifier so the router can load a JWKS from a controller-mounted
   file instead of a remote URL.
-- **Audit doc** — `docs/security-audits/2026-04-27-phase2-mcp-reconciler.md`,
+- **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-mcp-reconciler.md`,
   covering threat-model delta, OWASP MCP Top 10 mapping (MCP-01/04/08),
   auth/authz path, key custody, egress surface, audit events, failure modes,
   negative-test coverage, out-of-scope items, and a §10 verification table.
@@ -2171,7 +2171,7 @@ OpenClaw-only.
 - **`main.rs` wire-up** — spawns `tool_policy_reconciler::run` in the
   controller `select!` alongside the existing reconcilers; fatal exit on
   any reconciler termination preserved.
-- **Audit doc** — `docs/security-audits/2026-04-27-phase2-toolpolicy-reconciler.md`,
+- **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-toolpolicy-reconciler.md`,
   with §0 enumerating **13 reused Phase 0/1/S1 seams** (schema, CEL
   validations, conditions vocabulary, finalizer pattern, SSA-manager
   naming convention, `LocalObjectRef`, helm-drift harness, RFC-3339
@@ -2322,7 +2322,7 @@ S7. The compiled JSON ConfigMap is the hand-off contract.
 - **Helm CRD** — `deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml`,
   emitted by `helm_drift::tests::dump_inferencepolicy_crd_yaml` (env-gated)
   and drift-checked by `helm_inferencepolicy_crd_matches_rust_schema`.
-- **Audit doc** — `docs/security-audits/2026-04-27-phase2-inferencepolicy-reconciler.md`,
+- **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-inferencepolicy-reconciler.md`,
   documenting the AGT boundary verification against
   `agent-governance-toolkit` 3.3.0 on disk: AGT-Python has
   `BudgetTracker`, AGT-Rust does not (yet); `cedar-policy` + `regorus`
@@ -2645,7 +2645,7 @@ file. `cli/src/cli.ts` adds one import + one `addCommand`.
 ci/no-stubs + ci/no-custom-crypto + ci/check-loc all green with
 `BASE_REF=origin/dev`.
 
-**Audit:** `docs/security-audits/2026-04-28-phase2-migrate-mode-switch.md`.
+**Audit:** `docs/internal/security-audits/2026-04-28-phase2-migrate-mode-switch.md`.
 
 ### S11.1 `phase2-attest-baseline` — drift-aware `--baseline` diff
 
@@ -2715,7 +2715,7 @@ handling; `cli/src/commands/attest.test.ts` adds 11 new cases (no
 drift, every delta variant, set-comparison, missing/invalid baseline
 file). CLI workspace 304 → 315 (+11).
 
-**Audit:** `docs/security-audits/2026-04-28-phase2-attest-baseline.md`.
+**Audit:** `docs/internal/security-audits/2026-04-28-phase2-attest-baseline.md`.
 
 ### S11 `phase2-attest-cli` — `azureclaw attest <name>` read surface
 
@@ -2803,7 +2803,7 @@ able; emits a versioned `apiVersion: "azureclaw.azure.com/v1alpha1-attest"`
 all green; ci/no-stubs.sh, ci/no-custom-crypto.sh, ci/check-loc.sh
 all green with `BASE_REF=origin/dev`.
 
-**Audit:** `docs/security-audits/2026-04-27-phase2-attest-cli.md` — 2
+**Audit:** `docs/internal/security-audits/2026-04-27-phase2-attest-cli.md` — 2
 sign-offs.
 
 ### S8 `phase2-overlaymode` — sigs/agent-sandbox OverlayMode
@@ -2885,7 +2885,7 @@ schema-only — no runtime path beyond what already lands here.
 helpers + 1 condition constant exercise via overlay tests). Workspace
 green (router 595, integration 26).
 
-**Audit:** `docs/security-audits/2026-04-27-phase2-overlaymode.md` — 2
+**Audit:** `docs/internal/security-audits/2026-04-27-phase2-overlaymode.md` — 2
 sign-offs.
 
 ### S6 `phase2-claweval` — ClawEval CRD + binding ConfigMap + helm CRD
@@ -2951,7 +2951,7 @@ cron actuator / on-demand trigger that consumes it is deferred to S7.
   three new modules and spawns `claw_eval_reconciler::run` in
   the existing `tokio::select!` (REQUEUE_OK 300s, REQUEUE_FAIL 60s).
 - **Audit doc** —
-  `docs/security-audits/2026-04-27-phase2-claweval-reconciler.md`
+  `docs/internal/security-audits/2026-04-27-phase2-claweval-reconciler.md`
   with two sign-offs, full STRIDE coverage, AGT boundary
   verification (AGT 3.3.0 has no eval module — confirmed), 12-seam
   reuse map, explicit out-of-scope list (runtime trigger,
@@ -3028,7 +3028,7 @@ the sandbox-side informer that consumes it is deferred to S7.
 - **`main.rs` wiring** — `claw_memory_reconciler::run` spawned in
   `tokio::select!` alongside the four prior reconcilers. CRD-missing
   exit is non-fatal (matches S1–S4 pattern).
-- **Audit doc** — `docs/security-audits/2026-04-27-phase2-clawmemory-reconciler.md`
+- **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-clawmemory-reconciler.md`
   with two sign-offs, full STRIDE coverage, AGT boundary verification
   (AGT 3.3.0 carries no Memory Store module — confirmed against
   on-disk source), reuse map, out-of-scope set with explicit S7
@@ -3101,7 +3101,7 @@ CRD reconciler in the family lands. Phase 2 §14.6 column 12
 This entry covers **186 commits** on `dev` since `main`, structured as Phase 0
 (seams + safety net) and Phase 1 (protocol freshness + minimal schema). Every
 capability cites code; every capability-introducing PR shipped a security-audit
-doc under `docs/security-audits/` (75 docs total). See
+doc under `docs/internal/security-audits/` (75 docs total). See
 [`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md) for the full
 evidence index.
 
@@ -3126,7 +3126,7 @@ evidence index.
   (per-PR audit-doc enforcement, 2 sign-offs), `vendored-patch-audit.sh`
   (forces re-audit on AGT SDK bump), plus `a2a-module-isolation.sh`. Budget
   in `ci/loc-budget.yaml`.
-- **75 security-audit docs** under `docs/security-audits/` from the
+- **75 security-audit docs** under `docs/internal/security-audits/` from the
   `_template.md` shape: threat-model delta, OWASP MCP/LLM mapping, AuthN/Z
   path, secret + key custody, egress-surface delta, audit events emitted,
   failure mode (fail-closed default), negative-test coverage, two sign-offs.
@@ -3140,10 +3140,10 @@ evidence index.
 - **5 cargo-fuzz targets** (`inference-router/fuzz/fuzz_targets/`) —
   `a2a-jws`, `a2a-base64url`, `deserialize-state`, `sanitize-chat`,
   `parse-streaming-pf`.
-- **`docs/agt-vendored-patch-audit.md`** — index of fixes applied to the
+- **`docs/internal/agt-vendored-patch-audit.md`** — index of fixes applied to the
   vendored AgentMesh stack (SDK + relay + registry) with re-audit cadence on
   AGT SDK bumps.
-- **`docs/sigs-agent-sandbox-compat.md`** — `TranslateMode` / `OverlayMode`
+- **`docs/internal/sigs-agent-sandbox-compat.md`** — `TranslateMode` / `OverlayMode`
   design for optional compat with `kubernetes-sigs/agent-sandbox`. Opt-in,
   no upstream dependency, no CI pin.
 - **Hotspot decomposition (Pass 1 + 2)** with byte-equivalence proofs:
@@ -3238,7 +3238,7 @@ evidence index.
 
 ### Engineering metrics (PR #44)
 - **186 commits** on `dev` since `main`.
-- **75 security-audit docs** under `docs/security-audits/`.
+- **75 security-audit docs** under `docs/internal/security-audits/`.
 - **26 vendor patches** (SDK 21 + relay 4 + registry 1).
 - **6 blocking CI gates** + a2a-module-isolation + LOC budget.
 - **8 conformance specs**, **1 compat spec**, **5 fuzz targets**.
@@ -3285,7 +3285,7 @@ evidence index.
 - Router bind address fix for K8s probe accessibility
 - K8s probe host field removal (kubelet defaults to pod IP)
 - Missing transitive Python dependencies (typing_inspection, cryptography) via PyPI fallback
-- 8 vendor patches for AgentMesh relay, registry, and SDK bugs (this baseline; the active count is **26 patches** as of PR #44 — see `docs/agt-vendored-patch-audit.md`)
+- 8 vendor patches for AgentMesh relay, registry, and SDK bugs (this baseline; the active count is **26 patches** as of PR #44 — see `docs/internal/agt-vendored-patch-audit.md`)
 - Foundry Memory Store format — ensureMemoryStore creates full store with chat + embedding models; item format matches Foundry REST API spec
 
 ### Changed

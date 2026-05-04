@@ -21,7 +21,7 @@ We expect external contributions from:
 - **New MCP servers** that conform to the `McpServer` CRD and do not relax sandbox isolation
 - **New channels** (Telegram/Slack/Discord/WhatsApp pattern) or **web-search plugins** (Brave/Tavily/Exa/Firecrawl/Perplexity/OpenAI pattern)
 - **New Tier-2 BYO runtime adapters** that implement the multi-runtime architecture per `docs/architecture.md` (or `docs/runtime-contract.md` if present)
-- **Egress allowlist contributions** for the signed-OCI workflow (per S12 / `docs/security-audits/`)
+- **Egress allowlist contributions** for the signed-OCI workflow (per S12 / `docs/internal/security-audits/`)
 - **Documentation improvements**, especially for use-case blueprints, troubleshooting guides, and architecture clarifications
 - **Test coverage improvements** (chaos tests, conformance tests, unit tests) that increase confidence in isolation or governance
 - **Performance fixes** that do not relax security invariants (latency, throughput, resource utilization)
@@ -47,9 +47,9 @@ PRs that propose new CRDs, new runtimes, transport changes, or new direct depend
 
 1. An **Architecture Decision Record (ADR)** in `docs/adr/` (see existing ADRs for format)
 2. A public **RFC issue** discussing the motivation, design trade-offs, and impact on existing users
-3. **Security audit documentation** in `docs/security-audits/` with `Signed-off-by:` from at least one maintainer
+3. **Security audit documentation** in `docs/internal/security-audits/` with `Signed-off-by:` from at least one maintainer
 
-The maintainer team will not review implementation PRs for architecture changes without prior ADR + RFC. Implementation PRs must follow the slice-train pattern (breaking large changes into reviewable chunks). See existing examples in `docs/security-audits/2026-04-*` for the audit format.
+The maintainer team will not review implementation PRs for architecture changes without prior ADR + RFC. Implementation PRs must follow the slice-train pattern (breaking large changes into reviewable chunks). See existing examples in `docs/internal/security-audits/2026-04-*` for the audit format.
 
 ### Security Disclosures
 

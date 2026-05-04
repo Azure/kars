@@ -7,7 +7,7 @@
  *
  * Phase 2 S9.2: real translator. Phase 0 emitted exit 3.
  *
- * Design doc: `docs/sigs-agent-sandbox-compat.md` (mapping table normative;
+ * Design doc: `docs/internal/sigs-agent-sandbox-compat.md` (mapping table normative;
  * implementation tracks the actual CRD shape in
  * `controller/src/crd.rs:25-405`).
  *
@@ -592,7 +592,7 @@ Examples:
   $ azureclaw convert -f clawsandbox.yaml --to upstream-sandbox --allow-lossy
   $ azureclaw convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web
 
-See docs/sigs-agent-sandbox-compat.md for the normative mapping.
+See docs/internal/sigs-agent-sandbox-compat.md for the normative mapping.
 `,
     )
     .action(async (rawOpts: Record<string, unknown>) => {
