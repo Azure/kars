@@ -51,6 +51,7 @@
 - [Supply Chain](operations/supply-chain.md) — Cosign, SBOM, attestations
 - [GitOps](operations/gitops.md) — Reconciler in a GitOps fleet
 - [Image Versioning](operations/image-versioning.md) — Tag policy and runtime image overrides
+- [Helm Packaging](operations/helm-packaging.md) — Chart versioning + local packaging
 - [Secret Rotation Runbook](operations/secret-rotation.md) — Per-sandbox creds, TLS, AgentMesh identity, Azure
 - [Chaos Tier](operations/chaos-tier.md) — Fault-injection test surface
 

@@ -480,3 +480,6 @@ docs/internal/
 
 # LangGraph TS adapter — built in Docker stage, not committed
 runtimes/langgraph-ts/dist/
+
+# Helm chart packaging output (deploy/helm/package.sh) — not committed
+/dist/charts/
