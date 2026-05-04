@@ -1,13 +1,14 @@
 # AzureClaw CLI Reference
 
-AzureClaw ships 23 top-level commands organised by purpose: **Lifecycle**,
+AzureClaw ships **26 top-level commands** organised by purpose: **Lifecycle**,
 **Operations**, **Configuration**, **Observability**, and **Multi-Agent /
 Federation**. Everything you need to go from zero to a production-hardened,
 E2E-encrypted agent sandbox is expressed through these commands.
 
-See [README.md](../README.md) for the quick-start (< 5 minutes with
-`azureclaw up`). Architecture details live in
-[docs/architecture.md](architecture.md). CRD field reference is in
+See [README.md](../README.md) for the five-minute quick-start with
+`azureclaw dev`, and [getting-started.md](getting-started.md) for the
+full walkthrough including `azureclaw up` against AKS. Architecture details
+live in [docs/architecture.md](architecture.md). CRD field reference is in
 [docs/api/crd-reference.md](api/crd-reference.md).
 
 ---
