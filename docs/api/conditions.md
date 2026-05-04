@@ -88,6 +88,14 @@ that means the object **is** degraded; for `Ready`, that means it
 | `Progressing` | `Indexing`, `Backfilling`                                       |
 | `Degraded`    | `StoreUnreachable`, `EmbeddingFailed`                           |
 
+## TrustGraph
+
+| Type          | Reason values                                                  |
+|---------------|----------------------------------------------------------------|
+| `Ready`       | `GraphActive`, `GraphEmpty`                                     |
+| `Progressing` | `Resolving`, `RollupComputing`                                  |
+| `Degraded`    | `PeerUnverified`, `RegistryUnreachable`                         |
+
 ## Adding a new reason
 
 1. Pick the smallest noun phrase in PascalCase that names the failure.
