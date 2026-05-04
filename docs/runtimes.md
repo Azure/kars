@@ -23,6 +23,32 @@ The same router, the same governance profile, the same audit chain, the same Net
 
 The CRD enum is the source of truth for which kinds exist; `controller/src/reconciler/runtime.rs` is the source of truth for which kinds resolve to a working pod.
 
+### How dispatch works
+
+When you `kubectl apply` a `ClawSandbox`, the reconciler reads `spec.runtime.kind` and calls a single `dispatch()` function that fans out to one producer per kind. Each producer returns a fully-formed pod plan; everything *outside* the runtime container — the inference router sidecar, the egress-guard init container, the `NetworkPolicy`, the WI federated credential — is identical across all kinds.
+
+```mermaid
+flowchart LR
+  CR["ClawSandbox<br/>spec.runtime.kind"] --> D{dispatch}
+  D -->|OpenClaw| P1["openclaw producer<br/>image: sandbox-images/openclaw"]
+  D -->|OpenAIAgents| P2["openai-agents producer"]
+  D -->|MicrosoftAgentFramework<br/>language: python| P3["maf-python producer"]
+  D -->|MicrosoftAgentFramework<br/>language: dotnet| P3X[("ShapeInvalid<br/>🚧 deferred")]
+  D -->|LangGraph<br/>language: python| P4["langgraph producer"]
+  D -->|LangGraph<br/>language: typescript| P4T["langgraph-ts producer"]
+  D -->|Anthropic| P5["anthropic producer"]
+  D -->|PydanticAi| P6["pydantic-ai producer"]
+  D -->|SemanticKernel| P7X[("AdapterMissing<br/>🚧 deferred")]
+  D -->|BYO| P8["BYO contract validation<br/>(image + ports + env)"]
+  P1 & P2 & P3 & P4 & P4T & P5 & P6 & P8 --> COMMON["Common shell:<br/>· inference-router sidecar<br/>· egress-guard init<br/>· NetworkPolicy<br/>· WI federated credential<br/>· governance ConfigMap"]
+  COMMON --> POD[("Sandbox Pod")]
+
+  classDef deferred fill:#f0f0f0,stroke:#999,stroke-dasharray:4 3,color:#666
+  class P3X,P7X deferred
+```
+
+Verified against `controller/src/reconciler/runtime.rs:249-400` (`kind_str`, the dispatch match, and the producers for each kind). `SemanticKernel` returns `AdapterMissing` and `MicrosoftAgentFramework` with `language: dotnet` returns `ShapeInvalid` — both surface as `Degraded` conditions on the CR.
+
 ---
 
 ## Why each first-class adapter exists

@@ -100,6 +100,29 @@ Sub-µs evaluation latency. Plugin-side AGT only handles E2E-encrypted mesh tran
 
 The router exposes four provider seams (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider`), three with in-tree implementations and one (`MeshProvider`) by-design plugin-side. See **[Architecture — provider seams](architecture.md)** if you need to plug in a custom backend.
 
+#### Per-request gate order
+
+The governance modules don't fire as one giant blob — they run in a fixed order on every action that reaches the router (model inference, tool invocation, mesh send). Reading `Governance::evaluate_with_context` in `inference-router/src/governance/mod.rs`:
+
+```mermaid
+flowchart LR
+  ACT["Action arrives<br/>(inference / tool / mesh)"] --> RL{"RateLimiter<br/>token bucket"}
+  RL -->|over budget| D1[("429 + audit 'denied'")]
+  RL -->|allowed| PE{"PolicyEngine<br/>YAML rules"}
+  PE -->|deny| D2[("403 + audit 'denied'")]
+  PE -->|allow| AU["AuditLogger<br/>append hash-chained entry"]
+  AU --> BM["BehaviorMonitor<br/>record + score"]
+  BM -->|anomaly| AL[("emit alert<br/>(does not block)")]
+  BM -->|normal| OK[("→ proceed")]
+
+  classDef deny fill:#fde2e1,stroke:#c0392b
+  classDef ok fill:#dff5e1,stroke:#27ae60
+  class D1,D2 deny
+  class OK ok
+```
+
+`TrustManager` is **not** on the per-request hot path — it is consulted at session establishment time on the mesh (see Layer 8) to decide whether to accept a KNOCK from a peer.
+
 ### Layer 8 — End-to-end encrypted mesh
 
 Inter-agent communication uses [Signal Protocol](https://signal.org/docs/) (X3DH + Double Ratchet) over a small relay/registry that AzureClaw operates. The relay sees only ciphertext and routing metadata. KNOCK-gated session establishment evaluates per-peer trust score against `AGT_TRUST_THRESHOLD`.

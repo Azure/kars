@@ -50,25 +50,49 @@ then checks the request through the egress decision pipeline:
 
 ### Decision Flow
 
+```mermaid
+flowchart TD
+  REQ["Agent (UID 1000)<br/>HTTPS request"] --> IPT["iptables NAT REDIRECT<br/>TCP 443 → 127.0.0.1:8444"]
+  IPT --> FP["Forward proxy<br/>inference-router :8444"]
+  FP --> EXT["Extract domain<br/>from CONNECT or Host header"]
+  EXT --> BL{"Domain in<br/>blocklist?<br/>(seed + OISD + URLhaus)"}
+  BL -->|yes| BLOCK["403 Forbidden<br/>+ audit reason"]
+  BL -->|no| TLD{"High-risk TLD?<br/>.tk · .ml · .ga · .cf · .gq"}
+  TLD -->|yes| BLOCK
+  TLD -->|no| PRIV{"Private IP after<br/>DNS resolve?"}
+  PRIV -->|yes| BLOCK
+  PRIV -->|no| MODE{"Egress mode"}
+  MODE -->|learn| LOG["Log domain to learned set<br/>→ operator review queue"]
+  LOG --> TUNNEL
+  MODE -->|enforce| AL{"Domain in<br/>allowlist?<br/>(parent-domain match)"}
+  AL -->|yes| TUNNEL["Open TCP tunnel<br/>agent ↔ destination"]
+  AL -->|no| PEND["Create PendingApproval<br/>(deduped by domain)<br/>→ 403 'pending operator approval'"]
+
+  classDef block fill:#fde2e1,stroke:#c0392b
+  classDef ok fill:#dff5e1,stroke:#27ae60
+  classDef wait fill:#fff3cd,stroke:#d68910
+  class BLOCK,PEND block
+  class TUNNEL,LOG ok
+  class MODE,BL,TLD,PRIV,AL wait
 ```
-Request arrives at /egress/fetch
-    │
-    ▼
-Blocklist check (seed + OISD + URLhaus + high-risk TLDs + bare IPs)
-    │── Match ──→ BLOCKED (403 Forbidden)
-    │
-    ▼
-Allowlist check (operator-approved domains, parent domain matching)
-    │── Match ──→ ALLOWED (proxied to destination)
-    │
-    ▼
-Learn mode enabled?
-    │── Yes ──→ ALLOWED + domain logged to learned set
-    │
-    ▼
-Create pending approval request (dedup by domain)
-    └──────→ DENIED (403 — "pending operator approval")
+
+Verified against `inference-router/src/forward_proxy.rs` (handler) and `inference-router/src/blocklist.rs` (`check_egress`, the high-risk TLD list, the parent-domain allowlist match, `PendingApproval` deduplication).
+
+### Learn → Enforce lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> Learn: azureclaw add &lt;name&gt;<br/>(default; blocklist still enforced)
+  Learn: 🔍 Learn mode\nAll domains logged\nBlocklist still enforced
+  Review: 📋 Operator review\nazureclaw egress &lt;name&gt; --learned
+  Enforce: 🔒 Enforce mode\nOnly approved domains pass\nNew domains → PendingApproval
+
+  Learn --> Review: operator inspects learned set
+  Review --> Review: approve / deny per domain
+  Review --> Enforce: azureclaw egress --enforce
+  Enforce --> Learn: azureclaw egress --learn (rare)
 ```
+
 
 ## Operator Workflow
 
