@@ -118,6 +118,6 @@ Redis sync. Both knobs are Helm values so no rebuild is required.
 
 - `docs/operations/a2a-gateway.md` — operator runbook (enable, cert
   rotation, observability).
-- `docs/security-audits/2026-04-30-phase2-a2a-gateway.md` — audit
+- `docs/internal/security-audits/2026-04-30-phase2-a2a-gateway.md` — audit
   doc with explicit tracking of what was lifted from the router.
 - `docs/adr/0001-a2a-ingress-front-edge.md` — the ADR.

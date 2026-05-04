@@ -28,7 +28,7 @@ suspect_files=$(
   for root in "${SCAN_PATHS[@]}"; do
     [ -d "$root" ] || continue
     grep -l -R -E 'provider:[[:space:]]*(null|noop|disabled)' "$root" 2>/dev/null || true
-  done | sort -u | grep -v '^docs/security-audits/' || true
+  done | sort -u | grep -v '^docs/internal/security-audits/' || true
 )
 [ -z "$suspect_files" ] && exit 0
 

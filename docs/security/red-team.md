@@ -27,11 +27,11 @@ Each finding records: ID, date, surface, severity, summary, status, fix commit /
 
 ### Phase 0 + Phase 1 baseline
 
-The Phase 0 + 1 surface was exercised against the threat model in [`docs/threat-model.md`](../threat-model.md) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under [`docs/security-audits/`](../security-audits/).
+The Phase 0 + 1 surface was exercised against the threat model in [`docs/internal/threat-model.md`](../threat-model.md) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under [`docs/internal/security-audits/`](../security-audits/).
 
 ### Phase 2
 
-Phase 2 capabilities were exercised against the per-route threat model. Per-capability audit docs (CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, runtime-CLI hotspots) are committed under `docs/security-audits/2026-04-*-phase2-*.md`. Each carries two-reviewer sign-off.
+Phase 2 capabilities were exercised against the per-route threat model. Per-capability audit docs (CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, runtime-CLI hotspots) are committed under `docs/internal/security-audits/2026-04-*-phase2-*.md`. Each carries two-reviewer sign-off.
 
 ### v1.0 cut (open list)
 

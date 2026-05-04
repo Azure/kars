@@ -296,6 +296,6 @@ The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azur
 - `azureclaw_a2a_core::card_verifier` (JWS Ed25519 verifier, EdDSA hard-coded)
 - `deploy/helm/azureclaw/values.yaml` lines ~263–300 (`a2aGateway.*` + `inferenceRouter.a2aMtls.enabled`)
 - `docs/api/crd-reference.md` (`A2AAgent` CRD spec, `ClawSandbox.spec.a2a.*`)
-- `docs/e2e-encryption-proof.md` (the cryptographic proof for cross-org E2E)
-- `docs/policy-canonical-format.md` (signed OCI egress allowlist + SignerPolicy format)
+- `docs/internal/e2e-encryption-proof.md` (the cryptographic proof for cross-org E2E)
+- `docs/internal/policy-canonical-format.md` (signed OCI egress allowlist + SignerPolicy format)
 - ADR-0001 (front-edge architecture for non-mesh ingress; relevant for A2A 1.2 cross-org path)

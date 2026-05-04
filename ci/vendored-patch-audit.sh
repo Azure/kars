@@ -6,14 +6,14 @@
 #
 # If the PR changes vendor/** or bumps the AGT SDK pin (Cargo.toml /
 # package.json), require a new "Re-audit history" row in
-# docs/agt-vendored-patch-audit.md — dated today, signed by a reviewer.
+# docs/internal/agt-vendored-patch-audit.md — dated today, signed by a reviewer.
 set -euo pipefail
 
 BASE_REF="${BASE_REF:-origin/main}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-AUDIT_DOC='docs/agt-vendored-patch-audit.md'
+AUDIT_DOC='docs/internal/agt-vendored-patch-audit.md'
 
 changed=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only HEAD)
 

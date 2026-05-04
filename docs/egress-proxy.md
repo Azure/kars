@@ -249,7 +249,7 @@ an error.
 
 1. CLI reads `ClawSandbox.spec.networkPolicy.allowedEndpoints` +
    `metadata.generation`.
-2. Builds a byte-stable canonical YAML per `docs/policy-canonical-format.md`
+2. Builds a byte-stable canonical YAML per `docs/internal/policy-canonical-format.md`
    (`buildCanonicalAllowlist`).
 3. Pushes the artifact to the registry via `oras` (`buildOrasPushArgv`).
 4. Signs the OCI manifest with `cosign` (`buildCosignSignArgv`).
@@ -344,7 +344,7 @@ apply with `kubectl apply -f`. The YAML is deterministic (same input
 | `oras` | Push OCI artifacts to ACR |
 | `cosign` | Sign + verify OCI manifests |
 
-Both must be in `$PATH`. See `docs/security-audits/2026-04-30-phase2.5-ops-docs.md`
+Both must be in `$PATH`. See `docs/internal/security-audits/2026-04-30-phase2.5-ops-docs.md`
 and the S12.c security audit for the full threat model.
 
 ### Source files

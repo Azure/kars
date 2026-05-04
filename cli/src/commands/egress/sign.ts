@@ -5,7 +5,7 @@
 //
 // Producer side of the signed-egress-allowlist supply chain. Builds a
 // canonical YAML artifact that is byte-identical to the spec in
-// `docs/policy-canonical-format.md`, pushes it as an OCI artifact via
+// `docs/internal/policy-canonical-format.md`, pushes it as an OCI artifact via
 // `oras`, signs the resulting digest with `cosign`, and patches the
 // `ClawSandbox.spec.networkPolicy.allowlistRef` field.
 //
@@ -118,7 +118,7 @@ function normalizeHost(rawHost: string): string {
 }
 
 /**
- * Produces canonical YAML per `docs/policy-canonical-format.md`.
+ * Produces canonical YAML per `docs/internal/policy-canonical-format.md`.
  * Sorted, deduped, IDNA-normalized, port-explicit, block-style, LF
  * line endings with trailing newline. Byte-stable.
  */

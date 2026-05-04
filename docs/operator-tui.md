@@ -164,4 +164,4 @@ operator command  ───►  KubectlDataSource ──► ClusterState
   to `<present>` / `<missing>` via `panels/redact.ts`.
 - No telemetry is emitted from the TUI.
 
-See `docs/security-audits/2026-04-30-phase2-tui-redesign.md`.
+See `docs/internal/security-audits/2026-04-30-phase2-tui-redesign.md`.

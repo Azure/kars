@@ -11,4 +11,4 @@
 # Usage:
 #   kubectl apply -f examples/demo-clawshield/
 #
-# See docs/DEMO.md for the full walkthrough.
+# See docs/internal/DEMO.md for the full walkthrough.

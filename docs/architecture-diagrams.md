@@ -844,7 +844,7 @@ deriving `allowedEndpoints` for the NetworkPolicy. Source: `controller/src/polic
 
 ```mermaid
 flowchart TD
-    CLI["azureclaw egress ‹name› --sign<br/>--allowlist api.github.com,pypi.org"] --> BUILD["CLI builds canonical artifact<br/>(JSON, byte-stable canonical form<br/>per docs/policy-canonical-format.md)"]
+    CLI["azureclaw egress ‹name› --sign<br/>--allowlist api.github.com,pypi.org"] --> BUILD["CLI builds canonical artifact<br/>(JSON, byte-stable canonical form<br/>per docs/internal/policy-canonical-format.md)"]
 
     BUILD --> PUSH["Push OCI artifact to ACR<br/>azureclawacr.azurecr.io/allowlists/‹name›:‹sha›"]
 
