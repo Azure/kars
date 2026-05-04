@@ -20,83 +20,77 @@ reaching ours) terminate at a single, narrow surface that:
 
 ## Data flow
 
-```text
-                      external A2A 1.0.0 caller
-                                │
-                       TLS (rotating leaf)
-                                │
-                                ▼
-              ┌──────────────────────────────────────┐
-              │  Application Gateway for Containers   │
-              │  (Gateway API resource — Helm)        │
-              └─────────────────┬────────────────────┘
-                                │
-                                ▼
-              ┌──────────────────────────────────────┐
-              │      azureclaw-a2a-gateway            │
-              │                                       │
-              │  • TLS termination (rustls + ring)    │
-              │  • JWS verify (azureclaw-a2a-core)    │
-              │  • Replay nonce cache (5 min TTL)     │
-              │  • Subject token-bucket (60 burst /   │
-              │    5 rps refill, RAM-only in v1)      │
-              │  • Drop privs to UID 1002             │
-              │  • Distroless static + read-only FS   │
-              └─────────────────┬────────────────────┘
-                                │
-                            mTLS (8445)
-                                │
-                                ▼
-              ┌──────────────────────────────────────┐
-              │      azureclaw-inference-router       │
-              │      :8445 (mTLS) — gateway path      │
-              │      :8443 (mesh) — unchanged         │
-              └─────────────────┬────────────────────┘
-                                │
-                                ▼
-                          sandbox pod
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Peer as External A2A 1.2 caller<br/>(other org)
+  participant Ing as App Gateway for Containers<br/>(public TLS)
+  participant GW as a2a-gateway<br/>(UID 1002, distroless)
+  participant Cache as Replay nonce cache<br/>(5 min TTL)
+  participant Bucket as Token bucket<br/>(60 burst / 5 rps refill)
+  participant Router as Inference router<br/>(:8445 mTLS)
+  participant Pod as Sandbox pod
+
+  Peer->>Ing: HTTPS + signed AgentCard envelope
+  Ing->>GW: forward (TLS terminated at ingress)
+  GW->>GW: rustls TLS termination (leaf cert rotates)
+  GW->>GW: JWS verify (azureclaw-a2a-core)
+  alt invalid signature / no trust anchor
+    GW-->>Peer: 401 untrusted_card
+  end
+  GW->>Cache: check replay nonce
+  alt nonce seen within 5 min
+    GW-->>Peer: 409 replay
+  end
+  GW->>Bucket: per-subject limit (sub claim)
+  alt over rate
+    GW-->>Peer: 429 rate_limited
+  end
+  GW->>Router: mTLS on :8445<br/>(gateway path; mesh :8443 unchanged)
+  Router->>Pod: localhost dispatch
+  Pod-->>Router: response
+  Router-->>GW: response
+  GW->>GW: emit audit (peer subject, target sandbox, outcome)
+  GW-->>Peer: response
 ```
+
+The gateway runs as **UID 1002**, distroless static, read-only filesystem. Privileges drop on first request. The replay cache and rate-limit token bucket are RAM-only in `v1` (state survives a single pod, not a restart) — see [the operations runbook](../operations/a2a-gateway.md) for how this is monitored and what to consider when scaling out.
 
 ## Threat model
 
-### In scope (mitigated in S3.5)
+### What we mitigate
 
 | Threat | Mitigation |
 |---|---|
 | Eavesdropping on the public path | TLS 1.2/1.3 via rustls. |
 | Stolen TLS leaf | `notify::Watcher` triggers `Arc<ServerConfig>` swap on cert rotation; old sessions drain. |
-| Forged AgentCard | JWS Ed25519 verify in `azureclaw_a2a_core::verify_inbound_card` (library complete & tested) against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. **`[GAP-V1]`** the gateway *binary* does not yet run this verifier in its proxy hot path — see "Out of scope in S3.5" below. |
+| Forged AgentCard | JWS Ed25519 verify in `azureclaw_a2a_core::verify_inbound_card` against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. The gateway today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake; wiring the verifier directly as an axum layer is a v1.1 task. |
 | Replay of a valid envelope | Nonce cache with 5 min TTL and 100k entry cap. |
 | Untrusted gateway impersonating router | Router :8445 verifies client cert against the gateway-only CA bundle at `/etc/azureclaw/a2a-gateway-ca.pem`. |
 | Burst flood from one subject | Per-subject token bucket (60 burst / 5 rps); over-budget calls return 429. |
 | Container escape from the gateway | Distroless static base, read-only root FS, drop ALL caps, UID 1002, seccomp `azureclaw-strict.json`. |
 
-### Out of scope in S3.5
+### Known limitations (v1)
 
-| Concern | Resolution path |
+| Limitation | Notes |
 |---|---|
-| **`[GAP-V1]` JWS verifier wired as an axum layer** | The verifier is implemented and tested in `azureclaw-a2a-core`; the gateway binary today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake. Wiring `verify_inbound_card` directly inside the gateway as an opt-in axum layer is a v1.1 task. The unused `azureclaw-a2a-core` workspace dependency in `a2a-gateway/Cargo.toml` is the placeholder. |
-| Cross-replica rate-limit sync | Helm value `a2aGateway.rateLimits.sharedRedisUrl` is reserved; impl is `unimplemented!()`. Replicas in v1 enforce in-memory only — the router's downstream limiter is the second line of defence. |
+| Cross-replica rate-limit sync | Helm value `a2aGateway.rateLimits.sharedRedisUrl` is reserved; impl is `unimplemented!()`. Replicas enforce in-memory only — the router's downstream limiter is the second line of defence. |
 | SAN pinning beyond CA chain on :8445 | The gateway CA is single-purpose (issued only to gateway pods) so chain-of-trust is sufficient for v1. |
-| Mandatory mTLS on :8443 | Out of scope — :8443 stays exactly as it is in the dev branch. |
+| Mandatory mTLS on :8443 | Out of scope — :8443 stays exactly as it is on the dev branch. |
 
-## Surveyed-existing-implementation — what was lifted vs. what is new
+## Code layout
 
-The slice deliberately did *not* fork the JWS verifier. Instead:
+The JWS verifier and agent-card schema live in a shared workspace crate so the router and the gateway use the same byte-for-byte implementation:
 
-| Component | Pre-S3.5 location | Post-S3.5 location |
+| Module | Crate | Purpose |
 |---|---|---|
-| `signature.rs` (RFC 7515 signing-input) | `inference-router/src/a2a/` | `azureclaw-a2a-core/src/` |
-| `agent_card.rs` (A2A §5.5 schema) | `inference-router/src/a2a/` | `azureclaw-a2a-core/src/` |
-| `card_signing.rs` (Ed25519 sign + verify) | `inference-router/src/a2a/` | `azureclaw-a2a-core/src/` |
-| `card_verifier.rs` (inbound caller pin) | `inference-router/src/a2a/` | `azureclaw-a2a-core/src/` |
-| `error.rs` (A2A §3.3.2 codes) | `inference-router/src/a2a/` | `azureclaw-a2a-core/src/` |
+| `signature.rs` | `azureclaw-a2a-core` | RFC 7515 signing-input construction. |
+| `agent_card.rs` | `azureclaw-a2a-core` | A2A §5.5 schema. |
+| `card_signing.rs` | `azureclaw-a2a-core` | Ed25519 sign + verify. |
+| `card_verifier.rs` | `azureclaw-a2a-core` | Inbound caller pin against the trust store. |
+| `error.rs` | `azureclaw-a2a-core` | A2A §3.3.2 error codes. |
 
-The router re-exports each module under its original path
-(`crate::a2a::signature::*`, etc.) so every existing call site
-keeps compiling unchanged. The gateway depends on the new core
-crate directly. Both binaries therefore use the same byte-for-byte
-verifier.
+The router re-exports each module under its original path (`crate::a2a::signature::*`, etc.) so existing call sites keep compiling unchanged.
 
 ## Deployment sizing
 

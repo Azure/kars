@@ -50,6 +50,7 @@
 # API & policy
 
 - [CRD reference](api/crd-reference.md)
+- [Lifecycle & reconciliation](api/lifecycle.md)
 - [Conditions](api/conditions.md)
 - [Backwards compatibility](api/backwards-compatibility.md)
 
