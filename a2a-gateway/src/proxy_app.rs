@@ -303,7 +303,7 @@ async fn forward(
     state
         .metrics
         .requests_total
-        .with_label_values(&[&subject, status.as_str()])
+        .with_label_values(&[subject.as_str(), status.as_str()])
         .inc();
 
     info!(
