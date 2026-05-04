@@ -327,11 +327,7 @@ dependencies = [
  "axum",
  "azureclaw-a2a-core",
  "base64 0.22.1",
- "chrono",
  "ed25519-dalek",
- "futures",
- "futures-util",
- "http-body-util",
  "hyper",
  "hyper-util",
  "notify",
@@ -340,15 +336,12 @@ dependencies = [
  "reqwest 0.12.28",
  "rustls",
  "rustls-pemfile",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
@@ -358,16 +351,10 @@ name = "azureclaw-chaos-tests"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bytes",
- "futures",
- "futures-util",
- "hyper",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
- "tokio-test",
- "tokio-tungstenite 0.28.0",
 ]
 
 [[package]]
@@ -376,7 +363,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
- "serde_json",
  "serde_yaml",
  "walkdir",
 ]
@@ -396,7 +382,6 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
- "idna",
  "k8s-openapi",
  "kube",
  "oci-client 0.16.1",
@@ -434,7 +419,6 @@ dependencies = [
  "flate2",
  "futures",
  "hkdf",
- "hyper",
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
@@ -454,7 +438,6 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tokio-util",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "wiremock",
@@ -5062,17 +5045,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

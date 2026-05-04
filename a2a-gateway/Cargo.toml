@@ -19,17 +19,12 @@ azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
 # HTTP server / proxy
 axum.workspace = true
 tower.workspace = true
-tower-http.workspace = true
 hyper = { workspace = true, features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio", "http1", "http2"] }
-http-body-util = "0.1"
 reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 
 # Async
 tokio.workspace = true
-tokio-util = { version = "0.7", features = ["rt"] }
-futures.workspace = true
-futures-util.workspace = true
 
 # TLS — workspace-wide constraint: rustls only. ADR forbids
 # introducing a second TLS implementation.
@@ -40,10 +35,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # Cert / key file watching for hot reload.
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 
-# Serialisation
-serde.workspace = true
-serde_json.workspace = true
-
 # Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -53,9 +44,6 @@ prometheus.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 
-# Time / rate-limit bookkeeping
-chrono.workspace = true
-
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
@@ -63,3 +51,11 @@ rand.workspace = true
 base64.workspace = true
 serde_json.workspace = true
 tempfile = "3"
+
+[package.metadata.cargo-machete]
+# `azureclaw-a2a-core` is the dependency this crate exists to wrap (see
+# src/verify.rs doc comment). The wiring through `verify::ReplayCache` is
+# intentional and the explicit dep keeps the gateway aligned with the
+# router's verification path even though the import is not yet active in
+# the proxy hot path.
+ignored = ["azureclaw-a2a-core"]
