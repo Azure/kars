@@ -10,6 +10,7 @@ End-to-end blueprints you can `kubectl apply -f` after running `azureclaw up`.
 | [`demo-clawshield`](demo-clawshield/) | OpenClaw (×3) | Multi-tenant attack-simulation demo (poisoned document, two victim tenants, isolation proof). |
 | [`openai-agents-quickstart`](openai-agents-quickstart/) | OpenAIAgents (Python) | Hosts an unmodified OpenAI Agents SDK app inside an AzureClaw sandbox. Same security as default. |
 | [`maf-quickstart`](maf-quickstart/) | MicrosoftAgentFramework (Python) | Hosts an unmodified Microsoft Agent Framework app inside an AzureClaw sandbox. |
+| [`byo-quickstart`](byo-quickstart/) | BYO | Brings any container image under the BYO contract (`spec.runtime.kind: BYO`). Same isolation, same router. |
 
 All examples share the same control-plane install and isolation guarantees
 — only the agent runtime image changes. See

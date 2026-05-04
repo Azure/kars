@@ -4,12 +4,29 @@
 
 # Getting started
 
-- [Getting Started](getting-started.md)
+- [Getting started](getting-started.md)
 - [CLI reference](cli-reference.md)
-- [Demo](DEMO.md)
-- [Demo guide](DEMO-GUIDE.md)
 - [Use cases](use-cases.md)
-- [Migration from NemoClaw](migration-from-nemoclaw.md)
+
+# Architecture
+
+- [Architecture overview](architecture.md)
+- [Architecture diagrams](architecture-diagrams.md)
+- [Runtimes](runtimes.md)
+- [A2A gateway (architecture)](architecture/a2a-gateway.md)
+- [AGT boundary](architecture/agt-boundary.md)
+- [CRD versioning](architecture/crd-versioning.md)
+- [Multi-tenant model](multi-tenant.md)
+- [Egress proxy](egress-proxy.md)
+
+# Security
+
+- [Security overview](security.md)
+- [STRIDE × trust boundaries](security/stride.md)
+- [Red team playbook](security/red-team.md)
+- [Security validation](security-validation.md)
+- [MCP top-10](security-mcp-top10.md)
+- [Upstream alignment](upstream-alignment.md)
 
 # Agent capabilities
 
@@ -17,30 +34,9 @@
 - [Operator TUI](operator-tui.md)
 - [Permissions model](permissions.md)
 
-# Architecture
-
-- [Architecture overview](architecture.md)
-- [Architecture diagrams](architecture-diagrams.md)
-- [A2A gateway (architecture)](architecture/a2a-gateway.md)
-- [AGT boundary](architecture/agt-boundary.md)
-- [CRD versioning](architecture/crd-versioning.md)
-- [Multi-tenant model](multi-tenant.md)
-- [Egress proxy](egress-proxy.md)
-- [Any OpenClaw cloud offload](any-openclaw-cloud-offload.md)
-
-# Security
-
-- [Security overview](security.md)
-- [Threat model](threat-model.md)
-- [STRIDE × trust boundaries](security/stride.md)
-- [Red team playbook](security/red-team.md)
-- [E2E encryption proof](e2e-encryption-proof.md)
-- [Security validation](security-validation.md)
-- [MCP top-10](security-mcp-top10.md)
-- [SIGs / agent-sandbox compat](sigs-agent-sandbox-compat.md)
-
 # Operations
 
+- [Operations overview](operations/README.md)
 - [A2A gateway (operations)](operations/a2a-gateway.md)
 - [BYO strict mode](operations/byo-strict.md)
 - [Branch protection](operations/branch-protection.md)
@@ -56,7 +52,6 @@
 - [CRD reference](api/crd-reference.md)
 - [Conditions](api/conditions.md)
 - [Backwards compatibility](api/backwards-compatibility.md)
-- [Policy canonical format](policy-canonical-format.md)
 
 # Blueprints
 
@@ -70,10 +65,6 @@
 # Roadmap & ADRs
 
 - [Roadmap](roadmap.md)
-- [Upstream alignment](upstream-alignment.md)
 - [ADR index](adr/README.md)
   - [ADR-0001: A2A ingress front edge](adr/0001-a2a-ingress-front-edge.md)
 
-# Reference
-
-- [AGT vendored patch audit](agt-vendored-patch-audit.md)
