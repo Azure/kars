@@ -33,6 +33,9 @@ test-rust: ## Run Rust tests only
 test-e2e: ## Run E2E tests (requires Docker + Kind)
 	bash tests/e2e/run.sh
 
+test-e2e-manual: ## Run the manual E2E matrix against an existing cluster (see tests/e2e-manual/README.md)
+	bash tests/e2e-manual/run.sh
+
 # ─── Lint ─────────────────────────────────────────────────────────────────────
 
 lint: ## Run linters
