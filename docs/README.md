@@ -1,71 +1,75 @@
-# AzureClaw Documentation
+# AzureClaw documentation
 
-## Getting Started
+A secure runtime for AI agents on Azure Kubernetes Service. This is the documentation index. The top-level [`README`](../README.md) is a faster on-ramp; come here when you need depth.
 
-- [Quick Start](../README.md#quick-start) — Install, deploy, connect in 5 minutes
-- [Getting Started Guide](getting-started.md) — Walkthrough from `azureclaw up` to first agent
-- [CLI Reference](cli-reference.md) — Every command and flag
-- [Use Cases](use-cases.md) — Canonical scenarios with code citations
-- [Architecture](architecture.md) — Components, CRD schema, four-seam providers, MCP/A2A modules, API endpoints
-- [Architecture Diagrams](architecture-diagrams.md) — Mermaid flow diagrams
-- [API & CRD Reference](api/crd-reference.md) — `ClawSandbox` schema (v1alpha1)
+## Choose your path
 
-## Security
+### Read in order if you are new
+1. [Getting started](getting-started.md) — laptop in five minutes, then AKS.
+2. [Architecture](architecture.md) — the design and why.
+3. [Architecture diagrams](architecture-diagrams.md) — every component, dev and prod side by side.
+4. [Use cases](use-cases.md) — the four scenarios AzureClaw was built for.
 
-- [Security Model](security.md) — Defense-in-depth (infra + AGT governance + E2E mesh + protocol-layer controls)
-- [Threat Model — Routes](threat-model.md) — Per-route auth tier, input validation, blast-radius
-- [STRIDE Threat Model](security/stride.md) — Per-trust-boundary STRIDE matrix
-- [AGT Boundary](architecture/agt-boundary.md) — What AzureClaw consumes vs builds, four provider contracts
-- [AGT Vendored-Patch Audit](agt-vendored-patch-audit.md) — Vendored AgentMesh fixes pending AGT mesh shipping
-- [`sigs/agent-sandbox` Compat](sigs-agent-sandbox-compat.md) — Optional Translate / Overlay mode design
-- [OWASP MCP Top 10 (2025)](security-mcp-top10.md) — Controls matrix for the new MCP 2026 surface
-- [ADR-0001 — A2A ingress front-edge](adr/0001-a2a-ingress-front-edge.md) — Gateway-only, surgical opt-in
-- [Security Audits](security-audits/) — Per-capability audit docs (Phase 0 + Phase 1 + Phase 2)
-- [Red-Team Findings Log](security/red-team.md) — Internal adversarial-test history
-- [Network Egress & Proxy](egress-proxy.md) — Blocklist, allowlist, approval flow, learn mode
-- [E2E Encryption Proof](e2e-encryption-proof.md) — Signal Protocol inter-agent messaging with traffic capture evidence
-- [Security Validation](security-validation.md) — Live cluster evidence for every security layer
-- [Permissions](permissions.md) — Required Azure RBAC for `azureclaw up`
-- [Upstream Alignment](upstream-alignment.md) — How AzureClaw extends OpenClaw via upstream extension points (no fork)
+### By audience
 
-## Agent Capabilities
+| You are a… | Start here |
+|---|---|
+| **Executive / decision-maker** | [Architecture](architecture.md) → [Blueprints](blueprints/00-index.md) → [Use cases](use-cases.md) |
+| **Platform engineer** | [Getting started](getting-started.md) → [Operations](operations/) → [CLI reference](cli-reference.md) |
+| **Security engineer** | [Security model](security.md) → [STRIDE](security/stride.md) → [Red-team playbook](security/red-team.md) → [MCP top-10](security-mcp-top10.md) |
+| **Agent builder** | [Runtimes](runtimes.md) → [CRD reference](api/crd-reference.md) → [CLI reference](cli-reference.md) |
+| **Site reliability** | [Operations / GitOps](operations/gitops.md) → [Conditions](api/conditions.md) → [Egress proxy](egress-proxy.md) |
 
-- [Channels & Plugins](channels-plugins.md) — Telegram, Slack, Discord, WhatsApp, search plugins, Foundry Bing Grounding
-- [Architecture — Foundry Integration](architecture.md#foundry-standalone-apis-18-api-groups-imds-auth) — Responses API, Memory Store, Foundry IQ
-- [Any-OpenClaw + Cloud Offload](any-openclaw-cloud-offload.md) — Run the `azureclaw-mesh` plugin in *any* OpenClaw host (NemoClaw, laptop, …) and offload tasks to AzureClaw sandboxes over Signal E2E
+## Reference
 
-## Architecture deep-dives
+### Architecture & design
+- [Architecture](architecture.md) — the canonical design doc.
+- [Architecture diagrams](architecture-diagrams.md) — dev, prod, mesh, A2A, MCP.
+- [A2A gateway](architecture/a2a-gateway.md) — public-ingress topology and trust model.
+- [AGT boundary](architecture/agt-boundary.md) — what AGT enforces vs what AzureClaw enforces.
+- [CRD versioning](architecture/crd-versioning.md) — v1.0 stability commitments.
 
-- [A2A Gateway](architecture/a2a-gateway.md) — Front-edge gateway design and component split
-- [AGT Boundary](architecture/agt-boundary.md) — Responsibility split, provider contracts, outage modes
-- [CRD Versioning Policy](architecture/crd-versioning.md) — `v1alpha1` freeze + `v1alpha2` + conversion-webhook plan
-- [Backwards-Compatibility Commitment](api/backwards-compatibility.md) — SemVer surface, deprecation policy
+### API
+- [CRD reference](api/crd-reference.md) — all eight CRDs with schema and examples.
+- [Conditions reference](api/conditions.md) — every status condition the controller emits.
+- [Backwards compatibility](api/backwards-compatibility.md) — what we promise and what we do not.
 
-## Operations
+### Runtimes
+- [Runtime catalog](runtimes.md) — seven first-class adapters and the BYO contract.
 
-- [Egress Management](egress-proxy.md#operator-workflow) — Learn → review → approve → lock down
-- [Agent Handoff](architecture.md#cloud-handoff) — Live migration between local Docker and AKS
-- [Multi-Tenant Isolation](multi-tenant.md) — Per-namespace security boundaries
-- [BYO Strict Mode](operations/byo-strict.md) — Validating-only admission for non-default runtimes
-- [Branch Protection](operations/branch-protection.md) — Repo guardrails
-- [Supply Chain](operations/supply-chain.md) — Cosign, SBOM, attestations
-- [GitOps](operations/gitops.md) — Reconciler in a GitOps fleet
-- [Image Versioning](operations/image-versioning.md) — Tag policy and runtime image overrides
-- [Helm Packaging](operations/helm-packaging.md) — Chart versioning + local packaging
-- [Secret Rotation Runbook](operations/secret-rotation.md) — Per-sandbox creds, TLS, AgentMesh identity, Azure
-- [Chaos Tier](operations/chaos-tier.md) — Fault-injection test surface
+### Blueprints
+- [Index](blueprints/00-index.md)
+- [01 — Developer inner loop](blueprints/01-developer-inner-loop.md)
+- [02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md)
+- [03 — Managed public offload](blueprints/03-managed-public-offload.md)
+- [04 — Cross-org federation](blueprints/04-cross-org-federation.md)
+- [05 — Sovereign / air-gapped](blueprints/05-sovereign-airgapped.md)
 
-## Roadmap
+### Security
+- [Security model](security.md) — the layered control plane.
+- [STRIDE](security/stride.md) — threat model.
+- [Red-team playbook](security/red-team.md) — adversarial scenarios.
+- [Security validation](security-validation.md) — what CI verifies.
+- [MCP top-10](security-mcp-top10.md) — how AzureClaw addresses each item.
+- [Upstream alignment](upstream-alignment.md) — the OpenClaw extension contract.
 
-- [Roadmap](roadmap.md) — v1.0 capabilities, v1.1 targets, v1.2 directions, backlog
+### Operations
+- [Operations index](operations/) — fleet operations, GitOps, upgrades.
+- [Operator TUI](operator-tui.md) — `azureclaw operator`.
+- [Egress proxy](egress-proxy.md) — outbound network controls.
 
-## Demos & Examples
+### CLI
+- [CLI reference](cli-reference.md) — every command, every flag.
 
-- [ClawShield Demo](DEMO.md) — Full walkthrough with screenshots
-- [Demo Guide](DEMO-GUIDE.md) — 30-minute first-launch → multi-agent flow
-- [Demo Script](demo-script.md) — 3-act, ~15-minute live presentation
-- [Example Agents](../examples/) — `basic-agent`, `confidential-agent`, `demo-clawshield`, `byo-quickstart`
+## What is **not** here
 
-## Migration
+`docs/internal/` holds historical phase audits, migration logs, and one-off proofs that exist for traceability but are not part of the public surface. They are excluded from the rendered site.
 
-- [Migration from NemoClaw](migration-from-nemoclaw.md) — What changed and how to migrate
+## Reading the site offline
+
+```bash
+make docs-site-serve   # serves at http://localhost:3000
+make docs-site         # builds to target/book/index.html
+```
+
+The site is built with [mdBook](https://rust-lang.github.io/mdBook/). The chapter index is **[`SUMMARY.md`](SUMMARY.md)**.
