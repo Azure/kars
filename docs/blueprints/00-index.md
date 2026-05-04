@@ -1,42 +1,44 @@
-# AzureClaw Deployment Blueprints
+# Deployment blueprints
 
-Concrete, end-to-end shapes for running AzureClaw. Each blueprint pins down **who runs what**, **where the trust boundary sits**, and **how a single agent task flows from prompt to completion** — including which CRDs, controllers, network paths, and identity surfaces are in play.
+Five concrete shapes for running AzureClaw. Each blueprint pins down **who runs what**, **where the trust boundary sits**, and **the main flow** end to end.
 
-The four [use cases in `docs/use-cases.md`](../use-cases.md) describe *what* AzureClaw does. The blueprints below describe *how you run it for a given audience*. They are not mutually exclusive — a single AzureClaw cluster can serve multiple blueprints simultaneously (e.g. Blueprint 02 for internal employees + Blueprint 03 for external partners).
+These are not mutually exclusive — one AzureClaw cluster can serve several of them simultaneously (e.g. Blueprint 02 for internal employees + Blueprint 03 for external partners on the same cluster).
 
-## Blueprint catalogue
+## Catalogue
 
-| # | Blueprint | Audience | Where AzureClaw runs | Today's status |
+| # | Blueprint | Audience | Where AzureClaw runs | Status |
 |---|---|---|---|---|
-| **01** | [Developer inner-loop](01-developer-inner-loop.md) | Individual contributor on a laptop | Local Docker / kind, single-node | ✅ Shipping |
-| **02** | [Enterprise self-hosted cluster](02-enterprise-self-hosted.md) | Platform team inside a single org | Customer-owned AKS, single tenant | ✅ Shipping |
-| **03** | [Managed public offload service](03-managed-public-offload.md) | SaaS provider serving many external tenants | Provider-owned AKS, multi-tenant, Kata + AMD SEV-SNP | ✅ Runtime shipping · 🚧 SaaS productization in progress |
-| **04** | [Cross-org federation](04-cross-org-federation.md) | Two or more orgs collaborating | Two AKS clusters meshed E2E | ✅ Shipping |
-| **05** | [Sovereign / air-gapped](05-sovereign-airgapped.md) | Regulated, classified, disconnected, or sovereign-cloud workloads | Customer-owned AKS in an isolated network island | 🚧 Patterns documented; reproducible bundle on roadmap |
+| **[01](01-developer-inner-loop.md)** | Developer inner loop | Individual contributor | Laptop (`azureclaw dev` — single Docker container) | ✅ |
+| **[02](02-enterprise-self-hosted.md)** | Enterprise self-hosted | Platform team, single org | Customer-owned AKS, single tenant | ✅ |
+| **[03](03-managed-public-offload.md)** | Managed public offload | SaaS provider, many tenants | Provider-owned AKS, multi-tenant, optional Kata + AMD SEV-SNP | ✅ runtime · 🚧 productization |
+| **[04](04-cross-org-federation.md)** | Cross-org federation | Two or more orgs collaborating | Two AKS clusters, mesh + A2A across | ✅ |
+| **[05](05-sovereign-airgapped.md)** | Sovereign / air-gapped | Regulated / classified / disconnected | Isolated AKS, no public egress | 🚧 patterns documented |
 
-## Reading guide
+## How to read each blueprint
 
-Each blueprint has the same shape:
+Every blueprint follows the same shape:
 
-1. **Persona & intent** — who you are, what you want.
-2. **Topology** — Mermaid diagram of who-runs-what.
+1. **Persona & intent** — who, what, why.
+2. **Topology** — Mermaid diagram of who runs what.
 3. **Trust boundary** — where the credential / control boundary sits.
 4. **Primary flow** — sequence diagram of the main happy-path interaction.
-5. **What you provision** — concrete CLI / kubectl invocations.
-6. **What's unique to this blueprint** — the property that makes it not just a sub-case of another blueprint.
-7. **References** — code, CRDs, ADRs.
+5. **What you provision** — concrete CLI / Helm / `kubectl` invocations.
+6. **What is unique** — the property that makes this blueprint not just a sub-case of another.
+7. **References** — code, CRDs, related docs.
 
-## Cross-cutting properties
+## What every blueprint inherits
 
-Regardless of blueprint, every AzureClaw deployment ships:
+These properties are not blueprint-specific; they come from running AzureClaw at all. If your environment cannot satisfy them, you are outside the threat model — open an issue before deploying.
 
-- **Egress isolation** — agent UID 1000 can only reach `localhost` + DNS. The router (UID 1001) is the sole external path.
-- **Foundry-side Content Safety** — `Microsoft.DefaultV2` Prompt Shields on every inference.
-- **AGT-native governance** — `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` evaluated in-process on every tool call, every inference, every mesh message.
-- **Tamper-evident audit chain** — hash-chained log persisted via `AuditSink`.
-- **Signal-Protocol mesh** — X3DH + Double Ratchet. Relay sees only ciphertext. No plaintext fallback; failed-decrypt is a `security_event`, never a delivered cleartext message.
-- **CRD-driven control plane** — eight namespaced CRDs under `azureclaw.azure.com/v1alpha1`: `ClawSandbox`, `ClawPairing`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `A2AAgent`, `ClawMemory`, `ClawEval`. All eight reconcilers shipped in Phase 2. Full reference: [`docs/api/crd-reference.md`](../api/crd-reference.md).
-- **Multi-runtime hosting** — `spec.runtime.kind` selects the agent runtime variant: `OpenClaw` (default, Tier-1), `OpenAIAgents`, `MicrosoftAgentFramework` (Tier-1), `SemanticKernel`, `LangGraph`, `Anthropic` (Tier-2, schema shipped), or `BYO`. The inference-router, governance, and audit chain are runtime-agnostic.
-- **`spec.inferenceRef.name` (ref form)** — sandboxes reference an `InferencePolicy` CR by name rather than inlining model/budget config. Inline inference fields were removed in S13; all example YAMLs in these blueprints use the ref form.
+- **Egress isolation.** Agent runs as UID 1000 with no path to the network. The router (UID 1001) is the only egress. Enforced by the `egress-guard` initContainer (iptables) and a Kubernetes NetworkPolicy.
+- **Foundry-side Content Safety.** `Microsoft.DefaultV2` Prompt Shields on every inference, both directions.
+- **AGT governance.** `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` evaluated in-process on every tool call, every inference, every mesh message.
+- **Tamper-evident audit.** Hash-chained log via `AuditSink`. Each record is signed.
+- **Signal-Protocol mesh.** X3DH + Double Ratchet. Relay sees only ciphertext. Failed decrypt is a `security_event`; there is no plaintext fallback.
+- **CRD-driven control plane.** Eight CRDs in `azureclaw.azure.com/v1alpha1`: `ClawSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `ClawMemory`, `ClawEval`, `TrustGraph`. Full schema in [`docs/api/crd-reference.md`](../api/crd-reference.md).
+- **Multi-runtime hosting.** `ClawSandbox.spec.runtime.kind` selects the runtime: `OpenClaw` (default), `OpenAIAgents`, `MicrosoftAgentFramework` (Python — .NET deferred), `LangGraph` (Python or TypeScript), `Anthropic`, `PydanticAi`, or `BYO`. `SemanticKernel` is reserved but not yet wired. See [Runtime catalog](../runtimes.md).
+- **InferencePolicy reference.** Sandboxes bind to an `InferencePolicy` by name; model and budget configuration is no longer inline.
 
-If your environment can't support one of those, you're outside the AzureClaw threat model — open an issue before deploying.
+---
+
+The blueprints reuse the diagrams in [Architecture diagrams](../architecture-diagrams.md) where possible — go there for the canonical view of any given component.

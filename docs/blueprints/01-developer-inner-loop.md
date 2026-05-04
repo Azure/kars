@@ -1,166 +1,116 @@
-# Blueprint 01 — Developer inner-loop
+# Blueprint 01 — Developer inner loop
 
-> "I'm on my laptop. I want to iterate on AzureClaw — controller, router, sandbox image, plugin — without provisioning AKS, without paying for Azure, and without weakening the security model so much that what I test locally diverges from what runs in production."
+> *"I am on my laptop. I want to write an agent, change a tool policy, fix a router bug, and see the effect in seconds — without provisioning AKS, without paying for Azure, and without a different code path that 'will be replaced in production'."*
 
 ## Persona & intent
 
-- **You are:** an individual contributor or maintainer.
-- **You want:** sub-minute reload of controller / router / CLI / plugin / sandbox image. Real Foundry calls *optional* (`stub-foundry` mode for offline). Real K8s reconciliation. Real seccomp + NetworkPolicy enforcement so a green local run means something.
-- **You do not want:** to provision AKS for every PR; to share Azure credentials with experimental builds; to maintain a parallel "dev mock" code path that drifts from prod.
+- **You are:** an agent author or AzureClaw maintainer.
+- **You want:** seconds of feedback. Real router code. Real policy decisions. Real audit format. Optionally real Foundry calls (you have an Azure OpenAI key on your laptop). No Kubernetes.
+- **You do not want:** to operate a kind cluster for every PR; to stand up Workload Identity locally; to maintain a parallel "dev mock" that drifts from production.
 
 ## Topology
 
+One Docker container. Same image as the sandbox, just with the router co-located inside instead of a separate pod.
+
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
-  subgraph Laptop["💻 Laptop (your machine)"]
-    direction TB
-    KIND[("🔵 kind cluster<br/>1 node")]
-    REG[("📦 local registry<br/>:5001")]
-
-    subgraph KINDCONTENT[" "]
-      direction TB
-      CTRL["azureclaw-controller<br/>(operator)"]
-      SBX["ClawSandbox 'dev'<br/>📦 openclaw + 🛡 router"]
-    end
-
-    KIND --- KINDCONTENT
-    DOCKER["docker engine<br/>(builds + kind nodes)"]
+  subgraph Laptop["💻 Your laptop"]
     CLI["azureclaw CLI"]
+    subgraph Container["one Docker container"]
+      Agent["agent runtime"]
+      Router["inference-router (Rust)"]
+      Agent --> Router
+    end
+    Secret["mounted secret<br/>(Foundry key)"]
+    Secret -.-> Router
+    CLI -->|azureclaw dev / connect| Container
   end
-
-  CLI -->|"azureclaw up<br/>--mode local"| KIND
-  DOCKER -->|"docker push :5001"| REG
-  REG -->|"image pull"| KIND
-
-  CLI -.->|"azureclaw connect dev<br/>(port-forward 18789)"| SBX
-
-  subgraph Foundry["☁️ Azure AI Foundry (optional)"]
-    FND["gpt-4.1, gpt-5-mini, …"]
-  end
-
-  SBX -.->|"only if AZURE_OPENAI_*<br/>env vars set"| FND
-
-  classDef opt stroke-dasharray:5 5;
-  class Foundry,FND opt;
+  Foundry["☁️ Azure AI Foundry<br/>(optional)"]
+  Router -.->|"only if you set<br/>endpoint + key"| Foundry
+  classDef opt stroke-dasharray:5 5
+  class Foundry opt
 ```
 
 ## Trust boundary
 
-The trust boundary is **identical to production**:
+The trust boundary is **deliberately weaker than production**, because there is one process sharing one network namespace inside one Docker container. There is no UID separation, no egress guard, no NetworkPolicy. Treat dev mode as a development surface, not a security surface.
 
-- Agent UID 1000 inside the sandbox pod can reach only `localhost` + DNS. The router on UID 1001 is the sole external path.
-- The custom strict seccomp profile is loaded by kind (annotation: `localhostProfile: azureclaw-strict.json`).
-- NetworkPolicy default-deny is enforced by Cilium-on-kind.
-- Foundry calls go to the real Foundry endpoint via Workload Identity *only if* the user has configured one; otherwise the router runs in `--stub-foundry` mode and returns deterministic canned responses.
+| Property | Dev mode | Prod mode |
+|---|---|---|
+| Pod shape | one container | multi-container (agent + router + egress-guard) |
+| UID separation | no | UID 1000 (agent) / UID 1001 (router) |
+| Egress guard | no | iptables initContainer + NetworkPolicy |
+| Identity | resource-level Foundry key | Workload Identity (federated) |
+| Content Safety | yes | yes |
+| Governance + audit | yes | yes |
+| Mesh available | yes (against a real relay if you point at one) | yes |
 
-The only thing that's *not* like production is the host: `kind` instead of AKS, no Application Gateway, no Confidential Containers (kata + SEV-SNP) — Confidential mode silently degrades to standard mode in local-dev.
+Everything yes/yes is the same code path in both modes. That is what makes a green dev-mode test meaningful.
 
 ## Primary flow
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 sequenceDiagram
-    autonumber
-    participant Dev as 👤 You
-    participant CLI as azureclaw CLI
-    participant Docker as docker
-    participant Reg as local registry
-    participant Kind as kind
-    participant Ctrl as controller pod
-    participant SBX as ClawSandbox 'dev'
+  autonumber
+  participant Dev as You
+  participant CLI as azureclaw CLI
+  participant Docker as Docker
+  participant Img as Sandbox image
+  participant Router as Router (in-image)
 
-    Dev->>CLI: azureclaw up --mode local
-    CLI->>Docker: docker compose up (registry)
-    CLI->>Kind: kind create cluster
-    CLI->>CLI: helm install azureclaw …
-    Kind->>Ctrl: schedule controller
-    Dev->>Docker: cargo build && docker build sandbox
-    Docker->>Reg: docker push :5001/sandbox:latest
-    Dev->>CLI: azureclaw add dev --model stub-foundry
-    CLI->>Kind: kubectl apply ClawSandbox
-    Ctrl->>Kind: reconcile → Deployment + NP + ConfigMap
-    Kind->>SBX: pull from :5001 → start
-    Dev->>CLI: azureclaw connect dev
-    CLI->>SBX: kubectl port-forward 18789
-    Dev->>SBX: chat over WebUI
-    SBX-->>Dev: deterministic response (stub-foundry)
+  Dev->>CLI: azureclaw dev --name hello
+  CLI->>Docker: build image (cached)
+  CLI->>Docker: run container
+  Docker->>Img: ENTRYPOINT
+  Img->>Router: start on 127.0.0.1:8443
+  Img->>Img: start agent runtime
+  Dev->>CLI: azureclaw connect hello
+  CLI->>Img: TUI / WebSocket
+  Note over Dev,Router: every prompt goes through<br/>the same policy / audit / safety<br/>code path as in production
 ```
 
 ## What you provision
 
 ```bash
-# One-time
-git clone https://github.com/Azure/azureclaw && cd azureclaw
-make dev-prereqs                  # installs kind, helm, kubectl, cargo, node 22
+# clone + build (Node 22+, Rust 1.88+)
+git clone https://github.com/Azure/azureclaw.git
+cd azureclaw/cli && npm ci && npm run build && npm link
 
-# Every-loop
-make build                        # cargo build + cli npm run build
-make images                       # docker build for controller, router, sandbox
-azureclaw up --mode local         # spins kind + local registry + helm install
-azureclaw add dev --model stub-foundry --governance
-azureclaw connect dev             # port-forward to WebUI on :18789
+# run a sandbox locally — Docker only, no Azure, no Kubernetes
+azureclaw dev --name hello
 
-# When you change Rust code:
-make build images && azureclaw push --only sandbox --apply
+# talk to it
+azureclaw connect hello
 
-# Tear down:
-azureclaw down --mode local       # kind delete + docker compose down
+# tail logs (router + agent)
+azureclaw logs hello -f
+
+# inspect / change policy
+azureclaw policy show hello
+azureclaw policy apply ./my-tool-policy.yaml --sandbox hello
+
+# tear down
+azureclaw destroy hello
 ```
 
-### Runtime selection and the ref form
+On the first run you are prompted for an Azure OpenAI endpoint, deployment name, and resource-level key. **That credential is the only one dev mode ever sees, and it never leaves your laptop.** If you skip the prompt, the sandbox starts with a stub model — useful for offline plugin / policy work.
 
-Blueprint 01 defaults to `runtime.kind: OpenClaw`. To test a different runtime adapter locally, set `spec.runtime.kind` in the `ClawSandbox` manifest. The `spec.inferenceRef.name` field (S13 ref form) is **mandatory** on every sandbox — it points to an `InferencePolicy` CR in the same namespace instead of inlining model/budget config:
+## What is unique to this blueprint
 
-```yaml
-# azureclaw-dev namespace is created by the controller on reconcile
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: InferencePolicy
-metadata:
-  name: dev-policy
-  namespace: azureclaw-dev
-spec:
-  tokenBudget:
-    dailyTokens: 500000
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
-metadata:
-  name: dev
-  namespace: azureclaw-dev
-spec:
-  runtime:
-    kind: OpenClaw   # swap to OpenAIAgents / MicrosoftAgentFramework / BYO to test adapters
-  inferenceRef:
-    name: dev-policy # ref form — never inline; missing CR → Degraded/InferencePolicyNotFound
-  governance:
-    enabled: true
-```
+- **One image, two sides.** The router and the agent share an image so the inner loop is `docker run` rather than `kubectl apply`. This is the only difference in deployment shape between dev and the rest of the blueprints.
+- **Production-equal control logic.** The router is the same Rust crate. The policy engine is the same. The audit format is the same. A policy that allows a tool call locally allows it in prod; a policy that denies it locally denies it in prod.
+- **No Azure subscription required to start.** You can write plugins and iterate on `ToolPolicy` against the stub model. You only need an Azure OpenAI key the moment you want to talk to a real model.
 
-`azureclaw add dev --model stub-foundry --governance` emits the above CRs automatically; the YAML above is for direct `kubectl apply` iteration.
+## When this is the wrong blueprint
 
-For the cross-runtime mesh path (Blueprint 04 reduced to one machine), the same stack supports:
-
-```bash
-azureclaw mesh promote --port-forward      # exposes registry+relay on :18080/:18765
-azureclaw pair generate --name laptop-self # mints a token you can paste back into a NemoClaw also running locally
-```
-
-## What's unique to this blueprint
-
-- **Real reconciliation, fake cloud.** The controller does real K8s API calls against a real apiserver; only Foundry is optionally stubbed. No mock controllers, no in-memory K8s clients.
-- **Same image, same seccomp, same NP.** What you test locally is what gets pushed to AKS — modulo Confidential mode and Application Gateway.
-- **No Azure credentials anywhere on the laptop** in stub-foundry mode. Safe to run on shared / personal machines, in CI, in dependabot autoruns.
-
-## What this blueprint is NOT
-
-- Not a production deployment. `kind` is a single-node cluster on your laptop; if your laptop dies, your sandbox dies.
-- Not a security-audited environment. Local-dev disables some isolation features that require real AKS (Confidential Containers, Application Gateway WAF, Foundry-side Prompt Shields when in stub-foundry).
-- Not a substitute for the [conformance + compat suites](../conformance-suite.md) — those need a real cluster.
+- You want **multi-tenant isolation** — go to Blueprint 02.
+- You want **hardware-isolated execution** for customer prompts — go to Blueprint 03.
+- You want **two organisations to talk** — go to Blueprint 04.
+- You want **air-gapped deployment** — go to Blueprint 05.
 
 ## References
 
-- `cli/src/commands/up.ts` (`--mode local` branch)
-- `docker-compose.dev.yml` (local registry + helm-install harness)
-- `Makefile` (`dev-prereqs`, `build`, `images`, `images-load`)
-- `tests/e2e/` (kind-based e2e harness, same shape as this blueprint)
+- [`cli/src/commands/dev.ts`](../../cli/src/commands/dev.ts) — the implementation of `azureclaw dev`.
+- [`sandbox-images/`](../../sandbox-images/) — the per-runtime images dev mode uses.
+- [Architecture — Two modes](../architecture.md#two-modes) — the canonical write-up of dev vs prod.
+- [Getting started — Step 1](../getting-started.md#step-1--local-five-minutes) — the user-facing walkthrough.
