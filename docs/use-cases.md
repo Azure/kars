@@ -9,7 +9,7 @@ Six fully-shipped use cases covering every deployment pattern from laptop inner-
 | 1 | **AzureClaw-native agents (OpenClaw)** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
 | 2 | **Any-OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/internal/any-openclaw-cloud-offload.md`](any-openclaw-cloud-offload.md) |
 | 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | [`docs/internal/e2e-encryption-proof.md`](e2e-encryption-proof.md) |
-| 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (Tier-1: OpenClaw, OpenAIAgents, MAF, BYO) | [`docs/api/crd-reference.md#spec.runtime`](api/crd-reference.md) |
+| 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (OpenClaw, OpenAIAgents, MAF Python, LangGraph Py+TS, Anthropic, PydanticAi, BYO) | [`docs/runtimes.md`](runtimes.md) |
 | 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
 | 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → AzureClaw cluster | Translate + apply | ✅ Shipping | [`docs/internal/sigs-agent-sandbox-compat.md`](sigs-agent-sandbox-compat.md) |
 
@@ -19,7 +19,7 @@ All use cases share the same trust boundary:
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
 - Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
-- All 8 CRDs (`ClawSandbox`, `ClawPairing`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `A2AAgent`, `ClawMemory`, `ClawEval`) are first-class and visible in the operator TUI.
+- All 8 CRDs (`ClawSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `ClawMemory`, `ClawEval`, `TrustGraph`) are first-class and visible in the operator TUI.
 
 ---
 
@@ -396,24 +396,27 @@ spec:
 
 ### What the operator wants — now SHIPPED
 
-Phase 2 ships full support for three Tier-1 runtimes and a BYO contract for everything else. The same `ClawSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `ClawMemory` / `ClawEval` CRDs, and the same operator TUI apply regardless of runtime kind.
+v1.0 ships full support for seven first-class runtimes and a BYO contract for everything else. The same `ClawSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `ClawMemory` / `ClawEval` CRDs, and the same operator TUI apply regardless of runtime kind.
 
-| Tier | `spec.runtime.kind` | Status |
-|---|---|---|
-| Tier-1 | `OpenClaw` | ✅ Fully wired |
-| Tier-1 | `OpenAIAgents` | ✅ Fully wired |
-| Tier-1 | `MicrosoftAgentFramework` | ✅ Fully wired |
-| Tier-1 | `BYO` | ✅ Contract v1 |
-| Tier-2 | `SemanticKernel`, `LangGraph`, `Anthropic` | Schema present; `RuntimeReady=False/AdapterMissing` until adapters land |
+| `spec.runtime.kind` | Status |
+|---|---|
+| `OpenClaw` | ✅ |
+| `OpenAIAgents` | ✅ |
+| `MicrosoftAgentFramework` (Python) | ✅ (`.NET` deferred) |
+| `LangGraph` (Python or TypeScript) | ✅ |
+| `Anthropic` | ✅ |
+| `PydanticAi` | ✅ |
+| `BYO` | ✅ |
+| `SemanticKernel` | 🚧 Schema reserved; adapter image not yet built (`AdapterMissing`). |
 
-### Topology (same for all Tier-1 runtimes)
+### Topology (same for all first-class runtimes)
 
 ```mermaid
 graph TD
     subgraph AKS["AKS cluster"]
         CTRL[Controller]
         subgraph NS["azureclaw-<name>"]
-            RUNTIME["runtime container\n(any Tier-1 image, UID 1000)"]
+            RUNTIME["runtime container\n(any first-class image, UID 1000)"]
             IR["inference-router\n(UID 1001, port 8443)"]
         end
         TP[ToolPolicy CR]
