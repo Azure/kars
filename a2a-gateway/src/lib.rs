@@ -12,7 +12,8 @@
 //!                          ┌────────────────────────┐
 //!                          │   azureclaw-a2a-gateway │
 //!                          │   • TLS termination     │
-//!                          │   • JWS verify          │
+//!                          │   • subject extraction  │
+//!                          │   • replay cache        │
 //!                          │   • per-subject limits  │
 //!                          └──────────┬──────────────┘
 //!                                     │ mTLS
@@ -23,11 +24,26 @@
 //!                                 sandbox pod
 //! ```
 //!
-//! The gateway's *only* authentication boundary is the JWS verifier
-//! (`azureclaw_a2a_core::verify_inbound_card`). Everything downstream
-//! of `verify::verify_or_reject` is treated as authenticated and
-//! tagged with the verified subject claim, which the router uses as
-//! the policy key for inbound A2A.
+//! The gateway extracts the verified-caller subject from the
+//! `X-A2A-Agent-Subject` request header, applies replay protection via
+//! [`verify::ReplayCache`], rate-limits per subject, then forwards
+//! over mTLS to the inference router.
+//!
+//! ## `[GAP-V1]` JWS verifier wiring
+//!
+//! The standalone JWS path (`azureclaw_a2a_core::verify_inbound_card`)
+//! is **complete and tested** as a library function — every router
+//! that needs it can call it directly. The gateway *binary*, however,
+//! does **not** yet run that verifier in its proxy hot path; it
+//! consumes the `X-A2A-Agent-Subject` header written by an upstream
+//! component (today: the cluster Gateway API mTLS handshake; tomorrow:
+//! a verifying axum layer inside this binary).
+//!
+//! Wiring `verify_inbound_card` directly into the gateway as an
+//! opt-in axum layer is tracked as a v1.1 follow-up; the placeholder
+//! is the unused `azureclaw-a2a-core` workspace dependency declared
+//! in `Cargo.toml`. The `[GAP-V1]` marker is mirrored in
+//! `docs/architecture/a2a-gateway.md`.
 //!
 //! ## Hardening checklist
 //!

@@ -65,7 +65,7 @@ reaching ours) terminate at a single, narrow surface that:
 |---|---|
 | Eavesdropping on the public path | TLS 1.2/1.3 via rustls. |
 | Stolen TLS leaf | `notify::Watcher` triggers `Arc<ServerConfig>` swap on cert rotation; old sessions drain. |
-| Forged AgentCard | JWS Ed25519 verify against the pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. |
+| Forged AgentCard | JWS Ed25519 verify in `azureclaw_a2a_core::verify_inbound_card` (library complete & tested) against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. **`[GAP-V1]`** the gateway *binary* does not yet run this verifier in its proxy hot path — see "Out of scope in S3.5" below. |
 | Replay of a valid envelope | Nonce cache with 5 min TTL and 100k entry cap. |
 | Untrusted gateway impersonating router | Router :8445 verifies client cert against the gateway-only CA bundle at `/etc/azureclaw/a2a-gateway-ca.pem`. |
 | Burst flood from one subject | Per-subject token bucket (60 burst / 5 rps); over-budget calls return 429. |
@@ -75,6 +75,7 @@ reaching ours) terminate at a single, narrow surface that:
 
 | Concern | Resolution path |
 |---|---|
+| **`[GAP-V1]` JWS verifier wired as an axum layer** | The verifier is implemented and tested in `azureclaw-a2a-core`; the gateway binary today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake. Wiring `verify_inbound_card` directly inside the gateway as an opt-in axum layer is a v1.1 task. The unused `azureclaw-a2a-core` workspace dependency in `a2a-gateway/Cargo.toml` is the placeholder. |
 | Cross-replica rate-limit sync | Helm value `a2aGateway.rateLimits.sharedRedisUrl` is reserved; impl is `unimplemented!()`. Replicas in v1 enforce in-memory only — the router's downstream limiter is the second line of defence. |
 | SAN pinning beyond CA chain on :8445 | The gateway CA is single-purpose (issued only to gateway pods) so chain-of-trust is sufficient for v1. |
 | Mandatory mTLS on :8443 | Out of scope — :8443 stays exactly as it is in the dev branch. |

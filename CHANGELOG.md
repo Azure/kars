@@ -49,12 +49,14 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 ### Internal / docs
 
 - `docs/backlog.md`, `docs/phase-0-1-capabilities.md`, `docs/security-reviewers.md` moved to `docs/internal/`. Stale link in `README.md` to a gitignored `implementation-plan.md` removed; lingering reference in `docs/security.md` reworded.
+- A2A gateway architectural picture aligned with reality: `a2a-gateway/src/lib.rs`, `a2a-gateway/src/verify.rs`, and `docs/architecture/a2a-gateway.md` no longer claim the gateway binary runs the JWS verifier in its hot path. The verifier remains complete and tested at the `azureclaw-a2a-core` library level; in-binary wiring is documented as a v1.1 follow-up. `docs/roadmap.md` reflects the same.
 
 ### `[GAP-V1]` markers (accepted for v1.0)
 
 - Cosign-on-admission gating (read surface shipped; admission enforcement is v1.1).
 - TrustGraph live updates (projection captured at sandbox creation; v1.1).
 - Microsoft Agent Framework **.NET** adapter (returns when AGT lands `AgentMeshClient` for .NET).
+- A2A gateway in-binary JWS verifier (`azureclaw_a2a_core::verify_inbound_card` is library-complete & tested; the gateway binary today consumes the verified-caller subject from the upstream Gateway-API mTLS handshake. Wiring the verifier as an opt-in axum layer inside the gateway is a v1.1 task).
 
 ---
 
