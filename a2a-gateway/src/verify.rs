@@ -1,11 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Inbound JWS verification + replay protection.
+//! Replay-protection cache for inbound A2A traffic.
 //!
-//! Wraps [`azureclaw_a2a_core::verify_inbound_card`] and adds a
-//! short-TTL nonce cache so identical signed envelopes cannot be
-//! replayed even within their `nbf..exp` window.
+//! `[GAP-V1]` — this module currently provides only the
+//! [`ReplayCache`]. Wrapping [`azureclaw_a2a_core::verify_inbound_card`]
+//! as an axum layer that runs inside this binary is a v1.1 task;
+//! today the verified-caller subject is consumed from the
+//! `X-A2A-Agent-Subject` header populated by the upstream Gateway
+//! API mTLS handshake (see `docs/architecture/a2a-gateway.md`).
+//! [`VerifyError`] enumerates the failure surface that wiring will
+//! emit; nothing in this module raises `MissingSignature`,
+//! `Invalid`, or `UnknownIssuer` yet.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
