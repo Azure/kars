@@ -483,3 +483,6 @@ runtimes/langgraph-ts/dist/
 
 # Helm chart packaging output (deploy/helm/package.sh) — not committed
 /dist/charts/
+
+# mdbook documentation site output (docs/site/book.toml writes here)
+/target/book/

@@ -1,0 +1,41 @@
+[book]
+title = "AzureClaw — Documentation"
+description = "AzureClaw — secure AI agent runtime on Azure AKS. Sandbox isolation, AGT governance, AgentMesh E2E encryption."
+authors = ["AzureClaw Team"]
+language = "en"
+
+# The book sources live one level up — the existing docs/ tree is the
+# canonical content. The site only adds book.toml + SUMMARY.md +
+# theme overrides; chapter pages are the same .md files reviewers
+# already see on GitHub. This avoids drift between the rendered site
+# and the in-repo browsing experience.
+src = ".."
+
+[build]
+# Build output lives outside the source tree to avoid mdbook recursing
+# into its own previous output (since src = ".." traverses sibling
+# directories of book.toml).
+build-dir = "../../target/book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/Azure/azureclaw"
+edit-url-template = "https://github.com/Azure/azureclaw/edit/dev/docs/{path}"
+no-section-label = false
+mathjax-support = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
