@@ -29,11 +29,10 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-futures = { workspace = true }
-futures-util = { workspace = true }
-tokio-tungstenite = { workspace = true }
-hyper = { workspace = true }
-bytes = "1"
 
 [dev-dependencies]
-tokio-test = "0.4"
+
+[package.metadata.cargo-machete]
+# `serde` is used via `#[derive(Serialize, Deserialize)]` in tests/k8s_api_flakes.rs;
+# cargo-machete does not detect derive-macro usage of the parent crate.
+ignored = ["serde"]
