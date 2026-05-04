@@ -61,14 +61,50 @@ Whichever mode you run in, the CRDs are the same, the audit chain is the same, a
 
 Walk through what happens when an agent in prod mode says *"call the model"*:
 
-1. The agent SDK is configured (by the runtime adapter) to point at `http://127.0.0.1:8443`. There is no way for it to reach Foundry directly — egress-guard would drop the packet.
-2. The router receives the request. It runs **content safety** (Foundry guardrails on the way in), checks the **token budget** for the tenant, and asks the **governance** layer (`InferencePolicy` + AGT) whether this call is allowed.
-3. If allowed, the router attaches a **Workload Identity** AAD token (which it minted from the projected service-account token) and forwards to Foundry.
-4. The response comes back. Content safety runs on the way out.
-5. The router **audits** the call: prompt-fingerprint, model, tokens-in, tokens-out, decision, latency. The audit record is hash-chained to the previous record so tampering is detectable.
-6. The router returns to the agent. Done.
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Agent as Agent (UID 1000)
+  participant Router as Router (UID 1001)
+  participant Gov as Governance<br/>(InferencePolicy + AGT)
+  participant Budget as Token budget
+  participant WI as Workload Identity<br/>(IMDS / federated)
+  participant Foundry as Foundry model<br/>(DefaultV2 guardrails inline)
 
-Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer message) goes through the same path with a different policy module. The router is a small Rust crate; its surface is small enough to audit.
+  Agent->>Router: POST /v1/chat (prompt)
+  Router->>Gov: allow? (model + sandbox + action)
+  alt deny
+    Gov-->>Router: deny + reason
+    Router-->>Agent: 403 policy_violation
+  else allow
+    Gov-->>Router: allow
+    Router->>Budget: check tenant budget
+    alt over budget
+      Budget-->>Router: exceeded
+      Router-->>Agent: 429 budget_exceeded
+    else within budget
+      Router->>WI: exchange SA token → AAD bearer
+      WI-->>Router: bearer (cached, ~5 min)
+      Router->>Foundry: POST /openai/... + bearer
+      Foundry-->>Router: completion + prompt_filter_results
+      Router->>Router: parse content flags<br/>report to AGT BehaviorMonitor
+      Router->>Router: append audit record (hash-chained)
+      Router-->>Agent: completion
+    end
+  end
+```
+
+In prose:
+
+1. The agent SDK is configured (by the runtime adapter) to point at `http://127.0.0.1:8443`. There is no way for it to reach Foundry directly — `egress-guard` would drop the packet.
+2. The router receives the request. It asks the **governance** layer (`InferencePolicy` + AGT `PolicyDecisionProvider`) whether this call is allowed. Deny → 403.
+3. It checks the **token budget** for the tenant. Over → 429.
+4. It mints a **Workload Identity** AAD token (from the projected service-account token, cached for the token TTL) and forwards to Foundry.
+5. **Content safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
+6. The router appends an **audit record** — prompt-fingerprint, model, tokens-in / tokens-out, decision, latency — hash-chained to the previous record so tampering is detectable.
+7. The router returns to the agent.
+
+Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer message) goes through the same shape with a different policy module. Code: `inference-router/src/routes/chat_completions.rs:27-100`.
 
 ---
 
