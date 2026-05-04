@@ -2,8 +2,8 @@ apiVersion: v2
 name: azureclaw
 description: AzureClaw - Enterprise-grade OpenClaw sandbox orchestrator for AKS
 type: application
-version: 0.1.0
-appVersion: "0.1.0-alpha.1"
+version: 1.0.0-rc.1
+appVersion: "1.0.0-rc.1"
 keywords:
   - azure
   - openclaw

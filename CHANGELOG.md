@@ -37,6 +37,9 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 
 - `docs/README.md` rewritten as the canonical index for the public-facing tree.
 - `CRD `ClawSandbox.spec.runtime.maf.language` enum narrowed: `Dotnet` removed (no `AgentMeshClient` in `Microsoft.AgentGovernance` 3.3.0). `[GAP-V1]` recorded.
+- `deploy/helm/azureclaw/Chart.yaml` — `version` and `appVersion` bumped to `1.0.0-rc.1`.
+- New `make helm-package` target wraps `bash deploy/helm/package.sh` (lint + package + sha256). Output goes to gitignored `dist/charts/`.
+- New manually-runnable E2E suite at `tests/e2e-manual/` (PR #189). The CI Kind suite at `tests/e2e/run.sh` is unchanged.
 
 ### Fixed
 

@@ -36,6 +36,9 @@ test-e2e: ## Run E2E tests (requires Docker + Kind)
 test-e2e-manual: ## Run the manual E2E matrix against an existing cluster (see tests/e2e-manual/README.md)
 	bash tests/e2e-manual/run.sh
 
+helm-package: ## Lint + package the AzureClaw Helm chart into ./dist/charts/
+	bash deploy/helm/package.sh
+
 # ─── Lint ─────────────────────────────────────────────────────────────────────
 
 lint: ## Run linters
