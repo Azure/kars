@@ -40,6 +40,7 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 - `deploy/helm/azureclaw/Chart.yaml` — `version` and `appVersion` bumped to `1.0.0-rc.1`.
 - New `make helm-package` target wraps `bash deploy/helm/package.sh` (lint + package + sha256). Output goes to gitignored `dist/charts/`.
 - New manually-runnable E2E suite at `tests/e2e-manual/` (PR #189). The CI Kind suite at `tests/e2e/run.sh` is unchanged.
+- `docs/site/` — mdbook configuration for rendering the canonical `docs/` tree as a browsable static site. `make docs-site` builds to `./target/book/`; `make docs-site-serve` previews live. The site uses the existing markdown as-is — no content duplication.
 
 ### Fixed
 

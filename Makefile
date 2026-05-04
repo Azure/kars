@@ -39,6 +39,14 @@ test-e2e-manual: ## Run the manual E2E matrix against an existing cluster (see t
 helm-package: ## Lint + package the AzureClaw Helm chart into ./dist/charts/
 	bash deploy/helm/package.sh
 
+docs-site: ## Build the mdbook documentation site into target/book/ (requires mdbook)
+	@command -v mdbook >/dev/null 2>&1 || { echo "mdbook not installed: cargo install mdbook"; exit 1; }
+	cd docs/site && mdbook build
+
+docs-site-serve: ## Live-preview the documentation site at http://localhost:3000
+	@command -v mdbook >/dev/null 2>&1 || { echo "mdbook not installed: cargo install mdbook"; exit 1; }
+	cd docs/site && mdbook serve --port 3000 --open
+
 # ─── Lint ─────────────────────────────────────────────────────────────────────
 
 lint: ## Run linters
