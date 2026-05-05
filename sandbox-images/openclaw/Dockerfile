@@ -67,6 +67,31 @@ RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
 RUN chmod -R a-w /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk && \
     chmod -R a+rX /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk
 
+# Build a pruned dist-runtime/extensions/ tree mirroring dist/, but containing
+# only the 3 always-required runtime cores. Files are hardlinked (`cp -al`)
+# from dist/, so disk overhead is ~0.
+#
+# Why: OpenClaw's facade loader rejects symlinks whose realpath escapes the
+# bundled-plugins root (Symlink escapes bundled plugin directory). Setting
+# OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 short-circuits the override and points
+# at an empty tmp dir, breaking speech-core/image-generation-core/
+# media-understanding-core resolution. By instead pointing
+# OPENCLAW_BUNDLED_PLUGINS_DIR at this pruned tree (which is under
+# <packageRoot>/dist-runtime/extensions and so passes resolveTrustedExistingOverride),
+# we get:
+#   - manifest discovery scans only 3 plugins → no 50s pi-ai catalog wedge
+#   - facade loader's openBoundaryFileSync sees realpaths under dist-runtime/ → ok
+#   - hardlinked top-level chunks (redact-*.js, etc.) sit at dist-runtime/
+#     so the cores' relative `require("../../redact-*")` resolves correctly
+RUN OC=/usr/local/lib/node_modules/openclaw && \
+    if [ -d "$OC/dist" ] && [ ! -d "$OC/dist-runtime" ]; then \
+      cp -al "$OC/dist" "$OC/dist-runtime" && \
+      find "$OC/dist-runtime/extensions" -mindepth 1 -maxdepth 1 -type d \
+        ! -name speech-core ! -name image-generation-core ! -name media-understanding-core \
+        -exec rm -rf {} + && \
+      echo "Built dist-runtime with only 3 cores: $(ls $OC/dist-runtime/extensions)"; \
+    fi
+
 # Pre-create router-readable config dirs (root-owned, world-traversable).
 # /etc/azureclaw/policies/  — AGT governance policy YAMLs (populated by entrypoint)
 # /etc/azureclaw/blocklist/ — egress blocklist (populated by entrypoint)
