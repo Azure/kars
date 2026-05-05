@@ -27,7 +27,6 @@ export interface InferencePolicyOpts {
   sandboxName: string;
   namespace: string;
   model: string;
-  endpoint?: string;
   provider?: string;
   contentSafety?: boolean;
   promptShields?: boolean;
@@ -48,12 +47,6 @@ export function buildInferencePolicy(opts: InferencePolicyOpts): Record<string, 
       requirePromptShields: opts.promptShields !== false,
     },
   };
-  if (opts.endpoint) {
-    (spec.modelPreference as Record<string, unknown>).primary = {
-      ...(spec.modelPreference as Record<string, { primary: Record<string, unknown> }>).primary,
-      endpoint: opts.endpoint,
-    };
-  }
   const daily = opts.tokenBudgetDaily ?? 0;
   const perReq = opts.tokenBudgetPerRequest ?? 0;
   if (daily > 0 || perReq > 0) {
