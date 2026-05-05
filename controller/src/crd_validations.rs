@@ -496,6 +496,20 @@ pub fn trust_graph_crd() -> CustomResourceDefinition {
     .expect("kube-rs derive must produce a spec property on TrustGraph")
 }
 
+/// `ClawSandbox` CRD as produced by the kube-rs derive.
+///
+/// Currently no `claw_sandbox_validations()` helper exists — `ClawSandbox`
+/// has historically relied on its hand-written
+/// `deploy/helm/azureclaw/templates/crd.yaml` (with rich CEL rules baked
+/// in there) rather than rule-injection in code. This helper is exposed
+/// so future drift tests / dumpers can compare the kube-rs-derived
+/// schema to the hand-written one without each call site reimplementing
+/// the `ClawSandbox::crd()` invocation.
+#[must_use]
+pub fn claw_sandbox_crd() -> CustomResourceDefinition {
+    crate::crd::ClawSandbox::crd()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
