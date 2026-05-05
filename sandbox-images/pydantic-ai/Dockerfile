@@ -31,7 +31,7 @@
 # `runtimes/wheels/*.whl`. This keeps the image hermetic without
 # publishing private wheels to PyPI.
 
-FROM mcr.microsoft.com/cbl-mariner/base/python:3.12 AS base
+FROM mcr.microsoft.com/azurelinux/base/python:3.12 AS base
 
 LABEL org.azureclaw.runtime.contract="v1"
 LABEL org.azureclaw.runtime.kind="PydanticAi"
