@@ -282,7 +282,24 @@ export OPENCLAW_QA_ALLOW_LOCAL_IMAGE_PROVIDER=1
 # extensions tree and become unresolvable. We re-publish them as
 # auto-discovered non-bundled extensions further down (search for
 # "always-required runtime cores").
-export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
+# OpenClaw bundled-plugins strategy:
+# Instead of disabling bundled plugins (which causes the 3 always-required
+# runtime cores — speech-core, image-generation-core, media-understanding-core —
+# to fail to resolve), we point OPENCLAW_BUNDLED_PLUGINS_DIR at a pruned
+# dist-runtime/extensions/ tree (built at image build time, see Dockerfile)
+# that contains ONLY those 3 cores, hardlinked from dist/.
+#
+# This satisfies resolveTrustedExistingOverride (path is under
+# <packageRoot>/dist-runtime/extensions), keeps manifest discovery scope
+# tiny (no 50s pi-ai catalog wedge on first models.list), and the boundary
+# check passes because hardlinks have realpaths inside dist-runtime/.
+if [ -d "/usr/local/lib/node_modules/openclaw/dist-runtime/extensions" ]; then
+  export OPENCLAW_BUNDLED_PLUGINS_DIR="/usr/local/lib/node_modules/openclaw/dist-runtime/extensions"
+  unset OPENCLAW_DISABLE_BUNDLED_PLUGINS
+else
+  # Fallback for older base images without the pruned tree.
+  export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
+fi
 
 # Only configure if not already done (idempotent)
 if [ ! -f "$OPENCLAW_CONFIG" ]; then
@@ -802,41 +819,10 @@ fi
 # ── Always-required runtime cores (speech-core, image-generation-core,
 #    media-understanding-core) ─────────────────────────────────────────────
 # OpenClaw 2026.4.x's facade resolver hard-requires these three cores at
-# runtime — even for plain text replies — via
-# `Unable to resolve bundled plugin public surface <core>/runtime-api.js`
-# (see facade-loader-D3SAZIg3.js and facade-activation-check.runtime.js's
-# ALWAYS_ALLOWED_RUNTIME_DIR_NAMES set).
-#
-# We set OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 to avoid the 50s pi-ai catalog
-# wedge on first models.list. That points bundledPluginsDir at
-# os.tmpdir()/openclaw-empty-bundled-plugins (DISABLED_BUNDLED_PLUGINS_DIR
-# in bundled-dir-Dn1Nq3AQ.js). The resolver then can't find the cores
-# inside that empty dir.
-#
-# Fix: pre-populate the disabled dir with symlinks to just the 3 cores.
-# `resolveDisabledBundledPluginsDir` only does mkdir -p, it never empties
-# the dir, so our symlinks survive. The bundled-surface resolver
-# (resolveBundledPluginPublicSurfacePath in public-surface-runtime-*.js)
-# uses a plain fs.existsSync at `<bundledPluginsDir>/<dirName>/<artifact>`,
-# which our symlinks satisfy. The symlinks point at the real openclaw
-# extensions tree so internal `require("../../redact-*.js")` calls inside
-# runtime-api.js still resolve through to the real openclaw dist root.
-#
-# The 80+ heavy bundled plugins (xAI, Anthropic, Mistral, etc.) remain
-# absent from the disabled dir, so manifest discovery still finds zero
-# bundled providers and pi-ai's catalog stays small → models.list ~300ms
-# instead of ~50s.
-DISABLED_BUNDLED_DIR="${TMPDIR:-/tmp}/openclaw-empty-bundled-plugins"
-mkdir -p "$DISABLED_BUNDLED_DIR"
-for core in speech-core image-generation-core media-understanding-core; do
-  CORE_SRC="/usr/local/lib/node_modules/openclaw/dist/extensions/$core"
-  CORE_LINK="$DISABLED_BUNDLED_DIR/$core"
-  if [ -d "$CORE_SRC" ] && [ ! -L "$CORE_LINK" ]; then
-    rm -rf "$CORE_LINK" 2>/dev/null || true
-    ln -s "$CORE_SRC" "$CORE_LINK"
-  fi
-done
-echo "[azureclaw] Runtime cores re-published (speech-core, image-generation-core, media-understanding-core) in $DISABLED_BUNDLED_DIR"
+# NOTE: The 3 always-required runtime cores (speech-core, image-generation-core,
+# media-understanding-core) are made available via OPENCLAW_BUNDLED_PLUGINS_DIR
+# pointing at a pruned dist-runtime/extensions/ tree built at image build time.
+# See the export earlier in this script for the full rationale.
 
 # Write gateway token to .bashrc (remove any stale tokens from prior runs first)
 touch /sandbox/.bashrc 2>/dev/null || true
