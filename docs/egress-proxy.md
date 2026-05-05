@@ -1,96 +1,181 @@
 # Network Egress & Proxy
 
-## Overview
+## Where the policy lives
 
-AzureClaw enforces strict outbound network control for every sandboxed agent.
-No agent can reach the internet directly — all external HTTP traffic is mediated
-by a two-layer egress system that combines kernel-level iptables rules with an
-application-level proxy inside the inference router.
+Egress policy is **not its own CRD**. It's a sub-block of the `ClawSandbox`
+spec, alongside everything else that scopes to a single agent:
 
-## How It Works
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: my-agent
+spec:
+  networkPolicy:
+    learnEgress: true                # learn ↔ enforce toggle (default: learn)
+    allowedEndpoints:                # inline allowlist (current source of truth)
+      - api.telegram.org
+      - api.openai.com
+    allowlistRef:                    # optional: cosign-signed OCI artifact
+      registry: myacr.azurecr.io     # advisory today, becomes authoritative in v1.1
+      repository: policy/egress-allowlist/my-agent
+      digest: sha256:abc123…
+```
 
-### Layer 1: iptables (Kernel Level)
+The controller compiles this into **two** enforcement points:
 
-An init container (`egress-guard`) runs at pod startup and installs iptables
-rules that restrict the agent container (UID 1000 / `openclaw`) to:
+- **Kubernetes `NetworkPolicy`** — L3/L4 egress to peer pods, cluster DNS, and
+  the explicit pod-IP allowlist generated from `allowedEndpoints`.
+- **Router-side allowlist** — L7 host-header / SNI matching for outbound HTTP,
+  served from `inference-router` shared state and reloaded on `ClawSandbox`
+  updates.
+
+`allowlistRef` is an _advisory_ second source today (cosign-signed OCI artifact
+for supply-chain integrity); when set, the controller verifies it on every
+reconcile and surfaces `AllowlistVerified` / `AllowlistDrift` conditions on the
+`ClawSandbox`. Inline `allowedEndpoints` remains the runtime source of truth
+until v1.1 flips authority. See **Signed OCI egress allowlist** below.
+
+## How outbound traffic actually leaves a sandbox
+
+A sandbox pod has **two containers** and **three outbound paths**. Knowing which
+path a piece of traffic takes is the key to debugging egress.
+
+| Path | Triggered by | Listener | Mechanism | Used for |
+|---|---|---|---|---|
+| **A. Inference / tools** | Plugins talking to the local inference-router | `127.0.0.1:8443` | Direct HTTPS to the router | LLM calls, Foundry tools, `/egress/fetch`, Content Safety, AGT relay/registry |
+| **B. Transparent (catch-all)** | Any library that does plain `fetch()` on `:80`/`:443` and ignores `HTTPS_PROXY` | `127.0.0.1:8444` | iptables `NAT REDIRECT` of UID-1000 traffic | Unwitting SDKs, third-party libraries, anything Node 22 `fetch()` issues |
+| **C. Explicit forward proxy** | Code honouring `HTTPS_PROXY` (set by `proxy-bootstrap.js` for Node 22 fetch) | `127.0.0.1:8444` | HTTP `CONNECT` tunnel via undici dispatcher | Same listener as B, just reached via app-level proxy CONNECT instead of NAT |
+
+The inference-router (UID 1001) runs **two listeners** in the same process:
+
+- `:8443` — main HTTPS API (inference, governance, Foundry, AGT, **plus** `/egress/*` JSON endpoints)
+- `:8444` — `forward_proxy::start()` — transparent + CONNECT-style HTTP proxy that all UID-1000 traffic reaches via the iptables NAT redirect
+
+All three paths resolve to the **same** `blocklist::check_egress()` decision
+function — there is no policy-bypass route.
+
+## Layer 1: iptables (kernel level)
+
+An init container (`egress-guard`) runs at pod startup with `NET_ADMIN`/`NET_RAW`
+and installs the rules below for the agent container (UID 1000 / `openclaw`).
+The inference-router (UID 1001) is **not** subject to these rules.
+
+**Filter chain (`OUTPUT`)** — what UID 1000 may do at all:
 
 | Rule | Effect |
-|------|--------|
-| `-o lo -j ACCEPT` | Allow localhost (reach inference-router on `127.0.0.1:8443`) |
-| `-p udp --dport 53 -j ACCEPT` | Allow DNS resolution |
-| `-p tcp --dport 53 -j ACCEPT` | Allow DNS over TCP |
-| `--ctstate ESTABLISHED,RELATED -j ACCEPT` | Allow reply packets for inbound connections (WebUX, Telegram) |
-| `-j DROP` | **Drop everything else** |
+|---|---|
+| `-m owner --uid-owner 1000 -o lo -j ACCEPT` | Allow loopback (reach `:8443` and `:8444`) |
+| `-m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT` | Allow DNS over UDP |
+| `-m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT` | Allow DNS over TCP |
+| `-m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT` | Reply packets for inbound connections (WebUX, Telegram, A2A ingress) |
+| `-m owner --uid-owner 1000 -j DROP` | **Drop everything else** |
 
-The inference router (UID 1001) is **not** restricted — it has full
-network access to Azure OpenAI, Foundry, Content Safety, and approved egress
-destinations.
+**NAT chain (`OUTPUT`)** — pull HTTP/HTTPS into the proxy:
 
-This blocks:
+| Rule | Effect |
+|---|---|
+| `-t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444` | TCP/80 → transparent proxy |
+| `-t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444` | TCP/443 → transparent proxy |
+
+The NAT redirect happens **before** the filter table is consulted, so the
+redirected packet now has destination `127.0.0.1:8444`, which then matches the
+loopback `ACCEPT` in the filter chain. Net effect: any TCP/80 or TCP/443
+attempt by the agent container — no matter what library issued it — lands at
+the forward proxy.
+
+This denies, by construction:
+
 - **IMDS credential theft** (`169.254.169.254`) from the agent container
-- **Data exfiltration** to any external host
-- **Lateral movement** to other pods in the cluster
+- **Direct data exfiltration** to any external host
+- **Lateral movement** to other pods (NetworkPolicy adds belt-and-braces)
 
-### Layer 2: Forward Proxy (Explicit Mode)
+Source: `controller/src/reconciler/mod.rs::1356–1369` (egress-guard init container).
 
-The sandbox uses `proxy-bootstrap.js` (preloaded via `NODE_OPTIONS="--require ..."`) to set undici's `EnvHttpProxyAgent` as the global fetch dispatcher. This ensures all outbound HTTP/HTTPS requests from the Node.js process honor `HTTPS_PROXY` and `NO_PROXY` environment variables — providing an explicit (forward) proxy path through the inference-router.
+## Layer 2: Forward proxy (application level)
 
-This complements the iptables transparent proxy rules (which redirect UID 1000 traffic on ports 80/443 to `localhost:8444`). Both paths enforce the same blocklist, allowlist, and learn-mode policies.
+`inference-router/src/forward_proxy.rs` listens on `:8444` and handles **both**
+paths B and C:
 
-### Layer 3: Egress Proxy (Application Level)
+- **Path B (transparent):** packets arrive via NAT REDIRECT. The original
+  destination is recovered from the kernel's `SO_ORIGINAL_DST` and the SNI is
+  read from the TLS ClientHello.
+- **Path C (CONNECT):** the client speaks HTTP `CONNECT host:port` first
+  (Node's undici dispatcher does this when `HTTPS_PROXY=http://127.0.0.1:8444`).
+  This is what `proxy-bootstrap.js` enables for Node 22, whose built-in
+  `fetch()` ignores `HTTPS_PROXY` by itself.
 
-When an agent needs to make an external HTTP request, it uses the `http_fetch`
-tool which sends a `POST` to `localhost:8443/egress/fetch`. The inference-router
-then checks the request through the egress decision pipeline:
+Both feed the same decision pipeline below.
 
-1. **Blocklist check** — Is the domain on the threat intelligence blocklist?
-2. **Allowlist check** — Is the domain explicitly approved (including parent domains)?
-3. **Learn mode check** — If learn mode is on, allow and log the domain.
-4. **Pending approval** — Deny the request and create a pending approval entry.
+## Layer 3: `/egress/fetch` (explicit JSON tool)
 
-### Decision Flow
+Tools that need a request/response shape rather than a tunnel use the
+`http_fetch` tool, which `POST`s JSON to `127.0.0.1:8443/egress/fetch` (path A).
+The router executes the call, applies the same allowlist/blocklist/learn-mode
+logic, and returns the response body to the agent — no tunnel is ever opened
+from the agent container's network namespace.
+
+## Decision pipeline (shared by all three paths)
 
 ```mermaid
 flowchart TD
-  REQ["Agent (UID 1000)<br/>HTTPS request"] --> IPT["iptables NAT REDIRECT<br/>TCP 443 → 127.0.0.1:8444"]
-  IPT --> FP["Forward proxy<br/>inference-router :8444"]
-  FP --> EXT["Extract domain<br/>from CONNECT or Host header"]
-  EXT --> BL{"Domain in<br/>blocklist?<br/>(seed + OISD + URLhaus)"}
-  BL -->|yes| BLOCK["403 Forbidden<br/>+ audit reason"]
-  BL -->|no| TLD{"High-risk TLD?<br/>.tk · .ml · .ga · .cf · .gq"}
-  TLD -->|yes| BLOCK
-  TLD -->|no| PRIV{"Private IP after<br/>DNS resolve?"}
-  PRIV -->|yes| BLOCK
-  PRIV -->|no| MODE{"Egress mode"}
-  MODE -->|learn| LOG["Log domain to learned set<br/>→ operator review queue"]
-  LOG --> TUNNEL
-  MODE -->|enforce| AL{"Domain in<br/>allowlist?<br/>(parent-domain match)"}
-  AL -->|yes| TUNNEL["Open TCP tunnel<br/>agent ↔ destination"]
-  AL -->|no| PEND["Create PendingApproval<br/>(deduped by domain)<br/>→ 403 'pending operator approval'"]
+  A_TOOL["Path A: agent tool<br/>POST /egress/fetch (:8443)"] --> CHECK
+  B_NAT["Path B: lib fetch ()<br/>iptables NAT 80/443 → :8444"] --> FP
+  C_PROXY["Path C: HTTPS_PROXY<br/>CONNECT → :8444"] --> FP
+  FP["forward_proxy.rs<br/>extract host (SNI / Host / CONNECT)"] --> CHECK
 
-  classDef block fill:#fde2e1,stroke:#c0392b
-  classDef ok fill:#dff5e1,stroke:#27ae60
+  CHECK["blocklist::check_egress (host)"] --> BL{"Domain on<br/>blocklist?"}
+  BL -->|yes| DENY["403 + audit reason"]
+  BL -->|no| TLD{"High-risk TLD?<br/>.tk · .ml · .ga · .cf · .gq · .top · .buzz · .surf · .rest · .onion"}
+  TLD -->|yes| DENY
+  TLD -->|no| PRIV{"DNS resolves to<br/>private/loopback IP?<br/>(rebinding guard)"}
+  PRIV -->|yes| DENY
+  PRIV -->|no| MODE{"Egress mode"}
+  MODE -->|learn| LOG["Append to learned set<br/>→ operator review queue"]
+  LOG --> ALLOW
+  MODE -->|enforce| AL{"Domain on allowlist?<br/>(parent-domain match)"}
+  AL -->|yes| ALLOW["Tunnel / forward request"]
+  AL -->|no| PEND["Append to PendingApproval<br/>(deduped) → 403 'awaiting approval'"]
+
+  classDef bad fill:#fde2e1,stroke:#c0392b
+  classDef good fill:#dff5e1,stroke:#27ae60
   classDef wait fill:#fff3cd,stroke:#d68910
-  class BLOCK,PEND block
-  class TUNNEL,LOG ok
+  class DENY,PEND bad
+  class ALLOW,LOG good
   class MODE,BL,TLD,PRIV,AL wait
 ```
 
-Verified against `inference-router/src/forward_proxy.rs` (handler) and `inference-router/src/blocklist.rs` (`check_egress`, the high-risk TLD list, the parent-domain allowlist match, `PendingApproval` deduplication).
+Verified against `inference-router/src/forward_proxy.rs` and
+`inference-router/src/blocklist.rs` (`check_egress`, the high-risk TLD list,
+the parent-domain allowlist match, the DNS rebinding guard, and
+`PendingApproval` deduplication).
 
-### Learn → Enforce lifecycle
+## Learn → enforce lifecycle
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Learn: azureclaw add &lt;name&gt;<br/>(default; blocklist still enforced)
-  Learn: 🔍 Learn mode\nAll domains logged\nBlocklist still enforced
-  Review: 📋 Operator review\nazureclaw egress &lt;name&gt; --learned
-  Enforce: 🔒 Enforce mode\nOnly approved domains pass\nNew domains → PendingApproval
-
+  state "Learn mode" as Learn
+  state "Operator review" as Review
+  state "Enforce mode" as Enforce
+  [*] --> Learn
+  note right of Learn
+    azureclaw add <name>
+    All domains logged
+    Blocklist still enforced
+  end note
+  note right of Review
+    azureclaw egress <name> --learned
+    operator approves / denies per domain
+  end note
+  note right of Enforce
+    azureclaw egress <name> --no-learn
+    Only allowlisted domains pass
+    New domains → PendingApproval
+  end note
   Learn --> Review: operator inspects learned set
-  Review --> Review: approve / deny per domain
-  Review --> Enforce: azureclaw egress --enforce
-  Enforce --> Learn: azureclaw egress --learn (rare)
+  Review --> Review: approve / deny
+  Review --> Enforce: --enforce / --no-learn
+  Enforce --> Learn: --learn (rare; debugging only)
 ```
 
 
