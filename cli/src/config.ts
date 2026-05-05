@@ -20,7 +20,7 @@ const SECRETS_FILE = join(CONFIG_DIR, "secrets.json");
 
 /** Well-known secret keys and their descriptions */
 export const KNOWN_SECRETS: Record<string, { env: string; label: string }> = {
-  "azure-openai-key":  { env: "AZURE_OPENAI_API_KEY", label: "Azure OpenAI API key" },
+  "azure-openai-key":  { env: "AZURE_OPENAI_API_KEY", label: "Inference API key (Azure OpenAI key OR GitHub PAT)" },
   "telegram-token":    { env: "TELEGRAM_BOT_TOKEN",   label: "Telegram bot token" },
   "telegram-allow-from": { env: "TELEGRAM_ALLOW_FROM", label: "Telegram allowed user IDs" },
   "slack-token":       { env: "SLACK_BOT_TOKEN",      label: "Slack bot OAuth token" },
@@ -52,6 +52,15 @@ export interface AzureClawConfig {
   model: string;
   apiKey: string;
   foundryProjectEndpoint?: string;
+  /**
+   * Inference provider. "foundry" (default) routes inference at an Azure AI
+   * Foundry / Azure OpenAI resource via api-key or Workload Identity.
+   * "github-models" routes at https://models.github.ai/inference using a
+   * GitHub PAT — no Azure subscription needed; Foundry-only features
+   * (Memory Store, agents, evaluations, indexes, Content Safety inline)
+   * are unavailable in this mode.
+   */
+  provider?: "foundry" | "github-models";
 }
 
 /**
@@ -147,14 +156,24 @@ export function loadConfig(): AzureClawConfig | null {
     const apiKey = secrets["azure-openai-key"]
       || (existsSync(CREDENTIALS_FILE) ? readFileSync(CREDENTIALS_FILE, "utf-8").trim() : "");
     if (!config.endpoint || !apiKey) return null;
-    return { endpoint: config.endpoint, model: config.model || "gpt-4.1", apiKey, foundryProjectEndpoint: config.foundryProjectEndpoint };
+    const provider: AzureClawConfig["provider"] =
+      config.provider === "github-models" ? "github-models" : "foundry";
+    return {
+      endpoint: config.endpoint,
+      model: config.model || (provider === "github-models" ? "gpt-4o-mini" : "gpt-4.1"),
+      apiKey,
+      foundryProjectEndpoint: config.foundryProjectEndpoint,
+      provider,
+    };
   } catch {
     return null;
   }
 }
 
 /**
- * Interactively prompt for Azure OpenAI credentials, verify them, and save.
+ * Interactively prompt for inference credentials, verify them, and save.
+ * Leads with a provider choice (Azure AI Foundry / Azure OpenAI vs GitHub
+ * Models); the GitHub Models branch only needs a PAT.
  * If existing config is found, shows it as defaults.
  */
 export async function promptAndSaveCredentials(options?: {
@@ -162,6 +181,8 @@ export async function promptAndSaveCredentials(options?: {
   skipVerify?: boolean;
   /** Heading to show before prompts */
   heading?: string;
+  /** Force a specific provider (skip the choice prompt) */
+  provider?: "foundry" | "github-models";
 }): Promise<AzureClawConfig> {
   const existing = loadConfig();
 
@@ -170,9 +191,135 @@ export async function promptAndSaveCredentials(options?: {
   }
 
   if (existing) {
-    console.log(chalk.dim(`  Existing config found (${existing.endpoint}). Press Enter to keep.\n`));
+    const label = existing.provider === "github-models" ? "GitHub Models" : existing.endpoint;
+    console.log(chalk.dim(`  Existing config found (${label}). Press Enter to keep.\n`));
   }
 
+  // ── Step 1: provider choice ────────────────────────────────────────
+  let provider: "foundry" | "github-models";
+  if (options?.provider) {
+    provider = options.provider;
+  } else {
+    const providerAnswer = await inquirer.prompt([
+      {
+        type: "list",
+        name: "provider",
+        message: "Which inference provider do you want to use?",
+        default: existing?.provider ?? "foundry",
+        choices: [
+          {
+            name: "Azure AI Foundry / Azure OpenAI  (full feature set: Memory Store, agents, Content Safety, etc.)",
+            value: "foundry",
+          },
+          {
+            name: "GitHub Models                     (free; just need a GitHub PAT — Foundry-only features disabled)",
+            value: "github-models",
+          },
+        ],
+      },
+    ]);
+    provider = providerAnswer.provider;
+  }
+
+  if (provider === "github-models") {
+    return promptGithubModels(existing, options?.skipVerify);
+  }
+  return promptFoundry(existing, options?.skipVerify);
+}
+
+/**
+ * Prompt + verify + save the GitHub Models provider. The PAT lives in the
+ * same `azure-openai-key` slot the router reads at /run/secrets/, so no
+ * downstream wiring needs to change — only the URL and Bearer-vs-api-key
+ * decision (handled in the router based on the endpoint hostname).
+ */
+async function promptGithubModels(
+  existing: AzureClawConfig | null,
+  skipVerify?: boolean,
+): Promise<AzureClawConfig> {
+  console.log(chalk.dim(
+    "\n  GitHub Models docs: https://docs.github.com/github-models — create a PAT with 'models:read' scope.\n",
+  ));
+
+  const answers = await inquirer.prompt([
+    {
+      type: "input",
+      name: "model",
+      message: "Model to use (e.g. gpt-4o-mini, gpt-4o, Phi-3.5-mini-instruct):",
+      default: existing?.provider === "github-models" ? existing.model : "gpt-4o-mini",
+    },
+    {
+      type: "password",
+      name: "apiKey",
+      message: "GitHub PAT (must have 'models:read' scope):",
+      mask: "•",
+      validate: (input: string) => {
+        if (!input || input.length < 20) return "PAT is required";
+        return true;
+      },
+    },
+  ]);
+
+  const endpoint = "https://models.github.ai/inference";
+
+  // Verify by calling /catalog/models (a GET that just authenticates the PAT;
+  // doesn't consume the rate-limited inference budget).
+  if (!skipVerify) {
+    const spinner = ora({ color: "cyan" }).start("Verifying PAT against GitHub Models...");
+    try {
+      const response = await fetch("https://models.github.ai/catalog/models", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${answers.apiKey}`,
+          "Accept": "application/vnd.github+json",
+          "User-Agent": "azureclaw-cli",
+        },
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        spinner.fail("GitHub PAT verification failed");
+        console.log(chalk.red(`\n  ${response.status}: ${body.slice(0, 400)}\n`));
+        if (response.status === 401 || response.status === 403) {
+          console.log(chalk.yellow("  The PAT is missing the 'models:read' scope, or has been revoked."));
+          console.log(chalk.yellow("  Create a new fine-grained token: https://github.com/settings/personal-access-tokens/new\n"));
+        }
+        process.exit(1);
+      }
+      spinner.succeed("GitHub PAT verified (GitHub Models)");
+    } catch (error) {
+      spinner.fail("Could not reach GitHub Models");
+      console.log(chalk.red(`\n  ${error instanceof Error ? error.message : String(error)}\n`));
+      process.exit(1);
+    }
+  }
+
+  // Persist
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  const configObj: Record<string, string> = {
+    endpoint,
+    model: answers.model,
+    provider: "github-models",
+    version: "0.1.0-alpha.1",
+  };
+  writeFileSync(CONFIG_FILE, JSON.stringify(configObj, null, 2), "utf-8");
+  chmodSync(CONFIG_FILE, 0o600);
+  setSecret("azure-openai-key", answers.apiKey);
+  writeFileSync(CREDENTIALS_FILE, answers.apiKey, "utf-8");
+  chmodSync(CREDENTIALS_FILE, 0o600);
+
+  return {
+    endpoint,
+    model: answers.model,
+    apiKey: answers.apiKey,
+    provider: "github-models",
+  };
+}
+
+/** Prompt + verify + save the Azure AI Foundry / Azure OpenAI provider. */
+async function promptFoundry(
+  existing: AzureClawConfig | null,
+  skipVerify?: boolean,
+): Promise<AzureClawConfig> {
   const answers = await inquirer.prompt([
     {
       type: "input",
@@ -205,7 +352,7 @@ export async function promptAndSaveCredentials(options?: {
   ]);
 
   // Verify
-  if (!options?.skipVerify) {
+  if (!skipVerify) {
     const spinner = ora({ color: "cyan" }).start("Verifying credentials...");
     try {
       const response = await fetch(
@@ -254,7 +401,12 @@ export async function promptAndSaveCredentials(options?: {
 
   // Save
   mkdirSync(CONFIG_DIR, { recursive: true });
-  const configObj: Record<string, string> = { endpoint: answers.endpoint, model: answers.model, version: "0.1.0-alpha.1" };
+  const configObj: Record<string, string> = {
+    endpoint: answers.endpoint,
+    model: answers.model,
+    provider: "foundry",
+    version: "0.1.0-alpha.1",
+  };
   if (foundryProjectEndpoint) configObj.foundryProjectEndpoint = foundryProjectEndpoint;
   writeFileSync(CONFIG_FILE, JSON.stringify(configObj, null, 2), "utf-8");
   chmodSync(CONFIG_FILE, 0o600);
@@ -263,7 +415,13 @@ export async function promptAndSaveCredentials(options?: {
   writeFileSync(CREDENTIALS_FILE, answers.apiKey, "utf-8");
   chmodSync(CREDENTIALS_FILE, 0o600);
 
-  return { endpoint: answers.endpoint, model: answers.model, apiKey: answers.apiKey, foundryProjectEndpoint: foundryProjectEndpoint || undefined };
+  return {
+    endpoint: answers.endpoint,
+    model: answers.model,
+    apiKey: answers.apiKey,
+    foundryProjectEndpoint: foundryProjectEndpoint || undefined,
+    provider: "foundry",
+  };
 }
 
 /**
@@ -274,7 +432,7 @@ export async function ensureCredentials(): Promise<AzureClawConfig> {
   const existing = loadConfig();
   if (existing) return existing;
 
-  console.log(chalk.yellow("\n  No Azure OpenAI credentials found. Let's set them up:\n"));
+  console.log(chalk.yellow("\n  No inference credentials found. Let's set them up:\n"));
   return promptAndSaveCredentials();
 }
 

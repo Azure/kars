@@ -134,4 +134,68 @@ impl Config {
                 .filter(|s| !s.is_empty()),
         })
     }
+
+    /// Returns true if any configured endpoint points at GitHub Models
+    /// (a free, public, OpenAI-compatible inference service backed by a
+    /// GitHub PAT). When this is true, the router skips Azure-specific
+    /// URL rewriting (`/openai/v1/`) and Foundry-only routes return 501
+    /// instead of failing with a confusing upstream error.
+    pub fn is_github_models(&self) -> bool {
+        let candidates = [
+            self.azure_openai_endpoint.as_deref(),
+            self.foundry_endpoint.as_deref(),
+            self.foundry_project_endpoint.as_deref(),
+        ];
+        candidates
+            .iter()
+            .flatten()
+            .any(|e| e.contains("models.github.ai") || e.contains("models.inference.ai.azure.com"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(endpoint: Option<&str>) -> Config {
+        Config {
+            port: 8443,
+            foundry_endpoint: None,
+            foundry_project_endpoint: None,
+            azure_openai_endpoint: endpoint.map(String::from),
+            default_model: "gpt-4o-mini".into(),
+            content_safety_enabled: false,
+            prompt_shields_enabled: false,
+            content_safety_endpoint: None,
+            token_budget_daily: 0,
+            token_budget_per_request: 0,
+            registry_mode: RegistryMode::Local,
+            registry_url: None,
+        }
+    }
+
+    #[test]
+    fn detects_github_models_marketplace_endpoint() {
+        assert!(cfg(Some("https://models.github.ai/inference")).is_github_models());
+    }
+
+    #[test]
+    fn detects_legacy_github_models_endpoint() {
+        assert!(cfg(Some("https://models.inference.ai.azure.com")).is_github_models());
+    }
+
+    #[test]
+    fn does_not_match_foundry_endpoint() {
+        assert!(!cfg(Some("https://contoso.services.ai.azure.com")).is_github_models());
+    }
+
+    #[test]
+    fn does_not_match_legacy_aoai_endpoint() {
+        assert!(!cfg(Some("https://contoso.openai.azure.com")).is_github_models());
+    }
+
+    #[test]
+    fn returns_false_when_no_endpoint_set() {
+        assert!(!cfg(None).is_github_models());
+    }
 }

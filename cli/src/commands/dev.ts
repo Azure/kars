@@ -29,9 +29,17 @@ export function devCommand(): Command {
       "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop."
     )
     .addHelpText("before", `
-Requires an existing Azure OpenAI resource with at least one model deployment
-(e.g. gpt-4.1). On first run, you will be prompted for your endpoint, model
-deployment name, and resource-level API key.
+Requires either:
+  • An existing Azure AI Foundry / Azure OpenAI deployment, OR
+  • A GitHub PAT with \`models:read\` scope, which routes inference through
+    GitHub Models — no Azure subscription needed.
+
+On first run, you'll be prompted to choose between the two providers and
+your choice (and credentials) will be saved to ~/.azureclaw/. Subsequent
+runs reuse the saved provider — no flags required.
+
+Use --github-token for a one-off, ephemeral GitHub Models run that does
+NOT overwrite your saved credentials.
 `)
     // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "dev-agent")
@@ -40,6 +48,11 @@ deployment name, and resource-level API key.
       "--policy <preset>",
       "Policy preset: minimal | developer | web | azure",
       "developer"
+    )
+    // ── Provider override ─────────────────────────────────────────────
+    .option(
+      "--github-token <pat>",
+      "One-off GitHub Models override (does NOT save). Requires a PAT with `models:read`. To save GitHub Models as your default provider, run without this flag and pick GitHub Models at the prompt."
     )
     // ── Image build ────────────────────────────────────────────────────
     .option(
@@ -121,18 +134,46 @@ Notes:
 
         // ── Credentials (first — prompt before potentially long build) ──
         stepper.step("Checking credentials...");
+        const githubToken = typeof options.githubToken === "string" ? options.githubToken.trim() : undefined;
         let creds = loadConfig();
-        if (!creds) {
+        let mountedSecretPath = CREDENTIALS_FILE;
+
+        if (githubToken) {
+          // Ephemeral GitHub Models override: don't touch saved creds. Build
+          // an inline config and write the PAT to a per-run tempfile that
+          // gets mounted instead of the saved credentials file.
+          const ghModelsEndpoint = "https://models.github.ai/inference";
+          const ghDefaultModel = options.model !== "gpt-4.1" ? options.model : "gpt-4o-mini";
+          creds = {
+            endpoint: ghModelsEndpoint,
+            model: ghDefaultModel,
+            apiKey: githubToken,
+            foundryProjectEndpoint: undefined,
+            provider: "github-models",
+          };
+          const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
+          const ghTmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-ghmodels-"));
+          mountedSecretPath = path.join(ghTmpDir, "azure-openai-key");
+          writeFileSync(mountedSecretPath, githubToken, "utf-8");
+          chmodSync(mountedSecretPath, 0o600);
+          stepper.done("Credentials loaded (GitHub Models — ephemeral, not saved)");
+        } else if (!creds) {
           // Stop spinner so inquirer interactive prompts display correctly
           stepper.stop();
-          console.log(chalk.yellow("\n  No Azure OpenAI credentials found. Let's set them up."));
-          console.log(chalk.yellow("  You need an existing Azure OpenAI resource with a deployed model (e.g. gpt-4.1).\n"));
+          console.log(chalk.yellow("\n  No inference credentials found. Let's set them up."));
+          console.log(chalk.dim("  Choose between Azure AI Foundry / Azure OpenAI (full feature set) or GitHub Models (free, GitHub PAT).\n"));
           creds = await promptAndSaveCredentials();
-          stepper.done("Credentials configured");
+          const providerLabel = creds.provider === "github-models" ? "GitHub Models" : "Azure AI Foundry";
+          stepper.done(`Credentials configured (${providerLabel})`);
         } else {
-          stepper.done("Credentials loaded");
+          const providerLabel = creds.provider === "github-models" ? "GitHub Models" : "Azure AI Foundry";
+          stepper.done(`Credentials loaded (${providerLabel})`);
         }
-        const model = options.model !== "gpt-4.1" ? options.model : creds.model;
+        const isGithubModelsMode = creds.provider === "github-models";
+        const model = isGithubModelsMode
+          ? creds.model
+          : (options.model !== "gpt-4.1" ? options.model : creds.model);
+
 
         // ── Image resolution ─────────────────────────────────────────
         stepper.step("Resolving sandbox image...");
@@ -277,7 +318,8 @@ Notes:
         let discoveredDeployments = "";
         // Discover deployed models via Azure CLI (ARM management API — only reliable way).
         // Data-plane /openai/deployments always returns 404; skip it.
-        try {
+        // GitHub Models mode: skip entirely (the endpoint isn't an Azure resource).
+        if (!isGithubModelsMode) try {
           const accountName = new URL(creds.endpoint).hostname.split(".")[0];
           const { stdout: rgOut } = await execa("az", [
             "cognitiveservices", "account", "list",
@@ -598,7 +640,7 @@ Notes:
           "--tmpfs", "/tmp:rw,noexec,nosuid,size=1g",
           "-v", `${containerName}-data:/sandbox`,
           // Mount API key as read-only secret (never as env var)
-          "-v", `${CREDENTIALS_FILE}:/run/secrets/azure-openai-key:ro`,
+          "-v", `${mountedSecretPath}:/run/secrets/azure-openai-key:ro`,
           ...dockerSockArgs,
           ...kubeArgs,
           // Hide unnecessary filesystem paths
@@ -614,6 +656,7 @@ Notes:
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `SANDBOX_NAME=${options.name}`,
           "-e", "AZURECLAW_DEV_MODE=true",
+          ...(isGithubModelsMode ? ["-e", "AZURECLAW_PROVIDER=github-models"] : []),
           "-e", `DOCKER_NETWORK=${AGT_NETWORK}`,
           // Phase 2/F8 mitigations — env-gated suppression of false-positive
           // governance findings. Default-on in dev so research/citation

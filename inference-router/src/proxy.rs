@@ -462,6 +462,14 @@ fn inject_stream_usage(body: Bytes) -> Bytes {
     body
 }
 
+/// Returns true if the endpoint is a GitHub Models endpoint
+/// (https://models.github.ai/inference or the legacy
+/// https://models.inference.ai.azure.com URL). GitHub Models is OpenAI-API
+/// compatible but does NOT use the Azure `/openai/v1/` URL prefix.
+fn is_github_models_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("models.github.ai") || endpoint.contains("models.inference.ai.azure.com")
+}
+
 /// Build the upstream URL and optionally inject model into request body.
 /// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
 fn build_upstream_url(
@@ -470,14 +478,24 @@ fn build_upstream_url(
     path: &str,
     request_body: Bytes,
 ) -> Result<(String, Bytes)> {
-    // Use the unified /openai/v1/ format for all modes.
-    // Both API-key (dev) and Entra (AKS) work with Bearer auth on this endpoint.
-    // This supports all models including Responses-only models like gpt-5.4-pro.
-    let url = format!(
-        "{}/openai/v1/{}",
-        upstream.endpoint.trim_end_matches('/'),
-        path.trim_start_matches('/'),
-    );
+    // GitHub Models exposes OpenAI-compatible routes directly under the
+    // endpoint (no Azure-style `/openai/v1/` prefix). Detect and skip the
+    // rewrite for those endpoints; everything else goes via the unified
+    // `/openai/v1/` format that works for both Azure OpenAI (api-key) and
+    // Foundry project (Entra) endpoints.
+    let url = if is_github_models_endpoint(&upstream.endpoint) {
+        format!(
+            "{}/{}",
+            upstream.endpoint.trim_end_matches('/'),
+            path.trim_start_matches('/'),
+        )
+    } else {
+        format!(
+            "{}/openai/v1/{}",
+            upstream.endpoint.trim_end_matches('/'),
+            path.trim_start_matches('/'),
+        )
+    };
     let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
     {
         if body_json.get("model").is_none() {

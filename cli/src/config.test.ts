@@ -75,6 +75,7 @@ describe("loadConfig", () => {
       model: "gpt-4.1",
       apiKey: "sk-test-key-1234567890",
       foundryProjectEndpoint: undefined,
+      provider: "foundry",
     });
   });
 
@@ -90,6 +91,43 @@ describe("loadConfig", () => {
 
     const config = loadConfig();
     expect(config?.model).toBe("gpt-4.1");
+  });
+
+  it("loads GitHub Models provider with sane defaults", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockImplementation((p) => {
+      const path = String(p);
+      if (path.endsWith("config.json"))
+        return JSON.stringify({
+          endpoint: "https://models.github.ai/inference",
+          provider: "github-models",
+        });
+      if (path.endsWith("credentials")) return "ghp_testpat_1234567890";
+      return "";
+    });
+
+    const config = loadConfig();
+    expect(config?.provider).toBe("github-models");
+    expect(config?.endpoint).toBe("https://models.github.ai/inference");
+    // Default model for GitHub Models is gpt-4o-mini, not gpt-4.1
+    expect(config?.model).toBe("gpt-4o-mini");
+    expect(config?.apiKey).toBe("ghp_testpat_1234567890");
+  });
+
+  it("treats unknown provider strings as foundry", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockImplementation((p) => {
+      const path = String(p);
+      if (path.endsWith("config.json"))
+        return JSON.stringify({
+          endpoint: "https://test.openai.azure.com",
+          provider: "bogus-provider",
+        });
+      if (path.endsWith("credentials")) return "sk-test-key";
+      return "";
+    });
+
+    expect(loadConfig()?.provider).toBe("foundry");
   });
 
   it("returns null when endpoint is missing", () => {

@@ -573,6 +573,32 @@ async fn foundry_proxy(
         .or_else(|| state.config.azure_openai_endpoint.clone())
         .unwrap_or_default();
 
+    // GitHub Models mode does not provide Foundry-only APIs (Memory Store,
+    // agents, evaluations, indexes, knowledge bases, datasets, deployments,
+    // connections, etc.). Return a clear 501 instead of letting the call
+    // hit GitHub Models with a path it doesn't understand.
+    if state.config.is_github_models() {
+        tracing::info!(
+            sandbox = %sandbox_name,
+            path = %uri.path(),
+            "Rejected Foundry-only route under GitHub Models mode"
+        );
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!(
+                        "GitHub Models mode does not support `{}`. This endpoint requires Azure AI Foundry. Re-run `azureclaw dev` without --github-token (or set up Foundry) to enable Memory Stores, agents, evaluations, indexes, and other Foundry-only features.",
+                        uri.path()
+                    ),
+                    "type": "unsupported_for_provider",
+                    "provider": "github-models"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     // Blocklist check — block requests to known-malicious Foundry project endpoints
     if let crate::blocklist::BlockResult::Blocked { reason, domain } =
         state.blocklist.is_blocked(&endpoint).await

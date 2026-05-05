@@ -14,7 +14,7 @@ export function credentialsCommand(): Command {
 
   cmd
     .description(
-      "Manage AzureClaw credentials (Azure OpenAI, channel tokens, API keys)"
+      "Manage AzureClaw credentials (inference provider, channel tokens, API keys)"
     )
     .action(async () => {
       const { default: inquirer } = await import("inquirer");
@@ -37,7 +37,7 @@ export function credentialsCommand(): Command {
 
       // Main menu
       const categories = [
-        { name: "Azure OpenAI  — endpoint, model, API key", value: "aoai" },
+        { name: "Inference     — Azure AI Foundry / Azure OpenAI or GitHub Models", value: "inference" },
         { name: "Telegram      — bot token, allowed users", value: "telegram" },
         { name: "Slack         — bot OAuth token", value: "slack" },
         { name: "Discord       — bot token", value: "discord" },
@@ -57,8 +57,8 @@ export function credentialsCommand(): Command {
 
         if (category === "done") break;
 
-        if (category === "aoai") {
-          await promptAndSaveCredentials({ heading: "Azure OpenAI" });
+        if (category === "inference") {
+          await promptAndSaveCredentials({ heading: "Inference provider" });
         } else {
           const promptMap: Record<string, Array<{ key: string; label: string; allowSuffix?: boolean }>> = {
             telegram: [
