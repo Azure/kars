@@ -808,49 +808,35 @@ fi
 # ALWAYS_ALLOWED_RUNTIME_DIR_NAMES set).
 #
 # We set OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 to avoid the 50s pi-ai catalog
-# wedge in models.list, which empties the bundled plugin tree. That breaks
-# the cores' bundled lookup, so we re-publish them as auto-discovered
-# non-bundled extensions under $OPENCLAW_DIR/extensions/<core>/. The
-# resolver's fallback path (resolveRegistryPluginModuleLocation) then finds
-# them via the manifest registry, which is unaffected by the disable flag.
+# wedge on first models.list. That points bundledPluginsDir at
+# os.tmpdir()/openclaw-empty-bundled-plugins (DISABLED_BUNDLED_PLUGINS_DIR
+# in bundled-dir-Dn1Nq3AQ.js). The resolver then can't find the cores
+# inside that empty dir.
 #
-# Each core ships with `runtime-api.js`, `api.js`, `package.json` but no
-# `openclaw.plugin.json` — so we synthesize a minimal manifest.
+# Fix: pre-populate the disabled dir with symlinks to just the 3 cores.
+# `resolveDisabledBundledPluginsDir` only does mkdir -p, it never empties
+# the dir, so our symlinks survive. The bundled-surface resolver
+# (resolveBundledPluginPublicSurfacePath in public-surface-runtime-*.js)
+# uses a plain fs.existsSync at `<bundledPluginsDir>/<dirName>/<artifact>`,
+# which our symlinks satisfy. The symlinks point at the real openclaw
+# extensions tree so internal `require("../../redact-*.js")` calls inside
+# runtime-api.js still resolve through to the real openclaw dist root.
+#
+# The 80+ heavy bundled plugins (xAI, Anthropic, Mistral, etc.) remain
+# absent from the disabled dir, so manifest discovery still finds zero
+# bundled providers and pi-ai's catalog stays small → models.list ~300ms
+# instead of ~50s.
+DISABLED_BUNDLED_DIR="${TMPDIR:-/tmp}/openclaw-empty-bundled-plugins"
+mkdir -p "$DISABLED_BUNDLED_DIR"
 for core in speech-core image-generation-core media-understanding-core; do
   CORE_SRC="/usr/local/lib/node_modules/openclaw/dist/extensions/$core"
-  CORE_DST="$OPENCLAW_DIR/extensions/$core"
-  if [ -d "$CORE_SRC" ] && [ ! -f "$CORE_DST/runtime-api.js" ]; then
-    rm -rf "$CORE_DST" 2>/dev/null || true
-    mkdir -p "$CORE_DST"
-    cp -r --no-preserve=mode "$CORE_SRC"/. "$CORE_DST/" 2>/dev/null || true
-    # Synthesize package.json with the openclaw.extensions field that
-    # discoverInDirectory (discovery-BH0TILgt.js) requires to add the dir
-    # to the manifest registry.
-    cat > "$CORE_DST/package.json" <<EOF
-{
-  "name": "@openclaw/$core",
-  "version": "2026.4.25",
-  "private": true,
-  "description": "OpenClaw runtime core ($core)",
-  "type": "module",
-  "openclaw": { "extensions": ["./runtime-api.js"] }
-}
-EOF
-    # Synthesize openclaw.plugin.json — loadPluginManifest requires both
-    # `id` and `configSchema` (manifest-gzgxnRAf.js loadPluginManifest).
-    # enabledByDefault:false so the plugin is registered (and the resolver
-    # can find runtime-api.js) but not activated as a runtime plugin.
-    cat > "$CORE_DST/openclaw.plugin.json" <<EOF
-{
-  "id": "$core",
-  "configSchema": { "type": "object", "additionalProperties": false },
-  "activation": { "onStartup": false },
-  "enabledByDefault": false
-}
-EOF
+  CORE_LINK="$DISABLED_BUNDLED_DIR/$core"
+  if [ -d "$CORE_SRC" ] && [ ! -L "$CORE_LINK" ]; then
+    rm -rf "$CORE_LINK" 2>/dev/null || true
+    ln -s "$CORE_SRC" "$CORE_LINK"
   fi
 done
-echo "[azureclaw] Runtime cores re-published (speech-core, image-generation-core, media-understanding-core)"
+echo "[azureclaw] Runtime cores re-published (speech-core, image-generation-core, media-understanding-core) in $DISABLED_BUNDLED_DIR"
 
 # Write gateway token to .bashrc (remove any stale tokens from prior runs first)
 touch /sandbox/.bashrc 2>/dev/null || true
