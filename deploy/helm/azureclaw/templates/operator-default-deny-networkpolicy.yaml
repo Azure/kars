@@ -51,4 +51,20 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+    # AGT mesh peer connection — controller registers itself with the
+    # registry (TCP/8080) and connects to the relay (TCP/8765) to act
+    # as a fully-fledged mesh peer for cross-cluster trust propagation
+    # and operator-driven message injection. Without this rule the
+    # controller's `mesh_peer` task logs `Registry registration failed`
+    # forever while sandboxes connect successfully (their NetworkPolicy
+    # is rendered separately by the per-sandbox reconciler).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agentmesh
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8765
 {{- end }}
