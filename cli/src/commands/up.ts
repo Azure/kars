@@ -766,6 +766,12 @@ Auto-resume:
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--wait",
           "--timeout", "5m",
+          // Take ownership of fields previously written by `kubectl apply`
+          // or `kubectl patch` (e.g. CRDs / ClusterRoles touched out-of-band
+          // during prior debugging). Without this, Helm's server-side apply
+          // refuses with "conflict with kubectl-client-side-apply" and the
+          // whole `azureclaw up` flow fails after the 18-min image build.
+          "--force-conflicts",
         ];
         if (foundryEndpoint) {
           helmArgs.push("--set", `foundry.endpoint=${foundryEndpoint}`);
