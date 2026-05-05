@@ -31,7 +31,7 @@ The pre-v1.0 surface was exercised against the threat model in `docs/internal/th
 
 ### v1.0 surface
 
-Phase 2 capabilities were exercised against the per-route threat model. Per-capability audit docs (CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, runtime-CLI hotspots) are committed under `docs/internal/security-audits/2026-04-*-phase2-*.md`. Each carries two-reviewer sign-off.
+v1.0 capabilities were exercised against the per-route threat model. Per-capability audit docs (CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, runtime-CLI hotspots) are committed under `docs/internal/security-audits/`. Each carries two-reviewer sign-off.
 
 ### v1.0 cut (open list)
 
