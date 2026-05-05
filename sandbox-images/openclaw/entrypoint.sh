@@ -19,39 +19,37 @@ set -e
 # cannot reach npm directly because of egress-guard, so OpenClaw must
 # resolve every `require()` from local disk.
 #
-# Design contract (verified against OpenClaw 2026.4.27
-# dist/bundled-runtime-root-D11Fl_T4.js):
+# Why we mirror to a writable tmpfs (and not just point at /opt directly):
+# OpenClaw 2026.4.x's installBundledRuntimeDeps writes a sentinel lockfile
+# (.openclaw-runtime-deps.lock) into the version-hash subdir of the stage
+# tree on first resolve. With readOnlyRootFilesystem=true on AKS, the
+# build-time-staged tree at /opt/openclaw-stage is on the RO rootfs, so
+# the lockfile write fails with EROFS and the loader falls back to npm
+# install — which then 403s through the egress-guarded forward proxy and
+# wedges the node-host on every bundled plugin (memory-core, acpx, etc).
 #
-#   * `OPENCLAW_PLUGIN_STAGE_DIR` is a colon-separated *list* of base
-#     dirs (line ~666 of bundled-runtime-root: splits on `path.delimiter`).
-#   * All entries become NODE_PATH search roots (line ~1743:
-#     `registerBundledRuntimeDependencyNodePath`). Deps resolve from
-#     whichever root has them — read-only is fine.
-#   * The *last* entry is the install root: where the lock dir + retained
-#     manifest are written if (and only if) something is actually
-#     missing from the search roots (line ~1090: `externalRoots.at(-1)`).
-#   * `missingSpecs = deps.filter(dep => !hasDependencySentinel(searchRoots, dep))`
-#     (line ~1455). With everything pre-staged, `missingSpecs = []` and
-#     the install path (lock, npm spawn, manifest write) **never executes**.
+# Mirror the staged tree to /tmp/openclaw-stage at container start and
+# point OPENCLAW_PLUGIN_STAGE_DIR there. /tmp is a 1GiB tmpfs (pod spec)
+# and the staged tree is ~500MiB. The cp runs once per container start
+# (~3-5s). Works in both modes:
+#   - dev (Docker, writable rootfs): always works.
+#   - AKS (RO rootfs, hardened): /tmp is writable, lockfile + manifest writes
+#     succeed, and the loader's per-plugin install path returns early because
+#     deps are already satisfied in the mirrored search root.
 #
-# What this gives us:
-#   * /opt/openclaw-stage stays read-only at runtime — agent UID cannot
-#     tamper with bundled code (security posture: bundled TCB is immutable).
-#   * /tmp/openclaw-cache is a tiny tmpfs scratch area (~27 MiB observed:
-#     symlinks back into /opt + a few small NODE_PATH manifests). Fits in
-#     the 1 GiB /tmp tmpfs with a 36× safety margin.
-#   * No `cp -r` of the staged tree (saves 3-5 s of boot, ~1.8 GiB of
-#     tmpfs, and removes the previous "chmod -R u+w on stage" compromise).
-#
-# Order matters: read-only stage first, writable cache last.
+# This was the original working pattern (commit 4c3094a, Apr 27). It was
+# regressed in 3e4e9aa to a colon-separated path list with no mirror, which
+# left installRoot pointing at an empty /tmp/openclaw-cache and triggered
+# npm install on every startup.
 if [ -z "${OPENCLAW_PLUGIN_STAGE_DIR:-}" ] && [ -d /opt/openclaw-stage ]; then
-  mkdir -p /tmp/openclaw-cache 2>/dev/null || true
-  # In dev mode entrypoint starts as root; in AKS it starts as sandbox.
-  # Ensure the cache dir is owned by the agent UID either way.
-  if [ "$(id -u)" = "0" ]; then
-    chown sandbox:sandbox /tmp/openclaw-cache 2>/dev/null || true
+  if [ ! -d /tmp/openclaw-stage ]; then
+    cp -r /opt/openclaw-stage /tmp/openclaw-stage
+    chmod -R u+w /tmp/openclaw-stage 2>/dev/null || true
+    if [ "$(id -u)" = "0" ]; then
+      chown -R sandbox:sandbox /tmp/openclaw-stage 2>/dev/null || true
+    fi
   fi
-  export OPENCLAW_PLUGIN_STAGE_DIR=/opt/openclaw-stage:/tmp/openclaw-cache
+  export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-stage
 fi
 
 # Default SANDBOX_NAME to a clean agent name (strip pod suffix from hostname)
@@ -220,7 +218,15 @@ fi
 ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 
-# Build models list from FOUNDRY_DEPLOYMENTS (JSON array) or fall back to single MODEL
+# Build models list from FOUNDRY_DEPLOYMENTS (JSON array) or fall back to single MODEL.
+# We register ALL Foundry deployments (chat, embedding, image-gen) under the single
+# `azure-openai` provider so OpenClaw never auto-enables its bundled `openai`
+# extension plugin to handle gpt-image-1 / text-embedding-3-small. Auto-enabling
+# that bundled plugin triggers a ~50s synchronous require() chain across the
+# 1.7GB pre-stage tree on first WebUI `models.list` call (the first-impression
+# wedge that kept us debugging for hours). All Foundry deployments egress through
+# the router (127.0.0.1:8443) regardless of model kind, so a single unified
+# provider is all we need.
 MODELS_JSON="[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via AzureClaw)\"}]"
 if [ -n "${FOUNDRY_DEPLOYMENTS:-}" ]; then
   # Parse deployment names and build models array for openclaw.json
@@ -231,7 +237,7 @@ try:
     models = []
     for d in deps:
         name = d.get('name') or d.get('id') or ''
-        if name and 'embedding' not in name.lower():
+        if name:
             models.append({'id': name, 'name': f'{name} (Azure via AzureClaw)'})
     if not models:
         models = [{'id': '${MODEL}', 'name': '${MODEL} (Azure via AzureClaw)'}]
@@ -262,6 +268,22 @@ fi
 # reach arbitrary RFC 1918 hosts.
 export OPENCLAW_QA_ALLOW_LOCAL_IMAGE_PROVIDER=1
 
+# Skip OpenClaw's bundled-extension discovery for performance. OpenClaw 2026.4.x
+# loads pi-ai's full provider catalog via models.list every time the gateway
+# starts cold (xAI/Anthropic/Mistral/etc. — providers AzureClaw never uses
+# because all model traffic flows through the inference router to Foundry /
+# GitHub Models). Without this flag, models.list takes ~50s and blocks the
+# event loop on every first WebUI connect. With this flag, OpenClaw points at
+# an empty tmpdir for bundled plugins and skips the enumeration entirely
+# (see resolveDisabledBundledPluginsDir() in bundled-dir.js).
+#
+# Side effect: OpenClaw's 3 always-required runtime cores (speech-core,
+# image-generation-core, media-understanding-core) live under the bundled
+# extensions tree and become unresolvable. We re-publish them as
+# auto-discovered non-bundled extensions further down (search for
+# "always-required runtime cores").
+export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
+
 # Only configure if not already done (idempotent)
 if [ ! -f "$OPENCLAW_CONFIG" ]; then
   # Create OpenClaw directories (owned by sandbox user)
@@ -280,11 +302,6 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
         "authHeader": false,
         "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": ${MODELS_JSON}
-      },
-      "openai": {
-        "baseUrl": "http://127.0.0.1:8443/v1",
-        "apiKey": "routed-via-inference-router",
-        "models": []
       }
     }
   },
@@ -310,11 +327,11 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   "agents": {
     "defaults": {
       "model": { "primary": "azure-openai/${MODEL}" },
-      "imageGenerationModel": "openai/gpt-image-1",
+      "imageGenerationModel": "azure-openai/gpt-image-1",
       "timeoutSeconds": 300,
       "memorySearch": {
         "enabled": true,
-        "provider": "openai",
+        "provider": "azure-openai",
         "model": "text-embedding-3-small",
         "remote": {
           "baseUrl": "http://127.0.0.1:8443/v1/",
@@ -782,6 +799,41 @@ if [ -d /opt/azureclaw-plugin ]; then
   echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
 fi
 
+# ── Always-required runtime cores (speech-core, image-generation-core,
+#    media-understanding-core) ─────────────────────────────────────────────
+# OpenClaw 2026.4.x's facade resolver hard-requires these three cores at
+# runtime — even for plain text replies — via
+# `Unable to resolve bundled plugin public surface <core>/runtime-api.js`
+# (see facade-loader-D3SAZIg3.js and facade-activation-check.runtime.js's
+# ALWAYS_ALLOWED_RUNTIME_DIR_NAMES set).
+#
+# We set OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 to avoid the 50s pi-ai catalog
+# wedge in models.list, which empties the bundled plugin tree. That breaks
+# the cores' bundled lookup, so we re-publish them as auto-discovered
+# non-bundled extensions under $OPENCLAW_DIR/extensions/<core>/. The
+# resolver's fallback path (resolveRegistryPluginModuleLocation) then finds
+# them via the manifest registry, which is unaffected by the disable flag.
+#
+# Each core ships with `runtime-api.js`, `api.js`, `package.json` but no
+# `openclaw.plugin.json` — so we synthesize a minimal manifest.
+for core in speech-core image-generation-core media-understanding-core; do
+  CORE_SRC="/usr/local/lib/node_modules/openclaw/dist/extensions/$core"
+  CORE_DST="$OPENCLAW_DIR/extensions/$core"
+  if [ -d "$CORE_SRC" ] && [ ! -f "$CORE_DST/runtime-api.js" ]; then
+    rm -rf "$CORE_DST" 2>/dev/null || true
+    mkdir -p "$CORE_DST"
+    cp -r --no-preserve=mode "$CORE_SRC"/. "$CORE_DST/" 2>/dev/null || true
+    cat > "$CORE_DST/openclaw.plugin.json" <<EOF
+{
+  "id": "$core",
+  "activation": { "onStartup": false },
+  "enabledByDefault": false
+}
+EOF
+  fi
+done
+echo "[azureclaw] Runtime cores re-published (speech-core, image-generation-core, media-understanding-core)"
+
 # Write gateway token to .bashrc (remove any stale tokens from prior runs first)
 touch /sandbox/.bashrc 2>/dev/null || true
 sed -i '/OPENCLAW_GATEWAY_TOKEN/d' /sandbox/.bashrc 2>/dev/null || true
@@ -976,26 +1028,16 @@ mkdir -p /tmp/node-host-home/.openclaw
 # Create a minimal config for the node-host — it only needs gateway connectivity,
 # NOT our plugins. Using the main config causes "plugin not found: azureclaw" crash loops.
 #
-# IMPORTANT: `plugins.allow: []` (empty) is interpreted by OpenClaw's loader as
-# "no allowlist applied" — so every bundled plugin with `enabledByDefault: true`
-# (e.g. `acpx` with `activation.onStartup: true`) loads and triggers
-# `ensureBundledPluginRuntimeDeps`, which kicks off a 42-spec npm install at
-# runtime under the egress-guarded UID 1000. That blocks the node-host's event
-# loop indefinitely behind the forward proxy and wedges the gateway path the
-# WebUI talks to. Pre-staging at /opt/openclaw-stage doesn't help because
-# OpenClaw's materialization check reads `installRoot/package.json` and
-# `installRoot` is the LAST entry of OPENCLAW_PLUGIN_STAGE_DIR (the writable
-# `/tmp/openclaw-cache`, which is empty).
-#
-# Fix: pass a non-empty allowlist with a single lightweight bundled plugin
-# (`openai`). The loader's allow-list logic then disables every other bundled
-# plugin (`enableState.enabled = false`) and skips the runtime-deps install
-# path entirely (loader.js gates on `enableState.enabled` before calling
-# `prepareBundledPluginRuntimeLoadRoot`).
+# `plugins.allow: []` is the original (working) config: bundled plugins load with
+# their own runtime-deps, and the loader resolves those deps from the pre-staged
+# /tmp/openclaw-stage tree (mirrored from /opt/openclaw-stage at container start
+# — see the OPENCLAW_PLUGIN_STAGE_DIR setup near the top of this file). No
+# runtime npm install is triggered because every spec is already satisfied in a
+# search root.
 cat > /tmp/node-host-home/.openclaw/openclaw.json << 'NODECONF'
 {
   "gateway": { "port": 18789 },
-  "plugins": { "allow": ["openai"] }
+  "plugins": { "allow": [] }
 }
 NODECONF
 [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home/.openclaw/openclaw.json
