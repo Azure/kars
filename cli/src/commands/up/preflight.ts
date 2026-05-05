@@ -348,8 +348,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       { sku: "Standard_D4s_v5", label: "AKS system pool (D4s_v5)" },
       { sku: agentSku, label: agentLabel },
     ];
-    let skuOk = true;
-    for (const check of skuChecks) {
+    const checkOne = async (check: { sku: string; label: string }): Promise<{ ok: boolean; line: string; available: boolean }> => {
       try {
         const { stdout: skuJson } = await execa("az", [
           "vm", "list-skus",
@@ -357,18 +356,22 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
           "--size", check.sku,
           "--query", "[0].restrictions",
           "--output", "json",
-        ], { stdio: "pipe", timeout: 15000 });
+        ], { stdio: "pipe", timeout: 10000 });
         const restrictions = JSON.parse(skuJson || "[]");
         const blocked = restrictions.some((r: { type: string }) => r.type === "Location");
-        if (blocked) {
-          checkLine(false, `${check.label} — ${chalk.red("not available")} in ${options.region}`);
-          skuOk = false;
-        } else {
-          checkLine(true, `${check.label} — available`);
-        }
+        return blocked
+          ? { ok: false, available: false, line: `${check.label} — ${chalk.red("not available")} in ${options.region}` }
+          : { ok: true, available: true, line: `${check.label} — available` };
       } catch {
-        checkLine(false, `${check.label} — ${chalk.yellow("could not verify")} (continuing)`);
+        // Network/CLI failure is non-fatal — surface as "could not verify" but don't fail preflight
+        return { ok: true, available: true, line: `${check.label} — ${chalk.yellow("could not verify")} (continuing)` };
       }
+    };
+    const results = await Promise.all(skuChecks.map(checkOne));
+    let skuOk = true;
+    for (const r of results) {
+      checkLine(r.ok, r.line);
+      if (!r.available) skuOk = false;
     }
     if (!skuOk) {
       console.log(chalk.yellow(`\n  Some VM SKUs are not available in ${options.region}.`));

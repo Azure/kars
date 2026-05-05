@@ -33,6 +33,7 @@ export function upCommand(): Command {
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
+    .option("--skip-runtime-images", "Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
     .option("--dry-run", "Show what would be done without executing", false)
@@ -464,6 +465,22 @@ export function upCommand(): Command {
           await buildPush("vendor/agentmesh-relay/Dockerfile", "agentmesh-relay:latest", [], "vendor/agentmesh-relay");
           await buildPush("vendor/agentmesh-registry/Dockerfile", "agentmesh-registry:latest", [], "vendor/agentmesh-registry");
 
+          // Multi-runtime adapter images. Tags must match the controller's
+          // DEFAULT_*_IMAGE constants in `reconciler/runtime.rs`. Skipped
+          // when --skip-runtime-images is passed (faster first deploy).
+          if (!options.skipRuntimeImages) {
+            for (const rt of [
+              { dir: "openai-agents", tag: "azureclaw-runtime-openai-agents:latest" },
+              { dir: "maf-python", tag: "azureclaw-runtime-maf-python:latest" },
+              { dir: "anthropic", tag: "azureclaw-runtime-anthropic:latest" },
+              { dir: "langgraph", tag: "azureclaw-runtime-langgraph:latest" },
+              { dir: "langgraph-ts", tag: "azureclaw-runtime-langgraph-ts:latest" },
+              { dir: "pydantic-ai", tag: "azureclaw-runtime-pydantic-ai:latest" },
+            ]) {
+              await buildPush(`sandbox-images/${rt.dir}/Dockerfile`, rt.tag);
+            }
+          }
+
           stepper.done("Images built and pushed to ACR");
         } else {
           // Customer mode: import pre-built images from source ACR
@@ -475,6 +492,14 @@ export function upCommand(): Command {
             { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
             { source: `${sourceAcr}/agentmesh-relay:latest`, target: "agentmesh-relay:latest" },
             { source: `${sourceAcr}/agentmesh-registry:latest`, target: "agentmesh-registry:latest" },
+            // Multi-runtime adapter images. Failures here are non-fatal —
+            // some source ACRs may not host every runtime.
+            { source: `${sourceAcr}/azureclaw-runtime-openai-agents:latest`, target: "azureclaw-runtime-openai-agents:latest" },
+            { source: `${sourceAcr}/azureclaw-runtime-maf-python:latest`, target: "azureclaw-runtime-maf-python:latest" },
+            { source: `${sourceAcr}/azureclaw-runtime-anthropic:latest`, target: "azureclaw-runtime-anthropic:latest" },
+            { source: `${sourceAcr}/azureclaw-runtime-langgraph:latest`, target: "azureclaw-runtime-langgraph:latest" },
+            { source: `${sourceAcr}/azureclaw-runtime-langgraph-ts:latest`, target: "azureclaw-runtime-langgraph-ts:latest" },
+            { source: `${sourceAcr}/azureclaw-runtime-pydantic-ai:latest`, target: "azureclaw-runtime-pydantic-ai:latest" },
           ];
 
           for (const img of images) {
@@ -631,6 +656,14 @@ export function upCommand(): Command {
           "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
           "--set", `sandbox.image.repository=${acrLoginServer}/openclaw-sandbox`,
           "--set", `sandbox.image.tag=latest`,
+          // Multi-runtime adapter image overrides (consumed by controller via
+          // *_RUNTIME_IMAGE env vars; see helm controller-deployment.yaml).
+          "--set", `runtimes.openaiAgents.image=${acrLoginServer}/azureclaw-runtime-openai-agents:latest`,
+          "--set", `runtimes.mafPython.image=${acrLoginServer}/azureclaw-runtime-maf-python:latest`,
+          "--set", `runtimes.anthropic.image=${acrLoginServer}/azureclaw-runtime-anthropic:latest`,
+          "--set", `runtimes.langgraph.image=${acrLoginServer}/azureclaw-runtime-langgraph:latest`,
+          "--set", `runtimes.langgraphTs.image=${acrLoginServer}/azureclaw-runtime-langgraph-ts:latest`,
+          "--set", `runtimes.pydanticAi.image=${acrLoginServer}/azureclaw-runtime-pydantic-ai:latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--wait",

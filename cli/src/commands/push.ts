@@ -70,6 +70,20 @@ export function pushCommand(): Command {
           buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
         { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry",
           buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
+        // Multi-runtime adapter images — must match controller defaults in
+        // `controller/src/reconciler/runtime.rs` (DEFAULT_*_IMAGE constants).
+        { name: "runtime-openai-agents", tag: "azureclaw-runtime-openai-agents:latest",
+          dockerfile: "sandbox-images/openai-agents/Dockerfile" },
+        { name: "runtime-maf-python", tag: "azureclaw-runtime-maf-python:latest",
+          dockerfile: "sandbox-images/maf-python/Dockerfile" },
+        { name: "runtime-anthropic", tag: "azureclaw-runtime-anthropic:latest",
+          dockerfile: "sandbox-images/anthropic/Dockerfile" },
+        { name: "runtime-langgraph", tag: "azureclaw-runtime-langgraph:latest",
+          dockerfile: "sandbox-images/langgraph/Dockerfile" },
+        { name: "runtime-langgraph-ts", tag: "azureclaw-runtime-langgraph-ts:latest",
+          dockerfile: "sandbox-images/langgraph-ts/Dockerfile" },
+        { name: "runtime-pydantic-ai", tag: "azureclaw-runtime-pydantic-ai:latest",
+          dockerfile: "sandbox-images/pydantic-ai/Dockerfile" },
       ];
 
       // Filter if --only specified; skip sandbox-base unless explicitly requested
