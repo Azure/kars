@@ -78,6 +78,25 @@ sandbox:
       cpu: "2"
       memory: "4Gi"
 
+# Multi-runtime adapter images. Each value is a fully-qualified
+# `<repo>:<tag>` string consumed by controller/src/reconciler/runtime.rs
+# via the `*_RUNTIME_IMAGE` env vars on the controller Deployment.
+# Empty string falls back to the controller's compiled-in default.
+# `azureclaw up` populates these with `<your-acr>/azureclaw-runtime-*:latest`.
+runtimes:
+  openaiAgents:
+    image: ""
+  mafPython:
+    image: ""
+  anthropic:
+    image: ""
+  langgraph:
+    image: ""
+  langgraphTs:
+    image: ""
+  pydanticAi:
+    image: ""
+
 # Network policy defaults
 networkPolicy:
   defaultDenyEgress: true

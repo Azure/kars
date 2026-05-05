@@ -55,6 +55,21 @@ spec:
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE
               value: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
+            # Multi-runtime adapter image overrides (consumed by
+            # controller/src/reconciler/runtime.rs::*_default_image()).
+            # Empty string keeps the controller's compiled-in default.
+            - name: OPENAI_AGENTS_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.openaiAgents.image | default "" | quote }}
+            - name: MAF_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.mafPython.image | default "" | quote }}
+            - name: ANTHROPIC_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.anthropic.image | default "" | quote }}
+            - name: LANGGRAPH_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.langgraph.image | default "" | quote }}
+            - name: LANGGRAPH_TS_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.langgraphTs.image | default "" | quote }}
+            - name: PYDANTIC_AI_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.pydanticAi.image | default "" | quote }}
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
             - name: FOUNDRY_ENDPOINT
