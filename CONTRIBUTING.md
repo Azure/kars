@@ -156,6 +156,19 @@ CLI flag → Docker env var → entrypoint auto-config → plugins.allow + plugi
 
 Credentials are stored in a K8s secret named `<sandbox-name>-credentials` in the sandbox namespace (`azureclaw-<name>`). The controller mounts it via `envFrom` with `optional: true` so pods start even if no credentials secret exists. Use `azureclaw credentials update <name> --telegram-token <token>` to create/update the secret.
 
+## Working with the vendored AgentMesh forks
+
+`vendor/` contains patched forks of three AgentMesh components — `agentmesh-relay` (Rust), `agentmesh-registry` (Rust), and `@agentmesh/sdk` (TypeScript). Each subdirectory has a `README.md` documenting the upstream commit, the list of patches applied, and the upstream PR/issue link for each one (eight patches total at the time of writing).
+
+Two ground rules apply when touching vendored code:
+
+1. **Attempt the upstream merge first.** The `vendor/<component>/README.md` must show a link to the upstream PR (or a written explanation of why upstream rejected / didn't respond). PRs that add a vendored patch without that link will be asked to open the upstream change first.
+2. **Don't rebase on top of vendored files quietly.** The CI gate `ci/vendored-patch-audit.sh` fingerprints each patch and fails the build if a known patch goes missing — that's how we catch accidental upstream re-imports that drop our fixes. If you intentionally retire a patch (because upstream merged the fix), update `vendor/<component>/README.md` in the same PR.
+
+The sandbox Docker build installs `@agentmesh/sdk` from npm and then *overlays* with the vendored `dist/` files (see `sandbox-images/openclaw/Dockerfile`). When you change TS in `vendor/agentmesh-sdk/`, you must run `npm run build` inside that directory and commit the regenerated `dist/` so the overlay picks up your change. The Rust forks (`relay`, `registry`) are built directly via `cargo` and need Rust 1.94+ (upstream's pinned 1.83 toolchain is too old for our deps).
+
+Vendored code is excluded from the Microsoft copyright-header gate — do not add Microsoft headers to files under `vendor/`.
+
 ## Pull Requests
 
 1. Clear description of the change

@@ -101,6 +101,8 @@ azureclaw connect hello
 
 On first run `azureclaw dev` prompts for your Azure OpenAI endpoint, deployment name, and a resource-level API key — that is the only credential the local mode ever sees, and it never leaves your laptop. From here, every tool call the agent makes is governed by the same router code path that runs in production.
 
+> **Don't have an Azure AI Foundry deployment yet?** Two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-ai-foundry-deployment-yet)**.
+
 When you are ready for the real thing:
 
 ```bash
@@ -183,6 +185,18 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 ## Project status
 
 `v1.0.0-rc.1` — release candidate. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E + manual matrix). See **[`CHANGELOG.md`](CHANGELOG.md)** for the per-release change log and **[`docs/api/backwards-compatibility.md`](docs/api/backwards-compatibility.md)** for the API stability contract.
+
+## Known limitations
+
+We would rather you find these in this list than in production. None of them block the core promise (one router, one audit chain, one CRD shape across runtimes), but they shape how you should run the rc:
+
+- **Mesh trust tiers default to anonymous.** Sub-agents register with the AgentMesh registry as the *anonymous* tier unless the tenant administrator provisions an Entra app registration with `api://agentmesh` as an identifier URI. The router fails open: failed token-exchange logs `registering as anonymous tier` and the agent continues to function — KNOCK gating still happens, just against trust-score `0`. Resolution is one CLI command (`azureclaw mesh setup-trust`, idempotent, needs tenant admin); see **[`docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite`](docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite)** for the details.
+- **Multi-runtime images are not yet published to a public registry.** OpenClaw runs out of the box; the other six wired runtimes (OpenAI Agents SDK, Microsoft Agent Framework Python, LangGraph, LangGraph.js, Anthropic, Pydantic-AI) currently require `azureclaw push --build` against your own ACR before `azureclaw add --runtime <kind>` will succeed. The build pipeline is in tree (`sandbox-images/<kind>/Dockerfile`); the public distribution is what's pending.
+- **Semantic Kernel and MAF .NET runtimes are CRD-wired but adapter-incomplete.** The CRD enum accepts the values, the controller emits a `ShapeInvalid` condition, the agent does not start. Treat them as future work, not silent breakage.
+- **Attestation is router-and-audit only.** We sign and hash-chain audit entries; we do not yet emit cosign-signed runtime receipts (`attest sign`/`attest verify` are scaffolded — see `docs/roadmap.md`).
+- **No managed-service equivalent.** This is a runtime you operate. There is no hosted control plane.
+
+If a limitation surprised you in a way this list didn't warn about, that's a bug — please file it.
 
 ## Contributing & support
 
