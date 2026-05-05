@@ -138,12 +138,19 @@ Failed decrypt is a `security_event`, not a downgrade — there is no plaintext 
 | **Anonymous** | `0` | Default. No Entra token presented. Sandbox boots, registers, and operates normally — but every peer KNOCK is evaluated against score `0`. |
 | **Verified** | `600` | Agent's pod identity exchanges its federated Workload Identity token for an Entra access token with audience `api://agentmesh/.default`. Registry verifies and tags the agent as Tier 1. |
 
-To unlock the verified tier, a tenant administrator provisions an Entra app registration with `api://agentmesh` as an identifier URI and grants the AzureClaw managed identities the right to acquire tokens for it. This is a one-time, per-tenant operation; the controller and CLI do not perform it for you.
+To unlock the verified tier, a tenant administrator provisions an Entra app registration with `api://agentmesh` as an identifier URI and grants the AzureClaw managed identities the right to acquire tokens for it. This is a one-time, per-tenant operation. The fastest way is the AzureClaw CLI helper:
+
+```bash
+# Tenant admin runs once per tenant
+azureclaw mesh setup-trust
+```
+
+It is idempotent — re-running on a tenant where the app reg already exists just prints the existing IDs and exits. See `docs/permissions.md` for the underlying `az ad app create` calls if you'd rather run them by hand.
 
 **Until that registration exists, every sandbox runs as anonymous.** This is intentional — fail-open lets you stand up a cluster and explore the mesh without first negotiating an Entra app reg with your IT admin. The trade-off is that `AGT_TRUST_THRESHOLD` (default: `500` in production sandboxes) will reject every anonymous peer. For dev clusters or single-tenant pilots, you can either:
 
 1. **Lower the threshold** — set `spec.governance.trustThreshold: 0` on the `ClawSandbox` to accept anonymous peers (suitable only for trusted dev environments).
-2. **Provision the app registration** — the proper fix; see the [Entra Agent ID setup guidance](https://learn.microsoft.com/entra/identity/) for your tenant's onboarding flow.
+2. **Provision the app registration** — the proper fix. Run `azureclaw mesh setup-trust` (idempotent; needs Application Administrator at tenant scope), or follow the manual `az` calls in `docs/permissions.md`.
 3. **Use `AGT_SKIP_ENTRA=1`** — short-circuits the token-exchange retry loop entirely. The controller injects this automatically on clusters where the operator has flagged the SP as not provisioned, so sandbox boot doesn't burn ~120 s on doomed retries.
 
 The relevant log line you will see at sandbox start is one of:
