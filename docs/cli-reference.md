@@ -98,6 +98,7 @@ azureclaw up [options]
 | `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
 | `--source-acr <server>` | `azureclawacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
 | `--build` | `false` | Build images locally and push to ACR (developer mode) |
+| `--skip-runtime-images` | `false` | Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
 | `--openai-endpoint <url>` | — | Existing Azure OpenAI endpoint (`openai.azure.com`; derived from Foundry if omitted) |
 | `--dry-run` | `false` | Show what would be done without executing |
@@ -823,8 +824,8 @@ azureclaw model list my-agent
 ### `azureclaw policy`
 
 Manages sandbox network and security policies. Hot-reload capable: `allow`
-and `deny` take effect without a pod restart. `learn` is deprecated in favour
-of `azureclaw egress <name> --learned`.
+and `deny` take effect without a pod restart. `learn` is kept as a
+backward-compatible alias for `azureclaw egress <name> --learned`.
 
 **Usage:**
 ```
@@ -837,7 +838,7 @@ azureclaw policy <subcommand> [arguments] [options]
 | `allow <name> <host>` | Add an allowed egress endpoint (hot-reload) |
 | `get <name>` | Show the active policy for a sandbox |
 | `deny <name> <host>` | Remove an allowed endpoint from a running sandbox |
-| `learn <name>` | *(Deprecated)* Use `azureclaw egress <name> --learned` instead |
+| `learn <name>` | Alias for `azureclaw egress <name> --learned` (kept for backward compatibility) |
 
 **Arguments for `allow` / `deny`:**
 | Name | Required | Description |
@@ -850,7 +851,7 @@ azureclaw policy <subcommand> [arguments] [options]
 |---|---|---|
 | `--port <port>` | `443` | Port |
 
-**Options for `learn` (deprecated):**
+**Options for `learn`:**
 | Flag | Default | Description |
 |---|---|---|
 | `--apply` | `false` | Apply learned domains as the sandbox allowlist |
