@@ -730,7 +730,8 @@ export function translate(
         },
       },
       spec: {
-        appliesTo: { sandboxName },
+        // ToolPolicy.appliesTo has no sandboxName field — scope via sandbox label.
+        appliesTo: { sandboxMatchLabels: { [SANDBOX_LABEL_KEY]: sandboxName } },
       },
     });
     toolPolicies.sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));

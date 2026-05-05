@@ -93,7 +93,10 @@ export function buildToolPolicy(opts: ToolPolicyOpts): Record<string, unknown> {
         : undefined,
     },
     spec: {
-      appliesTo: { sandboxName: opts.sandboxName },
+      // ToolPolicy.appliesTo has no sandboxName field — scope via sandbox label.
+      appliesTo: {
+        sandboxMatchLabels: { "azureclaw.azure.com/sandbox": opts.sandboxName },
+      },
     },
   };
 }
