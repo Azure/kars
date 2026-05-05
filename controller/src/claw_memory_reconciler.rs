@@ -13,6 +13,26 @@
 //! 4. Sets full status (phase, observedGeneration, conditions,
 //!    bindingConfigMapRef, versionHash, lastReconciledAt).
 //!
+//! ## Honesty rule (status reporting)
+//!
+//! The controller does **not** create the upstream Azure AI Foundry
+//! Memory Store — that happens runtime-side via the CLI plugin and
+//! the router's `/memory_stores/*` proxy on first use (S7+ wiring).
+//! Therefore, on a successful binding compile, the controller reports:
+//!
+//! - `phase = "Pending"` (not `"Ready"`)
+//! - `Ready = False` / reason `AwaitingFoundryProvisioning`
+//! - `Progressing = True` / reason `AwaitingFoundryProvisioning`
+//!
+//! Reporting `Ready=True` after only writing the binding ConfigMap is
+//! a lie: the router will still 404 on `/memory_stores/<name>` until
+//! the runtime path provisions the store. `kubectl wait
+//! --for=condition=Ready` must block here — flipping it `True`
+//! prematurely was the bug this module guards against.
+//!
+//! When binding write itself fails, phase is `Failed` (not
+//! `Degraded`), `Ready=False`, `Degraded=True`.
+//!
 //! ## Reuse map (no-duplication rule, §0.2/§0.3)
 //!
 //! Same shape as S2 (ToolPolicy), S3 (A2AAgent), S4 (InferencePolicy).
@@ -139,10 +159,21 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
     );
+    // Honesty rule (see module docstring + claw_memory.rs §"Scope (S5)"):
+    // The controller only compiles a binding ConfigMap. Creating the
+    // upstream Azure AI Foundry Memory Store is the runtime path's job
+    // (CLI plugin → router `/memory_stores/*` proxy), and is not wired
+    // in this slice. Until S7 lands a sandbox-side informer that
+    // confirms the upstream store exists and stamps `foundryStoreId`,
+    // we MUST NOT report `phase=Ready` / `Ready=True` — doing so makes
+    // operators believe the store is provisioned when the router will
+    // still 404 on `/memory_stores/<name>`. Report `Pending` instead so
+    // `kubectl wait --for=condition=Ready` blocks until the upstream
+    // store is real.
     let phase = if degraded.is_some() {
-        "Degraded"
+        "Failed"
     } else {
-        "Ready"
+        "Pending"
     };
 
     // SSA requires apiVersion + kind in the patch body — without
@@ -215,20 +246,29 @@ fn build_conditions(
             ));
         }
         None => {
+            // Binding compiled OK, but the upstream Foundry Memory
+            // Store is provisioned by the runtime path (S7+), not by
+            // the controller. Report this honestly: `Ready=False` with
+            // `Progressing=True` until upstream confirmation lands.
+            // Operators / `kubectl wait --for=condition=Ready` should
+            // block here, not race ahead to talk to a store the router
+            // will 404 on.
+            const AWAITING_MSG: &str =
+                "binding ConfigMap compiled; awaiting upstream Foundry memory store provisioning by runtime path (router proxy on first use)";
             out.push(conditions::preserve_transition_time(
                 prior_ready,
                 conditions::TYPE_READY,
-                cond_status::TRUE,
-                reason::RECONCILED,
-                "ClawMemory binding compiled and published",
+                cond_status::FALSE,
+                reason::AWAITING_FOUNDRY_PROVISIONING,
+                AWAITING_MSG,
                 observed_generation,
             ));
             out.push(conditions::preserve_transition_time(
                 prior_progressing,
                 conditions::TYPE_PROGRESSING,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "compile complete",
+                cond_status::TRUE,
+                reason::AWAITING_FOUNDRY_PROVISIONING,
+                AWAITING_MSG,
                 observed_generation,
             ));
             out.push(conditions::preserve_transition_time(
@@ -396,13 +436,23 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_success() {
+        // "Success" here = binding ConfigMap published. Upstream Foundry
+        // store provisioning is runtime-path; controller intentionally
+        // reports Ready=False / Progressing=True until S7 confirmation.
         let conds = build_conditions(&[], Some(1), None);
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
             .unwrap();
-        assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_FOUNDRY_PROVISIONING);
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
+        assert_eq!(progressing.reason, reason::AWAITING_FOUNDRY_PROVISIONING);
         let degraded = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_DEGRADED)
