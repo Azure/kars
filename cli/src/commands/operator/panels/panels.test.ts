@@ -62,11 +62,31 @@ describe("S14 panels — empty cluster (no panic, no false data)", () => {
     });
   }
 
-  it("renderDashboard against empty cluster includes every panel header", () => {
+  it("renderDashboard against empty cluster shows agents+providers and the at-a-glance section", () => {
     const out = renderDashboard(empty);
+    // Default (triage-first) layout always shows agents and providers.
+    expect(out).toContain("ClawSandbox");
+    expect(out).toContain("Providers");
+    expect(out).toContain("At a glance");
+    // No issues → no triage section.
+    expect(out).not.toContain("🔥 Triage");
+    // Optional CRDs collapse when empty (not in detail).
+    // (They may still appear in at-a-glance if forced, but with default
+    // shouldSurface logic they're hidden when total=0.)
+  });
+
+  it("renderDashboard --panels=all preserves legacy full dump", () => {
+    const out = renderDashboard(empty, { panels: "all" });
     for (const p of DEFAULT_PANELS) {
       expect(out).toContain(p.title);
     }
+  });
+
+  it("renderDashboard --panels=triage on empty cluster shows header only", () => {
+    const out = renderDashboard(empty, { panels: "triage" });
+    expect(out).toContain("AzureClaw Operator");
+    expect(out).toContain("0 agents, ");
+    expect(out).not.toContain("At a glance");
   });
 
   it("renderDashboard --per-sandbox on empty cluster falls back to flat list", () => {
@@ -298,5 +318,106 @@ describe("S14 panels — FixtureDataSource", () => {
     const out = await ds.fetch();
     expect(out).toBe(snap);
     expect(out.sandboxes).toHaveLength(2);
+  });
+});
+
+describe("S20 panels — triage + at-a-glance layout", () => {
+  it("collectTriage returns no items for an empty cluster", async () => {
+    const { collectTriage } = await import("./layout.js");
+    expect(collectTriage(emptyClusterState())).toEqual([]);
+  });
+
+  it("collectTriage surfaces False conditions verbatim", async () => {
+    const { collectTriage } = await import("./layout.js");
+    const state = emptyClusterState();
+    state.inferencePolicies = [{
+      name: "ip-1",
+      namespace: "azureclaw-sb-1",
+      conditions: [
+        { type: "Ready", status: "False", reason: "ModelMissing", message: "gpt-foo not found" },
+      ],
+    }];
+    const triage = collectTriage(state);
+    expect(triage).toHaveLength(1);
+    expect(triage[0].panel).toBe("InferencePolicy");
+    expect(triage[0].name).toBe("ip-1");
+    expect(triage[0].reason).toBe("ModelMissing");
+    expect(triage[0].message).toBe("gpt-foo not found");
+  });
+
+  it("collectTriage flags down sandboxes", async () => {
+    const { collectTriage } = await import("./layout.js");
+    const state = emptyClusterState();
+    state.sandboxes = [{
+      name: "sb-down", namespace: "azureclaw-sb-down", status: "CrashLoopBackOff",
+      health: "down", model: "gpt-4.1", isolation: "enhanced", channels: "",
+      age: "1m", podName: "p", restarts: 5, role: "controller", parent: "", runtime: "aks",
+    }];
+    const triage = collectTriage(state);
+    expect(triage).toHaveLength(1);
+    expect(triage[0].panel).toBe("ClawSandbox");
+    expect(triage[0].status).toBe("False");
+  });
+
+  it("default dashboard hides empty optional CRDs", () => {
+    const out = renderDashboard(emptyClusterState());
+    // Optional CRDs shouldn't surface in detail when empty.
+    // They may still appear in at-a-glance only if total>0.
+    // Detail rule: omitted when total=0.
+    expect(out).not.toContain("┄ McpServer ┄");
+    expect(out).not.toContain("┄ ClawMemory ┄");
+    expect(out).not.toContain("┄ ClawEval ┄");
+    expect(out).not.toContain("┄ A2AAgent ┄");
+    // ClawPairing (internal) also hidden in default mode.
+    expect(out).not.toContain("┄ ClawPairing ┄");
+    // Agents + Providers always present.
+    expect(out).toContain("┄ ClawSandbox ┄");
+    expect(out).toContain("┄ Providers ┄");
+  });
+
+  it("dashboard with issues prepends a 🔥 Triage section", () => {
+    const state = emptyClusterState();
+    state.inferencePolicies = [{
+      name: "ip-bad", namespace: "azureclaw",
+      conditions: [{ type: "Ready", status: "False", reason: "Bad", message: "x" }],
+    }];
+    const out = renderDashboard(state);
+    expect(out).toContain("🔥 Triage");
+    expect(out).toContain("InferencePolicy");
+    expect(out).toContain("ip-bad");
+    expect(out).toContain("Bad");
+  });
+
+  it("at-a-glance groups panels by category", () => {
+    const out = renderDashboard(emptyClusterState());
+    expect(out).toContain("AGENTS");
+    expect(out).toContain("PROVIDERS");
+    // Optional features section is hidden when all optional CRDs are empty.
+    expect(out).not.toContain("OPTIONAL FEATURES");
+  });
+
+  it("each panel exposes purpose + category metadata", () => {
+    for (const p of DEFAULT_PANELS) {
+      expect(p.category).toBeDefined();
+      expect(typeof p.purpose).toBe("string");
+      expect(p.purpose!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("each panel implements summarize()", () => {
+    const empty = emptyClusterState();
+    for (const p of DEFAULT_PANELS) {
+      expect(p.summarize).toBeDefined();
+      const s = p.summarize!(empty);
+      expect(typeof s.total).toBe("number");
+      expect(s.total).toBe(0);
+    }
+  });
+
+  it("--panels=all preserves the legacy full dump", () => {
+    const out = renderDashboard(emptyClusterState(), { panels: "all" });
+    for (const p of DEFAULT_PANELS) {
+      expect(out).toContain(`┄ ${p.title} ┄`);
+    }
   });
 });

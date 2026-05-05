@@ -5,12 +5,16 @@
  * ClawEval panel (S6) — list + lastRunAt + lastScore + nextScheduledAt.
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const clawEvalPanel: Panel = {
   id: "claweval",
   title: "ClawEval",
+  category: "optional",
+  purpose: "reproducible eval runs — pinned image+config + scored history",
   refreshIntervalMs: 30_000,
+
+  summarize(state) { return summarizeItems(state.clawEvals); },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const items = opts?.sandbox

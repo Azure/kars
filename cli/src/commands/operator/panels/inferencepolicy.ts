@@ -5,12 +5,24 @@
  * InferencePolicy panel (S4) — list + budgets + guardrail floor + model preference.
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const inferencePolicyPanel: Panel = {
   id: "inferencepolicy",
   title: "InferencePolicy",
+  category: "infrastructure",
+  purpose: "model preference, daily token caps, guardrail floor",
   refreshIntervalMs: 30_000,
+
+  summarize(state) {
+    const s = summarizeItems(state.inferencePolicies);
+    if (state.inferencePolicies.length === 1) {
+      const p = state.inferencePolicies[0];
+      const primary = p.modelPreference?.[0];
+      if (primary) s.detail = `primary=${primary}`;
+    }
+    return s;
+  },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const items = opts?.sandbox

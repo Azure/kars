@@ -66,3 +66,42 @@ export function filterBySandbox<T extends Record<string, unknown>>(
     return false;
   });
 }
+
+/** Health bucket for a single CrdItem, derived from its conditions.
+ *
+ *  Rules (most-specific first):
+ *   - any condition with status="False" → "error"
+ *   - any condition with status="Unknown" → "unknown"
+ *   - at least one Ready=True (or any True) → "healthy"
+ *   - empty conditions list → "unknown"
+ */
+export function bucketFromConditions(
+  conds: CrdCondition[] | undefined,
+): "healthy" | "warning" | "error" | "unknown" {
+  if (!conds || conds.length === 0) return "unknown";
+  let hasFalse = false;
+  let hasUnknown = false;
+  let hasTrue = false;
+  for (const c of conds) {
+    if (c.status === "False") hasFalse = true;
+    else if (c.status === "Unknown") hasUnknown = true;
+    else if (c.status === "True") hasTrue = true;
+  }
+  if (hasFalse) return "error";
+  if (hasUnknown) return "unknown";
+  if (hasTrue) return "healthy";
+  return "warning";
+}
+
+/** Roll a list of CrdItems into a PanelSummary. */
+export function summarizeItems<T extends CrdItem>(
+  items: T[],
+  detail?: string,
+): import("./types.js").PanelSummary {
+  const s = { total: items.length, healthy: 0, warning: 0, error: 0, unknown: 0, detail };
+  for (const it of items) {
+    const b = bucketFromConditions(it.conditions);
+    s[b] += 1;
+  }
+  return s;
+}
