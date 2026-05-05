@@ -25,11 +25,11 @@ Each finding records: ID, date, surface, severity, summary, status, fix commit /
 
 ## Findings
 
-### Phase 0 + Phase 1 baseline
+### Pre-v1.0 baseline
 
-The Phase 0 + 1 surface was exercised against the threat model in `docs/internal/threat-model.md` (internal) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under `docs/internal/security-audits/` (internal).
+The pre-v1.0 surface was exercised against the threat model in `docs/internal/threat-model.md` (internal) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under `docs/internal/security-audits/` (internal).
 
-### Phase 2
+### v1.0 surface
 
 Phase 2 capabilities were exercised against the per-route threat model. Per-capability audit docs (CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, runtime-CLI hotspots) are committed under `docs/internal/security-audits/2026-04-*-phase2-*.md`. Each carries two-reviewer sign-off.
 
@@ -42,7 +42,7 @@ Phase 2 capabilities were exercised against the per-route threat model. Per-capa
 | `RT-2026-03` | 2026-04-28 | AgentMesh KNOCK | Medium | Anonymous peer (trust 0) could trigger registry lookups before policy check | **Closed** — by routing trust-evaluation before lookup; see vendored-patch audit |
 | `RT-2026-04` | 2026-04-30 | A2A gateway | Low | Non-allowlisted scheme echoed in error response | **Closed** — sanitised |
 
-### v1.0 — accepted as `[GAP-V1]`
+### v1.0 — accepted residual gaps
 
 These items were caught and explicitly deferred (each is documented in [`security/stride.md`](../security/stride.md) §Residual risk):
 

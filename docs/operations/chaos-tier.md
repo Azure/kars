@@ -1,6 +1,6 @@
 # Chaos tier — operations guide
 
-The chaos tier (Phase 2 S16) is a permanent CI surface that protects
+The chaos tier is a permanent CI surface that protects
 controller and router behaviour under failure-mode duress. It is **not**
 load testing for marketing numbers — it is reliability-invariant
 coverage for the failure shapes operators actually see in production.

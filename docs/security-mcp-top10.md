@@ -8,23 +8,23 @@ listing (<https://owasp.org/www-project-mcp-top-10/>), re-verified on
 
 > **Scope:** this document covers MCP calls originating *from* sandboxed
 > agents and MCP servers *hosted in AKS* via the forthcoming `McpServer`
-> CRD (plan §7). Managed SaaS MCP servers published by Foundry are out
+> CRD (the v1.1 plan). Managed SaaS MCP servers published by Foundry are out
 > of scope (Foundry hosts those).
 
 ## Summary table
 
-| # | OWASP MCP (2025) | Primary surface | Status | Plan phase |
-|---|---|---|---|---|
-| 01 | Token Mismanagement & Secret Exposure | Router auth path, ConfigMap/Secret custody, OAuth 2.1 | Partial today, hardens in P1 | Phase 1 (OAuth 2.1) |
-| 02 | Privilege Escalation via Scope Creep | `ToolPolicy` CRD, AGT policy profile, scopes-per-tool | Partial today, full in P2 | Phase 1 minimal, Phase 2 full |
-| 03 | Tool Poisoning | Sandbox image supply chain, cosign on pod images | Cosign Phase 3 | Phase 3 |
-| 04 | Supply Chain & Dependency Tampering | SBOM per release, SLSA-v1, vendored-patch audit | Vendored audit today, SLSA Phase 3 | Phase 3 |
-| 05 | Command Injection & Execution | Seccomp-strict, Landlock, egress-guard | Live today | Phase 0 (conformance corpus) |
-| 06 | Intent Flow Subversion (prompt injection) | Foundry Content Safety + `InferencePolicy` guardrails | Content Safety live today, CRD P2 | Phase 2 full |
-| 07 | Insufficient Authentication & Authorization | OAuth 2.1 on MCP, AGT `PolicyDecisionProvider` | OAuth 2.1 Phase 1 | Phase 1 |
-| 08 | Lack of Audit and Telemetry | AGT `AuditLogger`, OTel GenAI SemConv spans | Audit live, SemConv P1 | Phase 1 |
-| 09 | Shadow MCP Servers | Shadow-MCP admission policy (VAP) | Phase 3 | Phase 3 |
-| 10 | Context Injection & Over-Sharing | Per-sandbox namespace isolation, `Mcp-Session-Id`, tenancy boundary | Namespace live, session ID P1 | Phase 1 (session scoping) |
+| # | OWASP MCP (2025) | Primary surface | Status |
+|---|---|---|---|
+| 01 | Token Mismanagement & Secret Exposure | Router auth path, ConfigMap/Secret custody, OAuth 2.1 | Partial today; hardens in v1.1 |
+| 02 | Privilege Escalation via Scope Creep | `ToolPolicy` CRD, AGT policy profile, scopes-per-tool | Partial today; broadens in v1.1 |
+| 03 | Tool Poisoning | Sandbox image supply chain, cosign on pod images | Cosign verification deferred to v1.1 |
+| 04 | Supply Chain & Dependency Tampering | SBOM per release, SLSA-v1, vendored-patch audit | Vendored audit today; SLSA in v1.1 |
+| 05 | Command Injection & Execution | Seccomp-strict, Landlock, egress-guard | Live today |
+| 06 | Intent Flow Subversion (prompt injection) | Foundry Content Safety + `InferencePolicy` guardrails | Content Safety live; CRD broadens in v1.1 |
+| 07 | Insufficient Authentication & Authorization | OAuth 2.1 on MCP, AGT `PolicyDecisionProvider` | OAuth 2.1 in v1.1 |
+| 08 | Lack of Audit and Telemetry | AGT `AuditLogger`, OTel GenAI SemConv spans | Audit live; SemConv in v1.1 |
+| 09 | Shadow MCP Servers | Shadow-MCP admission policy (VAP) | v1.1 |
+| 10 | Context Injection & Over-Sharing | Per-sandbox namespace isolation, `Mcp-Session-Id`, tenancy boundary | Namespace live; session ID in v1.1 |
 
 ## Detail
 
@@ -40,19 +40,19 @@ container; **never mounted into the inference-router**; `UID 1000`
 agent code reads its own bindings but not router identity.
 
 **Gap.** Inbound MCP calls today run through the vendored trust path
-(handoff-style KNOCK); OAuth 2.1 short-lived token flow is a Phase 1
+(handoff-style KNOCK); OAuth 2.1 short-lived token flow is a v1.1
 deliverable.
 
-**Plan.** Phase 1 `inference-router/src/mcp/oauth.rs` (plan §7 item 1)
+**Plan.** A planned `inference-router/src/mcp/oauth.rs` module
 enforces PKCE, audience indicators (RFC 8707), and resource-indicated
 tokens; refresh-token rotation mandatory; no bearer token persists on
 disk. Negative tests in `tests/conformance/oauth/` assert replayed
 token reject / expired token reject / audience mismatch reject
-(plan §5.4 OAuth 2.1 corpus).
+.
 
 **Refs.** `sandbox-images/openclaw/entrypoint.sh` (credential mount),
 `deploy/helm/azureclaw/templates/` (secret shape),
-internal Phase 1 plan §7 item 1.
+the v1.1 milestone.
 
 ### MCP02 — Privilege escalation via scope creep
 
@@ -65,13 +65,12 @@ allowed, 28 explicit denies), Landlock read-only enforced on
 `sandbox-images/openclaw/entrypoint.sh:713-747`). Egress goes **only**
 through `127.0.0.1:8443` via iptables UID filter.
 
-**Plan.** Phase 1 minimal `ToolPolicy.spec` carries `appliesTo` selector
-and AP2 commerce caps; Phase 2 adds `approval` and `rateLimit`
+**Today.** `ToolPolicy.spec` carries `appliesTo` selector
+and AP2 commerce caps; v1.1 will add `approval` and `rateLimit`
 precedence. Policy evaluation is an AGT call
 (`PolicyDecisionProvider`) — we surface scopes, AGT decides.
 
-**Refs.** internal Phase 1 plan §§1.1, 7 item 4 (minimal ToolPolicy),
-§8 item 2 (full ToolPolicy).
+**Refs.** `controller/src/tool_policy_reconciler.rs`.
 
 ### MCP03 — Tool poisoning
 
@@ -82,10 +81,9 @@ injected; tool binary swapped post-deploy.
 `imagePullPolicy: Always` used across controller-managed deployments;
 ACR content-trust available but not enforced at admission.
 
-**Plan.** Phase 3 (plan §9 item 1) ships **cosign admission
-verification** on pod images against the release key, with a Rekor
+**Plan.** v1.1 ships **cosign admission verification** on pod images against the release key, with a Rekor
 transparency-log freshness window. Unsigned or stale images →
-admission deny. Distinct from CR-spec signing (also Phase 3).
+admission deny. Distinct from CR-spec signing.
 
 ### MCP04 — Software supply chain & dependency tampering
 
@@ -99,9 +97,9 @@ re-confirmation row in `docs/internal/agt-vendored-patch-audit.md` on every
 AGT SDK version bump — patches that become upstream-absorbed are
 documented as such rather than silently dropped.
 
-**Plan.** Phase 3 ships SBOM per release and SLSA-v1 provenance on CR
-specs (plan §9 item 1). `trivy` + `cosign-verify` + SCA gates enter
-permanent CI (plan §11.1 "Security regression" row) in Phase 2.
+**Plan.** v1.1 ships SBOM per release and SLSA-v1 provenance on CR
+specs (the v1.1 plan). `trivy` + `cosign-verify` + SCA gates enter
+permanent CI (the v1.1 plan "Security regression" row) in v1.1.
 
 ### MCP05 — Command injection & execution
 
@@ -117,7 +115,7 @@ Foundry Content Safety. This is the "defense-in-depth" posture summarised
 in `docs/security.md` §9.
 
 **Conformance.** `tests/conformance/seccomp-landlock-egress/` (plan
-§5.4 row 6, Phase 0) asserts that forbidden syscalls return `EPERM`
+§5.4 row 6, the v1.0 conformance corpus) asserts that forbidden syscalls return `EPERM`
 **not silently succeed** — directly targeting the class of bug where
 a control looks present but isn't actually wired.
 
@@ -130,11 +128,11 @@ selection, or downstream intent.
 (`Microsoft.DefaultV2`); `prompt_filter_results` parsed from response
 in `inference-router/src/safety.rs` (module docstring lines 1-14).
 There is **no** in-process circuit breaker or cooldown — by design;
-Foundry owns the guardrail (plan §3 non-compete row).
+Foundry owns the guardrail (the v1.1 plan non-compete row).
 
-**Plan.** Phase 1 `InferencePolicy.spec` (minimal) + Phase 2 full
+**Plan.** v1.1 `InferencePolicy.spec` (minimal) + v1.1 full
 `InferencePolicy` with `guardrails` field expresses *which* Foundry
-safety levels apply per-sandbox; a VAP (plan §7 item 13) denies
+safety levels apply per-sandbox; a VAP denies
 spec mutations that weaken Content Safety below the tenant floor.
 
 ### MCP07 — Insufficient authentication & authorization
@@ -142,7 +140,7 @@ spec mutations that weaken Content Safety below the tenant floor.
 **Threat.** Unauthenticated MCP endpoint exposed; anonymous callers
 assumed trusted.
 
-**Plan.** Phase 1 `McpServer.spec.productionMode: true` implies
+**Plan.** v1.1 `McpServer.spec.productionMode: true` implies
 `oauth.issuer` set (enforced by CEL `x-kubernetes-validations`, plan
 §7 item 12). Router refuses unauthenticated traffic on any
 production-mode `McpServer`. Dev-mode anonymous requires
@@ -161,11 +159,11 @@ trail.
 `inference-router/src/providers/policy.rs`. Names frozen in
 `docs/security.md` §Governance (lines ~153-170) and `CHANGELOG.md`.
 
-**Plan.** Phase 1 adds OTel GenAI SemConv 1.x emission on every router
-span (plan §7 item 9; constants module already landed in
+**Plan.** v1.1 adds OTel GenAI SemConv 1.x emission on every router
+span (the v1.1 plan; constants module already landed in
 `inference-router/src/telemetry/gen_ai.rs` with audit doc
-`2026-04-24-phase1-otel-genai-semconv.md`). Phase 2
-`kubectl claw attest <name>` (plan §8 item 11) returns fresh
+(internal audit doc)). v1.1
+`kubectl claw attest <name>` returns fresh
 attestation including AGT audit-receipt id.
 
 ### MCP09 — Shadow MCP servers
@@ -173,10 +171,10 @@ attestation including AGT audit-receipt id.
 **Threat.** Undocumented or orphaned MCP endpoints running somewhere
 in the cluster; no CR surface, no policy binding.
 
-**Plan.** Phase 3 `controller/src/admission/shadow_mcp.rs` (plan §9
+**Plan.** v1.1 `controller/src/admission/shadow_mcp.rs` (the v1.1 plan
 item 5) — ValidatingAdmissionPolicy denies any MCP call (observed
 by the router) to a server without a matching `McpServer` CR. Signal
-sourced from AGT `BehaviorMonitor` (plan §1.1). Paired with the
+sourced from AGT `BehaviorMonitor` (the v1.1 plan). Paired with the
 admission block so detection → enforcement is one loop.
 
 ### MCP10 — Context injection & over-sharing
@@ -186,12 +184,12 @@ another; context merges across boundaries.
 
 **Today.** Each sandbox gets its own K8s namespace (`azureclaw-<name>`)
 with NetworkPolicy + seccomp + Landlock. `ClawMemory` is a **binding
-resource** over Foundry Memory Store (plan §3 non-compete row); no
+resource** over Foundry Memory Store (the v1.1 plan non-compete row); no
 in-cluster memory backend shipped, so no cross-sandbox leak surface
 to defend.
 
-**Plan.** Phase 1 MCP Streamable HTTP enforces `Mcp-Session-Id`
-semantics (plan §5.4 row MCP 2026) — session id is scoped per
+**Plan.** v1.1 MCP Streamable HTTP enforces `Mcp-Session-Id`
+semantics (the v1.1 plan row MCP 2026) — session id is scoped per
 `McpServer` CR; `tests/conformance/mcp-2026/` asserts session
 confusion attacks fail closed.
 
@@ -211,4 +209,4 @@ confusion attacks fail closed.
   counts, component names).
 * `docs/internal/threat-model.md` — STRIDE per surface.
 * `docs/internal/security-audits/` — per-capability audit docs.
-* Internal Phase 1 plan §§0.2, 7 — principles and Phase 1 scope.
+* Internal v1.1 plan §§0.2, 7 — principles and v1.1 scope.

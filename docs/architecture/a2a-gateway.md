@@ -1,13 +1,12 @@
 # A2A public-ingress gateway
 
-> Phase 2 S3.5 — closes ADR-0001 #4.
-
 ## Why this component exists
 
-Before S3.5 the inference router exposed A2A endpoints on the
-cluster-internal mesh only. ADR-0001 #4 required a hardened public
-edge so external A2A 1.0.0 callers (other organisations' agents
-reaching ours) terminate at a single, narrow surface that:
+Before this component existed the inference router exposed A2A
+endpoints on the cluster-internal mesh only. [ADR-0001](../adr/0001-a2a-ingress-front-edge.md) required a
+hardened public edge so external A2A 1.0.0 callers (other
+organisations' agents reaching ours) terminate at a single, narrow
+surface that:
 
 1. Owns the public TLS certificate (rotated via Application Gateway
    for Containers / cert-manager).

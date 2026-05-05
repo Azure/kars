@@ -568,7 +568,7 @@ spec:
 - Same AGT governance — `ToolPolicy`, `TrustManager`, `AuditLogger`, `RateLimiter`.
 - Same `ClawMemory` (Foundry Memory Store binding) and `ClawEval` CRDs.
 - Same operator TUI — all 8 CRDs visible regardless of runtime kind.
-- `RuntimeReady` condition reflects per-runtime health; Tier-2 runtimes stamp `False/AdapterMissing`.
+- `RuntimeReady` condition reflects per-runtime health; runtime kinds without a shipped adapter stamp `False/AdapterMissing` (currently `SemanticKernel`).
 
 ### Cross-links
 
@@ -887,4 +887,4 @@ All dropped fields default to `disabled` (dev-only label applied automatically) 
 - AzureClaw is **not** a memory backend. `ClawMemory` is a Foundry Memory Store binding CR, never an in-cluster store.
 - AzureClaw is **not** a managed-MCP host for the public Microsoft-managed catalog. `McpServer` is for **AKS-hosted private/custom** tool servers; the publicly managed MCP surface stays with Foundry.
 - AzureClaw is **not** a SaaS agent author. Agent authoring lives in Microsoft 365 Agent Framework / Copilot Studio. AzureClaw is the AKS runtime substrate; M365 Copilot Studio agents can invoke AzureClaw-hosted MCP servers as a tool surface.
-- AzureClaw is **not** a Tier-2 runtime host today. `SemanticKernel`, `LangGraph`, `Anthropic` variants are in the schema; adapters land in a future phase. The controller stamps `RuntimeReady=False/AdapterMissing` on these variants so the operator knows immediately, rather than silently booting broken sandboxes.
+- AzureClaw ships first-class adapters for `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework` (Python), `LangGraph` (Python and TypeScript), `Anthropic`, `PydanticAi`, plus `BYO`. `SemanticKernel` and `MicrosoftAgentFramework` (`language: dotnet`) are in the schema but the adapters are not yet built — the controller stamps `RuntimeReady=False/AdapterMissing` (or `ShapeInvalid` for the .NET variant) so the operator knows immediately rather than silently booting broken sandboxes. See [Runtime catalog](runtimes.md).

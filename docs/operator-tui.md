@@ -1,11 +1,9 @@
-# Operator TUI — modular panels (S14)
+# Operator TUI — modular panels
 
-> Status: shipped in Phase 2 slice **S14** (`phase2-tui-redesign`).
 > Source: `cli/src/commands/operator/panels/`.
 
 `azureclaw operator` is the operator's terminal dashboard for live cluster
-state. Pre-S14 it surfaced `ClawSandbox` + `ClawPairing`; S14 adds modular
-panels for every Phase-2 CRD plus a per-sandbox provider-status panel.
+state. It surfaces every shipped CRD plus a per-sandbox provider-status panel.
 
 ## Quick start
 
@@ -157,7 +155,7 @@ operator command  ───►  KubectlDataSource ──► ClusterState
 
 ## Security posture
 
-- TUI is **read-only**. No destructive verbs are added in S14.
+- TUI is **read-only**. No destructive verbs are exposed.
 - RBAC scope = the operator's current kubeconfig context. Any visibility
   failure surfaces as `unknown` with the verbatim error.
 - **No secret bytes are rendered.** JWKS / token / API-key fields collapse

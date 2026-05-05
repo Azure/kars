@@ -16,7 +16,7 @@ Shipped capabilities (high-level):
 - Operator TUI + `azureclaw up / add / dev / connect / handoff / mesh / policy learn / migrate / convert / claw attest`.
 - Supply-chain: cosign keyless OIDC signatures, SBOM (CycloneDX) per image, Trivy + Container Image Scan + Rust Supply-Chain Gate (cargo-deny) + RustSec advisory audit in CI.
 
-Documented v1.0 gaps (`[GAP-V1]` markers in source):
+Documented v1.0 gaps (tracked in source as `// v1.1:` comments):
 
 - Cosign-on-admission gating (CRD-side admission webhook) — read surface is shipped; enforcement is post-v1.
 - TrustGraph live updates — projection is mounted at sandbox creation; topology changes require sandbox re-roll until v1.1.
