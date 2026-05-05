@@ -28,6 +28,7 @@ import { migrateCommand } from "./commands/migrate.js";
 import { toolPolicyCommand } from "./commands/toolpolicy.js";
 import { inferencePolicyCommand } from "./commands/inferencepolicy.js";
 import { mcpCommand } from "./commands/mcp.js";
+import { memoryCommand } from "./commands/memory.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -78,6 +79,7 @@ export function createCli(): Command {
   program.addCommand(toolPolicyCommand());
   program.addCommand(inferencePolicyCommand());
   program.addCommand(mcpCommand());
+  program.addCommand(memoryCommand());
 
   // Attestation
   program.addCommand(attestCommand());
