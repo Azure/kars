@@ -90,6 +90,8 @@ On the first run you are prompted to pick a provider:
 
 Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs.
 
+To switch providers later (or rotate keys), run **`azureclaw credentials`** — the same interactive prompt is exposed there too. The same command also handles channel tokens (Telegram, Slack, Discord) and third-party API keys (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI). Or scriptable: `azureclaw credentials set <key> <value>` / `list` / `remove`.
+
 The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router pod, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
 
 ### 1.3 Talk to the agent
