@@ -291,10 +291,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             Err(crate::reconciler::runtime::RuntimePlanError::AdapterMissing(kind)) => {
                 let msg = format!(
                     "spec.runtime.kind=`{kind}` has no adapter wired in this controller \
-                 build (S10.A1+A2 spine); skipping Deployment to avoid silently running \
-                 the OpenClaw image. Track adapter rollout: BYO=S10.A2.b, \
-                 OpenAIAgents=S10.A3 (wired), MicrosoftAgentFramework=S10.A4; \
-                 SemanticKernel/LangGraph/Anthropic are Tier-2 placeholders pending roadmap"
+                 build; skipping Deployment to avoid silently running the OpenClaw image. \
+                 Wired runtimes today: OpenClaw, OpenAIAgents, MicrosoftAgentFramework \
+                 (Python), LangGraph, Anthropic, PydanticAi, BYO. SemanticKernel is a \
+                 declared placeholder pending adapter rollout."
                 );
                 tracing::warn!(sandbox = %name, runtime = %kind, "{msg}");
                 crate::status::stamp_runtime_unsupported(client, &sandbox, &name, kind, &msg).await;

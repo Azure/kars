@@ -32,8 +32,7 @@ use serde::{Deserialize, Serialize};
 
 /// `ToolPolicy.spec` — declares per-tool gating: rate limits, approval,
 /// and AP2 commerce caps. Resolves bottom-up (most-specific selector
-/// wins). Precedence rules will be documented in `docs/crd-precedence.md`
-/// (Phase 2 deliverable §8 entry 10).
+/// wins). See `docs/api/lifecycle.md` for resolution semantics.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
     group = "azureclaw.azure.com",
@@ -90,8 +89,7 @@ pub struct AppliesToSelector {
 pub struct CommercePolicy {
     /// Daily spend cap as ISO-4217 currency string with 2-decimal-place
     /// integer minor units, e.g. `"USD 100.00"`. Parser is strict;
-    /// admission CEL rejects malformed values at apply time
-    /// (Phase 1 §7 entry 12).
+    /// admission CEL rejects malformed values at apply time.
     pub daily_cap: Option<String>,
 
     /// Monthly spend cap. Must be >= dailyCap (admission CEL).

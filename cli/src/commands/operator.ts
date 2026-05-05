@@ -62,9 +62,9 @@ export function operatorCommand(): Command {
     .option("--refresh <seconds>", "Auto-refresh interval", "10")
     .option("--context <name>", "Kubernetes context to use")
     .option("--dev", "Dev mode — discover Docker containers instead of K8s pods")
-    .option("--panels <list>", "S14 panel ids (comma-separated). Default = all.")
-    .option("--per-sandbox", "S14: group panels vertically per sandbox-name")
-    .option("--snapshot", "S14: render one snapshot to stdout and exit")
+    .option("--panels <list>", "CRD panel ids (comma-separated). Default = all.")
+    .option("--per-sandbox", "Group panels vertically per sandbox-name")
+    .option("--snapshot", "Render one snapshot to stdout and exit")
     .action(async (options) => {
       const isDevMode = !!options.dev;
       const defaultRefresh = isDevMode ? 3 : 10;

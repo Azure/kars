@@ -544,7 +544,7 @@ async function runFromKagent(
   if (sandboxesWithEgress.length > 0) {
     process.stderr.write(
       chalk.hex("#0078D4")(
-        `\nNext step (S12.g): the migrated bundle includes an egress allowlist. ` +
+        `\nNext step: the migrated bundle includes an egress allowlist. ` +
           `Sign and emit a GitOps manifest with:\n`,
       ),
     );
