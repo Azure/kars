@@ -5,12 +5,16 @@
  * A2AAgent panel (S3) — list + Conditions + AgentCard publication status.
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const a2aAgentPanel: Panel = {
   id: "a2aagent",
   title: "A2AAgent",
+  category: "optional",
+  purpose: "A2A 1.2 ingress + signing-key trust anchors — opt-in",
   refreshIntervalMs: 30_000,
+
+  summarize(state) { return summarizeItems(state.a2aAgents); },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     // A2AAgent is namespace-scoped; per-sandbox view filters by namespace.

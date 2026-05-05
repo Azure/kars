@@ -9,12 +9,16 @@
  * `spec.agentA`, `spec.agentB`, `status.phase`, `status.trustState`.
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const clawPairingPanel: Panel = {
   id: "clawpairing",
   title: "ClawPairing",
+  category: "internal",
+  purpose: "controller-managed handshake state — usually safe to ignore",
   refreshIntervalMs: 15_000,
+
+  summarize(state) { return summarizeItems(state.pairings); },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const items = opts?.sandbox

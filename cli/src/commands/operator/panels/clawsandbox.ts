@@ -15,7 +15,21 @@ import { EMPTY } from "./util.js";
 export const clawSandboxPanel: Panel = {
   id: "clawsandbox",
   title: "ClawSandbox",
+  category: "agent",
+  purpose: "the agents themselves — pod, runtime, model, isolation",
   refreshIntervalMs: 10_000,
+
+  summarize(state) {
+    const items = state.sandboxes;
+    const s = { total: items.length, healthy: 0, warning: 0, error: 0, unknown: 0 };
+    for (const it of items) {
+      if (it.health === "healthy") s.healthy += 1;
+      else if (it.health === "down") s.error += 1;
+      else if (it.health === "degraded") s.warning += 1;
+      else s.unknown += 1;
+    }
+    return s;
+  },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const all = state.sandboxes;

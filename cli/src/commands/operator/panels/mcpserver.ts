@@ -8,12 +8,16 @@
  * "<missing>" only — never raw values (plan §0.2 "no secret rendering").
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const mcpServerPanel: Panel = {
   id: "mcpserver",
   title: "McpServer",
+  category: "optional",
+  purpose: "MCP 2026 servers reachable from sandboxes — opt-in",
   refreshIntervalMs: 30_000,
+
+  summarize(state) { return summarizeItems(state.mcpServers); },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     // McpServer is namespace-scoped to a sandbox indirectly via

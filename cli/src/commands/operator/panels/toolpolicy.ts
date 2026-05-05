@@ -5,12 +5,16 @@
  * ToolPolicy panel (S2) — list + appliesTo + commerce / approval / rate-limit.
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const toolPolicyPanel: Panel = {
   id: "toolpolicy",
   title: "ToolPolicy",
+  category: "infrastructure",
+  purpose: "allow/deny tools, approval gates, rate limits, commerce mandates",
   refreshIntervalMs: 30_000,
+
+  summarize(state) { return summarizeItems(state.toolPolicies); },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const items = opts?.sandbox

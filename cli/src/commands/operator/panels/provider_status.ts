@@ -52,7 +52,23 @@ function renderProviders(label: string, items: ProviderState[]): string {
 export const providerStatusPanel: Panel = {
   id: "provider_status",
   title: "Providers",
+  category: "providers",
+  purpose: "Foundry, AGT, ACR, identity, ingress — health bar",
   refreshIntervalMs: 30_000,
+
+  summarize(state) {
+    let healthy = 0, warning = 0, error = 0, unknown = 0;
+    const all: ProviderState[] = [];
+    for (const list of state.providers.perSandbox.values()) all.push(...list);
+    for (const p of state.providers.cluster) all.push(p);
+    for (const p of all) {
+      if (p.status === "healthy") healthy += 1;
+      else if (p.status === "degraded") warning += 1;
+      else if (p.status === "down") error += 1;
+      else unknown += 1;
+    }
+    return { total: all.length, healthy, warning, error, unknown };
+  },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const lines: string[] = [];

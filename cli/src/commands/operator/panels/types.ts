@@ -129,6 +129,25 @@ export interface PanelRenderOpts {
   width?: number;
 }
 
+/** Category used by the layout to group panels. Optional for back-compat. */
+export type PanelCategory =
+  | "agent"           // ClawSandbox — the page's reason to exist
+  | "infrastructure"  // InferencePolicy, ToolPolicy — usually present, expected
+  | "optional"        // McpServer, A2AAgent, ClawMemory, ClawEval — hidden when 0
+  | "internal"        // ClawPairing — controller-managed, foldable
+  | "providers";      // Provider/health bar — always shown compact
+
+/** Per-panel summary used by the at-a-glance section. */
+export interface PanelSummary {
+  total: number;
+  healthy: number;
+  warning: number;
+  error: number;
+  unknown: number;
+  /** Optional one-line freeform hint (e.g., "primary=gpt-5.4"). */
+  detail?: string;
+}
+
 /** All panels implement this small surface. */
 export interface Panel {
   /** Stable id used by `--panels <a,b,c>` and registry lookups. */
@@ -139,6 +158,12 @@ export interface Panel {
   render(state: ClusterState, opts?: PanelRenderOpts): string;
   /** Optional: panel-specific recommended refresh cadence (ms). */
   refreshIntervalMs?: number;
+  /** Optional: one-line "why this CRD matters" tag for the at-a-glance. */
+  purpose?: string;
+  /** Optional: layout grouping. Defaults to "infrastructure". */
+  category?: PanelCategory;
+  /** Optional: counts/health summary used by at-a-glance. */
+  summarize?(state: ClusterState): PanelSummary;
 }
 
 /** An empty `ClusterState` — every consumer must accept this shape. */

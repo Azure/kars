@@ -9,12 +9,16 @@
  * RBAC scope summary the operator already records on the binding.
  */
 import type { Panel, PanelRenderOpts, ClusterState } from "./types.js";
-import { EMPTY, formatConditions, renderItemHeader } from "./util.js";
+import { EMPTY, formatConditions, renderItemHeader, summarizeItems } from "./util.js";
 
 export const clawMemoryPanel: Panel = {
   id: "clawmemory",
   title: "ClawMemory",
+  category: "optional",
+  purpose: "Foundry Memory Store binding — pinned scope, retention, cleanup",
   refreshIntervalMs: 30_000,
+
+  summarize(state) { return summarizeItems(state.clawMemories); },
 
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     const items = opts?.sandbox
