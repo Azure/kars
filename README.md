@@ -42,7 +42,7 @@ It is built for three audiences:
                     │  │  Inference Router (Rust)           │     │
                     │  │                                    │     │
                     │  │  Identity (Workload Identity)      │     │
-                    │  │  Content Safety (Foundry)          │     │
+                    │  │  Content Safety (Foundry inline)   │     │
                     │  │  Token budget · rate limit         │     │
                     │  │  Tool policy · governance (AGT)    │     │
                     │  │  Audit (tamper-evident chain)      │     │
@@ -57,12 +57,21 @@ It is built for three audiences:
                                          │
                   ┌──────────────────────┼─────────────────────────┐
                   ▼                      ▼                         ▼
-           Azure AI Foundry        AgentMesh relay            A2A peers
-           (model + Content        (Signal-Protocol           (signed
-            Safety + tools)         E2E messages)              AgentCards)
+           Inference backend       AgentMesh relay            A2A peers
+           ┌──────────────┐        (Signal-Protocol           (signed
+           │ Foundry /    │         E2E messages)              AgentCards)
+           │ Azure OpenAI │
+           │ (default)    │
+           ├──────────────┤
+           │ GitHub Models│  (dev mode · free tier · PAT)
+           ├──────────────┤
+           │ + more soon  │  ◄── feature-request via GitHub issues
+           └──────────────┘
 ```
 
 **The agent has no network of its own.** Every byte that leaves the pod leaves through the router. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
+
+**Pluggable inference backend.** **Azure AI Foundry / Azure OpenAI** is the default and unlocks the full feature set (Memory Store, agents, evaluations, indexes, inline Content Safety). **GitHub Models** is wired in for dev mode — free, just a GitHub PAT, no Azure subscription needed (Foundry-only routes return `501`; inline Content Safety not enforced — see [security.md](docs/security.md#what-we-do-not-defend-against)). Adding more providers (Anthropic, Bedrock, third-party OpenAI-compatible gateways) is mostly an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch — please open a GitHub issue / feature request.
 
 For the full picture (control plane, data plane, mesh, A2A, MCP), see **[`docs/architecture.md`](docs/architecture.md)** and **[`docs/architecture-diagrams.md`](docs/architecture-diagrams.md)**.
 
