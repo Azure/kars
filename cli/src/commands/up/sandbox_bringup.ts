@@ -340,7 +340,6 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     namespace: sandboxNamespace,
     model: options.model,
     provider: "azure-openai",
-    endpoint: openAiEndpoint,
     contentSafety: true,
     promptShields: true,
   });
