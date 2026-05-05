@@ -35,6 +35,10 @@ export interface InferencePolicyOpts {
 }
 
 export function buildInferencePolicy(opts: InferencePolicyOpts): Record<string, unknown> {
+  // Endpoint URLs (AOAI / Foundry) are NOT carried on this CR — they are
+  // sourced cluster-wide from helm values into router pod env vars.
+  // See docs/adr/0002-inference-endpoint-sourcing.md before adding any
+  // `endpoint`/`endpointOverride` field here.
   const spec: Record<string, unknown> = {
     appliesTo: { sandboxName: opts.sandboxName },
     modelPreference: {
