@@ -30,13 +30,15 @@ export function devCommand(): Command {
       "Requires an existing Azure OpenAI resource with at least one model deployment (e.g. gpt-4.1).\n" +
       "On first run, you will be prompted for your endpoint, model deployment name, and resource-level API key."
     )
+    // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "dev-agent")
     .option("--model <model>", "Existing model deployment name in your Azure OpenAI resource", "gpt-4.1")
     .option(
       "--policy <preset>",
-      "Policy preset: minimal, developer, web, azure",
+      "Policy preset: minimal | developer | web | azure",
       "developer"
     )
+    // ── Image build ────────────────────────────────────────────────────
     .option(
       "--image <image>",
       "Sandbox container image",
@@ -53,28 +55,52 @@ export function devCommand(): Command {
       false
     )
     .option(
+      "--base-image <image>",
+      "Azure Linux base image for building sandbox (override for custom registries)",
+      AZURELINUX_BASE
+    )
+    // ── Mesh federation ───────────────────────────────────────────────
+    .option(
       "--global-registry <url>",
       "Use a shared external registry (enables handoff). Skips local relay/registry/postgres."
     )
+    // ── Channels (OpenClaw only) ──────────────────────────────────────
     .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
     .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
     .option("--telegram-allow-from <ids>", "Telegram user IDs allowed to DM (comma-separated numeric IDs)")
     .option("--slack-token <token>", "Slack bot OAuth token")
     .option("--discord-token <token>", "Discord bot token")
+    // ── Skills + plugins (OpenClaw only) ──────────────────────────────
     .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
-    // Third-party plugin API keys (search, scraping, LLM providers)
     .option("--brave-api-key <key>", "Brave Search API key")
     .option("--tavily-api-key <key>", "Tavily search API key")
     .option("--exa-api-key <key>", "Exa search API key")
     .option("--firecrawl-api-key <key>", "Firecrawl web scraping API key")
     .option("--perplexity-api-key <key>", "Perplexity API key")
     .option("--openai-api-key <key>", "OpenAI API key (for dual-provider setups)")
-    .option(
-      "--base-image <image>",
-      "Azure Linux base image for building sandbox (override for custom registries)",
-      AZURELINUX_BASE
-    )
+    .addHelpText("after", `
+Flag groups:
+  Identity:           --name, --model, --policy
+  Image build:        --image, --build, --build-base, --base-image
+  Mesh federation:    --global-registry
+  Channels:           --channels, --telegram-*, --slack-token, --discord-token
+  Skills + plugins:   --skills, --brave-api-key, --tavily-api-key,
+                      --exa-api-key, --firecrawl-api-key,
+                      --perplexity-api-key, --openai-api-key
+
+Notes:
+  - Channels, skills, and plugin API keys are OpenClaw-specific. For
+    other runtimes, configure equivalents inside the agent's own code.
+  - Router-side guardrails (Content Safety, rate limits, audit, egress
+    allowlist) are always enforced — same in dev as in production.
+`)
     .action(async (options) => {
+      const policyPresets = ["minimal", "developer", "web", "azure"];
+      if (options.policy && !policyPresets.includes(options.policy)) {
+        console.error(chalk.red(`\n  Error: --policy must be one of: ${policyPresets.join(" | ")} (got "${options.policy}").\n`));
+        process.exit(1);
+      }
+
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
       const stepper = new Stepper({ totalSteps: 4 });

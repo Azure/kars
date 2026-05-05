@@ -14,35 +14,70 @@ export function upCommand(): Command {
     .description(
       "One command to go from zero to running agent. Provisions Azure resources, builds images, deploys controller, creates sandbox."
     )
+    // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "my-assistant")
     .option("--model <model>", "AI model", "gpt-4.1")
     .option(
       "--policy <preset>",
-      "Policy preset: minimal, developer, web, azure",
+      "Policy preset: minimal | developer | web | azure",
       "developer"
     )
+    // ── Cluster / region ───────────────────────────────────────────────
     .option("--region <region>", "Azure region", "eastus2")
     .option("--cluster-name <name>", "AKS cluster name", "azureclaw")
     .option(
       "--isolation <level>",
-      "Pod isolation level: standard (runc), enhanced (runc + strict seccomp), confidential (Kata VM)",
+      "Pod isolation level: standard (runc) | enhanced (runc + strict seccomp) | confidential (Kata VM)",
       "enhanced"
     )
     .option("-g, --resource-group <name>", "Resource group name")
+    // ── Infrastructure ────────────────────────────────────────────────
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
+    .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
+    // ── Images ─────────────────────────────────────────────────────────
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
     .option("--skip-runtime-images", "Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
+    // ── Foundry / Azure OpenAI ────────────────────────────────────────
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
-    .option("--dry-run", "Show what would be done without executing", false)
-    .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
+    // ── Mesh federation ───────────────────────────────────────────────
     .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
     .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
-    .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
+    // ── Output / lifecycle ────────────────────────────────────────────
+    .option("--dry-run", "Show what would be done without executing", false)
+    .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
+    .addHelpText("after", `
+Flag groups:
+  Identity:           --name, --model, --policy
+  Cluster / region:   --region, --cluster-name, --isolation, --resource-group
+  Infrastructure:     --skip-infra, --force-infra, --skip-preflight
+  Images:             --source-acr, --build, --skip-runtime-images
+  Foundry:            --foundry-endpoint, --openai-endpoint
+  Mesh federation:    --mesh-peer / --no-mesh-peer, --global-registry, --expose-registry
+  Output / lifecycle: --dry-run, --upgrade
+
+Examples:
+  azureclaw up                                       # Full provision with defaults
+  azureclaw up --name myagent --region westus3       # Pick a name + region
+  azureclaw up --skip-infra                          # Reuse existing AKS cluster
+  azureclaw up --upgrade                             # Fast Helm-only redeploy
+`)
     .action(async (options) => {
+      // Up-front validation: reject obviously-wrong values before any Azure work.
+      const isolationLevels = ["standard", "enhanced", "confidential"];
+      if (options.isolation && !isolationLevels.includes(options.isolation)) {
+        console.error(chalk.red(`\n  Error: --isolation must be one of: ${isolationLevels.join(" | ")} (got "${options.isolation}").\n`));
+        process.exit(1);
+      }
+      const policyPresets = ["minimal", "developer", "web", "azure"];
+      if (options.policy && !policyPresets.includes(options.policy)) {
+        console.error(chalk.red(`\n  Error: --policy must be one of: ${policyPresets.join(" | ")} (got "${options.policy}").\n`));
+        process.exit(1);
+      }
+
       const { execa } = await import("execa");
 
       // ── FAST UPGRADE PATH (S15.d.1: extracted to ./up/fast_upgrade.ts) ──
