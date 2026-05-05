@@ -48,7 +48,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Owned-resource label key, attached to every mirror by the reconciler
-/// so cleanup/observability can find them.
+/// so cleanup/observability can find them. Value format is
+/// `<kind>.<name>` (lowercased) — note `.` not `/`: K8s label *values*
+/// cannot contain `/` (only label *keys* may use the `prefix/name` form).
 pub(crate) const MIRROR_OWNER_LABEL: &str = "azureclaw.azure.com/mirrored-from";
 /// Sandbox name label, links the mirror back to its `ClawSandbox`.
 pub(crate) const MIRROR_SANDBOX_LABEL: &str = "azureclaw.azure.com/sandbox";
@@ -108,7 +110,7 @@ pub async fn mirror_configmap(
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert(
         MIRROR_OWNER_LABEL.into(),
-        format!("{source_kind}/{name}").to_lowercase(),
+        format!("{source_kind}.{name}").to_lowercase(),
     );
     labels.insert(MIRROR_SANDBOX_LABEL.into(), sandbox_name.into());
     labels.insert(
@@ -179,7 +181,7 @@ pub async fn mirror_secret(
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert(
         MIRROR_OWNER_LABEL.into(),
-        format!("{source_kind}/{name}").to_lowercase(),
+        format!("{source_kind}.{name}").to_lowercase(),
     );
     labels.insert(MIRROR_SANDBOX_LABEL.into(), sandbox_name.into());
     labels.insert(
