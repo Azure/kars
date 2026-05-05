@@ -162,6 +162,21 @@ export function buildRuntimeBlock(
         kind: "OpenAIAgents",
         openaiAgents: {},
       };
+    case "LangGraph":
+      return {
+        kind: "LangGraph",
+        langGraph: { language: "python" },
+      };
+    case "Anthropic":
+      return {
+        kind: "Anthropic",
+        anthropic: {},
+      };
+    case "PydanticAi":
+      return {
+        kind: "PydanticAi",
+        pydanticAi: {},
+      };
     case "MicrosoftAgentFramework": {
       const language = opts.mafLanguage ?? "python";
       // Reject dotnet client-side: the controller producer rejects

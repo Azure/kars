@@ -131,6 +131,24 @@ describe("buildRuntimeBlock", () => {
     expect((block.microsoftAgentFramework as Record<string, string>).language).toBe("python");
   });
 
+  it("emits the LangGraph block with python language", () => {
+    const block = buildRuntimeBlock({ kind: "LangGraph" }) as Record<string, unknown>;
+    expect(block.kind).toBe("LangGraph");
+    expect((block.langGraph as Record<string, string>).language).toBe("python");
+  });
+
+  it("emits the Anthropic block as empty config", () => {
+    const block = buildRuntimeBlock({ kind: "Anthropic" }) as Record<string, unknown>;
+    expect(block.kind).toBe("Anthropic");
+    expect(block.anthropic).toEqual({});
+  });
+
+  it("emits the PydanticAi block as empty config", () => {
+    const block = buildRuntimeBlock({ kind: "PydanticAi" }) as Record<string, unknown>;
+    expect(block.kind).toBe("PydanticAi");
+    expect(block.pydanticAi).toEqual({});
+  });
+
   it("rejects --maf-language dotnet client-side (upstream-blocked)", () => {
     expect(() => buildRuntimeBlock({
       kind: "MicrosoftAgentFramework",
