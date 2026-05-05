@@ -161,9 +161,16 @@ The state is invalidated automatically when:
 
 Runs a fully-policy-enforced sandbox locally via Docker for inner-loop
 development. Same model routing, same egress policies, and the same
-AGT governance layer as AKS — but on your laptop. Requires an existing
-Azure OpenAI resource with at least one model deployment. On first run,
-prompts for your endpoint, deployment name, and API key.
+AGT governance layer as AKS — but on your laptop.
+
+**Two inference providers** are supported. On first run you'll be asked
+to pick one; your choice is saved to `~/.azureclaw/config.json` and
+reused on subsequent runs:
+
+| Provider | Requires | Saved as | Trade-offs |
+|---|---|---|---|
+| **Azure AI Foundry / Azure OpenAI** | Existing Foundry or Azure OpenAI resource + API key | `provider: "foundry"` | Full feature set: Memory Store, agents, evaluations, Content Safety inline, indexes |
+| **GitHub Models** | A GitHub PAT with `models:read` scope | `provider: "github-models"` | Free, no Azure subscription needed. Foundry-only routes (Memory Store, agents, evaluations, indexes, Content Safety inline) return `501`. Subject to GitHub Models rate limits. |
 
 **Usage:**
 ```
@@ -174,8 +181,9 @@ azureclaw dev [options]
 | Flag | Default | Description |
 |---|---|---|
 | `--name <name>` | `dev-agent` | Sandbox name |
-| `--model <model>` | `gpt-4.1` | Azure OpenAI model deployment name |
+| `--model <model>` | `gpt-4.1` (Foundry) / `gpt-4o-mini` (GitHub Models) | Model deployment name |
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
+| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use this for ephemeral runs that shouldn't overwrite your saved provider. To make GitHub Models your default, run `azureclaw dev` without this flag and pick GitHub Models at the prompt. |
 | `--image <image>` | `azureclaw-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
@@ -198,6 +206,9 @@ azureclaw dev [options]
 ```bash
 # Start a local sandbox with default settings (prompts for credentials on first run)
 azureclaw dev
+
+# Ephemeral GitHub Models run — does not change your saved Foundry creds
+azureclaw dev --github-token $GITHUB_PAT
 
 # Named sandbox with Telegram channel
 azureclaw dev --name my-bot --channels telegram --telegram-token 123456:ABC-DEF
@@ -732,11 +743,20 @@ echo $?  # 0=match 2=drift 3=missing baseline
 
 ### `azureclaw credentials`
 
-Manages AzureClaw credentials (Azure OpenAI endpoint/key, channel tokens,
+Manages AzureClaw credentials (inference provider, channel tokens,
 third-party API keys). Invoking without a subcommand opens an interactive
-guided prompt. Use `credentials set` / `list` / `remove` for scripting.
-Use `credentials update` to patch a running AKS sandbox's K8s Secret without
-restarting the pod (unless you want a restart).
+guided prompt that lets you pick between **Azure AI Foundry / Azure OpenAI**
+and **GitHub Models** for inference, save channel tokens (Telegram, Slack,
+Discord), and configure third-party API keys (Brave, Tavily, Exa,
+Firecrawl, Perplexity, OpenAI). Use `credentials set` / `list` / `remove`
+for scripting. Use `credentials update` to patch a running AKS sandbox's
+K8s Secret without restarting the pod (unless you want a restart).
+
+The inference provider you pick is saved to `~/.azureclaw/config.json`
+(field `provider: "foundry" | "github-models"`); the API key / GitHub PAT
+is saved alongside in `~/.azureclaw/secrets.json` under the key
+`azure-openai-key`. Switch providers any time by re-running this command
+and picking the other option.
 
 **Usage:**
 ```

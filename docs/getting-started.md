@@ -13,10 +13,23 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 | For | You need |
 |---|---|
-| Local mode | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
+| Local mode (Foundry) | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
+| Local mode (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
 | AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
 The CLI bootstraps everything else (Helm chart install, Foundry resource creation, ACR build/push, federated identity wiring). You do not need to provision any of it by hand.
+
+### Quickest path: GitHub Models (no Azure account)
+
+If you just want to play with `azureclaw dev` and don't care about the Foundry-only features (Memory Store, agents, evaluations, indexes, inline Content Safety), you can run inference through **GitHub Models** with nothing but a GitHub PAT:
+
+1. Create a fine-grained PAT at <https://github.com/settings/personal-access-tokens/new> with the **`models:read`** scope.
+2. Run `azureclaw dev` and pick **GitHub Models** at the first prompt.
+3. Paste your PAT. The CLI verifies it against `https://models.github.ai/catalog/models` and saves it to `~/.azureclaw/`.
+
+Subsequent runs reuse the saved provider — no flag required. To override for one run only (without overwriting your saved provider), pass `--github-token <pat>`.
+
+> ⚠️ **Trade-offs in GitHub Models mode.** Foundry-only routes return `501 Not Implemented` (Memory Store, agents, evaluations, indexes, knowledge bases, datasets, deployments, connections). Inline Content Safety prompt-shield filtering is **not enforced** server-side — the router can only act on `prompt_filter_results` returned by the model, and GitHub Models doesn't return them. Subject to GitHub Models rate limits (free-tier; see [GitHub Models docs](https://docs.github.com/github-models)).
 
 ### Don't have an Azure AI Foundry deployment yet?
 
@@ -70,11 +83,14 @@ The CLI is a Node 22 ESM build with a small Rust dependency for the local router
 azureclaw dev --name hello
 ```
 
-On the first run you are prompted for:
+On the first run you are prompted to pick a provider:
 
-- **Endpoint** — your Azure OpenAI / Foundry endpoint, e.g. `https://my-resource.openai.azure.com`.
-- **Deployment name** — the model deployment you want the agent to use, e.g. `gpt-4.1`.
-- **API key** — a resource-level key. **This is the only credential local mode ever sees, and it is mounted from a local secret file — it never leaves your machine.**
+- **Azure AI Foundry / Azure OpenAI** — full feature set. Asks for your endpoint, model deployment name, and resource-level API key. **The API key is the only credential local mode ever sees, and it is mounted from a local secret file — it never leaves your machine.**
+- **GitHub Models** — free, no Azure account needed. Asks only for your GitHub PAT (`models:read` scope). Endpoint is hardcoded to `https://models.github.ai/inference`. Default model is `gpt-4o-mini`. Foundry-only routes return `501`.
+
+Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs.
+
+To switch providers later (or rotate keys), run **`azureclaw credentials`** — the same interactive prompt is exposed there too. The same command also handles channel tokens (Telegram, Slack, Discord) and third-party API keys (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI). Or scriptable: `azureclaw credentials set <key> <value>` / `list` / `remove`.
 
 The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router pod, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
 
