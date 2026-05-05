@@ -27,7 +27,7 @@ Each finding records: ID, date, surface, severity, summary, status, fix commit /
 
 ### Phase 0 + Phase 1 baseline
 
-The Phase 0 + 1 surface was exercised against the threat model in [`docs/internal/threat-model.md`](../threat-model.md) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under [`docs/internal/security-audits/`](../security-audits/).
+The Phase 0 + 1 surface was exercised against the threat model in `docs/internal/threat-model.md` (internal) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under `docs/internal/security-audits/` (internal).
 
 ### Phase 2
 
