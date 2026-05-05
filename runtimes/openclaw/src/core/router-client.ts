@@ -137,6 +137,44 @@ export async function routerCallStrict(
   });
 }
 
+// Binary GET helper — returns raw bytes (Buffer) instead of parsed JSON.
+// Used by tools that need to download files from the inference router
+// (e.g. `foundry_code_execute` retrieving container_file outputs).
+// Rejects on HTTP >= 400.
+export async function routerCallBinary(
+  path: string,
+  timeoutMs = 30000,
+): Promise<Buffer> {
+  const http = await import("node:http");
+  const url = new URL(path, routerBase());
+  return new Promise((resolve, reject) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts: any = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method: "GET",
+      headers: { "x-azureclaw-sandbox": "self" } as Record<string, string>,
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const req = http.request(opts, (res: any) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}: ${buf.toString("utf8").slice(0, 500)}`));
+          return;
+        }
+        resolve(buf);
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    req.end();
+  });
+}
+
 // Read admin token from the filesystem (used by handoff orchestration).
 export async function readAdminToken(): Promise<string> {
   const fs = await import("node:fs");

@@ -971,6 +971,42 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         return; // Don't process as a regular task
       }
 
+      // ── Handle peers_update — parent extends our trust set after a new spawn ──
+      // When the parent spawns a NEW sibling AFTER we booted, our pre-seeded
+      // AGT_TRUSTED_PEERS list is missing that sibling. Without this handler,
+      // backward-direction sibling traffic (new sibling → us) would be rejected
+      // at KNOCK time with score=0 < threshold=500. The parent broadcasts
+      // peers_update to us with the new sibling's AMID; we add it to
+      // parentTrustedAmids so future KNOCKs from that sibling are accepted.
+      // Authorized only when the sender AMID matches the recorded parent AMID
+      // (the first entry in AGT_TRUSTED_PEERS at boot).
+      if (message?.type === "peers_update" && Array.isArray(message?.peers)) {
+        const parentAmid: string | undefined = (process as any)[Symbol.for("agt-parent-amid")];
+        if (!parentAmid || fromAmid !== parentAmid) {
+          log.warn(`peers_update rejected: sender ${fromName} (${fromAmid.slice(0, 12)}...) is not our parent`);
+          return;
+        }
+        let added = 0;
+        for (const peer of message.peers) {
+          const name = peer?.name;
+          const amid = peer?.amid;
+          if (typeof name !== "string" || typeof amid !== "string" || !name || !amid) continue;
+          if (parentTrustedAmids.has(amid)) continue;
+          amidToName.set(amid, name);
+          nameToAmid.set(name, amid);
+          parentTrustedAmids.add(amid);
+          added += 1;
+          try {
+            await pushTrustToRouter(name, 0.0);
+          } catch { /* best-effort */ }
+          log.info(`AGT peer trust extended: ${name} (${amid.slice(0, 12)}...) via peers_update from parent`);
+        }
+        if (added > 0) {
+          log.info(`AGT peers_update applied: +${added} trusted peer(s) from parent`);
+        }
+        return; // Don't surface to inbox — control message
+      }
+
       // ── Handle handoff:interrupt — parent signals sub-agent to save progress ──
       // Sent before workspace_request so the sub-agent can checkpoint its work.
       // Sets the interrupt flag which processTaskWithTools checks between rounds.
@@ -1852,15 +1888,23 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // AGT_TRUSTED_PEERS is set by the parent's router at spawn time.
     // Format: "name:AMID,name:AMID,..." — these are parent-verified,
     // not self-reported, so they're safe to auto-trust.
+    // Convention (agt-tools/agt.ts:200-206): the FIRST entry is always the
+    // spawner (parent). We track its AMID separately so the `peers_update`
+    // handler can authorize only the parent to extend our trust set at runtime.
     const trustedPeersEnv = process.env.AGT_TRUSTED_PEERS || "";
     if (trustedPeersEnv && connected) {
       const peers = trustedPeersEnv.split(",").filter(Boolean);
+      let isFirst = true;
       for (const peer of peers) {
         const [name, amid] = peer.split(":");
         if (name && amid) {
           amidToName.set(amid, name);
           nameToAmid.set(name, amid);
           parentTrustedAmids.add(amid);
+          if (isFirst) {
+            (process as any)[Symbol.for("agt-parent-amid")] = amid;
+            isFirst = false;
+          }
           // Push baseline trust (score=500 = threshold) via local admin token
           try {
             await pushTrustToRouter(name, 0.0);

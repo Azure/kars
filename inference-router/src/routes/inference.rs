@@ -17,6 +17,22 @@ use crate::errors;
 use crate::proxy;
 
 use super::chat_completions::chat_completions;
+
+/// Strip the `/api/projects/<project>` segment from a Foundry endpoint URL,
+/// returning the bare account-scoped base URL.
+///
+/// Foundry chat-completions tolerates the project-scoped prefix; image
+/// generation does not (returns 404). Use this for any route that must hit
+/// the account-level base.
+fn strip_project_prefix(endpoint: &str) -> &str {
+    // Trim a trailing slash so callers don't end up with `https://x.com//openai/...`.
+    let trimmed = endpoint.trim_end_matches('/');
+    if let Some(idx) = trimmed.find("/api/projects/") {
+        &trimmed[..idx]
+    } else {
+        trimmed
+    }
+}
 /// Inference API routes — proxied to Azure AI Foundry.
 pub fn inference_routes() -> Router<AppState> {
     Router::new()
@@ -139,6 +155,16 @@ pub fn foundry_standalone_routes() -> Router<AppState> {
         .route("/openai/files", get(foundry_proxy).post(foundry_proxy))
         .route(
             "/openai/files/{*path}",
+            get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
+        )
+        // Containers APIs — code_interpreter generated files (`cfile_...`) live
+        // inside per-run containers and are retrieved via
+        // GET /openai/containers/{container_id}/files/{file_id}/content.
+        // Without this route, foundry_code_execute can never extract the
+        // matplotlib PNGs / CSVs that its container produces.
+        .route("/openai/containers", get(foundry_proxy).post(foundry_proxy))
+        .route(
+            "/openai/containers/{*path}",
             get(foundry_proxy).post(foundry_proxy).delete(foundry_proxy),
         )
         .route(
@@ -366,6 +392,12 @@ async fn images_generations(
 
     let mut upstream = state.upstream_config(sandbox_name);
     upstream.deployment = deployment.clone();
+
+    // Foundry's /openai/v1/images/generations endpoint is account-scoped only —
+    // it does NOT accept the /api/projects/<project>/ prefix that chat-completions
+    // and most other v1 routes tolerate. Without this strip the upstream returns
+    // a fast 404 and image generation silently degrades to written descriptions.
+    upstream.endpoint = strip_project_prefix(&upstream.endpoint).to_string();
 
     // Unified format: proxy builds {endpoint}/openai/v1/images/generations
     // Model (deployment) is injected into request body automatically
@@ -801,5 +833,49 @@ async fn foundry_proxy(
             )
             .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_project_prefix;
+
+    #[test]
+    fn strips_foundry_project_prefix() {
+        assert_eq!(
+            strip_project_prefix(
+                "https://azureclaw-foundry-services.services.ai.azure.com/api/projects/azureclaw"
+            ),
+            "https://azureclaw-foundry-services.services.ai.azure.com"
+        );
+    }
+
+    #[test]
+    fn strips_foundry_project_prefix_with_trailing_slash() {
+        assert_eq!(
+            strip_project_prefix("https://foo.services.ai.azure.com/api/projects/myproj/"),
+            "https://foo.services.ai.azure.com"
+        );
+    }
+
+    #[test]
+    fn passes_through_account_endpoint() {
+        // Pure Azure OpenAI account endpoint (dev mode) — no project prefix to strip.
+        assert_eq!(
+            strip_project_prefix("https://my-aoai.openai.azure.com"),
+            "https://my-aoai.openai.azure.com"
+        );
+        assert_eq!(
+            strip_project_prefix("https://my-aoai.openai.azure.com/"),
+            "https://my-aoai.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn passes_through_when_project_segment_absent() {
+        assert_eq!(
+            strip_project_prefix("https://x.services.ai.azure.com"),
+            "https://x.services.ai.azure.com"
+        );
     }
 }

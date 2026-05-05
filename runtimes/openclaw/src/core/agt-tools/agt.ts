@@ -268,6 +268,45 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
         }
 
+        // ── Broadcast peers_update to existing siblings ──────────────────
+        // The new sibling boots with the FULL list of existing peers (we just
+        // baked them into AGT_TRUSTED_PEERS above). But each EXISTING sibling
+        // only knows the peers that existed at ITS spawn time — so without
+        // this broadcast, a previously-spawned sibling will reject KNOCKs
+        // from this freshly-spawned one (registry score=0, no parent-trust
+        // bonus). That's the parallel-spawn race that broke 2 of 3 sibling
+        // pairs in multi-agent fan-out workloads. Best-effort: any send
+        // failure is logged but doesn't fail the spawn.
+        if (amid && deps.meshClient() && amidToName.size > 1) {
+          const peerEntry = { name: agentName, amid };
+          const myAmidLocal = deps.meshClient()?.getAmid?.() || deps.identity()?.amid;
+          const broadcastTargets: Array<{ name: string; amid: string }> = [];
+          for (const [siblingAmid, siblingName] of amidToName.entries()) {
+            // Skip self (parent) and skip the new sibling itself.
+            if (siblingAmid === myAmidLocal) continue;
+            if (siblingAmid === amid) continue;
+            broadcastTargets.push({ name: siblingName, amid: siblingAmid });
+          }
+          if (broadcastTargets.length > 0) {
+            log.info(`AGT peers_update: broadcasting new peer '${agentName}' to ${broadcastTargets.length} existing sibling(s)`);
+            await Promise.allSettled(
+              broadcastTargets.map(async (t) => {
+                try {
+                  await deps.meshClient()!.send(t.amid, {
+                    type: "peers_update",
+                    peers: [peerEntry],
+                    from_agent: process.env.SANDBOX_NAME || "parent",
+                    timestamp: new Date().toISOString(),
+                  });
+                  log.info(`AGT peers_update sent to '${t.name}' (${t.amid.slice(0, 12)}...)`);
+                } catch (sendErr: any) {
+                  log.warn(`AGT peers_update to '${t.name}' failed: ${sendErr?.message || sendErr}`);
+                }
+              }),
+            );
+          }
+        }
+
         // Collect known sibling names for context
         const siblings = [...amidToName.values()].filter(n => n !== agentName && n !== (process.env.SANDBOX_NAME || ""));
 

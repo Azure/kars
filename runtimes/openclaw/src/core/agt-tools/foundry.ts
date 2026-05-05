@@ -14,7 +14,7 @@
 //   foundry_evaluations      foundry_deployments
 //   foundry_agents
 
-import { routerCall } from "../router-client.js";
+import { routerCall, routerCallBinary } from "../router-client.js";
 import { safeJson } from "../safe-json.js";
 import type { FoundryProjectInfo } from "../foundry-discovery.js";
 
@@ -74,15 +74,95 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
         // Extract text output from Responses API format
         const output = result.output || result;
         const textParts: string[] = [];
+        // Container file references found in code_interpreter output —
+        // matplotlib PNGs / CSVs / etc. live in Foundry's per-run container
+        // and must be downloaded explicitly. Keys are "<container>/<file>"
+        // to dedupe across multiple annotations referencing the same file.
+        const fileRefs = new Map<
+          string,
+          { container_id: string; file_id: string; filename?: string }
+        >();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const collectFileRef = (cid: unknown, fid: unknown, fname?: unknown) => {
+          if (typeof cid !== "string" || typeof fid !== "string") return;
+          if (!cid || !fid) return;
+          const key = `${cid}/${fid}`;
+          if (fileRefs.has(key)) return;
+          fileRefs.set(key, {
+            container_id: cid,
+            file_id: fid,
+            filename: typeof fname === "string" ? fname : undefined,
+          });
+        };
         if (Array.isArray(output)) {
           for (const item of output) {
             if (item.type === "message" && item.content) {
               for (const c of item.content) {
                 if (c.type === "output_text" || c.type === "text") textParts.push(c.text);
+                // Look for container_file_citation annotations on the text.
+                if (Array.isArray(c.annotations)) {
+                  for (const a of c.annotations) {
+                    if (a?.type === "container_file_citation") {
+                      collectFileRef(a.container_id, a.file_id, a.filename);
+                    }
+                  }
+                }
               }
             } else if (item.type === "code_interpreter_call") {
-              textParts.push(`\`\`\`python\n${item.code}\n\`\`\`\nOutput: ${item.output || "(no output)"}`);
+              const codeBlock = `\`\`\`python\n${item.code}\n\`\`\``;
+              // Newer Responses API shape: outputs is an array of objects
+              // (e.g. { type: "image", file_id, container_id }, or
+              // { type: "logs", logs: "..." }).
+              const outputsArr = Array.isArray(item.outputs)
+                ? item.outputs
+                : (Array.isArray(item.output) ? item.output : []);
+              const logLines: string[] = [];
+              for (const out of outputsArr) {
+                if (!out || typeof out !== "object") continue;
+                if (out.type === "logs" && typeof out.logs === "string") {
+                  logLines.push(out.logs);
+                } else if (out.type === "image" || out.type === "file") {
+                  collectFileRef(
+                    out.container_id ?? item.container_id,
+                    out.file_id,
+                    out.filename,
+                  );
+                }
+              }
+              const tail = logLines.length > 0
+                ? `\nOutput: ${logLines.join("\n")}`
+                : (typeof item.output === "string" ? `\nOutput: ${item.output}` : "");
+              textParts.push(`${codeBlock}${tail}`);
             }
+          }
+        }
+        // Download every container file we discovered and write it to the
+        // local workspace, so downstream tools (mesh_transfer_file, file_write,
+        // mesh_send) can ship the bytes back to the parent.
+        if (fileRefs.size > 0) {
+          const fs = await import("node:fs");
+          const path = await import("node:path");
+          const workspaceDir = "/sandbox/.openclaw/workspace";
+          try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
+          const downloaded: string[] = [];
+          for (const ref of fileRefs.values()) {
+            const safeName = (ref.filename && /^[A-Za-z0-9._-]+$/.test(ref.filename))
+              ? ref.filename
+              : `${ref.file_id}.bin`;
+            const dest = path.join(workspaceDir, safeName);
+            const dlPath = `/openai/containers/${encodeURIComponent(ref.container_id)}/files/${encodeURIComponent(ref.file_id)}/content`;
+            try {
+              const bytes = await routerCallBinary(dlPath, 60000);
+              fs.writeFileSync(dest, bytes);
+              log.info(`foundry_code_execute: saved ${safeName} (${bytes.length} bytes) from container ${ref.container_id.slice(0, 12)}...`);
+              downloaded.push(`- ${dest} (${bytes.length} bytes, file_id=${ref.file_id})`);
+            } catch (dlErr: any) {
+              log.warn(`foundry_code_execute: download failed for ${ref.file_id}: ${dlErr?.message || dlErr}`);
+              downloaded.push(`- (download failed) file_id=${ref.file_id}: ${dlErr?.message || dlErr}`);
+            }
+          }
+          if (downloaded.length > 0) {
+            textParts.push(`\nGenerated files (saved to local workspace):\n${downloaded.join("\n")}`);
           }
         }
         return {
