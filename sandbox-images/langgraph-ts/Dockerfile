@@ -29,7 +29,7 @@
 # Build context MUST be the repo root (the COPY paths are anchored at
 # `runtimes/langgraph-ts/` and `sandbox-images/langgraph-ts/`).
 
-FROM mcr.microsoft.com/cbl-mariner/base/nodejs:22 AS builder
+FROM mcr.microsoft.com/azurelinux/base/nodejs:24 AS builder
 
 WORKDIR /build/runtime
 
@@ -40,7 +40,7 @@ COPY runtimes/langgraph-ts/src ./src
 RUN ./node_modules/.bin/tsc -p .
 
 # ---- Production stage ----------------------------------------------------
-FROM mcr.microsoft.com/cbl-mariner/base/nodejs:22
+FROM mcr.microsoft.com/azurelinux/base/nodejs:24
 
 LABEL org.azureclaw.runtime.contract="v1"
 LABEL org.azureclaw.runtime.kind="LangGraph"
