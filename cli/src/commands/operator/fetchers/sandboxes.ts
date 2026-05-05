@@ -38,19 +38,48 @@ export async function fetchSandboxes(kubeContext?: string): Promise<SandboxInfo[
 
 export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxInfo[]> {
   try {
-    const { stdout } = await execa("kubectl", kctl([
-      "get", "clawsandbox", "-A", "-o", "json",
-    ], kubeContext), { stdio: "pipe" });
-
-    const data = JSON.parse(stdout);
+    const [sandboxResult, ipResult] = await Promise.allSettled([
+      execa("kubectl", kctl(["get", "clawsandbox", "-A", "-o", "json"], kubeContext), { stdio: "pipe" }),
+      execa("kubectl", kctl(["get", "inferencepolicy", "-A", "-o", "json"], kubeContext), { stdio: "pipe" }),
+    ]);
+    if (sandboxResult.status !== "fulfilled") return [];
+    const data = JSON.parse(sandboxResult.value.stdout);
     const items: any[] = data.items || [];
+
+    // Build a `<namespace>/<name>` → primary deployment map so we can resolve
+    // the model used by each ClawSandbox via spec.inferenceRef.name without
+    // making N additional kubectl calls. Post-S10/S13 the model lives on the
+    // referenced InferencePolicy, NOT on the ClawSandbox spec.
+    const ipModel = new Map<string, string>();
+    if (ipResult.status === "fulfilled") {
+      try {
+        const ipData = JSON.parse(ipResult.value.stdout);
+        for (const it of (ipData.items || []) as any[]) {
+          const ns = it?.metadata?.namespace;
+          const nm = it?.metadata?.name;
+          const dep = it?.spec?.modelPreference?.primary?.deployment;
+          if (ns && nm && typeof dep === "string" && dep) {
+            ipModel.set(`${ns}/${nm}`, dep);
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
 
     // Fetch pods + secrets for ALL sandboxes in parallel (not sequentially)
     const enriched = await Promise.allSettled(items.map(async (item) => {
       const name: string = item.metadata?.name || "";
       if (!name) return null;
+      const ns: string = item.metadata?.namespace || "azureclaw-system";
       const phase: string = item.status?.phase || "Unknown";
-      const model: string = item.spec?.inference?.model || "gpt-4.1";
+      // Resolution order, post-S10/S13:
+      //   1. spec.inferenceRef.name → InferencePolicy.modelPreference.primary.deployment
+      //   2. legacy spec.inference.model (pre-S10 sandboxes still in flight)
+      //   3. "gpt-4.1" fallback (clearly visible default for un-typed sandboxes)
+      const inferenceRefName: string | undefined = item.spec?.inferenceRef?.name;
+      const ipKey = inferenceRefName ? `${ns}/${inferenceRefName}` : "";
+      const model: string = (ipKey && ipModel.get(ipKey))
+        || item.spec?.inference?.model
+        || "gpt-4.1";
       const isolation: string = item.spec?.sandbox?.isolation || "enhanced";
       const created: string = item.metadata?.creationTimestamp || "";
       const labels: Record<string, string> = item.metadata?.labels || {};
