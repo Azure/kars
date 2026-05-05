@@ -50,6 +50,7 @@ import { renderHeader as _renderHeader } from "./operator/render/header.js";
 import { openSpawnDialog } from "./operator/dialogs/spawn.js";
 import { deleteSelectedAgent as _deleteSelectedAgent } from "./operator/dialogs/delete.js";
 import { connectToAgent as _connectToAgent } from "./operator/dialogs/connect.js";
+import { openAgentDetailDialog } from "./operator/dialogs/agent_detail.js";
 import { createPanelsOverlay } from "./operator/panels_overlay.js";
 
 // ── Command ─────────────────────────────────────────────────────────
@@ -837,6 +838,24 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   }
 
   screen.key(["x"], () => deleteSelectedAgent());
+
+  // ── Per-agent drill-in (i) ────────────────────────────────────────
+  screen.key(["i"], () => {
+    if (dialogOpen) return;
+    if (sandboxes.length === 0) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const idx = (agentTable as any).rows?.selected ?? 0;
+    const sb = sandboxes[idx];
+    if (!sb) return;
+    openAgentDetailDialog({
+      screen,
+      sandbox: sb,
+      kubeContext,
+      activityLog,
+      setDialogOpen: (v: boolean) => { dialogOpen = v; },
+      refresh,
+    });
+  });
 
   // ── Connect to agent (Enter) ──────────────────────────────────────
   // (body extracted to operator/dialogs/connect.ts in S15.e.7)
