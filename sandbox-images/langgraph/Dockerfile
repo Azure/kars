@@ -54,8 +54,10 @@ RUN chmod 0755 /usr/local/bin/azureclaw-langgraph-entrypoint.sh
 # `agentCode: { oci | git }` (see `LangGraphConfig` in crd.rs).
 RUN mkdir -p /sandbox/agent && chown -R 1000:1000 /sandbox
 
+COPY --chown=1000:1000 sandbox-images/langgraph/default-agent/ /opt/azureclaw-default-agent/
+
 USER 1000
 WORKDIR /sandbox/agent
 
 ENTRYPOINT ["/usr/local/bin/azureclaw-langgraph-entrypoint.sh"]
-CMD ["python", "/sandbox/agent/main.py"]
+CMD ["python3", "/sandbox/agent/main.py"]

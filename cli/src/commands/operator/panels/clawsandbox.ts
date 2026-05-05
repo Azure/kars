@@ -38,7 +38,7 @@ export const clawSandboxPanel: Panel = {
 
     const lines: string[] = [];
     lines.push(
-      `{gray-fg}${"NAME".padEnd(28)} ${"HEALTH".padEnd(10)} ${"MODEL".padEnd(14)} ${"ISOLATION".padEnd(12)} ${"AGE".padEnd(6)} ROLE{/}`,
+      `{gray-fg}${"NAME".padEnd(28)} ${"HEALTH".padEnd(10)} ${"RUNTIME".padEnd(10)} ${"MODEL".padEnd(14)} ${"ISOLATION".padEnd(12)} ${"AGE".padEnd(6)} ROLE{/}`,
     );
     for (const s of items) {
       const healthColor =
@@ -46,9 +46,19 @@ export const clawSandboxPanel: Panel = {
         s.health === "degraded" ? "yellow" :
         s.health === "down" ? "red" :
         s.health === "dormant" ? "blue" : "gray";
+      const rk = s.runtimeKind || "OpenClaw";
+      const rkTag =
+        rk === "OpenClaw" ? "OC" :
+        rk === "OpenAIAgents" ? "OAI" :
+        rk === "MicrosoftAgentFramework" ? "MAF" :
+        rk === "LangGraph" ? "LG" :
+        rk === "Anthropic" ? "Anthropic" :
+        rk === "PydanticAi" ? "PydAI" :
+        rk === "BYO" ? "BYO" : rk;
       lines.push(
         `${s.name.padEnd(28)} ` +
           `{${healthColor}-fg}${s.health.padEnd(10)}{/} ` +
+          `${rkTag.padEnd(10)} ` +
           `${(s.model || "-").padEnd(14)} ` +
           `${(s.isolation || "-").padEnd(12)} ` +
           `${(s.age || "-").padEnd(6)} ` +

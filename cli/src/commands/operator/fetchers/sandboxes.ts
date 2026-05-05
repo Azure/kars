@@ -176,6 +176,7 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
         channels, age, podName, restarts,
         role, parent: parentLabel, handoffState,
         runtime: "aks",
+        runtimeKind: (item.spec?.runtime?.kind as string | undefined) || "OpenClaw",
       } as SandboxInfo;
     }));
 
@@ -284,6 +285,7 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
         parent: parent || "",
         handoffState,
         runtime: "docker",
+        runtimeKind: "OpenClaw",
       });
     }
 

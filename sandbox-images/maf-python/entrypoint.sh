@@ -43,6 +43,15 @@ fi
 # `OPENAI_BASE_URL` + `AZURE_OPENAI_ENDPOINT` pin. Idempotent (guarded
 # by `__AZURECLAW_RUNTIME_INITIALIZED__`). Non-fatal if telemetry init
 # fails — the adapter logs and continues.
-python -c "from azureclaw_runtime_maf_python.runtime import bootstrap; bootstrap()"
+python3 -c "from azureclaw_runtime_maf_python.runtime import bootstrap; bootstrap()"
+
+# If no user agent code is mounted at /sandbox/agent/main.py (operator
+# spawned this runtime without `agentCode`), fall back to the bundled
+# default smoke-test agent so the pod stays Running and proves the
+# Foundry inference path through the router.
+if [ ! -f /sandbox/agent/main.py ]; then
+    echo "[azureclaw-maf-python] no /sandbox/agent/main.py — running bundled default agent" >&2
+    exec python3 /opt/azureclaw-default-agent/main.py
+fi
 
 exec "$@"
