@@ -83,13 +83,23 @@ RUN chmod -R a-w /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk && \
 #   - facade loader's openBoundaryFileSync sees realpaths under dist-runtime/ → ok
 #   - hardlinked top-level chunks (redact-*.js, etc.) sit at dist-runtime/
 #     so the cores' relative `require("../../redact-*")` resolves correctly
+# We keep:
+#   - 3 always-required runtime cores (speech-core, image-generation-core,
+#     media-understanding-core) — without these OpenClaw fails to boot.
+#   - Channel plugins (telegram, slack, discord, whatsapp, imessage) — these
+#     are referenced from openclaw.json's channels.* / plugins.allow blocks
+#     by the entrypoint when a credential env var is set. Without them
+#     present in the bundled-plugins root, the gateway logs
+#     "channels.telegram: unknown channel id" and silently drops the channel.
+#     Hardlinks (cp -al) keep the disk overhead negligible.
 RUN OC=/usr/local/lib/node_modules/openclaw && \
     if [ -d "$OC/dist" ] && [ ! -d "$OC/dist-runtime" ]; then \
       cp -al "$OC/dist" "$OC/dist-runtime" && \
       find "$OC/dist-runtime/extensions" -mindepth 1 -maxdepth 1 -type d \
         ! -name speech-core ! -name image-generation-core ! -name media-understanding-core \
+        ! -name telegram ! -name slack ! -name discord ! -name whatsapp ! -name imessage \
         -exec rm -rf {} + && \
-      echo "Built dist-runtime with only 3 cores: $(ls $OC/dist-runtime/extensions)"; \
+      echo "Built dist-runtime with cores + channels: $(ls $OC/dist-runtime/extensions)"; \
     fi
 
 # Pre-create router-readable config dirs (root-owned, world-traversable).
