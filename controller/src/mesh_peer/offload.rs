@@ -101,73 +101,29 @@ pub(super) async fn handle_offload_request(
     let namespace =
         std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
 
-    let spec = json!({
-        "runtime": {
-            "kind": "OpenClaw",
-            "openclaw": {
-                "version": "2026.3.13",
-                "config": {
-                    "agent": {
-                        "model": format!("azure/{model}")
-                    }
-                }
-            }
-        },
-        "sandbox": {
-            // Offloads default to confidential isolation (Kata VM) — the
-            // requesting peer may be running on untrusted infrastructure,
-            // so we harden the executor.
-            "isolation": "confidential",
-            "readOnlyRootFilesystem": true,
-            "runAsNonRoot": true,
-            "allowPrivilegeEscalation": false
-        },
-        "inference": {
-            "provider": "azure-ai-foundry",
-            "model": model,
-            "contentSafety": true,
-            "promptShields": true,
-            "tokenBudget": {
-                "daily": pairing.spec.token_budget,
-                "perRequest": 32000
-            }
-        },
-        "networkPolicy": {
-            "defaultDeny": true,
-            "approvalRequired": true,
-            // Offloads default to learning (observe) egress — operators can
-            // review accessed domains with `azureclaw policy learn <name>`
-            // after the offload completes. Blocklist is still enforced.
-            "learnEgress": true,
-        },
-        "governance": {
-            "enabled": true,
-            "toolPolicy": "offload",
-            "trustThreshold": 900,
-            "trustedPeers": format!("offload-parent:{from_amid}"),
-            "registryMode": "global"
-        }
-    });
+    // Post-S10/S13 ClawSandbox shape:
+    //   - `runtime` (required) — multi-runtime selector
+    //   - `inferenceRef` (required) — by-name ref to an InferencePolicy CR
+    //   - `governance.toolPolicyRef` (required) — by-name ref to a ToolPolicy CR
+    //
+    // The sandbox CRD no longer carries inline `inference` / `openclaw`
+    // /  `governance.toolPolicy` blocks — those moved to dedicated CRs in
+    // S10.A1 / S13. We mint the matching InferencePolicy + ToolPolicy
+    // alongside the sandbox below so the controller can reconcile it.
+    let inference_ref_name = format!("{sandbox_name}-inference");
+    let tool_policy_ref_name = format!("{sandbox_name}-toolpolicy");
 
-    let crd = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
-        "kind": "ClawSandbox",
-        "metadata": {
-            "name": sandbox_name,
-            "namespace": namespace,
-            "labels": {
-                "azureclaw.azure.com/spawned-by": "offload",
-                "azureclaw.azure.com/offload-requester": from_amid,
-                "azureclaw.azure.com/request-id": request_id,
-            },
-            "annotations": {
-                "azureclaw.azure.com/offload-task": &task[..task.len().min(256)],
-                "azureclaw.azure.com/offload-timeout": format!("{timeout_minutes}m"),
-                "azureclaw.azure.com/offload-parent-amid": from_amid,
-            }
-        },
-        "spec": spec,
-    });
+    let crd = build_offload_sandbox_crd(
+        &sandbox_name,
+        &namespace,
+        from_amid,
+        request_id,
+        task,
+        model,
+        timeout_minutes,
+        &inference_ref_name,
+        &tool_policy_ref_name,
+    );
 
     // No OFFLOAD_MODE — sandbox starts as a full AzureClaw agent.
     // The external agent talks to it directly via existing mesh protocol
@@ -180,7 +136,114 @@ pub(super) async fn handle_offload_request(
         "OFFLOAD_TASK": task,
     });
 
-    // Create via K8s API
+    // S10.A1 / S13: ClawSandbox now references InferencePolicy + ToolPolicy
+    // CRs by name; we mint them alongside so the controller can reconcile
+    // the sandbox immediately. (`additionalProperties: false` means we
+    // can't fall back to inline policy blocks any more.)
+    let inference_policy = json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "InferencePolicy",
+        "metadata": {
+            "name": inference_ref_name,
+            "namespace": namespace,
+            "labels": {
+                "azureclaw.azure.com/spawned-by": "offload",
+                "azureclaw.azure.com/sandbox": sandbox_name.clone(),
+            }
+        },
+        "spec": {
+            "appliesTo": { "sandboxName": sandbox_name.clone() },
+            "modelPreference": {
+                "primary": { "provider": "azure-openai", "deployment": model },
+                "fallback": []
+            },
+            "contentSafety": { "requirePromptShields": true },
+            "tokenBudget": {
+                "daily": pairing.spec.token_budget,
+                "perRequest": 32000
+            }
+        }
+    });
+    let tool_policy = json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "ToolPolicy",
+        "metadata": {
+            "name": tool_policy_ref_name,
+            "namespace": namespace,
+            "labels": {
+                "azureclaw.azure.com/spawned-by": "offload",
+                "azureclaw.azure.com/sandbox": sandbox_name.clone(),
+            }
+        },
+        "spec": {
+            "appliesTo": {
+                "sandboxMatchLabels": {
+                    "azureclaw.azure.com/sandbox": sandbox_name.clone()
+                }
+            }
+        }
+    });
+
+    let inference_policy_ar = kube::api::ApiResource {
+        group: "azureclaw.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "azureclaw.azure.com/v1alpha1".into(),
+        kind: "InferencePolicy".into(),
+        plural: "inferencepolicies".into(),
+    };
+    let tool_policy_ar = kube::api::ApiResource {
+        group: "azureclaw.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "azureclaw.azure.com/v1alpha1".into(),
+        kind: "ToolPolicy".into(),
+        plural: "toolpolicies".into(),
+    };
+    let inference_api: Api<kube::api::DynamicObject> =
+        Api::namespaced_with(state.client.clone(), &namespace, &inference_policy_ar);
+    let toolpolicy_api: Api<kube::api::DynamicObject> =
+        Api::namespaced_with(state.client.clone(), &namespace, &tool_policy_ar);
+
+    for (label, payload, api) in [
+        ("InferencePolicy", inference_policy, &inference_api),
+        ("ToolPolicy", tool_policy, &toolpolicy_api),
+    ] {
+        let obj: kube::api::DynamicObject = match serde_json::from_value(payload) {
+            Ok(o) => o,
+            Err(e) => {
+                send_to_peer(
+                    out_tx,
+                    from_amid,
+                    &FederationMessage::OffloadError {
+                        request_id: request_id.into(),
+                        error: format!("Failed to build {label} CRD: {e}"),
+                        phase: "spawning".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if let Err(e) = api.create(&PostParams::default(), &obj).await {
+            // AlreadyExists is fine — we may be retrying the same offload.
+            let s = e.to_string();
+            if !s.contains("already exists") && !s.contains("AlreadyExists") {
+                tracing::error!(sandbox = %sandbox_name, "Failed to create {label}: {e}");
+                send_to_peer(
+                    out_tx,
+                    from_amid,
+                    &FederationMessage::OffloadError {
+                        request_id: request_id.into(),
+                        error: format!("Failed to create {label}: {e}"),
+                        phase: "spawning".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Create the sandbox itself.
     let api_resource = kube::api::ApiResource {
         group: "azureclaw.azure.com".into(),
         version: "v1alpha1".into(),
@@ -718,5 +781,161 @@ pub(super) async fn validate_pairing_for_offload(
 }
 
 // ---------------------------------------------------------------------------
+// Pure CRD builders (kept testable; called from `handle_offload_request`)
+// ---------------------------------------------------------------------------
+
+/// Build the ClawSandbox CRD payload for a cross-cluster offload sandbox.
+///
+/// Pure function — no I/O — so it round-trips through
+/// `serde_json::from_value::<ClawSandboxSpec>` in unit tests, catching
+/// schema regressions (legacy `spec.openclaw` / `spec.inference` /
+/// `governance.toolPolicy: <string>` shapes are rejected by the
+/// post-S10/S13 schema with `additionalProperties: false`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_offload_sandbox_crd(
+    sandbox_name: &str,
+    namespace: &str,
+    from_amid: &str,
+    request_id: &str,
+    task: &str,
+    model: &str,
+    timeout_minutes: u32,
+    inference_ref_name: &str,
+    tool_policy_ref_name: &str,
+) -> serde_json::Value {
+    let spec = json!({
+        "runtime": {
+            "kind": "OpenClaw",
+            "openclaw": {}
+        },
+        "inferenceRef": { "name": inference_ref_name },
+        "sandbox": {
+            "isolation": "confidential",
+            "readOnlyRootFilesystem": true,
+            "runAsNonRoot": true,
+            "allowPrivilegeEscalation": false
+        },
+        "networkPolicy": {
+            "defaultDeny": true,
+            "approvalRequired": true,
+            "learnEgress": true,
+        },
+        "governance": {
+            "enabled": true,
+            "toolPolicyRef": { "name": tool_policy_ref_name },
+            "trustThreshold": 900,
+            "trustedPeers": format!("offload-parent:{from_amid}"),
+            "registryMode": "global"
+        }
+    });
+
+    json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "ClawSandbox",
+        "metadata": {
+            "name": sandbox_name,
+            "namespace": namespace,
+            "labels": {
+                "azureclaw.azure.com/spawned-by": "offload",
+                "azureclaw.azure.com/offload-requester": from_amid,
+                "azureclaw.azure.com/request-id": request_id,
+            },
+            "annotations": {
+                "azureclaw.azure.com/offload-task": &task[..task.len().min(256)],
+                "azureclaw.azure.com/offload-timeout": format!("{timeout_minutes}m"),
+                "azureclaw.azure.com/offload-parent-amid": from_amid,
+                "azureclaw.azure.com/model": model,
+            }
+        },
+        "spec": spec,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::ClawSandboxSpec;
+
+    #[test]
+    fn offload_payload_round_trips_through_clawsandboxspec() {
+        // CI guard for the audit class of bugs: any json! shape we send
+        // to the API server MUST parse cleanly through the canonical
+        // `ClawSandboxSpec` (post-S10/S13). This catches reverts to the
+        // legacy `spec.openclaw` / `spec.inference` / `governance.toolPolicy`
+        // shapes — the API server rejects them at admission time
+        // (`additionalProperties: false`), but admission is only reached
+        // in the live cluster; this test fails at `cargo test` time.
+        let crd = build_offload_sandbox_crd(
+            "offload-abcdef12",
+            "azureclaw-system",
+            "did:agentmesh:peer.example",
+            "abcdef1234567890",
+            "summarize the attached PDF",
+            "gpt-5.4",
+            30,
+            "offload-abcdef12-inference",
+            "offload-abcdef12-toolpolicy",
+        );
+
+        // 1. Top-level CRD shape.
+        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
+        assert_eq!(crd["kind"], "ClawSandbox");
+
+        // 2. Spec must round-trip through ClawSandboxSpec.
+        let spec_value = crd
+            .get("spec")
+            .cloned()
+            .expect("offload payload missing `spec`");
+        let spec: ClawSandboxSpec = serde_json::from_value(spec_value)
+            .expect("offload payload must deserialize as ClawSandboxSpec");
+
+        // 3. Required references are present.
+        assert_eq!(spec.inference_ref.name, "offload-abcdef12-inference");
+        let gov = spec.governance.as_ref().expect("governance required");
+        assert_eq!(
+            gov.tool_policy_ref.name,
+            "offload-abcdef12-toolpolicy"
+        );
+
+        // 4. Negative guard: legacy fields must not be present at all
+        //    (the controller's `additionalProperties: false` would catch
+        //    them in production, but we want the test to fail loudly
+        //    at compile-equivalent speed if anyone re-adds them).
+        let raw_spec = &crd["spec"];
+        assert!(
+            raw_spec.get("openclaw").is_none(),
+            "legacy spec.openclaw must not be present"
+        );
+        assert!(
+            raw_spec.get("inference").is_none(),
+            "legacy spec.inference must not be present"
+        );
+        assert!(
+            raw_spec.get("model").is_none(),
+            "legacy spec.model must not be present"
+        );
+        assert!(
+            raw_spec.get("handoff").is_none(),
+            "legacy spec.handoff must not be present"
+        );
+        assert!(
+            raw_spec["governance"].get("toolPolicy").is_none(),
+            "legacy governance.toolPolicy (string) must not be present"
+        );
+    }
+
+    #[test]
+    fn offload_payload_uses_canonical_api_group() {
+        // Pre-S10 prototype briefly used `azureclaw.io/v1alpha1`. The
+        // canonical group is `azureclaw.azure.com`; using anything else
+        // makes the API server return 404 for the resource path.
+        let crd = build_offload_sandbox_crd(
+            "x", "azureclaw-system", "p", "rid", "t", "m", 30, "x-inference", "x-toolpolicy",
+        );
+        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
+    }
+}

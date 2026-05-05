@@ -173,118 +173,7 @@ pub async fn create_sandbox(
     // The legacy top-level `openclaw` and `inference` blocks were removed
     // from the schema in S10.A1 / S13; sending them now triggers
     // `additionalProperties: false` rejection at admission.
-    let mut spec = serde_json::json!({
-        "runtime": {
-            "kind": "OpenClaw",
-            "openclaw": {}
-        },
-        "inferenceRef": {
-            "name": format!("{parent_name}-inference")
-        },
-        "sandbox": {
-            "isolation": isolation,
-            "readOnlyRootFilesystem": true,
-            "runAsNonRoot": true,
-            "allowPrivilegeEscalation": false,
-        },
-        "networkPolicy": {
-            "defaultDeny": true,
-            "approvalRequired": true,
-            "learnEgress": req.learn_egress,
-        },
-    });
-
-    // Token budgets used to live on `spec.inference.tokenBudget` but the
-    // post-S13 schema delegates inference policy to the InferencePolicy CR.
-    // For now sub-agents inherit the parent's budget; per-sub-agent budgets
-    // would require minting a child InferencePolicy — tracked separately.
-    if req.token_budget_daily.is_some() || req.token_budget_per_request.is_some() {
-        tracing::warn!(
-            parent = %parent_name,
-            child = %req.agent_id,
-            "Per-sub-agent token budgets ignored — sub-agent inherits parent InferencePolicy '{parent_name}-inference'",
-        );
-    }
-
-    // Governance is always enabled (native in router)
-    {
-        // S13: `toolPolicy` (string profile name) was replaced with
-        // `toolPolicyRef` — a same-namespace reference to a ToolPolicy CR.
-        // Sub-agents reuse the parent's ToolPolicy by convention
-        // (`<parent>-toolpolicy`).
-        let mut gov = serde_json::json!({
-            "enabled": true,
-            "toolPolicyRef": { "name": format!("{parent_name}-toolpolicy") },
-            "trustThreshold": req.trust_threshold.unwrap_or(500),
-        });
-        // Propagate trusted peers so the target auto-trusts the source at KNOCK time
-        if let Some(ref peers) = req.trusted_peers {
-            gov["trustedPeers"] = serde_json::json!(peers);
-        }
-        // Handoff targets need global registry mode for mesh communication
-        if req.handoff.is_some() {
-            gov["registryMode"] = serde_json::json!("global");
-        }
-        spec["governance"] = gov;
-    }
-
-    // Propagate Foundry agent tools from parent environment
-    let mut agent_tools: Vec<String> = Vec::new();
-    if let Ok(tools) = std::env::var("FOUNDRY_AGENT_TOOLS") {
-        agent_tools = tools
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
-    if !agent_tools.is_empty() {
-        spec["agent"] = serde_json::json!({ "tools": agent_tools });
-    }
-
-    // Build labels — handoff targets use different labels than sub-agents
-    let mut labels = BTreeMap::new();
-    if req.handoff.is_some() {
-        labels.insert(
-            "azureclaw.azure.com/spawned-by".to_string(),
-            "handoff".to_string(),
-        );
-        labels.insert(
-            "azureclaw.azure.com/predecessor".to_string(),
-            parent_name.to_string(),
-        );
-    } else {
-        labels.insert(
-            "azureclaw.azure.com/parent".to_string(),
-            parent_name.to_string(),
-        );
-        labels.insert(
-            "azureclaw.azure.com/spawned-by".to_string(),
-            "agent".to_string(),
-        );
-    }
-
-    // Stash the requested model in an annotation. The CRD schema no longer
-    // carries `spec.inference.model` (delegated to InferencePolicy), but
-    // list_sandboxes / restore still need to surface what model the user
-    // asked for — labels would be too restrictive (`/` is invalid in label
-    // values), so we use an annotation.
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        "azureclaw.azure.com/model".to_string(),
-        model.to_string(),
-    );
-
-    let crd = serde_json::json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
-        "kind": "ClawSandbox",
-        "metadata": {
-            "name": req.agent_id,
-            "namespace": namespace,
-            "labels": labels,
-            "annotations": annotations,
-        },
-        "spec": spec,
-    });
+    let crd = build_sub_agent_crd(parent_name, &namespace, isolation, model, req);
 
     let obj: kube::api::DynamicObject =
         serde_json::from_value(crd).map_err(|e| format!("Failed to build CRD: {e}"))?;
@@ -715,6 +604,120 @@ pub async fn collect_sub_agent_snapshots(
     Ok(snapshots)
 }
 
+// ---------------------------------------------------------------------------
+// Pure CRD builder (kept testable; called from `create_sandbox`)
+// ---------------------------------------------------------------------------
+
+/// Build the ClawSandbox CRD payload for a spawned sub-agent or handoff
+/// target. Pure function — no I/O, no env vars except `FOUNDRY_AGENT_TOOLS`
+/// — so it round-trips through JSON-shape contract tests below, catching
+/// schema regressions to the pre-S10/S13 shape (`spec.openclaw`,
+/// `spec.inference`, `governance.toolPolicy: <string>`,
+/// top-level `spec.handoff`/`spec.model` — all rejected by
+/// `additionalProperties: false` at admission).
+pub(crate) fn build_sub_agent_crd(
+    parent_name: &str,
+    namespace: &str,
+    isolation: &str,
+    model: &str,
+    req: &SpawnRequest,
+) -> serde_json::Value {
+    let mut spec = serde_json::json!({
+        "runtime": {
+            "kind": "OpenClaw",
+            "openclaw": {}
+        },
+        "inferenceRef": {
+            "name": format!("{parent_name}-inference")
+        },
+        "sandbox": {
+            "isolation": isolation,
+            "readOnlyRootFilesystem": true,
+            "runAsNonRoot": true,
+            "allowPrivilegeEscalation": false,
+        },
+        "networkPolicy": {
+            "defaultDeny": true,
+            "approvalRequired": true,
+            "learnEgress": req.learn_egress,
+        },
+    });
+
+    if req.token_budget_daily.is_some() || req.token_budget_per_request.is_some() {
+        tracing::warn!(
+            parent = %parent_name,
+            child = %req.agent_id,
+            "Per-sub-agent token budgets ignored — sub-agent inherits parent InferencePolicy '{parent_name}-inference'",
+        );
+    }
+
+    {
+        let mut gov = serde_json::json!({
+            "enabled": true,
+            "toolPolicyRef": { "name": format!("{parent_name}-toolpolicy") },
+            "trustThreshold": req.trust_threshold.unwrap_or(500),
+        });
+        if let Some(ref peers) = req.trusted_peers {
+            gov["trustedPeers"] = serde_json::json!(peers);
+        }
+        if req.handoff.is_some() {
+            gov["registryMode"] = serde_json::json!("global");
+        }
+        spec["governance"] = gov;
+    }
+
+    let mut agent_tools: Vec<String> = Vec::new();
+    if let Ok(tools) = std::env::var("FOUNDRY_AGENT_TOOLS") {
+        agent_tools = tools
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if !agent_tools.is_empty() {
+        spec["agent"] = serde_json::json!({ "tools": agent_tools });
+    }
+
+    let mut labels = BTreeMap::new();
+    if req.handoff.is_some() {
+        labels.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "handoff".to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/predecessor".to_string(),
+            parent_name.to_string(),
+        );
+    } else {
+        labels.insert(
+            "azureclaw.azure.com/parent".to_string(),
+            parent_name.to_string(),
+        );
+        labels.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "agent".to_string(),
+        );
+    }
+
+    let mut annotations = BTreeMap::new();
+    annotations.insert(
+        "azureclaw.azure.com/model".to_string(),
+        model.to_string(),
+    );
+
+    serde_json::json!({
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "ClawSandbox",
+        "metadata": {
+            "name": req.agent_id,
+            "namespace": namespace,
+            "labels": labels,
+            "annotations": annotations,
+        },
+        "spec": spec,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,5 +783,103 @@ mod tests {
         let payload = r#"{"mode":"restore","predecessor":"p","extra":"smuggled"}"#;
         let err = serde_json::from_str::<HandoffMeta>(payload).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    fn minimal_req(agent_id: &str) -> SpawnRequest {
+        SpawnRequest {
+            agent_id: agent_id.into(),
+            model: None,
+            governance: true,
+            trust_threshold: None,
+            learn_egress: false,
+            isolation: None,
+            token_budget_daily: None,
+            token_budget_per_request: None,
+            trusted_peers: None,
+            handoff: None,
+        }
+    }
+
+    #[test]
+    fn sub_agent_crd_uses_post_s10_s13_shape() {
+        // Audit class-of-bug guard: the JSON we send to the API server
+        // MUST use the post-S10/S13 shape. The legacy shape is silently
+        // pruned by clusters whose CRD doesn't have
+        // `additionalProperties: false`, but rejected at admission on
+        // strict clusters — surfacing as a 422 at spawn time. This test
+        // catches reverts to the legacy shape at `cargo test` time.
+        let crd = build_sub_agent_crd(
+            "azclaw2",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &minimal_req("viz"),
+        );
+
+        // 1. Top-level
+        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
+        assert_eq!(crd["kind"], "ClawSandbox");
+        assert_eq!(
+            crd["metadata"]["annotations"]["azureclaw.azure.com/model"],
+            "gpt-5.4"
+        );
+
+        let spec = &crd["spec"];
+
+        // 2. Required post-S10/S13 fields present
+        assert_eq!(spec["runtime"]["kind"], "OpenClaw");
+        assert!(spec["runtime"]["openclaw"].is_object());
+        assert_eq!(spec["inferenceRef"]["name"], "azclaw2-inference");
+        assert_eq!(
+            spec["governance"]["toolPolicyRef"]["name"],
+            "azclaw2-toolpolicy"
+        );
+
+        // 3. Legacy fields absent (the audit's class of bugs)
+        assert!(spec.get("openclaw").is_none(), "legacy spec.openclaw");
+        assert!(spec.get("inference").is_none(), "legacy spec.inference");
+        assert!(spec.get("model").is_none(), "legacy spec.model");
+        assert!(spec.get("handoff").is_none(), "legacy top-level spec.handoff");
+        assert!(
+            spec["governance"].get("toolPolicy").is_none(),
+            "legacy governance.toolPolicy (string field)"
+        );
+    }
+
+    #[test]
+    fn handoff_target_crd_uses_canonical_shape_and_labels() {
+        // Same as above but for the handoff path — labels diverge but the
+        // schema-required keys must be identical.
+        let mut req = minimal_req("azclaw2-cloud");
+        req.handoff = Some(HandoffMeta {
+            mode: "restore".into(),
+            predecessor: Some("azclaw2".into()),
+        });
+        let crd = build_sub_agent_crd(
+            "azclaw2",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &req,
+        );
+
+        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
+        assert_eq!(
+            crd["metadata"]["labels"]["azureclaw.azure.com/spawned-by"],
+            "handoff"
+        );
+        assert_eq!(
+            crd["metadata"]["labels"]["azureclaw.azure.com/predecessor"],
+            "azclaw2"
+        );
+        // Handoff MUST request global registry mode for mesh comms.
+        assert_eq!(crd["spec"]["governance"]["registryMode"], "global");
+        assert_eq!(
+            crd["spec"]["inferenceRef"]["name"],
+            "azclaw2-inference"
+        );
+        // Legacy must still be absent.
+        assert!(crd["spec"].get("handoff").is_none());
+        assert!(crd["spec"].get("model").is_none());
     }
 }
