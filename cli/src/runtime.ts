@@ -23,6 +23,7 @@ export type RuntimeKind =
   | "SemanticKernel"
   | "LangGraph"
   | "Anthropic"
+  | "PydanticAi"
   | "BYO";
 
 /** kebab-case CLI flag values (e.g. `--runtime openai-agents`). */
@@ -33,6 +34,7 @@ export type RuntimeFlag =
   | "semantic-kernel"
   | "lang-graph"
   | "anthropic"
+  | "pydantic-ai"
   | "byo";
 
 const FLAG_TO_KIND: Record<RuntimeFlag, RuntimeKind> = {
@@ -42,6 +44,7 @@ const FLAG_TO_KIND: Record<RuntimeFlag, RuntimeKind> = {
   "semantic-kernel": "SemanticKernel",
   "lang-graph": "LangGraph",
   "anthropic": "Anthropic",
+  "pydantic-ai": "PydanticAi",
   "byo": "BYO",
 };
 
@@ -50,6 +53,9 @@ const WIRED_KINDS: RuntimeKind[] = [
   "OpenClaw",
   "OpenAIAgents",
   "MicrosoftAgentFramework",
+  "LangGraph",
+  "Anthropic",
+  "PydanticAi",
   "BYO",
 ];
 
@@ -65,18 +71,18 @@ export function flagToKind(flag: string): RuntimeKind {
 }
 
 /**
- * Reject Tier-2 placeholders (SemanticKernel/LangGraph/Anthropic) at
- * the CLI boundary so the operator gets a clear "not yet wired" error
- * rather than a `RuntimeReady=False / AdapterMissing` Condition stamp
- * after the apply round-trips. MAF .NET also unwired (Phase 3).
+ * Reject runtime kinds that have no adapter wired in the current
+ * controller build at the CLI boundary, so the operator gets a clear
+ * "not yet wired" error rather than a `RuntimeReady=False /
+ * AdapterMissing` Condition stamp after the apply round-trips. MAF
+ * .NET is also unwired (blocked on AgentMesh.Sdk .NET upstream).
  */
 export function assertRuntimeWired(kind: RuntimeKind): void {
   if (!WIRED_KINDS.includes(kind)) {
     throw new Error(
       `Runtime kind '${kind}' has no adapter wired in this controller build. ` +
       `Wired runtimes: ${WIRED_KINDS.join(", ")}. ` +
-      `Tier-2 runtimes (${(["SemanticKernel", "LangGraph", "Anthropic"] as const).join(", ")}) ` +
-      `are roadmap items pending operator demand.`,
+      `Other declared kinds are roadmap placeholders pending operator demand.`,
     );
   }
 }
@@ -164,7 +170,7 @@ export function buildRuntimeBlock(
       if (language !== "python") {
         throw new Error(
           `MAF language '${language}' is not yet wired ` +
-          `(blocked on AgentMesh.Sdk .NET upstream — Phase 3). ` +
+          `(blocked on AgentMesh.Sdk .NET upstream). ` +
           `Use --maf-language python.`,
         );
       }

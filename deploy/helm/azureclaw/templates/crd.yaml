@@ -58,7 +58,7 @@ spec:
                     Replaces the legacy `spec.openclaw` field — the
                     AzureClaw v1alpha1 schema is in-place edited (no
                     conversion webhook; pre-release simplification).
-                    Tier-2 placeholders (`semanticKernel`) parse but the
+                    Declared placeholders (`semanticKernel`) parse but the
                     controller stamps
                     `RuntimeReady=False / AdapterMissing` until the
                     respective adapter image ships.
@@ -103,7 +103,7 @@ spec:
                           description: "Extra environment variables (key/value map) injected into the openclaw container. Used by the controller for offload parameters (OFFLOAD_REQUEST_ID, OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES)."
                     openaiAgents:
                       type: object
-                      description: "OpenAI Agents Python runtime variant. Phase 2 parses but does not deploy until S10.A3 lands the adapter image."
+                      description: "OpenAI Agents Python runtime variant."
                       properties:
                         pythonVersion:
                           type: string
@@ -144,7 +144,7 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                     microsoftAgentFramework:
                       type: object
-                      description: "Microsoft Agent Framework runtime variant. Python is wired (S10.A4). .NET is `[GAP-V1]`: blocked upstream on a `Microsoft.AgentGovernance` .NET package that exposes an `AgentMesh` relay client (the package today ships trust/identity/policy/audit only). Re-introduced in v1.1 once upstream lands."
+                      description: "Microsoft Agent Framework runtime variant. Python is wired. .NET is blocked upstream on a `Microsoft.AgentGovernance` .NET package that exposes an `AgentMesh` relay client (the package today ships trust/identity/policy/audit only); it will be re-introduced once upstream lands."
                       properties:
                         language:
                           type: string
@@ -181,7 +181,7 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                     semanticKernel:
                       type: object
-                      description: "Semantic Kernel runtime variant (Tier-2 placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the SK adapter image ships."
+                      description: "Semantic Kernel runtime variant (declared placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the SK adapter image ships."
                       properties:
                         language:
                           type: string
@@ -328,7 +328,7 @@ spec:
                     byo:
                       type: object
                       required: ["image", "contractVersion"]
-                      description: "Bring-your-own runtime. The image must honor the BYO contract. Phase 2 enforcement is warn-only via `RuntimeReady` Condition."
+                      description: "Bring-your-own runtime. The image must honor the BYO contract. Enforcement is warn-only via `RuntimeReady` Condition unless the cluster operator opts in to strict mode."
                       properties:
                         image:
                           type: string
@@ -526,15 +526,13 @@ spec:
                       description: |
                         Reference to a signed OCI artifact containing the
                         canonical egress allowlist. Populated by
-                        `azureclaw egress … --sign` (S12.c). Audit-only
-                        in S12.a — controller still derives NetworkPolicy
-                        from `allowedEndpoints`. **Authoritative in
-                        S12.e** (always-on, no feature gate): when set,
-                        the verified canonical artifact is the source
-                        of truth for NetworkPolicy egress; on verify
-                        failure the controller fails closed (last-known
-                        good cache fallback, then no-broad-egress).
-                        See docs/internal/policy-canonical-format.md.
+                        `azureclaw egress … --sign`. **Authoritative**:
+                        when set, the verified canonical artifact is the
+                        source of truth for NetworkPolicy egress; on
+                        verify failure the controller fails closed
+                        (last-known-good cache fallback, then
+                        no-broad-egress).
+                        See docs/egress-proxy.md for the canonical format.
                       required:
                         - registry
                         - repository
@@ -652,7 +650,7 @@ spec:
           jsonPath: .spec.sandbox.isolation
         - name: Allowlist
           type: string
-          description: "Authoritative-allowlist condition status (S12.e)"
+          description: "Authoritative-allowlist condition status"
           jsonPath: .status.conditions[?(@.type=="AllowlistAuthoritative")].status
           priority: 1
         - name: Age

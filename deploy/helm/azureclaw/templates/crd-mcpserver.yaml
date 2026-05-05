@@ -130,7 +130,7 @@ spec:
               url:
                 description: |-
                   Server endpoint URL. MUST be `https://` when `productionMode: true`.
-                  Validated by admission CEL (Phase 1 requirement, §7 entry 12).
+                  Validated by admission CEL.
                 type: string
             required:
             - url

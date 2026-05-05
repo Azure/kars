@@ -9,11 +9,11 @@ controller:
     tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
-  # Phase 3 S8: when true, BYO sandboxes whose
+  # When true, BYO sandboxes whose
   # spec.runtime.byo.contractVersion is missing or unknown, OR whose
   # byo.image is shape-invalid, are rejected with Degraded=True
   # (Reason=BYOContractInvalid) instead of reconciling. Default
-  # `false` keeps the Phase 2 warn-only behaviour. Recommended `true`
+  # `false` keeps the warn-only behaviour. Recommended `true`
   # in production to fail-closed against operator typos.
   byoStrict: false
   # Optional list of additional env vars merged into the controller
@@ -144,7 +144,6 @@ monitoring:
       traceMount: true      # Detect mount attempts (should be blocked)
 
 # Admission policies shipped with the chart.
-# See internal Phase 1 plan §6 item 6 and §0.2 principle 9.
 admission:
   nullProviderBlock:
     # Deploy the ValidatingAdmissionPolicy that rejects
@@ -229,11 +228,11 @@ azure:
 cilium:
   enabled: false
 
-# S12.d — Cluster-scoped SignerPolicy ConfigMap.
+# Cluster-scoped SignerPolicy ConfigMap.
 #
 # Watched by the controller (filtered to the `azureclaw-signer-policy`
 # ConfigMap in this namespace). Defines who is permitted to sign egress
-# allowlist OCI artifacts (see `docs/internal/policy-canonical-format.md`).
+# allowlist OCI artifacts (see `docs/egress-proxy.md`).
 #
 # Both lists are required when `enabled: true`. Either list empty → the
 # controller surfaces `SignerPolicyMalformed` on affected ClawSandbox
@@ -259,7 +258,7 @@ signerPolicy:
     - https://github.com/Azure/azureclaw/.github/workflows/*.yml@*
 
 
-# A2A public-ingress gateway (Phase 2 S3.5 — ADR-0001 #4).
+# A2A public-ingress gateway (ADR-0001 #4).
 #
 # Opt-in. When `enabled: false` (default), the inference router is
 # reachable only on the cluster-internal mesh (port 8443) — current
@@ -303,8 +302,8 @@ a2aGateway:
     # Subject map cap. Beyond this, the most-stale subject is evicted
     # (RAM-only — replicas do NOT share state in v1).
     maxSubjects: 50000
-    # Cross-replica synchronisation entry-point. **Not implemented in
-    # S3.5** — the field is locked here so future opt-in is
+    # Cross-replica synchronisation entry-point. **Not yet
+    # implemented** — the field is locked here so future opt-in is
     # backward-compatible. Setting this value today has no effect.
     sharedRedisUrl: ""
   resources:

@@ -519,11 +519,11 @@ export function formatHuman(report: AttestationReport): string {
     }
   }
 
-  lines.push(`\n  ${chalk.bold("Reconcile trace ID:")}  ${report.reconcileTraceId ?? dim("(Phase 3)")}`);
+  lines.push(`\n  ${chalk.bold("Reconcile trace ID:")}  ${report.reconcileTraceId ?? dim("(not yet stamped)")}`);
   lines.push(
-    `  ${chalk.bold("AGT receipt ID:")}      ${report.agtAuditReceiptId ?? dim("(Phase 3)")}`,
+    `  ${chalk.bold("AGT receipt ID:")}      ${report.agtAuditReceiptId ?? dim("(not yet stamped)")}`,
   );
-  lines.push(`  ${chalk.bold("Signature:")}           ${report.signature ?? dim("(Phase 3)")}`);
+  lines.push(`  ${chalk.bold("Signature:")}           ${report.signature ?? dim("(not yet stamped)")}`);
 
   if (report.baselineDiff) {
     const d = report.baselineDiff;
@@ -556,7 +556,7 @@ export function attestCommand(): Command {
     .description(
       "Print a deterministic attestation receipt for a sandbox " +
         "(spec hash, SSA field owners, referenced policy versions, " +
-        "reconcile trace; signature/AGT receipt land in Phase 3). " +
+        "reconcile trace; cosign signature and AGT receipt are roadmap items). " +
         "Pass --baseline <file> to diff against a previously-saved " +
         "attestation; exits 2 on drift, 3 on missing baseline.",
     )

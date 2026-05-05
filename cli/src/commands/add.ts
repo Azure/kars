@@ -47,7 +47,7 @@ export function addCommand(): Command {
     .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | byo", "openclaw")
     .option("--byo-image <image>", "Container image for --runtime byo (must declare org.azureclaw.runtime.contract=v1)")
     .option("--byo-contract-version <version>", "BYO contract version", "v1")
-    .option("--maf-language <lang>", "Microsoft Agent Framework language: python (dotnet is Phase 3)", "python")
+    .option("--maf-language <lang>", "Microsoft Agent Framework language: python (dotnet not yet wired)", "python")
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");

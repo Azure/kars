@@ -37,7 +37,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: "x",        action: "delete selected agent (confirm)",       scope: "agents" },
   { key: "Enter",    action: "connect (shell session)",               scope: "agents" },
   { key: "c",        action: "toggle cluster health view",            scope: "global" },
-  { key: "Shift-p",  action: "toggle CRD panels overlay (S14)",       scope: "global" },
+  { key: "Shift-p",  action: "toggle CRD panels overlay",             scope: "global" },
   { key: "r",        action: "refresh now",                           scope: "global" },
   { key: "q / Esc",  action: "quit (or close overlay)",               scope: "global" },
 ] as const;
