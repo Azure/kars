@@ -313,14 +313,39 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
     try {
       const { stdout } = await execa("kubectl", [
         "get", "clawsandbox", name, "-n", "azureclaw-system",
-        "-o", "jsonpath={.spec}",
+        "-o", "json",
       ], { stdio: "pipe" });
-      const spec = JSON.parse(stdout);
+      const obj = JSON.parse(stdout);
+      const spec = obj.spec ?? {};
+      const annotations: Record<string, string> = obj.metadata?.annotations ?? {};
+
+      // Post-S10/S13: model lives on the InferencePolicy CR (referenced by
+      // spec.inferenceRef.name), not on the sandbox spec. Resolve it.
+      let model: string | undefined;
+      const inferenceRefName = spec.inferenceRef?.name;
+      if (typeof inferenceRefName === "string" && inferenceRefName.length > 0) {
+        try {
+          const { stdout: ipStdout } = await execa("kubectl", [
+            "get", "inferencepolicy", inferenceRefName, "-n", "azureclaw-system",
+            "-o", "jsonpath={.spec.modelPreference.primary.deployment}",
+          ], { stdio: "pipe" });
+          const dep = ipStdout.trim();
+          if (dep.length > 0) model = dep;
+        } catch {
+          /* ip not found / not Ready — fall through */
+        }
+      }
+      // Final fallback chain: annotation, legacy spec.inference (older
+      // CRs created before S10.A1), legacy openclaw.config, defaults.
+      model =
+        model ||
+        annotations["azureclaw.azure.com/model"] ||
+        spec.inference?.model ||
+        spec.runtime?.openclaw?.config?.agent?.model?.replace("azure/", "") ||
+        defaults.model;
+
       return {
-        model:
-          spec.inference?.model ||
-          spec.runtime?.openclaw?.config?.agent?.model?.replace("azure/", "") ||
-          defaults.model,
+        model: model || defaults.model,
         learnEgress: spec.networkPolicy?.learnEgress ?? defaults.learnEgress,
         isolation: spec.sandbox?.isolation || defaults.isolation,
         trustThreshold: spec.governance?.trustThreshold || defaults.trustThreshold,

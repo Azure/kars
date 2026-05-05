@@ -344,9 +344,17 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
         kind: "OpenClaw",
         openclaw,
       },
+      // Post-S10/S13: ClawSandbox MUST reference an InferencePolicy CR
+      // by name. We can't infer model preference from a Sigs upstream
+      // AgentSandbox (no analog), so we emit a placeholder ref and warn
+      // the operator to mint `<name>-inference` before applying.
+      inferenceRef: { name: `${meta.name}-inference` },
       sandbox: sandboxFields,
     },
   };
+  warnings.push(
+    `emitted spec.inferenceRef.name="${meta.name}-inference" — create that InferencePolicy CR before applying (model/contentSafety/tokenBudget have no upstream analog)`,
+  );
   if (primary.resources !== undefined) {
     (out.spec as Record<string, unknown>).resources = primary.resources;
   }
@@ -528,7 +536,7 @@ function emitOverlay(
     warnings.push("dropped input status (server-managed)");
   }
   warnings.push(
-    "overlay skeleton has no governance fields; add spec.governance / spec.inference / spec.a2a / spec.agent before applying",
+    "overlay skeleton has no governance fields; add spec.inferenceRef / spec.governance.toolPolicyRef / spec.networkPolicy / spec.agent before applying",
   );
 
   return { manifest: out, warnings };
