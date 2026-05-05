@@ -248,7 +248,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
         await execa("azureclaw", args, { stdio: "pipe" });
         activityLog.log(`{green-fg}✓ Spawned{/} ${state.name}`);
       } catch (e: any) {
-        activityLog.log(`{red-fg}✗ Spawn fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
+        activityLog.log(`{red-fg}✗ Spawn fail:{/} ${(e.stderr || e.message)?.substring(0, 200)}`);
       }
       await refresh();
     }
