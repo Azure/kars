@@ -147,9 +147,79 @@ Two separate channels for two separate trust models. See **[`docs/architecture/a
 
 ## CRDs as the API
 
-You operate AzureClaw by writing eight CRDs, not by clicking through a dashboard. The full schema is in **[`docs/api/crd-reference.md`](api/crd-reference.md)**; the role of each is summarised in the README. The important property: every component (controller, router, gateway, CLI, operator TUI) reads the same source of truth. There is no separate config store.
+You operate AzureClaw by writing CRDs, not by clicking through a dashboard or
+editing a private config store. The full schema lives in
+**[`docs/api/crd-reference.md`](api/crd-reference.md)**. This section answers
+the question we get every time: *why eight CRDs and not one?*
 
-The CRDs are at `v1alpha1` for `v1.0.0`. The stability contract — what we promise to keep working, what we may change, and how we will migrate — is in **[`docs/api/backwards-compatibility.md`](api/backwards-compatibility.md)** and **[`docs/architecture/crd-versioning.md`](architecture/crd-versioning.md)**.
+### The principle: separate concerns that change at different rates
+
+A CRD makes sense when it represents a thing that
+
+1. has its own lifecycle (created / updated / deleted at different times than
+   the agent),
+2. is **referenced by name** from somewhere else (so giving it an identity is
+   cheaper than copy-pasting its body), or
+3. is **owned by a different team** than the agent author (platform team,
+   security team, ops team).
+
+Anything that fails all three tests is a `ClawSandbox` field, not its own CRD.
+
+### The eight CRDs and what each one buys you
+
+| CRD | Owner / changes-with | What you'd give up if it were a `ClawSandbox` field |
+|---|---|---|
+| **`ClawSandbox`** | Agent author. Changes per agent. | (this *is* the agent — every other CRD is a reference into it) |
+| **`InferencePolicy`** | Platform / FinOps. Changes per quarter. | Every team would copy model / region / budget into every agent; rotating an OpenAI deployment or shifting traffic to a cheaper model would mean editing every `ClawSandbox`. |
+| **`ToolPolicy`** | Security team. Changes per audit. | A central "tool X is approval-only" rule could not exist. Each agent would carry its own copy and security would have no enforcement seam. |
+| **`McpServer`** | Plugin owner. One per backend. | An MCP server URL + auth would be inlined into every agent that uses it. Rotating the URL means editing N sandboxes and racing the rollouts. |
+| **`A2AAgent`** | The agent itself, but the **public-ingress identity** has its own lifecycle (TLS cert, public route, rate-limit, agent-card). | The Kubernetes `Service` / cert / ingress wiring would be tangled into the agent CRD. With `A2AAgent` separate, the agent can come and go while the public endpoint and its trust anchors stay stable. |
+| **`ClawMemory`** | Whoever owns the memory store. Outlives the agent. | Memory bindings would die with each agent restart; cross-agent memory sharing would require duplicating store IDs in every sandbox. |
+| **`ClawEval`** | Eval / QA. Run on demand. | Eval runs would be pods or jobs without a reproducible record; you'd lose the `status` history that lets `azureclaw eval` show "this prompt regressed at commit X". |
+| **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. |
+
+A ninth resource, `ClawPairing`, is **controller-internal** — it records the
+binding between a `ClawSandbox` and its AgentMesh registry identity. We
+expose it as a CRD so the controller can use the same reconciliation
+machinery as everything else, but you never write one by hand.
+
+### What you actually get from this design
+
+Three properties fall out of treating these as separate CRDs:
+
+- **One source of truth.** Every component — controller, router, gateway,
+  CLI, operator TUI — reads the same etcd objects. There is no shadow config
+  store, no in-memory state, and no "which file did the operator edit on
+  which node?" When the router sees a request, it resolves
+  `InferencePolicy` from the cluster and trusts that to be the policy in
+  force. The same is true for tool denials, MCP backends, and trust edges.
+- **RBAC scopes follow concerns.** A platform team can grant
+  `inferencepolicies.azureclaw.azure.com/edit` to FinOps without giving them
+  any control over agents. Security can own `toolpolicies` without being
+  able to stop a workload. These splits are not theoretical — they are the
+  reason the CRDs exist.
+- **GitOps works without translation.** Each CRD is independently committed
+  to a repo and reconciled by Argo / Flux. There is no "render these eight
+  things from one mega-template" step, because the eight things are already
+  the API.
+
+### When this design would be wrong
+
+If AzureClaw only ever ran one agent per cluster, with one model, no policy,
+no peers, no memory, and no eval — eight CRDs would be cargo-culting. We
+believe a single CRD with eight optional sub-objects would be worse for
+real-world deployments because you'd lose the rate-of-change separation
+above. But this is a judgement call, and we re-evaluate it every minor
+release. If your deployment never references a CRD other than `ClawSandbox`,
+the others cost you nothing — they only exist as registered types, not
+running workloads.
+
+### Stability contract
+
+The CRDs are at `v1alpha1` for `v1.0.0`. What we promise to keep working,
+what we may change, and how we will migrate is documented in
+**[`docs/api/backwards-compatibility.md`](api/backwards-compatibility.md)**
+and **[`docs/architecture/crd-versioning.md`](architecture/crd-versioning.md)**.
 
 ---
 
