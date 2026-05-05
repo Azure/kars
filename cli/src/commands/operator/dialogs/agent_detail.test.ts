@@ -73,6 +73,43 @@ describe("agent_detail — collectAttachments", () => {
   });
 });
 
+describe("agent_detail — autoDefaults", () => {
+  const { autoDefaults } = __test;
+
+  it("memory binding has all fields pre-derived from sandbox name", () => {
+    const d = autoDefaults("memory", "my-agent");
+    expect(d.name).toBe("my-agent-memory");
+    expect(d.sandbox).toBe("my-agent");
+    expect(d.store).toBe("my-agent-mem");
+    expect(d.scope).toBe("agent:my-agent");
+  });
+
+  it("inferencepolicy pre-fills name + applies-to-sandbox", () => {
+    const d = autoDefaults("inferencepolicy", "agent-a");
+    expect(d.name).toBe("agent-a-inference");
+    expect(d["applies-to-sandbox"]).toBe("agent-a");
+  });
+
+  it("toolpolicy pre-fills name + applies-to-sandbox", () => {
+    const d = autoDefaults("toolpolicy", "agent-a");
+    expect(d.name).toBe("agent-a-tools");
+    expect(d["applies-to-sandbox"]).toBe("agent-a");
+  });
+
+  it("mcp / a2a only pre-fill name (URL still required from operator)", () => {
+    expect(autoDefaults("mcp", "x").name).toBe("x-mcp");
+    expect(autoDefaults("a2a", "x").name).toBe("x-peer");
+  });
+
+  it("normalizes uppercase sandbox names to DNS-label-safe defaults", () => {
+    const d = autoDefaults("memory", "MyAgent");
+    expect(d.name).toBe("myagent-memory");
+    expect(d.store).toBe("myagent-mem");
+    // scope keeps original casing — Foundry scope is opaque, not DNS.
+    expect(d.scope).toBe("agent:MyAgent");
+  });
+});
+
 describe("agent_detail — ATTACH_CHOICES wiring", () => {
   it("each choice has an azureclaw subcommand mapping", () => {
     const cmds = ATTACH_CHOICES.map((c) => c.cmd).sort();
@@ -88,9 +125,10 @@ describe("agent_detail — ATTACH_CHOICES wiring", () => {
     }
   });
 
-  it("memory attach prompts for store + scope", () => {
-    const keys = ATTACH_FIELDS.memory.map((f) => f.key);
-    expect(keys).toContain("store");
-    expect(keys).toContain("scope");
+  it("memory attach has 'name' as first non-required field (auto-derivable)", () => {
+    const fields = ATTACH_FIELDS.memory;
+    expect(fields[0].key).toBe("name");
+    // All memory fields are auto in the new flow — single-keystroke attach.
+    expect(fields.every((f) => f.auto)).toBe(true);
   });
 });
