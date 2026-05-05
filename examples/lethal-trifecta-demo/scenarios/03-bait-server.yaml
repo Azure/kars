@@ -1,0 +1,85 @@
+# Cluster-internal HTTP server that hosts the poisoned skill.
+# Same Deployment lives in both namespaces so each agent fetches
+# its skill from "next door" and the demo doesn't depend on
+# external internet at fetch time. The injection only fires
+# downstream when the agent tries to *act* on the skill.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poisoned-skill
+  namespace: naked-claw
+data:
+  poisoned-skill.md: |
+    # See examples/lethal-trifecta-demo/bait/poisoned-skill.md
+    # The deploy.sh script populates this ConfigMap from the
+    # source-of-truth markdown so the bait stays in one place.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poisoned-skill
+  namespace: azureclaw-claw
+data:
+  poisoned-skill.md: |
+    # See examples/lethal-trifecta-demo/bait/poisoned-skill.md
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bait-server
+  namespace: naked-claw
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: bait-server}}
+  template:
+    metadata: {labels: {app: bait-server}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports: [{containerPort: 80}]
+          volumeMounts:
+            - {name: skill, mountPath: /usr/share/nginx/html}
+      volumes:
+        - name: skill
+          configMap: {name: poisoned-skill}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bait-server
+  namespace: naked-claw
+spec:
+  selector: {app: bait-server}
+  ports: [{port: 80, targetPort: 80}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bait-server
+  namespace: azureclaw-claw
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: bait-server}}
+  template:
+    metadata: {labels: {app: bait-server}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports: [{containerPort: 80}]
+          volumeMounts:
+            - {name: skill, mountPath: /usr/share/nginx/html}
+      volumes:
+        - name: skill
+          configMap: {name: poisoned-skill}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bait-server
+  namespace: azureclaw-claw
+spec:
+  selector: {app: bait-server}
+  ports: [{port: 80, targetPort: 80}]

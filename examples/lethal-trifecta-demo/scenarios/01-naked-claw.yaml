@@ -1,0 +1,64 @@
+# ── Naked claw — vanilla OpenClaw with ONLY a domain-only egress
+# allowlist. No AzureClaw control plane. This is the strawman that
+# falls to the lethal trifecta. We deploy it as a plain Pod
+# (NOT a ClawSandbox) precisely to show what running OpenClaw
+# without AzureClaw looks like.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: naked-claw-egress
+  namespace: naked-claw
+spec:
+  podSelector:
+    matchLabels:
+      app: realestate-agent
+  policyTypes: ["Egress"]
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+    # The "trusted" model-provider host. The whole point of the demo
+    # is that this is on the allowlist for legitimate inference, and
+    # the attacker rides through it.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: realestate-agent
+  namespace: naked-claw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: realestate-agent
+  template:
+    metadata:
+      labels:
+        app: realestate-agent
+    spec:
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:latest
+          env:
+            - name: AGENT_NAME
+              value: "realestate-agent"
+            - name: ALLOWED_HOSTS
+              value: "api.openai.com,api.github.com"
+            - name: SKILL_URL
+              value: "http://bait-server.naked-claw.svc.cluster.local/poisoned-skill.md"
+          # No seccomp profile, no read-only rootfs, no UID egress guard.
+          # Runs as root by default. This is what "just deploy OpenClaw"
+          # gets you without the AzureClaw stack.
