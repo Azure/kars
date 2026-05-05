@@ -232,7 +232,7 @@ azureclaw add <name> [options]
 | `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `openai-agents`, `microsoft-agent-framework`, `byo` |
 | `--byo-image <image>` | — | Container image for `--runtime byo` (must declare `org.azureclaw.runtime.contract=v1`) |
 | `--byo-contract-version <version>` | `v1` | BYO contract version |
-| `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is Phase 3) |
+| `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is deferred to v1.1) |
 | `--dry-run` | `false` | Print the ClawSandbox YAML without applying |
 
 **Examples:**
@@ -391,7 +391,7 @@ azureclaw migrate <subcommand> [arguments] [options]
 |---|---|
 | `to-overlay <name>` | Flip to overlay mode; AzureClaw provides governance overlay; upstream CR owns the Pod. Requires `--upstream-ref`. |
 | `from-overlay <name>` | Leave overlay mode; revert to native AzureClaw (controller resumes ownership). |
-| `to-translate <name>` | Accept upstream SandboxClaim semantics on inbound (Phase 1 schema-only). |
+| `to-translate <name>` | Accept upstream SandboxClaim semantics on inbound (schema-only translation). |
 | `to-observe <name>` | Mirror status of an upstream Sandbox CR without overlay. |
 | `to-native <name>` | Reset to default native mode (AzureClaw owns the workload). |
 | `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an AzureClaw resource bundle. Use `-` to read from stdin. |
@@ -663,7 +663,7 @@ field owners, referenced policy versions, and reconcile trace. Pass
 `--baseline` to diff against a previously saved attestation; exit code
 reflects drift (0 = match, 2 = drift, 3 = baseline missing).
 
-Full signature and AGT receipt are Phase 3 deliverables.
+Full signature and AGT receipt are deferred to v1.1.
 
 **Usage:**
 ```

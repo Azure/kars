@@ -64,7 +64,7 @@
 
 ---
 
-## Residual risk (`[GAP-V1]`)
+## Residual risk (deferred to v1.1)
 
 Items accepted for v1.0 with explicit user-visible markers in source/docs:
 

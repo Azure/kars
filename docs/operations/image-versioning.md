@@ -73,5 +73,5 @@ cosign verify $(REGISTRY)/azureclaw-controller@sha256:<digest> \
 
 See [`supply-chain.md`](./supply-chain.md) for the full Cosign /
 SBOM / cargo-deny gates. The Cosign **admission** gate (verify on
-`kubectl apply`) is tracked as a v1.1 deliverable — see `[GAP-V1]
+`kubectl apply`) is tracked as a v1.1 deliverable — see the v1.1 milestone (`
 cosign-admission` in the release plan.

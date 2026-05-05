@@ -1,7 +1,6 @@
 # BYO Strict-Mode Admission
 
-**Status:** GA in Phase 3 (audit slice S8). Default `false` for
-backward compatibility; recommended `true` in production.
+**Status:** GA. Default `false` for backward compatibility; recommended `true` in production.
 
 ## What it does
 
@@ -25,7 +24,8 @@ operator can re-roll cleanly after fixing the CR.
 When `byoStrict=false` (default), the same checks run as advisories:
 the controller logs `WARN`, optionally records a `RuntimeReady` /
 `BYOContractAdvisory` condition, and proceeds with the Deployment.
-Phase 2 behaviour is bit-for-bit preserved when the flag is `false`.
+Pre-strict-mode behaviour is bit-for-bit preserved when the flag is
+`false`.
 
 ## What it checks (CR-level)
 
@@ -41,13 +41,13 @@ missing tag, leading whitespace).
 ## What it does *not* check (yet)
 
 Registry-side label introspection — i.e. confirming the image
-actually carries `org.azureclaw.runtime.contract=v1` — is a Phase 4
+actually carries `org.azureclaw.runtime.contract=v1` — is a v1.1
 follow-on. That requires an authenticated registry pull in the
 controller's hot reconcile loop, which is a substantial new
 dependency surface (rate limits, image-cache, registry auth flow).
-The Phase 3 slice ships CR-level enforcement only, with a clear
-extension point: see `controller/src/reconciler/byo_contract.rs` and
-the doc comment under `## Two layers of validation`.
+v1.0 ships CR-level enforcement only, with a clear extension point:
+see `controller/src/reconciler/byo_contract.rs` and the doc comment
+under `## Two layers of validation`.
 
 ## Enabling
 

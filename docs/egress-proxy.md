@@ -249,9 +249,9 @@ decisions are recorded in the governance audit log.
 | `cli/src/commands/egress.ts` | CLI `azureclaw egress` command |
 | `controller/src/reconciler.rs` | iptables init container + NetworkPolicy generation |
 
-## Phase 2: Signed OCI Egress Allowlist
+## Signed OCI egress allowlist
 
-Phase 2 (S12.c onward) adds supply-chain integrity for egress allowlists.
+This adds supply-chain integrity for egress allowlists.
 The `--sign` flag seals the current allowlist as a content-addressed,
 cosign-signed OCI artifact and wires the digest into the `ClawSandbox` CRD
 so the controller can verify it on every reconcile.
@@ -339,12 +339,12 @@ and verification fails, `status.failClosedNoLkg` is set to `true` and
 the sandbox NetworkPolicy blocks all egress until a valid artifact is
 reachable.
 
-### Phase status
+### Status
 
-| Slice | Behaviour |
+| Mode | Behaviour |
 |-------|-----------|
-| **S12.c** (current) | Non-authoritative — inline `spec.networkPolicy.allowedEndpoints` is still the source of truth. Signed artifact is advisory. |
-| **S12.e** (planned) | Authoritative flip — signed artifact becomes the only source of truth; inline field is read-only. |
+| **Advisory** (current) | Non-authoritative — inline `spec.networkPolicy.allowedEndpoints` is still the source of truth. Signed artifact is advisory. |
+| **Authoritative** (planned, v1.1) | Signed artifact becomes the only source of truth; inline field is read-only. |
 
 ### GitOps mode (`--emit-manifest`)
 
@@ -368,8 +368,7 @@ apply with `kubectl apply -f`. The YAML is deterministic (same input
 | `oras` | Push OCI artifacts to ACR |
 | `cosign` | Sign + verify OCI manifests |
 
-Both must be in `$PATH`. See `docs/internal/security-audits/2026-04-30-phase2.5-ops-docs.md`
-and the S12.c security audit for the full threat model.
+Both must be in `$PATH`. See `docs/internal/security-audits/` for the full threat model.
 
 ### Source files
 

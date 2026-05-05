@@ -72,7 +72,7 @@ Three layers enforce network boundaries between tenants:
 
 Cross-namespace traffic is blocked by default. The only exception is AGT mesh traffic (port 8443) when governance is enabled — this requires an explicit ingress NetworkPolicy created by the controller.
 
-## Content Safety Floor (Phase 2)
+## Content Safety floor
 
 A Kubernetes `ValidatingAdmissionPolicy` (`azureclaw-content-safety-floor`)
 enforces a minimum severity threshold on every `InferencePolicy` CR before it
@@ -103,7 +103,7 @@ enforces this invariant.
 
 **Requirements:** Kubernetes ≥ 1.30 (ValidatingAdmissionPolicy GA).
 
-## A2A Public Ingress (Phase 2)
+## A2A public ingress
 
 AzureClaw can expose a sandboxed agent to external A2A (Agent-to-Agent) traffic
 via a Kubernetes `LoadBalancer` service fronted by an ingress-layer TLS

@@ -1,11 +1,9 @@
-# GitOps mode for egress allowlists (S12.g)
+# GitOps mode for egress allowlists
 
 This walkthrough covers the **sign-by-default** + **`--emit-manifest`**
-GitOps workflow shipped in slice S12.g (the close-out for S12). It
-assumes you have already followed
-`docs/internal/policy-canonical-format.md` (internal) for
-the v1 canonical egress allowlist format and that your cluster has a
-`SignerPolicy` ConfigMap installed (S12.d).
+GitOps workflow for signed egress allowlists. It assumes you have a
+`SignerPolicy` ConfigMap installed on your cluster and a working
+signing identity (Sigstore Fulcio or KMS).
 
 ## TL;DR
 
@@ -28,15 +26,15 @@ git push   # → Argo CD / Flux applies it; controller verifies; rolls out.
 
 ## Why default-on signing
 
-S12.a–S12.f built signed-allowlist support behind an opt-in `--sign`
-flag. In S12.g we flip the default: any time you run
-`azureclaw egress` with `--enforce` or `--approve`, the CLI signs the
-resulting allowlist and patches `spec.networkPolicy.allowlistRef`
-without you asking. This closes the most common foot-gun reported in
-the S12.f review — operators graduating their sandbox to enforcement
-mode in CI and forgetting to add `--sign`, leaving production with an
-inline-only allowlist that the controller will not treat as
-authoritative once a `SignerPolicy` is installed.
+Earlier builds of `azureclaw egress` made signing opt-in via a
+`--sign` flag. The current default is sign-by-default: any time you
+run `azureclaw egress` with `--enforce` or `--approve`, the CLI signs
+the resulting allowlist and patches `spec.networkPolicy.allowlistRef`
+without you asking. This closes the most common foot-gun — operators
+graduating their sandbox to enforcement mode in CI and forgetting to
+sign, leaving production with an inline-only allowlist that the
+controller will not treat as authoritative once a `SignerPolicy` is
+installed.
 
 To opt out:
 
@@ -51,11 +49,11 @@ azureclaw egress my-agent --enforce --no-sign
 `--no-sign` is incompatible with `--emit-manifest` — GitOps mode
 **requires** signed artifacts (an unsigned artifact would fail
 authoritative-mode verify on the cluster with no operator present to
-retry, fail-closed under S12.e).
+retry, fail-closed in authoritative mode).
 
 ## Why emit-manifest
 
-The original S12.c flow ended with `kubectl patch` against the live
+An earlier flow ended with `kubectl patch` against the live
 cluster. That works for ad-hoc operator runs from a laptop, but it
 breaks two common production patterns:
 
@@ -187,7 +185,7 @@ flow needed in CI.
 | `--emit-manifest cannot be combined with --no-sign`      | GitOps mode requires signed artifacts                                                      | Drop `--no-sign`                                                                             |
 | `--emit-manifest requires --enforce or --approve`        | Need a signing context to derive the allowlist                                              | Add `--enforce` or `--approve <domain>`                                                      |
 | `refusing to overwrite existing file …`                  | Target file already exists                                                                  | Add `--force` (typical in CI)                                                                |
-| Controller emits `AllowlistVerified=False/SignerPolicyMissing` | No `SignerPolicy` ConfigMap on the cluster                                          | Install one (S12.d)                                                                          |
+| Controller emits `AllowlistVerified=False/SignerPolicyMissing` | No `SignerPolicy` ConfigMap on the cluster                                          | Install one (see Helm value `controller.signerPolicy.enabled`)                                                                          |
 | Controller emits `AllowlistVerified=False/IdentityMismatch`    | Signer identity not allowlisted in `SignerPolicy`                                  | Update the `SignerPolicy` SAN/issuer allowlist                                               |
 
 ## Migrating from kagent
