@@ -44,7 +44,7 @@ export function addCommand(): Command {
     .option("--perplexity-api-key <key>", "Perplexity API key")
     .option("--openai-api-key <key>", "OpenAI API key (for dual-provider setups)")
     .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
-    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | byo", "openclaw")
+    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | langgraph | anthropic | pydantic-ai | byo", "openclaw")
     .option("--byo-image <image>", "Container image for --runtime byo (must declare org.azureclaw.runtime.contract=v1)")
     .option("--byo-contract-version <version>", "BYO contract version", "v1")
     .option("--maf-language <lang>", "Microsoft Agent Framework language: python (dotnet not yet wired)", "python")
