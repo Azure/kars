@@ -823,9 +823,27 @@ for core in speech-core image-generation-core media-understanding-core; do
     rm -rf "$CORE_DST" 2>/dev/null || true
     mkdir -p "$CORE_DST"
     cp -r --no-preserve=mode "$CORE_SRC"/. "$CORE_DST/" 2>/dev/null || true
+    # Synthesize package.json with the openclaw.extensions field that
+    # discoverInDirectory (discovery-BH0TILgt.js) requires to add the dir
+    # to the manifest registry.
+    cat > "$CORE_DST/package.json" <<EOF
+{
+  "name": "@openclaw/$core",
+  "version": "2026.4.25",
+  "private": true,
+  "description": "OpenClaw runtime core ($core)",
+  "type": "module",
+  "openclaw": { "extensions": ["./runtime-api.js"] }
+}
+EOF
+    # Synthesize openclaw.plugin.json — loadPluginManifest requires both
+    # `id` and `configSchema` (manifest-gzgxnRAf.js loadPluginManifest).
+    # enabledByDefault:false so the plugin is registered (and the resolver
+    # can find runtime-api.js) but not activated as a runtime plugin.
     cat > "$CORE_DST/openclaw.plugin.json" <<EOF
 {
   "id": "$core",
+  "configSchema": { "type": "object", "additionalProperties": false },
   "activation": { "onStartup": false },
   "enabledByDefault": false
 }
