@@ -159,9 +159,31 @@ export class KubectlDataSource implements ClusterDataSource {
       const applies = (spec.appliesTo ?? {}) as Record<string, unknown>;
       const tokenBudget = (spec.tokenBudget ?? {}) as Record<string, unknown>;
       const guardrails = (spec.guardrails ?? {}) as Record<string, unknown>;
-      const modelPref = Array.isArray(spec.modelPreference)
-        ? (spec.modelPreference as unknown[]).filter((m): m is string => typeof m === "string")
-        : [];
+      // Post-S10/S13 InferencePolicy.modelPreference is an OBJECT
+      // ({ primary: { deployment, provider }, fallback: [...] }), not the
+      // legacy string[] some fixtures still use. Support both so the
+      // operator panel renders correct deployment names regardless of
+      // which CRD revision the cluster is running.
+      const mpRaw: unknown = spec.modelPreference;
+      let modelPref: string[] = [];
+      if (Array.isArray(mpRaw)) {
+        modelPref = (mpRaw as unknown[]).filter((m): m is string => typeof m === "string");
+      } else if (mpRaw && typeof mpRaw === "object") {
+        const mp = mpRaw as Record<string, unknown>;
+        const primary = (mp.primary ?? {}) as Record<string, unknown>;
+        const primaryDep = typeof primary.deployment === "string" ? primary.deployment : "";
+        const fb = Array.isArray(mp.fallback) ? (mp.fallback as unknown[]) : [];
+        const fbDeps: string[] = [];
+        for (const f of fb) {
+          if (f && typeof f === "object") {
+            const dep = (f as Record<string, unknown>).deployment;
+            if (typeof dep === "string" && dep) fbDeps.push(dep);
+          } else if (typeof f === "string") {
+            fbDeps.push(f);
+          }
+        }
+        modelPref = primaryDep ? [primaryDep, ...fbDeps] : fbDeps;
+      }
       return {
         ...baseItem(it),
         appliesToSandbox: asString(applies.sandboxName),
