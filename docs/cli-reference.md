@@ -189,8 +189,9 @@ azureclaw dev --build
 
 Adds a new sandboxed agent to an **existing** AzureClaw cluster. Creates a
 `ClawSandbox` CR which the controller reconciles into an isolated namespace,
-NetworkPolicy, and inference-router deployment. Supports all four runtime
-kinds (openclaw, openai-agents, microsoft-agent-framework, byo).
+NetworkPolicy, and inference-router deployment. Supports all 7 wired runtime
+kinds (openclaw, openai-agents, microsoft-agent-framework, langgraph,
+anthropic, pydantic-ai, byo).
 
 **Usage:**
 ```
@@ -229,7 +230,7 @@ azureclaw add <name> [options]
 | `--perplexity-api-key <key>` | — | Perplexity API key |
 | `--openai-api-key <key>` | — | OpenAI API key (for dual-provider setups) |
 | `--learn-egress` | `false` | Enable egress learn mode: observe all domains, then review with `azureclaw egress` |
-| `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `openai-agents`, `microsoft-agent-framework`, `byo` |
+| `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `openai-agents`, `microsoft-agent-framework`, `langgraph`, `anthropic`, `pydantic-ai`, `byo` |
 | `--byo-image <image>` | — | Container image for `--runtime byo` (must declare `org.azureclaw.runtime.contract=v1`) |
 | `--byo-contract-version <version>` | `v1` | BYO contract version |
 | `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is deferred to v1.1) |
