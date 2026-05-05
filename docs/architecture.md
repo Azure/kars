@@ -69,7 +69,7 @@ sequenceDiagram
   participant Gov as Governance<br/>(InferencePolicy + AGT)
   participant Budget as Token budget
   participant WI as Workload Identity<br/>(IMDS / federated)
-  participant Foundry as Foundry model<br/>(DefaultV2 guardrails inline)
+  participant Model as Inference backend<br/>(Foundry · GitHub Models · ...)
 
   Agent->>Router: POST /v1/chat (prompt)
   Router->>Gov: allow? (model + sandbox + action)
@@ -83,11 +83,16 @@ sequenceDiagram
       Budget-->>Router: exceeded
       Router-->>Agent: 429 budget_exceeded
     else within budget
-      Router->>WI: exchange SA token → AAD bearer
-      WI-->>Router: bearer (cached, ~5 min)
-      Router->>Foundry: POST /openai/... + bearer
-      Foundry-->>Router: completion + prompt_filter_results
-      Router->>Router: parse content flags<br/>report to AGT BehaviorMonitor
+      alt provider = Foundry / Azure OpenAI
+        Router->>WI: exchange SA token → AAD bearer
+        WI-->>Router: bearer (cached, ~5 min)
+        Router->>Model: POST /openai/... + bearer
+        Model-->>Router: completion + prompt_filter_results
+        Router->>Router: parse content flags<br/>report to AGT BehaviorMonitor
+      else provider = GitHub Models (dev)
+        Router->>Model: POST /chat/completions + Bearer PAT
+        Model-->>Router: completion (no inline filter results)
+      end
       Router->>Router: append audit record (hash-chained)
       Router-->>Agent: completion
     end
@@ -96,13 +101,16 @@ sequenceDiagram
 
 In prose:
 
-1. The agent SDK is configured (by the runtime adapter) to point at `http://127.0.0.1:8443`. There is no way for it to reach Foundry directly — `egress-guard` would drop the packet.
+1. The agent SDK is configured (by the runtime adapter) to point at `http://127.0.0.1:8443`. There is no way for it to reach the model directly — `egress-guard` would drop the packet.
 2. The router receives the request. It asks the **governance** layer (`InferencePolicy` + AGT `PolicyDecisionProvider`) whether this call is allowed. Deny → 403.
 3. It checks the **token budget** for the tenant. Over → 429.
-4. It mints a **Workload Identity** AAD token (from the projected service-account token, cached for the token TTL) and forwards to Foundry.
-5. **Content safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
-6. The router appends an **audit record** — prompt-fingerprint, model, tokens-in / tokens-out, decision, latency — hash-chained to the previous record so tampering is detectable.
-7. The router returns to the agent.
+4. It branches by provider (read from `~/.azureclaw/config.json` → `provider`):
+   - **Foundry / Azure OpenAI** (default, full feature set): mints a **Workload Identity** AAD token (or uses a resource-level API key in dev), forwards to Foundry. **Content Safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
+   - **GitHub Models** (dev mode, free tier): forwards `Authorization: Bearer <PAT>` directly to `https://models.github.ai/inference`. GitHub Models doesn't return `prompt_filter_results`, so inline Content Safety isn't enforced — see [security.md → What we do *not* defend against](security.md#what-we-do-not-defend-against). Foundry-only routes (Memory Store, agents, evaluations, indexes) return clean 501.
+5. The router appends an **audit record** — prompt-fingerprint, model, tokens-in / tokens-out, decision, latency — hash-chained to the previous record so tampering is detectable.
+6. The router returns to the agent.
+
+> **More providers later.** GitHub Models is the second backend wired in. Adding more (Anthropic, Bedrock, AWS Q, third-party OpenAI-compatible gateways) is mostly a matter of an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch. We're tracking provider-expansion through GitHub issues — please open a feature request describing the provider, auth model, and which Foundry-only features (if any) you'd want preserved.
 
 Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer message) goes through the same shape with a different policy module. Code: `inference-router/src/routes/chat_completions.rs:27-100`.
 
