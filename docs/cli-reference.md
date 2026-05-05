@@ -727,11 +727,20 @@ echo $?  # 0=match 2=drift 3=missing baseline
 
 ### `azureclaw credentials`
 
-Manages AzureClaw credentials (Azure OpenAI endpoint/key, channel tokens,
+Manages AzureClaw credentials (inference provider, channel tokens,
 third-party API keys). Invoking without a subcommand opens an interactive
-guided prompt. Use `credentials set` / `list` / `remove` for scripting.
-Use `credentials update` to patch a running AKS sandbox's K8s Secret without
-restarting the pod (unless you want a restart).
+guided prompt that lets you pick between **Azure AI Foundry / Azure OpenAI**
+and **GitHub Models** for inference, save channel tokens (Telegram, Slack,
+Discord), and configure third-party API keys (Brave, Tavily, Exa,
+Firecrawl, Perplexity, OpenAI). Use `credentials set` / `list` / `remove`
+for scripting. Use `credentials update` to patch a running AKS sandbox's
+K8s Secret without restarting the pod (unless you want a restart).
+
+The inference provider you pick is saved to `~/.azureclaw/config.json`
+(field `provider: "foundry" | "github-models"`); the API key / GitHub PAT
+is saved alongside in `~/.azureclaw/secrets.json` under the key
+`azure-openai-key`. Switch providers any time by re-running this command
+and picking the other option.
 
 **Usage:**
 ```

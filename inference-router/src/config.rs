@@ -146,9 +146,10 @@ impl Config {
             self.foundry_endpoint.as_deref(),
             self.foundry_project_endpoint.as_deref(),
         ];
-        candidates.iter().flatten().any(|e| {
-            e.contains("models.github.ai") || e.contains("models.inference.ai.azure.com")
-        })
+        candidates
+            .iter()
+            .flatten()
+            .any(|e| e.contains("models.github.ai") || e.contains("models.inference.ai.azure.com"))
     }
 }
 

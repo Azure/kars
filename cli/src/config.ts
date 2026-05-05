@@ -20,7 +20,7 @@ const SECRETS_FILE = join(CONFIG_DIR, "secrets.json");
 
 /** Well-known secret keys and their descriptions */
 export const KNOWN_SECRETS: Record<string, { env: string; label: string }> = {
-  "azure-openai-key":  { env: "AZURE_OPENAI_API_KEY", label: "Azure OpenAI API key" },
+  "azure-openai-key":  { env: "AZURE_OPENAI_API_KEY", label: "Inference API key (Azure OpenAI key OR GitHub PAT)" },
   "telegram-token":    { env: "TELEGRAM_BOT_TOKEN",   label: "Telegram bot token" },
   "telegram-allow-from": { env: "TELEGRAM_ALLOW_FROM", label: "Telegram allowed user IDs" },
   "slack-token":       { env: "SLACK_BOT_TOKEN",      label: "Slack bot OAuth token" },
