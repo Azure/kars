@@ -59,10 +59,9 @@ use crate::mcp_server::LocalObjectRef;
 /// preference + fallback chain.
 ///
 /// Resolution rule (precedence): same as ToolPolicy — most-specific
-/// `appliesTo` selector wins. Documented in `docs/crd-precedence.md`
-/// (Phase 2 deliverable §8 entry 10). The compiled profile carries
-/// the unmodified selector; precedence resolution is router-side
-/// (S7).
+/// `appliesTo` selector wins. See `docs/api/lifecycle.md` for
+/// resolution semantics. The compiled profile carries the unmodified
+/// selector; precedence resolution is router-side.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
     group = "azureclaw.azure.com",

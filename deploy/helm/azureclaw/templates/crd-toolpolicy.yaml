@@ -53,8 +53,7 @@ spec:
             description: |-
               `ToolPolicy.spec` — declares per-tool gating: rate limits, approval,
               and AP2 commerce caps. Resolves bottom-up (most-specific selector
-              wins). Precedence rules will be documented in `docs/crd-precedence.md`
-              (Phase 2 deliverable §8 entry 10).
+              wins). See `docs/api/lifecycle.md` for resolution semantics.
             properties:
               appliesTo:
                 description: |-
@@ -117,8 +116,7 @@ spec:
                     description: |-
                       Daily spend cap as ISO-4217 currency string with 2-decimal-place
                       integer minor units, e.g. `"USD 100.00"`. Parser is strict;
-                      admission CEL rejects malformed values at apply time
-                      (Phase 1 §7 entry 12).
+                      admission CEL rejects malformed values at apply time.
                     nullable: true
                     type: string
                   monthlyCap:

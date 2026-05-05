@@ -163,7 +163,7 @@ describe("attestCommand — formatters", () => {
     expect(out).toContain("sha256:" + "a".repeat(8));
     expect(out).toContain("azureclaw-controller");
     expect(out).toContain("ToolPolicy");
-    expect(out).toContain("(Phase 3)");
+    expect(out).toContain("(not yet stamped)");
   });
 });
 

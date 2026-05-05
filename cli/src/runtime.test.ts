@@ -33,22 +33,23 @@ describe("flagToKind", () => {
 });
 
 describe("assertRuntimeWired", () => {
-  it("accepts the four wired runtimes", () => {
+  it("accepts every wired runtime", () => {
     expect(() => assertRuntimeWired("OpenClaw")).not.toThrow();
     expect(() => assertRuntimeWired("OpenAIAgents")).not.toThrow();
     expect(() => assertRuntimeWired("MicrosoftAgentFramework")).not.toThrow();
+    expect(() => assertRuntimeWired("LangGraph")).not.toThrow();
+    expect(() => assertRuntimeWired("Anthropic")).not.toThrow();
+    expect(() => assertRuntimeWired("PydanticAi")).not.toThrow();
     expect(() => assertRuntimeWired("BYO")).not.toThrow();
   });
 
-  it("rejects the three Tier-2 placeholders", () => {
+  it("rejects the unwired runtime placeholders", () => {
     expect(() => assertRuntimeWired("SemanticKernel")).toThrow(/no adapter wired/);
-    expect(() => assertRuntimeWired("LangGraph")).toThrow(/no adapter wired/);
-    expect(() => assertRuntimeWired("Anthropic")).toThrow(/no adapter wired/);
   });
 
   it("the rejection message names the wired runtimes for discoverability", () => {
     try {
-      assertRuntimeWired("LangGraph");
+      assertRuntimeWired("SemanticKernel");
       throw new Error("must have thrown");
     } catch (e) {
       const msg = (e as Error).message;
@@ -130,11 +131,11 @@ describe("buildRuntimeBlock", () => {
     expect((block.microsoftAgentFramework as Record<string, string>).language).toBe("python");
   });
 
-  it("rejects --maf-language dotnet client-side (Phase 3 / upstream-blocked)", () => {
+  it("rejects --maf-language dotnet client-side (upstream-blocked)", () => {
     expect(() => buildRuntimeBlock({
       kind: "MicrosoftAgentFramework",
       mafLanguage: "dotnet",
-    })).toThrow(/dotnet.*not yet wired.*Phase 3/);
+    })).toThrow(/dotnet.*not yet wired.*upstream/);
   });
 
   it("emits the BYO block with the supplied image and contract version", () => {

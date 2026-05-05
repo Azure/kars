@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct McpServerSpec {
     /// Server endpoint URL. MUST be `https://` when `productionMode: true`.
-    /// Validated by admission CEL (Phase 1 requirement, §7 entry 12).
+    /// Validated by admission CEL.
     pub url: String,
 
     /// OAuth 2.1 configuration. Required when `productionMode: true`.

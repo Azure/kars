@@ -34,13 +34,13 @@ export function egressCommand(): Command {
     .option("--allowlist", "Show currently approved domains")
     .option("--enforce", "Graduate: promote all learned domains to allowlist, switch to enforcement mode")
     .option("--status", "Show blocklist and learn mode status")
-    .option("--sign", "Build canonical allowlist artifact, push to OCI registry, sign with cosign, patch allowlistRef. **Default-on** when combined with --enforce or --approve (S12.g). Pass --no-sign to opt out.")
+    .option("--sign", "Build canonical allowlist artifact, push to OCI registry, sign with cosign, patch allowlistRef. **Default-on** when combined with --enforce or --approve. Pass --no-sign to opt out.")
     .option("--no-sign", "Skip signing. The controller will refuse to use the artifact in authoritative mode (SignerPolicyMissing). Use only for local dev.")
     .option("--sign-mode <mode>", "Cosign mode: keyless | identity-token | keyed (default: auto-detect)")
     .option("--sign-key <ref>", "Cosign key reference (path or KMS URI like azurekms://...) — required for --sign-mode keyed")
     .option("--registry <fqdn>", "Override target ACR for the artifact push (default: auto-discover)")
     .option("--repository <repo>", "Repository path within the registry (default: policy/egress-allowlist/<sandbox>)")
-    .option("--emit-manifest <path>", "GitOps mode (S12.g): write the ClawSandbox patch to <path> instead of running 'kubectl patch'. Requires signing (default-on). Refuses to overwrite without --force.")
+    .option("--emit-manifest <path>", "GitOps mode: write the ClawSandbox patch to <path> instead of running 'kubectl patch'. Requires signing (default-on). Refuses to overwrite without --force.")
     .option("--force", "With --emit-manifest, overwrite an existing file.")
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
@@ -363,7 +363,7 @@ async function runSignFlow(
   ns: string,
   options: any,
 ): Promise<void> {
-  const headerSlice = options.emitManifest ? "S12.g GitOps mode" : "S12.g sign-by-default";
+  const headerSlice = options.emitManifest ? "GitOps mode" : "sign-by-default";
   console.log(chalk.hex("#0078D4")(`\n  Signing egress allowlist artifact for '${name}' (${headerSlice})`));
   try {
     const { orasPath, cosignPath } = await ensureSigningTools();
@@ -486,7 +486,7 @@ async function runSignFlow(
       artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
     });
     console.log(chalk.green(`     ✅ Patched  spec.networkPolicy.allowlistRef`));
-    console.log(chalk.dim(`\n  The controller will verify the artifact and program NetworkPolicy egress on next reconcile (S12.e authoritative mode).\n`));
+    console.log(chalk.dim(`\n  The controller will verify the artifact and program NetworkPolicy egress on next reconcile (authoritative mode).\n`));
   } catch (e: any) {
     console.log(chalk.red(`\n  Signing aborted: ${e.message}\n`));
     process.exitCode = 1;

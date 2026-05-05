@@ -34,7 +34,7 @@ export function createPanelsOverlay(ctx: PanelsOverlayCtx): PanelsOverlayHandle 
     scrollable: true,
     alwaysScroll: true,
     mouse: true,
-    label: " 📊 Panels (S14) — [P] toggle ",
+    label: " 📊 CRD panels — [P] toggle ",
     border: { type: "line" },
     style: { border: { fg: "magenta" }, fg: "white", bg: "default" },
     padding: { left: 1, right: 1 },
