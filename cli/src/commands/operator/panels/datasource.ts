@@ -246,7 +246,7 @@ export class KubectlDataSource implements ClusterDataSource {
     const out: ProviderState[] = [];
 
     // Foundry — proxy through the in-pod inference router /healthz.
-    const foundry = await this.probeRouterHealth(namespace, "/healthz");
+    const foundry = await this.probeRouterHealth(namespace, sandbox, "/healthz");
     out.push({
       id: "foundry",
       label: "Foundry",
@@ -254,7 +254,7 @@ export class KubectlDataSource implements ClusterDataSource {
     });
 
     // AGT relay/registry — same router, /agt/status.
-    const agt = await this.probeRouterHealth(namespace, "/agt/status");
+    const agt = await this.probeRouterHealth(namespace, sandbox, "/agt/status");
     out.push({ id: "agt", label: "AGT", ...agt });
 
     // ACR pull-through — read recent ImagePullBackOff events.
@@ -272,17 +272,22 @@ export class KubectlDataSource implements ClusterDataSource {
 
   private async probeRouterHealth(
     namespace: string,
+    sandbox: string,
     path: string,
   ): Promise<Omit<ProviderState, "id" | "label">> {
     try {
+      // Sandbox deployments are named after the sandbox itself; address the
+      // pod via `deploy/<sandbox>` so we don't depend on a label selector
+      // (the legacy `app.kubernetes.io/name=openclaw` label doesn't exist
+      // on AzureClaw sandbox pods — they use `azureclaw.azure.com/sandbox`).
       const { stdout } = await execa(
         "kubectl",
         kctl(
           [
-            "exec", "-n", namespace, "-l", "app.kubernetes.io/name=openclaw",
+            "exec", "-n", namespace, `deploy/${sandbox}`,
             "-c", "inference-router", "--",
             "curl", "-sS", "--max-time", "3",
-            `http://localhost:8443${path}`,
+            `http://127.0.0.1:8443${path}`,
           ],
           this.kubeContext,
         ),
@@ -294,7 +299,9 @@ export class KubectlDataSource implements ClusterDataSource {
       return { status: "unknown", reason: "empty response" };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      return { status: "unknown", reason: msg.substring(0, 80) };
+      // Trim noisy execa wrapper to the actual stderr line.
+      const reason = msg.split("\n").find((ln) => ln.trim().length > 0 && !ln.includes("Command failed")) ?? msg;
+      return { status: "unknown", reason: reason.substring(0, 80) };
     }
   }
 
@@ -335,12 +342,14 @@ export class KubectlDataSource implements ClusterDataSource {
     }
   }
 
-  private async probeIdentity(namespace: string, sandbox: string): Promise<ProviderState> {
+  private async probeIdentity(namespace: string, _sandbox: string): Promise<ProviderState> {
     try {
+      // The sandbox-side service account is named `sandbox` (literal) by
+      // the controller — not `<sandbox>-sa` (legacy from the prototype).
       const { stdout } = await execa(
         "kubectl",
         kctl(
-          ["get", "sa", `${sandbox}-sa`, "-n", namespace, "-o", "json"],
+          ["get", "sa", "sandbox", "-n", namespace, "-o", "json"],
           this.kubeContext,
         ),
         { stdio: "pipe", timeout: 6000 },
@@ -358,11 +367,12 @@ export class KubectlDataSource implements ClusterDataSource {
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const reason = msg.split("\n").find((ln) => ln.trim().length > 0 && !ln.includes("Command failed")) ?? msg;
       return {
         id: "identity",
         label: "Identity (WI)",
         status: "unknown",
-        reason: msg.substring(0, 80),
+        reason: reason.substring(0, 80),
       };
     }
   }
@@ -371,7 +381,7 @@ export class KubectlDataSource implements ClusterDataSource {
     try {
       const { stdout } = await execa(
         "kubectl",
-        kctl(["get", "gateway", "-A", "-o", "json"], this.kubeContext),
+        kctl(["get", "gateway.gateway.networking.k8s.io", "-A", "-o", "json"], this.kubeContext),
         { stdio: "pipe", timeout: 6000 },
       );
       const data = JSON.parse(stdout);
@@ -381,7 +391,7 @@ export class KubectlDataSource implements ClusterDataSource {
           id: "agc",
           label: "AGC ingress",
           status: "unknown",
-          reason: "no Gateway objects (a2a-ingress not enabled)",
+          reason: "a2a-ingress not enabled",
         };
       }
       const ready = items.filter((it) => {
@@ -393,11 +403,23 @@ export class KubectlDataSource implements ClusterDataSource {
         : { id: "agc", label: "AGC ingress", status: "degraded", reason: `${ready.length}/${items.length} Programmed` };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // Gateway API CRDs aren't installed on every cluster (and shouldn't be
+      // required just to render this panel). Surface that cleanly instead of
+      // dumping the multi-line `kubectl` error.
+      if (/doesn't have a resource type|the server could not find/i.test(msg)) {
+        return {
+          id: "agc",
+          label: "AGC ingress",
+          status: "unknown",
+          reason: "Gateway API not installed",
+        };
+      }
+      const reason = msg.split("\n").find((ln) => ln.trim().length > 0 && !ln.includes("Command failed")) ?? msg;
       return {
         id: "agc",
         label: "AGC ingress",
         status: "unknown",
-        reason: msg.substring(0, 80),
+        reason: reason.substring(0, 80),
       };
     }
   }
