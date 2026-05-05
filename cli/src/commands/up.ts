@@ -49,6 +49,7 @@ export function upCommand(): Command {
     // ── Output / lifecycle ────────────────────────────────────────────
     .option("--dry-run", "Show what would be done without executing", false)
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
+    .option("--from-scratch", "Ignore any partial state from a prior failed run and start over", false)
     .addHelpText("after", `
 Flag groups:
   Identity:           --name, --model, --policy
@@ -57,13 +58,22 @@ Flag groups:
   Images:             --source-acr, --build, --skip-runtime-images
   Foundry:            --foundry-endpoint, --openai-endpoint
   Mesh federation:    --mesh-peer / --no-mesh-peer, --global-registry, --expose-registry
-  Output / lifecycle: --dry-run, --upgrade
+  Output / lifecycle: --dry-run, --upgrade, --from-scratch
 
 Examples:
   azureclaw up                                       # Full provision with defaults
   azureclaw up --name myagent --region westus3       # Pick a name + region
   azureclaw up --skip-infra                          # Reuse existing AKS cluster
   azureclaw up --upgrade                             # Fast Helm-only redeploy
+  azureclaw up --from-scratch                        # Discard any partial state from a previous failed run
+
+Auto-resume:
+  If a previous \`azureclaw up\` failed mid-flight, the next invocation
+  automatically resumes by skipping phases that already completed
+  (network firewall config, image push). State lives in
+  ~/.azureclaw/context.json and is invalidated on topology change
+  (region / resource-group / cluster / sandbox name) or after 7 days.
+  Use --from-scratch to discard it explicitly.
 `)
     .action(async (options) => {
       // Up-front validation: reject obviously-wrong values before any Azure work.
@@ -108,6 +118,35 @@ Examples:
       const clusterName = options.clusterName ?? "azureclaw";
       const baseName = clusterName.replace(/-aks$/, "");
       let acrName = ""; // resolved from Bicep output after deployment
+
+      // ── Auto-resume from prior partial run ──────────────────────────
+      // Inspects ~/.azureclaw/context.json. Returns null when there's no
+      // partial state, when topology (region / RG / cluster / sandbox /
+      // source-acr) changed, when the saved state is stale, or when the
+      // user passed --from-scratch.
+      const { loadResumeState, isPhaseSkippable, markPhaseDone, formatAge } =
+        await import("./up/resume.js");
+      const resumeTopology = {
+        region: options.region,
+        resourceGroup: rg,
+        aksCluster: `${baseName}-aks`,
+        sandboxName: options.name,
+        sourceAcr: options.sourceAcr,
+      };
+      const resumeState = loadResumeState(
+        { fromScratch: options.fromScratch },
+        resumeTopology,
+      );
+      if (resumeState) {
+        console.log(
+          chalk.cyan(
+            `  ↻ Resuming previous run (last completed: ${resumeState.resumeFromPhase}, ${formatAge(resumeState.ageMs)} ago). Use --from-scratch to start over.\n`,
+          ),
+        );
+      } else if (options.fromScratch) {
+        console.log(chalk.dim(`  --from-scratch: any cached partial state will be ignored.\n`));
+      }
+      const resumeFromPhase = resumeState?.resumeFromPhase ?? null;
       // Stepper counts the 9 runtime phases below (10 with --expose-registry).
       // Preflight runs before the stepper (see runPreflightChecks above).
       //   1. Resource group + preview features
@@ -213,6 +252,7 @@ Examples:
         await execa("az", ["provider", "register", "-n", "Microsoft.ContainerService", "--output", "none"], { stdio: "pipe" }).catch(() => {});
 
         stepper.done(`Resource group '${rg}' ready${callerIp ? ` (IP: ${callerIp})` : ""}`);
+        markPhaseDone("rg", {}, resumeTopology);
 
         // ── Step 3: Deploy Bicep (AKS + ACR + KV + AOAI + Monitor + WI) ─
         let acrLoginServer: string;
@@ -297,6 +337,11 @@ Examples:
             }
 
             stepper.done("Azure resources provisioned");
+            markPhaseDone(
+              "infra",
+              { acrLoginServer, acrName, foundryEndpoint: options.foundryEndpoint, wiClientId, keyVaultName: kvName },
+              resumeTopology,
+            );
           } catch (bicepErr: any) {
             clearInterval(ticker);
             throw bicepErr;
@@ -339,9 +384,19 @@ Examples:
           stepper.detail("ok", `Workload Identity — ${wiClientId.slice(0, 8)}...`);
 
           stepper.done("Infrastructure verified (Bicep skipped)");
+          markPhaseDone(
+            "infra",
+            { acrLoginServer, acrName, foundryEndpoint: options.foundryEndpoint, wiClientId, keyVaultName: kvName },
+            resumeTopology,
+          );
         }
 
         // ── Step 3a: Ensure caller IP is in AKS API server authorized ranges ──
+        if (isPhaseSkippable("network", resumeFromPhase)) {
+          stepper.step("Configuring network access & firewalls...");
+          stepper.detail("ok", "Already configured in previous run — skipping");
+          stepper.done("Network access (skipped — resumed from prior run)");
+        } else {
         stepper.step("Configuring network access & firewalls...");
         if (callerIp) {
           stepper.update("Updating AKS API server authorized IPs...");
@@ -425,6 +480,8 @@ Examples:
         });
 
         stepper.done("Network access configured");
+        }
+        markPhaseDone("network", {}, resumeTopology);
 
         // ── Step 5: Get AKS credentials ──────────────────────────────
         stepper.step("Configuring kubectl...");
@@ -436,11 +493,16 @@ Examples:
           "--output", "none",
         ], { stdio: "pipe" });
         stepper.done("kubectl configured");
+        markPhaseDone("kubectl", {}, resumeTopology);
 
         // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
 
-        if (options.build) {
+        if (isPhaseSkippable("images", resumeFromPhase)) {
+          stepper.step(options.build ? "Building and pushing images..." : "Importing images from source ACR...");
+          stepper.detail("ok", "Already pushed/imported in previous run — skipping");
+          stepper.done("Images (skipped — resumed from prior run)");
+        } else if (options.build) {
           // Developer mode: build locally and push
           stepper.step("Building and pushing images...");
           stepper.update("Logging into ACR...");
@@ -554,6 +616,7 @@ Examples:
 
           stepper.done("Images available in ACR");
         }
+        markPhaseDone("images", {}, resumeTopology);
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         stepper.step("Deploying Helm chart (controller + CRD + RBAC)...");
@@ -787,6 +850,7 @@ Examples:
         ], { stdio: "pipe" }).catch(() => {});
 
         stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
+        markPhaseDone("helm", {}, resumeTopology);
 
         // ── Step 6b/6c: Inspektor Gadget + AgentMesh deploy ──────────
         // (S15.d.3: extracted to ./up/agentmesh_deploy.ts)
@@ -798,6 +862,7 @@ Examples:
         const registryMode = meshResult.registryMode;
         const globalRegistryUrl = meshResult.globalRegistryUrl;
         const globalRelayUrl = meshResult.globalRelayUrl;
+        markPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
 
         // ── Step 7+8: Sandbox bring-up (S15.d.4: extracted to ./up/sandbox_bringup.ts) ──
         // Federated credentials, MI Contributor, Foundry RBAC, ClawSandbox CR,

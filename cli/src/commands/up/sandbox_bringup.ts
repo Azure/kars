@@ -481,7 +481,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(webUiUrl)}`);
   }
 
-  // Cache deployment context for subsequent commands (add, status, list, push, etc.)
+  // Cache deployment context for subsequent commands (add, status, list, push,
+  // etc.). Setting phase: "complete" also marks the auto-resume state as fully
+  // consumed so the next `azureclaw up` starts fresh.
   try {
     saveContext({
       region: options.region,
@@ -500,6 +502,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       registryMode,
       globalRegistryUrl,
       globalRelayUrl,
+      phase: "complete",
+      sandboxName: options.name,
+      sourceAcr: typeof options.sourceAcr === "string" ? options.sourceAcr : undefined,
     });
   } catch { /* non-critical */ }
 

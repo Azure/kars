@@ -54,7 +54,22 @@ export interface AzureClawConfig {
   foundryProjectEndpoint?: string;
 }
 
-/** Cached deployment context — saved after successful `azureclaw up` */
+/**
+ * Up phases tracked for auto-resume. Persisted in DeploymentContext.phase
+ * after each completed phase; cleared (set to "complete") after a successful run.
+ */
+export type UpPhase =
+  | "rg"
+  | "infra"
+  | "network"
+  | "kubectl"
+  | "images"
+  | "helm"
+  | "mesh"
+  | "sandbox"
+  | "complete";
+
+/** Cached deployment context — saved incrementally during `azureclaw up` */
 export interface DeploymentContext {
   subscription?: string;
   region?: string;
@@ -79,6 +94,24 @@ export interface DeploymentContext {
   globalRelayUrl?: string;
   /** How the registry was promoted: "port-forward" | "loadbalancer" */
   promoteMode?: string;
+  /**
+   * Last completed phase of `azureclaw up`. Used by auto-resume to skip
+   * already-done phases on a re-run after a failure. Set to "complete"
+   * after a fully successful run.
+   */
+  phase?: UpPhase;
+  /** ISO-8601 timestamp when the current run started (for resume staleness). */
+  phaseStartedAt?: string;
+  /**
+   * Sandbox name from --name. Used to detect topology mismatches that
+   * should invalidate a partial-run resume.
+   */
+  sandboxName?: string;
+  /**
+   * Source ACR (--source-acr) used for the run. Used to detect topology
+   * changes that should invalidate a partial-run resume.
+   */
+  sourceAcr?: string;
 }
 
 const CONTEXT_FILE = join(CONFIG_DIR, "context.json");

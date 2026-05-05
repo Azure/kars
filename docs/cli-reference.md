@@ -114,6 +114,7 @@ azureclaw up [options]
 | `--openai-endpoint <url>` | — | Existing Azure OpenAI endpoint (`openai.azure.com`; derived from Foundry if omitted) |
 | `--dry-run` | `false` | Show what would be done without executing |
 | `--upgrade` | `false` | Fast upgrade: skip prompts, reuse cached context, re-run Helm + RBAC only |
+| `--from-scratch` | `false` | Ignore any partial state from a prior failed run and start over |
 | `--mesh-peer` | `true` | Enable mesh federation peer (`--no-mesh-peer` to disable) |
 | `--global-registry <url>` | — | Use an external AgentMesh registry (skip local registry deployment) |
 | `--expose-registry` | `false` | Deploy AGIC Ingress to expose this cluster's registry publicly |
@@ -135,7 +136,22 @@ azureclaw up --dry-run
 
 # Developer — build images locally, connect to Foundry
 azureclaw up --build --foundry-endpoint https://my-project.services.ai.azure.com
+
+# Force a clean run (discard any auto-resume state)
+azureclaw up --from-scratch
 ```
+
+**Auto-resume:** If `azureclaw up` fails mid-flight (e.g. a transient quota
+error during image push), the next run automatically picks up where the
+previous one left off. State lives in `~/.azureclaw/context.json` and tracks
+which phases (`rg`, `infra`, `network`, `kubectl`, `images`, `helm`, `mesh`,
+`sandbox`) succeeded. On resume, the slow `network` and `images` phases are
+skipped if they already completed; everything else is re-run idempotently.
+The state is invalidated automatically when:
+- Topology changes (`--region`, `--resource-group`, `--cluster-name`, `--name`, `--source-acr`)
+- The saved state is older than 7 days
+- The previous run completed successfully (`phase: complete`)
+- You pass `--from-scratch`
 
 **See also:** [README quick-start](../README.md), [docs/architecture.md](architecture.md)
 
