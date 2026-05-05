@@ -268,8 +268,8 @@ fields and Deployment annotations.
 | **SSA owner map** | `metadata.managedFields` | Lists field-level owners (controller, CLI, user) |
 | **Observed-generation lineage** | `status.observedGeneration` vs `metadata.generation` | Drift = pending reconcile |
 | **Policy version hashes** | `status.versionHash` per referenced policy | Changes when referenced `ToolPolicy` / `InferencePolicy` is updated |
-| **Reconcile trace ID** | `azureclaw.azure.com/last-trace-id` annotation on Deployment | Prints `(Phase 3)` if not yet present |
-| **AGT audit-receipt id** | Phase 3 scaffold | Always `(Phase 3)` in current builds |
+| **Reconcile trace ID** | `azureclaw.azure.com/last-trace-id` annotation on Deployment | Prints `(pending)` if the controller has not yet annotated the Deployment |
+| **AGT audit-receipt id** | Reserved for v1.1 | Currently `(pending)` in shipped builds |
 
 ```bash
 # Human-readable summary

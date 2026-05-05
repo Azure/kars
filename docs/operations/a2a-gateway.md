@@ -76,7 +76,7 @@ Indicators you can lower them:
   callers (i.e., the cap was sized for breadth that does not exist).
 
 The Helm value `sharedRedisUrl` is reserved for cross-replica sync
-but **not implemented** in S3.5. Setting it today panics the
+but **not implemented** in v1.0. Setting it today panics the
 gateway with an explicit message.
 
 ## Observability setup

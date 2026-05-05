@@ -352,7 +352,7 @@ None of these change the trust model. They change the customer-facing UX around 
 - **Cross-tenant escape is treated as a P0.** NetworkPolicy default-deny + per-tenant namespace scoping + per-tenant ServiceAccount token audience + sandbox UID isolation + per-pod SEV-SNP enclave collectively block the obvious paths. The fuzz/conformance suite covers cross-tenant token spoofing.
 - **Pairing-token revocation must be immediate.** `kubectl delete pairing acme-prod` synchronously evicts active mesh sessions for that tenant; the registry refuses new connects.
 - **Foundry quota is per-tenant.** Either issue per-tenant Foundry projects or use Foundry's quota policies; the router enforces a soft cap via `--token-budget` regardless.
-- **Posture VAPs are tenant-defended.** The Phase 1 VAP set denies isolation downgrade, seccomp removal, `readOnlyRootFilesystem: false`, and `pods/exec|attach|portforward` on sandbox namespaces. Even a cluster-admin compromise cannot ratchet a tenant's posture down.
+- **Posture VAPs are tenant-defended.** The shipped VAP set denies isolation downgrade, seccomp removal, `readOnlyRootFilesystem: false`, and `pods/exec|attach|portforward` on sandbox namespaces. Even a cluster-admin compromise cannot ratchet a tenant's posture down.
 
 ## References
 
