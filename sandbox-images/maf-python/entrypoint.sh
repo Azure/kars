@@ -19,7 +19,7 @@ set -eu
 # Router sidecar — only LLM endpoint allowed by NetworkPolicy +
 # egress-guard. `agent-framework` consumes `openai`/`azure-openai`
 # clients which read these env vars by convention.
-export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/openai/v1}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/v1}"
 export AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-http://127.0.0.1:8443/openai}"
 
 # Platform MCP server: 9 Foundry-shim tools every runtime gets for

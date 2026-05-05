@@ -22,9 +22,16 @@ logger = logging.getLogger(__name__)
 
 ENV_INITIALIZED = "__AZURECLAW_RUNTIME_INITIALIZED__"
 ENV_OPENAI_BASE_URL = "OPENAI_BASE_URL"
+ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 ENV_AZURE_OPENAI_ENDPOINT = "AZURE_OPENAI_ENDPOINT"
-DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8443/openai/v1"
+ENV_AZURE_OPENAI_API_KEY = "AZURE_OPENAI_API_KEY"
+DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8443/v1"
 DEFAULT_AZURE_OPENAI_ENDPOINT = "http://127.0.0.1:8443/openai"
+# Router auths upstream via Workload Identity; the OpenAI / AzureOpenAI
+# SDKs demand SOME non-empty key string. See ROUTER_MANAGED_KEY_SENTINEL
+# in the anthropic / langgraph / pydantic-ai adapters for the same
+# pattern.
+ROUTER_MANAGED_KEY_SENTINEL = "router-managed"
 SERVICE_NAME = "azureclaw-runtime-maf-python"
 
 
@@ -61,6 +68,8 @@ def bootstrap(
 
     os.environ.setdefault(ENV_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL)
     os.environ.setdefault(ENV_AZURE_OPENAI_ENDPOINT, DEFAULT_AZURE_OPENAI_ENDPOINT)
+    os.environ.setdefault(ENV_OPENAI_API_KEY, ROUTER_MANAGED_KEY_SENTINEL)
+    os.environ.setdefault(ENV_AZURE_OPENAI_API_KEY, ROUTER_MANAGED_KEY_SENTINEL)
 
     version = service_version or _read_version()
     try:

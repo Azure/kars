@@ -25,7 +25,7 @@ set -eu
 # Provider base URLs — all routed through the inference-router
 # sidecar. LangChain factories read these at construction time
 # (ChatOpenAI, AzureChatOpenAI, ChatAnthropic, ...).
-export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/openai/v1}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/v1}"
 export AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-http://127.0.0.1:8443/azure-openai}"
 export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8443/anthropic/v1}"
 

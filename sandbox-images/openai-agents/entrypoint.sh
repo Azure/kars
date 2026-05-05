@@ -18,7 +18,7 @@ set -eu
 
 # Router sidecar — the only LLM endpoint allowed by NetworkPolicy +
 # egress-guard. Vanilla `openai` SDK reads OPENAI_BASE_URL.
-export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/openai/v1}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8443/v1}"
 
 # Platform MCP server: 9 Foundry-shim tools every runtime gets for
 # free. The OpenAI Agents SDK MCP client points here.

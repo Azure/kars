@@ -12,6 +12,12 @@ import os
 import sys
 import time
 
+# Bootstrap MUST run in this process so OPENAI_BASE_URL /
+# OPENAI_API_KEY (router-managed sentinel) and OTel are set
+# before any framework SDK is imported.
+from azureclaw_runtime_maf_python.runtime import bootstrap
+bootstrap()
+
 BANNER = "🔒 AzureClaw — Microsoft Agent Framework (default agent)"
 
 
@@ -45,7 +51,7 @@ async def _smoke_test() -> None:
 
     try:
         client = OpenAIChatClient(model_id=model)
-        agent = client.create_agent(
+        agent = client.as_agent(
             instructions=(
                 "You are a default smoke-test agent embedded in an AzureClaw sandbox. "
                 "Reply with exactly one short sentence confirming you are alive."
