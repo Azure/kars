@@ -190,7 +190,17 @@ the app registration automatically.
 If nobody has provisioned the `api://agentmesh` Entra application in your
 tenant, sandboxes still come up — they fall back to the **AGT anonymous
 tier**, which works for dev/test but not for production tenant-isolated
-workloads. Ask your tenant admin to run:
+workloads.
+
+The fastest fix is the AzureClaw CLI helper, which is idempotent and
+prints the tenant/client IDs when it's done:
+
+```bash
+# Requires Application Administrator or Global Admin
+azureclaw mesh setup-trust
+```
+
+If you'd rather run the underlying `az` calls directly:
 
 ```bash
 # Requires Application Administrator or Global Admin
