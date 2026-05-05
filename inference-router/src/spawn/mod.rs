@@ -160,27 +160,32 @@ pub async fn create_sandbox(
         ));
     }
 
-    // Build spec
+    // Build spec — matches the post-S10/S13 CRD schema:
+    //   - `runtime` (required) — multi-runtime selector; sub-agents always
+    //     spawn as OpenClaw with the controller's default image (`:latest`).
+    //   - `inferenceRef` (required) — by-name reference to an
+    //     InferencePolicy CR in the same namespace. Sub-agents reuse the
+    //     parent's policy (`<parent>-inference`) so they inherit the same
+    //     model preference, content-safety floor, prompt-shield setting,
+    //     and token budgets without us needing to clone the CR.
+    //   - `sandbox`, `governance`, `networkPolicy`, optional `agent` —
+    //     unchanged structurally.
+    // The legacy top-level `openclaw` and `inference` blocks were removed
+    // from the schema in S10.A1 / S13; sending them now triggers
+    // `additionalProperties: false` rejection at admission.
     let mut spec = serde_json::json!({
-        "openclaw": {
-            "version": "2026.3.13",
-            "config": {
-                "agent": {
-                    "model": format!("azure/{model}")
-                }
-            }
+        "runtime": {
+            "kind": "OpenClaw",
+            "openclaw": {}
+        },
+        "inferenceRef": {
+            "name": format!("{parent_name}-inference")
         },
         "sandbox": {
             "isolation": isolation,
             "readOnlyRootFilesystem": true,
             "runAsNonRoot": true,
             "allowPrivilegeEscalation": false,
-        },
-        "inference": {
-            "provider": "azure-ai-foundry",
-            "model": model,
-            "contentSafety": true,
-            "promptShields": true,
         },
         "networkPolicy": {
             "defaultDeny": true,
@@ -189,16 +194,16 @@ pub async fn create_sandbox(
         },
     });
 
-    // Add token budget if specified
+    // Token budgets used to live on `spec.inference.tokenBudget` but the
+    // post-S13 schema delegates inference policy to the InferencePolicy CR.
+    // For now sub-agents inherit the parent's budget; per-sub-agent budgets
+    // would require minting a child InferencePolicy — tracked separately.
     if req.token_budget_daily.is_some() || req.token_budget_per_request.is_some() {
-        let mut budget = serde_json::Map::new();
-        if let Some(d) = req.token_budget_daily {
-            budget.insert("daily".into(), serde_json::json!(d));
-        }
-        if let Some(p) = req.token_budget_per_request {
-            budget.insert("perRequest".into(), serde_json::json!(p));
-        }
-        spec["inference"]["tokenBudget"] = serde_json::Value::Object(budget);
+        tracing::warn!(
+            parent = %parent_name,
+            child = %req.agent_id,
+            "Per-sub-agent token budgets ignored — sub-agent inherits parent InferencePolicy '{parent_name}-inference'",
+        );
     }
 
     // Governance is always enabled (native in router)
@@ -254,6 +259,17 @@ pub async fn create_sandbox(
         );
     }
 
+    // Stash the requested model in an annotation. The CRD schema no longer
+    // carries `spec.inference.model` (delegated to InferencePolicy), but
+    // list_sandboxes / restore still need to surface what model the user
+    // asked for — labels would be too restrictive (`/` is invalid in label
+    // values), so we use an annotation.
+    let mut annotations = BTreeMap::new();
+    annotations.insert(
+        "azureclaw.azure.com/model".to_string(),
+        model.to_string(),
+    );
+
     let crd = serde_json::json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
         "kind": "ClawSandbox",
@@ -261,6 +277,7 @@ pub async fn create_sandbox(
             "name": req.agent_id,
             "namespace": namespace,
             "labels": labels,
+            "annotations": annotations,
         },
         "spec": spec,
     });
@@ -450,9 +467,9 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
                 .map(String::from);
 
             let model = data
-                .get("spec")
-                .and_then(|s| s.get("inference"))
-                .and_then(|i| i.get("model"))
+                .get("metadata")
+                .and_then(|m| m.get("annotations"))
+                .and_then(|a| a.get("azureclaw.azure.com/model"))
                 .and_then(|m| m.as_str())
                 .map(String::from);
 
@@ -609,10 +626,14 @@ pub async fn collect_sub_agent_snapshots(
             continue;
         }
 
-        // Reconstruct SpawnRequest from CRD spec
-        let model = spec
-            .get("inference")
-            .and_then(|i| i.get("model"))
+        // Reconstruct SpawnRequest from CRD metadata + spec.
+        // Model lives on the `azureclaw.azure.com/model` annotation since
+        // S13 (delegated to InferencePolicy on-CR).
+        let model = obj
+            .data
+            .get("metadata")
+            .and_then(|m| m.get("annotations"))
+            .and_then(|a| a.get("azureclaw.azure.com/model"))
             .and_then(|m| m.as_str())
             .map(String::from);
 
@@ -640,17 +661,11 @@ pub async fn collect_sub_agent_snapshots(
             .and_then(|i| i.as_str())
             .map(String::from);
 
-        let token_budget_daily = spec
-            .get("inference")
-            .and_then(|i| i.get("tokenBudget"))
-            .and_then(|b| b.get("daily"))
-            .and_then(|d| d.as_i64());
-
-        let token_budget_per_request = spec
-            .get("inference")
-            .and_then(|i| i.get("tokenBudget"))
-            .and_then(|b| b.get("perRequest"))
-            .and_then(|p| p.as_i64());
+        // Token budgets now live on the InferencePolicy CR, not the
+        // sub-agent CRD. On restore, the new spawn will inherit the
+        // parent's policy budgets — we no longer round-trip per-sub-agent.
+        let token_budget_daily: Option<i64> = None;
+        let token_budget_per_request: Option<i64> = None;
 
         let trusted_peers = spec
             .get("governance")
