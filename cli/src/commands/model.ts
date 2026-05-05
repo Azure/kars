@@ -20,13 +20,42 @@ export function modelCommand(): Command {
       const spinner = ora(`Switching ${name} to ${model}...`).start();
 
       try {
-        // Patch the ClawSandbox CR's inference.model field
+        // Post-S10/S13: model preference lives on the InferencePolicy CR
+        // referenced by spec.inferenceRef.name (NOT spec.inference.model;
+        // that field was removed by the schema in S10.A1 and is silently
+        // dropped on patch). Patch the InferencePolicy directly.
+        const { stdout: refStdout } = await execa("kubectl", [
+          "get", "clawsandbox", name,
+          "-n", "azureclaw-system",
+          "-o", "jsonpath={.spec.inferenceRef.name}",
+        ], { stdio: "pipe" });
+        const refName = refStdout.trim();
+        if (!refName) {
+          throw new Error(
+            `sandbox '${name}' has no spec.inferenceRef.name — please mint an InferencePolicy first`,
+          );
+        }
         await execa("kubectl", [
-          "patch", "clawsandbox", name,
+          "patch", "inferencepolicy", refName,
           "-n", "azureclaw-system",
           "--type", "merge",
-          "-p", JSON.stringify({ spec: { inference: { model } } }),
+          "-p", JSON.stringify({
+            spec: {
+              modelPreference: {
+                primary: { provider: "azure-openai", deployment: model },
+              },
+            },
+          }),
         ], { stdio: "pipe" });
+
+        // Mirror the model preference onto the sandbox annotation so
+        // `model get` and other read paths stay consistent.
+        await execa("kubectl", [
+          "annotate", "clawsandbox", name,
+          "-n", "azureclaw-system",
+          `azureclaw.azure.com/model=${model}`,
+          "--overwrite",
+        ], { stdio: "pipe" }).catch(() => {});
 
         // Update the inference router env var on the deployment
         const namespace = `azureclaw-${name}`;
@@ -55,12 +84,32 @@ export function modelCommand(): Command {
     .action(async (name: string) => {
       const { execa } = await import("execa");
       try {
-        const { stdout } = await execa("kubectl", [
+        // Post-S10/S13: model preference lives on the InferencePolicy CR
+        // referenced by spec.inferenceRef.name. Resolve via that ref; fall
+        // back to the metadata annotation; finally to legacy spec.inference.
+        const { stdout: sbJson } = await execa("kubectl", [
           "get", "clawsandbox", name,
           "-n", "azureclaw-system",
-          "-o", "jsonpath={.spec.inference.model}",
+          "-o", "json",
         ], { stdio: "pipe" });
-        console.log(`\n  ${name}: ${chalk.bold(stdout.trim() || "gpt-4.1")} (Foundry)\n`);
+        const obj = JSON.parse(sbJson);
+        const refName: string | undefined = obj.spec?.inferenceRef?.name;
+        const annotated: string | undefined = obj.metadata?.annotations?.["azureclaw.azure.com/model"];
+        let model = "";
+        if (refName) {
+          try {
+            const { stdout: mp } = await execa("kubectl", [
+              "get", "inferencepolicy", refName,
+              "-n", "azureclaw-system",
+              "-o", "jsonpath={.spec.modelPreference.primary.deployment}",
+            ], { stdio: "pipe" });
+            model = mp.trim();
+          } catch { /* fall through */ }
+        }
+        if (!model) {
+          model = annotated || obj.spec?.inference?.model || "gpt-4.1";
+        }
+        console.log(`\n  ${name}: ${chalk.bold(model)} (Foundry)\n`);
       } catch {
         console.log(chalk.red(`\n  Sandbox '${name}' not found.\n`));
       }

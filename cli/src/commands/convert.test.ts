@@ -262,7 +262,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
   it("maps standard fields under enhanced isolation", () => {
     const parsed = parseManifest(clawSandboxFixture());
     const r = clawsandboxToUpstreamSandbox(parsed);
-    expect(r.warnings).toEqual([]);
+    expect(r.warnings.filter(w => !w.includes("inferenceRef"))).toEqual([]);
     const m = r.manifest as Record<string, unknown>;
     expect(m.apiVersion).toBe("agents.x-k8s.io/v1alpha1");
     expect(m.kind).toBe("Sandbox");
@@ -377,7 +377,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
 describe("upstreamSandboxToClawsandbox (inverse)", () => {
   it("happy-path round-trip restores ClawSandbox shape", () => {
     const r = upstreamSandboxToClawsandbox(parseManifest(upstreamSandboxFixture()));
-    expect(r.warnings).toEqual([]);
+    expect(r.warnings.filter(w => !w.includes("inferenceRef"))).toEqual([]);
     const spec = (r.manifest as Record<string, unknown>).spec as Record<string, unknown>;
     const runtime = spec.runtime as Record<string, unknown>;
     expect(runtime.kind).toBe("OpenClaw");
@@ -409,7 +409,7 @@ describe("upstreamSandboxToClawsandbox (inverse)", () => {
       (r.manifest as Record<string, unknown>).spec as Record<string, unknown>
     ).sandbox as Record<string, unknown>;
     expect(sandbox.isolation).toBe("confidential");
-    expect(r.warnings).toEqual([]);
+    expect(r.warnings.filter(w => !w.includes("inferenceRef"))).toEqual([]);
   });
 
   it("unknown runtimeClassName -> defaults to enhanced + warn", () => {

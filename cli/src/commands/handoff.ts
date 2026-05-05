@@ -398,13 +398,72 @@ export function handoffCommand(): Command {
           // Always apply the CRD (create or update) with inherited config.
           // Server-side apply is idempotent; the controller only restarts the
           // pod if the deployment spec actually changed.
-          const crdManifest = JSON.stringify({
-            apiVersion: "azureclaw.io/v1alpha1",
-            kind: "ClawSandbox",
-            metadata: { name: targetName, namespace: "azureclaw-system" },
+          //
+          // Post-S10/S13 schema: ClawSandbox references InferencePolicy +
+          // ToolPolicy by name. We mint per-target policy CRs alongside.
+          const targetInferenceRef = `${targetName}-inference`;
+          const targetToolPolicyRef = `${targetName}-toolpolicy`;
+          const handoffModel = process.env.DEFAULT_MODEL || "gpt-5.4";
+
+          const inferencePolicyManifest = JSON.stringify({
+            apiVersion: "azureclaw.azure.com/v1alpha1",
+            kind: "InferencePolicy",
+            metadata: {
+              name: targetInferenceRef,
+              namespace: "azureclaw-system",
+              labels: {
+                "azureclaw.azure.com/spawned-by": "handoff",
+                "azureclaw.azure.com/predecessor": name,
+              },
+            },
             spec: {
-              model: process.env.DEFAULT_MODEL || "gpt-5.4",
-              handoff: { mode: "restore", predecessor: name },
+              appliesTo: { sandboxName: targetName },
+              modelPreference: {
+                primary: { provider: "azure-openai", deployment: handoffModel },
+                fallback: [],
+              },
+              contentSafety: { requirePromptShields: true },
+            },
+          });
+          const toolPolicyManifest = JSON.stringify({
+            apiVersion: "azureclaw.azure.com/v1alpha1",
+            kind: "ToolPolicy",
+            metadata: {
+              name: targetToolPolicyRef,
+              namespace: "azureclaw-system",
+              labels: {
+                "azureclaw.azure.com/spawned-by": "handoff",
+                "azureclaw.azure.com/predecessor": name,
+              },
+            },
+            spec: {
+              appliesTo: {
+                sandboxMatchLabels: {
+                  "azureclaw.azure.com/sandbox": targetName,
+                },
+              },
+            },
+          });
+
+          const crdManifest = JSON.stringify({
+            apiVersion: "azureclaw.azure.com/v1alpha1",
+            kind: "ClawSandbox",
+            metadata: {
+              name: targetName,
+              namespace: "azureclaw-system",
+              labels: {
+                "azureclaw.azure.com/spawned-by": "handoff",
+                "azureclaw.azure.com/predecessor": name,
+              },
+              annotations: {
+                "azureclaw.azure.com/handoff-mode": "restore",
+                "azureclaw.azure.com/handoff-predecessor": name,
+                "azureclaw.azure.com/model": handoffModel,
+              },
+            },
+            spec: {
+              runtime: { kind: "OpenClaw", openclaw: {} },
+              inferenceRef: { name: targetInferenceRef },
               networkPolicy: {
                 defaultDeny: true,
                 approvalRequired: true,
@@ -412,15 +471,28 @@ export function handoffCommand(): Command {
               },
               sandbox: {
                 isolation: sourceIsolation,
+                readOnlyRootFilesystem: true,
+                runAsNonRoot: true,
+                allowPrivilegeEscalation: false,
               },
               governance: {
                 enabled: true,
-                toolPolicy: "default",
+                toolPolicyRef: { name: targetToolPolicyRef },
                 trustThreshold: sourceTrustThreshold,
               },
             },
           });
           try {
+            // Apply policy CRs first so the sandbox's references resolve
+            // immediately on admission.
+            await execa("kubectl", ["apply", "-f", "-"], {
+              input: inferencePolicyManifest,
+              stdio: ["pipe", "pipe", "pipe"],
+            });
+            await execa("kubectl", ["apply", "-f", "-"], {
+              input: toolPolicyManifest,
+              stdio: ["pipe", "pipe", "pipe"],
+            });
             await execa("kubectl", ["apply", "-f", "-"], {
               input: crdManifest,
               stdio: ["pipe", "pipe", "pipe"],
