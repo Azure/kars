@@ -975,10 +975,27 @@ mkdir -p /tmp/node-host-home/.openclaw
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /tmp/node-host-home
 # Create a minimal config for the node-host — it only needs gateway connectivity,
 # NOT our plugins. Using the main config causes "plugin not found: azureclaw" crash loops.
+#
+# IMPORTANT: `plugins.allow: []` (empty) is interpreted by OpenClaw's loader as
+# "no allowlist applied" — so every bundled plugin with `enabledByDefault: true`
+# (e.g. `acpx` with `activation.onStartup: true`) loads and triggers
+# `ensureBundledPluginRuntimeDeps`, which kicks off a 42-spec npm install at
+# runtime under the egress-guarded UID 1000. That blocks the node-host's event
+# loop indefinitely behind the forward proxy and wedges the gateway path the
+# WebUI talks to. Pre-staging at /opt/openclaw-stage doesn't help because
+# OpenClaw's materialization check reads `installRoot/package.json` and
+# `installRoot` is the LAST entry of OPENCLAW_PLUGIN_STAGE_DIR (the writable
+# `/tmp/openclaw-cache`, which is empty).
+#
+# Fix: pass a non-empty allowlist with a single lightweight bundled plugin
+# (`openai`). The loader's allow-list logic then disables every other bundled
+# plugin (`enableState.enabled = false`) and skips the runtime-deps install
+# path entirely (loader.js gates on `enableState.enabled` before calling
+# `prepareBundledPluginRuntimeLoadRoot`).
 cat > /tmp/node-host-home/.openclaw/openclaw.json << 'NODECONF'
 {
   "gateway": { "port": 18789 },
-  "plugins": { "allow": [] }
+  "plugins": { "allow": ["openai"] }
 }
 NODECONF
 [ "$IS_ROOT" = "true" ] && chown sandbox:sandbox /tmp/node-host-home/.openclaw/openclaw.json
