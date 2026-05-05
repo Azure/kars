@@ -34,6 +34,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: "n",        action: "spawn new agent",                       scope: "agents" },
   { key: "m",        action: "switch model for selected agent",       scope: "agents" },
   { key: "l",        action: "tail logs for selected agent",          scope: "agents" },
+  { key: "Shift-e",  action: "open egress drawer (fleet posture + sign+enforce)", scope: "egress" },
   { key: "i",        action: "inspect (drill-in: attach/detach/eval)", scope: "agents" },
   { key: "x",        action: "delete selected agent (confirm)",       scope: "agents" },
   { key: "Enter",    action: "connect (shell session)",               scope: "agents" },
@@ -52,7 +53,7 @@ const viewClusterDim  = "{gray-fg}Cluster{/}";
 const viewTopologyDim = "{gray-fg}Topology{/}";
 
 const AGENTS_ACTIONS =
-  "[Tab] Focus  [↑↓] Nav  [Enter] Connect  [i] Inspect  [c] Cluster  [t] Topology  [P] Panels  " +
+  "[Tab] Focus  [↑↓] Nav  [Enter] Connect  [i] Inspect  [E] Egress  [c] Cluster  [t] Topology  [P] Panels  " +
   "[a] Approve  [A] All  [d] Del/Deny  [e] Enforce  [L] Learn/Enforce  [g] AGT  [n] Spawn  [r] Refresh  [q] Quit";
 
 /**

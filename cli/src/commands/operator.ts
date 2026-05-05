@@ -51,6 +51,7 @@ import { openSpawnDialog } from "./operator/dialogs/spawn.js";
 import { deleteSelectedAgent as _deleteSelectedAgent } from "./operator/dialogs/delete.js";
 import { connectToAgent as _connectToAgent } from "./operator/dialogs/connect.js";
 import { openAgentDetailDialog } from "./operator/dialogs/agent_detail.js";
+import { openEgressDrawer } from "./operator/dialogs/egress.js";
 import { createPanelsOverlay } from "./operator/panels_overlay.js";
 
 // ── Command ─────────────────────────────────────────────────────────
@@ -857,7 +858,19 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     });
   });
 
-  // ── Connect to agent (Enter) ──────────────────────────────────────
+  // ── Egress drawer (Shift-E) ───────────────────────────────────────
+  screen.key(["S-e"], () => {
+    if (dialogOpen) return;
+    openEgressDrawer({
+      screen,
+      sandboxes,
+      egressByAgent,
+      securityStates,
+      activityLog,
+      setDialogOpen: (v: boolean) => { dialogOpen = v; },
+      refresh,
+    });
+  });
   // (body extracted to operator/dialogs/connect.ts in S15.e.7)
   async function connectToAgent() {
     if (dialogOpen) return;
