@@ -23,7 +23,7 @@
 #   - Honors `AZURECLAW_*` env wiring (router URL, AGT relay URL, identity SAN).
 #   - Does not bind privileged ports; default `securityContext` only.
 
-FROM mcr.microsoft.com/cbl-mariner/base/python:3.12 AS base
+FROM mcr.microsoft.com/azurelinux/base/python:3.12 AS base
 
 LABEL org.azureclaw.runtime.contract="v1"
 LABEL org.azureclaw.runtime.kind="MicrosoftAgentFramework"
