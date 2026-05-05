@@ -486,3 +486,4 @@ runtimes/langgraph-ts/dist/
 
 # mdbook documentation site output (docs/site/book.toml writes here)
 /target/book/
+CRD-AUDIT-REPORT.md
