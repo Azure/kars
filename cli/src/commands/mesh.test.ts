@@ -272,12 +272,30 @@ describe("meshCommand", () => {
     expect(cmd.description()).toBeTruthy();
   });
 
-  it("has auth, status, and reset subcommands", () => {
+  it("has auth, status, reset, and setup-trust subcommands", () => {
     const cmd = meshCommand();
     const subNames = cmd.commands.map((c) => c.name());
     expect(subNames).toContain("auth");
     expect(subNames).toContain("status");
     expect(subNames).toContain("reset");
+    expect(subNames).toContain("setup-trust");
+  });
+
+  it("setup-trust has --display-name and --dry-run options", () => {
+    const cmd = meshCommand();
+    const setup = cmd.commands.find((c) => c.name() === "setup-trust")!;
+    expect(setup).toBeDefined();
+    const displayName = setup.options.find((o) => o.long === "--display-name");
+    expect(displayName).toBeDefined();
+    expect(displayName!.defaultValue).toBe("AzureClaw AgentMesh");
+    const dryRun = setup.options.find((o) => o.long === "--dry-run");
+    expect(dryRun).toBeDefined();
+  });
+
+  it("setup-trust description mentions api://agentmesh", () => {
+    const cmd = meshCommand();
+    const setup = cmd.commands.find((c) => c.name() === "setup-trust")!;
+    expect(setup.description()).toContain("api://agentmesh");
   });
 
   it("auth subcommand has --registry required option", () => {
