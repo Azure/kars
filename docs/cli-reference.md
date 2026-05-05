@@ -250,7 +250,7 @@ azureclaw add my-agent --runtime byo --byo-image myacr.azurecr.io/my-agent:lates
 azureclaw add reviewer --dry-run
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md), [docs/runtime-contract.md](runtime-contract.md), [docs/channels-plugins.md](channels-plugins.md)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md), [docs/runtimes.md](runtimes.md), [docs/channels-plugins.md](channels-plugins.md)
 
 ---
 
@@ -340,7 +340,7 @@ azureclaw push --only controller
 Translates manifests between `ClawSandbox` and the upstream
 `agents.x-k8s.io/v1alpha1 Sandbox` format (and the `overlay` variant). Hard-fails
 on lossy translations by default; pass `--allow-lossy` to proceed with
-warnings. See [docs/internal/sigs-agent-sandbox-compat.md](sigs-agent-sandbox-compat.md)
+warnings. See `docs/internal/sigs-agent-sandbox-compat.md` (internal)
 for the normative field mapping.
 
 **Usage:**
@@ -369,7 +369,7 @@ azureclaw convert -f clawsandbox.yaml --to upstream-sandbox --allow-lossy
 azureclaw convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web
 ```
 
-**See also:** [docs/internal/sigs-agent-sandbox-compat.md](sigs-agent-sandbox-compat.md)
+**See also:** `docs/internal/sigs-agent-sandbox-compat.md` (internal)
 
 ---
 
@@ -436,7 +436,7 @@ azureclaw migrate from-kagent agent.yaml --isolation enhanced --out-dir ./manife
 cat kagent-agent.yaml | azureclaw migrate from-kagent -
 ```
 
-**See also:** [docs/internal/sigs-agent-sandbox-compat.md](sigs-agent-sandbox-compat.md)
+**See also:** `docs/internal/sigs-agent-sandbox-compat.md` (internal)
 
 ---
 
@@ -565,7 +565,7 @@ azureclaw handoff my-agent --status
 azureclaw handoff my-agent --abort
 ```
 
-**See also:** [docs/architecture.md](architecture.md), [docs/internal/e2e-encryption-proof.md](e2e-encryption-proof.md)
+**See also:** [docs/architecture.md](architecture.md), `docs/internal/e2e-encryption-proof.md` (internal)
 
 ---
 
@@ -937,7 +937,7 @@ azureclaw egress my-agent --enforce --emit-manifest ./patches/egress-my-agent.ya
 azureclaw egress my-agent --approve api.github.com --sign-mode keyed --sign-key azurekms://myvault.vault.azure.net/keys/cosign
 ```
 
-**See also:** [docs/egress-proxy.md](egress-proxy.md), [docs/internal/policy-canonical-format.md](policy-canonical-format.md)
+**See also:** [docs/egress-proxy.md](egress-proxy.md), `docs/internal/policy-canonical-format.md` (internal)
 
 ---
 
@@ -1107,7 +1107,7 @@ azureclaw mesh demote
 azureclaw mesh unpair --name my-peer
 ```
 
-**See also:** [docs/internal/e2e-encryption-proof.md](e2e-encryption-proof.md)
+**See also:** `docs/internal/e2e-encryption-proof.md` (internal)
 
 ---
 
@@ -1164,7 +1164,7 @@ azureclaw pair inspect my-peer
 azureclaw pair revoke my-peer
 ```
 
-**See also:** [docs/internal/e2e-encryption-proof.md](e2e-encryption-proof.md)
+**See also:** `docs/internal/e2e-encryption-proof.md` (internal)
 
 ---
 
