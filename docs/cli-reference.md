@@ -145,9 +145,16 @@ azureclaw up --build --foundry-endpoint https://my-project.services.ai.azure.com
 
 Runs a fully-policy-enforced sandbox locally via Docker for inner-loop
 development. Same model routing, same egress policies, and the same
-AGT governance layer as AKS — but on your laptop. Requires an existing
-Azure OpenAI resource with at least one model deployment. On first run,
-prompts for your endpoint, deployment name, and API key.
+AGT governance layer as AKS — but on your laptop.
+
+**Two inference providers** are supported. On first run you'll be asked
+to pick one; your choice is saved to `~/.azureclaw/config.json` and
+reused on subsequent runs:
+
+| Provider | Requires | Saved as | Trade-offs |
+|---|---|---|---|
+| **Azure AI Foundry / Azure OpenAI** | Existing Foundry or Azure OpenAI resource + API key | `provider: "foundry"` | Full feature set: Memory Store, agents, evaluations, Content Safety inline, indexes |
+| **GitHub Models** | A GitHub PAT with `models:read` scope | `provider: "github-models"` | Free, no Azure subscription needed. Foundry-only routes (Memory Store, agents, evaluations, indexes, Content Safety inline) return `501`. Subject to GitHub Models rate limits. |
 
 **Usage:**
 ```
@@ -158,8 +165,9 @@ azureclaw dev [options]
 | Flag | Default | Description |
 |---|---|---|
 | `--name <name>` | `dev-agent` | Sandbox name |
-| `--model <model>` | `gpt-4.1` | Azure OpenAI model deployment name |
+| `--model <model>` | `gpt-4.1` (Foundry) / `gpt-4o-mini` (GitHub Models) | Model deployment name |
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
+| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use this for ephemeral runs that shouldn't overwrite your saved provider. To make GitHub Models your default, run `azureclaw dev` without this flag and pick GitHub Models at the prompt. |
 | `--image <image>` | `azureclaw-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
@@ -182,6 +190,9 @@ azureclaw dev [options]
 ```bash
 # Start a local sandbox with default settings (prompts for credentials on first run)
 azureclaw dev
+
+# Ephemeral GitHub Models run — does not change your saved Foundry creds
+azureclaw dev --github-token $GITHUB_PAT
 
 # Named sandbox with Telegram channel
 azureclaw dev --name my-bot --channels telegram --telegram-token 123456:ABC-DEF
