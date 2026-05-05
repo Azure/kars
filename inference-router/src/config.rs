@@ -34,6 +34,7 @@ pub struct Config {
 
     /// Azure AI Foundry endpoint for inference (e.g. https://my-resource.openai.azure.com/)
     /// Falls back to AZURE_OPENAI_ENDPOINT for dev-mode compatibility.
+    /// Sourced from helm values, NOT from CRs. See docs/adr/0002-inference-endpoint-sourcing.md.
     pub foundry_endpoint: Option<String>,
 
     /// Foundry project endpoint for standalone APIs: Memory Store, Foundry IQ, Agent Service.
