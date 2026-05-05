@@ -41,6 +41,9 @@ export {
   PANEL_BY_ID,
   resolvePanels,
   renderDashboard,
+  renderCrdSections,
+  renderCrdItemDetail,
+  type CrdRow,
   type LayoutOpts,
 } from "./layout.js";
 
