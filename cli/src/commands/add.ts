@@ -19,41 +19,114 @@ export function addCommand(): Command {
   cmd
     .description("Add a new sandboxed agent to an existing AzureClaw cluster")
     .argument("<name>", "Name for the new sandbox agent")
-    .option("--model <model>", "AI model", "gpt-4.1")
+
+    // ── Core (all runtimes) ────────────────────────────────────────────
+    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | langgraph | anthropic | pydantic-ai | byo", "openclaw")
+    .option("--model <model>", "AI model deployment name in Foundry", "gpt-4.1")
     .option("--isolation <level>", "Isolation level: standard | enhanced | confidential", "enhanced")
+    .option("--image <image>", "Custom sandbox image (default: from Helm values; OpenClaw runtime only)")
+
+    // ── Inference budget (all runtimes) ────────────────────────────────
     .option("--token-budget-daily <tokens>", "Daily token budget (0 = unlimited)", "0")
     .option("--token-budget-per-request <tokens>", "Per-request token limit (0 = unlimited)", "0")
-    .option("--agent-instructions <instructions>", "System prompt for Foundry agent")
-    .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
-    .option("--image <image>", "Custom sandbox image (default: from Helm values)")
-    .option("--governance", "Enable AGT governance (tool policy, trust, audit)", true)
-    .option("--no-governance", "Disable AGT governance")
-    .option("--trust-threshold <score>", "AGT trust threshold (0-1000, default: 500)", "500")
+
+    // ── Governance / network (all runtimes) ────────────────────────────
+    // Note: router-side content safety, audit, and rate limits are ALWAYS
+    // on. `--governance` only controls whether per-sandbox AGT
+    // ToolPolicy / TrustGraph CRs are generated.
+    .option("--governance", "Generate per-sandbox AGT ToolPolicy + TrustGraph CRs (router guardrails are always on regardless)", true)
+    .option("--no-governance", "Skip generating per-sandbox ToolPolicy / TrustGraph CRs (router guardrails still enforced)")
+    .option("--trust-threshold <score>", "AGT trust threshold (0-1000)", "500")
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
-    .option("--channels <channels>", "Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
-    .option("--telegram-token <token>", "Telegram bot token (from BotFather)")
-    .option("--telegram-allow-from <ids>", "Telegram user IDs allowed to DM (comma-separated numeric IDs)")
-    .option("--slack-token <token>", "Slack bot OAuth token")
-    .option("--discord-token <token>", "Discord bot token")
-    .option("--skills <skills>", "Skills to activate: browser,github,summarize,weather (comma-separated)")
-    // Third-party plugin API keys (stored as K8s secrets on AKS)
-    .option("--brave-api-key <key>", "Brave Search API key")
-    .option("--tavily-api-key <key>", "Tavily search API key")
-    .option("--exa-api-key <key>", "Exa search API key")
-    .option("--firecrawl-api-key <key>", "Firecrawl web scraping API key")
-    .option("--perplexity-api-key <key>", "Perplexity API key")
-    .option("--openai-api-key <key>", "OpenAI API key (for dual-provider setups)")
-    .option("--learn-egress", "Enable egress learn mode: observe all domains (blocklist still enforced), then review with 'azureclaw policy learn'", false)
-    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | langgraph | anthropic | pydantic-ai | byo", "openclaw")
-    .option("--byo-image <image>", "Container image for --runtime byo (must declare org.azureclaw.runtime.contract=v1)")
-    .option("--byo-contract-version <version>", "BYO contract version", "v1")
-    .option("--maf-language <lang>", "Microsoft Agent Framework language: python (dotnet not yet wired)", "python")
+    .option("--learn-egress", "Egress learn mode: observe outbound domains (blocklist still enforced); review with 'azureclaw policy learn'", false)
+
+    // ── Foundry agent (all runtimes; optional) ─────────────────────────
+    .option("--agent-instructions <instructions>", "System prompt for the Foundry agent")
+    .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
+
+    // ── Runtime-specific: OpenClaw only ────────────────────────────────
+    .option("--channels <channels>", "[OpenClaw only] Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
+    .option("--telegram-token <token>", "[OpenClaw only] Telegram bot token (from BotFather)")
+    .option("--telegram-allow-from <ids>", "[OpenClaw only] Telegram user IDs allowed to DM (comma-separated)")
+    .option("--slack-token <token>", "[OpenClaw only] Slack bot OAuth token")
+    .option("--discord-token <token>", "[OpenClaw only] Discord bot token")
+    .option("--skills <skills>", "[OpenClaw only] Skills to activate: browser,github,summarize,weather (comma-separated)")
+    .option("--brave-api-key <key>", "[OpenClaw only] Brave Search API key")
+    .option("--tavily-api-key <key>", "[OpenClaw only] Tavily search API key")
+    .option("--exa-api-key <key>", "[OpenClaw only] Exa search API key")
+    .option("--firecrawl-api-key <key>", "[OpenClaw only] Firecrawl web scraping API key")
+    .option("--perplexity-api-key <key>", "[OpenClaw only] Perplexity API key")
+    .option("--openai-api-key <key>", "[OpenClaw only] OpenAI API key (for dual-provider setups)")
+
+    // ── Runtime-specific: BYO ──────────────────────────────────────────
+    .option("--byo-image <image>", "[BYO only] Container image (must declare org.azureclaw.runtime.contract=v1)")
+    .option("--byo-contract-version <version>", "[BYO only] BYO contract version", "v1")
+
+    // ── Runtime-specific: Microsoft Agent Framework ────────────────────
+    .option("--maf-language <lang>", "[MAF only] Microsoft Agent Framework language: python (dotnet not yet wired)", "python")
+
+    // ── Output control ─────────────────────────────────────────────────
     .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
+    .addHelpText("after", `
+Flag groups (see --help for details):
+  Core:                --runtime, --model, --isolation, --image
+  Inference budget:    --token-budget-*
+  Governance / net:    --governance, --trust-threshold, --policy-profile, --learn-egress
+  Foundry agent:       --agent-instructions, --agent-tools
+  OpenClaw only:       --channels, --telegram-*, --slack-*, --discord-*, --skills, --*-api-key
+  BYO only:            --byo-image, --byo-contract-version
+  MAF only:            --maf-language
+
+Note: Router-side guardrails (content safety, rate limits, audit log,
+egress allowlist) are ALWAYS enforced. --no-governance only skips
+generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
+`)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
 
       const runtimeKind = flagToKind(options.runtime);
       assertRuntimeWired(runtimeKind);
+
+      // Validate runtime-specific flag combinations before doing any work.
+      // Reject incompatible flags up-front with a clear, actionable error
+      // — better than silently ignoring a user's intent.
+      const openClawOnlyFlags: Array<[string, unknown]> = [
+        ["--channels", options.channels],
+        ["--telegram-token", options.telegramToken],
+        ["--telegram-allow-from", options.telegramAllowFrom],
+        ["--slack-token", options.slackToken],
+        ["--discord-token", options.discordToken],
+        ["--skills", options.skills],
+        ["--brave-api-key", options.braveApiKey],
+        ["--tavily-api-key", options.tavilyApiKey],
+        ["--exa-api-key", options.exaApiKey],
+        ["--firecrawl-api-key", options.firecrawlApiKey],
+        ["--perplexity-api-key", options.perplexityApiKey],
+        ["--openai-api-key", options.openaiApiKey],
+        ["--image", options.image],
+      ];
+      if (runtimeKind !== "OpenClaw") {
+        const used = openClawOnlyFlags.filter(([, v]) => v !== undefined && v !== "" && v !== false).map(([f]) => f);
+        if (used.length > 0) {
+          console.error(chalk.red(`\n  Error: ${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with --runtime openclaw.`));
+          console.error(chalk.dim(`  Channels, skills, and plugin API keys are OpenClaw-specific entrypoint features.`));
+          console.error(chalk.dim(`  For ${options.runtime}, configure equivalents inside the agent's own code.\n`));
+          process.exit(1);
+        }
+      }
+      if (runtimeKind !== "BYO" && (options.byoImage || (options.byoContractVersion && options.byoContractVersion !== "v1"))) {
+        console.error(chalk.red(`\n  Error: --byo-image / --byo-contract-version are only valid with --runtime byo.\n`));
+        process.exit(1);
+      }
+      if (runtimeKind === "BYO" && !options.byoImage) {
+        console.error(chalk.red(`\n  Error: --runtime byo requires --byo-image <registry/image:tag>.\n`));
+        process.exit(1);
+      }
+      if (runtimeKind !== "MicrosoftAgentFramework" && options.mafLanguage && options.mafLanguage !== "python") {
+        console.error(chalk.red(`\n  Error: --maf-language is only valid with --runtime microsoft-agent-framework.\n`));
+        process.exit(1);
+      }
+
       const runtimeBlock = buildRuntimeBlock({
         kind: runtimeKind,
         openclawVersion: "2026.3.13",
