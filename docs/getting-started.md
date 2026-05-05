@@ -18,6 +18,37 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 The CLI bootstraps everything else (Helm chart install, Foundry resource creation, ACR build/push, federated identity wiring). You do not need to provision any of it by hand.
 
+### Don't have an Azure OpenAI deployment yet?
+
+Local mode needs an existing Azure OpenAI resource and a model deployment. You can create both with two `az` commands. Pick a region that has the model you want (`gpt-4.1` is widely available in `swedencentral`, `eastus2`, `westus3`):
+
+```bash
+# 1. Create the resource (≈ 30 s)
+az cognitiveservices account create \
+  --name my-aoai \
+  --resource-group my-rg \
+  --kind OpenAI --sku S0 \
+  --location swedencentral \
+  --custom-domain my-aoai
+
+# 2. Create a model deployment (≈ 10 s)
+az cognitiveservices account deployment create \
+  --name my-aoai \
+  --resource-group my-rg \
+  --deployment-name gpt-4.1 \
+  --model-name gpt-4.1 --model-version "2025-04-14" \
+  --model-format OpenAI \
+  --sku-capacity 50 --sku-name GlobalStandard
+
+# 3. Read the values you'll paste into the `azureclaw dev` prompt
+az cognitiveservices account show     -n my-aoai -g my-rg --query properties.endpoint -o tsv
+az cognitiveservices account keys list -n my-aoai -g my-rg --query key1            -o tsv
+```
+
+The free tier (`F0`) works too if you only need to smoke-test, but model availability is narrower. Full reference: [Azure OpenAI quickstart](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource).
+
+If you'd rather skip Azure OpenAI entirely and run against Foundry from `azureclaw up` instead, jump to **[Step 2 — Deploy to AKS](#step-2--deploy-to-aks)** — `up` provisions the Foundry resource and deployment for you.
+
 ---
 
 ## Step 1 — Local (five minutes)
