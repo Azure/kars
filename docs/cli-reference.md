@@ -1,9 +1,10 @@
 # AzureClaw CLI Reference
 
-AzureClaw ships **26 top-level commands** organised by purpose: **Lifecycle**,
-**Operations**, **Configuration**, **Observability**, and **Multi-Agent /
-Federation**. Everything you need to go from zero to a production-hardened,
-E2E-encrypted agent sandbox is expressed through these commands.
+AzureClaw ships **27 top-level commands** organised by purpose: **Lifecycle**,
+**Operations**, **Configuration**, **Observability**, and the
+**Multi-Agent / Federation** family (Agent mobility, Interop, Governance).
+Everything you need to go from zero to a production-hardened, E2E-encrypted
+agent sandbox is expressed through these commands.
 
 See [README.md](../README.md) for the five-minute quick-start with
 `azureclaw dev`, and [getting-started.md](getting-started.md) for the
@@ -61,11 +62,21 @@ All commands also inherit Commander.js built-in `--help`.
 - [trace](#azureclaw-trace)
 - [eval](#azureclaw-eval)
 
-### Multi-Agent / Federation
+### Agent mobility
 
 - [mesh](#azureclaw-mesh)
 - [pair](#azureclaw-pair)
+
+### Interop
+
 - [a2a](#azureclaw-a2a)
+- [a2a-agent](#azureclaw-a2a-agent)
+
+### Governance
+
+- [toolpolicy](#azureclaw-toolpolicy)
+- [inferencepolicy](#azureclaw-inferencepolicy)
+- [mcp](#azureclaw-mcp)
 
 ---
 
@@ -1025,6 +1036,11 @@ azureclaw eval my-agent --list-runs
 
 ## Multi-Agent / Federation
 
+> Three command families:
+> - **Agent mobility** — `mesh`, `pair`: identity, authentication, federation pairings
+> - **Interop** — `a2a`, `a2a-agent`: A2A ingress surfacing and per-agent trust anchors
+> - **Governance** — `toolpolicy`, `inferencepolicy`, `mcp`: cluster-wide CRD policy management
+
 ### `azureclaw mesh`
 
 Manages AgentMesh identity and authentication for cross-environment agent
@@ -1172,13 +1188,11 @@ azureclaw pair revoke my-peer
 
 ### `azureclaw a2a`
 
-A2A 1.0.0 ingress surfacing commands (per
-[docs/adr/0001-a2a-ingress-front-edge.md](adr/0001-a2a-ingress-front-edge.md)).
-`list-exposed` shows every sandbox currently exposed for inbound A2A traffic
-so operators can verify the blast radius at a glance. The full A2A routing
-ConfigMap (`azureclaw-a2a-routes`) lands in `phase1/a2a-controller-revocation`;
-until then `list-exposed` returns an empty table (correct: no agents are
-exposed in current builds).
+A2A (Agent-to-Agent) ingress surfacing commands. `list-exposed` shows every
+sandbox currently exposed for inbound A2A traffic so operators can verify the
+blast radius at a glance. Today no sandboxes opt into A2A ingress by default,
+so `list-exposed` typically returns an empty table; it populates as soon as
+sandboxes are configured to accept inbound A2A traffic.
 
 **Usage:**
 ```
@@ -1189,7 +1203,7 @@ azureclaw a2a <subcommand> [options]
 | Subcommand | Description |
 |---|---|
 | `list-exposed` | List sandboxes currently exposed for inbound A2A traffic (allowed callers, expiry, advertised skills, rate limits) |
-| `schema` | Print the AgentCard JSON shape this cluster will publish per A2A 1.0.0 §4.4 |
+| `schema` | Print the AgentCard JSON shape this cluster publishes per the A2A spec |
 
 **Options for `list-exposed`:**
 | Flag | Default | Description |
@@ -1205,8 +1219,234 @@ azureclaw a2a list-exposed
 # Machine-readable output
 azureclaw a2a list-exposed --output json
 
-# Show the AgentCard schema this cluster will publish
+# Show the AgentCard schema this cluster publishes
 azureclaw a2a schema
 ```
 
-**See also:** [docs/adr/0001-a2a-ingress-front-edge.md](adr/0001-a2a-ingress-front-edge.md)
+**See also:** [`azureclaw a2a-agent`](#azureclaw-a2a-agent) — manage A2AAgent CRs (signing-key trust anchors).
+
+---
+
+### `azureclaw a2a-agent`
+
+Manages **A2AAgent** custom resources — the trust anchors that authorise
+inbound A2A traffic. Each A2AAgent CR pins one or more signing keys and
+optionally points at a `ToolPolicy` for per-call authorisation.
+
+**Usage:**
+```
+azureclaw a2a-agent <subcommand> [options]
+```
+
+**Subcommands:**
+| Subcommand | Description |
+|---|---|
+| `apply <name>` | Create or update an A2AAgent |
+| `get <name>` | Show an A2AAgent by name |
+| `list` | List A2AAgents in a namespace |
+| `delete <name>` | Delete an A2AAgent |
+
+**Options for `apply`:**
+| Flag | Default | Description |
+|---|---|---|
+| `-n, --namespace <ns>` | `default` | Namespace |
+| `--from-file <path>` | — | Read full spec from a YAML/JSON file (overrides flags below) |
+| `--endpoint-url <url>` | — | Agent endpoint URL |
+| `--production-mode` | `false` | Reject unauthenticated traffic; require `https://` |
+| `--signing-key <kid:alg:b64u>` | — | Signing key entry `kid:alg:publicKeyB64u[:notAfter]` (repeatable, ≥1 required) |
+| `--capability <s>` | — | Advertised capability (repeatable) |
+| `--description <s>` | — | AgentCard description |
+| `--display-name <s>` | — | Human-readable display name |
+| `--policy-toolpolicy <name>` | — | ToolPolicy CR name to join at request time |
+| `--require-signed` | `false` | Reject unsigned inbound A2A requests |
+| `--min-signatures <n>` | — | Minimum independent valid signatures required |
+| `--max-skew-seconds <n>` | — | Maximum tolerated clock skew (seconds) |
+
+**Examples:**
+```bash
+# Register an external partner agent with one signing key
+azureclaw a2a-agent apply partner-bot \
+  --endpoint-url https://partner.example.com/a2a \
+  --signing-key key1:Ed25519:MCowBQYDK2VwAyEAxxx... \
+  --require-signed --production-mode
+
+# Apply from a YAML spec
+azureclaw a2a-agent apply partner-bot --from-file partner.yaml
+
+# List A2AAgents in a namespace
+azureclaw a2a-agent list -n acme
+```
+
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#a2aagent), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
+
+---
+
+### `azureclaw toolpolicy`
+
+Manages **ToolPolicy** custom resources — per-tool gating, rate limits, and
+AP2 commerce caps applied to every dispatched tool call. Aliased as `tp`.
+
+**Usage:**
+```
+azureclaw toolpolicy <subcommand> [options]
+azureclaw tp <subcommand> [options]
+```
+
+**Subcommands:**
+| Subcommand | Description |
+|---|---|
+| `apply <name>` | Create or update a ToolPolicy |
+| `get <name>` | Show a ToolPolicy by name |
+| `list` | List ToolPolicies in a namespace |
+| `delete <name>` | Delete a ToolPolicy by name |
+
+**Options for `apply`:**
+| Flag | Default | Description |
+|---|---|---|
+| `-n, --namespace <ns>` | `default` | Namespace |
+| `--from-file <path>` | — | Read spec from a YAML/JSON file |
+| `--tool <name>` | — | Tool name selector (use `*` for all tools) |
+| `--mcp-server <name>` | — | Restrict to a specific MCP server |
+| `--sandbox-label <kv>` | — | Sandbox match label `key=value` (repeatable) |
+| `--rps <n>` | — | Rate limit: requests per second |
+| `--burst <n>` | — | Rate limit: token-bucket burst |
+| `--window <s>` | — | Rate limit window, e.g. `1m`, `24h` |
+| `--daily-cap <s>` | — | AP2 daily cap, e.g. `'USD 100.00'` |
+| `--monthly-cap <s>` | — | AP2 monthly cap |
+| `--per-transfer-cap <s>` | — | AP2 per-transfer cap |
+| `--counterparty <s>` | — | AP2 counterparty allow-list entry (repeatable) |
+| `--approval-mode <mode>` | — | Approval mode: `never`, `always`, `aboveThreshold` |
+| `--approval-threshold <s>` | — | Approval threshold value |
+| `--approval-channel <s>` | — | Approval channel reference |
+| `--display-name <s>` | — | Human-readable display name |
+
+**Examples:**
+```bash
+# Rate-limit all tools to 10 rps with 20-burst
+azureclaw tp apply rate-limit-default --tool '*' --rps 10 --burst 20
+
+# AP2 cap on a payment tool
+azureclaw tp apply payments-cap --tool send-payment \
+  --daily-cap 'USD 500.00' --per-transfer-cap 'USD 100.00' \
+  --approval-mode aboveThreshold --approval-threshold 'USD 50.00'
+
+# Apply from YAML
+azureclaw tp apply complex-policy --from-file policy.yaml
+```
+
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#toolpolicy), [`azureclaw inferencepolicy`](#azureclaw-inferencepolicy)
+
+---
+
+### `azureclaw inferencepolicy`
+
+Manages **InferencePolicy** custom resources — token budgets, model
+preference, and Content Safety severity floor applied to every inference
+call. Aliased as `ip`.
+
+**Usage:**
+```
+azureclaw inferencepolicy <subcommand> [options]
+azureclaw ip <subcommand> [options]
+```
+
+**Subcommands:**
+| Subcommand | Description |
+|---|---|
+| `apply <name>` | Create or update an InferencePolicy |
+| `get <name>` | Show an InferencePolicy by name |
+| `list` | List InferencePolicies in a namespace |
+| `delete <name>` | Delete an InferencePolicy |
+
+**Options for `apply`:**
+| Flag | Default | Description |
+|---|---|---|
+| `-n, --namespace <ns>` | `default` | Namespace |
+| `--from-file <path>` | — | Read spec from a YAML/JSON file |
+| `--sandbox <name>` | — | Restrict to a specific sandbox |
+| `--action <kind>` | — | Inference action: `chat`, `responses`, `image`, `embeddings`, or `*` |
+| `--sandbox-label <kv>` | — | Sandbox match label `key=value` (repeatable) |
+| `--token-budget <n>` | — | Daily token cap (input + output) |
+| `--monthly-tokens <n>` | — | Monthly token cap |
+| `--per-request-tokens <n>` | — | Per-request token cap |
+| `--model <deployment>` | — | Primary model deployment name |
+| `--provider <name>` | `azure-openai` | Provider tag for `--model` |
+| `--fallback <provider:deployment>` | — | Fallback route (repeatable) |
+| `--content-safety-severity <sev>` | — | Severity floor for all CS categories: `Safe`, `Low`, `Medium`, `High` |
+| `--require-prompt-shields` | `false` | Require Prompt Shields annotations from upstream |
+| `--display-name <s>` | — | Human-readable display name |
+
+**Examples:**
+```bash
+# Daily cap for one sandbox with a fallback model
+azureclaw ip apply daily-budget \
+  --sandbox my-bot \
+  --token-budget 100000 \
+  --model gpt-4.1 \
+  --fallback azure-openai:gpt-4o-mini
+
+# Cluster-wide Content Safety floor
+azureclaw ip apply cs-floor --action '*' --content-safety-severity Medium
+
+# Apply from YAML
+azureclaw ip apply complex --from-file policy.yaml
+```
+
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#inferencepolicy), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
+
+---
+
+### `azureclaw mcp`
+
+Manages **McpServer** custom resources — registers external MCP (Model Context
+Protocol) servers that sandboxes are allowed to reach. The router proxies
+`/v1/mcp/*` requests through OAuth 2.1 + JWS verification when
+`productionMode=true`.
+
+**Usage:**
+```
+azureclaw mcp <subcommand> [options]
+```
+
+**Subcommands:**
+| Subcommand | Description |
+|---|---|
+| `apply <name>` | Create or update an McpServer |
+| `get <name>` | Show an McpServer by name |
+| `list` | List McpServers in a namespace |
+| `delete <name>` | Delete an McpServer |
+
+**Options for `apply`:**
+| Flag | Default | Description |
+|---|---|---|
+| `-n, --namespace <ns>` | `default` | Namespace |
+| `--from-file <path>` | — | Read spec from a YAML/JSON file |
+| `--url <url>` | — | Server endpoint URL (`https://` required in production mode) |
+| `--production-mode` | `false` | Require OAuth 2.1 + HTTPS |
+| `--oauth-issuer <url>` | — | OAuth issuer URL |
+| `--oauth-audience <s>` | — | OAuth audience claim |
+| `--oauth-resource <s>` | — | OAuth resource indicator |
+| `--scope <s>` | — | OAuth scope (repeatable) |
+| `--allowed-tool <s>` | — | Allowed tool name (repeatable; use `*` for any) |
+| `--allowed-sandbox-label <kv>` | — | Sandbox match label `key=value` (repeatable) |
+| `--display-name <s>` | — | Human-readable display name |
+
+**Examples:**
+```bash
+# Register a public MCP server (dev mode)
+azureclaw mcp apply github-mcp --url https://mcp.github.com --allowed-tool '*'
+
+# Production mode with OAuth + tool allowlist
+azureclaw mcp apply prod-mcp \
+  --url https://mcp.example.com \
+  --production-mode \
+  --oauth-issuer https://login.example.com \
+  --oauth-audience mcp-api \
+  --scope mcp.read --scope mcp.write \
+  --allowed-tool search --allowed-tool fetch
+
+# Apply from YAML
+azureclaw mcp apply complex --from-file mcp.yaml
+```
+
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#mcpserver), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
