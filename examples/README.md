@@ -8,6 +8,7 @@ End-to-end blueprints you can `kubectl apply -f` after running `azureclaw up`.
 | [`confidential-agent`](confidential-agent/) | OpenClaw | Same as `basic-agent` plus Confidential Containers (CVM workers, attested boot). |
 | [`telegram-agent`](telegram-agent/) | OpenClaw | OpenClaw agent wired to a Telegram channel via the channel-plugin pattern. |
 | [`demo-clawshield`](demo-clawshield/) | OpenClaw (×3) | Multi-tenant attack-simulation demo (poisoned document, two victim tenants, isolation proof). |
+| [`lethal-trifecta-demo`](lethal-trifecta-demo/) | OpenClaw (×2) | Reproduces the [Claude Cowork file-exfiltration attack](https://www.promptarmor.com/resources/claude-cowork-exfiltrates-files) (Jan 2026) on a vanilla OpenClaw vs. an AzureClaw-managed agent. Six independent layers — each one alone catches the attack. **Recommended launch demo.** |
 | [`openai-agents-quickstart`](openai-agents-quickstart/) | OpenAIAgents (Python) | Hosts an unmodified OpenAI Agents SDK app inside an AzureClaw sandbox. Same security as default. |
 | [`maf-quickstart`](maf-quickstart/) | MicrosoftAgentFramework (Python) | Hosts an unmodified Microsoft Agent Framework app inside an AzureClaw sandbox. |
 | [`byo-quickstart`](byo-quickstart/) | BYO | Brings any container image under the BYO contract (`spec.runtime.kind: BYO`). Same isolation, same router. |
