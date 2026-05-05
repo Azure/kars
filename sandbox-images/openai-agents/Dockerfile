@@ -50,8 +50,13 @@ RUN chmod 0755 /usr/local/bin/azureclaw-openai-agents-entrypoint.sh
 # `agentCode: { oci | git }` (see `OpenAIAgentsConfig` in crd.rs).
 RUN mkdir -p /sandbox/agent && chown -R 1000:1000 /sandbox
 
+# Default fallback agent — runs when the operator spawns this runtime
+# without supplying `agentCode`. Proves framework load + router
+# inference path; replace by mounting your own /sandbox/agent/main.py.
+COPY --chown=1000:1000 sandbox-images/openai-agents/default-agent/ /opt/azureclaw-default-agent/
+
 USER 1000
 WORKDIR /sandbox/agent
 
 ENTRYPOINT ["/usr/local/bin/azureclaw-openai-agents-entrypoint.sh"]
-CMD ["python", "/sandbox/agent/main.py"]
+CMD ["python3", "/sandbox/agent/main.py"]

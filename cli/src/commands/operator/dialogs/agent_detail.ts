@@ -159,7 +159,7 @@ export function openAgentDetailDialog(ctx: AgentDetailContext): void {
     width: "80%", height: "80%",
     border: { type: "line" },
     style: { border: { fg: "cyan" }, fg: "white", bg: "black" },
-    label: ` 🔬 Agent: ${sandbox.name}  (${sandbox.health}, ${sandbox.model}) `,
+    label: ` 🔬 Agent: ${sandbox.name}  (${sandbox.health}, ${sandbox.runtimeKind || "OpenClaw"}, ${sandbox.model}) `,
     tags: true, keys: true, mouse: true,
   });
 
@@ -167,7 +167,7 @@ export function openAgentDetailDialog(ctx: AgentDetailContext): void {
     parent: dialog, top: 0, left: 1, right: 1, height: 3,
     tags: true, style: { fg: "white", bg: "black" },
     content:
-      `  Namespace:  ${sandbox.namespace}    Isolation: ${sandbox.isolation}    Channels: ${sandbox.channels || "-"}\n` +
+      `  Namespace:  ${sandbox.namespace}    Runtime: ${sandbox.runtimeKind || "OpenClaw"}    Isolation: ${sandbox.isolation}    Channels: ${sandbox.channels || "-"}\n` +
       `  Status:     ${sandbox.status}    Restarts: ${sandbox.restarts}    Pod: ${sandbox.podName || "-"}\n`,
   });
 

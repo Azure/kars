@@ -417,11 +417,24 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         : s.handoffState === "returning"
           ? "Returning"
           : `${s.status}${restartStr}`;
-      return [hIcon, displayName, statusStr, s.model, s.isolation, s.channels, s.age];
+      // Short tag for the runtime kind so the column stays narrow:
+      // OpenClaw → "OC", OpenAIAgents → "OAI", MicrosoftAgentFramework → "MAF",
+      // LangGraph → "LG", Anthropic → "Anthropic", PydanticAi → "PydAI", BYO → "BYO".
+      const rk = s.runtimeKind || "OpenClaw";
+      const rkTag =
+        rk === "OpenClaw" ? "OC" :
+        rk === "OpenAIAgents" ? "OAI" :
+        rk === "MicrosoftAgentFramework" ? "MAF" :
+        rk === "LangGraph" ? "LG" :
+        rk === "Anthropic" ? "Anthropic" :
+        rk === "PydanticAi" ? "PydAI" :
+        rk === "BYO" ? "BYO" :
+        rk;
+      return [hIcon, displayName, statusStr, rkTag, s.model, s.isolation, s.channels, s.age];
     });
     (agentTable as any).setData({
-      headers: [" ", " Name", " Status", " Model", " Isolation", " Ch", " Age"],
-      data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", ""]],
+      headers: [" ", " Name", " Status", " Runtime", " Model", " Isolation", " Ch", " Age"],
+      data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", "", ""]],
     });
 
     // Egress list — filtered to selected agent, colored by status

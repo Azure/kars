@@ -29,6 +29,13 @@ export interface SandboxInfo {
   parent: string;  // parent agent name (empty if controller)
   handoffState?: "dormant" | "active-successor" | "returning";
   runtime: "docker" | "aks";
+  /**
+   * Agent framework runtime kind from `spec.runtime.kind`. One of
+   * `OpenClaw | OpenAIAgents | MicrosoftAgentFramework | LangGraph |
+   * Anthropic | PydanticAi | BYO`. Defaults to `OpenClaw` for legacy
+   * sandboxes that pre-date the `runtime` discriminator (S10).
+   */
+  runtimeKind?: string;
 }
 
 export interface EgressDomain {
