@@ -59,7 +59,7 @@ Applied to every sandbox pod:
 | `enhanced` (default) | Localhost `azureclaw-strict` | Custom strict allowlist. **Blocks** `mount`, `ptrace`, `bpf`, `unshare`, `setns`, `init_module`, `kexec_load`, `pivot_root`, `chroot`, `reboot`, `perf_event_open`, etc. |
 | `confidential` | RuntimeDefault | Kata VM provides the boundary. |
 
-The strict profile is installed on every node via a DaemonSet that writes `azureclaw-strict.json` to `/var/lib/kubelet/seccomp/profiles/`. The profile is published at `policy-engine/profiles/seccomp/azureclaw-strict.json`.
+The strict profile is installed on every node via a DaemonSet that writes `azureclaw-strict.json` to `/var/lib/kubelet/seccomp/profiles/`. The profile ships in the Helm chart at `deploy/helm/azureclaw/files/azureclaw-strict.json`.
 
 `inotify_*` and `fsync` / `fdatasync` / `sync` are intentionally allowed — they are required by Node-based runtimes and SQLite WAL, and they are safe (filesystem permissions still govern reach).
 

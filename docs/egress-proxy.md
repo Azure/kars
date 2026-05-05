@@ -245,9 +245,9 @@ decisions are recorded in the governance audit log.
 | File | Description |
 |------|-------------|
 | `inference-router/src/blocklist.rs` | Blocklist engine, allowlist, pending approvals, learn mode |
-| `inference-router/src/routes.rs` | HTTP handlers for `/egress/*` endpoints |
+| `inference-router/src/routes/egress.rs` | HTTP handlers for `/egress/*` endpoints |
 | `cli/src/commands/egress.ts` | CLI `azureclaw egress` command |
-| `controller/src/reconciler.rs` | iptables init container + NetworkPolicy generation |
+| `controller/src/reconciler/mod.rs` | iptables init container + NetworkPolicy generation |
 
 ## Signed OCI egress allowlist
 
