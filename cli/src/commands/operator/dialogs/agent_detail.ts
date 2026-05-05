@@ -173,7 +173,7 @@ export function openAgentDetailDialog(ctx: AgentDetailContext): void {
 
   const list = blessed.list({
     parent: dialog, top: 4, left: 1, right: 1, bottom: 3,
-    keys: true, mouse: true, tags: true,
+    keys: false, mouse: true, tags: true,
     style: {
       fg: "white", bg: "black",
       selected: { fg: "black", bg: "cyan", bold: true },
@@ -336,56 +336,85 @@ function openAttachPicker(ctx: AgentDetailContext, after: () => Promise<void>): 
   });
 }
 
-interface FieldDef { key: string; label: string; required: boolean; default?: string }
+interface FieldDef { key: string; label: string; required: boolean; default?: string; auto?: boolean }
 
+/**
+ * Attach forms — minimum-viable input. Anything that can be derived from
+ * the selected sandbox is `auto: true` and pre-filled; the operator only
+ * sees prompts for fields that genuinely need a human decision.
+ *
+ * Memory binding is the extreme case: pass nothing and it works
+ * (store=<sandbox>-mem, scope=agent:<sandbox>, no retention).
+ */
 const ATTACH_FIELDS: Record<AttachKind, FieldDef[]> = {
   mcp: [
-    { key: "name", label: "Name", required: true },
+    { key: "name", label: "Name", required: false, auto: true },
     { key: "url",  label: "URL (https://...)", required: true },
     { key: "production-mode", label: "Production mode (y/n)", required: false, default: "n" },
-    { key: "oauth-issuer", label: "OAuth issuer (prod only, optional)", required: false },
   ],
   inferencepolicy: [
-    { key: "name", label: "Name", required: true },
-    { key: "primary-model", label: "Primary model", required: true },
-    { key: "daily-tokens", label: "Daily token cap (number, optional)", required: false },
-    { key: "guardrail-floor", label: "Guardrail floor (low|medium|high, optional)", required: false },
+    { key: "name", label: "Name", required: false, auto: true },
+    { key: "primary-model", label: "Primary model", required: true, default: "gpt-4.1" },
+    { key: "daily-tokens", label: "Daily token cap (blank = uncapped)", required: false },
   ],
   toolpolicy: [
-    { key: "name", label: "Name", required: true },
-    { key: "applies-to-sandbox", label: "Applies-to sandbox", required: true },
+    { key: "name", label: "Name", required: false, auto: true },
+    { key: "applies-to-sandbox", label: "Applies-to sandbox", required: true, auto: true },
     { key: "approval-required", label: "Approval required (y/n)", required: false, default: "n" },
-    { key: "rate-limit-per-min", label: "Rate limit / min (optional)", required: false },
   ],
   a2a: [
-    { key: "name", label: "Name", required: true },
+    { key: "name", label: "Name", required: false, auto: true },
     { key: "endpoint-url", label: "Endpoint URL", required: true },
-    { key: "production-mode", label: "Production mode (y/n)", required: false, default: "n" },
   ],
   memory: [
-    { key: "name", label: "Name", required: true },
-    { key: "store", label: "Foundry Memory Store name (DNS-label)", required: true },
-    { key: "scope", label: "Scope key (e.g. agent:my-agent)", required: true },
-    { key: "retention-days", label: "Retention days (positive int, optional)", required: false },
+    { key: "name", label: "Name", required: false, auto: true },
+    { key: "sandbox", label: "Sandbox", required: true, auto: true },
+    { key: "store", label: "Foundry Memory Store name", required: false, auto: true },
+    { key: "scope", label: "Scope key", required: false, auto: true },
   ],
 };
 
+/**
+ * Derive smart defaults for a given attach kind + sandbox name.
+ * Exported for unit tests.
+ */
+export function autoDefaults(kind: AttachKind, sandboxName: string): Record<string, string> {
+  const base = sandboxName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  switch (kind) {
+    case "mcp":
+      return { name: `${base}-mcp` };
+    case "inferencepolicy":
+      return { name: `${base}-inference`, "applies-to-sandbox": sandboxName };
+    case "toolpolicy":
+      return { name: `${base}-tools`, "applies-to-sandbox": sandboxName };
+    case "a2a":
+      return { name: `${base}-peer` };
+    case "memory":
+      return {
+        name: `${base}-memory`,
+        sandbox: sandboxName,
+        store: `${base}-mem`,
+        scope: `agent:${sandboxName}`,
+      };
+  }
+}
+
 async function runAttachForm(ctx: AgentDetailContext, kind: AttachKind): Promise<void> {
   const fields = ATTACH_FIELDS[kind];
-  const values: Record<string, string> = {};
-  // Pre-fill the agent-binding field where applicable.
-  if (kind === "memory") values["sandbox"] = ctx.sandbox.name;
-  if (kind === "toolpolicy") values["applies-to-sandbox"] = ctx.sandbox.name;
-  if (kind === "inferencepolicy") values["applies-to-sandbox"] = ctx.sandbox.name;
+  const defaults = autoDefaults(kind, ctx.sandbox.name);
+  const values: Record<string, string> = { ...defaults };
 
+  // Only prompt for fields that genuinely need a human input. `auto: true`
+  // fields are pre-filled from defaults and never asked.
   for (const f of fields) {
+    if (f.auto && values[f.key]) continue;
     // eslint-disable-next-line no-await-in-loop
     const v = await prompt(ctx, `[${kind}] ${f.label}${f.default ? ` [${f.default}]` : ""}`);
     if (v === null) {
       ctx.activityLog.log(`{yellow-fg}attach ${kind}: cancelled.{/}`);
       return;
     }
-    values[f.key] = v.trim() || (f.default ?? "");
+    values[f.key] = v.trim() || (f.default ?? values[f.key] ?? "");
     if (f.required && !values[f.key]) {
       ctx.activityLog.log(`{red-fg}attach ${kind}: '${f.label}' is required.{/}`);
       return;
@@ -409,6 +438,13 @@ async function runAttachForm(ctx: AgentDetailContext, kind: AttachKind): Promise
 
   ctx.activityLog.log(`{cyan-fg}⏳ azureclaw ${args.join(" ")}{/}`);
   ctx.screen.render();
+  // Final confirm so the operator sees exactly what will be applied —
+  // critical for the all-auto cases (e.g. memory) where we never prompted.
+  const ok = await confirmYesNo(ctx, `Attach ${kind}/${values["name"]} to ${ctx.sandbox.name}?\n  azureclaw ${args.join(" ")}`);
+  if (!ok) {
+    ctx.activityLog.log(`{yellow-fg}attach ${kind}: cancelled at confirm.{/}`);
+    return;
+  }
   try {
     await execa("azureclaw", args, { stdio: "pipe" });
     ctx.activityLog.log(`{green-fg}✓ attached{/} ${kind}/${values["name"]} → ${ctx.sandbox.name}`);
@@ -475,23 +511,54 @@ function prompt(ctx: AgentDetailContext, label: string): Promise<string | null> 
 function confirmYesNo(ctx: AgentDetailContext, label: string): Promise<boolean> {
   return new Promise((resolve) => {
     const { screen } = ctx;
-    const box = blessed.box({
+    const dialog = blessed.box({
       parent: screen, top: "center", left: "center",
-      width: Math.min(70, Math.max(40, label.length + 12)), height: 5,
+      width: Math.min(72, Math.max(50, label.length + 12)), height: 7,
       border: { type: "line" },
       style: { border: { fg: "yellow" }, fg: "white", bg: "black" },
-      label: " Confirm ", tags: true,
-      content: `\n  ${label}\n  {gray-fg}[y] Yes   [n/Esc] No{/}`,
+      label: " ⚠  Confirm ", tags: true,
     });
-    screen.render();
+    blessed.box({
+      parent: dialog, top: 0, left: 2, right: 2, height: 2,
+      tags: true, style: { fg: "white", bg: "black" },
+      content: label,
+    });
+    let sel = 0;
+    const btnYes = blessed.button({
+      parent: dialog, top: 3, left: 8, width: 12, height: 1,
+      content: "  [ Yes ]  ", tags: true, mouse: true,
+      style: { fg: "white", bg: "green", focus: { bg: "green", fg: "white", bold: true } },
+    });
+    const btnNo = blessed.button({
+      parent: dialog, top: 3, left: 28, width: 12, height: 1,
+      content: "  [ No ]  ", tags: true, mouse: true,
+      style: { fg: "white", bg: "gray", focus: { bg: "gray", fg: "white", bold: true } },
+    });
+    const updateBtns = () => {
+      btnYes.style.bold = sel === 0;
+      btnNo.style.bold = sel === 1;
+      btnYes.style.bg = sel === 0 ? "green" : "black";
+      btnNo.style.bg = sel === 1 ? "gray" : "black";
+      screen.render();
+    };
+    const finish = (v: boolean) => {
+      screen.removeListener("keypress", onConfKey);
+      dialog.destroy(); screen.render(); resolve(v);
+    };
     const onConfKey = (_ch: unknown, key: { name?: string }) => {
-      if (key.name === "y" || key.name === "Y") { screen.removeListener("keypress", onConfKey); box.destroy(); screen.render(); resolve(true); }
-      else if (key.name === "n" || key.name === "N" || key.name === "escape") {
-        screen.removeListener("keypress", onConfKey); box.destroy(); screen.render(); resolve(false);
-      }
+      if (key.name === "left" || key.name === "right" || key.name === "tab") {
+        sel = sel === 0 ? 1 : 0; updateBtns();
+      } else if (key.name === "y" || key.name === "Y") finish(true);
+      else if (key.name === "n" || key.name === "N" || key.name === "escape") finish(false);
+      else if (key.name === "return" || key.name === "enter") finish(sel === 0);
     };
     screen.on("keypress", onConfKey);
+    btnYes.on("press", () => finish(true));
+    btnNo.on("press", () => finish(false));
+    updateBtns();
+    btnYes.focus();
+    screen.render();
   });
 }
 
-export const __test = { collectAttachments, formatBody, ATTACH_CHOICES, ATTACH_FIELDS };
+export const __test = { collectAttachments, formatBody, ATTACH_CHOICES, ATTACH_FIELDS, autoDefaults };

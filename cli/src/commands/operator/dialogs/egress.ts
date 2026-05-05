@@ -128,7 +128,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
 
   const list = blessed.list({
     parent: dialog, top: 5, left: 1, right: 1, bottom: 5,
-    keys: true, mouse: true, tags: true,
+    keys: false, mouse: true, tags: true,
     style: { fg: "white", bg: "black",
       selected: { fg: "black", bg: "yellow", bold: true } },
     items: [],
@@ -286,22 +286,53 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
 function confirmYesNo(ctx: EgressDrawerContext, label: string): Promise<boolean> {
   return new Promise((resolve) => {
     const { screen } = ctx;
-    const box = blessed.box({
+    const dialog = blessed.box({
       parent: screen, top: "center", left: "center",
-      width: Math.min(80, Math.max(50, label.length + 12)), height: 6,
+      width: Math.min(80, Math.max(50, label.length + 12)), height: 7,
       border: { type: "line" },
       style: { border: { fg: "yellow" }, fg: "white", bg: "black" },
-      label: " Confirm ", tags: true,
-      content: `\n  ${label}\n\n  {gray-fg}[y] Yes   [n/Esc] No{/}`,
+      label: " ⚠  Confirm ", tags: true,
     });
-    screen.render();
+    blessed.box({
+      parent: dialog, top: 0, left: 2, right: 2, height: 2,
+      tags: true, style: { fg: "white", bg: "black" },
+      content: label,
+    });
+    let sel = 0;
+    const btnYes = blessed.button({
+      parent: dialog, top: 3, left: 8, width: 12, height: 1,
+      content: "  [ Yes ]  ", tags: true, mouse: true,
+      style: { fg: "white", bg: "green", focus: { bg: "green", fg: "white", bold: true } },
+    });
+    const btnNo = blessed.button({
+      parent: dialog, top: 3, left: 28, width: 12, height: 1,
+      content: "  [ No ]  ", tags: true, mouse: true,
+      style: { fg: "white", bg: "gray", focus: { bg: "gray", fg: "white", bold: true } },
+    });
+    const updateBtns = () => {
+      btnYes.style.bold = sel === 0;
+      btnNo.style.bold = sel === 1;
+      btnYes.style.bg = sel === 0 ? "green" : "black";
+      btnNo.style.bg = sel === 1 ? "gray" : "black";
+      screen.render();
+    };
+    const finish = (v: boolean) => {
+      screen.removeListener("keypress", onConfKey);
+      dialog.destroy(); screen.render(); resolve(v);
+    };
     const onConfKey = (_ch: unknown, key: { name?: string }) => {
-      if (key.name === "y" || key.name === "Y") { screen.removeListener("keypress", onConfKey); box.destroy(); screen.render(); resolve(true); }
-      else if (key.name === "n" || key.name === "N" || key.name === "escape") {
-        screen.removeListener("keypress", onConfKey); box.destroy(); screen.render(); resolve(false);
-      }
+      if (key.name === "left" || key.name === "right" || key.name === "tab") {
+        sel = sel === 0 ? 1 : 0; updateBtns();
+      } else if (key.name === "y" || key.name === "Y") finish(true);
+      else if (key.name === "n" || key.name === "N" || key.name === "escape") finish(false);
+      else if (key.name === "return" || key.name === "enter") finish(sel === 0);
     };
     screen.on("keypress", onConfKey);
+    btnYes.on("press", () => finish(true));
+    btnNo.on("press", () => finish(false));
+    updateBtns();
+    btnYes.focus();
+    screen.render();
   });
 }
 
