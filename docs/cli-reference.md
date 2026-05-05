@@ -1057,6 +1057,7 @@ azureclaw mesh <subcommand> [arguments] [options]
 | Subcommand | Description |
 |---|---|
 | `auth` | Authenticate with an AgentMesh registry via OAuth |
+| `setup-trust` | Provision the tenant-wide `api://agentmesh` Entra app registration so sandboxes register as the AGT verified tier |
 | `status` | Show current mesh identity |
 | `list` | List mesh pairings and offload sandboxes on the cluster |
 | `reset` | Delete mesh identity (requires re-authentication) |
@@ -1071,6 +1072,14 @@ azureclaw mesh <subcommand> [arguments] [options]
 |---|---|---|
 | `--provider <provider>` | `github` | OAuth provider: `github`, `entra` |
 | `--no-browser` | — | Print URL instead of opening browser |
+
+**Options for `setup-trust`:**
+| Flag | Default | Description |
+|---|---|---|
+| `--display-name <name>` | `AzureClaw AgentMesh` | Display name for the Entra app registration |
+| `--dry-run` | `false` | Print what would be created without making changes |
+
+> Tenant-wide one-time operation. Requires Application Administrator (or higher) at tenant scope. Idempotent — re-running on a tenant where the app reg already exists is safe (just prints the existing IDs and exits).
 
 **Options for `security`:**
 | Flag | Default | Description |
@@ -1102,6 +1111,9 @@ azureclaw mesh <subcommand> [arguments] [options]
 ```bash
 # Authenticate with GitHub OAuth
 azureclaw mesh auth
+
+# Provision the tenant-wide api://agentmesh app reg (one-time, per-tenant)
+azureclaw mesh setup-trust
 
 # Check current mesh identity
 azureclaw mesh status
