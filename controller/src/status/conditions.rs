@@ -187,6 +187,13 @@ pub mod reason {
     /// kept visible briefly so operators see the cleanup before it is
     /// dropped from status.
     pub const INLINE_CLEARED: &str = "InlineCleared";
+    /// Phase 2 S5 — `AwaitingFoundryProvisioning`: the controller has
+    /// successfully compiled and published the binding ConfigMap, but
+    /// the upstream Azure AI Foundry Memory Store is created by the
+    /// runtime path (CLI plugin / router proxy) on first use, not by
+    /// the controller. Until the runtime confirms the upstream store
+    /// exists, we cannot honestly report `Ready=True`.
+    pub const AWAITING_FOUNDRY_PROVISIONING: &str = "AwaitingFoundryProvisioning";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
