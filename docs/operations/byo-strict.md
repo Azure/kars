@@ -87,6 +87,6 @@ If you have existing BYO sandboxes:
 
 ## Related
 
-- [`docs/byo-runtime-contract.md`](../byo-runtime-contract.md) — the contract itself
+- [`docs/runtimes.md`](../runtimes.md) — the BYO runtime contract
 - [`examples/byo-quickstart/`](../../examples/byo-quickstart/) — minimal working sandbox
 - [`controller/src/reconciler/byo_contract.rs`](../../controller/src/reconciler/byo_contract.rs) — implementation

@@ -90,7 +90,7 @@ az login
 az account set --subscription <your-subscription-id>
 ```
 
-You need permission to create resource groups, AKS clusters, ACRs, Foundry resources, and federated credentials in your subscription. (`Contributor` + `User Access Administrator` is sufficient; tighter scoping is documented in [`docs/operations/least-privilege.md`](operations/least-privilege.md) when present.)
+You need permission to create resource groups, AKS clusters, ACRs, Foundry resources, and federated credentials in your subscription.. `Contributor` + `User Access Administrator` is sufficient.
 
 ### 2.2 Bring it up
 

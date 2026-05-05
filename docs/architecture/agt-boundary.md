@@ -74,4 +74,4 @@ Per-tenant override via `ClawSandbox.spec.agt.outageMode`.
 
 - This file is shared with the AGT team for confirmation as a living seam document.
 - Disagreements are resolved by: (a) AGT's ownership wins if they commit to shipping; (b) AzureClaw picks it up temporarily if they cannot commit; (c) the scope is documented here and in the relevant security-audit doc.
-- AGT Rust SDK releases trigger `ci/vendored-patch-audit.sh` re-runs (see [`docs/internal/agt-vendored-patch-audit.md`](../agt-vendored-patch-audit.md)).
+- AGT Rust SDK releases trigger `ci/vendored-patch-audit.sh` re-runs.
