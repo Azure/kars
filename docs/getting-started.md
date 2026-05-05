@@ -13,27 +13,27 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 | For | You need |
 |---|---|
-| Local mode | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an Azure OpenAI endpoint + deployment + key. |
+| Local mode | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
 | AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
 The CLI bootstraps everything else (Helm chart install, Foundry resource creation, ACR build/push, federated identity wiring). You do not need to provision any of it by hand.
 
-### Don't have an Azure OpenAI deployment yet?
+### Don't have an Azure AI Foundry deployment yet?
 
-Local mode needs an existing Azure OpenAI resource and a model deployment. You can create both with two `az` commands. Pick a region that has the model you want (`gpt-4.1` is widely available in `swedencentral`, `eastus2`, `westus3`):
+Local mode needs an existing Azure AI Foundry resource and a model deployment. Foundry is the unified successor to standalone Azure OpenAI accounts — same model catalogue, same OpenAI-compatible API, plus Content Safety, Memory Store, agents, and the rest of the AI Services surface in one resource. Two `az` commands get you both. Pick a region that has the model you want (`gpt-4.1` is widely available in `swedencentral`, `eastus2`, `westus3`):
 
 ```bash
-# 1. Create the resource (≈ 30 s)
+# 1. Create the Foundry (AI Services) resource (≈ 30 s)
 az cognitiveservices account create \
-  --name my-aoai \
+  --name my-foundry \
   --resource-group my-rg \
-  --kind OpenAI --sku S0 \
+  --kind AIServices --sku S0 \
   --location swedencentral \
-  --custom-domain my-aoai
+  --custom-domain my-foundry
 
-# 2. Create a model deployment (≈ 10 s)
+# 2. Create a model deployment on it (≈ 10 s)
 az cognitiveservices account deployment create \
-  --name my-aoai \
+  --name my-foundry \
   --resource-group my-rg \
   --deployment-name gpt-4.1 \
   --model-name gpt-4.1 --model-version "2025-04-14" \
@@ -41,13 +41,13 @@ az cognitiveservices account deployment create \
   --sku-capacity 50 --sku-name GlobalStandard
 
 # 3. Read the values you'll paste into the `azureclaw dev` prompt
-az cognitiveservices account show     -n my-aoai -g my-rg --query properties.endpoint -o tsv
-az cognitiveservices account keys list -n my-aoai -g my-rg --query key1            -o tsv
+az cognitiveservices account show     -n my-foundry -g my-rg --query properties.endpoint -o tsv
+az cognitiveservices account keys list -n my-foundry -g my-rg --query key1            -o tsv
 ```
 
-The free tier (`F0`) works too if you only need to smoke-test, but model availability is narrower. Full reference: [Azure OpenAI quickstart](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource).
+Use `--kind AIServices` (not `--kind OpenAI`) — Foundry is what AzureClaw integrates with end-to-end (Content Safety, Memory Store, the 18 Foundry API groups the router proxies). Standalone `--kind OpenAI` accounts work for `dev` mode's model calls too, but you lose the rest of the surface. Full reference: [Azure AI Foundry quickstart](https://learn.microsoft.com/azure/ai-foundry/).
 
-If you'd rather skip Azure OpenAI entirely and run against Foundry from `azureclaw up` instead, jump to **[Step 2 — Deploy to AKS](#step-2--deploy-to-aks)** — `up` provisions the Foundry resource and deployment for you.
+If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](#step-2--deploy-to-aks)** — `azureclaw up` provisions the Foundry resource, project, Content Safety binding, and a model deployment for you.
 
 ---
 

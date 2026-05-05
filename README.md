@@ -101,7 +101,7 @@ azureclaw connect hello
 
 On first run `azureclaw dev` prompts for your Azure OpenAI endpoint, deployment name, and a resource-level API key — that is the only credential the local mode ever sees, and it never leaves your laptop. From here, every tool call the agent makes is governed by the same router code path that runs in production.
 
-> **Don't have an Azure OpenAI deployment yet?** Two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-openai-deployment-yet)**.
+> **Don't have an Azure AI Foundry deployment yet?** Two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-ai-foundry-deployment-yet)**.
 
 When you are ready for the real thing:
 
