@@ -34,6 +34,7 @@ import {
 } from "./mesh/health.js";
 import { attachAuthSubcommand } from "./mesh/auth.js";
 import { attachPromoteSubcommand } from "./mesh/promote.js";
+import { attachSetupTrustSubcommand } from "./mesh/setup-trust.js";
 
 export function meshCommand(): Command {
   const cmd = new Command("mesh");
@@ -45,6 +46,11 @@ export function meshCommand(): Command {
   // mesh auth (S15.b: extracted to ./mesh/auth.ts)
   // -----------------------------------------------------------------------
   attachAuthSubcommand(cmd);
+
+  // -----------------------------------------------------------------------
+  // mesh setup-trust — provision the api://agentmesh Entra app reg
+  // -----------------------------------------------------------------------
+  attachSetupTrustSubcommand(cmd);
 
   // -----------------------------------------------------------------------
   // mesh status
