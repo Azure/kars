@@ -38,7 +38,7 @@ import { runApply, runDelete, runGet, runList } from "./toolpolicy.js";
  */
 export function a2aCommand(): Command {
   const cmd = new Command("a2a")
-    .description("Inspect A2A (Agent-to-Agent) ingress surfaces.");
+    .description("Inspect A2A (Agent-to-Agent) ingress surfaces");
 
   cmd
     .command("list-exposed")
