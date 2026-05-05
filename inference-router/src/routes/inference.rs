@@ -17,6 +17,7 @@ use crate::errors;
 use crate::proxy;
 
 use super::chat_completions::chat_completions;
+use super::anthropic_messages::anthropic_messages;
 
 /// Strip the `/api/projects/<project>` segment from a Foundry endpoint URL,
 /// returning the bare account-scoped base URL.
@@ -49,6 +50,8 @@ pub fn inference_routes() -> Router<AppState> {
         )
         // OpenAI-compatible endpoint: extracts model from body, defaults to gpt-image-1
         .route("/v1/images/generations", post(images_generations_v1))
+        // Anthropic Messages API translation: Anthropic SDK -> Foundry chat
+        .route("/anthropic/v1/messages", post(anthropic_messages))
 }
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
 /// These are proxied to the Foundry project endpoint, authenticated via IMDS with ai.azure.com audience.

@@ -11,6 +11,12 @@ import os
 import sys
 import time
 
+# Bootstrap MUST run in this process so OPENAI_BASE_URL /
+# OPENAI_API_KEY (router-managed sentinel) and OTel are set
+# before any framework SDK is imported.
+from azureclaw_runtime_langgraph.runtime import bootstrap
+bootstrap()
+
 BANNER = "🔒 AzureClaw — LangGraph (default agent)"
 
 

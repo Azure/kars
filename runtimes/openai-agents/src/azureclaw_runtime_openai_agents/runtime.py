@@ -23,7 +23,14 @@ logger = logging.getLogger(__name__)
 
 ENV_INITIALIZED = "__AZURECLAW_RUNTIME_INITIALIZED__"
 ENV_OPENAI_BASE_URL = "OPENAI_BASE_URL"
-DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8443/openai/v1"
+ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
+DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8443/v1"
+# The router authenticates upstream Foundry calls via Workload Identity
+# (IMDS), so the SDK-side API key is never used for auth — but the
+# OpenAI Python SDK refuses to construct a client when the env var is
+# missing or empty. We pin a sentinel so `OpenAI()` succeeds; the
+# router ignores client-supplied keys.
+ROUTER_MANAGED_KEY_SENTINEL = "router-managed"
 SERVICE_NAME = "azureclaw-runtime-openai-agents"
 
 
@@ -66,6 +73,7 @@ def bootstrap(
 
     # Make sure the SDK never accidentally points at api.openai.com.
     os.environ.setdefault(ENV_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL)
+    os.environ.setdefault(ENV_OPENAI_API_KEY, ROUTER_MANAGED_KEY_SENTINEL)
 
     version = service_version or _read_version()
     try:

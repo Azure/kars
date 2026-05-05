@@ -23,7 +23,7 @@ set -eu
 
 # Router sidecar — the only LLM endpoint allowed by NetworkPolicy +
 # egress-guard. Anthropic Python SDK reads ANTHROPIC_BASE_URL.
-export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8443/anthropic/v1}"
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8443/anthropic}"
 
 # Sentinel API key — router strips on egress. NEVER a real key.
 # The bootstrap() call below also defaults this, but exporting here

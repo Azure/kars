@@ -43,7 +43,7 @@ SERVICE_NAME = "azureclaw-runtime-langgraph"
 
 # (env_var_for_base_url, default_router_path, env_var_for_api_key)
 PROVIDER_BASE_URLS: list[tuple[str, str, Optional[str]]] = [
-    ("OPENAI_BASE_URL", "http://127.0.0.1:8443/openai/v1", "OPENAI_API_KEY"),
+    ("OPENAI_BASE_URL", "http://127.0.0.1:8443/v1", "OPENAI_API_KEY"),
     (
         "AZURE_OPENAI_ENDPOINT",
         "http://127.0.0.1:8443/azure-openai",

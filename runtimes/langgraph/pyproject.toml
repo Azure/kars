@@ -32,6 +32,7 @@ dependencies = [
     # tolerable.
     "langgraph>=0.2,<1",
     "langchain-core>=0.3,<1",
+    "langchain-openai>=0.2,<1",
     "azure-identity>=1.17,<2",
     "opentelemetry-api>=1.27,<2",
     "opentelemetry-sdk>=1.27,<2",
