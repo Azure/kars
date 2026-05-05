@@ -34,7 +34,8 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
 
 
     const state = {
-      name: "", model: "gpt-4.1", isolation: "enhanced",
+      name: "", runtime: "openclaw" as string,
+      model: "gpt-4.1", isolation: "enhanced",
       channel: "", telegramToken: "", slackToken: "", discordToken: "",
       telegramAllowFrom: "",
       learnEgress: true,
@@ -59,20 +60,43 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
     // Auto-fill allow-from if exactly one variant
     if (storedAllowFrom.length === 1) state.telegramAllowFrom = storedAllowFrom[0].value;
 
+    // Runtime kinds — kebab flag values, must match cli/src/runtime.ts WIRED_KINDS.
+    const runtimeOpts = [
+      "openclaw",
+      "openai-agents",
+      "microsoft-agent-framework",
+      "lang-graph",
+      "anthropic",
+      "pydantic-ai",
+      "byo",
+    ];
+    const runtimeLabels: Record<string, string> = {
+      "openclaw":                   "OpenClaw",
+      "openai-agents":              "OpenAI Agents",
+      "microsoft-agent-framework":  "Microsoft Agent Framework",
+      "lang-graph":                 "LangGraph",
+      "anthropic":                  "Anthropic Claude SDK",
+      "pydantic-ai":                "Pydantic AI",
+      "byo":                        "Bring-your-own image",
+    };
     const isoOpts = ["enhanced", "standard", "confidential"];
     const chOpts = ["", "telegram", "slack", "discord"];
     const chLabels: Record<string, string> = { "": "(none)", telegram: "telegram", slack: "slack", discord: "discord" };
     const fields = () => {
-      const f = ["name", "model", "isolation", "channel"];
-      if (state.channel && tokenStateKey[state.channel]) f.push("chtoken");
-      if (state.channel === "telegram") f.push("challowfrom");
+      const f = ["name", "runtime", "model", "isolation"];
+      // Channels are an OpenClaw-only feature today (entrypoint.sh wires them).
+      if (state.runtime === "openclaw") {
+        f.push("channel");
+        if (state.channel && tokenStateKey[state.channel]) f.push("chtoken");
+        if (state.channel === "telegram") f.push("challowfrom");
+      }
       f.push("egress", "launch");
       return f;
     };
 
     const dialog = blessed.box({
       parent: screen, top: "center", left: "center",
-      width: 62, height: 18,
+      width: 70, height: 20,
       border: { type: "line" },
       style: { border: { fg: "cyan" }, fg: "white", bg: "black" },
       label: " 🚀 Spawn New Agent ",
@@ -80,7 +104,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
     });
 
     const formBox = blessed.box({
-      parent: dialog, top: 0, left: 1, width: 58, height: 14,
+      parent: dialog, top: 0, left: 1, width: 66, height: 16,
       tags: true, style: { fg: "white", bg: "black" },
     });
 
@@ -92,6 +116,8 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
         const f = ff[i];
         if (f === "name") {
           lines.push(`${sel} {bold}Name:{/}       ${state.name || "{gray-fg}(press Enter to type){/}"}`);
+        } else if (f === "runtime") {
+          lines.push(`${sel} {bold}Runtime:{/}    {green-fg}${runtimeLabels[state.runtime]}{/}  {gray-fg}←→{/}`);
         } else if (f === "model") {
           lines.push(`${sel} {bold}Model:{/}      ${state.model || "{gray-fg}(press Enter to type){/}"}`);
         } else if (f === "isolation") {
@@ -190,7 +216,10 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
 
       if (devMode) {
         args = ["dev", "--name", state.name.trim(), "--model", state.model];
-        if (state.channel) {
+        if (state.runtime !== "openclaw") {
+          args.push("--runtime", state.runtime);
+        }
+        if (state.runtime === "openclaw" && state.channel) {
           args.push("--channels", state.channel);
           if (currentToken && tokenFlag[state.channel]) {
             args.push(tokenFlag[state.channel], currentToken);
@@ -200,9 +229,10 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
           }
         }
       } else {
-        args = ["add", state.name.trim(), "--model", state.model, "--isolation", state.isolation];
+        args = ["add", state.name.trim(), "--runtime", state.runtime,
+                "--model", state.model, "--isolation", state.isolation];
         if (state.learnEgress) args.push("--learn-egress");
-        if (state.channel) {
+        if (state.runtime === "openclaw" && state.channel) {
           args.push("--channels", state.channel);
           if (currentToken && tokenFlag[state.channel]) {
             args.push(tokenFlag[state.channel], currentToken);
@@ -212,7 +242,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
           }
         }
       }
-      activityLog.log(`{cyan-fg}⏳ Spawning {bold}${state.name}{/bold} (${state.model}, ${state.isolation})...{/}`);
+      activityLog.log(`{cyan-fg}⏳ Spawning {bold}${state.name}{/bold} (${runtimeLabels[state.runtime]}, ${state.model}, ${state.isolation})...{/}`);
       screen.render();
       try {
         await execa("azureclaw", args, { stdio: "pipe" });
@@ -238,7 +268,14 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
         draw();
       } else if (key.name === "left" || key.name === "right") {
         const d = key.name === "left" ? -1 : 1;
-        if (f === "isolation") {
+        if (f === "runtime") {
+          const i = runtimeOpts.indexOf(state.runtime);
+          state.runtime = runtimeOpts[(i + d + runtimeOpts.length) % runtimeOpts.length];
+          // Switching away from openclaw clears channel selection (channels
+          // are wired into entrypoint.sh and only the OpenClaw runtime ships
+          // with that entrypoint).
+          if (state.runtime !== "openclaw") state.channel = "";
+        } else if (f === "isolation") {
           const i = isoOpts.indexOf(state.isolation);
           state.isolation = isoOpts[(i + d + isoOpts.length) % isoOpts.length];
         } else if (f === "channel") {
