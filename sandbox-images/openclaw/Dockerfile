@@ -91,15 +91,37 @@ RUN chmod -R a-w /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk && \
 #     by the entrypoint when a credential env var is set. Without them
 #     present in the bundled-plugins root, the gateway logs
 #     "channels.telegram: unknown channel id" and silently drops the channel.
-#     Hardlinks (cp -al) keep the disk overhead negligible.
+#   - Third-party tool plugins matching the entrypoint's auto-enable list
+#     (brave, tavily, exa, firecrawl, perplexity, openai) — same stale-config
+#     pitfall as channels: they're written into plugins.allow when the
+#     corresponding API-key env var is present.
+#   - Generic-utility plugins that don't depend on a model provider:
+#       browser            — headless browse / Playwright tool
+#       duckduckgo         — no-API-key web search fallback
+#       webhooks           — generic inbound webhook channel
+#       file-transfer      — AGT mesh file transfer
+#       document-extract   — PDF / Office extract (pairs with foundry_file_search)
+#       web-readability    — strip chrome/ads from fetched pages
+#       diffs              — code-diff renderer
+#
+# Hardlinks (cp -al) keep the disk overhead negligible. We deliberately
+# do NOT keep pi-ai model-provider plugins (anthropic, openai-provider
+# mode, xai, mistral, groq, deepseek, ollama, bedrock, openrouter,
+# litellm, codex, copilot-proxy, github-copilot, vercel-ai-gateway, etc.)
+# because each one re-enables a slice of the pi-ai catalog enumeration
+# that wedges models.list for ~50s on first WebUI connect; AzureClaw
+# routes all model traffic through the inference router instead.
 RUN OC=/usr/local/lib/node_modules/openclaw && \
     if [ -d "$OC/dist" ] && [ ! -d "$OC/dist-runtime" ]; then \
       cp -al "$OC/dist" "$OC/dist-runtime" && \
       find "$OC/dist-runtime/extensions" -mindepth 1 -maxdepth 1 -type d \
         ! -name speech-core ! -name image-generation-core ! -name media-understanding-core \
         ! -name telegram ! -name slack ! -name discord ! -name whatsapp ! -name imessage \
+        ! -name brave ! -name tavily ! -name exa ! -name firecrawl ! -name perplexity ! -name openai \
+        ! -name browser ! -name duckduckgo ! -name webhooks ! -name file-transfer \
+        ! -name document-extract ! -name web-readability ! -name diffs \
         -exec rm -rf {} + && \
-      echo "Built dist-runtime with cores + channels: $(ls $OC/dist-runtime/extensions)"; \
+      echo "Built dist-runtime ($(ls $OC/dist-runtime/extensions | wc -l) plugins kept): $(ls $OC/dist-runtime/extensions | tr '\n' ' ')"; \
     fi
 
 # Pre-create router-readable config dirs (root-owned, world-traversable).
