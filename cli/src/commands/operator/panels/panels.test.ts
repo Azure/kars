@@ -64,15 +64,13 @@ describe("S14 panels — empty cluster (no panic, no false data)", () => {
 
   it("renderDashboard against empty cluster shows agents+providers and the at-a-glance section", () => {
     const out = renderDashboard(empty);
-    // Default (triage-first) layout always shows agents and providers.
-    expect(out).toContain("ClawSandbox");
-    expect(out).toContain("Providers");
-    expect(out).toContain("At a glance");
-    // No issues → no triage section.
-    expect(out).not.toContain("🔥 Triage");
-    // Optional CRDs collapse when empty (not in detail).
-    // (They may still appear in at-a-glance if forced, but with default
-    // shouldSurface logic they're hidden when total=0.)
+    // Default layout always renders the Health alerts section.
+    expect(out).toContain("🚨 Health alerts");
+    expect(out).toContain("✓ No alerts");
+    // Empty cluster has no CRD instances.
+    expect(out).toContain("(no CRD instances)");
+    // Old "Triage" wording must not leak through.
+    expect(out).not.toContain("Triage");
   });
 
   it("renderDashboard --panels=all preserves legacy full dump", () => {
@@ -82,16 +80,18 @@ describe("S14 panels — empty cluster (no panic, no false data)", () => {
     }
   });
 
-  it("renderDashboard --panels=triage on empty cluster shows header only", () => {
+  it("renderDashboard --panels=triage on empty cluster shows header + 'no alerts' only", () => {
     const out = renderDashboard(empty, { panels: "triage" });
     expect(out).toContain("AzureClaw Operator");
     expect(out).toContain("0 agents, ");
-    expect(out).not.toContain("At a glance");
+    expect(out).toContain("✓ No alerts");
+    expect(out).not.toContain("ClawSandbox");
   });
 
   it("renderDashboard --per-sandbox on empty cluster falls back to flat list", () => {
     const out = renderDashboard(empty, { perSandbox: true });
-    expect(out).toContain("ClawSandbox");
+    // Empty cluster → no per-sandbox grouping headers and no CRD sections.
+    expect(out).toContain("(no CRD instances)");
     expect(out).not.toContain("══ Sandbox:");
   });
 });
@@ -361,39 +361,41 @@ describe("S20 panels — triage + at-a-glance layout", () => {
 
   it("default dashboard hides empty optional CRDs", () => {
     const out = renderDashboard(emptyClusterState());
-    // Optional CRDs shouldn't surface in detail when empty.
-    // They may still appear in at-a-glance only if total>0.
-    // Detail rule: omitted when total=0.
-    expect(out).not.toContain("┄ McpServer ┄");
-    expect(out).not.toContain("┄ ClawMemory ┄");
-    expect(out).not.toContain("┄ ClawEval ┄");
-    expect(out).not.toContain("┄ A2AAgent ┄");
-    // ClawPairing (internal) also hidden in default mode.
-    expect(out).not.toContain("┄ ClawPairing ┄");
-    // Agents + Providers always present.
-    expect(out).toContain("┄ ClawSandbox ┄");
-    expect(out).toContain("┄ Providers ┄");
+    // Optional CRDs shouldn't surface as section headers when empty.
+    expect(out).not.toContain("═══ McpServer");
+    expect(out).not.toContain("═══ ClawMemory");
+    expect(out).not.toContain("═══ ClawEval");
+    expect(out).not.toContain("═══ A2AAgent");
+    expect(out).not.toContain("═══ ClawPairing");
+    // ClawSandbox section is only rendered when there are sandboxes.
+    expect(out).not.toContain("═══ ClawSandbox");
   });
 
-  it("dashboard with issues prepends a 🔥 Triage section", () => {
+  it("dashboard with issues prepends a 🚨 Health alerts section", () => {
     const state = emptyClusterState();
     state.inferencePolicies = [{
       name: "ip-bad", namespace: "azureclaw",
       conditions: [{ type: "Ready", status: "False", reason: "Bad", message: "x" }],
     }];
     const out = renderDashboard(state);
-    expect(out).toContain("🔥 Triage");
+    expect(out).toContain("🚨 Health alerts");
     expect(out).toContain("InferencePolicy");
     expect(out).toContain("ip-bad");
     expect(out).toContain("Bad");
+    expect(out).not.toContain("Triage");
   });
 
-  it("at-a-glance groups panels by category", () => {
-    const out = renderDashboard(emptyClusterState());
-    expect(out).toContain("AGENTS");
-    expect(out).toContain("PROVIDERS");
-    // Optional features section is hidden when all optional CRDs are empty.
-    expect(out).not.toContain("OPTIONAL FEATURES");
+  it("default dashboard renders one section per non-empty CRD type with [N] indices", () => {
+    const out = renderDashboard(fullFixture());
+    // Each non-empty CRD type gets its own section header.
+    expect(out).toContain("═══ ClawSandbox (");
+    expect(out).toContain("═══ InferencePolicy (");
+    expect(out).toContain("═══ ToolPolicy (");
+    // Drill-in indices.
+    expect(out).toContain("[1]");
+    // Compact table column header.
+    expect(out).toContain("PHASE");
+    expect(out).toContain("STATUS");
   });
 
   it("each panel exposes purpose + category metadata", () => {
@@ -419,5 +421,39 @@ describe("S20 panels — triage + at-a-glance layout", () => {
     for (const p of DEFAULT_PANELS) {
       expect(out).toContain(`┄ ${p.title} ┄`);
     }
+  });
+});
+
+describe("CRD panel — per-type sections + drill-in", () => {
+  it("renderCrdSections returns one row per CRD instance with stable indices", async () => {
+    const { renderCrdSections } = await import("./layout.js");
+    const { rows, body } = renderCrdSections(fullFixture());
+    expect(rows.length).toBeGreaterThan(0);
+    // Indices are 1-based and contiguous.
+    expect(rows.map((r) => r.index)).toEqual(rows.map((_, i) => i + 1));
+    // Body contains a section per non-empty kind.
+    expect(body).toContain("═══ ClawSandbox");
+  });
+
+  it("renderCrdSections on empty cluster returns the (no CRD instances) placeholder", async () => {
+    const { renderCrdSections } = await import("./layout.js");
+    const { body, rows } = renderCrdSections(emptyClusterState());
+    expect(rows).toEqual([]);
+    expect(body).toContain("(no CRD instances)");
+  });
+
+  it("renderCrdItemDetail returns the verbose render of a single CRD", async () => {
+    const { renderCrdItemDetail } = await import("./layout.js");
+    const state = fullFixture();
+    const sb = state.sandboxes[0];
+    const out = renderCrdItemDetail(state, "ClawSandbox", sb.name, sb.namespace);
+    expect(out).toContain("ClawSandbox detail");
+    expect(out).toContain(sb.name);
+  });
+
+  it("renderCrdItemDetail returns a friendly 'not found' for unknown items", async () => {
+    const { renderCrdItemDetail } = await import("./layout.js");
+    const out = renderCrdItemDetail(emptyClusterState(), "ClawSandbox", "ghost", "azureclaw-ghost");
+    expect(out).toContain("not found");
   });
 });

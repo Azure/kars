@@ -4,22 +4,26 @@
 /**
  * Panel registry + layout.
  *
- * Renders the operator dashboard with a triage-first structure:
+ * Default layout (S20+):
  *
- *   1. Header        — agent count, issue count.
- *   2. 🔥 Triage     — items with non-Ready/False/Unknown conditions or down
- *                      health, listed verbatim. Hidden when the cluster is
- *                      healthy.
- *   3. 📋 At-a-glance — one line per CRD, grouped by category. Optional
- *                      CRDs with zero instances are omitted.
- *   4. 📑 Detail      — full per-item rendering, scoped to non-empty panels
- *                      (or to user-requested panels via `--panels=...`).
+ *   1. Header              — agent count, alert count.
+ *   2. 🚨 Health alerts    — items with non-Ready/False/Unknown conditions
+ *                            or down/degraded sandboxes/providers, listed
+ *                            verbatim. Always shown — when the cluster is
+ *                            healthy it renders "✓ No alerts".
+ *   3. CRD sections        — one section per non-empty CRD type
+ *                            (ClawSandbox, InferencePolicy, ToolPolicy,
+ *                            ClawMemory, ClawEval, MCPServer, A2AAgent,
+ *                            ClawPairing). Each section is a compact
+ *                            table with [#], NAME, NAMESPACE, PHASE, AGE,
+ *                            STATUS columns. Drill-in via numeric keys
+ *                            opens a per-instance detail popup.
  *
- * The legacy "dump every panel" behavior is preserved behind
- * `--panels=all` for muscle memory, and `--panels=triage` collapses to just
- * the header + triage section.
+ * Legacy "dump every panel" behavior is preserved behind `--panels=all`
+ * for muscle memory; `--panels=triage` collapses to header + alerts only.
  */
-import type { Panel, ClusterState, PanelCategory, PanelSummary } from "./types.js";
+import type { Panel, ClusterState, PanelCategory } from "./types.js";
+import { bucketFromConditions } from "./util.js";
 import { clawSandboxPanel } from "./clawsandbox.js";
 import { clawPairingPanel } from "./clawpairing.js";
 import { mcpServerPanel } from "./mcpserver.js";
@@ -79,7 +83,7 @@ function renderPanel(p: Panel, state: ClusterState, sandbox?: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Triage
+//  Health alerts (formerly "Triage")
 // ─────────────────────────────────────────────────────────────────────
 
 interface TriageItem {
@@ -151,10 +155,13 @@ export function collectTriage(state: ClusterState): TriageItem[] {
   return out;
 }
 
-function renderTriage(items: TriageItem[]): string {
-  if (items.length === 0) return "";
+function renderHealthAlerts(items: TriageItem[]): string {
+  const header = `{bold}🚨 Health alerts{/}`;
+  if (items.length === 0) {
+    return `${header}\n  {green-fg}✓ No alerts{/}\n${PANEL_RULE}`;
+  }
   const lines: string[] = [];
-  lines.push(`{bold}{red-fg}🔥 Triage — ${items.length} ${items.length === 1 ? "issue" : "issues"}{/}{/}`);
+  lines.push(`{bold}{red-fg}🚨 Health alerts — ${items.length} ${items.length === 1 ? "issue" : "issues"}{/}{/}`);
   for (const t of items) {
     const color = t.status === "False" ? "red" : "yellow";
     const reason = t.reason ? ` ${t.reason}` : "";
@@ -169,79 +176,254 @@ function renderTriage(items: TriageItem[]): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  At-a-glance
+//  Per-CRD-type compact sections (default layout)
 // ─────────────────────────────────────────────────────────────────────
 
-const CATEGORY_LABEL: Record<PanelCategory, string> = {
-  agent:          "AGENTS",
-  infrastructure: "INFRASTRUCTURE",
-  optional:       "OPTIONAL FEATURES",
-  internal:       "INTERNAL",
-  providers:      "PROVIDERS",
+/** A single row in a CRD section's compact table. */
+export interface CrdRow {
+  index: number;          // 1-based, used for drill-in keybinding
+  kind: string;           // CRD kind (e.g. "ClawSandbox") — same as section title
+  name: string;
+  namespace: string;
+  phase: string;          // bucketed: healthy / degraded / down / pending / warning / error / unknown
+  age: string;
+  status: string;         // one-line key-status summary specific to the CRD type
+}
+
+/** Phase string + blessed color for a CRD row. */
+function phaseColor(phase: string): string {
+  switch (phase) {
+    case "healthy": return "green";
+    case "degraded":
+    case "warning":
+    case "pending": return "yellow";
+    case "down":
+    case "error":   return "red";
+    case "dormant": return "blue";
+    default:        return "gray";
+  }
+}
+
+/** Map a list of CrdItem conditions onto a phase bucket label. */
+function phaseFromConditions(conds: import("./types.js").CrdCondition[] | undefined): string {
+  switch (bucketFromConditions(conds)) {
+    case "healthy": return "healthy";
+    case "warning": return "warning";
+    case "error":   return "error";
+    default:        return "unknown";
+  }
+}
+
+/** Best-effort one-line status per CRD type. */
+function buildRows(state: ClusterState): CrdRow[] {
+  const rows: CrdRow[] = [];
+  let i = 0;
+  const next = () => ++i;
+
+  // ClawSandbox — uses SandboxInfo (no conditions; health field is authoritative).
+  for (const s of state.sandboxes) {
+    const rk = s.runtimeKind || "OpenClaw";
+    const status = `${rk}  ·  ${s.model || "-"}  ·  ${s.isolation || "-"}  ·  ${s.role}`;
+    rows.push({
+      index: next(),
+      kind: "ClawSandbox",
+      name: s.name,
+      namespace: s.namespace || `azureclaw-${s.name}`,
+      phase: s.health,
+      age: s.age || "-",
+      status,
+    });
+  }
+
+  // ClawMemory
+  for (const m of state.clawMemories) {
+    const parts: string[] = [];
+    if (m.sandboxRef) parts.push(`sandbox=${m.sandboxRef}`);
+    if (m.storeName) parts.push(`store=${m.storeName}`);
+    if (m.scope) parts.push(`scope=${m.scope}`);
+    if (m.foundryBound) parts.push(`binding=${m.foundryBound}`);
+    rows.push({
+      index: next(), kind: "ClawMemory",
+      name: m.name, namespace: m.namespace,
+      phase: phaseFromConditions(m.conditions),
+      age: m.age || "-",
+      status: parts.join("  ·  ") || "—",
+    });
+  }
+
+  // ClawEval
+  for (const e of state.clawEvals) {
+    const parts: string[] = [];
+    if (e.sandboxRef) parts.push(`sandbox=${e.sandboxRef}`);
+    if (e.suite) parts.push(`suite=${e.suite}`);
+    if (e.lastScore) parts.push(`score=${e.lastScore}`);
+    if (e.schedule) parts.push(`sched=${e.schedule}`);
+    rows.push({
+      index: next(), kind: "ClawEval",
+      name: e.name, namespace: e.namespace,
+      phase: phaseFromConditions(e.conditions),
+      age: e.age || "-",
+      status: parts.join("  ·  ") || "—",
+    });
+  }
+
+  // ClawPairing
+  for (const p of state.pairings) {
+    const parts: string[] = [];
+    parts.push(`${p.agentA ?? "?"} ↔ ${p.agentB ?? "?"}`);
+    if (p.state) parts.push(`state=${p.state}`);
+    if (p.trust) parts.push(`trust=${p.trust}`);
+    rows.push({
+      index: next(), kind: "ClawPairing",
+      name: p.name, namespace: p.namespace,
+      phase: phaseFromConditions(p.conditions),
+      age: p.age || "-",
+      status: parts.join("  ·  "),
+    });
+  }
+
+  // InferencePolicy
+  for (const ip of state.inferencePolicies) {
+    const parts: string[] = [];
+    parts.push(`appliesTo=${ip.appliesToSandbox ?? "<all>"}`);
+    if (ip.modelPreference?.length) parts.push(`model=${ip.modelPreference[0]}`);
+    if (ip.dailyTokens !== undefined) parts.push(`daily=${ip.dailyTokens}`);
+    if (ip.guardrailFloor) parts.push(`floor=${ip.guardrailFloor}`);
+    rows.push({
+      index: next(), kind: "InferencePolicy",
+      name: ip.name, namespace: ip.namespace,
+      phase: phaseFromConditions(ip.conditions),
+      age: ip.age || "-",
+      status: parts.join("  ·  "),
+    });
+  }
+
+  // ToolPolicy
+  for (const t of state.toolPolicies) {
+    const parts: string[] = [];
+    parts.push(`appliesTo=${t.appliesToSandbox ?? "<all>"}`);
+    if (t.ruleCount !== undefined) parts.push(`rules=${t.ruleCount}`);
+    parts.push(`approval=${t.approvalRequired ? "yes" : "no"}`);
+    if (t.rateLimitPerMin !== undefined) parts.push(`rate=${t.rateLimitPerMin}/min`);
+    rows.push({
+      index: next(), kind: "ToolPolicy",
+      name: t.name, namespace: t.namespace,
+      phase: phaseFromConditions(t.conditions),
+      age: t.age || "-",
+      status: parts.join("  ·  "),
+    });
+  }
+
+  // McpServer
+  for (const m of state.mcpServers) {
+    const parts: string[] = [];
+    if (m.url) parts.push(`url=${m.url}`);
+    if (m.productionMode !== undefined) parts.push(`prod=${m.productionMode ? "yes" : "no"}`);
+    if (m.jwksSecretPresent) parts.push(`jwks=<${m.jwksSecretPresent}>`);
+    if (m.allowedToolCount !== undefined) parts.push(`tools=${m.allowedToolCount}`);
+    rows.push({
+      index: next(), kind: "MCPServer",
+      name: m.name, namespace: m.namespace,
+      phase: phaseFromConditions(m.conditions),
+      age: m.age || "-",
+      status: parts.join("  ·  ") || "—",
+    });
+  }
+
+  // A2AAgent
+  for (const a of state.a2aAgents) {
+    const parts: string[] = [];
+    if (a.endpointUrl) parts.push(`endpoint=${a.endpointUrl}`);
+    if (a.productionMode !== undefined) parts.push(`prod=${a.productionMode ? "yes" : "no"}`);
+    if (a.agentCardPublished) parts.push(`card=${a.agentCardPublished}`);
+    rows.push({
+      index: next(), kind: "A2AAgent",
+      name: a.name, namespace: a.namespace,
+      phase: phaseFromConditions(a.conditions),
+      age: a.age || "-",
+      status: parts.join("  ·  ") || "—",
+    });
+  }
+
+  return rows;
+}
+
+/** Section order — only sections with rows are rendered. */
+const SECTION_ORDER = [
+  "ClawSandbox",
+  "InferencePolicy",
+  "ToolPolicy",
+  "ClawMemory",
+  "ClawEval",
+  "MCPServer",
+  "A2AAgent",
+  "ClawPairing",
+] as const;
+
+const SECTION_PURPOSE: Record<string, string> = {
+  ClawSandbox:     "the agents themselves — pod, runtime, model, isolation",
+  InferencePolicy: "model preference, daily token caps, guardrail floor",
+  ToolPolicy:      "allow/deny tools, approval gates, rate limits",
+  ClawMemory:      "Foundry Memory Store binding — scope, retention",
+  ClawEval:        "reproducible eval runs — pinned image+config",
+  MCPServer:       "MCP servers reachable from sandboxes",
+  A2AAgent:        "A2A ingress + signing-key trust anchors",
+  ClawPairing:     "controller-managed handshake state",
 };
 
-const CATEGORY_ORDER: PanelCategory[] = [
-  "agent",
-  "infrastructure",
-  "optional",
-  "providers",
-  "internal",
-];
+function padTag(s: string, width: number, color?: string): string {
+  const trimmed = s.length > width ? s.substring(0, width - 1) + "…" : s;
+  const padded = trimmed + " ".repeat(Math.max(0, width - trimmed.length));
+  return color ? `{${color}-fg}${padded}{/}` : padded;
+}
+
+function renderCrdSection(kind: string, rows: CrdRow[]): string {
+  const purpose = SECTION_PURPOSE[kind] ? `  {gray-fg}— ${SECTION_PURPOSE[kind]}{/}` : "";
+  const lines: string[] = [];
+  lines.push(`{bold}{blue-fg}═══ ${kind} (${rows.length}) ═══{/}{/}${purpose}`);
+  lines.push(
+    `  {gray-fg}${"#".padEnd(4)}${"NAME".padEnd(28)} ${"NAMESPACE".padEnd(22)} ${"PHASE".padEnd(10)} ${"AGE".padEnd(6)} STATUS{/}`,
+  );
+  for (const r of rows) {
+    const idx = `[${r.index}]`.padEnd(4);
+    const phase = padTag(r.phase, 10, phaseColor(r.phase));
+    lines.push(
+      `  ${idx}${padTag(r.name, 28)} ${padTag(r.namespace, 22)} ${phase} ${padTag(r.age, 6)} ${r.status}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Build all rows + render every non-empty CRD-type section. Also returns
+ *  the flat row list so callers (e.g. drill-in) can map index → item. */
+export function renderCrdSections(state: ClusterState): { body: string; rows: CrdRow[] } {
+  const all = buildRows(state);
+  const byKind = new Map<string, CrdRow[]>();
+  for (const r of all) {
+    if (!byKind.has(r.kind)) byKind.set(r.kind, []);
+    byKind.get(r.kind)!.push(r);
+  }
+  const sections: string[] = [];
+  for (const kind of SECTION_ORDER) {
+    const rows = byKind.get(kind);
+    if (!rows || rows.length === 0) continue;
+    sections.push(renderCrdSection(kind, rows));
+  }
+  if (sections.length === 0) {
+    sections.push(`{gray-fg}(no CRD instances){/}`);
+  }
+  return { body: sections.join("\n\n"), rows: all };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Legacy detail (preserved for `--panels=all` and `--per-sandbox`)
+// ─────────────────────────────────────────────────────────────────────
 
 function categoryOf(p: Panel): PanelCategory {
   return p.category ?? "infrastructure";
 }
 
-/** Should this panel surface in the at-a-glance summary? */
-function shouldSurface(p: Panel, summary: PanelSummary): boolean {
-  const cat = categoryOf(p);
-  // Always show agents and providers.
-  if (cat === "agent" || cat === "providers") return true;
-  // Optional + internal panels collapse when empty.
-  if ((cat === "optional" || cat === "internal") && summary.total === 0) return false;
-  return true;
-}
-
-function summaryBadge(s: PanelSummary): string {
-  if (s.total === 0) return "{gray-fg}0{/}";
-  const parts: string[] = [];
-  parts.push(`${s.total}`);
-  const tags: string[] = [];
-  if (s.error)   tags.push(`{red-fg}${s.error}✕{/}`);
-  if (s.warning) tags.push(`{yellow-fg}${s.warning}!{/}`);
-  if (s.unknown) tags.push(`{gray-fg}${s.unknown}?{/}`);
-  if (s.healthy) tags.push(`{green-fg}${s.healthy}✓{/}`);
-  if (tags.length > 0) parts.push(`(${tags.join(" ")})`);
-  return parts.join(" ");
-}
-
-function renderAtAGlance(state: ClusterState): string {
-  const lines: string[] = [`{bold}📋 At a glance{/}`];
-  for (const cat of CATEGORY_ORDER) {
-    const panelsInCat = DEFAULT_PANELS.filter((p) => categoryOf(p) === cat);
-    const visible: { panel: Panel; summary: PanelSummary }[] = [];
-    for (const p of panelsInCat) {
-      const summary = p.summarize ? p.summarize(state) : { total: 0, healthy: 0, warning: 0, error: 0, unknown: 0 };
-      if (shouldSurface(p, summary)) visible.push({ panel: p, summary });
-    }
-    if (visible.length === 0) continue;
-    lines.push(`  {dim}${CATEGORY_LABEL[cat]}{/}`);
-    for (const { panel, summary } of visible) {
-      const badge = summaryBadge(summary);
-      const purpose = panel.purpose ? `  {gray-fg}— ${panel.purpose}{/}` : "";
-      const detail = summary.detail ? `  {gray-fg}[${summary.detail}]{/}` : "";
-      lines.push(`    ${panel.title.padEnd(18)} ${badge}${detail}${purpose}`);
-    }
-  }
-  lines.push(PANEL_RULE);
-  return lines.join("\n");
-}
-
-// ─────────────────────────────────────────────────────────────────────
-//  Detail
-// ─────────────────────────────────────────────────────────────────────
-
-/** Pick which panels deserve a full detail render. */
+/** Pick which panels deserve a full detail render in legacy/per-sandbox mode. */
 function pickDetailPanels(state: ClusterState): Panel[] {
   // Always render agent + providers (small, signal-heavy).
   // Render optional/infrastructure panels only when they have items.
@@ -291,26 +473,98 @@ export function renderDashboard(
     return renderLegacy(picked, state, opts);
   }
 
-  // ── Default: triage-first layout ──
+  // ── Default: health-alerts-first, per-CRD-type sections ──
   const triage = collectTriage(state);
   const sections: string[] = [];
   sections.push(renderHeader(state, triage.length));
-  if (triage.length > 0) sections.push(renderTriage(triage));
+  sections.push(renderHealthAlerts(triage));
   if (spec === "triage") return sections.join("\n");
 
-  sections.push(renderAtAGlance(state));
-
-  // Detail rendering — preserves per-sandbox grouping when requested.
-  const detailPanels = pickDetailPanels(state);
+  // Per-sandbox grouping is a legacy mode kept for muscle memory.
   if (opts.perSandbox && state.sandboxes.length > 0) {
+    const detailPanels = pickDetailPanels(state);
     for (const sb of state.sandboxes) {
       sections.push(`{bold}{blue-fg}══ Sandbox: ${sb.name} ══{/}{/}`);
       for (const p of detailPanels) sections.push(renderPanel(p, state, sb.name));
     }
-  } else {
-    for (const p of detailPanels) sections.push(renderPanel(p, state));
+    return sections.join("\n");
   }
-  return sections.join("\n");
+
+  const { body } = renderCrdSections(state);
+  sections.push(body);
+  return sections.join("\n\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Drill-in detail renderer
+// ─────────────────────────────────────────────────────────────────────
+
+/** Render the verbose details of a single CRD item (drill-in dialog).
+ *  Returns a friendly placeholder if the item can't be resolved. */
+export function renderCrdItemDetail(state: ClusterState, kind: string, name: string, namespace: string): string {
+  const empty = (): ClusterState => ({
+    sandboxes: [], pairings: [], mcpServers: [], toolPolicies: [],
+    inferencePolicies: [], a2aAgents: [], clawMemories: [], clawEvals: [],
+    providers: { perSandbox: new Map(), cluster: [] },
+  });
+  const match = <T extends { name: string; namespace: string }>(items: T[]): T | undefined =>
+    items.find((it) => it.name === name && it.namespace === namespace);
+
+  const heading = (title: string, body: string) =>
+    `{bold}{blue-fg}${title}{/}{/}\n{gray-fg}${name} (${namespace}){/}\n\n${body}`;
+
+  switch (kind) {
+    case "ClawSandbox": {
+      const sb = state.sandboxes.find((s) => s.name === name);
+      if (!sb) return `{red-fg}sandbox '${name}' not found{/}`;
+      const sub = empty(); sub.sandboxes = [sb];
+      return heading("ClawSandbox detail", clawSandboxPanel.render(sub));
+    }
+    case "ClawMemory": {
+      const m = match(state.clawMemories);
+      if (!m) return `{red-fg}ClawMemory '${name}' not found{/}`;
+      const sub = empty(); sub.clawMemories = [m];
+      return heading("ClawMemory detail", clawMemoryPanel.render(sub));
+    }
+    case "ClawEval": {
+      const e = match(state.clawEvals);
+      if (!e) return `{red-fg}ClawEval '${name}' not found{/}`;
+      const sub = empty(); sub.clawEvals = [e];
+      return heading("ClawEval detail", clawEvalPanel.render(sub));
+    }
+    case "ClawPairing": {
+      const p = match(state.pairings);
+      if (!p) return `{red-fg}ClawPairing '${name}' not found{/}`;
+      const sub = empty(); sub.pairings = [p];
+      return heading("ClawPairing detail", clawPairingPanel.render(sub));
+    }
+    case "InferencePolicy": {
+      const ip = match(state.inferencePolicies);
+      if (!ip) return `{red-fg}InferencePolicy '${name}' not found{/}`;
+      const sub = empty(); sub.inferencePolicies = [ip];
+      return heading("InferencePolicy detail", inferencePolicyPanel.render(sub));
+    }
+    case "ToolPolicy": {
+      const t = match(state.toolPolicies);
+      if (!t) return `{red-fg}ToolPolicy '${name}' not found{/}`;
+      const sub = empty(); sub.toolPolicies = [t];
+      return heading("ToolPolicy detail", toolPolicyPanel.render(sub));
+    }
+    case "MCPServer": {
+      const m = match(state.mcpServers);
+      if (!m) return `{red-fg}MCPServer '${name}' not found{/}`;
+      const sub = empty(); sub.mcpServers = [m];
+      return heading("MCPServer detail", mcpServerPanel.render(sub));
+    }
+    case "A2AAgent": {
+      const a = match(state.a2aAgents);
+      if (!a) return `{red-fg}A2AAgent '${name}' not found{/}`;
+      const sub = empty(); sub.a2aAgents = [a];
+      return heading("A2AAgent detail", a2aAgentPanel.render(sub));
+    }
+    default:
+      return `{red-fg}unknown CRD kind '${kind}'{/}`;
+  }
 }
 
 /** Old "dump every panel" rendering, kept for `--panels=all` and explicit
