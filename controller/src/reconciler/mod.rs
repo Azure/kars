@@ -1420,7 +1420,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         ],
                         "volumes": [
                             {"name": "sandbox-data", "emptyDir": {}},
-                            {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}},
+                            {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "4Gi"}},
                             {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
                         ],
                         "tolerations": [{
