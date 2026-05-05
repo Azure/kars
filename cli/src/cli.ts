@@ -74,13 +74,33 @@ export function createCli(): Command {
   program.addCommand(a2aAgentCommand());
   program.addCommand(migrateCommand());
 
-  // Governance CRDs (Slice S6)
+  // Governance CRDs
   program.addCommand(toolPolicyCommand());
   program.addCommand(inferencePolicyCommand());
   program.addCommand(mcpCommand());
 
-  // Attestation (Phase 2 read surface; signing lands in Phase 3)
+  // Attestation
   program.addCommand(attestCommand());
+
+  program.addHelpText("after", `
+Command groups:
+  Lifecycle       up, dev, add, push, destroy
+  Operations      connect, status, list, logs
+  Configuration   credentials, model, policy, egress
+  Observability   trace, eval, operator
+  Agent mobility  handoff, mesh, pair
+  Interop         convert, a2a, a2a-agent, migrate
+  Governance      toolpolicy, inferencepolicy, mcp
+  Attestation     attest
+
+Quick start:
+  azureclaw up                    # Provision Azure + deploy controller + first sandbox
+  azureclaw add my-bot            # Add a sandbox to an existing cluster
+  azureclaw operator              # Live TUI dashboard for all sandboxes
+  azureclaw <cmd> --help          # Detailed help for any subcommand
+
+Docs: https://github.com/Azure/azureclaw#readme
+`);
 
   return program;
 }
