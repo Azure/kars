@@ -26,10 +26,13 @@ export function devCommand(): Command {
 
   cmd
     .description(
-      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop.\n" +
-      "Requires an existing Azure OpenAI resource with at least one model deployment (e.g. gpt-4.1).\n" +
-      "On first run, you will be prompted for your endpoint, model deployment name, and resource-level API key."
+      "Run a sandbox locally via Docker for development. Same policies, same model routing, on your laptop."
     )
+    .addHelpText("before", `
+Requires an existing Azure OpenAI resource with at least one model deployment
+(e.g. gpt-4.1). On first run, you will be prompted for your endpoint, model
+deployment name, and resource-level API key.
+`)
     // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "dev-agent")
     .option("--model <model>", "Existing model deployment name in your Azure OpenAI resource", "gpt-4.1")

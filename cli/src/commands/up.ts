@@ -12,7 +12,7 @@ export function upCommand(): Command {
 
   cmd
     .description(
-      "One command to go from zero to running agent. Provisions Azure resources, builds images, deploys controller, creates sandbox."
+      "One command to go from zero to running agent — provisions Azure resources, builds images, deploys controller, creates sandbox"
     )
     // ── Identity ───────────────────────────────────────────────────────
     .option("--name <name>", "Sandbox name", "my-assistant")
