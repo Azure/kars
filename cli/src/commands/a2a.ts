@@ -38,7 +38,7 @@ import { runApply, runDelete, runGet, runList } from "./toolpolicy.js";
  */
 export function a2aCommand(): Command {
   const cmd = new Command("a2a")
-    .description("A2A 1.0.0 ingress surfacing (per ADR-0001 D6).");
+    .description("Inspect A2A (Agent-to-Agent) ingress surfaces.");
 
   cmd
     .command("list-exposed")
@@ -71,7 +71,7 @@ export function a2aCommand(): Command {
   cmd
     .command("schema")
     .description(
-      "Print the AgentCard JSON shape this cluster will publish per A2A 1.0.0 §4.4. Useful for tenants writing CR specs."
+      "Print the AgentCard JSON shape this cluster publishes per the A2A spec. Useful for tenants writing CR specs."
     )
     .action(async () => {
       // Mirrors inference-router/src/a2a/agent_card.rs serialization.

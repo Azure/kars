@@ -98,7 +98,7 @@ export function connectCommand(): Command {
           return;
         }
         if (!options.web) {
-          console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)} (local). OpenClaw is ready.\n`));
+          console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)} (local). Agent is ready.\n`));
           console.log(chalk.dim(`  Chat:    openclaw tui`));
           console.log(chalk.dim(`  Message: openclaw agent --agent main --local -m "hello" --session-id test`));
           console.log(chalk.dim(`  Exit:    type "exit"\n`));
@@ -225,7 +225,7 @@ export function connectCommand(): Command {
         }
       } else {
         // Shell mode
-        console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)}. OpenClaw is ready.\n`));
+        console.log(chalk.hex("#0078D4")(`\n  Connected to ${chalk.bold(name)}. Agent is ready.\n`));
         console.log(chalk.dim(`  Chat:    openclaw tui`));
         console.log(chalk.dim(`  Exit:    type "exit"\n`));
         await execa("kubectl", [

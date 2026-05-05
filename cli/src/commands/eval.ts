@@ -3,6 +3,7 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { agentContainerName, runtimeKindFromCr } from "../runtime.js";
 
 export function evalCommand(): Command {
   const cmd = new Command("eval");
@@ -39,10 +40,21 @@ export function evalCommand(): Command {
 
         const V = "api-version=2025-11-15-preview";
 
+        // Resolve the agent container name from the ClawSandbox CR's
+        // runtime kind — `openclaw` for OpenClaw, `agent` for every
+        // other adapter image. Falls back to `openclaw` if lookup fails.
+        let agentContainer = "openclaw";
+        try {
+          const { stdout: crJson } = await execa("kubectl", [
+            "get", "clawsandbox", name, "-n", "azureclaw-system", "-o", "json",
+          ], { stdio: "pipe" });
+          agentContainer = agentContainerName(runtimeKindFromCr(JSON.parse(crJson)));
+        } catch { /* fall back to openclaw default */ }
+
         // Helper: exec curl inside the pod via the inference router
         async function foundryGet(path: string): Promise<unknown> {
           const { stdout } = await execa("kubectl", [
-            "exec", "-n", namespace, podName, "-c", "openclaw", "--",
+            "exec", "-n", namespace, podName, "-c", agentContainer, "--",
             "curl", "-s", `http://localhost:8443/${path}?${V}`,
           ], { stdio: "pipe" });
           return JSON.parse(stdout);
@@ -50,7 +62,7 @@ export function evalCommand(): Command {
 
         async function foundryPost(path: string, body: unknown): Promise<unknown> {
           const { stdout } = await execa("kubectl", [
-            "exec", "-n", namespace, podName, "-c", "openclaw", "--",
+            "exec", "-n", namespace, podName, "-c", agentContainer, "--",
             "curl", "-s", "-X", "POST",
             `http://localhost:8443/${path}?${V}`,
             "-H", "Content-Type: application/json",
