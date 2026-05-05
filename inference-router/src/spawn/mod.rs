@@ -208,9 +208,13 @@ pub async fn create_sandbox(
 
     // Governance is always enabled (native in router)
     {
+        // S13: `toolPolicy` (string profile name) was replaced with
+        // `toolPolicyRef` — a same-namespace reference to a ToolPolicy CR.
+        // Sub-agents reuse the parent's ToolPolicy by convention
+        // (`<parent>-toolpolicy`).
         let mut gov = serde_json::json!({
             "enabled": true,
-            "toolPolicy": "default",
+            "toolPolicyRef": { "name": format!("{parent_name}-toolpolicy") },
             "trustThreshold": req.trust_threshold.unwrap_or(500),
         });
         // Propagate trusted peers so the target auto-trusts the source at KNOCK time
