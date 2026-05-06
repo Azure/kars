@@ -79,7 +79,8 @@ export type SignedState = "unsigned" | "signed-pending" | "signed-active" | "unk
 
 export interface SignedDetail {
   state: SignedState;
-  ref?: { name: string; revision?: string; namespace?: string };
+  /** Display label for the ref, e.g. `repo@sha256:abcd1234`. */
+  ref?: { display: string; digest?: string; repository?: string };
   conditionMessage?: string;
 }
 
@@ -202,8 +203,8 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       const sec = ctx.securityStates.get(cur.name);
       const sd = signedByAgent.get(cur.name);
       const sigDetail =
-        cur.signed === "signed-active"  ? `{green-fg}signed ✓{/} ref=${sd?.ref?.name ?? "?"}` :
-        cur.signed === "signed-pending" ? `{yellow-fg}signing…{/} ref=${sd?.ref?.name ?? "?"} (${sd?.conditionMessage ?? "pending verify"})` :
+        cur.signed === "signed-active"  ? `{green-fg}signed ✓{/} ref=${sd?.ref?.display ?? "?"}` :
+        cur.signed === "signed-pending" ? `{yellow-fg}signing…{/} ref=${sd?.ref?.display ?? "?"} (${sd?.conditionMessage ?? "pending verify"})` :
         cur.signed === "unsigned"       ? `{gray-fg}unsigned{/} (inline allowedEndpoints — press [s] to sign)` :
                                           `{gray-fg}—{/}`;
       detail.setContent(
@@ -239,18 +240,30 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       const data = JSON.parse(stdout) as { items?: Array<Record<string, unknown>> };
       for (const item of data.items ?? []) {
         const meta = item.metadata as { name?: string } | undefined;
-        const spec = item.spec as { networkPolicy?: { allowlistRef?: { name?: string; revision?: string; namespace?: string } } } | undefined;
+        const spec = item.spec as { networkPolicy?: { allowlistRef?: { registry?: string; repository?: string; digest?: string; artifactType?: string } } } | undefined;
         const status = item.status as { conditions?: Array<{ type?: string; status?: string; message?: string; reason?: string }> } | undefined;
         const name = meta?.name;
         if (!name) continue;
         const ref = spec?.networkPolicy?.allowlistRef;
         const cond = (status?.conditions ?? []).find((c) => c.type === "AllowlistAuthoritative");
-        if (!ref || !ref.name) {
+        // The CRD shape is OCI: `{registry, repository, digest, artifactType}`.
+        // "Set" means we have at least a `digest` (registry+repository alone
+        // would be ambiguous / non-pinned). `name`/`revision` are not part of
+        // the schema and were a stale read in earlier versions.
+        const isSet = !!(ref && ref.digest);
+        if (!isSet) {
           out.set(name, { state: "unsigned", conditionMessage: cond?.message });
-        } else if (cond?.status === "True") {
-          out.set(name, { state: "signed-active", ref: { name: ref.name, revision: ref.revision, namespace: ref.namespace }, conditionMessage: cond?.message });
+          continue;
+        }
+        const shortDigest = (ref!.digest ?? "").replace(/^sha256:/, "").slice(0, 12);
+        const display = ref!.repository
+          ? `${ref!.repository}@sha256:${shortDigest}`
+          : `sha256:${shortDigest}`;
+        const refDetail = { display, digest: ref!.digest, repository: ref!.repository };
+        if (cond?.status === "True") {
+          out.set(name, { state: "signed-active", ref: refDetail, conditionMessage: cond?.message });
         } else {
-          out.set(name, { state: "signed-pending", ref: { name: ref.name, revision: ref.revision, namespace: ref.namespace }, conditionMessage: cond?.message ?? cond?.reason });
+          out.set(name, { state: "signed-pending", ref: refDetail, conditionMessage: cond?.message ?? cond?.reason });
         }
       }
     } catch {
@@ -281,9 +294,9 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     if (d.state === "unsigned") {
       activityLog.log(`{gray-fg}✗ ${sb.name}: UNSIGNED — spec.networkPolicy.allowlistRef is not set; controller is using inline allowedEndpoints{/}`);
     } else if (d.state === "signed-pending") {
-      activityLog.log(`{yellow-fg}⏳ ${sb.name}: signed-pending — ref=${d.ref?.name}${d.ref?.revision ? "@" + d.ref.revision.substring(0, 12) : ""} (${d.conditionMessage ?? "verify in progress"}){/}`);
+      activityLog.log(`{yellow-fg}⏳ ${sb.name}: signed-pending — ref=${d.ref?.display ?? "?"} (${d.conditionMessage ?? "verify in progress"}){/}`);
     } else if (d.state === "signed-active") {
-      activityLog.log(`{green-fg}✓ ${sb.name}: SIGNED+VERIFIED — ref=${d.ref?.name}${d.ref?.revision ? "@" + d.ref.revision.substring(0, 12) : ""} (AllowlistAuthoritative=True){/}`);
+      activityLog.log(`{green-fg}✓ ${sb.name}: SIGNED+VERIFIED — ref=${d.ref?.display ?? "?"} (AllowlistAuthoritative=True){/}`);
     }
   };
 
