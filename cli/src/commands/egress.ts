@@ -368,6 +368,13 @@ async function runSignFlow(
   try {
     const { orasPath, cosignPath } = await ensureSigningTools();
 
+    // The pod-namespace `azureclaw-<name>` is where the sandbox's pod, NetworkPolicy,
+    // and per-sandbox secrets live — but the *ClawSandbox CR* itself is created
+    // by the operator in the operator's release namespace (default
+    // `azureclaw-system`). Read/patch always need the CR's namespace, NOT the
+    // pod ns. Discover it once via cross-ns lookup.
+    const crNamespace = await discoverClawSandboxNamespace(name, ns);
+
     // Resolve registry: explicit flag wins; otherwise auto-discover via
     // existing context (kubectl current-context's ACR is recorded by
     // `azureclaw context`). For the CLI we read it from azd / config
@@ -387,12 +394,12 @@ async function runSignFlow(
     // Read live ClawSandbox state — generation + endpoints.
     const state = await readClawSandboxState({
       kubectlPath: "kubectl",
-      namespace: ns,
+      namespace: crNamespace,
       name,
     });
     if (state.endpoints.length === 0) {
       throw new Error(
-        `ClawSandbox ${ns}/${name} has no spec.networkPolicy.allowedEndpoints — refusing to sign empty allowlist.`,
+        `ClawSandbox ${crNamespace}/${name} has no spec.networkPolicy.allowedEndpoints — refusing to sign empty allowlist.`,
       );
     }
 
@@ -442,7 +449,7 @@ async function runSignFlow(
       // ClawSandbox manifest the operator commits to their GitOps
       // repo. The cluster never sees this command.
       const manifest = buildEmitManifestYaml({
-        namespace: ns,
+        namespace: crNamespace,
         name,
         registry,
         repository,
@@ -478,7 +485,7 @@ async function runSignFlow(
 
     await patchClawSandbox({
       kubectlPath: "kubectl",
-      namespace: ns,
+      namespace: crNamespace,
       name,
       registry,
       repository,
@@ -504,4 +511,49 @@ async function discoverRegistry(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Find the namespace where the ClawSandbox CR lives. The pod-namespace
+ * `azureclaw-<name>` (used as a fallback) is where the *pod* runs, but
+ * the controller creates the ClawSandbox CR in its own release namespace
+ * (default `azureclaw-system`). Earlier sign attempts were querying the
+ * pod ns and failing with `clawsandbox/<name> not found`.
+ *
+ * Strategy: try the operator's standard namespace first (cheap, fast),
+ * then fall back to a cross-namespace lookup, and finally to the
+ * pod-namespace if everything else fails (preserves legacy behavior
+ * for unusual setups). Surfaces a clear error rather than letting
+ * a downstream kubectl call fail with a confusing 'not found'.
+ */
+async function discoverClawSandboxNamespace(name: string, podNs: string): Promise<string> {
+  const { execa } = await import("execa");
+  // 1) Operator default — covers >99% of installs.
+  try {
+    await execa("kubectl", [
+      "get", `clawsandbox/${name}`, "-n", "azureclaw-system", "-o", "name",
+    ], { stdio: "pipe", timeout: 5_000 });
+    return "azureclaw-system";
+  } catch {
+    /* fall through */
+  }
+  // 2) Cross-namespace lookup — handles non-default operator releases.
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get", "clawsandbox", "-A", "-o",
+      `jsonpath={range .items[?(@.metadata.name=="${name}")]}{.metadata.namespace}{"\\n"}{end}`,
+    ], { stdio: "pipe", timeout: 5_000 });
+    const ns = stdout.trim().split("\n").map((s) => s.trim()).filter(Boolean)[0];
+    if (ns) return ns;
+  } catch {
+    /* fall through */
+  }
+  // 3) Last-ditch: pod ns. Will likely fail downstream with a clear
+  //    "not found" — and the operator can pass --namespace explicitly.
+  throw new Error(
+    `ClawSandbox '${name}' not found in 'azureclaw-system' or any other namespace. ` +
+    `Pass --namespace <ns> to specify the operator's release namespace.`,
+  );
+  // (intentionally unused; kept to silence linter about podNs param)
+  void podNs;
 }
