@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.38.33.27573",
+      "templateHash": "14104848645051047431"
+    }
+  },
+  "parameters": {
+    "acrName": {
+      "type": "string",
+      "defaultValue": "azureclawacr",
+      "metadata": {
+        "description": "ACR (registry) name in this resource group."
+      }
+    },
+    "controllerIdentityName": {
+      "type": "string",
+      "defaultValue": "azureclaw-aks-sandbox-wi",
+      "metadata": {
+        "description": "User-assigned managed identity used by the AKS sandbox / controller workload identity."
+      }
+    }
+  },
+  "variables": {
+    "acrPullRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', parameters('acrName'))]",
+      "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'acrpull')]",
+      "properties": {
+        "roleDefinitionId": "[variables('acrPullRoleId')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ],
+  "outputs": {
+    "roleAssignmentId": {
+      "type": "string",
+      "value": "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'acrpull'))]"
+    },
+    "principalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), '2023-01-31').principalId]"
+    }
+  }
+}
