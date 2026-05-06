@@ -67,7 +67,20 @@ export interface FleetRow {
   mode: string;          // "learning" | "enforcing" | "unknown"
   learned: number;       // count of learned-state domains
   allowlist: number;     // approved domains
-  signed: boolean;       // allowlistRef present (from SecurityState reasonable proxy)
+  signed: SignedState;   // honest signed-state from live spec + status
+}
+
+/** Honest, kubectl-sourced signed state for a sandbox.
+ *  - `unsigned`     : no `spec.networkPolicy.allowlistRef` set
+ *  - `signed-pending`: ref set but `AllowlistAuthoritative` condition is False/Unknown
+ *  - `signed-active`: ref set AND `AllowlistAuthoritative=True`
+ *  - `unknown`      : kubectl lookup failed (e.g. docker-agent or RBAC) */
+export type SignedState = "unsigned" | "signed-pending" | "signed-active" | "unknown";
+
+export interface SignedDetail {
+  state: SignedState;
+  ref?: { name: string; revision?: string; namespace?: string };
+  conditionMessage?: string;
 }
 
 /**
@@ -78,6 +91,7 @@ export function buildFleetRows(
   sandboxes: SandboxInfo[],
   egressByAgent: Map<string, EgressDomain[]>,
   securityStates: Map<string, SecurityState>,
+  signedByAgent: Map<string, SignedDetail>,
 ): FleetRow[] {
   return sandboxes.map((sb) => {
     const domains = egressByAgent.get(sb.name) ?? [];
@@ -89,11 +103,12 @@ export function buildFleetRows(
       mode: sec?.egressMode ?? "unknown",
       learned,
       allowlist,
-      // Approximation: a sandbox is "signed" when allowlistDomains > 0 and
-      // mode is enforcing. The honest signal lives in the
-      // `ClawSandbox.spec.networkPolicy.allowlistRef` field which the
-      // panels framework surfaces; the drawer treats this as advisory.
-      signed: !!sec && sec.egressMode === "enforcing" && (sec.allowlistDomains ?? 0) > 0,
+      // Read from the live ClawSandbox spec/status — NOT a heuristic on
+      // domain count. The earlier proxy ("enforcing + allowlistDomains>0")
+      // labelled inline-only sandboxes as "signed", which is wrong: signing
+      // requires `spec.networkPolicy.allowlistRef` + a verified cosign
+      // signature surfaced via `AllowlistAuthoritative=True`.
+      signed: signedByAgent.get(sb.name)?.state ?? "unknown",
     };
   });
 }
@@ -108,16 +123,30 @@ export function formatFleetRow(r: FleetRow): string {
     r.mode === "enforcing" ? "{green-fg}enforcing{/}" :
     r.mode === "learning"  ? "{yellow-fg}learning{/}" :
                              "{gray-fg}unknown{/}";
-  const sig = r.signed ? "{green-fg}signed{/}" : "{gray-fg}—{/}";
+  const sig =
+    r.signed === "signed-active"  ? "{green-fg}signed ✓{/}"   :
+    r.signed === "signed-pending" ? "{yellow-fg}signing…{/}"  :
+    r.signed === "unsigned"       ? "{gray-fg}unsigned{/}"    :
+                                    "{gray-fg}—{/}";
   return `  ${COL(r.name, 28)}  ${COL(r.mode === "unknown" ? "?" : "", 0)}${mode}  ${COL("", 4)}` +
          `  L:${COL(String(r.learned), 4)} A:${COL(String(r.allowlist), 4)}  ${sig}`;
 }
 
 export function openEgressDrawer(ctx: EgressDrawerContext): void {
-  const { screen, sandboxes, egressByAgent, securityStates, activityLog, setDialogOpen, refresh } = ctx;
+  const { screen, activityLog, setDialogOpen, refresh } = ctx;
   setDialogOpen(true);
 
-  let rows = buildFleetRows(sandboxes, egressByAgent, securityStates);
+  // IMPORTANT: do NOT destructure `sandboxes`, `egressByAgent`, or
+  // `securityStates` — the operator's `refresh()` REPLACES those maps
+  // (operator.ts:517,524 build new Maps, line 505 reassigns `sandboxes`).
+  // Always read live via `ctx.<field>` so post-refresh state is visible.
+
+  // Honest signed-state map, refreshed on every reload(). Sourced from
+  // `kubectl get clawsandbox` rather than the operator's SecurityState
+  // (which is router-internal and doesn't see allowlistRef).
+  let signedByAgent = new Map<string, SignedDetail>();
+
+  let rows = buildFleetRows(ctx.sandboxes, ctx.egressByAgent, ctx.securityStates, signedByAgent);
   let selected = 0;
 
   const dialog = blessed.box({
@@ -134,7 +163,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     tags: true, style: { fg: "white", bg: "black" },
     content:
       `  Fleet egress at a glance. Each row is one sandbox.\n` +
-      `  L = learned (pending approval)   A = allowlist (approved)   signed = enforcing + allowlistRef present`,
+      `  L = learned (pending approval)   A = allowlist (approved)   sign = live spec.networkPolicy.allowlistRef + AllowlistAuthoritative`,
   });
 
   blessed.box({
@@ -161,7 +190,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     parent: dialog, bottom: 0, left: 1, right: 1, height: 2,
     tags: true, style: { fg: "white", bg: "black" },
     content:
-      `  {bold}[s]{/bold} Sign+enforce highlighted   {bold}[A]{/bold} Approve-all-learned (entire fleet)   ` +
+      `  {bold}[s]{/bold} Sign+enforce   {bold}[v]{/bold} Verify signed-state (live)   {bold}[A]{/bold} Approve-all-learned   ` +
       `{bold}[L]{/bold} Toggle learn/enforce   {bold}[r]{/bold} Refresh   {bold}[q/Esc]{/bold} Back`,
   });
 
@@ -170,15 +199,22 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     list.select(Math.min(selected, Math.max(0, rows.length - 1)));
     const cur = rows[selected];
     if (cur) {
-      const sec = securityStates.get(cur.name);
+      const sec = ctx.securityStates.get(cur.name);
+      const sd = signedByAgent.get(cur.name);
+      const sigDetail =
+        cur.signed === "signed-active"  ? `{green-fg}signed ✓{/} ref=${sd?.ref?.name ?? "?"}` :
+        cur.signed === "signed-pending" ? `{yellow-fg}signing…{/} ref=${sd?.ref?.name ?? "?"} (${sd?.conditionMessage ?? "pending verify"})` :
+        cur.signed === "unsigned"       ? `{gray-fg}unsigned{/} (inline allowedEndpoints — press [s] to sign)` :
+                                          `{gray-fg}—{/}`;
       detail.setContent(
         `  Selected: {bold}${cur.name}{/bold}    pending=${cur.learned}  allowlist=${cur.allowlist}  ` +
-        `mode=${cur.mode}  ${cur.signed ? "{green-fg}signed{/}" : "{gray-fg}unsigned{/}"}\n` +
+        `mode=${cur.mode}  ${sigDetail}\n` +
         (sec ? `  blocklist=${sec.blocklistDomains ?? 0}  blocklist-learn=${sec.blocklistLearnMode ? "yes" : "no"}` : ""),
       );
     } else {
       detail.setContent("  {gray-fg}(no sandboxes — spawn one with [n]){/}");
     }
+    list.focus();
     screen.render();
   };
 
@@ -189,11 +225,66 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     setTimeout(() => { setDialogOpen(false); }, 50);
   };
 
+  /** Honest signed-state snapshot for every running sandbox.
+   *  Reads `spec.networkPolicy.allowlistRef` and the controller's
+   *  `AllowlistAuthoritative` condition in a single batched JSON pull.
+   *  Failures are silent (sandbox left as "unknown") because docker
+   *  agents have no ClawSandbox CR. */
+  const fetchSignedStates = async (): Promise<Map<string, SignedDetail>> => {
+    const out = new Map<string, SignedDetail>();
+    try {
+      const { stdout } = await execa("kubectl", [
+        "get", "clawsandbox", "-A", "-o", "json",
+      ], { stdio: "pipe", timeout: 5_000 });
+      const data = JSON.parse(stdout) as { items?: Array<Record<string, unknown>> };
+      for (const item of data.items ?? []) {
+        const meta = item.metadata as { name?: string } | undefined;
+        const spec = item.spec as { networkPolicy?: { allowlistRef?: { name?: string; revision?: string; namespace?: string } } } | undefined;
+        const status = item.status as { conditions?: Array<{ type?: string; status?: string; message?: string; reason?: string }> } | undefined;
+        const name = meta?.name;
+        if (!name) continue;
+        const ref = spec?.networkPolicy?.allowlistRef;
+        const cond = (status?.conditions ?? []).find((c) => c.type === "AllowlistAuthoritative");
+        if (!ref || !ref.name) {
+          out.set(name, { state: "unsigned", conditionMessage: cond?.message });
+        } else if (cond?.status === "True") {
+          out.set(name, { state: "signed-active", ref: { name: ref.name, revision: ref.revision, namespace: ref.namespace }, conditionMessage: cond?.message });
+        } else {
+          out.set(name, { state: "signed-pending", ref: { name: ref.name, revision: ref.revision, namespace: ref.namespace }, conditionMessage: cond?.message ?? cond?.reason });
+        }
+      }
+    } catch {
+      // leave map empty — UI will show "—"
+    }
+    return out;
+  };
+
   const reload = async () => {
     activityLog.log(`{cyan-fg}↻ refreshing fleet egress posture...{/}`);
     await refresh();
-    rows = buildFleetRows(sandboxes, egressByAgent, securityStates);
+    signedByAgent = await fetchSignedStates();
+    rows = buildFleetRows(ctx.sandboxes, ctx.egressByAgent, ctx.securityStates, signedByAgent);
     renderRows();
+  };
+
+  const verifyLive = async (sb: FleetRow) => {
+    activityLog.log(`{cyan-fg}🔍 verifying live signed-state for ${sb.name}…{/}`);
+    const fresh = await fetchSignedStates();
+    signedByAgent = fresh;
+    rows = buildFleetRows(ctx.sandboxes, ctx.egressByAgent, ctx.securityStates, signedByAgent);
+    renderRows();
+    const d = fresh.get(sb.name);
+    if (!d) {
+      activityLog.log(`{gray-fg}? ${sb.name}: no ClawSandbox CR found{/}`);
+      return;
+    }
+    if (d.state === "unsigned") {
+      activityLog.log(`{gray-fg}✗ ${sb.name}: UNSIGNED — spec.networkPolicy.allowlistRef is not set; controller is using inline allowedEndpoints{/}`);
+    } else if (d.state === "signed-pending") {
+      activityLog.log(`{yellow-fg}⏳ ${sb.name}: signed-pending — ref=${d.ref?.name}${d.ref?.revision ? "@" + d.ref.revision.substring(0, 12) : ""} (${d.conditionMessage ?? "verify in progress"}){/}`);
+    } else if (d.state === "signed-active") {
+      activityLog.log(`{green-fg}✓ ${sb.name}: SIGNED+VERIFIED — ref=${d.ref?.name}${d.ref?.revision ? "@" + d.ref.revision.substring(0, 12) : ""} (AllowlistAuthoritative=True){/}`);
+    }
   };
 
   const sign = async (sb: FleetRow) => {
@@ -248,7 +339,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       `Approve ALL learned domains across ${eligible.length} sandbox(es)? This is fleet-wide and irreversible from the drawer.`);
     if (!ok) return;
     for (const r of eligible) {
-      const domains = egressByAgent.get(r.name) ?? [];
+      const domains: EgressDomain[] = ctx.egressByAgent.get(r.name) ?? [];
       const learned = domains.filter((d) => d.state === "learned");
       activityLog.log(`{cyan-fg}⏳ ${r.name}: approving ${learned.length} domain(s)...{/}`);
       screen.render();
@@ -301,6 +392,15 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       case "s": {
         const cur = rows[selected];
         if (cur) await sign(cur);
+        list.focus();
+        screen.render();
+        return;
+      }
+      case "v": {
+        const cur = rows[selected];
+        if (cur) await verifyLive(cur);
+        list.focus();
+        screen.render();
         return;
       }
       case "A":
@@ -320,6 +420,13 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
   renderRows();
   list.focus();
   screen.render();
+  // Kick off an initial honest signed-state fetch (non-blocking) so the
+  // first render shows the real state from kubectl rather than "—".
+  void (async () => {
+    signedByAgent = await fetchSignedStates();
+    rows = buildFleetRows(ctx.sandboxes, ctx.egressByAgent, ctx.securityStates, signedByAgent);
+    renderRows();
+  })();
 }
 
 function confirmYesNo(ctx: EgressDrawerContext, label: string): Promise<boolean> {

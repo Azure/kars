@@ -4,6 +4,7 @@
 import { describe, it, expect } from "vitest";
 import { __test } from "./egress.js";
 import type { SandboxInfo, EgressDomain, SecurityState } from "../types.js";
+import type { SignedDetail } from "./egress.js";
 
 const { buildFleetRows, formatFleetRow } = __test;
 
@@ -36,8 +37,10 @@ function sec(name: string, mode: "learning" | "enforcing" | "unknown", allowlist
 }
 
 describe("egress drawer — buildFleetRows", () => {
+  const noSigned = new Map<string, SignedDetail>();
+
   it("returns empty array when no sandboxes", () => {
-    expect(buildFleetRows([], new Map(), new Map())).toEqual([]);
+    expect(buildFleetRows([], new Map(), new Map(), noSigned)).toEqual([]);
   });
 
   it("counts learned + approved domains per sandbox", () => {
@@ -46,20 +49,30 @@ describe("egress drawer — buildFleetRows", () => {
       ["a", [dom("api.openai.com", "a", "approved"), dom("evil.example.com", "a", "learned"), dom("foo.com", "a", "learned")]],
       ["b", [dom("api.cohere.com", "b", "approved")]],
     ]);
-    const rows = buildFleetRows(sandboxes, egress, new Map());
+    const rows = buildFleetRows(sandboxes, egress, new Map(), noSigned);
     expect(rows[0]).toMatchObject({ name: "a", learned: 2, allowlist: 1 });
     expect(rows[1]).toMatchObject({ name: "b", learned: 0, allowlist: 1 });
   });
 
-  it("marks signed=true only when enforcing AND allowlistDomains>0", () => {
-    const sandboxes = [sb("a"), sb("b"), sb("c")];
+  it("reports signed-state honestly from the signed map (not from heuristic)", () => {
+    const sandboxes = [sb("a"), sb("b"), sb("c"), sb("d")];
     const states = new Map<string, SecurityState>([
-      ["a", sec("a", "enforcing", 4)],   // signed
-      ["b", sec("b", "enforcing", 0)],   // enforcing but empty → not signed
-      ["c", sec("c", "learning", 8)],    // learning → not signed
+      // Old heuristic ('enforcing && allowlist>0') would have marked a, b
+      // signed; only the live spec is the source of truth now.
+      ["a", sec("a", "enforcing", 4)],
+      ["b", sec("b", "enforcing", 4)],
+      ["c", sec("c", "learning", 8)],
+      ["d", sec("d", "enforcing", 0)],
     ]);
-    const rows = buildFleetRows(sandboxes, new Map(), states);
-    expect(rows.map((r) => r.signed)).toEqual([true, false, false]);
+    const signed = new Map<string, SignedDetail>([
+      ["a", { state: "signed-active", ref: { name: "egress-a-v3" } }],
+      ["b", { state: "signed-pending", ref: { name: "egress-b-v1" } }],
+      // c, d → no entry → "unknown"
+    ]);
+    const rows = buildFleetRows(sandboxes, new Map(), states, signed);
+    expect(rows.map((r) => r.signed)).toEqual([
+      "signed-active", "signed-pending", "unknown", "unknown",
+    ]);
   });
 
   it("derives mode from securityStates, defaults to 'unknown'", () => {
@@ -67,18 +80,30 @@ describe("egress drawer — buildFleetRows", () => {
     const states = new Map<string, SecurityState>([
       ["a", sec("a", "enforcing", 0)],
     ]);
-    const rows = buildFleetRows(sandboxes, new Map(), states);
+    const rows = buildFleetRows(sandboxes, new Map(), states, noSigned);
     expect(rows[0].mode).toBe("enforcing");
     expect(rows[1].mode).toBe("unknown");
   });
 });
 
 describe("egress drawer — formatFleetRow", () => {
-  it("renders agent name + counts in row format", () => {
-    const out = formatFleetRow({ name: "agent-a", mode: "enforcing", learned: 2, allowlist: 5, signed: true });
+  it("renders agent name + counts + 'signed ✓' for signed-active", () => {
+    const out = formatFleetRow({ name: "agent-a", mode: "enforcing", learned: 2, allowlist: 5, signed: "signed-active" });
     expect(out).toContain("agent-a");
     expect(out).toContain("L:2");
     expect(out).toContain("A:5");
     expect(out).toContain("enforcing");
+    expect(out).toContain("signed ✓");
+  });
+
+  it("renders 'unsigned' when truly unsigned (the user-facing fix)", () => {
+    const out = formatFleetRow({ name: "agent-b", mode: "enforcing", learned: 0, allowlist: 3, signed: "unsigned" });
+    expect(out).toContain("unsigned");
+    expect(out).not.toContain("signed ✓");
+  });
+
+  it("renders 'signing…' for signed-pending", () => {
+    const out = formatFleetRow({ name: "agent-c", mode: "enforcing", learned: 0, allowlist: 3, signed: "signed-pending" });
+    expect(out).toContain("signing");
   });
 });
