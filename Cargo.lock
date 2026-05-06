@@ -45,9 +45,9 @@ dependencies = [
 
 [[package]]
 name = "agentmesh"
-version = "3.3.0"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbaef94069c2dee3cc60357a787e65b9f875bb326f782181753e1b250189fc38"
+checksum = "80a4f60fdcb773ad62a94585f07d8141ca46764d7134ddbe18fcc594130b2ad2"
 dependencies = [
  "base64 0.22.1",
  "cedar-policy",
