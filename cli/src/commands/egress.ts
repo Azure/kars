@@ -418,6 +418,10 @@ async function runSignFlow(
     console.log(chalk.dim(`     Registry:   ${registry}/${repository}`));
     console.log(chalk.dim(`     Generation: ${state.generation}`));
     console.log(chalk.dim(`     Endpoints:  ${canonical.endpoints.length}`));
+    for (const ep of canonical.endpoints) {
+      const proto = ep.protocol ? `${ep.protocol}://` : "";
+      console.log(chalk.dim(`                   • ${proto}${ep.host}:${ep.port}`));
+    }
     console.log(chalk.dim(`     Sign mode:  ${mode}`));
 
     // Pre-flight: oras and cosign authenticate via the local Docker /
