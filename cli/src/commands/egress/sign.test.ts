@@ -385,6 +385,7 @@ describe("buildCosignSignArgv", () => {
       "--yes",
       "--registry-referrers-mode",
       "legacy",
+      "--new-bundle-format=false",
       `${base.registry}/${base.repository}@${base.digest}`,
     ]);
   });
@@ -401,6 +402,7 @@ describe("buildCosignSignArgv", () => {
       "--yes",
       "--registry-referrers-mode",
       "legacy",
+      "--new-bundle-format=false",
       "--identity-token",
       "tok123",
       `${base.registry}/${base.repository}@${base.digest}`,
@@ -419,6 +421,7 @@ describe("buildCosignSignArgv", () => {
       "--yes",
       "--registry-referrers-mode",
       "legacy",
+      "--new-bundle-format=false",
       "--key",
       "azurekms://kv/k",
       `${base.registry}/${base.repository}@${base.digest}`,
@@ -451,6 +454,7 @@ describe("signArtifact", () => {
       "--yes",
       "--registry-referrers-mode",
       "legacy",
+      "--new-bundle-format=false",
       "--key",
       "k.pem",
       `r.example.com/x/y@sha256:${"a".repeat(64)}`,

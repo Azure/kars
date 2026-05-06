@@ -386,13 +386,26 @@ export function buildCosignSignArgv(opts: {
   identityToken?: string;
 }): string[] {
   const target = `${opts.registry}/${opts.repository}@${opts.digest}`;
-  // Force legacy `.sig` tag convention. Without this, cosign 2.x +
-  // OCI-1.1-capable registries (incl. ACR Premium) write the
-  // signature as a subject-based referrer, which sigstore-rs in the
-  // controller cannot find — it looks for `<digest>.sig` tags. Using
-  // legacy keeps verification working across Notation/sigstore-rs
-  // toolchains and matches what the controller fetches today.
-  const argv: string[] = ["sign", "--yes", "--registry-referrers-mode", "legacy"];
+  // Force legacy `.sig` tag convention. Without this:
+  //   • Cosign 3.x defaults to `--new-bundle-format=true`, which
+  //     writes the signature in the new Sigstore bundle format
+  //     instead of the legacy `<digest>.sig` tag.
+  //   • Cosign 2.x + OCI-1.1-capable registries (incl. ACR Premium)
+  //     use OCI 1.1 referrers (subject-based, no `.sig` tag) by
+  //     default. `--registry-referrers-mode=legacy` falls back to
+  //     `.sig` tag for fetches.
+  //
+  // The controller verifies signatures via sigstore-rs 0.13, whose
+  // triangulate() is hard-coded to look up `<digest>.sig` tags
+  // (https://docs.rs/sigstore/0.13.0 — client.rs L62). It supports
+  // neither OCI 1.1 referrers nor the new bundle format, so both
+  // toggles are required for end-to-end verification.
+  const argv: string[] = [
+    "sign",
+    "--yes",
+    "--registry-referrers-mode", "legacy",
+    "--new-bundle-format=false",
+  ];
   switch (opts.mode) {
     case "keyless":
       // No auth flag — cosign launches the OIDC browser flow.
