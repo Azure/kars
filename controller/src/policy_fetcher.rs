@@ -103,6 +103,7 @@ pub enum FetchError {
     #[error("artifact not found at {0}")]
     NotFound(String),
     #[error("digest mismatch: expected {expected}, got {actual}")]
+    #[allow(dead_code)]
     DigestMismatch { expected: String, actual: String },
     #[error("cosign signature verification failed: {0}")]
     SignatureVerifyFailed(String),
@@ -224,6 +225,31 @@ struct CacheEntry {
 fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
     static CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Lazily initialize and cache a process-wide Sigstore Public Good trust
+/// root (Fulcio CA chain + Rekor public keys + CTfe keys). The first
+/// call performs a TUF refresh against `tuf-repo-cdn.sigstore.dev` (with
+/// the crate's embedded `root.json` as the anchor); subsequent calls
+/// reuse the in-memory result. Wrapped in `Arc` so we can hand out
+/// borrows without holding a long-lived lock across `.await` points.
+async fn trust_root_cache()
+-> Result<std::sync::Arc<sigstore::trust::sigstore::SigstoreTrustRoot>, FetchError> {
+    use sigstore::trust::sigstore::SigstoreTrustRoot;
+    use std::sync::Arc;
+    use tokio::sync::OnceCell;
+    static ROOT: OnceCell<Arc<SigstoreTrustRoot>> = OnceCell::const_new();
+    let root = ROOT
+        .get_or_try_init(|| async {
+            // `cache_dir = None` keeps the trusted_root in memory only.
+            // Network call is to `tuf-repo-cdn.sigstore.dev` (Sigstore PGI).
+            SigstoreTrustRoot::new(None)
+                .await
+                .map(Arc::new)
+                .map_err(|e| FetchError::Transient(format!("sigstore trust root: {e}")))
+        })
+        .await?;
+    Ok(root.clone())
 }
 
 fn cache_key(r: &OciArtifactRef) -> String {
@@ -446,15 +472,19 @@ async fn verify_via_sigstore(
     use sigstore::cosign::{ClientBuilder, CosignCapabilities, verify_constraints};
     use sigstore::registry::OciReference;
 
-    // The S12.b client is built without a Fulcio/Rekor trust repository
-    // explicitly attached. Sigstore-rs requires both to elevate the
-    // embedded cert in `SignatureLayer.certificate_signature`, which
-    // means with this minimal builder the `CertSubject*Verifier`
-    // constraints will not match (they require a verified cert subject).
-    // S12.d wires `ManualTrustRoot` from the cluster `SignerPolicy`
-    // ConfigMap; for now we surface verification failure as
-    // `SignatureVerifyFailed` rather than silently passing.
+    // Lazily initialize a Sigstore Public Good trust root (Fulcio CA +
+    // Rekor + CTfe keys) from the embedded TUF root and remote metadata.
+    // Without this, sigstore-rs builds clients with `Fulcio integration
+    // disabled` and `signature_layer.certificate_signature` is `None`,
+    // causing every `CertSubject*Verifier` constraint to fail closed.
+    // Cached process-wide; refreshed on controller restart (TUF metadata
+    // is checked-in via the crate's embedded snapshot, with TUF refresh
+    // performed once on first reconcile).
+    let trust_root = trust_root_cache().await?;
+
     let mut client = ClientBuilder::default()
+        .with_trust_repository(trust_root.as_ref())
+        .map_err(|e| FetchError::Transient(format!("cosign client (trust repo): {e}")))?
         .build()
         .map_err(|e| FetchError::Transient(format!("cosign client: {e}")))?;
 
@@ -486,35 +516,71 @@ async fn verify_via_sigstore(
     // `Vec<Box<dyn VerificationConstraint>>` is dropped before the next
     // `.await` (kube-rs requires the reconcile future to be `Send`).
     {
-        let mut constraints: VerificationConstraintVec = Vec::new();
+        use sigstore::cosign::signature_layers::SignatureLayer;
+        use sigstore::cosign::verification_constraint::VerificationConstraint;
+        use sigstore::errors::Result as SigstoreResult;
+
+        // OR adapter: passes if ANY inner constraint passes. Sigstore-rs'
+        // `verify_constraints` ANDs across constraints by design; we need
+        // OR semantics across the cartesian (issuer × SAN) pairs because
+        // an admin lists multiple acceptable signer combos and a single
+        // cert can only match one of them.
+        #[derive(Debug)]
+        struct AnyOf(Vec<Box<dyn VerificationConstraint>>);
+        impl VerificationConstraint for AnyOf {
+            fn verify(&self, sl: &SignatureLayer) -> SigstoreResult<bool> {
+                for c in &self.0 {
+                    if c.verify(sl)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+
+        let mut inner: Vec<Box<dyn VerificationConstraint>> = Vec::new();
         for issuer in &signer_policy.fulcio_issuers {
             for san in &signer_policy.san_patterns {
                 if san.starts_with("https://") || san.starts_with("http://") {
-                    constraints.push(Box::new(CertSubjectUrlVerifier {
+                    inner.push(Box::new(CertSubjectUrlVerifier {
                         url: san.clone(),
                         issuer: issuer.clone(),
                     }));
                 } else {
-                    constraints.push(Box::new(CertSubjectEmailVerifier {
-                        email: StringVerifier::ExactMatch(san.clone()),
+                    let email_v = if let Some(re) = san.strip_prefix("re:") {
+                        match regex::Regex::new(re) {
+                            Ok(r) => StringVerifier::Regex(r),
+                            Err(e) => {
+                                return Err(FetchError::IdentityMismatch(format!(
+                                    "invalid regex SAN pattern `{san}`: {e}"
+                                )));
+                            }
+                        }
+                    } else {
+                        StringVerifier::ExactMatch(san.clone())
+                    };
+                    inner.push(Box::new(CertSubjectEmailVerifier {
+                        email: email_v,
                         issuer: Some(StringVerifier::ExactMatch(issuer.clone())),
                     }));
                 }
             }
         }
-        verify_constraints(&layers, constraints.iter())
+        let any_of: VerificationConstraintVec = vec![Box::new(AnyOf(inner))];
+        verify_constraints(&layers, any_of.iter())
             .map_err(|e| FetchError::IdentityMismatch(format!("{e:?}")))?;
     }
 
-    // Step D: pull artifact bytes (digest-pinned) and re-validate.
+    // Step D: pull artifact bytes (digest-pinned).
+    //
+    // The pull is content-addressed by manifest digest (`@sha256:...`), so the
+    // registry cannot substitute a different manifest. `oci_client::pull`
+    // verifies each layer descriptor against the manifest as part of the pull,
+    // which authenticates the bytes we get back. We deliberately do NOT
+    // recompute `sha256(layer_bytes)` here and compare it to `artifact_ref.digest`:
+    // those are different things (layer digest vs. manifest digest) and would
+    // never match for any non-trivial artifact.
     let bytes = pull_artifact_bytes(artifact_ref, &auth).await?;
-    let actual = format!("sha256:{}", sha256_hex(&bytes));
-    if actual != artifact_ref.digest {
-        return Err(FetchError::DigestMismatch {
-            expected: artifact_ref.digest.clone(),
-            actual,
-        });
-    }
 
     let mut parsed = canonical::parse(&bytes)?;
     parsed.digest = artifact_ref.digest.clone();
@@ -582,6 +648,8 @@ fn map_oci_distribution_error(e: oci_client::errors::OciDistributionError) -> Fe
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
