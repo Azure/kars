@@ -441,11 +441,21 @@ EOF
         dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
         fail "ClawMemory: binding ConfigMap not created"
     fi
-    if wait_for_ready clawmemory e2e-clawmemory azureclaw-system 30; then
-        pass "ClawMemory: status.conditions Ready=True"
+    # ClawMemory intentionally reports phase=Pending / Ready=False with
+    # reason=AwaitingFoundryProvisioning until the upstream Foundry
+    # Memory Store is created lazily by the runtime path on first use
+    # (see commit 825daff). The binding ConfigMap is the controller's
+    # complete output; reporting Ready=True here would mislead anyone
+    # using `kubectl wait --for=condition=Ready`. Assert the honest state.
+    local mem_phase mem_ready mem_reason
+    mem_phase=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    mem_ready=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    mem_reason=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    if [ "$mem_phase" = "Pending" ] && [ "$mem_ready" = "False" ] && [ "$mem_reason" = "AwaitingFoundryProvisioning" ]; then
+        pass "ClawMemory: phase=Pending, Ready=False reason=AwaitingFoundryProvisioning (binding-only reconcile, honest report)"
     else
         dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
-        fail "ClawMemory: Ready=True not observed"
+        fail "ClawMemory: expected phase=Pending/Ready=False/AwaitingFoundryProvisioning, got phase=$mem_phase ready=$mem_ready reason=$mem_reason"
     fi
     kubectl delete clawmemory e2e-clawmemory -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
