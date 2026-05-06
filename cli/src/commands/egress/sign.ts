@@ -387,9 +387,12 @@ export function buildCosignSignArgv(opts: {
 }): string[] {
   const target = `${opts.registry}/${opts.repository}@${opts.digest}`;
   // Force legacy `.sig` tag convention. Without this:
-  //   • Cosign 3.x defaults to `--new-bundle-format=true`, which
-  //     writes the signature in the new Sigstore bundle format
-  //     instead of the legacy `<digest>.sig` tag.
+  //   • Cosign 3.x defaults to `--use-signing-config=true` (TUF-
+  //     provided signing config), which forces `--new-bundle-format`.
+  //     The new bundle format doesn't write the legacy `<digest>.sig`
+  //     tag the controller looks for. Disable it.
+  //   • Cosign 3.x then defaults `--new-bundle-format=true`. Force
+  //     false so the legacy `.sig` tag is written.
   //   • Cosign 2.x + OCI-1.1-capable registries (incl. ACR Premium)
   //     use OCI 1.1 referrers (subject-based, no `.sig` tag) by
   //     default. `--registry-referrers-mode=legacy` falls back to
@@ -398,12 +401,13 @@ export function buildCosignSignArgv(opts: {
   // The controller verifies signatures via sigstore-rs 0.13, whose
   // triangulate() is hard-coded to look up `<digest>.sig` tags
   // (https://docs.rs/sigstore/0.13.0 — client.rs L62). It supports
-  // neither OCI 1.1 referrers nor the new bundle format, so both
-  // toggles are required for end-to-end verification.
+  // neither OCI 1.1 referrers nor the new bundle format, so all
+  // three toggles are required for end-to-end verification.
   const argv: string[] = [
     "sign",
     "--yes",
     "--registry-referrers-mode", "legacy",
+    "--use-signing-config=false",
     "--new-bundle-format=false",
   ];
   switch (opts.mode) {
