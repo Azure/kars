@@ -22,7 +22,7 @@ var RelayTransport = class {
     this.identity = identity;
     this.relayUrl = options.relayUrl ?? "wss://relay.agentmesh.online/v1/connect";
     this.p2pCapable = options.p2pCapable ?? false;
-    this.maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
     this.reconnectBaseDelay = options.reconnectBaseDelay ?? 1e3;
   }
   /**
@@ -92,7 +92,7 @@ var RelayTransport = class {
               const handler = this.messageHandlers.get(msgType);
               if (handler) {
                 Promise.resolve(handler(data)).catch((err) => {
-                  console.error(`Handler error for ${msgType}:`, err);
+                  console.error(`Handler error for ${String(msgType)}: ${err instanceof Error ? err.message : String(err)}`);
                 });
               }
             }
@@ -348,7 +348,7 @@ var RelayTransport = class {
       console.error("Max reconnection attempts reached");
       return;
     }
-    const delay = this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts);
+    const delay = Math.min(this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts), 6e4);
     this.reconnectAttempts++;
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     this.reconnectTimeout = setTimeout(async () => {
@@ -411,5 +411,5 @@ function createP2PTransport(identity, targetAmid) {
 exports.P2PTransport = P2PTransport;
 exports.RelayTransport = RelayTransport;
 exports.createP2PTransport = createP2PTransport;
-//# sourceMappingURL=chunk-FAEZQCEA.cjs.map
-//# sourceMappingURL=chunk-FAEZQCEA.cjs.map
+//# sourceMappingURL=chunk-V7P74WPK.cjs.map
+//# sourceMappingURL=chunk-V7P74WPK.cjs.map

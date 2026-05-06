@@ -2,10 +2,10 @@ import { Identity } from './chunk-LOQIKWYK.js';
 export { Identity } from './chunk-LOQIKWYK.js';
 import { RegistryClient, Policy } from './chunk-NMOWWZKF.js';
 export { Config, ConfigError, FileConfigLoader, Policy, RegistryClient, Tier, TierLevel, createFileConfigLoader, getTierLevel } from './chunk-NMOWWZKF.js';
-import { RelayTransport } from './chunk-WM5AX4U5.js';
-export { P2PTransport, RelayTransport, createP2PTransport } from './chunk-WM5AX4U5.js';
-import { MemoryStorage } from './chunk-HCHXHXAO.js';
-export { FileStorage, KVStorage, MemoryStorage, R2Storage } from './chunk-HCHXHXAO.js';
+import { RelayTransport } from './chunk-5EY5BCUD.js';
+export { P2PTransport, RelayTransport, createP2PTransport } from './chunk-5EY5BCUD.js';
+import { MemoryStorage } from './chunk-74NU76Z4.js';
+export { FileStorage, KVStorage, MemoryStorage, R2Storage } from './chunk-74NU76Z4.js';
 import './chunk-ZBMIGRGY.js';
 import { AgentMeshError, NetworkError, SessionError, ValidationError } from './chunk-FBJD3DSJ.js';
 export { AgentMeshError, CryptoError, NetworkError, SessionError, StorageError, ValidationError } from './chunk-FBJD3DSJ.js';
@@ -155,6 +155,9 @@ async function importX25519PublicKey(publicKey) {
   );
 }
 async function x25519DH(privateKey, publicKey) {
+  if (privateKey.length !== 32 || publicKey.length !== 32) {
+    throw new Error(`Invalid X25519 key length: private=${privateKey.length} public=${publicKey.length}`);
+  }
   const privKey = await importX25519PrivateKey(privateKey);
   const pubKey = await importX25519PublicKey(publicKey);
   const sharedBits = await crypto.subtle.deriveBits(
@@ -162,7 +165,11 @@ async function x25519DH(privateKey, publicKey) {
     privKey,
     256
   );
-  return new Uint8Array(sharedBits);
+  const result = new Uint8Array(sharedBits);
+  if (result.every((b) => b === 0)) {
+    throw new Error("X25519 DH produced all-zero output \u2014 possible low-order point attack");
+  }
+  return result;
 }
 async function generateSignedPrekey(identity, id) {
   const { publicKey, privateKey } = await generateX25519Keypair();
@@ -509,12 +516,19 @@ var X3DHKeyExchange = class {
    * @returns The shared secret and initiator message
    */
   static async initiator(ourIdentity, theirBundle, theirSigningPublicKey) {
+    if (theirBundle.signedPrekey.length !== 32) {
+      throw new Error(`Invalid signedPrekey length: ${theirBundle.signedPrekey.length} (expected 32)`);
+    }
+    if (theirBundle.identityKey.length !== 32) {
+      throw new Error(`Invalid identityKey length: ${theirBundle.identityKey.length} (expected 32)`);
+    }
     const signatureValid = await Identity.verifySignatureRaw(
       theirSigningPublicKey,
       theirBundle.signedPrekey,
       theirBundle.signedPrekeySignature
     );
     if (!signatureValid) {
+      console.error("[X3DH] Signed prekey signature verification FAILED \u2014 possible key substitution attack");
       throw new Error("Invalid signed prekey signature");
     }
     const ephemeral = await generateX25519Keypair();
@@ -956,9 +970,7 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const binary = String.fromCharCode(...bytes);
     return btoa(binary);
   }
   /**
@@ -966,10 +978,11 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    */
   bytesEqual(a, b) {
     if (a.length !== b.length) return false;
+    let result = 0;
     for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) return false;
+      result |= a[i] ^ b[i];
     }
-    return true;
+    return result === 0;
   }
 };
 function serializeRatchetHeader(header) {
@@ -1056,7 +1069,7 @@ var SessionManager = class {
   async initiateSession(peerAmid, peerBundle, peerSigningKey) {
     const existing = this.getSessionByPeer(peerAmid);
     if (existing && existing.state === "active" /* ACTIVE */) {
-      return { sessionId: existing.sessionId, x3dhMessage: null, reused: true };
+      throw new Error(`Active session already exists with ${peerAmid}`);
     }
     const x3dhResult = await X3DHKeyExchange.initiator(
       this.identity,
@@ -1207,7 +1220,7 @@ var SessionManager = class {
   /**
    * Close a session.
    */
-  async closeSession(sessionId, reason = "normal") {
+  async closeSession(sessionId, _reason = "normal") {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.info.state = "closed" /* CLOSED */;
@@ -1367,9 +1380,7 @@ var SessionManager = class {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const binary = String.fromCharCode(...bytes);
     return btoa(binary);
   }
   /**
@@ -1644,7 +1655,7 @@ var KnockProtocol = class {
       timestamp: now,
       nonce
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
+    new TextEncoder().encode(JSON.stringify(messageData));
     const signature = await this.identity.sign(messageBytes);
     const knock = {
       ...messageData,
@@ -1721,7 +1732,7 @@ var KnockProtocol = class {
       to: knock.from,
       knockNonce: knock.nonce
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
+    new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
     return {
       ...responseData,
@@ -1741,7 +1752,7 @@ var KnockProtocol = class {
       to: knock.from,
       knockNonce: knock.nonce
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
+    new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
     return {
       ...responseData,
@@ -1986,6 +1997,7 @@ var EncryptedAuditLogger = class {
   encrypted;
   encryptedEntries = [];
   keyInitialized = false;
+  usedNonces = /* @__PURE__ */ new Set();
   constructor(config) {
     this.baseLogger = new AuditLogger(config);
     this.encrypted = config.encrypted ?? true;
@@ -2098,14 +2110,20 @@ var EncryptedAuditLogger = class {
       false,
       ["encrypt"]
     );
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    let nonce;
+    let nonceB64;
+    do {
+      nonce = crypto.getRandomValues(new Uint8Array(12));
+      nonceB64 = toBase64(nonce);
+    } while (this.usedNonces.has(nonceB64));
+    this.usedNonces.add(nonceB64);
     const ciphertext = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: toArrayBuffer2(nonce) },
       aesKey,
       toArrayBuffer2(plaintext)
     );
     return {
-      nonce: toBase64(nonce),
+      nonce: nonceB64,
       ciphertext: toBase64(new Uint8Array(ciphertext)),
       id: event.id,
       timestamp: event.timestamp.toISOString()
@@ -2286,7 +2304,7 @@ var SEVERITY_PRIORITY = {
 };
 function generateEventId() {
   const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).slice(2, 10);
+  const random = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   return `audit_${timestamp}_${random}`;
 }
 var AuditLogger = class {
@@ -2388,19 +2406,21 @@ var AuditLogger = class {
   logToConsole(event) {
     const prefix = `[${event.severity}] [${event.type}]`;
     const msg = `${prefix} ${event.message}`;
+    const detail = event.severity === "ERROR" || event.severity === "CRITICAL" ? event.error || event.metadata || void 0 : event.metadata || void 0;
+    const line = detail !== void 0 ? `${msg} ${JSON.stringify(detail)}` : msg;
     switch (event.severity) {
       case "DEBUG":
-        console.debug(msg, event.metadata || "");
+        console.debug(line);
         break;
       case "INFO":
-        console.info(msg, event.metadata || "");
+        console.info(line);
         break;
       case "WARNING":
-        console.warn(msg, event.metadata || "");
+        console.warn(line);
         break;
       case "ERROR":
       case "CRITICAL":
-        console.error(msg, event.error || event.metadata || "");
+        console.error(line);
         break;
     }
   }
@@ -2800,7 +2820,6 @@ var AgentMeshClient = class _AgentMeshClient {
   knockHandler;
   e2eVerifiedPeers = /* @__PURE__ */ new Set();
   knockAcceptedPeers = /* @__PURE__ */ new Set();
-  knockPendingPeers = /* @__PURE__ */ new Map(); // PATCH: track in-flight KNOCK → Promise<void>
   knockEnforcementEnabled = false;
   eventHandlers = /* @__PURE__ */ new Map();
   // Circuit breaker state
@@ -2823,16 +2842,9 @@ var AgentMeshClient = class _AgentMeshClient {
     this.relayUrl = options.relayUrl || "wss://relay.agentmesh.online/v1/connect";
     this.registry = new RegistryClient(this.registryUrl);
     const transportOptions = {
-      relayUrl: this.relayUrl,
-      // PATCH #9: forward caller-supplied transport options (e.g. wsFactory
-      // for CONNECT-tunneled WebSocket upgrades through HTTPS_PROXY).
-      ...(options.transportOptions || {})
+      relayUrl: this.relayUrl
     };
     this.transport = new RelayTransport(identity, transportOptions);
-    // PATCH #9: peers listed here bypass Signal E2E — send() wraps the
-    // plaintext JSON as base64 in `encrypted_payload` (matches the legacy
-    // wire format used by peers that have not yet adopted the SDK).
-    this.plaintextPeers = new Set(options.plaintextPeers || []);
     this.prekeyManager = new PrekeyManager(identity, this.storage);
     this.sessionManager = new SessionManager(identity, this.storage, this.prekeyManager, options.sessionConfig);
     this.protocolSessions = new ProtocolSessionManager();
@@ -2878,28 +2890,6 @@ var AgentMeshClient = class _AgentMeshClient {
     return new _AgentMeshClient(identity, options);
   }
   /**
-   * PATCH #9: Add a peer to the plaintext-compat set at runtime. Sends and
-   * receives to this AMID skip Signal E2E and use the legacy base64(JSON)
-   * wire format. Used for peers (e.g. Rust controller) that do not yet
-   * speak the full Signal Protocol.
-   */
-  addPlaintextPeer(amid) {
-    if (amid) this.plaintextPeers.add(amid);
-  }
-  /**
-   * PATCH #9: Remove a plaintext-compat peer (e.g. after it upgrades to
-   * real Signal).
-   */
-  removePlaintextPeer(amid) {
-    this.plaintextPeers.delete(amid);
-  }
-  /**
-   * PATCH #9: Snapshot the current plaintext-peer set (for diagnostics).
-   */
-  getPlaintextPeers() {
-    return Array.from(this.plaintextPeers);
-  }
-  /**
    * Get the underlying identity.
    */
   getIdentity() {
@@ -2932,125 +2922,31 @@ var AgentMeshClient = class _AgentMeshClient {
     if (options.autoUploadPrekeys !== false) {
       await this.uploadPrekeys();
     }
-    // PATCH #9: Check transport.connect() result — don't set connected if transport failed
-    const transportConnected = await this.transport.connect();
+    await this.transport.connect();
     this.transport.onMessage("receive", async (data) => {
       const fromAmid = data.from;
       const rawPayload = data.encrypted_payload;
       const msgType = data.message_type;
-      // PATCH #9: plaintext peers send base64(JSON) instead of Signal envelopes.
-      // Decode and deliver directly, skipping KNOCK / Signal entirely.
-      if (this.plaintextPeers.has(fromAmid)) {
-        let payloadStr;
-        try {
-          payloadStr = Buffer.from(rawPayload, "base64").toString("utf8");
-        } catch {
-          payloadStr = rawPayload;
-        }
-        let parsedPlain;
-        try { parsedPlain = JSON.parse(payloadStr); } catch { parsedPlain = payloadStr; }
-        for (const handler of this.messageHandlers) {
-          try { handler(fromAmid, parsedPlain); } catch {}
-        }
-        return;
-      }
       try {
         const parsed = JSON.parse(rawPayload);
-        // Vendor patch #11: handle peer-initiated session close (e.g. ratchet desync).
-        // Clear our local session so the next outbound send to that peer triggers
-        // a fresh KNOCK + X3DH handshake.
-        if (msgType === "close" || parsed?.type === "close") {
-          const reason = parsed?.reason || "unknown";
-          console.warn(`[AGT] peer ${fromAmid} signalled session close (reason=${reason}) \u2014 clearing local session`);
-          const localSessionId = this.activeSessions.get(fromAmid);
-          if (localSessionId) {
-            try { this.sessionManager.closeSession(localSessionId); } catch {}
-            this.activeSessions.delete(fromAmid);
-          }
-          try { this.sessionCache?.clearByAmid?.(fromAmid); } catch {}
-          for (const handler of this.errorHandlers) {
-            try { handler("session_desync", fromAmid, `peer_close:${reason}`); } catch {}
-          }
-          return;
-        }
         if (msgType === "knock") {
           const request = parsed.request || parsed;
-          // PATCH: Track this KNOCK as pending so concurrent messages wait
-          let resolveKnockPending;
-          this.knockPendingPeers.set(fromAmid, new Promise((r) => { resolveKnockPending = r; }));
-          try {
-            const result = await this.handleIncomingKnock(fromAmid, request);
-            if (result.accept) {
-              try {
-                const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
-                await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
-              } catch {
-              }
-            } else if (this.knockEnforcementEnabled) {
-              console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
+          const result = await this.handleIncomingKnock(fromAmid, request);
+          if (result.accept) {
+            try {
+              const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
+              await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
+            } catch {
             }
-          } finally {
-            // PATCH: Unblock any messages waiting on this KNOCK
-            this.knockPendingPeers.delete(fromAmid);
-            resolveKnockPending();
+          } else if (this.knockEnforcementEnabled) {
+            console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
           }
         } else if (this.knockEnforcementEnabled && this.knockHandler && !this.knockAcceptedPeers.has(fromAmid)) {
-          // PATCH: If a KNOCK from this peer is being processed, wait instead of rejecting
-          if (this.knockPendingPeers.has(fromAmid)) {
-            await this.knockPendingPeers.get(fromAmid);
-          }
-          // Re-check after waiting — KNOCK may have been accepted
-          if (this.knockAcceptedPeers.has(fromAmid)) {
-            // Fall through: re-parse and handle as normal message
-            if (parsed.type === "encrypted" && parsed.x3dh) {
-              try {
-                const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
-                const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
-                this.activeSessions.set(fromAmid, sessionId);
-                const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
-                this.emitE2EVerified(fromAmid);
-                for (const handler of this.messageHandlers) {
-                  try { handler(fromAmid, decrypted); } catch {}
-                }
-              } catch (e) {
-                console.error("[AGT] E2E decrypt failed (post-KNOCK wait):", e?.message || e);
-                for (const handler of this.errorHandlers) {
-                  try { handler("decrypt_failed", fromAmid, e?.message || "unknown"); } catch {}
-                }
-              }
-            } else if (parsed.type === "encrypted") {
-              const sessionId = this.activeSessions.get(fromAmid);
-              if (sessionId) {
-                try {
-                  const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
-                  this.emitE2EVerified(fromAmid);
-                  for (const handler of this.messageHandlers) {
-                    try { handler(fromAmid, decrypted); } catch {}
-                  }
-                } catch (decErr) {
-                  console.error("[AGT] E2E decrypt failed (post-KNOCK wait):", decErr?.message || decErr);
-                  for (const handler of this.errorHandlers) {
-                    try { handler("decrypt_failed", fromAmid, decErr?.message || "unknown"); } catch {}
-                  }
-                }
-              } else {
-                console.error(`[AGT] Encrypted message from ${fromAmid} but no session (post-KNOCK wait)`);
-                for (const handler of this.errorHandlers) {
-                  try { handler("no_session", fromAmid, "No encryption session established"); } catch {}
-                }
-              }
-            } else {
-              for (const handler of this.messageHandlers) {
-                try { handler(fromAmid, parsed); } catch {}
-              }
-            }
-          } else {
-            console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
-            for (const handler of this.errorHandlers) {
-              try {
-                handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
-              } catch {
-              }
+          console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
+          for (const handler of this.errorHandlers) {
+            try {
+              handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
+            } catch {
             }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
@@ -3089,32 +2985,6 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             } catch (decErr) {
               console.error("[AGT] E2E decrypt failed for existing session \u2014 message REJECTED:", decErr?.message || decErr);
-              // Vendor patch #11: ratchet desync recovery.
-              // The local session is now unusable (Double Ratchet keys are
-              // out of sync — typical causes: post-KNOCK message reordering,
-              // duplicate KNOCK, or stale session from earlier exchange).
-              // Clear local state so the next outbound mesh_send triggers a
-              // fresh KNOCK + X3DH. Best-effort notify peer to clear too.
-              try {
-                this.sessionManager.closeSession(sessionId);
-              } catch {}
-              this.activeSessions.delete(fromAmid);
-              try { this.sessionCache?.clearByAmid?.(fromAmid); } catch {}
-              if (this.isConnected) {
-                try {
-                  await this.transport.send(
-                    fromAmid,
-                    JSON.stringify({ type: "close", reason: "ratchet_desync" }),
-                    "close",
-                  );
-                } catch {}
-              }
-              for (const handler of this.errorHandlers) {
-                try {
-                  handler("session_desync", fromAmid, decErr?.message || "ratchet_desync");
-                } catch {
-                }
-              }
               for (const handler of this.errorHandlers) {
                 try {
                   handler("decrypt_failed", fromAmid, decErr?.message || "unknown");
@@ -3148,11 +3018,6 @@ var AgentMeshClient = class _AgentMeshClient {
         }
       }
     });
-    // PATCH #9 continued: only mark connected if transport actually connected
-    if (transportConnected === false) {
-      await this.auditLogger.log("CONNECTION_FAILED", "WARN", "Transport connect returned false — relay unreachable");
-      return; // Don't set this.connected = true, so reconnect can retry
-    }
     this.connected = true;
     this.emitEvent("connected", { amid: this.amid });
     await this.auditLogger.log("CONNECTION_ESTABLISHED", "INFO", "Connected to AgentMesh");
@@ -3222,15 +3087,6 @@ var AgentMeshClient = class _AgentMeshClient {
     if (this.rateLimiter) {
       this.rateLimiter.consume(toAmid);
     }
-    // PATCH #9: plaintext peers bypass Signal — wire format matches the
-    // legacy controllers/agents that pre-date full SDK adoption:
-    //   encrypted_payload = base64(JSON.stringify(message))
-    if (this.plaintextPeers.has(toAmid)) {
-      const b64 = Buffer.from(JSON.stringify(message), "utf8").toString("base64");
-      await this.transport.send(toAmid, b64, "message");
-      await this.auditLogger.logMessageSent(toAmid, "plaintext-peer");
-      return;
-    }
     let sessionId = this.activeSessions.get(toAmid);
     const intent = options.intent || "*";
     if (!sessionId) {
@@ -3276,28 +3132,26 @@ var AgentMeshClient = class _AgentMeshClient {
    * The responder will process the KNOCK asynchronously.
    */
   async establishSession(toAmid, options) {
-    const registryBundle = await this.registry.getPrekeys(toAmid);
+    const [registryBundle, agentInfo] = await Promise.all([
+      this.registry.getPrekeys(toAmid),
+      this.registry.lookup(toAmid)
+    ]);
     if (!registryBundle) {
       throw new SessionError(`Cannot get prekeys for ${toAmid}`, "PREKEY_NOT_FOUND");
     }
-    const agentInfo = await this.registry.lookup(toAmid);
     if (!agentInfo) {
       throw new SessionError(`Cannot find agent ${toAmid}`, "AGENT_NOT_FOUND");
     }
     const bundle = this.convertRegistryBundle(registryBundle);
     const signingKeyB64 = agentInfo.signingPublicKey;
     const signingKey = this.base64Decode(signingKeyB64);
-    const result = await this.sessionManager.initiateSession(
+    const { sessionId, x3dhMessage } = await this.sessionManager.initiateSession(
       toAmid,
       bundle,
       signingKey
     );
-    const { sessionId } = result;
+    this.pendingX3DH.set(toAmid, x3dhMessage);
     this.activeSessions.set(toAmid, sessionId);
-    if (result.reused) {
-      return sessionId;
-    }
-    this.pendingX3DH.set(toAmid, result.x3dhMessage);
     const request = {
       type: options.sessionType || "one-shot",
       ttl: options.ttl || 3600,
@@ -3428,7 +3282,7 @@ var AgentMeshClient = class _AgentMeshClient {
         return { accept: false, reason: policyResult.reason || "policy_rejected" };
       }
     }
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const sessionId = `sess_${Date.now()}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
     this.protocolSessions.createSession(fromAmid, request, false);
     this.knockAcceptedPeers.add(fromAmid);
     await this.auditLogger.log(
@@ -4244,7 +4098,7 @@ var CapabilityNegotiator = class {
     const matches = [];
     const hasWildcard = requested.includes("*");
     const requestPattern = hasWildcard ? new RegExp("^" + requested.replace(/\*/g, ".*") + "$") : null;
-    for (const [id, cap] of this.capabilities) {
+    for (const [id] of this.capabilities) {
       if (id === requested) {
         matches.push({
           capabilityId: id,
@@ -4721,7 +4575,7 @@ var DIDResolver = class {
         didDocumentMetadata: {}
       };
     }
-    const [, method, identifier] = match;
+    const [, method] = match;
     if (method === "agentmesh") {
       return {
         didDocument: null,

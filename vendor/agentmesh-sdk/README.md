@@ -484,6 +484,24 @@ Two additions needed to run the SDK inside the NemoClaw mesh-plugin:
 
 Both hooks are purely additive — defaults match upstream behavior.
 
+### 9. Relay reconnect: never give up + capped backoff
+
+**File:** `src/transport.ts` (rebuilt into `dist/chunk-*.js` / `chunk-*.cjs`)
+
+Upstream `RelayTransport` defaulted to `maxReconnectAttempts = 5` and uncapped
+exponential delay. After the 5th failure the SDK silently logged
+`Max reconnection attempts reached` and stayed mesh-deaf forever. In the
+AzureClaw cluster this manifested as: registry searches kept working (HTTPS,
+unaffected) but the relay had zero active WebSocket clients within minutes of
+any transient blip (e.g. registry-not-yet-ready during pod boot, or a kubelet
+network hiccup) — and stayed at zero until the pod restarted.
+
+Patch:
+- `maxReconnectAttempts` default → `Number.POSITIVE_INFINITY` (never quit).
+- Reconnect delay capped at 60 s: `min(base * 2^n, 60_000)`.
+
+Callers that want the old behavior can still override via `TransportOptions`.
+
 ## License
 
 MIT
