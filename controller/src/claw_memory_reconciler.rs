@@ -253,8 +253,7 @@ fn build_conditions(
             // Operators / `kubectl wait --for=condition=Ready` should
             // block here, not race ahead to talk to a store the router
             // will 404 on.
-            const AWAITING_MSG: &str =
-                "binding ConfigMap compiled; awaiting upstream Foundry memory store provisioning by runtime path (router proxy on first use)";
+            const AWAITING_MSG: &str = "binding ConfigMap compiled; awaiting upstream Foundry memory store provisioning by runtime path (router proxy on first use)";
             out.push(conditions::preserve_transition_time(
                 prior_ready,
                 conditions::TYPE_READY,

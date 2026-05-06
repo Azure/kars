@@ -75,7 +75,10 @@ pub(super) fn anthropic_to_openai(req: &Value) -> Value {
                     .iter()
                     .filter_map(|p| {
                         match p.get("type").and_then(|t| t.as_str()) {
-                            Some("text") => p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()),
+                            Some("text") => p
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string()),
                             Some("tool_result") => p
                                 .get("content")
                                 .and_then(|c| c.as_str())
@@ -237,11 +240,7 @@ pub(super) async fn anthropic_messages(
     // Token budget check.
     if let Err(msg) = state.budget.check_budget(sandbox_name).await {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded (anthropic): {msg}");
-        return deny_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            &msg,
-            "rate_limit_error",
-        );
+        return deny_response(StatusCode::TOO_MANY_REQUESTS, &msg, "rate_limit_error");
     }
 
     let requested_model = req_json
@@ -291,12 +290,7 @@ pub(super) async fn anthropic_messages(
         Ok((status, _resp_headers, resp_body)) => {
             if !status.is_success() {
                 // Pass through Foundry error verbatim — it's already JSON.
-                return (
-                    status,
-                    [("content-type", "application/json")],
-                    resp_body,
-                )
-                    .into_response();
+                return (status, [("content-type", "application/json")], resp_body).into_response();
             }
 
             // Track usage tokens for budget (mirrors chat_completions handler).

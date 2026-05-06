@@ -498,10 +498,7 @@ async fn agt_registry_proxy(
 /// Returns `Err((status, message))` if the claim must be rejected. An empty
 /// body (which can occur for some capability update shapes) is allowed and
 /// passes through to the upstream registry.
-pub(super) fn enforce_identity_claim(
-    path: &str,
-    body: &Bytes,
-) -> Result<(), (StatusCode, String)> {
+pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (StatusCode, String)> {
     let sandbox_name = match std::env::var("SANDBOX_NAME") {
         Ok(v) if !v.is_empty() && v != "unknown" => v,
         _ => {
@@ -677,11 +674,14 @@ mod tests {
     #[test]
     fn enforce_accepts_matching_display_name() {
         with_env("SANDBOX_NAME", "azureclawtest", || {
-            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
-                "amid": "ABC",
-                "display_name": "azureclawtest",
-                "capabilities": ["azureclaw-agent", "task-execution", "azureclawtest"],
-            })).unwrap());
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "amid": "ABC",
+                    "display_name": "azureclawtest",
+                    "capabilities": ["azureclaw-agent", "task-execution", "azureclawtest"],
+                }))
+                .unwrap(),
+            );
             assert!(enforce_identity_claim("registry/register", &body).is_ok());
         });
     }
@@ -689,10 +689,13 @@ mod tests {
     #[test]
     fn enforce_rejects_squatted_display_name() {
         with_env("SANDBOX_NAME", "viz", || {
-            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
-                "amid": "ABC",
-                "display_name": "azureclawtest",
-            })).unwrap());
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "amid": "ABC",
+                    "display_name": "azureclawtest",
+                }))
+                .unwrap(),
+            );
             let err = enforce_identity_claim("registry/register", &body).unwrap_err();
             assert_eq!(err.0, StatusCode::FORBIDDEN);
             assert!(err.1.contains("display_name"));
@@ -702,11 +705,14 @@ mod tests {
     #[test]
     fn enforce_rejects_squatted_capability() {
         with_env("SANDBOX_NAME", "viz", || {
-            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
-                "amid": "ABC",
-                "display_name": "viz",
-                "capabilities": ["azureclaw-agent", "azureclawtest"],
-            })).unwrap());
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "amid": "ABC",
+                    "display_name": "viz",
+                    "capabilities": ["azureclaw-agent", "azureclawtest"],
+                }))
+                .unwrap(),
+            );
             let err = enforce_identity_claim("registry/register", &body).unwrap_err();
             assert_eq!(err.0, StatusCode::FORBIDDEN);
             assert!(err.1.contains("capability"));
@@ -729,10 +735,13 @@ mod tests {
     fn enforce_allows_missing_display_name() {
         // Some capability-update payloads omit display_name.
         with_env("SANDBOX_NAME", "viz", || {
-            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
-                "amid": "ABC",
-                "capabilities": ["task-execution"],
-            })).unwrap());
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "amid": "ABC",
+                    "capabilities": ["task-execution"],
+                }))
+                .unwrap(),
+            );
             assert!(enforce_identity_claim("registry/capabilities", &body).is_ok());
         });
     }
@@ -742,9 +751,12 @@ mod tests {
         let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("SANDBOX_NAME").ok();
         unsafe { std::env::remove_var("SANDBOX_NAME") };
-        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
-            "display_name": "anything",
-        })).unwrap());
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "display_name": "anything",
+            }))
+            .unwrap(),
+        );
         let err = enforce_identity_claim("registry/register", &body).unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         if let Some(v) = prev {

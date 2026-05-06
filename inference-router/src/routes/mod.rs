@@ -48,8 +48,8 @@ pub use egress::egress_routes;
 mod inference;
 pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
 
-mod chat_completions;
 mod anthropic_messages;
+mod chat_completions;
 
 mod mcp;
 pub use mcp::{
