@@ -97,13 +97,18 @@ import { redactSecrets, sanitizeLog } from "./core/log-redact.js";
 import {
   amidToName,
   nameToAmid,
+  nameToAmidTs,
   parentTrustedAmids,
+  parentTrustedNames,
   peerSigningKeys,
   getCachedAmid,
   pickFreshestRegistryMatch,
   resolveAmidByName as _resolveAmidByName,
   resolveAmidToName as _resolveAmidToName,
   resolveSigningKey as _resolveSigningKey,
+  seedTrustedPeers,
+  verifyTrustedByName as _verifyTrustedByName,
+  isAmidVerified,
 } from "./core/amid-cache.js";
 
 // Thin wrappers so internal callers don't need to thread `routerUrl` through.
@@ -284,6 +289,7 @@ async function processTaskWithTools(
 ): Promise<string> {
   return _processTaskWithTools(taskContent, {
     meshClient: () => agtMeshClient,
+    meshIdentity: () => agtIdentity,
     isInterruptRequested: () => handoffInterruptRequested,
     interruptReason: () => handoffInterruptReason,
     setInterrupt: (req, reason) => {
@@ -441,6 +447,31 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       relayUrl,
     });
 
+    // ── Pre-seed name-based trust BEFORE connect() ───────────────────────
+    // The KNOCK handler (registered just below) must see the trust set
+    // populated when the first KNOCK arrives. AGT_TRUSTED_PEERS is set by
+    // the parent's router at spawn time and is the source of truth for
+    // which sandbox names this agent should trust. AMIDs in that env are
+    // ephemeral hints — the receiver re-verifies them via the registry.
+    const trustedPeersEnv = process.env.AGT_TRUSTED_PEERS || "";
+    seedTrustedPeers(trustedPeersEnv);
+    {
+      const parsedPeers = trustedPeersEnv
+        .split(",")
+        .map(p => p.trim())
+        .filter(Boolean);
+      if (parsedPeers.length > 0) {
+        // Convention (agt-tools/agt.ts:200-206): the FIRST entry is always
+        // the spawner (parent). We track the parent's NAME — its AMID
+        // rotates on every restart, so AMID-based parent identity is unsafe.
+        const firstName = parsedPeers[0].split(":", 1)[0].trim();
+        if (firstName) {
+          (process as any)[Symbol.for("agt-parent-name")] = firstName;
+        }
+        log.info(`AGT trust set seeded from parent: ${[...parentTrustedNames].join(", ")}`);
+      }
+    }
+
     // ── Register ALL handlers BEFORE connect() ──────────────────────────
     // Messages can arrive immediately after connect() returns, so handlers
     // must be in place first.
@@ -463,11 +494,28 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // Registry returns 0.0-1.0 scale; normalize to 0-1000 for threshold comparison
           const rawScore = peerInfo?.reputationScore ?? 0;
           const normalizedScore = Math.round(rawScore * 1000);
-          // Spawner affinity: +200 bonus for agents this agent spawned directly
-          const isSpawnedChild = amidToName.has(fromAmid) && !parentTrustedAmids.has(fromAmid);
-          // Parent-verified trust: +500 for peers pre-seeded by our parent at spawn time.
-          // These AMIDs came via AGT_TRUSTED_PEERS env var (set by router, not self-reported).
-          const isParentTrusted = parentTrustedAmids.has(fromAmid);
+
+          // Resolve parent-verified status by NAME, not by stale AMID seed.
+          // verifyTrustedByName looks up display_name via /registry/lookup,
+          // checks our authoritative parentTrustedNames set, and confirms
+          // the AMID is the freshest live registration for that name.
+          // Returns immediately on a hot-path verified-cache hit.
+          let isParentTrusted = isAmidVerified(fromAmid);
+          let verifiedByName: string | undefined;
+          if (!isParentTrusted) {
+            const v = await _verifyTrustedByName(fromAmid, routerUrl);
+            if (v.trusted) {
+              isParentTrusted = true;
+              verifiedByName = v.name;
+            } else if (v.reason && v.reason !== "name_not_trusted") {
+              log.warn(`AGT KNOCK verify deferred for ${fromName}: ${v.reason}`);
+            }
+          }
+
+          // Spawner affinity: agents this sandbox spawned directly. After
+          // the name-based verification refactor, parent-trust dominates;
+          // the +200 spawner bonus remains for siblings discovered ad-hoc.
+          const isSpawnedChild = amidToName.has(fromAmid) && !isParentTrusted;
           const affinityBonus = isParentTrusted ? 500 : (isSpawnedChild ? 200 : 0);
           const affinityLabel = isParentTrusted ? "parent-verified" : (isSpawnedChild ? "spawner" : "");
           const effectiveScore = normalizedScore + affinityBonus;
@@ -475,10 +523,22 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             log.warn(`AGT KNOCK rejected: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''}) < threshold=${AGT_TRUST_THRESHOLD}`);
             return { accept: false, reason: `trust_score_${effectiveScore}_below_${AGT_TRUST_THRESHOLD}` };
           }
-          log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''})`);
+          if (verifiedByName) {
+            log.info(`AGT KNOCK trust OK: ${verifiedByName} (${fromAmid.slice(0, 12)}...) name-verified via registry, score=${effectiveScore}`);
+          } else {
+            log.info(`AGT KNOCK trust OK: ${fromName} score=${effectiveScore} (registry=${normalizedScore}${affinityBonus > 0 ? ` +${affinityBonus} ${affinityLabel}` : ''})`);
+          }
         } catch {
-          // Registry lookup failed — accept anyway for mesh agents (trust evaluation best-effort)
-          log.warn(`AGT KNOCK trust lookup failed for ${fromName} — accepting (best-effort)`);
+          // Registry unreachable. Soften the historical fail-open: accept
+          // only if this AMID has a recent verified-trust entry. Unknown
+          // AMIDs are rejected — the sender will retry, and the SDK already
+          // re-establishes sessions on transient failures.
+          if (isAmidVerified(fromAmid)) {
+            log.warn(`AGT KNOCK trust lookup failed for ${fromName} — accepting (recent verified entry exists)`);
+          } else {
+            log.warn(`AGT KNOCK rejected: registry unreachable and no recent verified entry for ${fromName} (${fromAmid.slice(0, 12)}...)`);
+            return { accept: false, reason: "registry_unreachable_no_cache" };
+          }
         }
       }
 
@@ -570,7 +630,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // ── Transport layer: intercept chunked transfer messages ──
       // mesh:transfer_manifest and mesh:transfer_chunk are transport-level —
       // they get accumulated and reassembled before reaching application logic.
-      const transportResult = await meshHandleTransportMessage(fromAmid, fromName, message, log);
+      const transportResult = await meshHandleTransportMessage(fromAmid, fromName, message, log, agtMeshClient);
       if (transportResult === null) {
         // Transport message absorbed (manifest or partial chunk) — don't process further
         return;
@@ -975,31 +1035,48 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // When the parent spawns a NEW sibling AFTER we booted, our pre-seeded
       // AGT_TRUSTED_PEERS list is missing that sibling. Without this handler,
       // backward-direction sibling traffic (new sibling → us) would be rejected
-      // at KNOCK time with score=0 < threshold=500. The parent broadcasts
-      // peers_update to us with the new sibling's AMID; we add it to
-      // parentTrustedAmids so future KNOCKs from that sibling are accepted.
-      // Authorized only when the sender AMID matches the recorded parent AMID
-      // (the first entry in AGT_TRUSTED_PEERS at boot).
+      // at KNOCK time with score=0 < threshold=500.
+      //
+      // Authorization is by parent NAME (control-plane-attested via the router's
+      // display_name enforcement), not by parent AMID — the parent's AMID
+      // rotates on every pod restart, so AMID-pinned auth was a stale-trust
+      // bug. We verify the sender's AMID via the registry, then check the
+      // resolved display_name matches our recorded parent name.
       if (message?.type === "peers_update" && Array.isArray(message?.peers)) {
-        const parentAmid: string | undefined = (process as any)[Symbol.for("agt-parent-amid")];
-        if (!parentAmid || fromAmid !== parentAmid) {
-          log.warn(`peers_update rejected: sender ${fromName} (${fromAmid.slice(0, 12)}...) is not our parent`);
+        const parentName: string | undefined = (process as any)[Symbol.for("agt-parent-name")];
+        if (!parentName) {
+          log.warn(`peers_update rejected: no parent name recorded`);
+          return;
+        }
+        let senderName: string | undefined;
+        if (isAmidVerified(fromAmid)) {
+          senderName = amidToName.get(fromAmid);
+        } else {
+          const v = await _verifyTrustedByName(fromAmid, routerUrl);
+          if (v.trusted) senderName = v.name;
+        }
+        if (!senderName || senderName !== parentName) {
+          log.warn(`peers_update rejected: sender ${fromName} (${fromAmid.slice(0, 12)}...) resolved to '${senderName ?? "?"}' — not parent '${parentName}'`);
           return;
         }
         let added = 0;
         for (const peer of message.peers) {
+          // Accept entries with a name; AMID is now an optional warm hint
+          // (the receiver re-verifies on first KNOCK from that peer).
           const name = peer?.name;
-          const amid = peer?.amid;
-          if (typeof name !== "string" || typeof amid !== "string" || !name || !amid) continue;
-          if (parentTrustedAmids.has(amid)) continue;
-          amidToName.set(amid, name);
-          nameToAmid.set(name, amid);
-          parentTrustedAmids.add(amid);
+          if (typeof name !== "string" || !name) continue;
+          const amid = typeof peer?.amid === "string" && peer.amid ? peer.amid : undefined;
+          if (parentTrustedNames.has(name) && (!amid || amidToName.get(amid) === name)) continue;
+          parentTrustedNames.add(name);
+          if (amid) {
+            amidToName.set(amid, name);
+            nameToAmid.set(name, amid);
+          }
           added += 1;
           try {
             await pushTrustToRouter(name, 0.0);
           } catch { /* best-effort */ }
-          log.info(`AGT peer trust extended: ${name} (${amid.slice(0, 12)}...) via peers_update from parent`);
+          log.info(`AGT peer trust extended: ${name}${amid ? ` (${amid.slice(0, 12)}...)` : ""} via peers_update from parent`);
         }
         if (added > 0) {
           log.info(`AGT peers_update applied: +${added} trusted peer(s) from parent`);
@@ -1600,11 +1677,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     }
 
                     // Register new sub-agent AMID in trust maps so parent accepts
-                    // their messages (KNOCK handler checks parentTrustedAmids).
+                    // their messages. Trust is now name-keyed: their KNOCK to
+                    // us will be granted the spawner-affinity bonus because
+                    // amidToName.has(fromAmid) — no need to mutate the legacy
+                    // parentTrustedAmids set directly.
                     // After handoff, sub-agents have new key pairs → new AMIDs.
                     amidToName.set(subAmid, spawned.name);
                     nameToAmid.set(spawned.name, subAmid);
-                    parentTrustedAmids.add(subAmid);
+                    nameToAmidTs.set(spawned.name, Date.now());
                     try {
                       await pushTrustToRouter(spawned.name, 0.0);
                       log.info(`🔑 Registered re-spawned sub-agent '${spawned.name}' as trusted (${subAmid.slice(0, 12)}...)`);
@@ -1884,38 +1964,26 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
     (process as any)[Symbol.for("agt-identity")] = agtIdentity;
 
-    // ── Pre-seed trusted peers from parent ──────────────────────────────
-    // AGT_TRUSTED_PEERS is set by the parent's router at spawn time.
-    // Format: "name:AMID,name:AMID,..." — these are parent-verified,
-    // not self-reported, so they're safe to auto-trust.
-    // Convention (agt-tools/agt.ts:200-206): the FIRST entry is always the
-    // spawner (parent). We track its AMID separately so the `peers_update`
-    // handler can authorize only the parent to extend our trust set at runtime.
-    const trustedPeersEnv = process.env.AGT_TRUSTED_PEERS || "";
-    if (trustedPeersEnv && connected) {
-      const peers = trustedPeersEnv.split(",").filter(Boolean);
-      let isFirst = true;
-      for (const peer of peers) {
-        const [name, amid] = peer.split(":");
-        if (name && amid) {
-          amidToName.set(amid, name);
-          nameToAmid.set(name, amid);
-          parentTrustedAmids.add(amid);
-          if (isFirst) {
-            (process as any)[Symbol.for("agt-parent-amid")] = amid;
-            isFirst = false;
-          }
-          // Push baseline trust (score=500 = threshold) via local admin token
-          try {
-            await pushTrustToRouter(name, 0.0);
-            log.info(`AGT trusted peer seeded: ${name} (${amid.slice(0, 12)}...)`);
-          } catch {
-            log.warn(`AGT trusted peer seed failed for ${name}`);
-          }
+    // ── Push baseline trust scores for pre-seeded parent peers ──────────
+    // The authoritative parse + parentTrustedNames seeding already happened
+    // pre-connect (see "Pre-seed name-based trust BEFORE connect()" above).
+    // What still needs to run AFTER connect is the network-side effect:
+    // pushing baseline trust (score = threshold) to our local router so the
+    // AGT trust evaluator surfaces these peers as expected.
+    if (connected) {
+      let pushed = 0;
+      for (const name of parentTrustedNames) {
+        try {
+          await pushTrustToRouter(name, 0.0);
+          const amid = nameToAmid.get(name);
+          log.info(`AGT trusted peer seeded: ${name}${amid ? ` (${amid.slice(0, 12)}...)` : " (name-only)"}`);
+          pushed += 1;
+        } catch {
+          log.warn(`AGT trusted peer seed failed for ${name}`);
         }
       }
-      if (peers.length > 0) {
-        log.info(`AGT pre-seeded ${peers.length} trusted peer(s) from parent`);
+      if (pushed > 0) {
+        log.info(`AGT pre-seeded ${pushed} trusted peer(s) from parent`);
       }
     }
 
@@ -2177,6 +2245,70 @@ function registerMemorySyncShutdownHook(log: { info: (m: string) => void; warn: 
   };
   process.once("SIGTERM", flush);
   process.once("SIGINT", flush);
+}
+
+// Best-effort self-revoke on pod shutdown so the agentmesh registry doesn't
+// accumulate graveyard entries across azureclaw destroy/up cycles. The vendor
+// registry's `/registry/search` endpoint returns ALL agents that ever registered
+// — it doesn't filter by status or last_seen, and `azureclaw destroy` had no
+// deregistration path. Result: a brand-new top-level agent calling discover
+// would see 100+ stale AMIDs from long-dead sandboxes and the LLM would try to
+// mesh_send to ghosts. The receiver-side discover filter (90s last_seen window
+// in agt-tools/agt.ts) is the immediate fix; this hook is the upstream fix
+// that prunes the registry over time. POSTs an Ed25519-signed revoke request
+// using the agent's existing identity, which the registry already accepts as a
+// self-revoke (revoker_amid == amid → permission check passes).
+let revokeShutdownRegistered = false;
+function registerRevokeShutdownHook(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (revokeShutdownRegistered) return;
+  revokeShutdownRegistered = true;
+  let revokeInFlight = false;
+  const revoke = async () => {
+    if (revokeInFlight) return;
+    revokeInFlight = true;
+    try {
+      if (!agtIdentity || typeof agtIdentity.sign !== "function" || !agtIdentity.amid) return;
+      const ts = new Date().toISOString();
+      const sigBytes: Uint8Array = await agtIdentity.sign(new TextEncoder().encode(ts));
+      const sigB64 = Buffer.from(sigBytes).toString("base64");
+      const body = JSON.stringify({
+        amid: agtIdentity.amid,
+        revoker_amid: agtIdentity.amid,
+        reason: "cessation_of_operation",
+        signature: sigB64,
+        timestamp: ts,
+      });
+      // Hit the router proxy on localhost; no DNS, no extra deps.
+      // We deliberately use a 2s timeout — pod terminationGracePeriod is
+      // typically 30s, but the router may already be tearing down.
+      await new Promise<void>((resolve) => {
+        const http = require("http");
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: 8443,
+          method: "POST",
+          path: "/agt/registry/registry/revoke",
+          headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+          timeout: 2000,
+        }, (res: any) => {
+          let chunk = "";
+          res.on("data", (c: Buffer) => { chunk += c.toString(); });
+          res.on("end", () => {
+            log.info(`AGT self-revoke: status=${res.statusCode} body=${chunk.slice(0, 120)}`);
+            resolve();
+          });
+        });
+        req.on("error", (err: any) => { log.warn(`AGT self-revoke failed: ${err?.message || err}`); resolve(); });
+        req.on("timeout", () => { req.destroy(); resolve(); });
+        req.write(body);
+        req.end();
+      });
+    } catch (err: any) {
+      log.warn(`AGT self-revoke unexpected error: ${err?.message || err}`);
+    }
+  };
+  process.once("SIGTERM", () => { revoke().catch(() => {}); });
+  process.once("SIGINT", () => { revoke().catch(() => {}); });
 }
 
 interface OpenClawConfig {
@@ -2492,6 +2624,7 @@ const azureClawPlugin = definePluginEntry({
       });
     };
     registerMemorySyncShutdownHook(log);
+    registerRevokeShutdownHook(log);
 
     // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
     // These are first-class tools the LLM can call directly.

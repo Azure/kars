@@ -502,6 +502,178 @@ Patch:
 
 Callers that want the old behavior can still override via `TransportOptions`.
 
+## Patch #13 — Decrypt-fail clears local session + emits `session_desync` (May 2026)
+
+**File:** `dist/index.js` (`AgentMeshClient.receive` handler, ~line 2986)
+
+Upstream behavior: when `decryptMessage` throws inside an existing session
+(ratchet desync — peer rotated keys, transport interleaved a stale message,
+etc.), the SDK only emits `decrypt_failed` and **leaves the broken session
+in `activeSessions`**. Every subsequent inbound message from that peer
+fails decrypt the same way — and is silently dropped. The sender keeps
+encrypting against a stale receiver state, so no replies ever arrive.
+
+In the AzureClaw production demo (May 2026) this took down sibling-to-sibling
+binary file transfers between sub-agents: chunked PNGs (4–5 chunks each) shipped
+fine until the first decrypt failure, then every subsequent chunk in the
+chunked-transfer protocol was rejected, leaving partial transfers in
+`pendingTransfers` until TTL'd. The receiver never reassembled, never sent
+`file_transfer_ack`, the sender retried the whole file 3× — same fate. Hero
+image transfers failed; chart transfers (single-chunk → no decrypt session
+overlap) succeeded.
+
+Patch:
+
+- On decrypt failure for an existing session, **delete** the entry from
+  `activeSessions`, `pendingX3DH`, and `knockAcceptedPeers` (best-effort).
+  Next `establishSession` to that peer will run a fresh X3DH + KNOCK round.
+- Emit `session_desync` (was `decrypt_failed`) so callers can distinguish
+  recoverable ratchet drift from genuine tampering or no-session drops.
+
+The companion mesh-transport recovery layer in
+`runtimes/openclaw/src/core/mesh-transport.ts` (gap-detection chunk
+re-request + outbound retransmit cache) handles in-flight chunked transfers
+that crossed the desync boundary.
+
+## Patch #15 — KNOCK/encrypt race: keep X3DH bundle, idempotent responder (May 2026)
+
+**Files:** `dist/index.js`
+- `AgentMeshClient.send` encrypted branch (~line 3122)
+- `AgentMeshClient.receive` `parsed.type === "encrypted" && parsed.x3dh` branch (~line 2952)
+
+### Symptom
+Cross-sandbox encrypted messages were silently rejected with `no_session — message REJECTED` after a fresh KNOCK had been accepted. Logs on the receiver showed a clean trust verification:
+
+```
+21:20:57.817 AGT KNOCK from azureclawtest (322PXauB2Nzs...)
+21:20:57.820 ⛔ Message blocked from 322PXauB2Nzs: no accepted KNOCK session
+21:20:57.874 AGT KNOCK trust OK: name-verified via registry, score=1000
+21:22:11.603 AGT E2E no_session from azureclawtest: No encryption session established
+```
+
+### Root cause
+A two-step race between KNOCK and the first encrypted message:
+
+1. Parent calls `establishSession(toAmid)`:
+   - Stores X3DH bundle in `pendingX3DH` (line 3169)
+   - Sends KNOCK on the relay (line 3182)
+   - Returns; caller's `send()` immediately encrypts and ships the first
+     application message with the bundle attached (line 3126),
+   - **Sender deletes `pendingX3DH` after that one send (line 3127).**
+
+2. Receiver:
+   - KNOCK and the first encrypted message arrive within a few ms.
+   - The encrypted message can land **before** the KNOCK is processed — or
+     while `verifyTrustedByName`'s registry lookup is still in flight.
+   - At that moment `knockAcceptedPeers.has(fromAmid)` is `false`, so the
+     pre-decrypt KNOCK gate at line ~2944 blocks the message and drops it.
+   - Receiver therefore never calls `acceptSession()`, never builds the
+     responder ratchet, and has no encryption session.
+
+3. Subsequent sends:
+   - Sender's `pendingX3DH` was burned in step 1 → no `x3dh` field on the
+     wire → receiver falls through to the "session-required" branch
+     (~line 2974) → emits `no_session` for every message forever.
+
+This was masked for a long time by `AGT_TRUST_THRESHOLD=0` (the SDK
+fail-open path skipped the KNOCK gate). Once threshold was restored to
+500 (production default) the race became always-fatal in practice.
+
+### Patch
+- **Sender:** stop deleting `pendingX3DH` after the first attach. Every
+  encrypted send now carries the bundle until the session is explicitly
+  torn down (e.g. by patch #13's `session_desync` recovery). Cost is one
+  ~150-byte serialized X3DH message per outbound message — negligible
+  next to the AEAD ciphertext + ratchet header.
+- **Receiver:** make the `encrypted+x3dh` branch idempotent. It now calls
+  `acceptSession()` only when no session exists for `fromAmid`; otherwise
+  it decrypts with the established session. This is required because the
+  bundle is now re-attached on every message — without idempotence the
+  receiver would reset the ratchet on every inbound message and corrupt
+  any in-flight chunked transfer.
+
+## Patch #16 — Pre-KNOCK message buffer (May 2026)
+
+**File:** `dist/index.js` (`AgentMeshClient.connect` receive handler, ~line 2926)
+
+### Symptom
+Even with patch #15 in place, the very first encrypted message after a fresh
+KNOCK was still being lost in the demo (request/response) pattern. Receiver
+log:
+```
+21:31:19.551 ⛔ Message blocked from <parent>: no accepted KNOCK session
+21:31:19.563 AGT KNOCK from <parent>
+21:31:19.642 AGT KNOCK accepted
+```
+The encrypted message arrived ~12 ms before the KNOCK; the gate dropped it;
+KNOCK was then accepted but no further messages arrived (the parent had
+sent only one and was waiting for a reply). Patch #15's "re-attach X3DH on
+every send" only helps when the sender produces a SECOND message — it
+cannot recover a request/response flow where the first message is lost.
+
+### Root cause
+The relay does not guarantee inter-message ordering between distinct
+`message_type`s. A sender that calls `establishSession()` (which fires KNOCK)
+followed immediately by `send()` (which fires the encrypted payload) can
+have the two messages arrive at the receiver in **either** order. The pre-
+decrypt gate at line ~2944 drops anything that arrives before
+`knockAcceptedPeers.has(fromAmid)`, with no recovery.
+
+### Patch
+- Refactor the `transport.onMessage("receive", ...)` callback into a named
+  closure `processInbound(data)` so it can be re-entered.
+- Add `this.preKnockBuffer = new Map()` keyed by `fromAmid`. When a peer's
+  encrypted message arrives before we've accepted their KNOCK, the
+  message's raw transport `data` is buffered (cap: 5 messages per peer) and
+  scheduled for eviction after **3 s**.
+- When KNOCK from the same peer is later accepted, the buffer is drained:
+  each buffered `data` is fed back through `processInbound`, hitting the
+  normal `encrypted+x3dh` branch (now idempotent per patch #15) and
+  decrypting against the freshly built session.
+- The drop event still fires (`knock_rejected` to `errorHandlers`) so any
+  caller monitoring failures sees that the race occurred — operators can
+  alert on it if it spikes — but the message itself is no longer lost.
+
+### Why this is safe
+- The buffer is per-peer, capped at 5 entries × 3 s, bounded memory.
+- We only buffer messages that already passed transport-level validation
+  (the relay envelope is signed; data structure was JSON-parsed).
+- We do not bypass the KNOCK gate — buffered messages are only replayed
+  AFTER `handleIncomingKnock` returns `accept: true`.
+- AEAD authentication on the encrypted body still applies; tampered
+  payloads still fail decrypt.
+- No replay vulnerability: the buffer is in-memory only and cleared after
+  drain or 3s; an attacker who wanted to replay a message would need to
+  send it AFTER KNOCK acceptance, in which case the existing AEAD
+  sequence/nonce checks on `decryptMessage` reject duplicates.
+
 ## License
 
 MIT
+
+## Patch #14 — Restore `messageBytes` assignment in KNOCK signing (May 2026)
+
+**File:** `dist/index.js` (`KnockProtocol.createKnock`, `createAcceptResponse`,
+`createRejectResponse`, ~lines 1658, 1735, 1755)
+
+Three sites in upstream's published `dist/index.js` had the form
+
+```js
+new TextEncoder().encode(JSON.stringify(messageData));
+const signature = await this.identity.sign(messageBytes);
+```
+
+— the encoded bytes are computed but **discarded**, and `messageBytes` is never
+declared. At runtime every `createKnock` / `createAcceptResponse` /
+`createRejectResponse` throws `ReferenceError: messageBytes is not defined`,
+visible in caller logs as `KNOCK send to <amid> failed: messageBytes is not defined`.
+
+This was masked for a long time by `AGT_TRUST_THRESHOLD=0`, which makes the
+SDK fail-open on inbound peer messages without an accepted KNOCK session.
+Once threshold was restored to 500 (production default) every KNOCK send
+broke and **every cross-sandbox message was silently rejected** at the
+receiver with `"no accepted KNOCK session"` — the parent agent could not
+discover or talk to any sub-agent.
+
+Patch: assign `const messageBytes = new TextEncoder().encode(...)` at all
+three sites so the buffer is actually passed to `this.identity.sign(...)`.

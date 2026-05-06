@@ -15,8 +15,9 @@
 
 import type { AgtInboxEntry } from "./agt-handoff.js";
 import { TASK_TOOLS } from "./agt-task-tools.js";
-import { resolveAmidByName, getStaleAmid } from "./amid-cache.js";
+import { resolveAmidByName, getStaleAmid, amidToName, parentTrustedNames } from "./amid-cache.js";
 import { sanitizeLog } from "./log-redact.js";
+import { meshSendWithIdentity, type MeshIdentity } from "./mesh-transport.js";
 import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
 
@@ -27,6 +28,8 @@ type Logger = { info: (m: string) => void; warn: (m: string) => void };
 export interface TaskLoopDeps {
   /** Returns the current AGT mesh client, or null if not connected. */
   meshClient: () => AnyMeshClient | null;
+  /** Returns the current AGT identity for per-message Ed25519 signing in chunked transfers. May be null if not yet loaded. */
+  meshIdentity?: () => MeshIdentity | null;
   /** True if a handoff interrupt has been requested for this task. */
   isInterruptRequested: () => boolean;
   /** Read the textual reason for the current interrupt (e.g. "cli_handoff"). */
@@ -425,6 +428,13 @@ export async function processTaskWithTools(
               log.warn(`AGT sub-agent mesh_send: offload mode — rewriting to_agent '${toAgent}' → 'parent' (peer routing disabled in offload)`);
               toAgent = "parent";
             }
+            // Alias 'parent' → actual parent sandbox name (PARENT_SANDBOX env).
+            // Sub-agent LLMs commonly use the literal 'parent' as the recipient
+            // even though the parent is registered under its real name.
+            if (toAgent === "parent" && process.env.PARENT_SANDBOX && !process.env.OFFLOAD_REQUEST_ID) {
+              log.info(`AGT sub-agent mesh_send: alias 'parent' → '${process.env.PARENT_SANDBOX}'`);
+              toAgent = process.env.PARENT_SANDBOX;
+            }
             const meshMsg = args.message as string;
             // Guard: reject malformed file_transfer envelopes / cross-container
             // path references before they hit the wire. Peer agents cannot
@@ -465,18 +475,22 @@ export async function processTaskWithTools(
               }
 
               const meshClient = deps.meshClient();
+              const meshIdentityFn = deps.meshIdentity;
               if (!targetAmid) {
                 result = `Agent '${toAgent}' not found in registry after retries. It may not be running yet.`;
               } else if (meshClient) {
                 let sendErr: Error | null = null;
                 for (let sendAttempt = 0; sendAttempt < 5; sendAttempt++) {
                   try {
-                    await meshClient.send(targetAmid, {
+                    // Use chunking wrapper so messages > 512KB (e.g. agents
+                    // pasting large JSON) are auto-split into manifest+chunks
+                    // rather than hitting silent SDK / WebSocket limits.
+                    await meshSendWithIdentity(meshClient, targetAmid, {
                       type: "task_request",
                       content: meshMsg,
                       from_agent: process.env.SANDBOX_NAME || "unknown",
                       timestamp: new Date().toISOString(),
-                    });
+                    }, meshIdentityFn ? meshIdentityFn() : null, log);
                     sendErr = null;
                     break;
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -489,6 +503,11 @@ export async function processTaskWithTools(
                       break;
                     }
                   }
+                }
+                if (sendErr) {
+                  log.warn(`AGT sub-agent mesh_send: to=${toAgent} FAILED — ${sendErr.message}`);
+                } else {
+                  log.info(`AGT sub-agent mesh_send: to=${toAgent} OK`);
                 }
                 result = sendErr
                   ? `mesh_send to ${toAgent} failed: ${sendErr.message}`
@@ -506,6 +525,10 @@ export async function processTaskWithTools(
             if (process.env.OFFLOAD_REQUEST_ID && toAgent !== "parent") {
               log.warn(`AGT sub-agent mesh_transfer_file: offload mode — rewriting to_agent '${toAgent}' → 'parent'`);
               toAgent = "parent";
+            }
+            if (toAgent === "parent" && process.env.PARENT_SANDBOX && !process.env.OFFLOAD_REQUEST_ID) {
+              log.info(`AGT sub-agent mesh_transfer_file: alias 'parent' → '${process.env.PARENT_SANDBOX}'`);
+              toAgent = process.env.PARENT_SANDBOX;
             }
             const filePath = String(args.file_path || "");
             const desc = typeof args.description === "string" ? args.description : "";
@@ -590,9 +613,23 @@ export async function processTaskWithTools(
                         timestamp: new Date().toISOString(),
                       };
                       let sendErr: Error | null = null;
+                      const meshIdentityFn = deps.meshIdentity;
                       for (let attempt = 0; attempt < 5; attempt++) {
                         try {
-                          await meshClient.send(targetAmid, fileMsg);
+                          // Use chunking wrapper. Files > 512 KB are split
+                          // into manifest + chunks; the receiver reassembles
+                          // in meshHandleTransportMessage. WITHOUT this
+                          // wrapper, multi-megabyte transfers fail silently
+                          // at the SDK / WebSocket layer because the
+                          // upstream SDK has no built-in chunking despite
+                          // what tool descriptions claim.
+                          await meshSendWithIdentity(
+                            meshClient,
+                            targetAmid,
+                            fileMsg,
+                            meshIdentityFn ? meshIdentityFn() : null,
+                            log,
+                          );
                           sendErr = null;
                           break;
                           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -609,6 +646,11 @@ export async function processTaskWithTools(
                       const sizeHuman = finalSize < 1024 ? `${finalSize}B`
                         : finalSize < 1024 * 1024 ? `${(finalSize / 1024).toFixed(1)}KB`
                         : `${(finalSize / 1024 / 1024).toFixed(1)}MB`;
+                      if (sendErr) {
+                        log.warn(`AGT sub-agent mesh_transfer_file: ${fileName} (${sizeHuman}) → ${toAgent} FAILED — ${sendErr.message}`);
+                      } else {
+                        log.info(`AGT sub-agent mesh_transfer_file: ${fileName} (${sizeHuman}) → ${toAgent} OK`);
+                      }
                       result = sendErr
                         ? `mesh_transfer_file to ${toAgent} failed: ${sendErr.message}`
                         : `File '${fileName}' (${sizeHuman}) sent to ${toAgent} via E2E encrypted mesh relay. The recipient's gateway will auto-save it under /sandbox/.openclaw/workspace/incoming/.`;
@@ -624,15 +666,78 @@ export async function processTaskWithTools(
             const pattern = (args.pattern as string) || "*";
             log.info(`AGT sub-agent discover: pattern=${pattern}`);
             try {
-              const registryBase = routerUrl("/agt/registry");
-              const discoverResult = await new Promise<string>((resolve, reject) => {
-                const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
-                  let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+              // Build the local-cache view first — this is the source of
+              // truth for "who do I trust right now". The registry's
+              // capability search (`?capability=*`) returns nothing because
+              // the agentmesh registry has no name-glob endpoint and the
+              // capability index doesn't match a literal "*". Without this
+              // local fallback, sub-agents in a fan-out spawn report 0 peers
+              // even when their parent already seeded all sibling AMIDs via
+              // peers_update. The LLM then refuses to talk to siblings it
+              // could otherwise reach. (See peers_update inward seed in
+              // agt-tools/agt.ts spawn handler.)
+              const localPeers: Array<{ name: string; amid: string; source: string }> = [];
+              const seenNames = new Set<string>();
+              const selfName = process.env.SANDBOX_NAME || "";
+              for (const [amid, name] of amidToName.entries()) {
+                if (name === selfName) continue;
+                if (seenNames.has(name)) continue;
+                seenNames.add(name);
+                localPeers.push({
+                  name,
+                  amid,
+                  source: parentTrustedNames.has(name) ? "parent_trusted" : "peers_update",
                 });
-                req.on("error", reject);
-                req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
+              }
+
+              // Best-effort registry capability search (still useful when
+              // the upstream operator registers agents with explicit
+              // capability tags). We post-filter for staleness because the
+              // upstream registry doesn't prune offline agents from search
+              // results — see graveyard analysis in agt-tools/agt.ts:1260.
+              let registryRaw = "";
+              try {
+                const registryBase = routerUrl("/agt/registry");
+                registryRaw = await new Promise<string>((resolve, reject) => {
+                  const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
+                    let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
+                  });
+                  req.on("error", reject);
+                  req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
+                });
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } catch (regErr: any) {
+                registryRaw = JSON.stringify({ agents: [], error: regErr?.message || String(regErr) });
+              }
+
+              // Apply the same 90s staleness filter parents use, so sub-agents
+              // don't see graveyard entries either.
+              let registryParsed: any;
+              try { registryParsed = JSON.parse(registryRaw); } catch { registryParsed = registryRaw; }
+              if (registryParsed && Array.isArray(registryParsed.results)) {
+                const STALE_AFTER_MS = 90_000;
+                const now = Date.now();
+                const before = registryParsed.results.length;
+                registryParsed.results = registryParsed.results.filter((a: any) => {
+                  if (typeof a?.status === "string" && a.status.toLowerCase() !== "online") return false;
+                  const ls = a?.last_seen;
+                  if (!ls) return false;
+                  const t = Date.parse(typeof ls === "string" ? ls : "");
+                  if (!Number.isFinite(t)) return false;
+                  return (now - t) <= STALE_AFTER_MS;
+                });
+                registryParsed.filtered_stale = before - registryParsed.results.length;
+              }
+
+              result = JSON.stringify({
+                peers: localPeers,
+                peer_count: localPeers.length,
+                self: selfName,
+                registry_capability_search: registryParsed,
+                note: localPeers.length === 0
+                  ? "No peers visible yet. The parent fans out peers_update messages on sibling spawn — if a sibling was just spawned, retry in a few seconds. You can also call mesh_send to a known sibling name; the AMID will be resolved on demand."
+                  : "Use mesh_send / mesh_transfer_file with the 'name' field — AMIDs are resolved from the local cache below.",
               });
-              result = discoverResult;
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } catch (discErr: any) {
               result = `discover failed: ${discErr.message}`;

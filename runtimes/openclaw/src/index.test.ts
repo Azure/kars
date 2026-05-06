@@ -819,9 +819,10 @@ describe("DEFAULT_CONFIG values", () => {
     const mod = await import("./index.js");
     const mock = createMockApi({}); // empty pluginConfig → defaults
     mod.default.register(mock.api);
-    // The spawn tool defaults to gpt-4.1 in its body
+    // The spawn tool's `model` param doc states inheritance from parent;
+    // sub-agents inherit the parent's model when `model` is omitted.
     const spawnTool = mock.tools.get("azureclaw_spawn")!;
-    expect(spawnTool.parameters.properties.model.description).toContain("gpt-4.1");
+    expect(spawnTool.parameters.properties.model.description.toLowerCase()).toContain("inherit");
     delete process.env.AGT_SKIP_INIT;
   });
 });
