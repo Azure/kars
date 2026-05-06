@@ -20,12 +20,8 @@ var RelayTransport = class {
     this.identity = identity;
     this.relayUrl = options.relayUrl ?? "wss://relay.agentmesh.online/v1/connect";
     this.p2pCapable = options.p2pCapable ?? false;
-    this.maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
     this.reconnectBaseDelay = options.reconnectBaseDelay ?? 1e3;
-    // PATCH #9: wsFactory lets callers inject a custom WebSocket (e.g. routed
-    // through a CONNECT proxy tunnel in Node 22 where global fetch ignores
-    // HTTPS_PROXY). Falls back to the global WebSocket constructor.
-    this.wsFactory = options.wsFactory ?? null;
   }
   /**
    * Check if connected to relay.
@@ -54,7 +50,7 @@ var RelayTransport = class {
     }
     return new Promise((resolve) => {
       try {
-        this.ws = this.wsFactory ? this.wsFactory(this.relayUrl) : new WebSocket(this.relayUrl);
+        this.ws = new WebSocket(this.relayUrl);
         this.ws.onopen = async () => {
           const [timestamp, signature] = await this.identity.signTimestamp();
           const connectMsg = {
@@ -94,7 +90,7 @@ var RelayTransport = class {
               const handler = this.messageHandlers.get(msgType);
               if (handler) {
                 Promise.resolve(handler(data)).catch((err) => {
-                  console.error(`Handler error for ${msgType}:`, err);
+                  console.error(`Handler error for ${String(msgType)}: ${err instanceof Error ? err.message : String(err)}`);
                 });
               }
             }
@@ -350,7 +346,7 @@ var RelayTransport = class {
       console.error("Max reconnection attempts reached");
       return;
     }
-    const delay = this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts);
+    const delay = Math.min(this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts), 6e4);
     this.reconnectAttempts++;
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     this.reconnectTimeout = setTimeout(async () => {
@@ -411,5 +407,5 @@ function createP2PTransport(identity, targetAmid) {
 }
 
 export { P2PTransport, RelayTransport, createP2PTransport };
-//# sourceMappingURL=chunk-WM5AX4U5.js.map
-//# sourceMappingURL=chunk-WM5AX4U5.js.map
+//# sourceMappingURL=chunk-5EY5BCUD.js.map
+//# sourceMappingURL=chunk-5EY5BCUD.js.map

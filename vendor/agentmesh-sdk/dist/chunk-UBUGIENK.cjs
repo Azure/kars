@@ -809,75 +809,30 @@ var RegistryClient = class {
         method: "POST",
         body: JSON.stringify(payload)
       });
-      if (response.status !== 200) {
-        const errText = await response.text().catch(() => "");
-        console.error(`[agentmesh-sdk] submitReputation rejected: ${response.status} ${errText} (from=${identity.amid} target=${targetAmid})`);
-      }
       return response.status === 200;
-    } catch (err) {
-      console.error(`[agentmesh-sdk] submitReputation error: ${err?.message || err} (from=${identity.amid} target=${targetAmid})`);
+    } catch {
       return false;
     }
   }
   /**
-   * Internal fetch helper with timeout + retry-with-backoff (vendor patch #12).
-   * Retries transient registry failures (5xx, 408, 429, network errors) for
-   * idempotent or allowlisted requests. Hard cap: 3 attempts / ~2s budget.
+   * Internal fetch helper with timeout.
    */
   async fetch(path2, options = {}) {
-    const method = (options.method || "GET").toUpperCase();
-    const isIdempotent = method === "GET" || method === "HEAD";
-    const POST_RETRY_ALLOWLIST = [
-      "/registry/register", "/registry/prekeys", "/registry/reputation",
-      "/registry/status", "/registry/capabilities", "/registry/revocations/bulk",
-      "/auth/oauth/authorize"
-    ];
-    const isAllowlistedPost = method === "POST" && POST_RETRY_ALLOWLIST.some((p) => path2.startsWith(p));
-    const retryEligible = isIdempotent || isAllowlistedPost;
-    const RETRY_STATUSES = new Set([408, 429, 502, 503, 504]);
-    const MAX_ATTEMPTS = 3;
-    const BUDGET_MS = 2000;
-    const BASE_BACKOFF_MS = 100;
-    const RETRY_AFTER_CAP_MS = 1500;
-    const startedAt = Date.now();
-    let lastErr;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-      try {
-        const response = await fetch(`${this.baseUrl}${path2}`, {
-          ...options,
-          headers: {
-            "Content-Type": "application/json",
-            ...options.headers
-          },
-          signal: controller.signal
-        });
-        if (!retryEligible || !RETRY_STATUSES.has(response.status) || attempt === MAX_ATTEMPTS) {
-          return response;
-        }
-        let waitMs = BASE_BACKOFF_MS * Math.pow(2, attempt - 1);
-        const retryAfter = response.headers.get("retry-after");
-        if (retryAfter) {
-          const ra = Number(retryAfter);
-          if (Number.isFinite(ra) && ra > 0) waitMs = Math.min(ra * 1000, RETRY_AFTER_CAP_MS);
-        }
-        if (Date.now() - startedAt + waitMs > BUDGET_MS) return response;
-        try { await response.body?.cancel?.(); } catch { /* ignore */ }
-        console.warn(`[agentmesh-sdk] retry ${attempt}/${MAX_ATTEMPTS} ${method} ${path2} status=${response.status} wait=${waitMs}ms`);
-        await new Promise((r) => setTimeout(r, waitMs));
-      } catch (err) {
-        lastErr = err;
-        if (!retryEligible || attempt === MAX_ATTEMPTS) throw err;
-        const waitMs = BASE_BACKOFF_MS * Math.pow(2, attempt - 1);
-        if (Date.now() - startedAt + waitMs > BUDGET_MS) throw err;
-        console.warn(`[agentmesh-sdk] retry ${attempt}/${MAX_ATTEMPTS} ${method} ${path2} err=${err?.message || err} wait=${waitMs}ms`);
-        await new Promise((r) => setTimeout(r, waitMs));
-      } finally {
-        clearTimeout(timeoutId);
-      }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const response = await fetch(`${this.baseUrl}${path2}`, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...options.headers
+        },
+        signal: controller.signal
+      });
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw lastErr ?? new Error("registry fetch retry budget exhausted");
   }
   /**
    * Parse agent info from API response.

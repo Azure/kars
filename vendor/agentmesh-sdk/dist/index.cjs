@@ -2,8 +2,8 @@
 
 var chunkBPYP43TA_cjs = require('./chunk-BPYP43TA.cjs');
 var chunkUBUGIENK_cjs = require('./chunk-UBUGIENK.cjs');
-var chunkFAEZQCEA_cjs = require('./chunk-FAEZQCEA.cjs');
-var chunkC7KJHFTP_cjs = require('./chunk-C7KJHFTP.cjs');
+var chunkV7P74WPK_cjs = require('./chunk-V7P74WPK.cjs');
+var chunkS7F5N5HC_cjs = require('./chunk-S7F5N5HC.cjs');
 require('./chunk-FK3FEKXY.cjs');
 var chunkFNHOFD2H_cjs = require('./chunk-FNHOFD2H.cjs');
 var sodium = require('libsodium-wrappers');
@@ -156,6 +156,9 @@ async function importX25519PublicKey(publicKey) {
   );
 }
 async function x25519DH(privateKey, publicKey) {
+  if (privateKey.length !== 32 || publicKey.length !== 32) {
+    throw new Error(`Invalid X25519 key length: private=${privateKey.length} public=${publicKey.length}`);
+  }
   const privKey = await importX25519PrivateKey(privateKey);
   const pubKey = await importX25519PublicKey(publicKey);
   const sharedBits = await crypto.subtle.deriveBits(
@@ -163,7 +166,11 @@ async function x25519DH(privateKey, publicKey) {
     privKey,
     256
   );
-  return new Uint8Array(sharedBits);
+  const result = new Uint8Array(sharedBits);
+  if (result.every((b) => b === 0)) {
+    throw new Error("X25519 DH produced all-zero output \u2014 possible low-order point attack");
+  }
+  return result;
 }
 async function generateSignedPrekey(identity, id) {
   const { publicKey, privateKey } = await generateX25519Keypair();
@@ -510,12 +517,19 @@ var X3DHKeyExchange = class {
    * @returns The shared secret and initiator message
    */
   static async initiator(ourIdentity, theirBundle, theirSigningPublicKey) {
+    if (theirBundle.signedPrekey.length !== 32) {
+      throw new Error(`Invalid signedPrekey length: ${theirBundle.signedPrekey.length} (expected 32)`);
+    }
+    if (theirBundle.identityKey.length !== 32) {
+      throw new Error(`Invalid identityKey length: ${theirBundle.identityKey.length} (expected 32)`);
+    }
     const signatureValid = await chunkBPYP43TA_cjs.Identity.verifySignatureRaw(
       theirSigningPublicKey,
       theirBundle.signedPrekey,
       theirBundle.signedPrekeySignature
     );
     if (!signatureValid) {
+      console.error("[X3DH] Signed prekey signature verification FAILED \u2014 possible key substitution attack");
       throw new Error("Invalid signed prekey signature");
     }
     const ephemeral = await generateX25519Keypair();
@@ -957,9 +971,7 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const binary = String.fromCharCode(...bytes);
     return btoa(binary);
   }
   /**
@@ -967,10 +979,11 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    */
   bytesEqual(a, b) {
     if (a.length !== b.length) return false;
+    let result = 0;
     for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) return false;
+      result |= a[i] ^ b[i];
     }
-    return true;
+    return result === 0;
   }
 };
 function serializeRatchetHeader(header) {
@@ -1208,7 +1221,7 @@ var SessionManager = class {
   /**
    * Close a session.
    */
-  async closeSession(sessionId, reason = "normal") {
+  async closeSession(sessionId, _reason = "normal") {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.info.state = "closed" /* CLOSED */;
@@ -1368,9 +1381,7 @@ var SessionManager = class {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const binary = String.fromCharCode(...bytes);
     return btoa(binary);
   }
   /**
@@ -1645,7 +1656,7 @@ var KnockProtocol = class {
       timestamp: now,
       nonce
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
+    new TextEncoder().encode(JSON.stringify(messageData));
     const signature = await this.identity.sign(messageBytes);
     const knock = {
       ...messageData,
@@ -1722,7 +1733,7 @@ var KnockProtocol = class {
       to: knock.from,
       knockNonce: knock.nonce
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
+    new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
     return {
       ...responseData,
@@ -1742,7 +1753,7 @@ var KnockProtocol = class {
       to: knock.from,
       knockNonce: knock.nonce
     };
-    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
+    new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
     return {
       ...responseData,
@@ -1987,6 +1998,7 @@ var EncryptedAuditLogger = class {
   encrypted;
   encryptedEntries = [];
   keyInitialized = false;
+  usedNonces = /* @__PURE__ */ new Set();
   constructor(config) {
     this.baseLogger = new AuditLogger(config);
     this.encrypted = config.encrypted ?? true;
@@ -2099,14 +2111,20 @@ var EncryptedAuditLogger = class {
       false,
       ["encrypt"]
     );
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    let nonce;
+    let nonceB64;
+    do {
+      nonce = crypto.getRandomValues(new Uint8Array(12));
+      nonceB64 = toBase64(nonce);
+    } while (this.usedNonces.has(nonceB64));
+    this.usedNonces.add(nonceB64);
     const ciphertext = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: toArrayBuffer2(nonce) },
       aesKey,
       toArrayBuffer2(plaintext)
     );
     return {
-      nonce: toBase64(nonce),
+      nonce: nonceB64,
       ciphertext: toBase64(new Uint8Array(ciphertext)),
       id: event.id,
       timestamp: event.timestamp.toISOString()
@@ -2287,7 +2305,7 @@ var SEVERITY_PRIORITY = {
 };
 function generateEventId() {
   const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).slice(2, 10);
+  const random = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   return `audit_${timestamp}_${random}`;
 }
 var AuditLogger = class {
@@ -2389,19 +2407,21 @@ var AuditLogger = class {
   logToConsole(event) {
     const prefix = `[${event.severity}] [${event.type}]`;
     const msg = `${prefix} ${event.message}`;
+    const detail = event.severity === "ERROR" || event.severity === "CRITICAL" ? event.error || event.metadata || void 0 : event.metadata || void 0;
+    const line = detail !== void 0 ? `${msg} ${JSON.stringify(detail)}` : msg;
     switch (event.severity) {
       case "DEBUG":
-        console.debug(msg, event.metadata || "");
+        console.debug(line);
         break;
       case "INFO":
-        console.info(msg, event.metadata || "");
+        console.info(line);
         break;
       case "WARNING":
-        console.warn(msg, event.metadata || "");
+        console.warn(line);
         break;
       case "ERROR":
       case "CRITICAL":
-        console.error(msg, event.error || event.metadata || "");
+        console.error(line);
         break;
     }
   }
@@ -2801,7 +2821,6 @@ var AgentMeshClient = class _AgentMeshClient {
   knockHandler;
   e2eVerifiedPeers = /* @__PURE__ */ new Set();
   knockAcceptedPeers = /* @__PURE__ */ new Set();
-  knockPendingPeers = /* @__PURE__ */ new Map(); // PATCH: track in-flight KNOCK → Promise<void>
   knockEnforcementEnabled = false;
   eventHandlers = /* @__PURE__ */ new Map();
   // Circuit breaker state
@@ -2819,14 +2838,14 @@ var AgentMeshClient = class _AgentMeshClient {
   pendingX3DH = /* @__PURE__ */ new Map();
   constructor(identity, options = {}) {
     this.identity = identity;
-    this.storage = options.storage || new chunkC7KJHFTP_cjs.MemoryStorage();
+    this.storage = options.storage || new chunkS7F5N5HC_cjs.MemoryStorage();
     this.registryUrl = options.registryUrl || "https://agentmesh.online/v1";
     this.relayUrl = options.relayUrl || "wss://relay.agentmesh.online/v1/connect";
     this.registry = new chunkUBUGIENK_cjs.RegistryClient(this.registryUrl);
     const transportOptions = {
       relayUrl: this.relayUrl
     };
-    this.transport = new chunkFAEZQCEA_cjs.RelayTransport(identity, transportOptions);
+    this.transport = new chunkV7P74WPK_cjs.RelayTransport(identity, transportOptions);
     this.prekeyManager = new PrekeyManager(identity, this.storage);
     this.sessionManager = new SessionManager(identity, this.storage, this.prekeyManager, options.sessionConfig);
     this.protocolSessions = new ProtocolSessionManager();
@@ -2911,99 +2930,24 @@ var AgentMeshClient = class _AgentMeshClient {
       const msgType = data.message_type;
       try {
         const parsed = JSON.parse(rawPayload);
-        // Vendor patch #11: peer-initiated session close (ratchet desync recovery).
-        if (msgType === "close" || parsed?.type === "close") {
-          const reason = parsed?.reason || "unknown";
-          console.warn(`[AGT] peer ${fromAmid} signalled session close (reason=${reason}) \u2014 clearing local session`);
-          const localSessionId = this.activeSessions.get(fromAmid);
-          if (localSessionId) {
-            try { this.sessionManager.closeSession(localSessionId); } catch {}
-            this.activeSessions.delete(fromAmid);
-          }
-          try { this.sessionCache?.clearByAmid?.(fromAmid); } catch {}
-          for (const handler of this.errorHandlers) {
-            try { handler("session_desync", fromAmid, `peer_close:${reason}`); } catch {}
-          }
-          return;
-        }
         if (msgType === "knock") {
           const request = parsed.request || parsed;
-          // PATCH: Track this KNOCK as pending so concurrent messages wait
-          let resolveKnockPending;
-          this.knockPendingPeers.set(fromAmid, new Promise((r) => { resolveKnockPending = r; }));
-          try {
-            const result = await this.handleIncomingKnock(fromAmid, request);
-            if (result.accept) {
-              try {
-                const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
-                await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
-              } catch {
-              }
-            } else if (this.knockEnforcementEnabled) {
-              console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
+          const result = await this.handleIncomingKnock(fromAmid, request);
+          if (result.accept) {
+            try {
+              const accept = await this.knockProtocol.createAcceptResponse(parsed, result.sessionId);
+              await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
+            } catch {
             }
-          } finally {
-            // PATCH: Unblock any messages waiting on this KNOCK
-            this.knockPendingPeers.delete(fromAmid);
-            resolveKnockPending();
+          } else if (this.knockEnforcementEnabled) {
+            console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
           }
         } else if (this.knockEnforcementEnabled && this.knockHandler && !this.knockAcceptedPeers.has(fromAmid)) {
-          // PATCH: If a KNOCK from this peer is being processed, wait instead of rejecting
-          if (this.knockPendingPeers.has(fromAmid)) {
-            await this.knockPendingPeers.get(fromAmid);
-          }
-          // Re-check after waiting — KNOCK may have been accepted
-          if (this.knockAcceptedPeers.has(fromAmid)) {
-            // Fall through: re-parse and handle as normal message
-            if (parsed.type === "encrypted" && parsed.x3dh) {
-              try {
-                const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
-                const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
-                this.activeSessions.set(fromAmid, sessionId);
-                const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
-                this.emitE2EVerified(fromAmid);
-                for (const handler of this.messageHandlers) {
-                  try { handler(fromAmid, decrypted); } catch {}
-                }
-              } catch (e) {
-                console.error("[AGT] E2E decrypt failed (post-KNOCK wait):", e?.message || e);
-                for (const handler of this.errorHandlers) {
-                  try { handler("decrypt_failed", fromAmid, e?.message || "unknown"); } catch {}
-                }
-              }
-            } else if (parsed.type === "encrypted") {
-              const sessionId = this.activeSessions.get(fromAmid);
-              if (sessionId) {
-                try {
-                  const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
-                  this.emitE2EVerified(fromAmid);
-                  for (const handler of this.messageHandlers) {
-                    try { handler(fromAmid, decrypted); } catch {}
-                  }
-                } catch (decErr) {
-                  console.error("[AGT] E2E decrypt failed (post-KNOCK wait):", decErr?.message || decErr);
-                  for (const handler of this.errorHandlers) {
-                    try { handler("decrypt_failed", fromAmid, decErr?.message || "unknown"); } catch {}
-                  }
-                }
-              } else {
-                console.error(`[AGT] Encrypted message from ${fromAmid} but no session (post-KNOCK wait)`);
-                for (const handler of this.errorHandlers) {
-                  try { handler("no_session", fromAmid, "No encryption session established"); } catch {}
-                }
-              }
-            } else {
-              for (const handler of this.messageHandlers) {
-                try { handler(fromAmid, parsed); } catch {}
-              }
-            }
-          } else {
-            console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
-            for (const handler of this.errorHandlers) {
-              try {
-                handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
-              } catch {
-              }
+          console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
+          for (const handler of this.errorHandlers) {
+            try {
+              handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
+            } catch {
             }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
@@ -3042,27 +2986,6 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             } catch (decErr) {
               console.error("[AGT] E2E decrypt failed for existing session \u2014 message REJECTED:", decErr?.message || decErr);
-              // Vendor patch #11: ratchet desync recovery.
-              try {
-                this.sessionManager.closeSession(sessionId);
-              } catch {}
-              this.activeSessions.delete(fromAmid);
-              try { this.sessionCache?.clearByAmid?.(fromAmid); } catch {}
-              if (this.isConnected) {
-                try {
-                  await this.transport.send(
-                    fromAmid,
-                    JSON.stringify({ type: "close", reason: "ratchet_desync" }),
-                    "close",
-                  );
-                } catch {}
-              }
-              for (const handler of this.errorHandlers) {
-                try {
-                  handler("session_desync", fromAmid, decErr?.message || "ratchet_desync");
-                } catch {
-                }
-              }
               for (const handler of this.errorHandlers) {
                 try {
                   handler("decrypt_failed", fromAmid, decErr?.message || "unknown");
@@ -3210,11 +3133,13 @@ var AgentMeshClient = class _AgentMeshClient {
    * The responder will process the KNOCK asynchronously.
    */
   async establishSession(toAmid, options) {
-    const registryBundle = await this.registry.getPrekeys(toAmid);
+    const [registryBundle, agentInfo] = await Promise.all([
+      this.registry.getPrekeys(toAmid),
+      this.registry.lookup(toAmid)
+    ]);
     if (!registryBundle) {
       throw new chunkFNHOFD2H_cjs.SessionError(`Cannot get prekeys for ${toAmid}`, "PREKEY_NOT_FOUND");
     }
-    const agentInfo = await this.registry.lookup(toAmid);
     if (!agentInfo) {
       throw new chunkFNHOFD2H_cjs.SessionError(`Cannot find agent ${toAmid}`, "AGENT_NOT_FOUND");
     }
@@ -3358,7 +3283,7 @@ var AgentMeshClient = class _AgentMeshClient {
         return { accept: false, reason: policyResult.reason || "policy_rejected" };
       }
     }
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const sessionId = `sess_${Date.now()}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
     this.protocolSessions.createSession(fromAmid, request, false);
     this.knockAcceptedPeers.add(fromAmid);
     await this.auditLogger.log(
@@ -4174,7 +4099,7 @@ var CapabilityNegotiator = class {
     const matches = [];
     const hasWildcard = requested.includes("*");
     const requestPattern = hasWildcard ? new RegExp("^" + requested.replace(/\*/g, ".*") + "$") : null;
-    for (const [id, cap] of this.capabilities) {
+    for (const [id] of this.capabilities) {
       if (id === requested) {
         matches.push({
           capabilityId: id,
@@ -4651,7 +4576,7 @@ var DIDResolver = class {
         didDocumentMetadata: {}
       };
     }
-    const [, method, identifier] = match;
+    const [, method] = match;
     if (method === "agentmesh") {
       return {
         didDocument: null,
@@ -5397,31 +5322,31 @@ Object.defineProperty(exports, "getTierLevel", {
 });
 Object.defineProperty(exports, "P2PTransport", {
   enumerable: true,
-  get: function () { return chunkFAEZQCEA_cjs.P2PTransport; }
+  get: function () { return chunkV7P74WPK_cjs.P2PTransport; }
 });
 Object.defineProperty(exports, "RelayTransport", {
   enumerable: true,
-  get: function () { return chunkFAEZQCEA_cjs.RelayTransport; }
+  get: function () { return chunkV7P74WPK_cjs.RelayTransport; }
 });
 Object.defineProperty(exports, "createP2PTransport", {
   enumerable: true,
-  get: function () { return chunkFAEZQCEA_cjs.createP2PTransport; }
+  get: function () { return chunkV7P74WPK_cjs.createP2PTransport; }
 });
 Object.defineProperty(exports, "FileStorage", {
   enumerable: true,
-  get: function () { return chunkC7KJHFTP_cjs.FileStorage; }
+  get: function () { return chunkS7F5N5HC_cjs.FileStorage; }
 });
 Object.defineProperty(exports, "KVStorage", {
   enumerable: true,
-  get: function () { return chunkC7KJHFTP_cjs.KVStorage; }
+  get: function () { return chunkS7F5N5HC_cjs.KVStorage; }
 });
 Object.defineProperty(exports, "MemoryStorage", {
   enumerable: true,
-  get: function () { return chunkC7KJHFTP_cjs.MemoryStorage; }
+  get: function () { return chunkS7F5N5HC_cjs.MemoryStorage; }
 });
 Object.defineProperty(exports, "R2Storage", {
   enumerable: true,
-  get: function () { return chunkC7KJHFTP_cjs.R2Storage; }
+  get: function () { return chunkS7F5N5HC_cjs.R2Storage; }
 });
 Object.defineProperty(exports, "AgentMeshError", {
   enumerable: true,

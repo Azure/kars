@@ -74,7 +74,7 @@ export class RelayTransport {
     this.identity = identity;
     this.relayUrl = options.relayUrl ?? 'wss://relay.agentmesh.online/v1/connect';
     this.p2pCapable = options.p2pCapable ?? false;
-    this.maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
     this.reconnectBaseDelay = options.reconnectBaseDelay ?? 1000;
   }
 
@@ -480,7 +480,7 @@ export class RelayTransport {
       return;
     }
 
-    const delay = this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts);
+    const delay = Math.min(this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts), 60_000);
     this.reconnectAttempts++;
 
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);

@@ -1,29 +1,6 @@
-'use strict';
-
-var chunkFNHOFD2H_cjs = require('./chunk-FNHOFD2H.cjs');
-var os = require('os');
-var nodePath = require('path');
-
-function _interopNamespace(e) {
-  if (e && e.__esModule) return e;
-  var n = Object.create(null);
-  if (e) {
-    Object.keys(e).forEach(function (k) {
-      if (k !== 'default') {
-        var d = Object.getOwnPropertyDescriptor(e, k);
-        Object.defineProperty(n, k, d.get ? d : {
-          enumerable: true,
-          get: function () { return e[k]; }
-        });
-      }
-    });
-  }
-  n.default = e;
-  return Object.freeze(n);
-}
-
-var os__namespace = /*#__PURE__*/_interopNamespace(os);
-var nodePath__namespace = /*#__PURE__*/_interopNamespace(nodePath);
+import { StorageError } from './chunk-FBJD3DSJ.js';
+import * as os from 'os';
+import * as nodePath from 'path';
 
 // src/storage/memory.ts
 var MemoryStorage = class {
@@ -102,7 +79,7 @@ function getDefaultAgentMeshPath() {
   if (process.env.AGENTMESH_HOME) {
     return process.env.AGENTMESH_HOME;
   }
-  return nodePath__namespace.join(os__namespace.homedir(), ".agentmesh");
+  return nodePath.join(os.homedir(), ".agentmesh");
 }
 function createDefaultFileStorage() {
   return new FileStorage(getDefaultAgentMeshPath());
@@ -120,7 +97,7 @@ var FileStorage = class {
         this.fs = await import('fs/promises');
         this.path = await import('path');
       } catch {
-        throw new chunkFNHOFD2H_cjs.StorageError(
+        throw new StorageError(
           "FileStorage requires Node.js environment with fs module",
           "FS_NOT_AVAILABLE"
         );
@@ -142,11 +119,11 @@ var FileStorage = class {
     try {
       const data = await this.fs.readFile(filePath);
       return new Uint8Array(data);
-    } catch (error) {
+    } catch {
       if (error.code === "ENOENT") {
         return null;
       }
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to read file: ${key}`, "READ_ERROR");
+      throw new StorageError(`Failed to read file: ${key}`, "READ_ERROR");
     }
   }
   async set(key, value, options) {
@@ -163,8 +140,8 @@ var FileStorage = class {
         };
         await this.fs.writeFile(metaPath, JSON.stringify(metaData), { mode: 384 });
       }
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to write file: ${key}`, "WRITE_ERROR");
+    } catch {
+      throw new StorageError(`Failed to write file: ${key}`, "WRITE_ERROR");
     }
   }
   async delete(key) {
@@ -172,9 +149,9 @@ var FileStorage = class {
     const filePath = this.resolvePath(key);
     try {
       await this.fs.unlink(filePath);
-    } catch (error) {
+    } catch {
       if (error.code !== "ENOENT") {
-        throw new chunkFNHOFD2H_cjs.StorageError(`Failed to delete file: ${key}`, "DELETE_ERROR");
+        throw new StorageError(`Failed to delete file: ${key}`, "DELETE_ERROR");
       }
     }
     try {
@@ -200,11 +177,11 @@ var FileStorage = class {
         }
       }
       return keys.sort();
-    } catch (error) {
+    } catch {
       if (error.code === "ENOENT") {
         return [];
       }
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to list directory: ${prefix}`, "LIST_ERROR");
+      throw new StorageError(`Failed to list directory: ${prefix}`, "LIST_ERROR");
     }
   }
   async exists(key) {
@@ -233,8 +210,8 @@ var R2Storage = class {
       }
       const buffer = await object.arrayBuffer();
       return new Uint8Array(buffer);
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to get from R2: ${key}`, "R2_GET_ERROR");
+    } catch {
+      throw new StorageError(`Failed to get from R2: ${key}`, "R2_GET_ERROR");
     }
   }
   async set(key, value, options) {
@@ -253,15 +230,15 @@ var R2Storage = class {
         };
       }
       await this.bucket.put(key, value, putOptions);
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to put to R2: ${key}`, "R2_PUT_ERROR");
+    } catch {
+      throw new StorageError(`Failed to put to R2: ${key}`, "R2_PUT_ERROR");
     }
   }
   async delete(key) {
     try {
       await this.bucket.delete(key);
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to delete from R2: ${key}`, "R2_DELETE_ERROR");
+    } catch {
+      throw new StorageError(`Failed to delete from R2: ${key}`, "R2_DELETE_ERROR");
     }
   }
   async list(prefix) {
@@ -280,8 +257,8 @@ var R2Storage = class {
         cursor = result.truncated ? result.cursor : void 0;
       } while (cursor);
       return keys.sort();
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to list R2: ${prefix}`, "R2_LIST_ERROR");
+    } catch {
+      throw new StorageError(`Failed to list R2: ${prefix}`, "R2_LIST_ERROR");
     }
   }
   async exists(key) {
@@ -318,8 +295,8 @@ var KVStorage = class {
         return null;
       }
       return new Uint8Array(buffer);
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to get from KV: ${key}`, "KV_GET_ERROR");
+    } catch {
+      throw new StorageError(`Failed to get from KV: ${key}`, "KV_GET_ERROR");
     }
   }
   async set(key, value, options) {
@@ -332,15 +309,15 @@ var KVStorage = class {
         putOptions.metadata = options.metadata;
       }
       await this.namespace.put(key, value, putOptions);
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to put to KV: ${key}`, "KV_PUT_ERROR");
+    } catch {
+      throw new StorageError(`Failed to put to KV: ${key}`, "KV_PUT_ERROR");
     }
   }
   async delete(key) {
     try {
       await this.namespace.delete(key);
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to delete from KV: ${key}`, "KV_DELETE_ERROR");
+    } catch {
+      throw new StorageError(`Failed to delete from KV: ${key}`, "KV_DELETE_ERROR");
     }
   }
   async list(prefix) {
@@ -359,8 +336,8 @@ var KVStorage = class {
         cursor = result.list_complete ? void 0 : result.cursor;
       } while (cursor);
       return keys.sort();
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to list KV: ${prefix}`, "KV_LIST_ERROR");
+    } catch {
+      throw new StorageError(`Failed to list KV: ${prefix}`, "KV_LIST_ERROR");
     }
   }
   async exists(key) {
@@ -381,17 +358,12 @@ var KVStorage = class {
         value: result.value ? new Uint8Array(result.value) : null,
         metadata: result.metadata
       };
-    } catch (error) {
-      throw new chunkFNHOFD2H_cjs.StorageError(`Failed to get with metadata from KV: ${key}`, "KV_GET_ERROR");
+    } catch {
+      throw new StorageError(`Failed to get with metadata from KV: ${key}`, "KV_GET_ERROR");
     }
   }
 };
 
-exports.FileStorage = FileStorage;
-exports.KVStorage = KVStorage;
-exports.MemoryStorage = MemoryStorage;
-exports.R2Storage = R2Storage;
-exports.createDefaultFileStorage = createDefaultFileStorage;
-exports.getDefaultAgentMeshPath = getDefaultAgentMeshPath;
-//# sourceMappingURL=chunk-C7KJHFTP.cjs.map
-//# sourceMappingURL=chunk-C7KJHFTP.cjs.map
+export { FileStorage, KVStorage, MemoryStorage, R2Storage, createDefaultFileStorage, getDefaultAgentMeshPath };
+//# sourceMappingURL=chunk-74NU76Z4.js.map
+//# sourceMappingURL=chunk-74NU76Z4.js.map
