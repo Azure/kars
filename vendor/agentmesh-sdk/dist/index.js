@@ -1655,7 +1655,7 @@ var KnockProtocol = class {
       timestamp: now,
       nonce
     };
-    new TextEncoder().encode(JSON.stringify(messageData));
+    const messageBytes = new TextEncoder().encode(JSON.stringify(messageData));
     const signature = await this.identity.sign(messageBytes);
     const knock = {
       ...messageData,
@@ -1732,7 +1732,7 @@ var KnockProtocol = class {
       to: knock.from,
       knockNonce: knock.nonce
     };
-    new TextEncoder().encode(JSON.stringify(responseData));
+    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
     return {
       ...responseData,
@@ -1752,7 +1752,7 @@ var KnockProtocol = class {
       to: knock.from,
       knockNonce: knock.nonce
     };
-    new TextEncoder().encode(JSON.stringify(responseData));
+    const messageBytes = new TextEncoder().encode(JSON.stringify(responseData));
     const signature = await this.identity.sign(messageBytes);
     return {
       ...responseData,
@@ -2923,7 +2923,18 @@ var AgentMeshClient = class _AgentMeshClient {
       await this.uploadPrekeys();
     }
     await this.transport.connect();
-    this.transport.onMessage("receive", async (data) => {
+    // PATCH (azureclaw vendor patch #16, May 2026): pre-KNOCK message
+    // buffer. The relay does not guarantee inter-message ordering, so a
+    // sender that calls establishSession() + send() in rapid succession
+    // can have its first encrypted message arrive at the receiver BEFORE
+    // its KNOCK does. Without buffering, the gate at line ~2944 drops
+    // that first message; if the sender then waits for a reply (the
+    // common request/response demo pattern) it deadlocks because patch
+    // #15's re-attach only helps when there's a NEXT outbound message.
+    // We buffer up to 5 pre-KNOCK messages per peer for 3s and replay
+    // them through the same handler once KNOCK is accepted.
+    this.preKnockBuffer = this.preKnockBuffer || new Map();
+    const processInbound = async (data) => {
       const fromAmid = data.from;
       const rawPayload = data.encrypted_payload;
       const msgType = data.message_type;
@@ -2938,11 +2949,38 @@ var AgentMeshClient = class _AgentMeshClient {
               await this.transport.send(fromAmid, JSON.stringify(accept), "accept");
             } catch {
             }
+            // PATCH #16: drain pre-KNOCK buffered messages now that the
+            // session is authorised. We re-enter processInbound so the
+            // normal encrypted/x3dh branches run with the same logic.
+            const buffered = this.preKnockBuffer.get(fromAmid);
+            if (buffered && buffered.length > 0) {
+              this.preKnockBuffer.delete(fromAmid);
+              console.log(`[AGT] Replaying ${buffered.length} pre-KNOCK buffered message(s) from ${fromAmid}`);
+              for (const item of buffered) {
+                try { await processInbound(item.data); } catch (e) {
+                  console.warn(`[AGT] Replay failed for buffered message from ${fromAmid}:`, e?.message || e);
+                }
+              }
+            }
           } else if (this.knockEnforcementEnabled) {
             console.warn(`[AGT] KNOCK rejected from ${fromAmid} (reason: ${result.reason}) \u2014 messages will be blocked`);
           }
         } else if (this.knockEnforcementEnabled && this.knockHandler && !this.knockAcceptedPeers.has(fromAmid)) {
-          console.warn(`[AGT] \u26D4 Message blocked from ${fromAmid}: no accepted KNOCK session`);
+          // PATCH #16: buffer briefly in case KNOCK is in flight
+          const list = this.preKnockBuffer.get(fromAmid) || [];
+          if (list.length < 5) {
+            const item = { data };
+            list.push(item);
+            this.preKnockBuffer.set(fromAmid, list);
+            setTimeout(() => {
+              const cur = this.preKnockBuffer.get(fromAmid);
+              if (!cur) return;
+              const idx = cur.indexOf(item);
+              if (idx >= 0) cur.splice(idx, 1);
+              if (cur.length === 0) this.preKnockBuffer.delete(fromAmid);
+            }, 3000);
+          }
+          console.warn(`[AGT] \u26D4 Message from ${fromAmid} pre-KNOCK \u2014 buffered 3s pending KNOCK accept`);
           for (const handler of this.errorHandlers) {
             try {
               handler("knock_rejected", fromAmid, "Message blocked: peer KNOCK not accepted");
@@ -2951,9 +2989,20 @@ var AgentMeshClient = class _AgentMeshClient {
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
           try {
-            const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
-            const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
-            this.activeSessions.set(fromAmid, sessionId);
+            // PATCH (azureclaw vendor patch #15, May 2026): make this
+            // branch idempotent. The sender now re-attaches its X3DH
+            // bundle on every message (because the first message can be
+            // dropped during the KNOCK-accept race), so we only build the
+            // responder session the first time — subsequent messages
+            // decrypt with the established session. Calling acceptSession
+            // again would re-init the ratchet and break decryption of
+            // anything in flight.
+            let sessionId = this.activeSessions.get(fromAmid);
+            if (!sessionId) {
+              const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
+              sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
+              this.activeSessions.set(fromAmid, sessionId);
+            }
             const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
             this.emitE2EVerified(fromAmid);
             for (const handler of this.messageHandlers) {
@@ -2985,9 +3034,25 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             } catch (decErr) {
               console.error("[AGT] E2E decrypt failed for existing session \u2014 message REJECTED:", decErr?.message || decErr);
+              // PATCH (azureclaw vendor patch #11 — re-applied 2026-05): on a
+              // ratchet desync (e.g. the peer rotated keys mid-session, or a
+              // chunked transfer interleaved with a new KNOCK), the local
+              // session is now permanently broken — every subsequent inbound
+              // message will fail the same way and silently drop, taking down
+              // sibling-to-sibling file transfers (production incident, see
+              // mesh-transport.ts gap-recovery comments). Clear the local
+              // session so the next outbound message triggers a fresh KNOCK.
+              try {
+                this.activeSessions.delete(fromAmid);
+                if (this.pendingX3DH && this.pendingX3DH.delete) this.pendingX3DH.delete(fromAmid);
+                if (this.knockAcceptedPeers && this.knockAcceptedPeers.delete) this.knockAcceptedPeers.delete(fromAmid);
+                if (this.protocolSessions && this.protocolSessions.deleteSession) {
+                  try { this.protocolSessions.deleteSession(fromAmid); } catch {}
+                }
+              } catch {}
               for (const handler of this.errorHandlers) {
                 try {
-                  handler("decrypt_failed", fromAmid, decErr?.message || "unknown");
+                  handler("session_desync", fromAmid, decErr?.message || "ratchet desync");
                 } catch {
                 }
               }
@@ -3017,7 +3082,8 @@ var AgentMeshClient = class _AgentMeshClient {
           }
         }
       }
-    });
+    };
+    this.transport.onMessage("receive", processInbound);
     this.connected = true;
     this.emitEvent("connected", { amid: this.amid });
     await this.auditLogger.log("CONNECTION_ESTABLISHED", "INFO", "Connected to AgentMesh");
@@ -3108,7 +3174,20 @@ var AgentMeshClient = class _AgentMeshClient {
       const x3dhMsg = this.pendingX3DH.get(toAmid);
       if (x3dhMsg) {
         envelope.x3dh = serializeX3DHMessage(x3dhMsg);
-        this.pendingX3DH.delete(toAmid);
+        // PATCH (azureclaw vendor patch #15, May 2026): do NOT delete the
+        // pending X3DH bundle after the first send. The receiver can drop
+        // that first encrypted message during a KNOCK-accept race (KNOCK
+        // and the message arrive nearly simultaneously; the message lands
+        // before knockAcceptedPeers is populated and is rejected at the
+        // pre-decrypt KNOCK gate). Without the bundle on subsequent
+        // messages the receiver can never build the responder ratchet
+        // and every later send dies as `no_session — REJECTED`.
+        // The receiver-side branch (line ~2952) is now idempotent: it
+        // calls acceptSession() only if no session exists, otherwise
+        // decrypts with the existing session — so re-attaching the
+        // bundle on every message is safe and costs ~150 bytes/message.
+        // Cleared by the SDK only when the session is torn down via
+        // patch #13's session_desync recovery.
       }
       await this.transport.send(toAmid, JSON.stringify(envelope), "message");
     }
@@ -3164,7 +3243,17 @@ var AgentMeshClient = class _AgentMeshClient {
     try {
       const knock = await this.knockProtocol.createKnock(toAmid, request);
       await this.transport.send(toAmid, JSON.stringify(knock), "knock");
-    } catch {
+    } catch (knockErr) {
+      // PATCH (azureclaw vendor patch #11): the upstream SDK swallows KNOCK
+      // send failures silently. That made stale-AMID receiver bugs invisible
+      // because the parent thought the session was established and proceeded
+      // to encrypt+send messages that the receiver could never KNOCK-accept.
+      // Surface the error to console so operators see the failure path; do
+      // not rethrow because legacy callers expect best-effort delivery.
+      try {
+        // eslint-disable-next-line no-console
+        console.warn(`[agentmesh-sdk] KNOCK send to ${toAmid?.slice ? toAmid.slice(0, 12) : toAmid}... failed:`, knockErr && knockErr.message ? knockErr.message : knockErr);
+      } catch {}
     }
     this.knockAcceptedPeers.add(toAmid);
     await this.sessionManager.activateSessionDirect(sessionId);

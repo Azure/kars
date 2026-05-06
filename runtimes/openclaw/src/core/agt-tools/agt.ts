@@ -170,7 +170,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       type: "object",
       properties: {
         name: { type: "string", description: "DNS-safe name for the sub-agent (lowercase alphanumeric + hyphens, e.g. 'auditor', 'analyst')" },
-        model: { type: "string", description: "AI model deployment (default: gpt-4.1)" },
+        model: { type: "string", description: "AI model deployment override. Omit to inherit the parent's model (recommended)." },
         governance: { type: "boolean", description: "Enable AGT governance + mesh communication (default: true)" },
       },
       required: ["name"],
@@ -207,7 +207,15 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
 
         const result = await routerCall("POST", "/sandbox/spawn", {
           agent_id: params.name,
-          model: params.model || "gpt-4.1",
+          // Omit `model` when caller didn't specify one so the router
+          // inherits the parent's model from AZURE_OPENAI_DEPLOYMENT /
+          // OPENCLAW_MODEL (see inference-router/src/spawn/mod.rs ~line 151).
+          // Previously this defaulted to "gpt-4.1" here, which silently
+          // overrode the parent's choice and caused sub-agents to run on
+          // gpt-4.1 even when the parent was configured for a different
+          // model — operator UI showed parent's model but inference logs
+          // showed `inference:chat_completions:gpt-4.1`.
+          ...(params.model ? { model: params.model } : {}),
           governance: params.governance !== false,
           trust_threshold: 500,
           trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
@@ -304,6 +312,28 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 }
               }),
             );
+          }
+
+          // ── Inward seed: tell the NEW sibling about all existing peers ──
+          // The outward broadcast above only tells already-running siblings
+          // about the new one. Without this inward seed, the LAST agent to
+          // register in a parallel fan-out spawn (e.g. analyst-2026 in a
+          // 3-way analyst/viz/writer set) sees zero peers in its own
+          // discover and refuses to talk to its siblings. Send it a single
+          // peers_update containing all already-trusted sibling AMIDs so
+          // the receiver-side trust-extend path adds them on arrival.
+          if (broadcastTargets.length > 0) {
+            try {
+              await deps.meshClient()!.send(amid, {
+                type: "peers_update",
+                peers: broadcastTargets.map(t => ({ name: t.name, amid: t.amid })),
+                from_agent: process.env.SANDBOX_NAME || "parent",
+                timestamp: new Date().toISOString(),
+              });
+              log.info(`AGT peers_update (inward): seeded '${agentName}' with ${broadcastTargets.length} existing peer(s)`);
+            } catch (seedErr: any) {
+              log.warn(`AGT peers_update inward seed to '${agentName}' failed: ${seedErr?.message || seedErr}`);
+            }
           }
         }
 
@@ -1132,10 +1162,15 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         return { content: [{ type: "text", text: safeJson({ error: "telegram_status: TELEGRAM_ALLOW_FROM is empty" }) }] };
       }
       const truncated = text.length > 4096 ? text.slice(0, 4093) + "..." : text;
+      // Defensive: strip a leading "bot" prefix from the token if present.
+      // grammY's transport prepends "bot" when building URLs; if a user (or
+      // `azureclaw up --telegram-token`) supplied the raw "bot…:…" form, we
+      // would otherwise emit /botbot…/sendMessage and get a 404.
+      const tgTokenClean = tgToken.startsWith("bot") ? tgToken.slice(3) : tgToken;
       const results: Array<{ chat_id: string; ok: boolean; status?: number; error?: string }> = [];
       for (const chatId of chatIds) {
         try {
-          const tgResp = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+          const tgResp = await fetch(`https://api.telegram.org/bot${tgTokenClean}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ chat_id: chatId, text: truncated }),
@@ -1145,12 +1180,19 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           } else {
             // Sanitize: strip the token from any echoed body before surfacing.
             const body = await tgResp.text().catch(() => "");
-            const sanitized = body.replace(tgToken, "[REDACTED]").slice(0, 200);
-            results.push({ chat_id: chatId, ok: false, status: tgResp.status, error: sanitized });
-            log.warn(`telegram_status: HTTP ${tgResp.status} for chat ${chatId}`);
+            const sanitized = body.replace(tgToken, "[REDACTED]").replace(tgTokenClean, "[REDACTED]").slice(0, 200);
+            // Common cause: user has not /start'd the bot, so DM chat_id is
+            // unknown to Telegram. Surface an actionable hint.
+            const hint = tgResp.status === 400 && /chat not found/i.test(sanitized)
+              ? `Open Telegram → DM @<your-bot-username> → tap /start. Then retry. (chat_id ${chatId} = your user id; the bot can't initiate DMs.)`
+              : tgResp.status === 404
+                ? `Telegram returned 404 — usually means bot token is invalid (or has unexpected 'bot' prefix). Verify with: curl https://api.telegram.org/bot<token>/getMe`
+                : undefined;
+            results.push({ chat_id: chatId, ok: false, status: tgResp.status, error: sanitized, ...(hint ? { hint } : {}) });
+            log.warn(`telegram_status: HTTP ${tgResp.status} for chat ${chatId}${hint ? " — " + hint : ""}`);
           }
         } catch (e: any) {
-          const msg = String(e?.message || e).replace(tgToken, "[REDACTED]");
+          const msg = String(e?.message || e).replace(tgToken, "[REDACTED]").replace(tgTokenClean, "[REDACTED]");
           results.push({ chat_id: chatId, ok: false, error: msg });
           log.warn(`telegram_status: send error for chat ${chatId}: ${msg}`);
         }
@@ -1233,7 +1275,33 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           : `/agt/registry/registry/search?capability=${encodeURIComponent(query)}`;
         const result = await routerCall("GET", searchUrl);
         const agents = (result as any)?.results || [];
-        const summary = agents.map((a: any) => ({
+
+        // Filter graveyard entries. The agentmesh registry (vendor/agentmesh-registry)
+        // does NOT prune offline agents from `search_capabilities` results — every
+        // sandbox that ever registered remains in the index until manually
+        // revoked, and the controller-side `azureclaw destroy` path was missing
+        // a deregistration call for a long time. Without filtering, a brand-new
+        // top-level agent calling discover sees ALL historical sandboxes (we've
+        // observed 170+ stale entries in a single dev cluster), which:
+        //   1. Confuses the LLM into trying to mesh_send to long-dead AMIDs
+        //      (the per-message KNOCK then loops until timeout, burning turns).
+        //   2. Pollutes the operator UI with non-existent "trusted peers".
+        // We compute staleness from the registry-reported `last_seen` against
+        // a 90s threshold (3× the SDK heartbeat interval) AND require status=online.
+        // If the registry adds proper TTL eviction upstream this filter becomes
+        // a cheap no-op. Empty/malformed last_seen falls through as stale.
+        const STALE_AFTER_MS = 90_000;
+        const now = Date.now();
+        const fresh = agents.filter((a: any) => {
+          if (typeof a?.status === "string" && a.status.toLowerCase() !== "online") return false;
+          const ls = a?.last_seen;
+          if (!ls) return false;
+          const t = Date.parse(typeof ls === "string" ? ls : "");
+          if (!Number.isFinite(t)) return false;
+          return (now - t) <= STALE_AFTER_MS;
+        });
+        const filteredOut = agents.length - fresh.length;
+        const summary = fresh.map((a: any) => ({
           amid: a.amid,
           name: a.display_name,
           tier: a.tier,
@@ -1242,7 +1310,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           status: a.status,
           last_seen: a.last_seen,
         }));
-        return { content: [{ type: "text", text: safeJson({ agents: summary, count: summary.length }) }] };
+        return { content: [{ type: "text", text: safeJson({
+          agents: summary,
+          count: summary.length,
+          filtered_stale: filteredOut,
+          note: filteredOut > 0
+            ? `Filtered ${filteredOut} stale registry entries (offline / last_seen > 90s).`
+            : undefined,
+        }) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Discovery failed: ${e.message}` }] };
       }
@@ -1362,9 +1437,10 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           const dirLabel = direction === "local_to_aks" ? "cloud (AKS)" : "local";
           if (tgToken && tgAllowFrom) {
             const chatIds = tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean);
+            const tgTokenClean = tgToken.startsWith("bot") ? tgToken.slice(3) : tgToken;
             for (const chatId of chatIds) {
               try {
-                const tgResp = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+                const tgResp = await fetch(`https://api.telegram.org/bot${tgTokenClean}/sendMessage`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({

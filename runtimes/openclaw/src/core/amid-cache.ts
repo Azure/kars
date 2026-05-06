@@ -21,21 +21,61 @@ export const nameToAmid: Map<string, string> = new Map();
 export const nameToAmidTs: Map<string, number> = new Map();
 // 60s — long enough to amortize registry lookups across normal sends, short
 // enough that a crashed-and-restarted sub-agent is re-resolved within one
-// follow-up send cycle. The stable 'parent' alias bypasses TTL (see
-// getCachedAmid below) because it's seeded by the operator at spawn and never
-// changes for the lifetime of this pod.
+// follow-up send cycle.
 export const AMID_CACHE_TTL_MS = 60_000;
 
-// Parent-verified trusted peer AMIDs — pre-seeded at spawn via
-// AGT_TRUSTED_PEERS env var. Separate from amidToName to prevent trust
-// escalation via arbitrary registry lookups.
+// ── Name-based trust (authoritative) ──────────────────────────────────
+// Trust is keyed by NAME (admission-unique sandbox display_name), not by
+// the ephemeral AMID. The router enforces that a sandbox can only register
+// the registry under its own SANDBOX_NAME, which makes display_name a
+// control-plane-attested identity that survives pod restarts and AMID
+// rotation.
+//
+// `parentTrustedNames` is the source of truth, seeded at boot from
+// AGT_TRUSTED_PEERS. AMID-keyed trust lives only in `verifiedAmidCache`,
+// which is a TTL'd runtime artifact — populated when an incoming KNOCK is
+// verified against the registry, and superseded whenever the same name
+// rebinds to a fresh AMID.
+export const parentTrustedNames: Set<string> = new Set();
+
+interface VerifiedTrust {
+  name: string;
+  verifiedAt: number;
+  // 'env-hint' = pre-seeded warm cache (must be re-verified before granting
+  //              the parent-trust bonus on a KNOCK).
+  // 'registry-verified' = went through verifyTrustedByName successfully.
+  source: "env-hint" | "registry-verified";
+}
+
+export const verifiedAmidCache: Map<string, VerifiedTrust> = new Map();
+
+// 2 minutes — long enough that fan-out KNOCK bursts after a parent restart
+// don't re-hit the registry repeatedly, short enough that a peer that loses
+// trust (e.g. its display_name changed in registry) re-verifies promptly.
+export const VERIFIED_TRUST_TTL_MS = 120_000;
+
+// Backwards-compatible re-export — older code paths in plugin.ts and
+// agt-handoff still call `parentTrustedAmids.has(amid)` for cheap O(1) probes.
+// The new semantics: an AMID is "in" this set if it has a non-expired
+// `registry-verified` entry in `verifiedAmidCache`. Mutating this set
+// directly (via `.add` / `.delete`) is no longer the right way to grant
+// trust — call `verifyTrustedByName` to mint a verified entry instead.
 export const parentTrustedAmids: Set<string> = new Set();
+
+// Internal: keep parentTrustedAmids in sync with verifiedAmidCache so existing
+// `.has(amid)` call sites continue to function.
+function syncTrustedAmidView(amid: string, present: boolean): void {
+  if (present) parentTrustedAmids.add(amid);
+  else parentTrustedAmids.delete(amid);
+}
 
 // AMID → Ed25519 signing public key (base64) — cached from registry lookups
 export const peerSigningKeys: Map<string, string> = new Map();
 
 export function getCachedAmid(name: string): string | undefined {
-  if (name === "parent") return nameToAmid.get(name);
+  // Apply TTL uniformly: the parent identity is also ephemeral (pod restart
+  // rotates its AMID), so the historical "parent" alias bypass was a fourth
+  // stale-AMID bug. resolveAmidByName falls back to the registry on miss.
   const ts = nameToAmidTs.get(name);
   if (ts === undefined) return nameToAmid.get(name);
   if (Date.now() - ts > AMID_CACHE_TTL_MS) {
@@ -222,4 +262,262 @@ export async function resolveSigningKey(
     }
   } catch { /* best effort */ }
   return "";
+}
+
+// ── Name-based trust helpers ──────────────────────────────────────────
+
+/**
+ * Parse the AGT_TRUSTED_PEERS env var into seed entries.
+ * Format is `name[:AMID][,name[:AMID]...]`. The AMID is an optional warm
+ * cache hint — receivers must re-verify it via the registry before granting
+ * a parent-trust bonus on a KNOCK.
+ *
+ * Splits on the FIRST `:` so an AMID containing `:` (forward-compat) is not
+ * truncated. Empty / whitespace-only names are dropped.
+ */
+export function parseTrustedPeers(env: string): Array<{ name: string; amid?: string }> {
+  if (!env) return [];
+  return env.split(",")
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(peer => {
+      const idx = peer.indexOf(":");
+      if (idx < 0) return { name: peer };
+      const name = peer.slice(0, idx).trim();
+      const amid = peer.slice(idx + 1).trim();
+      return { name, amid: amid || undefined };
+    })
+    .filter(e => e.name.length > 0);
+}
+
+/**
+ * Seed authoritative trust by name plus a warm AMID hint cache.
+ * Hints DO NOT grant the parent-trust bonus on their own — they're only used
+ * to skip a registry lookup when an incoming KNOCK's AMID happens to match.
+ * The first call to `verifyTrustedByName` for an unknown AMID re-resolves
+ * via the registry and supersedes any stale hint.
+ */
+export function seedTrustedPeers(env: string): void {
+  for (const { name, amid } of parseTrustedPeers(env)) {
+    parentTrustedNames.add(name);
+    if (amid) {
+      verifiedAmidCache.set(amid, {
+        name,
+        verifiedAt: Date.now(),
+        source: "env-hint",
+      });
+      // Keep amidToName / nameToAmid in lockstep for send-side resolution.
+      amidToName.set(amid, name);
+      nameToAmid.set(name, amid);
+      nameToAmidTs.set(name, Date.now());
+    }
+  }
+}
+
+/**
+ * Evict every cached entry pointing at `oldAmid` for the trusted name `name`
+ * — used when a fresh AMID for the same name is verified, e.g. after a
+ * parent restart. This is what closes the door on the receiver-side stale
+ * trust bug. SDK ratchet sessions are keyed by AMID and naturally re-KNOCK
+ * for the new AMID, so we only evict our own caches.
+ */
+export function evictPriorAmidsForName(name: string, keepAmid: string): void {
+  // Sweep verifiedAmidCache for the same name with a different AMID.
+  for (const [amid, entry] of verifiedAmidCache.entries()) {
+    if (entry.name === name && amid !== keepAmid) {
+      verifiedAmidCache.delete(amid);
+      syncTrustedAmidView(amid, false);
+      amidToName.delete(amid);
+      peerSigningKeys.delete(amid);
+    }
+  }
+  // nameToAmid is point-in-time; let the next lookup refresh it. Resetting
+  // here would cause an extra registry hit; leave the rebind to the caller.
+  if (nameToAmid.get(name) !== keepAmid) {
+    nameToAmid.set(name, keepAmid);
+    nameToAmidTs.set(name, Date.now());
+  }
+}
+
+/**
+ * Return whether `amid` currently has a non-expired `registry-verified`
+ * trust entry. Used by the KNOCK handler to decide whether to skip the
+ * verify-by-name round trip on a hot path. Hints (`source: "env-hint"`)
+ * never count — they must be promoted to verified first.
+ */
+export function isAmidVerified(amid: string, now: number = Date.now()): boolean {
+  const entry = verifiedAmidCache.get(amid);
+  if (!entry) {
+    syncTrustedAmidView(amid, false);
+    return false;
+  }
+  if (entry.source !== "registry-verified") return false;
+  if (now - entry.verifiedAt > VERIFIED_TRUST_TTL_MS) {
+    verifiedAmidCache.delete(amid);
+    syncTrustedAmidView(amid, false);
+    return false;
+  }
+  syncTrustedAmidView(amid, true);
+  return true;
+}
+
+interface VerificationOptions {
+  /** Total time budget for retries on registry lag, ms. */
+  retryBudgetMs?: number;
+  /** Per-attempt fetch timeout, ms. */
+  perRequestTimeoutMs?: number;
+  /** Override base URL (sub-agents use AGT_REGISTRY_URL when set). */
+  registryBase?: string;
+}
+
+interface VerificationResult {
+  trusted: boolean;
+  /** Resolved display_name (when registry returned one). */
+  name?: string;
+  /** Reason a non-trusted result was returned — for logging only. */
+  reason?: string;
+}
+
+/**
+ * Verify that `fromAmid` belongs to a peer whose display_name is in
+ * `parentTrustedNames`, AND that the same AMID is the freshest live
+ * registration in the registry for that name (defense against a stale
+ * ghost being chosen for an attacker who later squats the name — though
+ * the router-side enforcement should already prevent the squat).
+ *
+ * Bounded retry handles the registry-lag race after a parent restart:
+ * the new parent's AMID may not be visible the instant the KNOCK arrives.
+ */
+export async function verifyTrustedByName(
+  fromAmid: string,
+  routerUrl: (path: string) => string,
+  opts: VerificationOptions = {},
+): Promise<VerificationResult> {
+  const cached = verifiedAmidCache.get(fromAmid);
+  if (cached
+    && cached.source === "registry-verified"
+    && Date.now() - cached.verifiedAt <= VERIFIED_TRUST_TTL_MS) {
+    syncTrustedAmidView(fromAmid, true);
+    return { trusted: true, name: cached.name };
+  }
+
+  const retryBudgetMs = opts.retryBudgetMs ?? 2000;
+  const perRequestTimeoutMs = opts.perRequestTimeoutMs ?? 1500;
+  const base = opts.registryBase ?? routerUrl("/agt/registry");
+
+  const start = Date.now();
+  const delays = [0, 100, 250, 500, 1000];
+  let attempt = 0;
+  let lastReason = "registry_unreachable";
+
+  while (Date.now() - start < retryBudgetMs) {
+    if (attempt > 0) {
+      const wait = delays[Math.min(attempt, delays.length - 1)];
+      if (Date.now() - start + wait > retryBudgetMs) break;
+      await new Promise(r => setTimeout(r, wait));
+    }
+    attempt += 1;
+
+    const lookupName = await registryLookupDisplayName(fromAmid, base, perRequestTimeoutMs);
+    if (!lookupName) {
+      lastReason = "amid_not_in_registry";
+      continue;
+    }
+    if (!parentTrustedNames.has(lookupName)) {
+      // No retry — name is well-defined and not in our trust set.
+      return { trusted: false, name: lookupName, reason: "name_not_trusted" };
+    }
+    const freshestAmid = await registrySearchFreshestAmid(lookupName, base, perRequestTimeoutMs);
+    if (!freshestAmid) {
+      lastReason = "search_returned_no_match";
+      continue;
+    }
+    if (freshestAmid !== fromAmid) {
+      // Either we're early (registry hasn't indexed the new identity yet)
+      // or the AMID is genuinely stale. Retry a few times — if the new
+      // AMID is the legitimate one, registry will catch up; if the legit
+      // owner already rotated past, this AMID is dead and we must reject.
+      lastReason = `freshest_amid_mismatch(${freshestAmid.slice(0, 12)}...)`;
+      continue;
+    }
+
+    // Verified — record it and evict any stale AMIDs that share the name.
+    verifiedAmidCache.set(fromAmid, {
+      name: lookupName,
+      verifiedAt: Date.now(),
+      source: "registry-verified",
+    });
+    syncTrustedAmidView(fromAmid, true);
+    evictPriorAmidsForName(lookupName, fromAmid);
+    amidToName.set(fromAmid, lookupName);
+    return { trusted: true, name: lookupName };
+  }
+
+  return { trusted: false, reason: lastReason };
+}
+
+async function registryLookupDisplayName(
+  amid: string,
+  base: string,
+  timeoutMs: number,
+): Promise<string | undefined> {
+  try {
+    const http = await import("node:http");
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.get(
+        `${base}/registry/lookup?amid=${encodeURIComponent(amid)}`,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (res: any) => {
+          let d = "";
+          res.on("data", (c: Buffer) => { d += c.toString(); });
+          res.on("end", () => resolve(d));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    });
+    const parsed = JSON.parse(body);
+    const name = parsed?.display_name;
+    return typeof name === "string" && name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function registrySearchFreshestAmid(
+  name: string,
+  base: string,
+  timeoutMs: number,
+): Promise<string | undefined> {
+  try {
+    const http = await import("node:http");
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.get(
+        `${base}/registry/search?capability=${encodeURIComponent(name)}`,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (res: any) => {
+          let d = "";
+          res.on("data", (c: Buffer) => { d += c.toString(); });
+          res.on("end", () => resolve(d));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    });
+    const parsed = JSON.parse(body);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const results: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
+    // Authoritative match is the display_name field — the router enforces
+    // a sandbox can only register its own SANDBOX_NAME there. Capability
+    // self-assertion is a softer signal; we ignore it here.
+    const match = pickFreshestRegistryMatch(
+      results,
+      name,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (a: any) => a?.display_name === name,
+    );
+    return match?.amid || match?.id;
+  } catch {
+    return undefined;
+  }
 }
