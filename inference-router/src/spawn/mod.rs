@@ -148,7 +148,25 @@ pub async fn create_sandbox(
     let api: Api<DynamicObject> =
         Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
 
-    let model = req.model.as_deref().unwrap_or("gpt-4.1");
+    // Sub-agents inherit the parent's model unless the spawn request explicitly
+    // overrides it. The controller plumbs the parent's resolved
+    // `inferenceRef`/`InferencePolicy.model` into both `AZURE_OPENAI_DEPLOYMENT`
+    // (on the inference-router container, see reconciler/mod.rs ~line 1210)
+    // and `OPENCLAW_MODEL` (on the agent container, see ~line 996). Reading
+    // either gives us the parent's effective model — fall back to `DEFAULT_MODEL`
+    // for parity with `RouterConfig::default_model` (config.rs ~line 97), and
+    // only as a last resort to "gpt-4.1".
+    //
+    // Bug history: previously this hardcoded "gpt-4.1" as the unwrap_or fallback,
+    // so any sub-agent spawned without an explicit `model` ran on gpt-4.1
+    // regardless of the parent's choice. Symptom: operator UI showed parent's
+    // model (e.g. gpt-5.4) but sub-agent inference logs showed
+    // `inference:chat_completions:gpt-4.1`.
+    let parent_model = std::env::var("AZURE_OPENAI_DEPLOYMENT")
+        .or_else(|_| std::env::var("OPENCLAW_MODEL"))
+        .or_else(|_| std::env::var("DEFAULT_MODEL"))
+        .unwrap_or_else(|_| "gpt-4.1".into());
+    let model = req.model.as_deref().unwrap_or(parent_model.as_str());
     let parent_isolation = std::env::var("SANDBOX_ISOLATION").unwrap_or_else(|_| "enhanced".into());
     let isolation = req.isolation.as_deref().unwrap_or(&parent_isolation);
 

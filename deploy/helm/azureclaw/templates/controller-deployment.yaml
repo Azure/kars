@@ -122,6 +122,12 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            # Writable /tmp for sigstore-rs TUF trust-root unpacking
+            # (tough crate creates a tempdir for the repository datastore
+            # during `SigstoreTrustRoot::new`; rootfs is read-only).
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: {{ .Values.controller.resources.requests.cpu | quote }}
@@ -139,3 +145,8 @@ spec:
               command: ["sh", "-c", "test -f /proc/1/status"]
             initialDelaySeconds: 3
             periodSeconds: 10
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

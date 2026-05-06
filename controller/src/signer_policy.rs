@@ -163,12 +163,21 @@ fn validate_issuer(s: &str) -> Result<(), &'static str> {
 }
 
 fn validate_san(s: &str) -> Result<(), &'static str> {
-    // Accept either an http(s) URL (CertSubjectUrlVerifier) or a
-    // generic email-like / glob string (CertSubjectEmailVerifier). The
-    // only hard rule is "no embedded whitespace" — matches the
+    // Accept either an http(s) URL (CertSubjectUrlVerifier), an
+    // `re:<pattern>` regex (CertSubjectEmailVerifier::Regex), or a
+    // generic email-like literal (CertSubjectEmailVerifier::ExactMatch).
+    // The only hard rule is "no embedded whitespace" — matches the
     // env-var-path's CSV split semantics.
     if s.contains(char::is_whitespace) {
         return Err("SAN must not contain whitespace");
+    }
+    if let Some(re) = s.strip_prefix("re:") {
+        if re.is_empty() {
+            return Err("re: prefix requires a regex pattern");
+        }
+        if regex::Regex::new(re).is_err() {
+            return Err("re: pattern is not a valid regular expression");
+        }
     }
     Ok(())
 }

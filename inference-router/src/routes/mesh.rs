@@ -104,7 +104,23 @@ async fn relay_websocket_bridge(
     let sent_metrics = mesh_metrics.clone();
     let recv_metrics = mesh_metrics.clone();
 
+    // Channel for messages that need to be sent on the upstream socket from
+    // either bridge direction (writes from `relay_to_client` for upstream
+    // auto-Pong, plus all client→relay forwarding from `client_to_relay`).
+    // Without this, the upstream `SinkExt` would have to be locked across
+    // tasks; an mpsc keeps the writer single-owned.
+    let (upstream_send_tx, mut upstream_send_rx) =
+        tokio::sync::mpsc::channel::<tungstenite::Message>(32);
+    let upstream_writer = tokio::spawn(async move {
+        while let Some(m) = upstream_send_rx.recv().await {
+            if upstream_tx.send(m).await.is_err() {
+                break;
+            }
+        }
+    });
+
     // Forward: client → relay (outbound encrypted messages)
+    let upstream_send_tx_c2r = upstream_send_tx.clone();
     let mut client_to_relay = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_rx.next().await {
             let (tung_msg, size) = match msg {
@@ -112,16 +128,14 @@ async fn relay_websocket_bridge(
                 Message::Binary(ref b) => {
                     (tungstenite::Message::Binary(b.to_vec().into()), b.len())
                 }
-                Message::Ping(p) => {
-                    let _ = upstream_tx
-                        .send(tungstenite::Message::Ping(p.to_vec().into()))
-                        .await;
+                Message::Ping(_p) => {
+                    // Axum auto-Pongs to the client; nothing to forward upstream.
+                    // Do NOT propagate client Pings to relay (would corrupt the
+                    // relay's pong-tracking state machine).
                     continue;
                 }
-                Message::Pong(p) => {
-                    let _ = upstream_tx
-                        .send(tungstenite::Message::Pong(p.to_vec().into()))
-                        .await;
+                Message::Pong(_p) => {
+                    // Client-side keepalive Pong; relay tracks its own ping state.
                     continue;
                 }
                 Message::Close(_) => break,
@@ -160,13 +174,14 @@ async fn relay_websocket_bridge(
                 ascii = %printable,
                 "AGT relay: TRAFFIC CAPTURE (outbound frame)"
             );
-            if upstream_tx.send(tung_msg).await.is_err() {
+            if upstream_send_tx_c2r.send(tung_msg).await.is_err() {
                 break;
             }
         }
     });
 
     // Forward: relay → client (inbound encrypted messages)
+    let upstream_send_tx_r2c = upstream_send_tx.clone();
     let mut relay_to_client = tokio::spawn(async move {
         while let Some(Ok(msg)) = upstream_rx.next().await {
             let (axum_msg, size) = match msg {
@@ -175,11 +190,20 @@ async fn relay_websocket_bridge(
                     (Message::Binary(b.to_vec().into()), b.len())
                 }
                 tungstenite::Message::Ping(p) => {
-                    let _ = client_tx.send(Message::Ping(p.to_vec().into())).await;
+                    // CRITICAL: tokio-tungstenite client mode does NOT auto-Pong.
+                    // The relay (vendor/agentmesh-relay) sends Pings every
+                    // PING_INTERVAL_SECS and disconnects the agent at the next
+                    // tick if no Pong is received within PING_TIMEOUT_SECS.
+                    // We must respond on the upstream socket directly — the
+                    // axum client side is not a viable Pong source because
+                    // axum strips Pong frames from the application stream.
+                    let _ = upstream_send_tx_r2c
+                        .send(tungstenite::Message::Pong(p.to_vec().into()))
+                        .await;
                     continue;
                 }
-                tungstenite::Message::Pong(p) => {
-                    let _ = client_tx.send(Message::Pong(p.to_vec().into())).await;
+                tungstenite::Message::Pong(_p) => {
+                    // Relay-side Pong; nothing for the client to do.
                     continue;
                 }
                 tungstenite::Message::Close(_) => break,
@@ -232,6 +256,9 @@ async fn relay_websocket_bridge(
         _ = &mut client_to_relay => { relay_to_client.abort(); },
         _ = &mut relay_to_client => { client_to_relay.abort(); },
     }
+    // Drop the upstream sender channel so the writer task exits cleanly.
+    drop(upstream_send_tx);
+    upstream_writer.abort();
 
     let out_n = outbound_count.load(Ordering::Relaxed);
     let out_b = outbound_bytes.load(Ordering::Relaxed);
@@ -284,6 +311,29 @@ async fn agt_registry_proxy(
     if let Some(qs) = query.0 {
         url.push('?');
         url.push_str(&qs);
+    }
+
+    // ── Identity-claim enforcement ──────────────────────────────────────
+    // Trust in AzureClaw's mesh is keyed by sandbox display_name (which is
+    // K8s admission-unique within a cluster). The receiver-side KNOCK
+    // handler resolves a peer AMID → display_name via the registry and
+    // checks it against `parentTrustedNames`. That trust is only sound if
+    // the registry guarantees a sandbox CANNOT claim another sandbox's
+    // name. This block is that guarantee: every register/capabilities
+    // mutation through this router is gated to identities matching the
+    // local SANDBOX_NAME. Self-asserted display_name + capability claims
+    // from a compromised sandbox cannot impersonate a peer.
+    if method == axum::http::Method::POST
+        && (path == "registry/register" || path == "registry/capabilities")
+    {
+        if let Err((status, msg)) = enforce_identity_claim(&path, &body) {
+            tracing::warn!(
+                path = %path,
+                reason = %msg,
+                "AGT registry proxy: identity-claim enforcement rejected mutation"
+            );
+            return errors::flat(status, msg).into_response();
+        }
     }
 
     // Defense-in-depth retry mirror of vendored SDK Patch #12. The plugin's
@@ -433,6 +483,91 @@ async fn agt_registry_proxy(
     .into_response()
 }
 
+/// Identity-claim enforcement for AGT registry mutations.
+///
+/// AzureClaw mesh trust is name-based: receivers verify peers by resolving
+/// `display_name` through the registry and matching against a parent-seeded
+/// trust set. That guarantee only holds if a sandbox cannot register another
+/// sandbox's name. This function vets POST bodies for `registry/register` and
+/// `registry/capabilities`, allowing only:
+///   - `display_name` equal to the router's `SANDBOX_NAME` env (or absent)
+///   - `capabilities` drawn from `{SANDBOX_NAME, "azureclaw-agent",
+///     "task-execution"}` plus any prefixed with `azureclaw:` (reserved for
+///     future controller-issued attestations)
+///
+/// Returns `Err((status, message))` if the claim must be rejected. An empty
+/// body (which can occur for some capability update shapes) is allowed and
+/// passes through to the upstream registry.
+pub(super) fn enforce_identity_claim(
+    path: &str,
+    body: &Bytes,
+) -> Result<(), (StatusCode, String)> {
+    let sandbox_name = match std::env::var("SANDBOX_NAME") {
+        Ok(v) if !v.is_empty() && v != "unknown" => v,
+        _ => {
+            // Fail closed: a router without a known SANDBOX_NAME has no way
+            // to authoritatively gate identity claims. In dev/test we
+            // expect SANDBOX_NAME to always be set by the controller.
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "router cannot enforce identity claims: SANDBOX_NAME not set".into(),
+            ));
+        }
+    };
+
+    if body.is_empty() {
+        return Ok(());
+    }
+
+    let parsed: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            // Don't leak bytes; let upstream registry reject the bad body.
+            return Ok(());
+        }
+    };
+
+    if let Some(name) = parsed.get("display_name").and_then(|v| v.as_str())
+        && name != sandbox_name
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "display_name '{}' does not match router SANDBOX_NAME '{}' — \
+                 sandboxes may only register under their own admission-bound name",
+                name, sandbox_name
+            ),
+        ));
+    }
+
+    if let Some(caps) = parsed.get("capabilities").and_then(|v| v.as_array()) {
+        for cap in caps {
+            let Some(s) = cap.as_str() else {
+                continue;
+            };
+            let allowed = s == sandbox_name
+                || s == "azureclaw-agent"
+                || s == "task-execution"
+                || s.starts_with("azureclaw:");
+            if !allowed {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "capability '{}' is not permitted — sandboxes may \
+                         only assert capabilities matching SANDBOX_NAME or \
+                         the AzureClaw default set ({{azureclaw-agent, \
+                         task-execution, azureclaw:*}})",
+                        s
+                    ),
+                ));
+            }
+        }
+    }
+
+    let _ = path;
+    Ok(())
+}
+
 /// Look up an agent's AMID from the registry by searching for its sandbox name.
 pub(super) async fn lookup_parent_amid(
     client: &reqwest::Client,
@@ -514,5 +649,122 @@ async fn blocklist_check(
             })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize all enforcement tests: they mutate the SANDBOX_NAME process
+    // env, which would race under cargo's default parallel test runner.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    fn with_env<R>(name: &str, value: &str, f: impl FnOnce() -> R) -> R {
+        let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(name).ok();
+        // SAFETY: env mutation gated by ENV_GUARD; tests are the only callers.
+        unsafe { std::env::set_var(name, value) };
+        let result = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var(name, v) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+        result
+    }
+
+    #[test]
+    fn enforce_accepts_matching_display_name() {
+        with_env("SANDBOX_NAME", "azureclawtest", || {
+            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+                "amid": "ABC",
+                "display_name": "azureclawtest",
+                "capabilities": ["azureclaw-agent", "task-execution", "azureclawtest"],
+            })).unwrap());
+            assert!(enforce_identity_claim("registry/register", &body).is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_rejects_squatted_display_name() {
+        with_env("SANDBOX_NAME", "viz", || {
+            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+                "amid": "ABC",
+                "display_name": "azureclawtest",
+            })).unwrap());
+            let err = enforce_identity_claim("registry/register", &body).unwrap_err();
+            assert_eq!(err.0, StatusCode::FORBIDDEN);
+            assert!(err.1.contains("display_name"));
+        });
+    }
+
+    #[test]
+    fn enforce_rejects_squatted_capability() {
+        with_env("SANDBOX_NAME", "viz", || {
+            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+                "amid": "ABC",
+                "display_name": "viz",
+                "capabilities": ["azureclaw-agent", "azureclawtest"],
+            })).unwrap());
+            let err = enforce_identity_claim("registry/register", &body).unwrap_err();
+            assert_eq!(err.0, StatusCode::FORBIDDEN);
+            assert!(err.1.contains("capability"));
+        });
+    }
+
+    #[test]
+    fn enforce_allows_default_capability_set() {
+        with_env("SANDBOX_NAME", "viz", || {
+            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+                "amid": "ABC",
+                "display_name": "viz",
+                "capabilities": ["azureclaw-agent", "task-execution", "viz", "azureclaw:internal"],
+            })).unwrap());
+            assert!(enforce_identity_claim("registry/register", &body).is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_allows_missing_display_name() {
+        // Some capability-update payloads omit display_name.
+        with_env("SANDBOX_NAME", "viz", || {
+            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+                "amid": "ABC",
+                "capabilities": ["task-execution"],
+            })).unwrap());
+            assert!(enforce_identity_claim("registry/capabilities", &body).is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_fails_closed_without_sandbox_name() {
+        let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("SANDBOX_NAME").ok();
+        unsafe { std::env::remove_var("SANDBOX_NAME") };
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+            "display_name": "anything",
+        })).unwrap());
+        let err = enforce_identity_claim("registry/register", &body).unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("SANDBOX_NAME", v) };
+        }
+    }
+
+    #[test]
+    fn enforce_passes_empty_body() {
+        with_env("SANDBOX_NAME", "viz", || {
+            assert!(enforce_identity_claim("registry/register", &Bytes::new()).is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_passes_invalid_json() {
+        // Invalid JSON is forwarded so upstream registry can return its own error.
+        with_env("SANDBOX_NAME", "viz", || {
+            let body = Bytes::from_static(b"not json");
+            assert!(enforce_identity_claim("registry/register", &body).is_ok());
+        });
     }
 }
