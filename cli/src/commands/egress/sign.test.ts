@@ -303,11 +303,16 @@ describe("parseOrasDigest", () => {
 });
 
 describe("pushArtifact", () => {
-  it("invokes oras with the right argv and verifies the digest", async () => {
+  it("invokes oras with the right argv and verifies the blob digest", async () => {
     const yaml = "apiVersion: azureclaw.dev/v1alpha1\nkind: EgressAllowlist\n";
-    const expected = digestOfCanonical(yaml);
+    const expectedBlob = digestOfCanonical(yaml);
+    const manifestDigest = "sha256:" + "a".repeat(64);
     const fakeExeca = vi.fn(async () => ({
-      stdout: JSON.stringify({ reference: { digest: expected } }),
+      stdout: JSON.stringify({
+        reference: "r.example.com/policy/egress-allowlist/foo:latest",
+        digest: manifestDigest,
+        files: [{ path: "allowlist.yaml", digest: expectedBlob }],
+      }),
     }));
     const out = await pushArtifact({
       orasPath: "/usr/bin/oras",
@@ -317,7 +322,7 @@ describe("pushArtifact", () => {
       artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
       execaImpl: fakeExeca as any,
     });
-    expect(out).toBe(expected);
+    expect(out).toBe(manifestDigest);
     expect(fakeExeca).toHaveBeenCalledTimes(1);
     const [bin, argv] = fakeExeca.mock.calls[0] as unknown as [string, string[]];
     expect(bin).toBe("/usr/bin/oras");
@@ -325,11 +330,15 @@ describe("pushArtifact", () => {
     expect(argv[1]).toBe("r.example.com/policy/egress-allowlist/foo:latest");
   });
 
-  it("aborts when oras-reported digest disagrees with locally computed digest", async () => {
+  it("aborts when oras-reported blob digest disagrees with locally computed digest", async () => {
     const yaml = "apiVersion: azureclaw.dev/v1alpha1\n";
-    const wrong = "sha256:" + "0".repeat(64);
+    const wrongBlob = "sha256:" + "0".repeat(64);
     const fakeExeca = vi.fn(async () => ({
-      stdout: JSON.stringify({ reference: { digest: wrong } }),
+      stdout: JSON.stringify({
+        reference: "r/x/y:latest",
+        digest: "sha256:" + "a".repeat(64),
+        files: [{ path: "allowlist.yaml", digest: wrongBlob }],
+      }),
     }));
     await expect(
       pushArtifact({
@@ -341,6 +350,23 @@ describe("pushArtifact", () => {
         execaImpl: fakeExeca as any,
       }),
     ).rejects.toThrow(/diverged/);
+  });
+
+  it("returns manifest digest when oras output omits files[].digest (still acceptable)", async () => {
+    const yaml = "apiVersion: azureclaw.dev/v1alpha1\n";
+    const manifest = "sha256:" + "c".repeat(64);
+    const fakeExeca = vi.fn(async () => ({
+      stdout: JSON.stringify({ reference: "r/x/y:latest", digest: manifest }),
+    }));
+    const out = await pushArtifact({
+      orasPath: "/usr/bin/oras",
+      registry: "r",
+      repository: "x/y",
+      yaml,
+      artifactType: EGRESS_ALLOWLIST_MEDIA_TYPE,
+      execaImpl: fakeExeca as any,
+    });
+    expect(out).toBe(manifest);
   });
 });
 
