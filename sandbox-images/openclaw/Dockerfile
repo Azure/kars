@@ -121,7 +121,9 @@ RUN OC=/usr/local/lib/node_modules/openclaw && \
         ! -name browser ! -name duckduckgo ! -name webhooks ! -name file-transfer \
         ! -name document-extract ! -name web-readability ! -name diffs \
         -exec rm -rf {} + && \
-      echo "Built dist-runtime ($(ls $OC/dist-runtime/extensions | wc -l) plugins kept): $(ls $OC/dist-runtime/extensions | tr '\n' ' ')"; \
+      KEPT=$(find "$OC/dist-runtime/extensions" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null) && \
+      KEPT_COUNT=$(printf '%s\n' "$KEPT" | wc -w) && \
+      echo "Built dist-runtime ($KEPT_COUNT plugins kept): $KEPT"; \
     fi
 
 # Pre-create router-readable config dirs (root-owned, world-traversable).
