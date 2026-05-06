@@ -288,10 +288,6 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
   };
 
   const sign = async (sb: FleetRow) => {
-    const ok = await confirmYesNo(ctx,
-      `Sign + enforce ${sb.name}? This pushes a cosign-signed allowlist artifact and switches the sandbox to enforcing mode.`);
-    if (!ok) return;
-
     // Pre-flight: oras + cosign are required by `azureclaw egress --enforce`
     // (auto-signs as of S12.g). Surface a clear, actionable error here rather
     // than letting the subprocess fail later with an opaque "Command failed
@@ -308,17 +304,49 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     if (missingTools.length > 0) {
       activityLog.log(
         `{red-fg}✗ ${sb.name}: cannot sign — missing tool(s): ${missingTools.join(", ")}.{/} ` +
-        `Install: oras → https://oras.land/docs/installation, cosign → https://docs.sigstore.dev/cosign/installation. ` +
-        `(Or run with --no-sign for unsigned dev mode — the controller will refuse the artifact.)`,
+        `Install: oras → https://oras.land/docs/installation, cosign → https://docs.sigstore.dev/cosign/installation.`,
       );
       screen.render();
       return;
     }
 
+    // Pre-flight: signing identity. The dialog spawns the signer as a
+    // subprocess with stdio=pipe — there is NO TTY. Without an identity
+    // token in the env (or a configured key ref), cosign keyless OIDC
+    // can't open a browser, and `autoDetectSignMode` aborts with a
+    // multi-line error that's easy to miss. Detect this BEFORE spawning
+    // and explain the operator's options.
+    const hasIdentityToken = !!(process.env.SIGSTORE_ID_TOKEN || process.env.OIDC_TOKEN);
+    const hasKeyRef = !!(process.env.AZURECLAW_SIGN_KEY || process.env.COSIGN_KEY);
+    if (!hasIdentityToken && !hasKeyRef) {
+      activityLog.log(
+        `{yellow-fg}⚠ ${sb.name}: cannot sign from inside the operator TUI{/} — keyless OIDC needs a TTY for browser auth, and no identity token / key ref is set.`,
+      );
+      activityLog.log(
+        `{gray-fg}  → Run from a terminal: {bold}azureclaw egress ${sb.name} --enforce{/bold}{/}`,
+      );
+      activityLog.log(
+        `{gray-fg}  → Or set {bold}SIGSTORE_ID_TOKEN{/bold} (keyless) or {bold}AZURECLAW_SIGN_KEY=<path|azurekms://…>{/bold} (keyed) before launching the operator.{/}`,
+      );
+      screen.render();
+      return;
+    }
+
+    const ok = await confirmYesNo(ctx,
+      `Sign + enforce ${sb.name}? This pushes a cosign-signed allowlist artifact and switches the sandbox to enforcing mode.`);
+    if (!ok) return;
+
     activityLog.log(`{cyan-fg}⏳ azureclaw egress ${sb.name} --enforce  {gray-fg}(auto-signs){/}{/}`);
     screen.render();
+    const signArgs = ["egress", sb.name, "--enforce"];
+    if (hasKeyRef && !hasIdentityToken) {
+      // Pass the key ref explicitly so autoDetectSignMode picks 'keyed'
+      // — env var is auxiliary; the flag is canonical.
+      signArgs.push("--sign-mode", "keyed", "--sign-key",
+        process.env.AZURECLAW_SIGN_KEY ?? process.env.COSIGN_KEY ?? "");
+    }
     try {
-      const { stdout } = await execa("azureclaw", ["egress", sb.name, "--enforce"], {
+      const { stdout } = await execa("azureclaw", signArgs, {
         stdio: "pipe", timeout: 180_000,
       });
       const lastLine = stdout.split("\n").map((l) => l.trim()).filter(Boolean).slice(-1)[0] || "(no stdout)";
