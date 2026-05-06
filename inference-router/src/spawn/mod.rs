@@ -718,10 +718,7 @@ pub(crate) fn build_sub_agent_crd(
     }
 
     let mut annotations = BTreeMap::new();
-    annotations.insert(
-        "azureclaw.azure.com/model".to_string(),
-        model.to_string(),
-    );
+    annotations.insert("azureclaw.azure.com/model".to_string(), model.to_string());
 
     serde_json::json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
@@ -857,7 +854,10 @@ mod tests {
         assert!(spec.get("openclaw").is_none(), "legacy spec.openclaw");
         assert!(spec.get("inference").is_none(), "legacy spec.inference");
         assert!(spec.get("model").is_none(), "legacy spec.model");
-        assert!(spec.get("handoff").is_none(), "legacy top-level spec.handoff");
+        assert!(
+            spec.get("handoff").is_none(),
+            "legacy top-level spec.handoff"
+        );
         assert!(
             spec["governance"].get("toolPolicy").is_none(),
             "legacy governance.toolPolicy (string field)"
@@ -873,13 +873,7 @@ mod tests {
             mode: "restore".into(),
             predecessor: Some("azclaw2".into()),
         });
-        let crd = build_sub_agent_crd(
-            "azclaw2",
-            "azureclaw-system",
-            "enhanced",
-            "gpt-5.4",
-            &req,
-        );
+        let crd = build_sub_agent_crd("azclaw2", "azureclaw-system", "enhanced", "gpt-5.4", &req);
 
         assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
         assert_eq!(
@@ -892,10 +886,7 @@ mod tests {
         );
         // Handoff MUST request global registry mode for mesh comms.
         assert_eq!(crd["spec"]["governance"]["registryMode"], "global");
-        assert_eq!(
-            crd["spec"]["inferenceRef"]["name"],
-            "azclaw2-inference"
-        );
+        assert_eq!(crd["spec"]["inferenceRef"]["name"], "azclaw2-inference");
         // Legacy must still be absent.
         assert!(crd["spec"].get("handoff").is_none());
         assert!(crd["spec"].get("model").is_none());

@@ -896,10 +896,7 @@ mod tests {
         // 3. Required references are present.
         assert_eq!(spec.inference_ref.name, "offload-abcdef12-inference");
         let gov = spec.governance.as_ref().expect("governance required");
-        assert_eq!(
-            gov.tool_policy_ref.name,
-            "offload-abcdef12-toolpolicy"
-        );
+        assert_eq!(gov.tool_policy_ref.name, "offload-abcdef12-toolpolicy");
 
         // 4. Negative guard: legacy fields must not be present at all
         //    (the controller's `additionalProperties: false` would catch
@@ -934,7 +931,15 @@ mod tests {
         // canonical group is `azureclaw.azure.com`; using anything else
         // makes the API server return 404 for the resource path.
         let crd = build_offload_sandbox_crd(
-            "x", "azureclaw-system", "p", "rid", "t", "m", 30, "x-inference", "x-toolpolicy",
+            "x",
+            "azureclaw-system",
+            "p",
+            "rid",
+            "t",
+            "m",
+            30,
+            "x-inference",
+            "x-toolpolicy",
         );
         assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
     }

@@ -16,8 +16,8 @@ use super::AppState;
 use crate::errors;
 use crate::proxy;
 
-use super::chat_completions::chat_completions;
 use super::anthropic_messages::anthropic_messages;
+use super::chat_completions::chat_completions;
 
 /// Strip the `/api/projects/<project>` segment from a Foundry endpoint URL,
 /// returning the bare account-scoped base URL.
