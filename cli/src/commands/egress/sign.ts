@@ -386,7 +386,13 @@ export function buildCosignSignArgv(opts: {
   identityToken?: string;
 }): string[] {
   const target = `${opts.registry}/${opts.repository}@${opts.digest}`;
-  const argv: string[] = ["sign", "--yes"];
+  // Force legacy `.sig` tag convention. Without this, cosign 2.x +
+  // OCI-1.1-capable registries (incl. ACR Premium) write the
+  // signature as a subject-based referrer, which sigstore-rs in the
+  // controller cannot find — it looks for `<digest>.sig` tags. Using
+  // legacy keeps verification working across Notation/sigstore-rs
+  // toolchains and matches what the controller fetches today.
+  const argv: string[] = ["sign", "--yes", "--registry-referrers-mode", "legacy"];
   switch (opts.mode) {
     case "keyless":
       // No auth flag — cosign launches the OIDC browser flow.

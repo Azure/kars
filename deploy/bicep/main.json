@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.38.33.27573",
-      "templateHash": "14459152280850448221"
+      "templateHash": "15572180885470160344"
     }
   },
   "parameters": {
@@ -80,7 +80,18 @@
       "metadata": {
         "description": "Azure OpenAI model version"
       }
+    },
+    "deployAoai": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy Azure OpenAI resource (set false when using --foundry-endpoint)"
+      }
     }
+  },
+  "variables": {
+    "acrName": "[format('{0}{1}', replace(parameters('baseName'), '-', ''), take(uniqueString(resourceGroup().id), 6))]",
+    "kvSuffix": "[take(uniqueString(resourceGroup().id), 6)]"
   },
   "resources": [
     {
@@ -94,7 +105,7 @@
         "mode": "Incremental",
         "parameters": {
           "name": {
-            "value": "[format('{0}acr', parameters('baseName'))]"
+            "value": "[variables('acrName')]"
           },
           "location": {
             "value": "[parameters('location')]"
@@ -196,10 +207,13 @@
         "mode": "Incremental",
         "parameters": {
           "name": {
-            "value": "[format('{0}-kv', parameters('baseName'))]"
+            "value": "[format('{0}-kv-{1}', parameters('baseName'), variables('kvSuffix'))]"
           },
           "location": {
             "value": "[parameters('location')]"
+          },
+          "recover": {
+            "value": false
           }
         },
         "template": {
@@ -209,7 +223,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.38.33.27573",
-              "templateHash": "7801397398815544204"
+              "templateHash": "8262240890248690713"
             }
           },
           "parameters": {
@@ -223,6 +237,13 @@
               "type": "string",
               "metadata": {
                 "description": "Azure region"
+              }
+            },
+            "recover": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Recover soft-deleted vault"
               }
             }
           },
@@ -242,6 +263,7 @@
                 "enableSoftDelete": true,
                 "softDeleteRetentionInDays": 30,
                 "enablePurgeProtection": true,
+                "createMode": "[if(parameters('recover'), 'recover', 'default')]",
                 "networkAcls": {
                   "defaultAction": "Deny",
                   "bypass": "AzureServices"
@@ -263,6 +285,7 @@
       }
     },
     {
+      "condition": "[parameters('deployAoai')]",
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "[format('{0}-aoai', parameters('baseName'))]",
@@ -286,6 +309,9 @@
           },
           "authorizedIpRanges": {
             "value": "[parameters('authorizedIpRanges')]"
+          },
+          "restore": {
+            "value": false
           }
         },
         "template": {
@@ -295,7 +321,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.38.33.27573",
-              "templateHash": "636445065291174368"
+              "templateHash": "1248769661329074457"
             }
           },
           "parameters": {
@@ -329,6 +355,13 @@
               "metadata": {
                 "description": "Authorized IP ranges (empty = allow all)"
               }
+            },
+            "restore": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Restore from soft-delete (set false for first deploy)"
+              }
             }
           },
           "resources": [
@@ -343,6 +376,7 @@
               },
               "properties": {
                 "customSubDomainName": "[parameters('name')]",
+                "restore": "[parameters('restore')]",
                 "publicNetworkAccess": "Enabled",
                 "networkAcls": {
                   "copy": [
@@ -507,7 +541,7 @@
             "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-kv', parameters('baseName'))), '2025-04-01').outputs.keyVaultName.value]"
           },
           "openAiAccountId": {
-            "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName'))), '2025-04-01').outputs.accountId.value]"
+            "value": "[coalesce(tryGet(if(parameters('deployAoai'), reference(resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName'))), '2025-04-01'), null()), 'outputs', 'accountId', 'value'), '')]"
           },
           "authorizedIpRanges": {
             "value": "[parameters('authorizedIpRanges')]"
@@ -523,7 +557,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.38.33.27573",
-              "templateHash": "16609947099236812081"
+              "templateHash": "12432265393954369648"
             }
           },
           "parameters": {
@@ -614,7 +648,7 @@
                   "networkPolicy": "cilium",
                   "networkDataplane": "cilium"
                 },
-                "agentPoolProfiles": "[concat(createArray(createObject('name', 'system', 'count', 2, 'vmSize', 'Standard_D2s_v5', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'System', 'enableFIPS', parameters('enableFips')), createObject('name', 'clawpool', 'count', parameters('nodeCount'), 'vmSize', parameters('vmSize'), 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox'))), if(parameters('enableKata'), createArray(createObject('name', 'katapool', 'count', parameters('nodeCount'), 'vmSize', 'Standard_D4s_v3', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'workloadRuntime', 'KataMshvVmIsolation', 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox-kata'))), createArray()))]",
+                "agentPoolProfiles": "[concat(createArray(createObject('name', 'system', 'count', 2, 'vmSize', 'Standard_D2as_v5', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'System', 'enableFIPS', parameters('enableFips')), createObject('name', 'clawpool', 'count', parameters('nodeCount'), 'vmSize', parameters('vmSize'), 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox'))), if(parameters('enableKata'), createArray(createObject('name', 'katapool', 'count', parameters('nodeCount'), 'vmSize', 'Standard_D4as_v6', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'workloadRuntime', 'KataMshvVmIsolation', 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox-kata'))), createArray()))]",
                 "addonProfiles": {
                   "omsagent": {
                     "enabled": true,
@@ -670,6 +704,37 @@
               ]
             },
             {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}/{1}', format('{0}-sandbox-wi', parameters('name')), 'azureclaw-controller-sa')]",
+              "properties": {
+                "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').oidcIssuerProfile.issuerURL]",
+                "subject": "system:serviceaccount:azureclaw-system:azureclaw-controller",
+                "audiences": [
+                  "api://AzureADTokenExchange"
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', parameters('name'))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', format('{0}-sandbox-wi', parameters('name')), 'azureclaw-sandbox')]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.ManagedIdentity/userAssignedIdentities/{0}', format('{0}-sandbox-wi', parameters('name')))]",
+              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), 'mi-contributor')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59')]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+              ]
+            },
+            {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
               "name": "[guid(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), parameters('acrId'), 'acrpull')]",
@@ -683,6 +748,21 @@
               ]
             },
             {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', last(split(parameters('acrId'), '/')))]",
+              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), parameters('acrId'), 'acrpull')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('openAiAccountId')))]",
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
               "scope": "[format('Microsoft.CognitiveServices/accounts/{0}', last(split(parameters('openAiAccountId'), '/')))]",
@@ -756,6 +836,10 @@
       "type": "string",
       "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-acr', parameters('baseName'))), '2025-04-01').outputs.loginServer.value]"
     },
+    "acrName": {
+      "type": "string",
+      "value": "[variables('acrName')]"
+    },
     "keyVaultUri": {
       "type": "string",
       "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-kv', parameters('baseName'))), '2025-04-01').outputs.vaultUri.value]"
@@ -766,7 +850,7 @@
     },
     "openAiEndpoint": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName'))), '2025-04-01').outputs.endpoint.value]"
+      "value": "[coalesce(tryGet(if(parameters('deployAoai'), reference(resourceId('Microsoft.Resources/deployments', format('{0}-aoai', parameters('baseName'))), '2025-04-01'), null()), 'outputs', 'endpoint', 'value'), '')]"
     },
     "logAnalyticsWorkspaceId": {
       "type": "string",
