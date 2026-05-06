@@ -420,6 +420,16 @@ async function runSignFlow(
     console.log(chalk.dim(`     Endpoints:  ${canonical.endpoints.length}`));
     console.log(chalk.dim(`     Sign mode:  ${mode}`));
 
+    // Pre-flight: oras and cosign authenticate via the local Docker /
+    // ORAS keychain; both require a prior `az acr login --name <acr>`
+    // (or equivalent docker login). Without it, `oras push` returns a
+    // 401 from the registry's OAuth token endpoint with a multi-line
+    // error that's hard to interpret. Try auto-login when we detect az
+    // is available, then surface a single-line actionable error if it
+    // still fails. This is best-effort — if `az` isn't in PATH we just
+    // proceed and let oras fail with the real error.
+    await ensureAcrAuth(registry);
+
     const digest = await pushArtifact({
       orasPath,
       registry,
@@ -499,6 +509,42 @@ async function runSignFlow(
     process.exitCode = 1;
   }
 }
+
+/**
+ * Best-effort ACR pre-auth so `oras push` doesn't 401. The ORAS keychain
+ * reads ~/.docker/config.json (and the credential helpers it points at);
+ * `az acr login` is the canonical way to populate it. If `az` is missing
+ * we skip — the oras call may still succeed with cached creds, and if
+ * not the error message will be the same as before this helper existed.
+ */
+async function ensureAcrAuth(registry: string): Promise<void> {
+  // Strip any path component — we only want the registry FQDN.
+  const fqdn = registry.split("/")[0];
+  if (!fqdn.endsWith(".azurecr.io")) return;
+  const acrName = fqdn.replace(/\.azurecr\.io$/, "");
+  const { execa } = await import("execa");
+  // Confirm `az` is on PATH; bail silently if not.
+  try {
+    await execa("az", ["--version"], { stdio: "pipe", timeout: 5_000 });
+  } catch {
+    return;
+  }
+  // Fast-path: probe if we already have a fresh token. `az acr login`
+  // is idempotent and cheap, so we just always run it (it returns
+  // 'Login Succeeded' in <2s when already authenticated).
+  console.log(chalk.dim(`     ACR auth:   ensuring login to ${fqdn} (az acr login --name ${acrName})`));
+  try {
+    await execa("az", ["acr", "login", "--name", acrName], { stdio: "pipe", timeout: 30_000 });
+    console.log(chalk.dim(`     ACR auth:   ✓ logged in`));
+  } catch (e: any) {
+    // Surface a one-liner, but don't fail the whole flow yet — let oras
+    // try and report the actual 401 if the credential is genuinely bad.
+    const tail = String(e?.stderr ?? e?.stdout ?? e?.message ?? "")
+      .split("\n").map((s: string) => s.trim()).filter(Boolean).slice(-1)[0] ?? "unknown";
+    console.log(chalk.yellow(`     ACR auth:   ⚠ az acr login failed (${tail.substring(0, 120)}). Continuing — oras may still have cached creds.`));
+  }
+}
+
 
 async function discoverRegistry(): Promise<string | null> {
   // Best-effort lookup from the CLI's config file. Keeping this thin
