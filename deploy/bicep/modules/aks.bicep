@@ -188,6 +188,26 @@ resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+// Grant the sandbox/controller workload identity AcrPull on the ACR.
+// The controller uses this UAMI (federated via OIDC) to fetch signed
+// egress allowlist artifacts (and any other policy artifacts) from
+// the registry as part of `AllowlistVerified` verification. Without
+// this assignment the controller falls back to anonymous, which 401s
+// when anonymous pull is disabled (the secure default).
+resource acrRef 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+  name: last(split(acrId, '/'))
+}
+
+resource sandboxAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sandboxIdentity.id, acrId, 'acrpull')
+  scope: acrRef
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')  // AcrPull
+    principalId: sandboxIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // Grant sandbox identity "Cognitive Services OpenAI User" on the AOAI resource (only when AOAI is deployed)
 resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (!empty(openAiAccountId)) {
   name: last(split(openAiAccountId, '/'))

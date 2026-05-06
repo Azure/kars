@@ -383,6 +383,8 @@ describe("buildCosignSignArgv", () => {
     ).toEqual([
       "sign",
       "--yes",
+      "--registry-referrers-mode",
+      "legacy",
       `${base.registry}/${base.repository}@${base.digest}`,
     ]);
   });
@@ -397,6 +399,8 @@ describe("buildCosignSignArgv", () => {
     ).toEqual([
       "sign",
       "--yes",
+      "--registry-referrers-mode",
+      "legacy",
       "--identity-token",
       "tok123",
       `${base.registry}/${base.repository}@${base.digest}`,
@@ -413,6 +417,8 @@ describe("buildCosignSignArgv", () => {
     ).toEqual([
       "sign",
       "--yes",
+      "--registry-referrers-mode",
+      "legacy",
       "--key",
       "azurekms://kv/k",
       `${base.registry}/${base.repository}@${base.digest}`,
@@ -443,6 +449,8 @@ describe("signArtifact", () => {
     expect(argv).toEqual([
       "sign",
       "--yes",
+      "--registry-referrers-mode",
+      "legacy",
       "--key",
       "k.pem",
       `r.example.com/x/y@sha256:${"a".repeat(64)}`,
