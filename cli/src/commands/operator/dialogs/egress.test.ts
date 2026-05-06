@@ -65,8 +65,8 @@ describe("egress drawer — buildFleetRows", () => {
       ["d", sec("d", "enforcing", 0)],
     ]);
     const signed = new Map<string, SignedDetail>([
-      ["a", { state: "signed-active", ref: { name: "egress-a-v3" } }],
-      ["b", { state: "signed-pending", ref: { name: "egress-b-v1" } }],
+      ["a", { state: "signed-active", ref: { display: "policy/egress-allowlist/a@sha256:abcdef012345" } }],
+      ["b", { state: "signed-pending", ref: { display: "policy/egress-allowlist/b@sha256:cafef00dbeef" } }],
       // c, d → no entry → "unknown"
     ]);
     const rows = buildFleetRows(sandboxes, new Map(), states, signed);
