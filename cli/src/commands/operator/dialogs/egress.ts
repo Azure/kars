@@ -34,6 +34,23 @@ import type { SecurityState } from "../types.js";
 
 interface ActivityLog { log(msg: string): void; }
 
+/** Format an execa failure into a single-line, ANSI-stripped reason string.
+ *  Many `azureclaw` subcommands write user-facing abort/error messages to
+ *  STDOUT via console.log (chalk-colored), not stderr, so a stderr-only
+ *  read produces empty output. Surface stderr first, then the last few
+ *  meaningful stdout lines, and finally the exit code so the operator
+ *  always sees the actual failure reason (not just "Command failed"). */
+function formatExecError(e: unknown, maxLen: number): string {
+  const err = e as { stdout?: string; stderr?: string; message?: string; exitCode?: number };
+  const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
+  const stderrTail = (err.stderr ?? "").split("\n").map((l) => stripAnsi(l).trim()).filter(Boolean).slice(-1)[0] ?? "";
+  const stdoutTail = (err.stdout ?? "")
+    .split("\n").map((l) => stripAnsi(l).trim()).filter(Boolean).slice(-3).join(" | ");
+  const detail = stderrTail || stdoutTail || err.message || "unknown failure";
+  const code = err.exitCode !== undefined ? ` (exit ${err.exitCode})` : "";
+  return `${detail}${code}`.substring(0, maxLen);
+}
+
 export interface EgressDrawerContext {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   screen: any;
@@ -183,16 +200,40 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     const ok = await confirmYesNo(ctx,
       `Sign + enforce ${sb.name}? This pushes a cosign-signed allowlist artifact and switches the sandbox to enforcing mode.`);
     if (!ok) return;
+
+    // Pre-flight: oras + cosign are required by `azureclaw egress --enforce`
+    // (auto-signs as of S12.g). Surface a clear, actionable error here rather
+    // than letting the subprocess fail later with an opaque "Command failed
+    // with exit code 1" — the operator otherwise sees only the ⏳ line and
+    // can't tell whether the operation is still running or already failed.
+    const missingTools: string[] = [];
+    for (const tool of ["oras", "cosign"]) {
+      try {
+        await execa("which", [tool], { stdio: "pipe", timeout: 5_000 });
+      } catch {
+        missingTools.push(tool);
+      }
+    }
+    if (missingTools.length > 0) {
+      activityLog.log(
+        `{red-fg}✗ ${sb.name}: cannot sign — missing tool(s): ${missingTools.join(", ")}.{/} ` +
+        `Install: oras → https://oras.land/docs/installation, cosign → https://docs.sigstore.dev/cosign/installation. ` +
+        `(Or run with --no-sign for unsigned dev mode — the controller will refuse the artifact.)`,
+      );
+      screen.render();
+      return;
+    }
+
     activityLog.log(`{cyan-fg}⏳ azureclaw egress ${sb.name} --enforce  {gray-fg}(auto-signs){/}{/}`);
     screen.render();
     try {
       const { stdout } = await execa("azureclaw", ["egress", sb.name, "--enforce"], {
         stdio: "pipe", timeout: 180_000,
       });
-      activityLog.log(`{green-fg}✓ signed+enforced{/} ${sb.name}: ${stdout.split("\n").slice(-1)[0] || "(no stdout)"}`);
+      const lastLine = stdout.split("\n").map((l) => l.trim()).filter(Boolean).slice(-1)[0] || "(no stdout)";
+      activityLog.log(`{green-fg}✓ signed+enforced{/} ${sb.name}: ${lastLine}`);
     } catch (e: unknown) {
-      const err = e as { stderr?: string; message?: string };
-      activityLog.log(`{red-fg}✗ sign failed:{/} ${(err.stderr || err.message || "").substring(0, 160)}`);
+      activityLog.log(`{red-fg}✗ sign failed:{/} ${formatExecError(e, 240)}`);
     }
     await reload();
   };
@@ -216,8 +257,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
           // eslint-disable-next-line no-await-in-loop
           await execa("azureclaw", ["egress", r.name, "--approve", d.domain], { stdio: "pipe", timeout: 60_000 });
         } catch (e: unknown) {
-          const err = e as { stderr?: string; message?: string };
-          activityLog.log(`{red-fg}✗ ${r.name}/${d.domain}:{/} ${(err.stderr || err.message || "").substring(0, 80)}`);
+          activityLog.log(`{red-fg}✗ ${r.name}/${d.domain}:{/} ${formatExecError(e, 80)}`);
         }
       }
     }
@@ -235,8 +275,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       await execa("azureclaw", ["egress", sb.name, flag], { stdio: "pipe", timeout: 60_000 });
       activityLog.log(`{green-fg}✓ ${sb.name} → ${target}{/}`);
     } catch (e: unknown) {
-      const err = e as { stderr?: string; message?: string };
-      activityLog.log(`{red-fg}✗ toggle failed:{/} ${(err.stderr || err.message || "").substring(0, 120)}`);
+      activityLog.log(`{red-fg}✗ toggle failed:{/} ${formatExecError(e, 160)}`);
     }
     await reload();
   };
