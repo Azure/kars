@@ -286,16 +286,21 @@ export async function pushArtifact(opts: PushArtifactOpts): Promise<string> {
     });
     const result = await exec(opts.orasPath, argv, { cwd: dir, stdio: "pipe" });
     const stdout = String(result.stdout ?? "");
-    const reported = parseOrasDigest(stdout);
-    if (!reported) {
-      throw new Error(`oras push: could not parse digest from output: ${stdout.slice(0, 200)}`);
+    const parsed = parseOrasPushOutput(stdout);
+    if (!parsed.manifestDigest) {
+      throw new Error(`oras push: could not parse manifest digest from output: ${stdout.slice(0, 200)}`);
     }
-    if (reported !== expected) {
+    // Verify that the BLOB (layer) bytes pushed match what we hashed
+    // locally. The manifest digest is a wrapper that references the
+    // blob — comparing it to digestOfCanonical(yaml) would be a
+    // category error (manifest is JSON, blob is the YAML).
+    if (parsed.blobDigest && parsed.blobDigest !== expected) {
       throw new Error(
-        `oras push reported digest ${reported}; producer computed ${expected}. Canonical bytes diverged — aborting before signing.`,
+        `oras push reported blob digest ${parsed.blobDigest}; producer computed ${expected}. Canonical bytes diverged — aborting before signing.`,
       );
     }
-    return reported;
+    // cosign signs by manifest digest.
+    return parsed.manifestDigest;
   } finally {
     if (!opts.workdir) {
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -303,27 +308,58 @@ export async function pushArtifact(opts: PushArtifactOpts): Promise<string> {
   }
 }
 
-/** Parse the `digest` from `oras push --format json` output. */
-export function parseOrasDigest(stdout: string): string | null {
+/**
+ * Parse digests from `oras push --format json` output.
+ *
+ * `oras push` JSON shape (oras 1.x):
+ *   {
+ *     "reference": "registry/repo:tag",
+ *     "digest":    "sha256:…",   // manifest digest
+ *     "mediaType": "application/vnd.oci.image.manifest.v1+json",
+ *     "files":     [ { "path": "…", "digest": "sha256:…", … } ]
+ *   }
+ *
+ * Older shapes also nested as `reference: { digest }` or `manifest: { digest }`.
+ * We accept all of these for the manifest digest, and pull blob from
+ * `files[0].digest` when present.
+ */
+export function parseOrasPushOutput(
+  stdout: string,
+): { manifestDigest: string | null; blobDigest: string | null } {
   const trimmed = stdout.trim();
-  if (trimmed.length === 0) return null;
+  if (trimmed.length === 0) return { manifestDigest: null, blobDigest: null };
+  const isDigest = (v: unknown): v is string =>
+    typeof v === "string" && /^sha(256|384|512):[a-f0-9]+$/.test(v);
   try {
-    const obj = JSON.parse(trimmed);
-    const candidate =
-      obj?.reference?.digest ??
-      obj?.manifest?.digest ??
-      obj?.digest ??
+    const obj: any = JSON.parse(trimmed);
+    const manifest =
+      (isDigest(obj?.digest) && obj.digest) ||
+      (isDigest(obj?.reference?.digest) && obj.reference.digest) ||
+      (isDigest(obj?.manifest?.digest) && obj.manifest.digest) ||
       null;
-    if (typeof candidate === "string" && /^sha(256|384|512):[a-f0-9]+$/.test(candidate)) {
-      return candidate;
+    let blob: string | null = null;
+    if (Array.isArray(obj?.files)) {
+      for (const f of obj.files) {
+        if (isDigest(f?.digest)) { blob = f.digest; break; }
+      }
     }
+    if (!blob && Array.isArray(obj?.layers)) {
+      for (const l of obj.layers) {
+        if (isDigest(l?.digest)) { blob = l.digest; break; }
+      }
+    }
+    return { manifestDigest: manifest || null, blobDigest: blob };
   } catch {
     // fall through to text-mode parse below
   }
-  // Text fallback: oras text output contains "Digest: sha256:…".
+  // Text fallback: oras text output contains "Digest: sha256:…" (manifest only).
   const match = trimmed.match(/Digest:\s*(sha(?:256|384|512):[a-f0-9]+)/);
-  if (match) return match[1];
-  return null;
+  return { manifestDigest: match ? match[1] : null, blobDigest: null };
+}
+
+/** Back-compat wrapper — returns the manifest digest. */
+export function parseOrasDigest(stdout: string): string | null {
+  return parseOrasPushOutput(stdout).manifestDigest;
 }
 
 export interface SignArtifactOpts {
