@@ -456,4 +456,45 @@ describe("CRD panel — per-type sections + drill-in", () => {
     const out = renderCrdItemDetail(emptyClusterState(), "ClawSandbox", "ghost", "azureclaw-ghost");
     expect(out).toContain("not found");
   });
+
+  it("bucketFromConditions: Ready=True + Progressing=False + Degraded=False → healthy (regression: do not treat False on negative-polarity conditions as error)", async () => {
+    const { bucketFromConditions } = await import("./util.js");
+    const conds = [
+      { type: "Ready", status: "True", lastTransitionTime: "", reason: "Reconciled", message: "" },
+      { type: "Progressing", status: "False", lastTransitionTime: "", reason: "Reconciled", message: "" },
+      { type: "Degraded", status: "False", lastTransitionTime: "", reason: "Reconciled", message: "" },
+    ];
+    expect(bucketFromConditions(conds)).toBe("healthy");
+  });
+
+  it("bucketFromConditions: Degraded=True dominates Ready=True → error", async () => {
+    const { bucketFromConditions } = await import("./util.js");
+    const conds = [
+      { type: "Ready", status: "True", lastTransitionTime: "", reason: "", message: "" },
+      { type: "Degraded", status: "True", lastTransitionTime: "", reason: "", message: "" },
+    ];
+    expect(bucketFromConditions(conds)).toBe("error");
+  });
+
+  it("bucketFromConditions: Ready=False → error, Ready=Unknown → unknown", async () => {
+    const { bucketFromConditions } = await import("./util.js");
+    expect(bucketFromConditions([
+      { type: "Ready", status: "False", lastTransitionTime: "", reason: "", message: "" },
+    ])).toBe("error");
+    expect(bucketFromConditions([
+      { type: "Ready", status: "Unknown", lastTransitionTime: "", reason: "", message: "" },
+    ])).toBe("unknown");
+  });
+
+  it("ClawPairing rows: empty conditions + state=Active → phase=healthy (regression: pairing reconciler emits no conditions)", async () => {
+    const { renderCrdSections } = await import("./layout.js");
+    const state = emptyClusterState();
+    state.pairings = [{
+      name: "p1", namespace: "azureclaw-system", age: undefined, conditions: [],
+      agentA: "a", agentB: "b", state: "Active", trust: "verified",
+    }];
+    const { rows } = renderCrdSections(state);
+    const pairing = rows.find((r) => r.kind === "ClawPairing");
+    expect(pairing?.phase).toBe("healthy");
+  });
 });

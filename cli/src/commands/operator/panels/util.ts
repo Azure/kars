@@ -69,28 +69,43 @@ export function filterBySandbox<T extends Record<string, unknown>>(
 
 /** Health bucket for a single CrdItem, derived from its conditions.
  *
- *  Rules (most-specific first):
- *   - any condition with status="False" → "error"
- *   - any condition with status="Unknown" → "unknown"
- *   - at least one Ready=True (or any True) → "healthy"
- *   - empty conditions list → "unknown"
+ *  Kubernetes uses two polarities for condition types:
+ *    - **Positive** (Ready, Available, Established, Bound, Synced):
+ *      True=good, False=bad, Unknown=unknown.
+ *    - **Negative** (Degraded, Failing, ReconcileError):
+ *      True=bad (regardless of Ready), False=good (do NOT count as error),
+ *      Unknown=ignored.
+ *  Informational types (Progressing) don't gate health — Progressing=False
+ *  is the steady-state for a fully reconciled object and must not be
+ *  reported as an error.
+ *
+ *  Rules:
+ *   - Any negative-polarity condition with status="True" → "error".
+ *   - The single positive-polarity Ready/Available/etc. condition decides
+ *     the bucket: True=healthy, False=error, Unknown=unknown.
+ *   - Empty list, or no positive condition found → "unknown".
  */
+const POSITIVE_TYPES = new Set([
+  "Ready", "Available", "Established", "Bound", "Synced",
+]);
+const NEGATIVE_TYPES = new Set([
+  "Degraded", "Failing", "ReconcileError",
+]);
+
 export function bucketFromConditions(
   conds: CrdCondition[] | undefined,
 ): "healthy" | "warning" | "error" | "unknown" {
   if (!conds || conds.length === 0) return "unknown";
-  let hasFalse = false;
-  let hasUnknown = false;
-  let hasTrue = false;
+  let positive: "healthy" | "error" | "unknown" | undefined;
   for (const c of conds) {
-    if (c.status === "False") hasFalse = true;
-    else if (c.status === "Unknown") hasUnknown = true;
-    else if (c.status === "True") hasTrue = true;
+    if (NEGATIVE_TYPES.has(c.type) && c.status === "True") return "error";
+    if (POSITIVE_TYPES.has(c.type)) {
+      if (c.status === "True" && positive !== "error") positive = "healthy";
+      else if (c.status === "False") positive = "error";
+      else if (c.status === "Unknown" && positive === undefined) positive = "unknown";
+    }
   }
-  if (hasFalse) return "error";
-  if (hasUnknown) return "unknown";
-  if (hasTrue) return "healthy";
-  return "warning";
+  return positive ?? "unknown";
 }
 
 /** Roll a list of CrdItems into a PanelSummary. */

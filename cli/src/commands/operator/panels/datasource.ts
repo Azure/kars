@@ -220,8 +220,13 @@ export class KubectlDataSource implements ClusterDataSource {
       const status = (it.status ?? {}) as Record<string, unknown>;
       const sbRef = (spec.sandboxRef ?? {}) as Record<string, unknown>;
       const phase = asString(status.phase);
-      const bound = phase === "Bound" ? "bound"
-                  : phase === "Pending" ? "pending"
+      // The ClawMemory reconciler emits phase="Ready" once the binding has
+      // compiled and published successfully (the post-S7 honesty fix flips
+      // it to "Pending" with reason=AwaitingFoundryProvisioning until the
+      // upstream Foundry store actually exists). Treat "Ready" as bound,
+      // "Pending"/"Degraded" as pending, "Failed" as failed.
+      const bound = phase === "Ready" || phase === "Bound" ? "bound"
+                  : phase === "Pending" || phase === "Degraded" ? "pending"
                   : phase === "Failed" ? "failed"
                   : "unknown";
       return {

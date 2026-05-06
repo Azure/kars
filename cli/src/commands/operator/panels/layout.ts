@@ -267,16 +267,29 @@ function buildRows(state: ClusterState): CrdRow[] {
     });
   }
 
-  // ClawPairing
+  // ClawPairing — the pairing reconciler emits `status.phase` (PendingPairing,
+  // Active, Expired, Revoked) but does NOT publish conditions, so a pure
+  // condition-based bucketing always returns "unknown". Map the phase
+  // string directly to a health bucket.
   for (const p of state.pairings) {
     const parts: string[] = [];
     parts.push(`${p.agentA ?? "?"} ↔ ${p.agentB ?? "?"}`);
     if (p.state) parts.push(`state=${p.state}`);
     if (p.trust) parts.push(`trust=${p.trust}`);
+    let phase: string;
+    if (p.conditions && p.conditions.length > 0) {
+      phase = phaseFromConditions(p.conditions);
+    } else {
+      phase = p.state === "Active" ? "healthy"
+            : p.state === "PendingPairing" ? "pending"
+            : p.state === "Expired" ? "warning"
+            : p.state === "Revoked" ? "error"
+            : "unknown";
+    }
     rows.push({
       index: next(), kind: "ClawPairing",
       name: p.name, namespace: p.namespace,
-      phase: phaseFromConditions(p.conditions),
+      phase,
       age: p.age || "-",
       status: parts.join("  ·  "),
     });
