@@ -36,10 +36,10 @@ export function escapeHtml(s: unknown): string {
 // Strip CR/LF from untrusted data before logging so attackers can't forge
 // log lines (CWE-117: log-injection). Classic pattern recognized by CodeQL.
 export function sanitizeForLog(s: unknown): string {
-  return String(s ?? "")
-    .replace(/\r/g, "")
-    .replace(/\n/g, " ")
-    .replace(/\t/g, " ");
+  // Single-regex form recognized by CodeQL js/log-injection as a sanitizer.
+  // Strips CR/LF/TAB plus ANSI escape introducer (CWE-117 log forging).
+  // eslint-disable-next-line no-control-regex
+  return String(s ?? "").replace(/[\r\n\t\x1b]/g, " ");
 }
 
 export async function waitForOAuthCallback(
