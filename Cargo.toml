@@ -68,7 +68,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Crypto (Ed25519 identity for mesh peer)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.9"
+rand = "0.10"
 sha2 = "0.10"
 bs58 = "0.5"
 base64 = "0.22"

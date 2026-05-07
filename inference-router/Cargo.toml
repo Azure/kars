@@ -60,7 +60,7 @@ azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
-rand = "0.9"
+rand = "0.10"
 base64 = "0.22"
 flate2 = "1"
 # Ed25519 sign/verify for A2A 1.0.0 AgentCard signatures (a2a::card_signing).
