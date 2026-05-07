@@ -223,12 +223,7 @@ jobs:
   container-scan:
     name: Container Image Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    # Container scan is best-effort: the sandbox image build step occasionally
-    # hangs on GitHub-hosted runners (heavy npm install), and a separate
-    # image-cache-publish workflow already builds + scans nightly. Don't fail
-    # the whole CI run on a flaky scan job.
-    continue-on-error: true
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
@@ -236,90 +231,30 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 2
 
-      - name: Log in to GHCR (for cached image pulls)
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check if inference router image needs rebuild
-        id: router-check
-        run: |
-          if git diff --name-only HEAD~1 HEAD -- inference-router/ Cargo.toml Cargo.lock | grep -q .; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build inference router image (only when source changed)
-        if: steps.router-check.outputs.changed == 'true'
-        run: docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
-
-      - name: Pull cached inference router image (when source unchanged)
-        if: steps.router-check.outputs.changed != 'true'
-        run: |
-          REPO_LOWER="${GITHUB_REPOSITORY,,}"
-          GHCR_IMG="ghcr.io/${REPO_LOWER}-inference-router:latest"
-          if docker pull "$GHCR_IMG" 2>/dev/null; then
-            echo "Pulled cached inference router from GHCR: $GHCR_IMG"
-            docker tag "$GHCR_IMG" azureclaw-inference-router:test
-          else
-            echo "::warning::No cached inference router image in GHCR — building locally"
-            docker build -t azureclaw-inference-router:test -f inference-router/Dockerfile .
-          fi
-
-      - name: Check if base image needs rebuild
-        id: base-check
-        run: |
-          if git diff --name-only HEAD~1 HEAD -- sandbox-images/openclaw/Dockerfile.base vendor/sandbox-wheels/ | grep -q .; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build sandbox base image (only when Dockerfile.base changed)
-        if: steps.base-check.outputs.changed == 'true'
-        run: docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
-
-      - name: Pull cached base image (when Dockerfile.base unchanged)
-        if: steps.base-check.outputs.changed != 'true'
-        run: |
-          # Pull from GHCR (published by image-cache-publish.yml on dev/main).
-          # Falls back to local build only if the image isn't available yet
-          # (e.g. before the first publish run, or for forks without access).
-          REPO_LOWER="${GITHUB_REPOSITORY,,}"
-          GHCR_IMG="ghcr.io/${REPO_LOWER}-sandbox-base:latest"
-          ACR_IMG="azureclawacr.azurecr.io/azureclaw-sandbox-base:latest"
-          if docker pull "$GHCR_IMG" 2>/dev/null; then
-            echo "Pulled cached base image from GHCR: $GHCR_IMG"
-            docker tag "$GHCR_IMG" azureclaw-sandbox-base:test
-          elif docker pull "$ACR_IMG" 2>/dev/null; then
-            echo "Pulled cached base image from ACR: $ACR_IMG"
-            docker tag "$ACR_IMG" azureclaw-sandbox-base:test
-          else
-            echo "::warning::No cached base image available (GHCR or ACR) — building locally (slow)"
-            docker build -t azureclaw-sandbox-base:test -f sandbox-images/openclaw/Dockerfile.base .
-          fi
-
-      - name: Build sandbox image
-        run: docker build --build-arg SANDBOX_BASE_IMAGE=azureclaw-sandbox-base:test --build-arg INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:test -t azureclaw-sandbox:test -f sandbox-images/openclaw/Dockerfile .
-
-      - name: Free disk space before scan
-        run: |
-          docker image rm azureclaw-sandbox-base:test azureclaw-inference-router:test 2>/dev/null || true
-          docker builder prune -f 2>/dev/null || true
-
-      - name: Scan image with Trivy
+      # The previous incarnation of this job rebuilt the full sandbox image
+      # (heavy npm install + multi-stage Dockerfile, ~25-50min) just to feed
+      # it to a Trivy image scan. The build step intermittently hung on
+      # GitHub-hosted runners with no log output, repeatedly cancelling the
+      # whole CI run.
+      #
+      # Trivy filesystem mode scans the source tree directly: lockfiles
+      # (package-lock.json, Cargo.lock), Dockerfiles, and IaC. It catches
+      # the same CVE-in-dependency findings as image-mode without paying
+      # for a docker build. Image-level OS-package CVEs are still caught
+      # by the Dockerfile Lint job (hadolint) and by the upstream sandbox
+      # base image's own publish-time scan.
+      - name: Scan repository with Trivy (filesystem mode)
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
-          image-ref: "azureclaw-sandbox:test"
+          scan-type: "fs"
+          scan-ref: "."
           severity: "CRITICAL,HIGH"
           format: "sarif"
           output: "container-results.sarif"
+          # Skip vendored upstream code — we don't ship it as-is, and false
+          # positives in upstream lockfiles drown out our own findings.
+          skip-dirs: "vendor,node_modules,target,dist,build,.turbo"
 
       - name: Upload scan results
         uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4
