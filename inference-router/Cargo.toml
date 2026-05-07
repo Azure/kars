@@ -44,7 +44,7 @@ agentmesh.workspace = true
 socket2 = "0.5"
 
 # WebSocket proxy for AGT relay
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 
 # Kubernetes (for sub-agent spawn via CRD)
 kube.workspace = true
