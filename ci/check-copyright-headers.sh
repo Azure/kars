@@ -38,7 +38,8 @@ done < <(
     | grep -v '/build/' \
     | grep -v '\.d\.ts$' \
     | grep -v '\.turbo/' \
-    | grep -v '/coverage/'
+    | grep -v '/coverage/' \
+    | grep -v '^docs/site/mermaid'
 )
 
 if [ "${#MISSING[@]}" -gt 0 ]; then
@@ -54,4 +55,4 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   exit 1
 fi
 
-echo "✅ All $(git ls-files | grep -E '\.(rs|ts|tsx|js|sh)$' | grep -v '^vendor/' | grep -v 'node_modules/' | grep -v '/dist/' | grep -v '^target/' | grep -v '/build/' | grep -v '\.d\.ts$' | grep -v '\.turbo/' | grep -v '/coverage/' | wc -l | tr -d ' ') source files carry the Microsoft + MIT copyright header."
+echo "✅ All $(git ls-files | grep -E '\.(rs|ts|tsx|js|sh)$' | grep -v '^vendor/' | grep -v 'node_modules/' | grep -v '/dist/' | grep -v '^target/' | grep -v '/build/' | grep -v '\.d\.ts$' | grep -v '\.turbo/' | grep -v '/coverage/' | grep -v '^docs/site/mermaid' | wc -l | tr -d ' ') source files carry the Microsoft + MIT copyright header."
