@@ -637,7 +637,11 @@ Notes:
           // Grant NET_ADMIN for iptables egress guard (same as AKS init container)
           "--cap-add", "NET_ADMIN",
           // Writable paths
-          "--tmpfs", "/tmp:rw,noexec,nosuid,size=1g",
+          // /tmp must hold the staged OpenClaw tree (~1.8 GiB at 2026.4.27),
+          // openclaw-{UID} runtime dirs, and gateway/agent IPC files. AKS uses
+          // 4Gi (controller/src/reconciler/mod.rs:1423) — match that here so
+          // dev mode behaves the same as AKS.
+          "--tmpfs", "/tmp:rw,noexec,nosuid,size=4g",
           "-v", `${containerName}-data:/sandbox`,
           // Mount API key as read-only secret (never as env var)
           "-v", `${mountedSecretPath}:/run/secrets/azure-openai-key:ro`,
