@@ -41,7 +41,7 @@ serde_yaml = "0.9"
 agentmesh.workspace = true
 
 # TCP keepalive for tunnel dead-connection detection
-socket2 = "0.5"
+socket2 = "0.6"
 
 # WebSocket proxy for AGT relay
 tokio-tungstenite = "0.26"
