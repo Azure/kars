@@ -84,6 +84,9 @@ assert_contains "registry registration for peer B" "$name_b" "$relay_logs"
 # exact surface differs per runtime; for openclaw we have a shell tool.
 log_step "triggering mesh_send from peer A → peer B"
 pod_a=$(kubectl -n "$pod_ns_a" get pod -l "azureclaw.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
+# Mesh probe needs to invoke the OpenClaw plugin from inside the agent
+# container — enable break-glass on peer-A's namespace just for that.
+enable_break_glass "$pod_ns_a"
 if [[ -z "$pod_a" ]]; then
     log_fail "could not find peer-A pod"
 else
@@ -105,5 +108,5 @@ assert_contains "relay routed an envelope between peers" "${name_a}" "$relay_aft
 
 cleanup_sandbox "$ns_a" "$name_a"
 cleanup_sandbox "$ns_b" "$name_b"
-
+disable_break_glass "$pod_ns_a"
 scenario_summary "Cross-runtime AgentMesh round-trip"
