@@ -56,14 +56,27 @@ ns_b=$(new_ns "mesh-b-${peer_b//[._]/-}")
 pod_ns_a=$(pod_ns_for "$name_a")
 pod_ns_b=$(pod_ns_for "$name_b")
 
-# Plant peer A with B in its allowlist.
+# Plant peer A with mesh enabled. The factory now emits two docs
+# (InferencePolicy + ClawSandbox); only the ClawSandbox carries the
+# governance block, so use `select(.kind == "ClawSandbox")` to scope
+# the patch and `with()`/passthrough for the rest.
+_mesh_overlay() {
+    yq eval '
+        select(.kind == "ClawSandbox")
+            | .spec.governance.enabled = true
+            | .spec.governance.registryMode = "global"
+        ,
+        select(.kind != "ClawSandbox")
+    ' -
+}
+
 cr_dispatch "$peer_a" "$name_a" "$ns_a" \
-  | yq eval ".spec.agt.mesh.enabled = true | .spec.agt.mesh.peers = [{\"name\": \"${name_b}\", \"tier\": \"trusted\"}]" - 2>/dev/null \
+  | _mesh_overlay \
   | kubectl apply -f - >/dev/null \
   || { log_fail "could not apply peer A (yq required for this scenario)"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
 cr_dispatch "$peer_b" "$name_b" "$ns_b" \
-  | yq eval ".spec.agt.mesh.enabled = true | .spec.agt.mesh.peers = [{\"name\": \"${name_a}\", \"tier\": \"trusted\"}]" - 2>/dev/null \
+  | _mesh_overlay \
   | kubectl apply -f - >/dev/null \
   || { log_fail "could not apply peer B"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
