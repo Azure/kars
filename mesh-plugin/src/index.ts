@@ -430,19 +430,50 @@ export function definePluginEntry() {
           "yet; messages stay in the inbox so you can re-read them. Pass " +
           "mark_read=true once you have acted on the contents to flag them " +
           "as seen, or unread_only=false to also see entries from previous " +
-          "turns. The response includes a `diagnostics` block with lifecycle " +
-          "counters so you can tell apart 'never received' from 'already " +
-          "consumed by an offload waiter'.",
+          "turns. **Server-side blocking:** pass `block_until_message=true` " +
+          "(with optional `timeout_seconds`, default 120, max 300) to wait " +
+          "until at least one new message arrives instead of polling. The " +
+          "response includes a `diagnostics` block with lifecycle counters " +
+          "so you can tell apart 'never received' from 'already consumed by " +
+          "an offload waiter'.",
         parameters: {
           type: "object",
           properties: {
             limit: { type: "number", description: "Max messages to return (default: 10)" },
             mark_read: { type: "boolean", description: "When true, flag returned entries as read." },
             unread_only: { type: "boolean", description: "Default true. Set false to include entries you already read." },
+            block_until_message: { type: "boolean", description: "When true, block server-side until at least one matching message arrives or `timeout_seconds` elapses. Use this instead of polling." },
+            timeout_seconds: { type: "number", description: "Maximum wait when block_until_message=true (default 120, max 300)." },
           },
         },
         handler: meshInboxHandler,
         execute: meshInboxHandler,
+      });
+
+      // ── mesh_await ──
+      api.registerTool({
+        name: "mesh_await",
+        description:
+          "Block server-side until ALL named peer agents have delivered at " +
+          "least one content message (or until timeout). Use this BEFORE " +
+          "assembly steps that depend on multiple sibling outputs (e.g. a " +
+          "writer waiting on both an analyst and a viz). The tool blocks " +
+          "inside a single tool call — you do NOT need to poll mesh_inbox in " +
+          "a loop. Returns once every requested sender has arrived, or with " +
+          "status 'partial_timeout' listing the missing senders. Combine with " +
+          "mark_read=true to flush matched entries and then call mesh_inbox " +
+          "to fetch the actual content.",
+        parameters: {
+          type: "object",
+          properties: {
+            senders: { type: "array", items: { type: "string" }, description: "Names (or amids) of peer agents you must hear from. Match is case-insensitive on the inbox `from` field." },
+            timeout_seconds: { type: "number", description: "Max wait in seconds (default 180, max 600)." },
+            mark_read: { type: "boolean", description: "When true, mark matched messages as read on resolve. Default false." },
+          },
+          required: ["senders"],
+        },
+        handler: meshAwaitHandler,
+        execute: meshAwaitHandler,
       });
 
       // ── discover ──
@@ -1598,6 +1629,8 @@ async function meshInboxHandler(...args: any[]): Promise<string> {
     limit?: number;
     mark_read?: boolean;
     unread_only?: boolean;
+    block_until_message?: boolean;
+    timeout_seconds?: number;
   };
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
@@ -1608,11 +1641,28 @@ async function meshInboxHandler(...args: any[]): Promise<string> {
   const limit = typeof params.limit === "number" && params.limit > 0
     ? Math.floor(params.limit)
     : 10;
+  const blockUntilMessage = params.block_until_message === true;
+  const timeoutSeconds = typeof params.timeout_seconds === "number" && params.timeout_seconds > 0
+    ? Math.min(Math.floor(params.timeout_seconds), 300)
+    : 120;
 
-  // getInbox is peek-only — does not mutate the underlying array.
-  // Filtering/limit happens here so the LLM can ask for unread-only or all.
-  const all = connection.getInbox();
-  const visible = unreadOnly ? all.filter((m) => !m.read_at) : all;
+  const computeVisible = (): ReturnType<MeshConnection["getInbox"]> => {
+    const all = connection!.getInbox();
+    return unreadOnly ? all.filter((m) => !m.read_at) : all;
+  };
+
+  let visible = computeVisible();
+  // Server-side blocking — replaces the LLM polling pattern.
+  if (blockUntilMessage && visible.length === 0) {
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    while (visible.length === 0 && Date.now() < deadline) {
+      const remaining = Math.max(1, deadline - Date.now());
+      const woke = await connection.waitForInbox(remaining);
+      visible = computeVisible();
+      if (!woke) break;
+    }
+  }
+
   const slice = visible.slice(-limit);
 
   if (markRead && slice.length > 0) {
@@ -1621,7 +1671,7 @@ async function meshInboxHandler(...args: any[]): Promise<string> {
 
   const diag = connection.getDiagnostics();
   const unreadCount = connection.getUnreadCount();
-  const totalInbox = all.length;
+  const totalInbox = connection.getInbox().length;
 
   if (slice.length === 0) {
     // Empty inbox → still return diagnostics so operators / the LLM can
@@ -1629,7 +1679,9 @@ async function meshInboxHandler(...args: any[]): Promise<string> {
     // waiter / mesh_send reply waiter / earlier mark_read".
     const summary = unreadOnly && unreadCount === 0 && totalInbox > 0
       ? `📭 No unread messages (${totalInbox} already read; pass unread_only=false to re-read).`
-      : "📭 Inbox empty.";
+      : blockUntilMessage
+        ? `📭 Inbox empty (waited ${timeoutSeconds}s blocking, no message arrived).`
+        : "📭 Inbox empty.";
     return `${summary}\n\nDiagnostics: ${JSON.stringify(diag)}`;
   }
 
@@ -1644,6 +1696,99 @@ async function meshInboxHandler(...args: any[]): Promise<string> {
 
   const header = `📬 ${slice.length} of ${totalInbox} message(s) (${unreadCount} unread${markRead ? `, ${slice.length} now marked read` : ""}):`;
   return `${header}\n${lines.join("\n")}\n\nDiagnostics: ${JSON.stringify(diag)}`;
+}
+
+async function meshAwaitHandler(...args: any[]): Promise<string> {
+  const params = extractParams(args) as {
+    senders?: unknown;
+    timeout_seconds?: number;
+    mark_read?: boolean;
+  };
+  const err = await ensureInitialized();
+  if (err) return `❌ ${err}`;
+  if (!connection) return "❌ Mesh client not connected.";
+
+  const sendersRaw = params.senders;
+  if (!Array.isArray(sendersRaw) || sendersRaw.length === 0) {
+    return "❌ mesh_await: `senders` must be a non-empty array of agent names.";
+  }
+  const wantedSenders = (sendersRaw as unknown[])
+    .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    .map((s) => s.trim());
+  if (wantedSenders.length === 0) {
+    return "❌ mesh_await: `senders` must contain at least one non-empty agent name.";
+  }
+  const wantedSet = new Set(wantedSenders.map((s) => s.toLowerCase()));
+  const timeoutSeconds = typeof params.timeout_seconds === "number" && params.timeout_seconds > 0
+    ? Math.min(Math.floor(params.timeout_seconds), 600)
+    : 180;
+  const markReadOnResolve = params.mark_read === true;
+
+  const computeMatches = (): Map<string, string[]> => {
+    const out = new Map<string, string[]>();
+    for (const m of connection!.getInbox()) {
+      if (m.read_at) continue;
+      const fromAmid = (m.from || "").toLowerCase();
+      const contentObj = (m.content && typeof m.content === "object")
+        ? (m.content as Record<string, unknown>)
+        : null;
+      const fromAgent = (contentObj && typeof contentObj.from_agent === "string")
+        ? (contentObj.from_agent as string).toLowerCase()
+        : "";
+      let matchedKey: string | null = null;
+      if (wantedSet.has(fromAmid)) matchedKey = fromAmid;
+      else if (fromAgent && wantedSet.has(fromAgent)) matchedKey = fromAgent;
+      if (!matchedKey) continue;
+      const list = out.get(matchedKey) ?? [];
+      list.push(m.id);
+      out.set(matchedKey, list);
+    }
+    return out;
+  };
+
+  let matches = computeMatches();
+  const startedAt = Date.now();
+  if (matches.size < wantedSet.size) {
+    const deadline = startedAt + timeoutSeconds * 1000;
+    while (matches.size < wantedSet.size && Date.now() < deadline) {
+      const remaining = Math.max(1, deadline - Date.now());
+      const woke = await connection.waitForInbox(remaining);
+      matches = computeMatches();
+      if (!woke) break;
+    }
+  }
+
+  const missing: string[] = [];
+  for (const wanted of wantedSet) if (!matches.has(wanted)) missing.push(wanted);
+
+  let markedRead = 0;
+  if (markReadOnResolve) {
+    const allMatchedIds: string[] = [];
+    for (const ids of matches.values()) for (const id of ids) allMatchedIds.push(id);
+    if (allMatchedIds.length > 0) {
+      markedRead = connection.markRead(allMatchedIds);
+    }
+  }
+
+  const matchedSummary: Record<string, string[]> = {};
+  for (const [sender, ids] of matches) matchedSummary[sender] = ids;
+
+  const status = missing.length === 0 ? "all_received" : "partial_timeout";
+  const note = missing.length === 0
+    ? "All requested senders delivered. Call mesh_inbox to read message contents."
+    : `Timeout: missing ${missing.join(", ")}. Call mesh_inbox to inspect what arrived; retry mesh_await for the missing senders or proceed with partial input.`;
+
+  return JSON.stringify({
+    status,
+    requested_senders: wantedSenders,
+    matched: matchedSummary,
+    missing,
+    mark_read: markReadOnResolve,
+    marked_read_count: markedRead,
+    waited_seconds: Math.round((Date.now() - startedAt) / 1000),
+    timeout_seconds: timeoutSeconds,
+    note,
+  });
 }
 
 async function discoverHandler(...args: any[]): Promise<string> {

@@ -16,10 +16,12 @@
 //! pass-through fields and most callers will get a clean text reply.
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use bytes::Bytes;
+use futures::stream::StreamExt;
 use serde_json::{Value, json};
 
 use super::AppState;
@@ -195,7 +197,7 @@ pub(super) async fn anthropic_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = headers
+    let sandbox_name: String = headers
         .get("x-azureclaw-sandbox")
         .and_then(|v| v.to_str().ok())
         .filter(|v| {
@@ -205,7 +207,9 @@ pub(super) async fn anthropic_messages(
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                 && v.as_bytes()[0].is_ascii_alphanumeric()
         })
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+        .to_string();
+    let sandbox_name = sandbox_name.as_str();
 
     let req_json: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -249,6 +253,15 @@ pub(super) async fn anthropic_messages(
         .unwrap_or("")
         .to_string();
 
+    let upstream = state.upstream_config(sandbox_name);
+
+    // Copilot exposes a native Anthropic Messages endpoint at /v1/messages.
+    // Skip translation entirely and forward the body as-is, preserving the
+    // streaming + tool_use + multi-modal contracts of the Anthropic SDK.
+    if proxy::is_copilot_endpoint(&upstream.endpoint) {
+        return forward_anthropic_passthrough(state, sandbox_name, headers, body, upstream).await;
+    }
+
     // Translate Anthropic -> OpenAI chat completions request shape.
     let openai_body = anthropic_to_openai(&req_json);
     let openai_bytes: Bytes = match serde_json::to_vec(&openai_body) {
@@ -261,8 +274,6 @@ pub(super) async fn anthropic_messages(
             );
         }
     };
-
-    let upstream = state.upstream_config(sandbox_name);
 
     // Force JSON content-type on upstream call; strip Anthropic-specific
     // headers (anthropic-version, x-api-key) that Foundry would reject.
@@ -277,6 +288,7 @@ pub(super) async fn anthropic_messages(
 
     let result = proxy::forward(
         &state.auth,
+        Some(&state.copilot),
         &state.client,
         &upstream,
         axum::http::Method::POST,
@@ -325,6 +337,142 @@ pub(super) async fn anthropic_messages(
                 &format!("Upstream error: {e}"),
                 "api_error",
             )
+        }
+    }
+}
+
+/// Native passthrough for Copilot's Anthropic Messages API.
+///
+/// No translation: forwards body verbatim to `{copilot_endpoint}/v1/messages`,
+/// preserves Anthropic SDK headers (`anthropic-version`, `anthropic-beta`),
+/// supports SSE streaming and returns response bytes 1:1. Tool use,
+/// multi-modal content, and prompt caching all flow through unchanged.
+async fn forward_anthropic_passthrough(
+    state: AppState,
+    sandbox_name: &str,
+    headers: HeaderMap,
+    body: Bytes,
+    upstream: crate::proxy::UpstreamConfig,
+) -> axum::response::Response {
+    let is_stream = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("stream")?.as_bool())
+        .unwrap_or(false);
+
+    // Strip the Anthropic API key — the router authenticates upstream using
+    // the Copilot JWT (injected by `proxy::build_upstream_headers`). Pass the
+    // anthropic-version / anthropic-beta headers through verbatim.
+    let mut upstream_headers = HeaderMap::new();
+    for (name, value) in headers.iter() {
+        let n = name.as_str().to_ascii_lowercase();
+        if n == "x-api-key" || n == "authorization" {
+            continue;
+        }
+        upstream_headers.insert(name.clone(), value.clone());
+    }
+
+    if is_stream {
+        match proxy::forward_stream(
+            state.auth.clone(),
+            Some(state.copilot.clone()),
+            state.client.clone(),
+            upstream,
+            "v1/messages",
+            upstream_headers,
+            body,
+        )
+        .await
+        {
+            Ok((status, resp_headers, stream)) => {
+                let body = Body::from_stream(stream.map(|c| c.map_err(std::io::Error::other)));
+                let mut resp = axum::response::Response::builder().status(status);
+                if let Some(h) = resp.headers_mut() {
+                    for (n, v) in resp_headers.iter() {
+                        h.insert(n.clone(), v.clone());
+                    }
+                    h.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("text/event-stream"),
+                    );
+                }
+                resp.body(body).unwrap_or_else(|_| {
+                    deny_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to construct response",
+                        "api_error",
+                    )
+                })
+            }
+            Err(e) => {
+                tracing::warn!(sandbox = %sandbox_name, error = %e, "Copilot Anthropic stream failed");
+                deny_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Upstream error: {e}"),
+                    "api_error",
+                )
+            }
+        }
+    } else {
+        match proxy::forward(
+            &state.auth,
+            Some(&state.copilot),
+            &state.client,
+            &upstream,
+            axum::http::Method::POST,
+            "v1/messages",
+            &upstream_headers,
+            body,
+        )
+        .await
+        {
+            Ok((status, resp_headers, resp_body)) => {
+                // Best-effort token usage tracking for Anthropic-shape replies.
+                if status.is_success()
+                    && let Ok(body_json) = serde_json::from_slice::<Value>(&resp_body)
+                    && let Some(usage) = body_json.get("usage")
+                {
+                    let input = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let output = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let total = input + output;
+                    if total > 0 {
+                        state.budget.record_usage(sandbox_name, total).await;
+                    }
+                }
+
+                let mut resp = axum::response::Response::builder().status(status);
+                if let Some(h) = resp.headers_mut() {
+                    for (n, v) in resp_headers.iter() {
+                        h.insert(n.clone(), v.clone());
+                    }
+                    if !h.contains_key(axum::http::header::CONTENT_TYPE) {
+                        h.insert(
+                            axum::http::header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("application/json"),
+                        );
+                    }
+                }
+                resp.body(Body::from(resp_body)).unwrap_or_else(|_| {
+                    deny_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to construct response",
+                        "api_error",
+                    )
+                })
+            }
+            Err(e) => {
+                tracing::warn!(sandbox = %sandbox_name, error = %e, "Copilot Anthropic call failed");
+                deny_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Upstream error: {e}"),
+                    "api_error",
+                )
+            }
         }
     }
 }

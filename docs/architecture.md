@@ -69,7 +69,7 @@ sequenceDiagram
   participant Gov as Governance<br/>(InferencePolicy + AGT)
   participant Budget as Token budget
   participant WI as Workload Identity<br/>(IMDS / federated)
-  participant Model as Inference backend<br/>(Foundry · GitHub Models · ...)
+  participant Model as Inference backend<br/>(Copilot · Foundry · GitHub Models · ...)
 
   Agent->>Router: POST /v1/chat (prompt)
   Router->>Gov: allow? (model + sandbox + action)
@@ -83,7 +83,16 @@ sequenceDiagram
       Budget-->>Router: exceeded
       Router-->>Agent: 429 budget_exceeded
     else within budget
-      alt provider = Foundry / Azure OpenAI
+      alt provider = GitHub Copilot
+        Router->>Router: refresh exchanged Copilot JWT<br/>(cached ≈ 25 min, proactive)
+        alt model family = Claude (Anthropic shape)
+          Router->>Model: POST /v1/messages + Bearer JWT<br/>+ Editor-Version, Copilot-Integration-Id
+          Model-->>Router: native Anthropic response (no shape rewrite)
+        else
+          Router->>Model: POST /chat/completions + Bearer JWT<br/>+ Editor-Version, Copilot-Integration-Id
+          Model-->>Router: completion
+        end
+      else provider = Foundry / Azure OpenAI
         Router->>WI: exchange SA token → AAD bearer
         WI-->>Router: bearer (cached, ~5 min)
         Router->>Model: POST /openai/... + bearer
@@ -105,12 +114,15 @@ In prose:
 2. The router receives the request. It asks the **governance** layer (`InferencePolicy` + AGT `PolicyDecisionProvider`) whether this call is allowed. Deny → 403.
 3. It checks the **token budget** for the tenant. Over → 429.
 4. It branches by provider (read from `~/.azureclaw/config.json` → `provider`):
-   - **Foundry / Azure OpenAI** (default, full feature set): mints a **Workload Identity** AAD token (or uses a resource-level API key in dev), forwards to Foundry. **Content Safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
+   - **GitHub Copilot** (default for `azureclaw dev`, full Copilot model catalogue: Claude Opus / Sonnet, GPT-5 / 4.1, Gemini, o-series): the router exchanges the GitHub OAuth token for a short-lived **Copilot JWT** at `https://api.github.com/copilot_internal/v2/token` and proactively refreshes it. Outbound requests carry the static headers Copilot's ingress requires (`Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`). For Claude models the router routes natively to `/v1/messages` (Anthropic shape passthrough — no lossy OpenAI-to-Anthropic rewrite, full tool-calling fidelity). For all other models the standard `/chat/completions` path is used. Copilot doesn't return `prompt_filter_results` either, so inline Content Safety isn't enforced — same caveat as GitHub Models.
+   - **Foundry / Azure OpenAI** (full feature set, default for AKS): mints a **Workload Identity** AAD token (or uses a resource-level API key in dev), forwards to Foundry. **Content Safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
    - **GitHub Models** (dev mode, free tier): forwards `Authorization: Bearer <PAT>` directly to `https://models.github.ai/inference`. GitHub Models doesn't return `prompt_filter_results`, so inline Content Safety isn't enforced — see [security.md → What we do *not* defend against](security.md#what-we-do-not-defend-against). Foundry-only routes (Memory Store, agents, evaluations, indexes) return clean 501.
 5. The router appends an **audit record** — prompt-fingerprint, model, tokens-in / tokens-out, decision, latency — hash-chained to the previous record so tampering is detectable.
 6. The router returns to the agent.
 
-> **More providers later.** GitHub Models is the second backend wired in. Adding more (Anthropic, Bedrock, AWS Q, third-party OpenAI-compatible gateways) is mostly a matter of an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch. We're tracking provider-expansion through GitHub issues — please open a feature request describing the provider, auth model, and which Foundry-only features (if any) you'd want preserved.
+> **Sub-agent inheritance.** When a parent spawns a sub-agent (`/sandbox/spawn`), the router propagates `OPENCLAW_MODEL`, `AZURECLAW_PROVIDER`, the upstream endpoint, and the auth credential (Copilot OAuth token or PAT) into the new container's environment. The child uses the same provider + model + credentials as its parent without per-spawn wiring.
+
+> **More providers later.** Copilot, Foundry, and GitHub Models are the three backends wired in today. Adding more (direct Anthropic, Bedrock, AWS Q, third-party OpenAI-compatible gateways) is mostly a matter of an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch. We're tracking provider-expansion through GitHub issues — please open a feature request describing the provider, auth model, and which Foundry-only features (if any) you'd want preserved.
 
 Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer message) goes through the same shape with a different policy module. Code: `inference-router/src/routes/chat_completions.rs:27-100`.
 
@@ -127,6 +139,8 @@ Inter-agent communication is **end-to-end encrypted**. Two agents that want to t
 5. The relay sees only opaque ciphertext blobs and addressing metadata. It cannot read messages and cannot impersonate either party.
 
 The relay and registry are operated by AzureClaw (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol; we vendor a small forked SDK with eight bug-fix patches documented in `vendor/`.
+
+> **Multi-agent peer roster.** When an agent spawns more than one sub-agent (each with a `role` — e.g. `data analyst`, `visualization engineer`, `technical writer`), the OpenClaw runtime maintains a **peer roster** of canonical names + roles and **automatically prepends a `Peer roster:` block** to every outbound `mesh_send` / `mesh_transfer_file` once two or more siblings exist. Sub-agents that need to hand work to each other ("send the chart to viz", "deliver the brief to the writer") resolve role references against this roster instead of guessing names — eliminating misroute bugs in pipelines like `analyst → viz → writer`. The roster is built deterministically from spawn metadata; `azureclaw_spawn` rejects sub-agents without a `role` parameter when more than one sibling will exist. Implementation: `runtimes/openclaw/src/core/agt-tools/agt.ts` (roster maintenance + auto-prepend), `runtimes/openclaw/skills/azureclaw-spawn/SKILL.md` (agent-facing contract).
 
 See **[`docs/architecture/agt-boundary.md`](architecture/agt-boundary.md)** for what AGT enforces vs what AzureClaw enforces.
 

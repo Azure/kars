@@ -17,6 +17,10 @@
 
 set -euo pipefail
 
+# ── Metrics layer (sourced from sibling lib) ────────────────────────────
+# shellcheck source=metrics.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/metrics.sh"
+
 # ── Colours ─────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -70,8 +74,8 @@ require_cluster() {
 }
 
 require_azureclaw_installed() {
-    if ! kubectl get crd clawsandboxes.azureclaw.io >/dev/null 2>&1; then
-        log_fail "AzureClaw CRDs not installed in this cluster (no clawsandboxes.azureclaw.io)"
+    if ! kubectl get crd clawsandboxes.azureclaw.azure.com >/dev/null 2>&1; then
+        log_fail "AzureClaw CRDs not installed in this cluster (no clawsandboxes.azureclaw.azure.com)"
         log_info "install with: helm upgrade --install azureclaw deploy/helm/azureclaw -n azureclaw-system --create-namespace"
         exit 2
     fi
@@ -96,6 +100,39 @@ cleanup_ns() {
         return
     fi
     kubectl delete namespace "$ns" --wait=false --ignore-not-found=true >/dev/null 2>&1 || true
+}
+
+# Return the controller-managed pod namespace for a given sandbox name.
+# The controller always provisions sandbox pods in `azureclaw-<name>`,
+# regardless of where the ClawSandbox CR itself lives.
+pod_ns_for() {
+    echo "azureclaw-$1"
+}
+
+# Best-effort cleanup of both the test scenario namespace and the
+# matching `azureclaw-<name>` pod namespace the controller created.
+# Honours MANUAL_E2E_KEEP_NS exactly like `cleanup_ns`.
+cleanup_sandbox() {
+    local cr_ns="$1" name="$2"
+    cleanup_ns "$cr_ns"
+    cleanup_ns "$(pod_ns_for "$name")"
+}
+
+# Toggle the audited break-glass label on a sandbox pod namespace so
+# tests can `kubectl exec` into the openclaw container. Production-grade
+# admission policy (azureclaw-sandbox-exec-ban) blocks exec/attach into
+# the agent runtime container by default; the label is the documented
+# emergency-override path. Bypasses are audited at the apiserver layer.
+enable_break_glass() {
+    local pod_ns="$1"
+    kubectl label namespace "$pod_ns" \
+        azureclaw.azure.com/break-glass=true --overwrite >/dev/null 2>&1 || true
+}
+
+disable_break_glass() {
+    local pod_ns="$1"
+    kubectl label namespace "$pod_ns" \
+        azureclaw.azure.com/break-glass- >/dev/null 2>&1 || true
 }
 
 # ── Wait helpers ────────────────────────────────────────────────────────
@@ -136,6 +173,8 @@ wait_for_clawsandbox_ready() {
     local ns="$1" name="$2" timeout="${3:-$MANUAL_E2E_TIMEOUT}"
     log_step "waiting for ClawSandbox/${name} to become Ready (≤${timeout}s)…"
     local deadline=$((SECONDS + timeout))
+    local started_ms now_ms
+    started_ms=$(_metrics_now_ms)
     while (( SECONDS < deadline )); do
         local phase ready
         phase=$(kubectl -n "$ns" get clawsandbox "$name" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
@@ -143,11 +182,16 @@ wait_for_clawsandbox_ready() {
             -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
         if [[ "$ready" == "True" || "$phase" == "Running" ]]; then
             log_pass "ClawSandbox/${name} is Ready"
+            now_ms=$(_metrics_now_ms)
+            metric_emit "${MANUAL_E2E_SCENARIO:-?}" ttiSandbox ms $((now_ms - started_ms)) \
+                "sandbox=${name}" "ns=${ns}" "phase=${phase:-Ready}"
             return 0
         fi
         sleep 3
     done
     log_fail "ClawSandbox/${name} did not become Ready within ${timeout}s"
+    metric_emit "${MANUAL_E2E_SCENARIO:-?}" ttiSandboxTimeout ms "$((timeout * 1000))" \
+        "sandbox=${name}" "ns=${ns}"
     if [[ "${MANUAL_E2E_VERBOSE:-0}" == "1" ]]; then
         kubectl -n "$ns" describe clawsandbox "$name" | sed 's/^/    /'
         kubectl -n "$ns" get pods -o wide | sed 's/^/    /'
@@ -181,9 +225,10 @@ assert_pod_running() {
         -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l | tr -d ' ')
     if (( count > 0 )); then
         log_pass "pod(s) running in ${ns} for selector '${selector}' (count=${count})"
-    else
-        log_fail "no Running pods in ${ns} for selector '${selector}'"
+        return 0
     fi
+    log_fail "no Running pods in ${ns} for selector '${selector}'"
+    return 1
 }
 
 # ── Scenario boilerplate ────────────────────────────────────────────────

@@ -677,3 +677,182 @@ discover or talk to any sub-agent.
 
 Patch: assign `const messageBytes = new TextEncoder().encode(...)` at all
 three sites so the buffer is actually passed to `this.identity.sign(...)`.
+
+
+## Patch #17 — `String.fromCharCode(...bytes)` stack overflow on large payloads (May 2026)
+
+### Symptom
+`mesh_transfer_file <name>.png (2.2MB) → <peer> FAILED — Maximum call stack size exceeded`
+
+Reproduces on every transfer ≥ ~125 KB. Demos that ship a hero image, a
+chart, or any non-trivial binary collapse: the receiver never gets the
+artifact, the sender retries 3× with the same crash, the dependent agent
+fabricates around the missing input.
+
+### Root cause
+SDK helpers in 5 sites use `String.fromCharCode(...bytes)` to build the
+binary string fed to `btoa()`. The `...` spread expands every byte to a
+function argument; V8 caps the argument count per call at ~125–250K
+(implementation-defined). Our chunked transfer uses 512 KB chunks; even a
+single ratchet-encrypted ciphertext easily exceeds the spread limit.
+
+Affected code:
+
+| File | Site |
+|---|---|
+| `src/encryption/ratchet.ts` | `DoubleRatchetSession.bytesToBase64` (private) + `serializeRatchetHeader` (`header.dhPublicKey`) |
+| `src/encryption/session.ts` | `EncryptedSession.bytesToBase64` (private) — hot path for KNOCK + chunk ciphertexts |
+| `src/encryption/prekey.ts` | `serializePrekeyBundle` + `serializeState` local `toBase64` |
+| `src/encryption/x3dh.ts` | `serializeX3DHMessage` local `toBase64` |
+| `src/dht/index.ts` | DHT capability entry signature inline |
+
+### Patch
+Replace each helper with a Node-Buffer fast path + browser fallback that
+chunks the byte array by 32 KB before spreading:
+
+```ts
+private bytesToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+  }
+  return btoa(binary);
+}
+```
+
+For inline `String.fromCharCode(...x)` sites (ratchet header serialization,
+DHT signature, prekey/X3DH local helpers), the same pattern is inlined.
+
+### Dist patch
+`dist/index.{js,cjs}` are hand-edited (per repo convention: never run
+`npm run build` on the vendored SDK — it regenerates dist and obliterates
+patches). A small helper `__bmsdkB64Bin(bytes)` is injected near the top
+of each file; all 9 `String.fromCharCode(...X)` call sites are replaced
+with `__bmsdkB64Bin(X)`. The helper returns a binary string (the same
+shape `String.fromCharCode(...bytes)` produced) so the surrounding
+`btoa(binary)` call still works unchanged.
+
+### Why this is safe
+- Node.js `Buffer.from(bytes).toString("base64")` is the same encoding
+  produced by `btoa(String.fromCharCode(...bytes))` for any Uint8Array.
+- The browser fallback chunks at 32 KB — well under any documented JS
+  engine arg-count limit — and produces the identical binary string the
+  spread version produced before crashing.
+- Only path-of-execution change is internal; wire format is unchanged.
+
+## Patch #18 — Ratchet desync self-heal + per-peer inbound mutex (May 2026)
+
+### Symptom
+After any local Double Ratchet desync (chunked-transfer interleave, peer
+restart, or a single dropped frame), the writer side enters a permanent
+"KNOCK-deaf" loop: every subsequent inbound message from the desynced
+peer is rejected with `decrypt_failed` or `no_session`, and the runtime
+trust-handler bleeds -0.5 per event until the peer drops below threshold
+and gets blocked. The analyst→viz→writer chunked file transfer never
+completes.
+
+### Root cause chain
+1. Peer A's outbound `establishSession()` re-attaches the SAME X3DH bundle
+   on every send (patch #15 keeps it for the KNOCK race).
+2. Peer B's patch #15 idempotency: on `encrypted+x3dh` with an existing
+   `sessionId`, skip `acceptSession` and decrypt with the stale session.
+3. After a desync, B's stale session can no longer decrypt the new
+   payload. With the old patch #15 code, B emits `decrypt_failed` and
+   leaves state untouched — every following message fails the same way.
+4. Meanwhile patch #11 (peer-side desync teardown) clears
+   `knockAcceptedPeers`, putting B's KNOCK gate in front of any future
+   recovery message. Death-spiral.
+
+### Patch (Patch #18)
+
+Replaces the encrypted+x3dh branch and the patch #11 teardown.
+
+**A. X3DH fingerprint-aware self-heal** (`dist/index.js` ~3005-3120,
+`dist/index.cjs` mirror).
+
+- Track `acceptedX3dhFingerprints: Map<string, string>` per client. The
+  fingerprint is `parsed.x3dh` itself (deterministic per session).
+- First contact (no `sessionId`): `acceptSession` → store fingerprint →
+  decrypt. Unchanged.
+- Existing session, decrypt OK: store fingerprint, deliver. Unchanged.
+- Existing session, decrypt FAILS:
+  - If `parsed.x3dh` fingerprint == last-accepted fingerprint → this is
+    patch #15's re-attached bundle, NOT a fresh offer. Genuine ratchet
+    desync. Tear down: `activeSessions.delete`, `sessionCache.clearByAmid`,
+    `pendingX3DH.delete`, close all `protocolSessions` for the peer,
+    `sessionManager.closeSession(sessionId)`. Emit `session_desync` so
+    the runtime suppresses trust deltas (Patch #18 trust-handler change).
+  - If fingerprint NEW → transactional rebuild:
+    1. `candidateSid = await acceptSession(parsed.x3dh)`
+    2. `decrypted = await decryptMessage(candidateSid, parsed)`
+    3. On candidate **failure** (e.g. one-time prekey already consumed
+       at the registry): `closeSession(candidateSid)`, leave old session
+       intact, emit `decrypt_failed`.
+    4. On candidate **success**: swap `activeSessions.set(candidateSid)`,
+       store new fingerprint, `sessionCache.clearByAmid` (so `send()`
+       can't resurrect the old session), `closeSession(oldSid)`. Log
+       "Patch #18: rebuilt session for {peer} via fresh X3DH (desync
+       recovered)".
+
+**B. Patch #11 hardening** (`dist/index.js` ~3160).
+
+The same teardown path now also clears `sessionCache`,
+`acceptedX3dhFingerprints`, and closes all `protocolSessions` for the
+peer + the local `sessionId` (was previously leaving them dangling).
+Still does NOT clear `knockAcceptedPeers` — KNOCK trust is identity-
+level and persists across session churn (clearing it was the original
+bug that turned a one-message hiccup into a permanent block).
+
+**C. Per-peer inbound mutex** (`dist/index.js` ~2950, ~3231).
+
+Wraps `processInbound` in a `Map<peerAmid, Promise<void>>` chain. Two
+concurrent inbound messages from the same peer (common during chunked
+transfer) used to race the rebuild path: both read stale
+`activeSessions`, both `acceptSession()` against the same X3DH bundle,
+the registry consumes the one-time prekey for the first, the second
+fails. The mutex serializes per-peer state mutations. Map entries are
+self-cleaned via `next.finally`.
+
+**D. Policy-aware KNOCK re-add** (`dist/index.js` ~3105).
+
+Successful x3dh decryption only re-adds to `knockAcceptedPeers` if the
+peer was previously accepted (has a stored fingerprint history) AND is
+not currently `isBlocked()`. Successful crypto must not bypass an
+explicit operator block.
+
+**E. Trust handler classification** (runtime side,
+`runtimes/openclaw/src/index.ts:643-700`).
+
+Reclassifies `session_desync`, `no_session`, and `decrypt_failed` as
+PROTOCOL events: surface a single advisory inbox entry, do NOT call
+`pushTrustToRouter(name, -0.5)`. Genuine security events
+(signature/tamper failures via `knock_rejected` and other types) keep
+the -0.5 trust penalty.
+
+### Why this is safe
+- **Replay attacks:** rebuild only triggers on a NEW fingerprint, never
+  on a repeated patch #15 bundle. Same-fingerprint desync tears down
+  state but never accepts the message — no ratchet poisoning.
+- **State consistency:** transactional rebuild guarantees we never
+  delete a working session before proving the candidate works.
+- **Forward secrecy:** `closeSession(oldSid)` + `sessionCache.clearByAmid`
+  ensure no stale ratchet keys remain after a successful rebuild.
+- **Concurrency:** per-peer mutex makes acceptSession+decrypt atomic
+  per peer; OTP can't be consumed twice.
+- **Policy:** `isBlocked()` check on KNOCK re-add prevents crypto
+  success from bypassing an operator block.
+
+### Files modified
+- `vendor/agentmesh-sdk/dist/index.js` — full implementation (encrypted+x3dh
+  branch, patch #11 block, per-peer mutex wrapper).
+- `vendor/agentmesh-sdk/dist/index.cjs` — parity (no per-peer mutex; cjs
+  is not the runtime path).
+- `runtimes/openclaw/src/index.ts:643-700` — trust handler reclassification.
+
+### Compatibility
+- Wire format unchanged. Patch is purely receiver-side state-machine
+  hardening. A patched receiver works against any (patched or unpatched)
+  sender. The only requirement for full self-heal is patch #15 on the
+  sender side, which we ship in the same vendor bundle.

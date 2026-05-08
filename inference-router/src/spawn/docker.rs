@@ -106,7 +106,12 @@ pub(super) fn docker_create_body(
     req: &SpawnRequest,
     parent_name: &str,
 ) -> serde_json::Value {
-    let model = req.model.as_deref().unwrap_or("gpt-4.1");
+    // Inherit parent's model when sub-agent spawn request doesn't specify one.
+    // Falls back to gpt-4.1 only if neither side has a model configured.
+    let parent_model = std::env::var("OPENCLAW_MODEL")
+        .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
+        .unwrap_or_else(|_| "gpt-4.1".into());
+    let model = req.model.as_deref().unwrap_or(&parent_model);
     let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
     let relay_url = std::env::var("AGT_RELAY_URL").unwrap_or_default();
     let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
@@ -126,6 +131,18 @@ pub(super) fn docker_create_body(
         format!("DOCKER_NETWORK={}", network),
         "EGRESS_LEARN_MODE=true".to_string(),
     ];
+
+    // Propagate the model provider to the sub-agent so its entrypoint +
+    // plugin can pick the right tool catalog. Without this, sub-agents
+    // spawned from a GH-Models parent would register the full Foundry
+    // tool catalog (~25k tokens) and 413 on every chat against the 16k
+    // GH-Models input cap. The parent router process inherits this env
+    // from its own container, which the CLI sets in dev.ts.
+    if let Ok(provider) = std::env::var("AZURECLAW_PROVIDER")
+        && !provider.is_empty()
+    {
+        env.push(format!("AZURECLAW_PROVIDER={}", provider));
+    }
 
     if !foundry_endpoint.is_empty() {
         env.push(format!("FOUNDRY_PROJECT_ENDPOINT={}", foundry_endpoint));
@@ -160,7 +177,7 @@ pub(super) fn docker_create_body(
         "HostConfig": {
             "ReadonlyRootfs": true,
             "CapAdd": ["NET_ADMIN"],
-            "Tmpfs": { "/tmp": "rw,noexec,nosuid,size=512m" },
+            "Tmpfs": { "/tmp": "rw,noexec,nosuid,size=4g" },
             "Binds": [
                 "/var/run/docker.sock:/var/run/docker.sock",
                 format!("{}-data:/sandbox", container_name),
@@ -237,7 +254,10 @@ pub(super) async fn create_sandbox_docker(
     req: &SpawnRequest,
 ) -> Result<SpawnResponse, String> {
     let container_name = format!("azureclaw-{}", req.agent_id);
-    let model = req.model.as_deref().unwrap_or("gpt-4.1");
+    let parent_model = std::env::var("OPENCLAW_MODEL")
+        .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
+        .unwrap_or_else(|_| "gpt-4.1".into());
+    let model = req.model.as_deref().unwrap_or(&parent_model);
 
     // Check if container already exists and is running — reuse it
     if let Ok(inspect_resp) =

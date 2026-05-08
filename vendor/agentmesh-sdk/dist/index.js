@@ -1,3 +1,18 @@
+// Patch #13: chunked binary-string builder for safe base64 encoding.
+// Replaces String.fromCharCode(...bytes) which overflows V8 arg limit
+// (~125-250K) on payloads >~125 KB. Used by ratchet/session ciphertexts.
+function __bmsdkB64Bin(bytes) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("binary");
+  }
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return binary;
+}
+
 import { Identity } from './chunk-LOQIKWYK.js';
 export { Identity } from './chunk-LOQIKWYK.js';
 import { RegistryClient, Policy } from './chunk-NMOWWZKF.js';
@@ -196,7 +211,7 @@ async function generateOneTimePrekeys(startId, count) {
 }
 function serializePrekeyBundle(bundle) {
   const toBase642 = (bytes) => {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   };
   return {
@@ -434,7 +449,7 @@ var PrekeyManager = class {
       throw new Error("No state to serialize");
     }
     const toBase642 = (bytes) => {
-      const binary = String.fromCharCode(...bytes);
+      const binary = __bmsdkB64Bin(bytes);
       return btoa(binary);
     };
     const oneTimePrekeys = {};
@@ -615,7 +630,7 @@ var X3DHKeyExchange = class {
 };
 function serializeX3DHMessage(msg) {
   const toBase642 = (bytes) => {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   };
   return {
@@ -970,7 +985,7 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   }
   /**
@@ -986,7 +1001,7 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
   }
 };
 function serializeRatchetHeader(header) {
-  const binary = String.fromCharCode(...header.dhPublicKey);
+  const binary = __bmsdkB64Bin(header.dhPublicKey);
   return {
     dh_public_key: btoa(binary),
     pn: header.previousChainLength,
@@ -1380,7 +1395,7 @@ var SessionManager = class {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   }
   /**
@@ -1779,7 +1794,7 @@ var KnockProtocol = class {
    * Base64 encode bytes.
    */
   base64Encode(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   }
   /**
@@ -2934,7 +2949,15 @@ var AgentMeshClient = class _AgentMeshClient {
     // We buffer up to 5 pre-KNOCK messages per peer for 3s and replay
     // them through the same handler once KNOCK is accepted.
     this.preKnockBuffer = this.preKnockBuffer || new Map();
-    const processInbound = async (data) => {
+    // PATCH (azureclaw vendor patch #17, May 2026): per-peer inbound mutex.
+    // Without this, two inbound messages from the same peer arriving
+    // concurrently (common during chunked file transfer) can race the
+    // session-rebuild path: both read the same stale activeSessions,
+    // both try to acceptSession() with the same x3dh, OTP gets consumed
+    // by the first, second fails. We serialize per-peer to make state
+    // updates atomic.
+    this.inboundQueues = this.inboundQueues || new Map();
+    const processInboundCore = async (data) => {
       const fromAmid = data.from;
       const rawPayload = data.encrypted_payload;
       const msgType = data.message_type;
@@ -2957,7 +2980,7 @@ var AgentMeshClient = class _AgentMeshClient {
               this.preKnockBuffer.delete(fromAmid);
               console.log(`[AGT] Replaying ${buffered.length} pre-KNOCK buffered message(s) from ${fromAmid}`);
               for (const item of buffered) {
-                try { await processInbound(item.data); } catch (e) {
+                try { await processInboundCore(item.data); } catch (e) {
                   console.warn(`[AGT] Replay failed for buffered message from ${fromAmid}:`, e?.message || e);
                 }
               }
@@ -2988,22 +3011,98 @@ var AgentMeshClient = class _AgentMeshClient {
             }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
+          // PATCH (azureclaw vendor patch #17, May 2026): robust x3dh handling
+          // with self-healing recovery from ratchet desync.
+          //
+          // Critical context: patch #15 attaches the SAME pendingX3DH bundle
+          // to EVERY message during a session — so `parsed.x3dh` does NOT
+          // imply "fresh rekey offer". We track the last-accepted bundle
+          // fingerprint per peer; only treat a *changed* fingerprint as a
+          // fresh offer worthy of session rebuild. Same-fingerprint decrypt
+          // failures are real ratchet desync and tear down the local session
+          // so the peer can detect via their own next-establishSession path.
+          //
+          // Recovery is transactional: build candidate session FIRST, decrypt
+          // with it, only then atomically swap activeSessions. On candidate
+          // failure (e.g. one-time prekey already consumed), we restore the
+          // old session and emit decrypt_failed so the caller can decide.
+          //
+          // Also clears sessionCache to prevent stale cached sessions from
+          // resurrecting in subsequent send() calls.
+          this.acceptedX3dhFingerprints = this.acceptedX3dhFingerprints || new Map();
+          const fingerprint = typeof parsed.x3dh === "string"
+            ? parsed.x3dh
+            : JSON.stringify(parsed.x3dh);
+          const lastFingerprint = this.acceptedX3dhFingerprints.get(fromAmid);
+          let sessionId = this.activeSessions.get(fromAmid);
+          let decrypted;
+          let recovered = false;
+          let teardownReason = null;
           try {
-            // PATCH (azureclaw vendor patch #15, May 2026): make this
-            // branch idempotent. The sender now re-attaches its X3DH
-            // bundle on every message (because the first message can be
-            // dropped during the KNOCK-accept race), so we only build the
-            // responder session the first time — subsequent messages
-            // decrypt with the established session. Calling acceptSession
-            // again would re-init the ratchet and break decryption of
-            // anything in flight.
-            let sessionId = this.activeSessions.get(fromAmid);
             if (!sessionId) {
               const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
               sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
               this.activeSessions.set(fromAmid, sessionId);
+              this.acceptedX3dhFingerprints.set(fromAmid, fingerprint);
+              decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+            } else {
+              try {
+                decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+              } catch (firstErr) {
+                if (lastFingerprint && lastFingerprint === fingerprint) {
+                  // Same bundle as already-accepted — this is patch #15's
+                  // re-attached offer, not a fresh rekey. Decrypt genuinely
+                  // failed: ratchet is desynced. Tear down our session and
+                  // emit session_desync (not decrypt_failed) so the runtime
+                  // doesn't penalise trust. The peer will detect via its own
+                  // path (its next inbound from us will fail decrypt, fire
+                  // patch #11 on its side, clear pendingX3DH, and the next
+                  // outbound establishSession will produce a NEW fingerprint
+                  // that triggers our transactional rebuild on the receive.
+                  teardownReason = firstErr?.message || "ratchet desync (same x3dh fingerprint)";
+                  throw firstErr;
+                }
+                // NEW fingerprint → transactional rebuild
+                const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
+                let candidateSid = null;
+                try {
+                  candidateSid = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
+                  decrypted = await this.sessionManager.decryptMessage(candidateSid, parsed);
+                } catch (candidateErr) {
+                  if (candidateSid && this.sessionManager.closeSession) {
+                    try { await this.sessionManager.closeSession(candidateSid, "rebuild-failed"); } catch {}
+                  }
+                  // Keep the old session intact and surface as decrypt_failed
+                  // (NOT session_desync — old session is still usable).
+                  for (const handler of this.errorHandlers) {
+                    try { handler("decrypt_failed", fromAmid, candidateErr?.message || "rebuild candidate decrypt failed"); } catch {}
+                  }
+                  return;
+                }
+                // Transactional swap: candidate succeeded → close old, swap in new
+                const oldSid = sessionId;
+                this.activeSessions.set(fromAmid, candidateSid);
+                this.acceptedX3dhFingerprints.set(fromAmid, fingerprint);
+                if (this.sessionCache && this.sessionCache.clearByAmid) {
+                  try { this.sessionCache.clearByAmid(fromAmid); } catch {}
+                }
+                if (oldSid && this.sessionManager.closeSession) {
+                  try { await this.sessionManager.closeSession(oldSid, "rebuilt"); } catch {}
+                }
+                recovered = true;
+                console.log(`[AGT] Patch #18: rebuilt session for ${fromAmid} via fresh X3DH (desync recovered)`);
+              }
             }
-            const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+            // Re-affirm KNOCK acceptance ONLY if peer was previously accepted
+            // (we have a stored fingerprint history) AND is not currently
+            // blocked. Successful crypto must not bypass an explicit policy
+            // block.
+            if (this.knockAcceptedPeers
+                && !this.knockAcceptedPeers.has(fromAmid)
+                && this.acceptedX3dhFingerprints.has(fromAmid)
+                && (!this.isBlocked || !this.isBlocked(fromAmid))) {
+              this.knockAcceptedPeers.add(fromAmid);
+            }
             this.emitE2EVerified(fromAmid);
             for (const handler of this.messageHandlers) {
               try {
@@ -3012,13 +3111,34 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             }
           } catch (e) {
-            console.error("[AGT] E2E decrypt failed \u2014 message REJECTED (not delivered):", e?.message || e);
-            for (const handler of this.errorHandlers) {
+            if (teardownReason) {
+              // Same-fingerprint desync teardown (recoverable, not security)
               try {
-                handler("decrypt_failed", fromAmid, e?.message || "unknown");
-              } catch {
+                this.activeSessions.delete(fromAmid);
+                if (this.sessionCache && this.sessionCache.clearByAmid) this.sessionCache.clearByAmid(fromAmid);
+                if (this.pendingX3DH && this.pendingX3DH.delete) this.pendingX3DH.delete(fromAmid);
+                if (this.protocolSessions && this.protocolSessions.getSessionsForPeer && this.protocolSessions.closeSession) {
+                  for (const s of this.protocolSessions.getSessionsForPeer(fromAmid)) {
+                    try { this.protocolSessions.closeSession(s.id); } catch {}
+                  }
+                }
+                if (sessionId && this.sessionManager.closeSession) {
+                  try { await this.sessionManager.closeSession(sessionId, "desync"); } catch {}
+                }
+              } catch {}
+              for (const handler of this.errorHandlers) {
+                try { handler("session_desync", fromAmid, teardownReason); } catch {}
+              }
+            } else {
+              console.error("[AGT] E2E decrypt failed \u2014 message REJECTED (not delivered):", e?.message || e);
+              for (const handler of this.errorHandlers) {
+                try {
+                  handler("decrypt_failed", fromAmid, e?.message || "unknown");
+                } catch {
+                }
               }
             }
+            return;
           }
         } else if (parsed.type === "encrypted") {
           const sessionId = this.activeSessions.get(fromAmid);
@@ -3045,9 +3165,34 @@ var AgentMeshClient = class _AgentMeshClient {
               try {
                 this.activeSessions.delete(fromAmid);
                 if (this.pendingX3DH && this.pendingX3DH.delete) this.pendingX3DH.delete(fromAmid);
-                if (this.knockAcceptedPeers && this.knockAcceptedPeers.delete) this.knockAcceptedPeers.delete(fromAmid);
-                if (this.protocolSessions && this.protocolSessions.deleteSession) {
-                  try { this.protocolSessions.deleteSession(fromAmid); } catch {}
+                // PATCH (azureclaw vendor patch #17, May 2026): do NOT
+                // clear knockAcceptedPeers here. KNOCK trust is identity-
+                // level (peer's Ed25519 signing key) and persists across
+                // session lifetime. Clearing it would block the recovery
+                // message at the KNOCK gate (line ~2983) — which is the
+                // very death-spiral patch #11 was meant to escape.
+                // if (this.knockAcceptedPeers && this.knockAcceptedPeers.delete) this.knockAcceptedPeers.delete(fromAmid);
+                //
+                // PATCH #17 also clears sessionCache to prevent stale
+                // outbound sessions from resurrecting via send()'s cache
+                // hit path, which would attach the OLD x3dh fingerprint
+                // and block self-heal. Also closes protocolSessions and
+                // the SessionManager session for the local sessionId.
+                if (this.sessionCache && this.sessionCache.clearByAmid) {
+                  try { this.sessionCache.clearByAmid(fromAmid); } catch {}
+                }
+                if (this.acceptedX3dhFingerprints && this.acceptedX3dhFingerprints.delete) {
+                  try { this.acceptedX3dhFingerprints.delete(fromAmid); } catch {}
+                }
+                if (this.protocolSessions && this.protocolSessions.getSessionsForPeer && this.protocolSessions.closeSession) {
+                  try {
+                    for (const s of this.protocolSessions.getSessionsForPeer(fromAmid)) {
+                      try { this.protocolSessions.closeSession(s.id); } catch {}
+                    }
+                  } catch {}
+                }
+                if (sessionId && this.sessionManager && this.sessionManager.closeSession) {
+                  try { this.sessionManager.closeSession(sessionId, "desync"); } catch {}
                 }
               } catch {}
               for (const handler of this.errorHandlers) {
@@ -3082,6 +3227,26 @@ var AgentMeshClient = class _AgentMeshClient {
           }
         }
       }
+    };
+    const processInbound = (data) => {
+      // PATCH #17: per-peer queue. Best-effort fromAmid extraction; if
+      // we can't determine the sender we fall back to immediate exec
+      // (the fallback path inside processInboundCore handles malformed
+      // payloads gracefully).
+      let key = "__unknown__";
+      try {
+        if (data && typeof data === "object" && typeof data.from === "string") {
+          key = data.from;
+        }
+      } catch {}
+      const prev = this.inboundQueues.get(key) || Promise.resolve();
+      const next = prev.catch(() => {}).then(() => processInboundCore(data));
+      this.inboundQueues.set(key, next);
+      // Self-cleanup so the map doesn't grow unbounded
+      next.finally(() => {
+        if (this.inboundQueues.get(key) === next) this.inboundQueues.delete(key);
+      });
+      return next;
     };
     this.transport.onMessage("receive", processInbound);
     this.connected = true;
@@ -3755,7 +3920,7 @@ function parsePEM(pem) {
   return bytes;
 }
 function toPEM(der) {
-  const binary = String.fromCharCode(...der);
+  const binary = __bmsdkB64Bin(der);
   const base64 = btoa(binary);
   const lines = [];
   for (let i = 0; i < base64.length; i += 64) {
@@ -4985,7 +5150,7 @@ var DHTClient = class {
       address: "",
       // Would be set by caller
       timestamp,
-      signature: btoa(String.fromCharCode(...signature))
+      signature: btoa(__bmsdkB64Bin(signature))
     };
     for (const capability of capabilities) {
       const key = `capability:${capability}`;

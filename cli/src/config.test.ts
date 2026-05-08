@@ -76,6 +76,7 @@ describe("loadConfig", () => {
       apiKey: "sk-test-key-1234567890",
       foundryProjectEndpoint: undefined,
       provider: "foundry",
+      firstRunCompleted: false,
     });
   });
 
@@ -288,7 +289,7 @@ describe("secrets store", () => {
     expect(mockChmodSync).toHaveBeenCalledWith(SECRETS_FILE, 0o600);
   });
 
-  it("setSecret adds a key to existing secrets", () => {
+  it("setSecret adds a key to existing secrets and normalizes telegram-token bot prefix", () => {
     mockExistsSync.mockImplementation((path) => {
       if (typeof path === "string" && path.endsWith("secrets.json")) return true;
       return false;
@@ -299,7 +300,21 @@ describe("secrets store", () => {
 
     const written = JSON.parse(mockWriteFileSync.mock.calls[0][1] as string);
     expect(written["existing"]).toBe("value");
-    expect(written["telegram-token"]).toBe("bot999:abc");
+    // setSecret strips the leading `bot` so grammY's prefix doesn't collide.
+    expect(written["telegram-token"]).toBe("999:abc");
+  });
+
+  it("setSecret leaves non-telegram secrets untouched", () => {
+    mockExistsSync.mockImplementation((path) => {
+      if (typeof path === "string" && path.endsWith("secrets.json")) return true;
+      return false;
+    });
+    mockReadFileSync.mockReturnValue(JSON.stringify({}));
+
+    setSecret("brave-api-key", "bot-shouldnt-strip");
+
+    const written = JSON.parse(mockWriteFileSync.mock.calls[0][1] as string);
+    expect(written["brave-api-key"]).toBe("bot-shouldnt-strip");
   });
 
   it("deleteSecret removes a key", () => {

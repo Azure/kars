@@ -10,7 +10,7 @@
 
 Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
 
-[**Try it on your laptop →**](#try-it-in-five-minutes) &nbsp;·&nbsp; [**Run it on AKS →**](docs/getting-started.md#deploy-to-aks) &nbsp;·&nbsp; [**Architecture →**](docs/architecture.md) &nbsp;·&nbsp; [**Blueprints →**](docs/blueprints/00-index.md)
+[**Try it on your laptop →**](#try-it-in-five-minutes) &nbsp;·&nbsp; [**Run it on AKS →**](docs/getting-started.md#step-2--deploy-to-aks) &nbsp;·&nbsp; [**Architecture →**](docs/architecture.md) &nbsp;·&nbsp; [**Blueprints →**](docs/blueprints/00-index.md)
 
 </div>
 
@@ -58,20 +58,29 @@ It is built for three audiences:
                   ┌──────────────────────┼─────────────────────────┐
                   ▼                      ▼                         ▼
            Inference backend       AgentMesh relay            A2A peers
-           ┌──────────────┐        (Signal-Protocol           (signed
-           │ Foundry /    │         E2E messages)              AgentCards)
-           │ Azure OpenAI │
-           │ (default)    │
-           ├──────────────┤
-           │ GitHub Models│  (dev mode · free tier · PAT)
-           ├──────────────┤
-           │ + more soon  │  ◄── feature-request via GitHub issues
-           └──────────────┘
+           ┌─────────────────┐     (Signal-Protocol           (signed
+           │ GitHub Copilot  │      E2E messages)              AgentCards)
+           │ (Claude · GPT · │
+           │  Gemini · …)    │  ◄── recommended for dev (one OAuth login)
+           ├─────────────────┤
+           │ Azure AI Foundry│
+           │ / Azure OpenAI  │  ◄── full feature set (Memory, Agents, CS)
+           ├─────────────────┤
+           │ GitHub Models   │  (free tier · PAT · small context)
+           ├─────────────────┤
+           │ + more soon     │  ◄── feature-request via GitHub issues
+           └─────────────────┘
 ```
 
 **The agent has no network of its own.** Every byte that leaves the pod leaves through the router. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
 
-**Pluggable inference backend.** **Azure AI Foundry / Azure OpenAI** is the default and unlocks the full feature set (Memory Store, agents, evaluations, indexes, inline Content Safety). **GitHub Models** is wired in for dev mode — free, just a GitHub PAT, no Azure subscription needed (Foundry-only routes return `501`; inline Content Safety not enforced — see [security.md](docs/security.md#what-we-do-not-defend-against)). Adding more providers (Anthropic, Bedrock, third-party OpenAI-compatible gateways) is mostly an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch — please open a GitHub issue / feature request.
+**Pluggable inference backend.** Three providers are wired in today:
+
+- **GitHub Copilot** — recommended for the inner loop. One device-code OAuth login (no Azure account, no PAT to manage). Picks from the full Copilot model catalogue: **Claude Opus / Sonnet, GPT-5/4.1, Gemini, o-series**, etc. Native Anthropic-shape passthrough for Claude (no shape translation, full tool-calling fidelity). Largest context windows in the lineup.
+- **Azure AI Foundry / Azure OpenAI** — the production-grade default. Unlocks the full feature set: Memory Store, agents, evaluations, indexes, inline Content Safety, the 18 Foundry API groups the router proxies. Use this when you need anything beyond plain chat completions, or when running on AKS.
+- **GitHub Models** — free, PAT-only, no subscription. Convenient for trivial demos; smaller context windows and tight rate limits make it a poor fit for real agents. Foundry-only routes return `501`; inline Content Safety is not enforced (see [security.md](docs/security.md#what-we-do-not-defend-against)).
+
+Adding more providers (Bedrock, direct Anthropic, third-party OpenAI-compatible gateways) is mostly an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch — please open a GitHub issue / feature request.
 
 For the full picture (control plane, data plane, mesh, A2A, MCP), see **[`docs/architecture.md`](docs/architecture.md)** and **[`docs/architecture-diagrams.md`](docs/architecture-diagrams.md)**.
 
@@ -86,7 +95,7 @@ You write the same `ClawSandbox` YAML for both. The difference is where it runs 
 | Where | One Docker container on your laptop | An AKS cluster in your subscription |
 | Pod shape | **Single container** — agent + router co-located in one image | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
 | Network isolation | Docker network, no egress guard | NetworkPolicy + `egress-guard` initContainer + per-namespace isolation |
-| Identity | Resource-level API key (you provide once, mounted from secret) | Workload Identity (federated, no keys on disk) |
+| Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | Workload Identity (federated, no keys on disk) |
 | Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) |
 | Use it for | Inner-loop dev, plugin authoring, demos | Real workloads, multi-tenant, production |
 
@@ -102,15 +111,44 @@ git clone https://github.com/Azure/azureclaw.git && cd azureclaw
 cd cli && npm ci && npm run build && npm link
 
 # Launch a sandbox locally — Docker only, no Azure, no AKS
-azureclaw dev --name hello
-
-# Talk to it (TUI auto-opens; or use the CLI directly)
-azureclaw connect hello
+azureclaw dev
 ```
 
-On first run `azureclaw dev` prompts for your Azure OpenAI endpoint, deployment name, and a resource-level API key — that is the only credential the local mode ever sees, and it never leaves your laptop. From here, every tool call the agent makes is governed by the same router code path that runs in production.
+On first run `azureclaw dev` shows a 3-way provider picker:
 
-> **Don't have an Azure AI Foundry deployment yet?** Two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-ai-foundry-deployment-yet)**.
+```
+$ azureclaw dev
+
+  ╭────────────────────────────────────────────────╮
+  │  AzureClaw · Local Sandbox                     │
+  │  Secure AI Agent Runtime on Azure              │
+  ╰────────────────────────────────────────────────╯
+
+  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.
+  Copilot is the default (largest context). You can change later with `azureclaw credentials`.
+
+? Which inference provider do you want to use?
+❯ GitHub Copilot                    (recommended; needs an active Copilot seat — large context, Claude/GPT/Gemini)
+  Azure AI Foundry / Azure OpenAI   (full feature set: Memory Store, agents, Content Safety, etc.)
+  GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)
+```
+
+1. **GitHub Copilot** *(default)* — one device-code login at `https://github.com/login/device`, then pick from the Copilot model catalogue (Claude Opus 4.7, GPT-5, Gemini, …). No Azure, no PAT, no key files. **This is the fastest path to a working agent on a real frontier model.**
+2. **Azure AI Foundry / Azure OpenAI** — paste an endpoint, deployment, and resource-level API key. Required for Memory Store, agents, evaluations, and inline Content Safety.
+3. **GitHub Models** — paste a GitHub PAT with `models:read`. Free; small context windows.
+
+Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs. Switch later with `azureclaw credentials`.
+
+The first run also prompts for an **agent name** (default `dev-agent` — hit Enter to accept). Use that name in subsequent commands:
+
+```bash
+# Talk to the agent (TUI auto-opens; or use the CLI directly)
+azureclaw connect dev-agent
+```
+
+Every tool call the agent makes is governed by the same router code path that runs in production.
+
+> **Don't have an Azure AI Foundry deployment yet?** If you picked Copilot or Models above, you don't need one. If you want the full Foundry feature set, two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-ai-foundry-deployment-yet)**.
 
 When you are ready for the real thing:
 
@@ -216,7 +254,22 @@ If a limitation surprised you in a way this list didn't warn about, that's a bug
 
 ## License
 
-MIT. See **[`LICENSE`](LICENSE)** and **[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)**.
+MIT. See **[`LICENSE`](LICENSE)** and **[`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt)**.
+
+## Data collection
+
+AzureClaw does not collect telemetry, usage data, or crash reports. Nothing
+in this repository — the CLI, controller, inference router, or sandbox
+images — sends data to Microsoft or any third party.
+
+Logs and traces emitted by the components stay inside your cluster. They are
+visible only to whatever log/metrics pipeline you have wired up (Container
+Insights, Loki, your own OTLP collector, etc.). No exporter endpoint is
+configured by default.
+
+When AzureClaw forwards a model call to Azure AI Foundry on your behalf,
+that call is governed by your Azure agreement with Microsoft — not by this
+project.
 
 ---
 

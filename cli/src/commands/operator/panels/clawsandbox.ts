@@ -38,7 +38,7 @@ export const clawSandboxPanel: Panel = {
 
     const lines: string[] = [];
     lines.push(
-      `{gray-fg}${"NAME".padEnd(28)} ${"HEALTH".padEnd(10)} ${"RUNTIME".padEnd(10)} ${"MODEL".padEnd(14)} ${"ISOLATION".padEnd(12)} ${"AGE".padEnd(6)} ROLE{/}`,
+      `{gray-fg}${"NAME".padEnd(28)} ${"HEALTH".padEnd(10)} ${"RUNTIME".padEnd(10)} ${"MODEL".padEnd(20)} ${"ISOLATION".padEnd(12)} ${"AGE".padEnd(6)} ROLE{/}`,
     );
     for (const s of items) {
       const healthColor =
@@ -59,7 +59,7 @@ export const clawSandboxPanel: Panel = {
         `${s.name.padEnd(28)} ` +
           `{${healthColor}-fg}${s.health.padEnd(10)}{/} ` +
           `${rkTag.padEnd(10)} ` +
-          `${(s.model || "-").padEnd(14)} ` +
+          `${(s.model || "-").padEnd(20)} ` +
           `${(s.isolation || "-").padEnd(12)} ` +
           `${(s.age || "-").padEnd(6)} ` +
           `${s.role}`,

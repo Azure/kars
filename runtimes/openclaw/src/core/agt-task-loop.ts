@@ -14,7 +14,7 @@
 // sanitizeLog) are pulled directly from sibling core modules.
 
 import type { AgtInboxEntry } from "./agt-handoff.js";
-import { TASK_TOOLS } from "./agt-task-tools.js";
+import { getTaskTools } from "./agt-task-tools.js";
 import { resolveAmidByName, getStaleAmid, amidToName, parentTrustedNames } from "./amid-cache.js";
 import { sanitizeLog } from "./log-redact.js";
 import { meshSendWithIdentity, type MeshIdentity } from "./mesh-transport.js";
@@ -51,6 +51,15 @@ export interface TaskLoopDeps {
    * regardless of which tool path consumed the messages.
    */
   markRead?: (ids: string[]) => void;
+  /**
+   * Server-side blocking inbox wait. Wired by index.ts to the same
+   * `waitForInbox()` helper used by `azureclaw_mesh_inbox`. Used by the
+   * sub-agent task-loop's `mesh_inbox` (block_until_message) and
+   * `mesh_await` to obviate LLM poll-and-yield. Returns true on wake,
+   * false on timeout. Always resolves; never rejects. Optional — when
+   * absent, blocking tools fall back to a single immediate read.
+   */
+  waitForInbox?: (timeoutMs: number) => Promise<boolean>;
 }
 
 export async function processTaskWithTools(
@@ -61,17 +70,45 @@ export async function processTaskWithTools(
 ): Promise<string> {
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
-  const model = process.env.MODEL || "gpt-4.1";
+  const model = process.env.OPENCLAW_MODEL || process.env.MODEL || "gpt-4.1";
 
-  const tools = TASK_TOOLS;
+  const tools = getTaskTools();
+  const slim = process.env.AZURECLAW_PROVIDER === "github-models";
+
+  const offloadToolBlock = slim
+    ? "- file_write: write text content to a file (preferred over shell redirection, which is blocked)\n- exec_command: run shell commands (read-only ops; avoid `>`, `>>`, `<<`, `<<<` — use file_write instead). Run Python with `python3 -c '...'` or by writing a script via file_write then executing it.\n- http_fetch: HTTP requests through the egress-controlled security proxy\n- web_search: real-time web search via DuckDuckGo (egress-proxied; returns title/url/snippet list)\n- memory: local persistent memory (operations: 'update' to store a fact, 'search' to query, 'list' to dump). Backed by /sandbox/.openclaw/memory.json — per-container, no peer sync.\n- mesh_send: send an E2E encrypted message to the parent (to_agent is locked to 'parent' in offload mode)\n- mesh_inbox: check for incoming messages from the parent (pass `block_until_message=true` to wait server-side)\n- discover: list agents in the mesh (informational)"
+    : "- file_write: write text content to a file (preferred over shell redirection, which is blocked)\n- exec_command: run shell commands (read-only ops; avoid `>`, `>>`, `<<`, `<<<` — use file_write instead)\n- http_fetch: HTTP requests through the egress-controlled security proxy\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python server-side (pandas, numpy, matplotlib). Save artifacts to /mnt/data/<name>; the wrapper auto-downloads them to /sandbox/.openclaw/workspace/ and lists local paths in a `<downloaded_files>` JSON block. Avoid copying files inside Python — the local /sandbox path does not exist in Foundry's container.\n- foundry_download_file: fetch a single Foundry container file by file_id+container_id when auto-download missed it. Always pass the literal `cntr_…` and `cfile_…` identifiers from the most recent foundry_code_execute response — never substitute filenames, friendly names, or the string 'default'.\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send an E2E encrypted message to the parent (to_agent is locked to 'parent' in offload mode)\n- mesh_inbox: check for incoming messages from the parent (pass `block_until_message=true` to wait server-side)\n- discover: list agents in the mesh (informational)";
+
+  const subAgentToolBlock = slim
+    ? "- file_write: write text to a file (use this for artifacts; shell redirection is blocked)\n- exec_command: run shell commands (avoid `>`, `>>`, `<<`, `<<<` — use file_write instead). Run Python with `python3 -c '...'` or by writing a script via file_write then executing it.\n- http_fetch: HTTP requests through the egress-controlled security proxy\n- web_search: real-time web search via DuckDuckGo (egress-proxied; returns title/url/snippet list). Use for current events, news, or anything needing live information.\n- memory: local persistent memory (operations: 'update' to store, 'search' to query, 'list' to dump). Backed by /sandbox/.openclaw/memory.json — per-container, no peer sync.\n- mesh_send: send an E2E encrypted text/JSON message to any agent — auto-discovers the target\n- mesh_transfer_file: ship a file/image/binary to another agent (handles base64 + chunking)\n- mesh_inbox: check for incoming messages (pass `block_until_message=true` to wait server-side)\n- mesh_await: block until all named senders have delivered at least one message, e.g. `mesh_await(senders=['analyst','viz'], timeout_seconds=300)`\n- discover: list agents in the mesh with status and trust scores"
+    : "- file_write: write text to a file (use this for artifacts; shell redirection is blocked)\n- exec_command: run shell commands (avoid `>`, `>>`, `<<`, `<<<` — use file_write instead)\n- http_fetch: HTTP requests through the egress-controlled security proxy\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python server-side (pandas, numpy, matplotlib). Save artifacts to /mnt/data/<name>; the wrapper auto-downloads them to /sandbox/.openclaw/workspace/ and lists local paths in a `<downloaded_files>` JSON block. Avoid copying files inside Python — the local /sandbox path does not exist in Foundry's container.\n- foundry_download_file: fetch a single Foundry container file by file_id+container_id when auto-download missed it. Always pass the literal `cntr_…` and `cfile_…` identifiers from the most recent foundry_code_execute response — never substitute filenames, friendly names, or the string 'default'.\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send an E2E encrypted text/JSON message to any agent — auto-discovers the target\n- mesh_transfer_file: ship a file/image/binary to another agent (handles base64 + chunking)\n- mesh_inbox: check for incoming messages (pass `block_until_message=true` to wait server-side)\n- mesh_await: block until all named senders have delivered at least one message, e.g. `mesh_await(senders=['analyst','viz'], timeout_seconds=300)`\n- discover: list agents in the mesh with status and trust scores";
+
+  const offloadConventions = slim
+    ? "Offload-mode conventions:\n1. Outbound mesh messages always go to 'parent'. The mesh_send tool rewrites any other to_agent to 'parent'.\n2. Place every output artifact (markdown, JSON, CSV, HTML, PDF, PNG, TXT) in /sandbox/.openclaw/workspace/ via the file_write tool. Files there are harvested and shipped back at offload_done.\n3. For Python data work, use exec_command with `python3 -c` or file_write a script + exec_command. Pandas/numpy/matplotlib are pre-installed.\n4. Execute the task immediately — no preamble, just act. Be concise."
+    : "Offload-mode conventions:\n1. Outbound mesh messages always go to 'parent'. The mesh_send tool rewrites any other to_agent to 'parent'.\n2. Place every output artifact (markdown, JSON, CSV, HTML, PDF, PNG, TXT) in /sandbox/.openclaw/workspace/ via the file_write tool. Files there are harvested and shipped back at offload_done.\n3. foundry_code_execute writes to Foundry's ephemeral /mnt/data/. The wrapper auto-downloads anything saved there and surfaces the local paths under `<downloaded_files>`. Use those `path` values directly. If a file you expected is missing, retry with foundry_download_file(file_id, container_id).\n4. Execute the task immediately — no preamble, just act. Be concise.";
+
+  const slimSubAgentNote = slim
+    ? "\n\nMode note (GitHub Models slim): you are running on GitHub Models. The Foundry tool catalog is NOT available, but you have full equivalents: web_search (DuckDuckGo) for live information, exec_command for Python and shell, http_fetch for any HTTP, memory for local persistence, and the full mesh toolset. Never reply that a task is impossible because of mode limitations — do the work with the tools you have."
+    : "";
+
+  const offloadPrompt =
+    "You are an AzureClaw offload worker — a short-lived sandboxed agent executing one task on behalf of a remote parent. Always identify as an AzureClaw offload worker.\n\nAvailable tools:\n" +
+    offloadToolBlock + "\n\n" + offloadConventions;
+
+  const subAgentMeshBlock =
+    "Peer-to-peer mesh: you can message any agent directly, not only the parent. To forward data to a sibling such as 'writer', call mesh_send with to_agent='writer'; discovery is automatic.\n\nIsolated filesystems: each sub-agent runs in its own container with its own /sandbox and /tmp. Siblings cannot read your local files, so file paths cannot be sent over the wire — they will not resolve on the other side.\n  - For text or JSON, call mesh_send with the full stringified content in `message`. The SDK auto-chunks large payloads.\n  - For files, images, or binaries (PNG, JPG, PDF, …), call mesh_transfer_file(to_agent, file_path). The recipient's gateway writes the bytes to /sandbox/.openclaw/workspace/incoming/ and the saved path appears in their mesh_inbox.\n  - Avoid hand-crafting `{type:'file_transfer', ...}` envelopes through mesh_send — they are not accepted, since the peer cannot read your filesystem.\n  - Avoid stand-in strings such as `<base64-image-data>` in `file_data` — only real bytes are accepted.\nExamples:\n  Good: mesh_transfer_file(to_agent='writer', file_path='/sandbox/.openclaw/workspace/hero.png', description='hero image 1024x1024')\n  Good: mesh_send(to_agent='viz', message=JSON.stringify({trends: [...], metrics: [...]}))\n  Avoid: mesh_send(to_agent='writer', message={hero_image_path:'/tmp/img.png'})  — the peer cannot read /tmp\n  Avoid: mesh_send(to_agent='viz', message={artifact_path:'/sandbox/data.json'})  — the peer cannot read /sandbox\n\nReceiving from siblings: when your task description says data will arrive from a sibling, start with mesh_inbox (no arguments) — sibling messages typically arrive before you read them. Sibling artifacts appear as `message_type:'peer_message'` (text/JSON via mesh_send) or `message_type:'file_transfer'` (files via mesh_transfer_file; read the file at `saved_to`). mesh_inbox is peek-only by default and does not consume messages.\n\nIf the inbox is empty on first check and your task description expects sibling data, the next call should be mesh_await(senders=['<sender>'], timeout_seconds=600). Sibling work commonly takes a few minutes (web search, code-exec, image generation). mesh_await blocks server-side and returns as soon as a matching message arrives, so polling is not needed. After it returns, call mesh_inbox once to read the content. Avoid reporting 'no peers' or 'no data' before mesh_await has been used.\n\nTask execution: act on the task immediately, no preamble. When asked to forward results to another agent, call mesh_send for text/JSON or mesh_transfer_file for files. Chain tool calls as needed. Be concise." +
+    slimSubAgentNote +
+    "\n\nRouting rule (CRITICAL — read your task carefully): your task description names the downstream peer(s) for each artifact. If the task says \"hand to writer\", \"send to writer\", \"deliver to <peer>\", \"return to <peer>\", or describes a pipeline like \"analyst → viz → writer\", then route BOTH text/JSON (mesh_send) AND files (mesh_transfer_file) directly to that NAMED SIBLING with to_agent='<sibling>' — do NOT send to 'parent'. Sending to 'parent' when the task specifies a sibling is a routing bug: parent will not forward to the sibling, and the sibling will time out waiting. Only fall back to to_agent='parent' when (a) the task explicitly says to return to parent / spawner, OR (b) you are the final agent in the pipeline (e.g. 'writer' producing the assembled brief), OR (c) the task names no downstream peer at all (typical for ordinary single-agent tasks — return final text/files to 'parent'). If the task targets DIFFERENT peers for different artifacts (e.g. \"send chart to viz and JSON to writer\"), resolve the target per artifact, not once for the whole batch. If unsure of the exact agent name, call `discover` once to list peers — but do not over-discover; one call per task is plenty.\n\nPeer name resolution: when your task content begins with a `Peer roster:` block, that roster is the single source of truth for sibling names. Use ONLY the names listed there with mesh_send / mesh_transfer_file — never invent variants, role descriptions, or your own name as a target. Resolve role references (\"the writer\", \"the analyst\", \"the graphic designer\") by matching them to the role text after each `—` in the roster. If the roster is missing OR a role reference does not unambiguously map to one entry, send a single mesh_send to 'parent' asking for the canonical name and wait for the reply — do NOT guess. Never use your own SANDBOX_NAME as `to_agent`; the gateway rejects self-sends.\n\nReceived artifacts persist on disk: files delivered to you via mesh_transfer_file are written by the gateway to /sandbox/.openclaw/workspace/incoming/<file_name> and STAY THERE across the rest of your task — they are not consumed by reading the inbox. If you previously saw a file_transfer in mesh_inbox (with a `saved_to` path) and later need to confirm what you have, list /sandbox/.openclaw/workspace/incoming/ via exec_command (`ls -la /sandbox/.openclaw/workspace/incoming/`) rather than re-polling the inbox. Avoid reporting \"no artifacts received\" if the directory contains the expected files; treat the filesystem as the source of truth for delivered artifacts.\n\nFinal deliverables: when you have produced a final artifact (markdown, document, image, dataset, JSON, etc.), the last step before returning your textual summary should be mesh_transfer_file(to_agent='<resolved-target>', file_path='/sandbox/.openclaw/workspace/<artifact>', description='<short label>') where <resolved-target> follows the routing rule above. Files left only in your local /sandbox are not visible to other agents and will be lost when the sub-agent exits. If you produced multiple outputs (brief.md + chart.png + hero.png), call mesh_transfer_file once per file, resolving the target per artifact. Trust mesh_transfer_file's return value (`status: 'delivered'` plus a `message_id`) as proof of delivery — there is no separate inbox ack to wait for, so do not block on one. If the call returned an error or the recipient later reports it never arrived, resend to the correct target. Only report 'final delivered' once mesh_transfer_file has returned success for each artifact at its correct target.";
+
+  const subAgentPrompt =
+    "You are an AzureClaw sub-agent — a sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent.\n\nAvailable tools:\n" +
+    subAgentToolBlock + "\n\n" + subAgentMeshBlock;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: process.env.OFFLOAD_REQUEST_ID
-        ? "You are an AzureClaw OFFLOAD WORKER — a short-lived sandboxed agent executing ONE task on behalf of a remote parent agent. Always identify as an AzureClaw offload worker. Your tools:\n- file_write: write text content directly to a file (USE THIS for all artifacts — never use shell redirection)\n- exec_command: run shell commands (read-only ops are fine; DO NOT use `>`, `>>`, `<<`, `<<<` — the shell policy blocks redirection. Use file_write instead.)\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted message to PARENT (to_agent is locked to 'parent')\n- mesh_inbox: check for incoming messages from the parent\n- discover: list agents in the mesh network (informational only)\n\nHARD RULES (offload mode):\n1. ALL outbound mesh messages go to 'parent'. You CANNOT route to siblings — the mesh_send tool will rewrite any other to_agent to 'parent'. Messages to peers will NOT reach the requester.\n2. ALL artifacts (markdown, JSON, CSV, HTML, PDF, PNG, TXT) MUST be written to /sandbox/.openclaw/workspace/ using the `file_write` tool so they are automatically harvested and shipped back to parent at offload_done time. DO NOT use `cat > file <<EOF` or `echo > file` — those are blocked by the shell policy.\n3. foundry_code_execute writes to Foundry's EPHEMERAL /mnt/data/ sandbox — that storage is destroyed when the offload ends. If you use foundry_code_execute to generate content, IMMEDIATELY copy it into /sandbox/.openclaw/workspace/ by calling file_write with the content. Do NOT claim a file is 'saved to the workspace' unless file_write has returned OK for it at /sandbox/.openclaw/workspace/.\n4. Execute the task immediately — do not announce, just act. Be concise, report results."
-        : "You are an AzureClaw sub-agent — a governed, sandboxed AI worker in the AzureClaw multi-agent platform on Azure. Always identify as an AzureClaw agent. Your tools:\n- file_write: write text content directly to a file (use this for all artifacts — shell redirection is blocked)\n- exec_command: run shell commands (no `>`, `>>`, `<<`, `<<<` — use file_write instead)\n- http_fetch: HTTP requests through security proxy (egress-controlled)\n- foundry_web_search: real-time web search via Bing grounding\n- foundry_code_execute: run Python code server-side (pandas, numpy, matplotlib)\n- foundry_image_generation: generate images from text prompts (gpt-image-1)\n- foundry_file_search: search documents in vector stores\n- foundry_memory: persistent memory store — 'search' to recall, 'update' to remember\n- mesh_send: send E2E encrypted TEXT/JSON messages to ANY agent (parent, siblings, or others) — auto-discovers the target\n- mesh_transfer_file: ship a FILE / IMAGE / BINARY to another agent (handles base64 + chunking for you)\n- mesh_inbox: check for incoming messages from any agent\n- discover: list agents in the mesh network with status and trust scores\n\nPEER-TO-PEER MESH: You can message any agent directly — not just your parent. To forward data to a sibling agent (e.g. 'writer'), just call mesh_send with to_agent='writer'. Discovery is automatic. After sending, the recipient can reply via mesh_send back to you — check mesh_inbox for replies.\n\n🚨 ISOLATED FILESYSTEMS — CRITICAL: Each sub-agent runs in its OWN isolated container with its OWN /sandbox AND its own /tmp filesystem. Sibling agents CANNOT read your local files. NEVER send a sibling a file path, /tmp/ path, /sandbox path, or URL pointing into your container — they cannot resolve it.\n  • For TEXT / JSON artifacts → call `mesh_send` with the FULL stringified content in the `message` field. The SDK auto-chunks large messages.\n  • For FILES / IMAGES / BINARIES (PNG, JPG, PDF, …) → ALWAYS call `mesh_transfer_file(to_agent, file_path)`. It reads the bytes, base64-encodes them, and ships them via the chunked transfer protocol. The recipient's gateway auto-writes the file to /sandbox/.openclaw/workspace/incoming/ and they see the saved path in their mesh_inbox.\n  • DO NOT hand-craft `{type:'file_transfer', file_path:'/sandbox/...'}` envelopes through `mesh_send` — they will be REJECTED. The peer cannot read your filesystem.\n  • DO NOT use placeholder strings like `<base64-image-data>` or `<base64-bytes>` in `file_data` — they will be REJECTED.\n❌ BAD:  `mesh_send(to=writer, msg={hero_image_path:'/tmp/img.png'})`           ← peer cannot read /tmp\n❌ BAD:  `mesh_send(to=viz, msg={artifact_path:'/sandbox/data.json'})`           ← peer cannot read /sandbox\n❌ BAD:  `mesh_send(to=writer, msg={type:'file_transfer', file_data:'<base64-bytes>'})` ← placeholder, not real bytes\n✅ GOOD: `mesh_transfer_file(to_agent='writer', file_path='/sandbox/.openclaw/workspace/hero.png', description='hero image 1024x1024')`\n✅ GOOD: `mesh_send(to=viz, msg=JSON.stringify({trends:[...real data...], metrics:[...]}))`\n\n📥 INBOX-FIRST RULE — MANDATORY: Whenever your task description says you should already have data from a sibling, your VERY FIRST action MUST be `mesh_inbox` (no arguments). Sibling messages always arrive before you process them — the inbox is your buffer. Sibling artifacts appear with `message_type:'peer_message'` (text/JSON via mesh_send) or `message_type:'file_transfer'` (files via mesh_transfer_file — read the file at `saved_to` to get the bytes). NEVER reply 'BLOCKED' or 'no data received' without first checking mesh_inbox in the current turn — the data is almost always sitting there waiting. mesh_inbox is peek-only by default; calling it does not consume the messages, so concurrent task sessions all see the same data.\n\nExecute tasks immediately — do not announce, just act. When asked to forward results to another agent, DO IT directly (mesh_send for text/JSON, mesh_transfer_file for files). Chain tool calls as needed. Be concise, report results.\n\n📤 FINAL DELIVERABLE RULE — MANDATORY: When your task is done and you have produced a final artifact (markdown, document, image, dataset, JSON, etc.), your VERY LAST action before returning a textual summary MUST be `mesh_transfer_file(to_agent='parent', file_path='/sandbox/.openclaw/workspace/<your-final-artifact>', description='<short label>')`. Files left only in your local /sandbox are NOT visible to the parent — they vanish when the sub-agent exits. If you produced multiple outputs (e.g. brief.md + chart.png + hero.png), call mesh_transfer_file once per file. Only after all transfers succeed should you reply with a status summary. NEVER claim 'final brief delivered' or 'artifact ready' unless mesh_transfer_file has actually returned OK for that file in this same task session.",
+      content: process.env.OFFLOAD_REQUEST_ID ? offloadPrompt : subAgentPrompt,
     },
     {
       role: "user",
@@ -203,8 +240,112 @@ export async function processTaskWithTools(
               req.end();
             });
             result = fetchResult;
-          } else if (fnName === "foundry_web_search" || fnName === "foundry_code_execute" || fnName === "foundry_file_search") {
+          } else if (fnName === "web_search") {
+            const q = String(args.query || "").slice(0, 500);
+            const max = Math.min(Math.max(Number(args.max_results) || 8, 1), 20);
+            log.info(`AGT sub-agent web_search: ${q}`);
+            const ddgUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+            const fetchBody = JSON.stringify({
+              url: ddgUrl,
+              method: "GET",
+              headers: {
+                "User-Agent": "Mozilla/5.0 (compatible; AzureClawSubAgent/1.0)",
+                Accept: "text/html,application/xhtml+xml",
+              },
+              body: "",
+            });
+            const httpMod = await import("node:http");
+            const ddgHtml = await new Promise<string>((resolve) => {
+              const req = httpMod.request(routerUrl("/egress/fetch"), {
+                method: "POST", timeout: 35000,
+                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
+              }, (res) => {
+                let data = "";
+                res.on("data", (c: Buffer) => { data += c.toString(); });
+                res.on("end", () => resolve(data));
+              });
+              req.on("error", (e: Error) => resolve(`web_search error: ${e.message}`));
+              req.on("timeout", () => { req.destroy(); resolve("web_search timeout"); });
+              req.write(fetchBody);
+              req.end();
+            });
+            try {
+              const results: Array<{ title: string; url: string; snippet: string }> = [];
+              const resultRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+              const stripTags = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim(); // lgtm[js/double-escaping] lgtm[js/incomplete-multi-character-sanitization] — output is JSON metadata returned to the LLM, never rendered as HTML
+              const decodeDdg = (href: string) => {
+                const m = href.match(/[?&]uddg=([^&]+)/);
+                return m ? decodeURIComponent(m[1]) : href;
+              };
+              let m: RegExpExecArray | null;
+              while ((m = resultRe.exec(ddgHtml)) && results.length < max) {
+                results.push({
+                  title: stripTags(m[2]),
+                  url: decodeDdg(m[1]),
+                  snippet: stripTags(m[3]),
+                });
+              }
+              result = results.length
+                ? JSON.stringify({ query: q, results }, null, 2)
+                : `web_search: no parseable results for "${q}" (DuckDuckGo HTML may have changed; try http_fetch with a specific source).`;
+            } catch (e) {
+              result = `web_search parse error: ${(e as Error).message}`;
+            }
+          } else if (fnName === "memory") {
+            const op = String(args.operation || "").toLowerCase();
+            const text = String(args.text || "").trim();
+            log.info(`AGT sub-agent memory: ${op}${text ? ` "${text.slice(0, 80)}"` : ""}`);
+            try {
+              const fs = await import("node:fs");
+              const path = await import("node:path");
+              const memDir = "/sandbox/.openclaw";
+              const memFile = path.join(memDir, "memory.json");
+              fs.mkdirSync(memDir, { recursive: true });
+              let entries: Array<{ id: string; text: string; ts: string }> = [];
+              try {
+                const buf = fs.readFileSync(memFile, "utf8");
+                entries = JSON.parse(buf) || [];
+              } catch { entries = []; }
+              if (op === "update") {
+                if (!text) {
+                  result = "memory.update error: 'text' is required";
+                } else {
+                  const id = `mem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                  entries.push({ id, text, ts: new Date().toISOString() });
+                  fs.writeFileSync(memFile, JSON.stringify(entries, null, 2));
+                  result = JSON.stringify({ stored: true, id, total: entries.length });
+                }
+              } else if (op === "search") {
+                const needle = text.toLowerCase();
+                const matches = needle
+                  ? entries.filter((e) => e.text.toLowerCase().includes(needle)).slice(-20)
+                  : entries.slice(-20);
+                result = JSON.stringify({ query: text, count: matches.length, matches }, null, 2);
+              } else if (op === "list") {
+                result = JSON.stringify({ count: entries.length, entries: entries.slice(-50) }, null, 2);
+              } else {
+                result = `memory error: unknown operation '${op}' (use 'update', 'search', or 'list')`;
+              }
+            } catch (e) {
+              result = `memory error: ${(e as Error).message}`;
+            }
             log.info(`AGT sub-agent ${fnName}: ${JSON.stringify(args).slice(0, 200)}`);
+            // Guard: Foundry's code-interpreter container has its OWN /sandbox and /tmp
+            // that are NOT the agent's filesystem. Writing/copying to those paths from
+            // inside Foundry "succeeds" silently but the file is invisible to us — that
+            // produced the shutil.copy death-loop in the demo. Block code that
+            // references those paths as destinations. Only matches quoted literals so
+            // mentions of /sandbox/ in an f-string template or comment do not trigger.
+            let codeBlocked = false;
+            if (fnName === "foundry_code_execute") {
+              const code = String(args.code || "");
+              const forbidden = /(["'])(\/sandbox\/|\/tmp\/)/;
+              if (forbidden.test(code)) {
+                result = "foundry_code_execute REJECTED: code references '/sandbox/' or '/tmp/' as a destination path. Foundry's code-interpreter container has its OWN /sandbox and /tmp that are NOT visible to your agent. Save files ONLY under /mnt/data/ — the wrapper auto-downloads them to your real /sandbox/.openclaw/workspace/. Then use the returned path with mesh_transfer_file.";
+                log.warn(`AGT sub-agent foundry_code_execute REJECTED: ${(args.code || "").slice(0, 150)}`);
+                codeBlocked = true;
+              }
+            }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let reqBody: any;
             if (fnName === "foundry_web_search") {
@@ -234,6 +375,11 @@ export async function processTaskWithTools(
                 model: model,
                 input: args.code,
                 tools: [{ type: "code_interpreter", container: { type: "auto" } }],
+                // Force the model to invoke code_interpreter rather than just
+                // describing the code in prose. Without this, gpt-4.1 (and
+                // others) often hallucinate "successfully executed" without
+                // ever calling the tool, leaving no container_id and no files.
+                tool_choice: { type: "code_interpreter" },
                 instructions: "Execute the provided Python code and return the output.",
                 store: false,
               };
@@ -245,6 +391,7 @@ export async function processTaskWithTools(
                 store: false,
               };
             }
+            if (!codeBlocked) {
             const foundryResult = await new Promise<string>((resolve, reject) => {
               const postBody = JSON.stringify(reqBody);
               const req = http.request(routerUrl("/openai/responses?api-version=2025-11-15-preview"), {
@@ -281,11 +428,162 @@ export async function processTaskWithTools(
                 } else {
                   result = foundryResult;
                 }
+                // For code_interpreter calls, harvest any container files
+                // so the LLM can hand artifacts to mesh_transfer_file or
+                // file_write without a follow-up download round-trip.
+                if (fnName === "foundry_code_execute" && Array.isArray(output)) {
+                  const fileRefs = new Map<string, { container_id: string; file_id: string; filename?: string }>();
+                  const collect = (cid: unknown, fid: unknown, fname?: unknown): void => {
+                    if (typeof cid !== "string" || typeof fid !== "string" || !cid || !fid) return;
+                    const key = `${cid}/${fid}`;
+                    if (fileRefs.has(key)) return;
+                    fileRefs.set(key, { container_id: cid, file_id: fid, filename: typeof fname === "string" ? fname : undefined });
+                  };
+                  for (const item of output) {
+                    if (item.type === "message" && Array.isArray(item.content)) {
+                      for (const c of item.content) {
+                        if (Array.isArray(c.annotations)) {
+                          for (const a of c.annotations) {
+                            if (a?.type === "container_file_citation") collect(a.container_id, a.file_id, a.filename);
+                          }
+                        }
+                      }
+                    } else if (item.type === "code_interpreter_call") {
+                      const outs = Array.isArray(item.outputs) ? item.outputs : (Array.isArray(item.output) ? item.output : []);
+                      for (const o of outs) {
+                        if (o && (o.type === "image" || o.type === "file")) {
+                          collect(o.container_id ?? item.container_id, o.file_id, o.filename);
+                        }
+                      }
+                    }
+                  }
+                  // Annotations alone are unreliable: Foundry only emits
+                  // container_file_citation when the model writes a markdown
+                  // sandbox: link in its reply. Authoritative discovery is
+                  // GET /openai/containers/{cid}/files which lists everything
+                  // the container actually wrote. Aggregate container_ids from
+                  // any code_interpreter_call we saw and list each.
+                  const containerIds = new Set<string>();
+                  for (const item of output) {
+                    if (item?.type === "code_interpreter_call" && typeof item.container_id === "string") {
+                      containerIds.add(item.container_id);
+                    }
+                  }
+                  for (const cid of containerIds) {
+                    try {
+                      const listed = await new Promise<string>((resolve, reject) => {
+                        const lp = `/openai/containers/${encodeURIComponent(cid)}/files?api-version=2025-11-15-preview`;
+                        const r = http.get(routerUrl(lp), { timeout: 15000 }, (res) => {
+                          const chunks: Buffer[] = [];
+                          res.on("data", (c: Buffer) => chunks.push(c));
+                          res.on("end", () => {
+                            if ((res.statusCode || 0) >= 400) reject(new Error(`HTTP ${res.statusCode}`));
+                            else resolve(Buffer.concat(chunks).toString("utf-8"));
+                          });
+                        });
+                        r.on("error", reject);
+                        r.on("timeout", () => { r.destroy(); reject(new Error("list timeout")); });
+                      });
+                      const lj = JSON.parse(listed);
+                      const data = Array.isArray(lj?.data) ? lj.data : (Array.isArray(lj) ? lj : []);
+                      for (const f of data) {
+                        // user-uploaded inputs have source==="user"; we want assistant-produced outputs only
+                        if (f && (f.source === "assistant" || f.source === undefined)) {
+                          collect(cid, f.id, f.path || f.filename);
+                        }
+                      }
+                    } catch (listErr: any) {
+                      log.warn(`foundry_code_execute (task-loop): list files failed for ${cid.slice(0, 12)}...: ${listErr?.message || listErr}`);
+                    }
+                  }
+                  if (fileRefs.size > 0) {
+                    const fs = await import("node:fs");
+                    const path = await import("node:path");
+                    const workspaceDir = "/sandbox/.openclaw/workspace";
+                    try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
+                    const downloaded: Array<{ path: string; filename: string; bytes: number; file_id: string; container_id: string }> = [];
+                    const failed: Array<{ file_id: string; container_id: string; error: string }> = [];
+                    for (const ref of fileRefs.values()) {
+                      const safeName = (ref.filename && /^[A-Za-z0-9._-]+$/.test(ref.filename)) ? ref.filename : `${ref.file_id}.bin`;
+                      const dest = path.join(workspaceDir, safeName);
+                      try {
+                        const bytes = await new Promise<Buffer>((resolve, reject) => {
+                          const dlPath = `/openai/containers/${encodeURIComponent(ref.container_id)}/files/${encodeURIComponent(ref.file_id)}/content?api-version=2025-11-15-preview`;
+                          const req = http.get(routerUrl(dlPath), { timeout: 60000 }, (res) => {
+                            const chunks: Buffer[] = [];
+                            res.on("data", (c: Buffer) => chunks.push(c));
+                            res.on("end", () => {
+                              if ((res.statusCode || 0) >= 400) reject(new Error(`HTTP ${res.statusCode}`));
+                              else resolve(Buffer.concat(chunks));
+                            });
+                          });
+                          req.on("error", reject);
+                          req.on("timeout", () => { req.destroy(); reject(new Error("download timeout")); });
+                        });
+                        fs.writeFileSync(dest, bytes);
+                        log.info(`foundry_code_execute (task-loop): saved ${safeName} (${bytes.length} bytes)`);
+                        downloaded.push({ path: dest, filename: safeName, bytes: bytes.length, file_id: ref.file_id, container_id: ref.container_id });
+                      } catch (dlErr: any) {
+                        log.warn(`foundry_code_execute (task-loop): download failed for ${ref.file_id}: ${dlErr?.message || dlErr}`);
+                        failed.push({ file_id: ref.file_id, container_id: ref.container_id, error: String(dlErr?.message || dlErr) });
+                      }
+                    }
+                    if (downloaded.length > 0 || failed.length > 0) {
+                      result = `${result}\n\n<downloaded_files>${JSON.stringify({
+                        downloaded, failed,
+                        hint: downloaded.length > 0
+                          ? "Use the `path` values directly with mesh_transfer_file or file_write — DO NOT cp/shutil.copy from inside Python."
+                          : "No files downloaded. Retry with foundry_download_file(file_id, container_id).",
+                      })}</downloaded_files>`;
+                    }
+                  }
+                }
               }
             } catch {
               result = foundryResult;
             }
+            } // end if (!codeBlocked)
             log.info(`AGT sub-agent ${fnName} result: ${result.slice(0, 200)}`);
+          } else if (fnName === "foundry_download_file") {
+            log.info(`AGT sub-agent foundry_download_file: file_id=${args.file_id}`);
+            const fileId = String(args.file_id || "").trim();
+            const containerId = String(args.container_id || "").trim();
+            if (!fileId || !containerId) {
+              result = "foundry_download_file: file_id and container_id are required.";
+            } else {
+              const requestedName = typeof args.local_basename === "string" ? args.local_basename.trim() : "";
+              const safeName = (requestedName && /^[A-Za-z0-9._-]+$/.test(requestedName)) ? requestedName : `${fileId}.bin`;
+              try {
+                const fs = await import("node:fs");
+                const path = await import("node:path");
+                const workspaceDir = "/sandbox/.openclaw/workspace";
+                try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
+                const dest = path.join(workspaceDir, safeName);
+                const bytes = await new Promise<Buffer>((resolve, reject) => {
+                  const dlPath = `/openai/containers/${encodeURIComponent(containerId)}/files/${encodeURIComponent(fileId)}/content?api-version=2025-11-15-preview`;
+                  const req = http.get(routerUrl(dlPath), { timeout: 60000 }, (res) => {
+                    const chunks: Buffer[] = [];
+                    res.on("data", (c: Buffer) => chunks.push(c));
+                    res.on("end", () => {
+                      if ((res.statusCode || 0) >= 400) reject(new Error(`HTTP ${res.statusCode}`));
+                      else resolve(Buffer.concat(chunks));
+                    });
+                  });
+                  req.on("error", reject);
+                  req.on("timeout", () => { req.destroy(); reject(new Error("download timeout")); });
+                });
+                fs.writeFileSync(dest, bytes);
+                log.info(`foundry_download_file: saved ${safeName} (${bytes.length} bytes)`);
+                result = `Downloaded ${safeName} (${bytes.length} bytes) → ${dest}\n\n<downloaded_files>${JSON.stringify({
+                  downloaded: [{ path: dest, filename: safeName, bytes: bytes.length, file_id: fileId, container_id: containerId }],
+                  failed: [],
+                  hint: "Use the `path` value directly with mesh_transfer_file or file_write.",
+                })}</downloaded_files>`;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } catch (e: any) {
+                result = `foundry_download_file failed: ${e.message}`;
+              }
+            }
           } else if (fnName === "foundry_memory") {
             log.info(`AGT sub-agent foundry_memory: ${args.operation} — ${(args.text as string || "").slice(0, 100)}`);
             const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
@@ -435,6 +733,17 @@ export async function processTaskWithTools(
               log.info(`AGT sub-agent mesh_send: alias 'parent' → '${process.env.PARENT_SANDBOX}'`);
               toAgent = process.env.PARENT_SANDBOX;
             }
+            // Self-send guard: LLMs sometimes hallucinate their own name as
+            // to_agent (especially for "writer" / "analyst" style names that
+            // also appear as task verbs). Self-sending bounces every chunk
+            // through the relay back to ourselves — wasteful at best, and
+            // pollutes our own inbox with stale chunks. Reject up front.
+            const selfName = process.env.SANDBOX_NAME || "";
+            const isSelfSend = !!(selfName && toAgent === selfName);
+            if (isSelfSend) {
+              log.warn(`AGT sub-agent mesh_send: self-send rejected (to_agent='${toAgent}' is this agent)`);
+              result = `mesh_send rejected: to_agent='${toAgent}' is your own agent name. You cannot send messages to yourself. Pick a real peer (use 'discover' to list available agents) or 'parent' to return to the spawner.`;
+            } else {
             const meshMsg = args.message as string;
             // Guard: reject malformed file_transfer envelopes / cross-container
             // path references before they hit the wire. Peer agents cannot
@@ -520,6 +829,7 @@ export async function processTaskWithTools(
               result = `mesh_send failed: ${meshErr.message}`;
             }
             }
+            } // end self-send else
           } else if (fnName === "mesh_transfer_file") {
             let toAgent = args.to_agent as string;
             if (process.env.OFFLOAD_REQUEST_ID && toAgent !== "parent") {
@@ -530,6 +840,15 @@ export async function processTaskWithTools(
               log.info(`AGT sub-agent mesh_transfer_file: alias 'parent' → '${process.env.PARENT_SANDBOX}'`);
               toAgent = process.env.PARENT_SANDBOX;
             }
+            // Self-send guard (see mesh_send). Without it, mesh_transfer_file
+            // ships every chunk back to the sender — observed in the AKS demo
+            // as a 12-chunk writer→writer self-loop at 10:48:58.
+            const selfNameTransfer = process.env.SANDBOX_NAME || "";
+            const isSelfTransfer = !!(selfNameTransfer && toAgent === selfNameTransfer);
+            if (isSelfTransfer) {
+              log.warn(`AGT sub-agent mesh_transfer_file: self-send rejected (to_agent='${toAgent}' is this agent)`);
+              result = `mesh_transfer_file rejected: to_agent='${toAgent}' is your own agent name. You cannot transfer files to yourself. The file is already on your local /sandbox — pick a real peer (use 'discover') or 'parent' to ship the artifact upstream.`;
+            } else {
             const filePath = String(args.file_path || "");
             const desc = typeof args.description === "string" ? args.description : "";
             log.info(`AGT sub-agent mesh_transfer_file: to=${toAgent} file=${filePath}`);
@@ -662,6 +981,7 @@ export async function processTaskWithTools(
             } catch (transferErr: any) {
               result = `mesh_transfer_file failed: ${transferErr.message}`;
             }
+            } // end self-send else
           } else if (fnName === "discover") {
             const pattern = (args.pattern as string) || "*";
             log.info(`AGT sub-agent discover: pattern=${pattern}`);
@@ -765,24 +1085,43 @@ export async function processTaskWithTools(
                   "handoff:workspace_inject", "handoff:workspace_inject_ack",
                   "handoff:resume", "handoff:resume_ack",
                   "file_transfer_ack",
+                  "task_progress", "offload_progress",
                 ]);
                 const markRead = args.mark_read === true; // default false — match parent peek-only semantics
                 const unreadOnly = args.unread_only !== false; // default true
                 const limit = typeof args.limit === "number" && (args.limit as number) > 0
                   ? Math.floor(args.limit as number)
                   : 50;
+                const blockUntilMessage = args.block_until_message === true;
+                const timeoutSeconds = typeof args.timeout_seconds === "number" && (args.timeout_seconds as number) > 0
+                  ? Math.min(Math.floor(args.timeout_seconds as number), 300)
+                  : 120;
 
-                const visible = inbox.filter((m) => {
-                  if (m.message_type && HIDDEN_TYPES.has(m.message_type)) return false;
-                  // Also hide entries whose JSON content advertises an internal type
-                  try {
-                    const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
-                    if (parsed?.type && HIDDEN_TYPES.has(parsed.type)) return false;
-                  } catch { /* not JSON — keep */ }
-                  return true;
-                });
+                const computeFiltered = (): typeof inbox => {
+                  const v = inbox.filter((m) => {
+                    if (m.message_type && HIDDEN_TYPES.has(m.message_type)) return false;
+                    try {
+                      const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                      if (parsed?.type && HIDDEN_TYPES.has(parsed.type)) return false;
+                    } catch { /* not JSON — keep */ }
+                    return true;
+                  });
+                  return unreadOnly ? v.filter((m) => !m.read_at) : v;
+                };
 
-                const filtered = unreadOnly ? visible.filter((m) => !m.read_at) : visible;
+                let filtered = computeFiltered();
+
+                // Server-side blocking wait — replaces the LLM poll loop.
+                if (blockUntilMessage && filtered.length === 0 && deps.waitForInbox) {
+                  const deadline = Date.now() + timeoutSeconds * 1000;
+                  while (filtered.length === 0 && Date.now() < deadline) {
+                    const remaining = Math.max(1, deadline - Date.now());
+                    const woke = await deps.waitForInbox(remaining);
+                    filtered = computeFiltered();
+                    if (!woke) break;
+                  }
+                }
+
                 const slice = filtered.slice(-limit);
 
                 // Pre-import fs once so the synchronous .map() below can
@@ -890,6 +1229,116 @@ export async function processTaskWithTools(
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } catch (inboxErr: any) {
               result = `mesh_inbox failed: ${inboxErr.message}`;
+            }
+          } else if (fnName === "mesh_await") {
+            log.info(`AGT sub-agent mesh_await: senders=${JSON.stringify(args.senders)}`);
+            try {
+              const inbox = deps.inbox;
+              if (!inbox) {
+                result = "mesh_await unavailable: gateway buffer not wired";
+              } else {
+                const sendersRaw = args.senders;
+                if (!Array.isArray(sendersRaw) || sendersRaw.length === 0) {
+                  result = JSON.stringify({ error: "senders must be a non-empty array of agent names" });
+                } else {
+                  const wantedSenders = (sendersRaw as unknown[])
+                    .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+                    .map((s) => s.trim());
+                  if (wantedSenders.length === 0) {
+                    result = JSON.stringify({ error: "senders must contain at least one non-empty agent name" });
+                  } else {
+                    const wantedSet = new Set(wantedSenders.map((s) => s.toLowerCase()));
+                    const timeoutSeconds = typeof args.timeout_seconds === "number" && (args.timeout_seconds as number) > 0
+                      ? Math.min(Math.floor(args.timeout_seconds as number), 600)
+                      : 180;
+                    const markReadOnResolve = args.mark_read === true;
+
+                    const HIDDEN = new Set([
+                      "handoff_transfer", "handoff_verification", "handoff_ready",
+                      "handoff:interrupt", "handoff:interrupt_ack",
+                      "handoff:workspace_request", "handoff:workspace_response",
+                      "handoff:workspace_inject", "handoff:workspace_inject_ack",
+                      "handoff:resume", "handoff:resume_ack",
+                      "file_transfer_ack", "task_progress", "offload_progress",
+                    ]);
+                    const isInternal = (m: typeof inbox[number]): boolean => {
+                      if (m.message_type && HIDDEN.has(m.message_type)) return true;
+                      try {
+                        const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+                        if (parsed?.type && HIDDEN.has(parsed.type)) return true;
+                      } catch { /* not JSON */ }
+                      return false;
+                    };
+                    const computeMatches = (): Map<string, string[]> => {
+                      const out = new Map<string, string[]>();
+                      for (const m of inbox) {
+                        if (m.read_at) continue;
+                        if (isInternal(m)) continue;
+                        const fromName = (m.from_agent || "").toLowerCase();
+                        if (!wantedSet.has(fromName)) continue;
+                        const list = out.get(fromName) ?? [];
+                        list.push(m.id);
+                        out.set(fromName, list);
+                      }
+                      return out;
+                    };
+
+                    let matches = computeMatches();
+                    const startedAt = Date.now();
+                    if (matches.size < wantedSet.size && deps.waitForInbox) {
+                      const deadline = startedAt + timeoutSeconds * 1000;
+                      while (matches.size < wantedSet.size && Date.now() < deadline) {
+                        const remaining = Math.max(1, deadline - Date.now());
+                        const woke = await deps.waitForInbox(remaining);
+                        matches = computeMatches();
+                        if (!woke) break;
+                      }
+                    }
+
+                    const missing: string[] = [];
+                    for (const wanted of wantedSet) if (!matches.has(wanted)) missing.push(wanted);
+
+                    let markedRead = 0;
+                    if (markReadOnResolve) {
+                      const allMatchedIds = new Set<string>();
+                      for (const ids of matches.values()) for (const id of ids) allMatchedIds.add(id);
+                      if (allMatchedIds.size > 0) {
+                        const now = new Date().toISOString();
+                        const newlyRead: string[] = [];
+                        for (const m of inbox) {
+                          if (allMatchedIds.has(m.id) && !m.read_at) {
+                            m.read_at = now;
+                            newlyRead.push(m.id);
+                            markedRead += 1;
+                          }
+                        }
+                        if (newlyRead.length > 0) {
+                          try { deps.markRead?.(newlyRead); } catch { /* best effort */ }
+                        }
+                      }
+                    }
+
+                    const matchedSummary: Record<string, string[]> = {};
+                    for (const [sender, ids] of matches) matchedSummary[sender] = ids;
+                    result = JSON.stringify({
+                      status: missing.length === 0 ? "all_received" : "partial_timeout",
+                      requested_senders: wantedSenders,
+                      matched: matchedSummary,
+                      missing,
+                      mark_read: markReadOnResolve,
+                      marked_read_count: markedRead,
+                      waited_seconds: Math.round((Date.now() - startedAt) / 1000),
+                      timeout_seconds: timeoutSeconds,
+                      note: missing.length === 0
+                        ? "All requested senders delivered. Call mesh_inbox to read message contents."
+                        : `Timeout: missing ${missing.join(", ")}. Call mesh_inbox to inspect what arrived; retry mesh_await for the missing senders or proceed with partial input.`,
+                    });
+                  }
+                }
+              }
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } catch (awaitErr: any) {
+              result = `mesh_await failed: ${awaitErr.message}`;
             }
           } else {
             const cmd = String(args.command || args.cmd || "echo 'no command'");

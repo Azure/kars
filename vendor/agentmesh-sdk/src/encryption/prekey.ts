@@ -227,8 +227,14 @@ export async function generateOneTimePrekeys(
  * Serialize prekey bundle for registry upload.
  */
 export function serializePrekeyBundle(bundle: PrekeyBundle): PrekeyBundleSerialized {
-  const toBase64 = (bytes: Uint8Array) => {
-    const binary = String.fromCharCode(...bytes);
+  // Patch #13: chunked base64 — see ratchet.ts/session.ts bytesToBase64 helpers
+  const toBase64 = (bytes: Uint8Array): string => {
+    if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+    }
     return btoa(binary);
   };
 
@@ -533,8 +539,14 @@ export class PrekeyManager {
       throw new Error('No state to serialize');
     }
 
-    const toBase64 = (bytes: Uint8Array) => {
-      const binary = String.fromCharCode(...bytes);
+    // Patch #13: chunked base64 — see ratchet.ts/session.ts bytesToBase64 helpers
+    const toBase64 = (bytes: Uint8Array): string => {
+      if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+      }
       return btoa(binary);
     };
 

@@ -318,15 +318,17 @@ export async function runHandoffOrchestration(
     }
 
     try {
-      await _routerCall("POST", "/sandbox/spawn", {
+      const spawnPayload: Record<string, unknown> = {
         agent_id: targetName,
-        model: process.env.DEFAULT_MODEL || "gpt-4.1",
         governance: true,
         trust_threshold: 500,
         learn_egress: process.env.EGRESS_LEARN_MODE === "true",
         trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
         handoff: { mode: "restore", predecessor: myName },
-      });
+      };
+      const handoffModel = process.env.OPENCLAW_MODEL || process.env.DEFAULT_MODEL;
+      if (handoffModel) spawnPayload.model = handoffModel;
+      await _routerCall("POST", "/sandbox/spawn", spawnPayload);
       _hp("spawn", "🚀 CRD created — waiting for pod to start...");
     } catch (spawnErr: any) {
       if (!spawnErr.message?.includes("already exists")) throw spawnErr;

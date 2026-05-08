@@ -17,12 +17,20 @@ export const nameToAmid: Map<string, string> = new Map();
 // Per-name cache age for nameToAmid. Used to invalidate stale entries when a
 // sub-agent crashes and re-registers with a fresh AMID (sandbox identities are
 // ephemeral by design — keys regenerate on every pod boot, so an AMID cached
-// before a restart points at a dead identity in the registry).
+// before a registry blip points at a dead identity in the registry).
 export const nameToAmidTs: Map<string, number> = new Map();
 // 60s — long enough to amortize registry lookups across normal sends, short
 // enough that a crashed-and-restarted sub-agent is re-resolved within one
 // follow-up send cycle.
 export const AMID_CACHE_TTL_MS = 60_000;
+
+// Spawned-sibling roster: name → role/persona description provided at spawn
+// time by the parent. Used by azureclaw_mesh_send to prepend a deterministic
+// "Peer roster:" block to outbound task content so sub-agents can resolve
+// role references ("the writer", "the graphic designer") to canonical names
+// without LLM guessing. Populated on azureclaw_spawn, cleaned on
+// azureclaw_spawn_destroy.
+export const spawnedRoster: Map<string, string> = new Map();
 
 // ── Name-based trust (authoritative) ──────────────────────────────────
 // Trust is keyed by NAME (admission-unique sandbox display_name), not by

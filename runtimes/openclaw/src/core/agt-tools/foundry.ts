@@ -47,14 +47,29 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
       "Execute Python code server-side via Azure AI Foundry's code_interpreter. " +
       "Has pandas, numpy, matplotlib, scipy pre-installed. Use for data analysis, " +
       "charts, complex math, and file processing. Runs in a managed Foundry sandbox " +
-      "(not the local sandbox). No egress policy needed.",
+      "(not the local sandbox). No egress policy needed.\n\n" +
+      "📂 OUTPUT FILES — IMPORTANT: " +
+      "(1) Foundry's container is EPHEMERAL — files written to `/mnt/data/<name>` " +
+      "in the snippet exist only for the duration of the call. " +
+      "(2) This tool ALREADY downloads any chart / image / CSV / file that the " +
+      "snippet writes to `/mnt/data/` and saves it under " +
+      "`/sandbox/.openclaw/workspace/<filename>`. The downloaded paths are " +
+      "returned in the `downloaded_files` field of the tool result. " +
+      "(3) DO NOT shell out (`cp`, `mv`, `shutil.copy`) inside Python to copy " +
+      "files into `/sandbox/...` — the Foundry sandbox cannot see your local " +
+      "filesystem; that path does not exist there. Just write to " +
+      "`/mnt/data/<name>` and read the `downloaded_files` field. " +
+      "(4) If a file you expected does not appear in `downloaded_files`, retry " +
+      "with `foundry_download_file(file_id=..., container_id=...)` using the " +
+      "ids surfaced in the call output.",
     parameters: {
       type: "object",
       properties: {
         input: {
           type: "string",
           description: "Natural language instruction or Python code to execute. " +
-            "The model will write and run Python code to fulfill the request.",
+            "The model will write and run Python code to fulfill the request. " +
+            "To produce a downloadable artifact, write it to `/mnt/data/<filename>`.",
         },
         model: {
           type: "string",
@@ -65,10 +80,23 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
     },
     async execute(_id: string, params: Record<string, unknown>) {
       try {
+        // Guard: Foundry's code-interpreter container has its OWN /sandbox
+        // and /tmp that are not visible to us. Block code that tries to write
+        // to those paths — those copies "succeed" silently and we'd never
+        // see the file. Save under /mnt/data/ instead.
+        const inputStr = typeof params.input === "string" ? params.input : "";
+        const forbidden = /(["'])(\/sandbox\/|\/tmp\/)/;
+        if (forbidden.test(inputStr)) {
+          return { content: [{ type: "text", text: "foundry_code_execute REJECTED: code references '/sandbox/' or '/tmp/' as a destination path. Foundry's code-interpreter container has its OWN /sandbox and /tmp that are NOT visible to your agent. Save files ONLY under /mnt/data/ — the wrapper auto-downloads them to your real /sandbox/.openclaw/workspace/. Then use the returned `path` value with mesh_transfer_file." }] };
+        }
         const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
           model: (params.model as string) || "gpt-4.1",
           input: params.input,
           tools: [{ type: "code_interpreter", container: { type: "auto" } }],
+          // Force code_interpreter invocation. Without tool_choice, the
+          // model often just describes the code in prose without actually
+          // executing it — producing no container_id and no output files.
+          tool_choice: { type: "code_interpreter" },
           store: false,
         });
         // Extract text output from Responses API format
@@ -136,34 +164,98 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
             }
           }
         }
+        // Annotation harvesting alone is unreliable: Foundry only emits
+        // container_file_citation when the model writes a markdown sandbox:
+        // link in its reply. Authoritative discovery is GET /openai/containers/
+        // {cid}/files which lists everything actually written. Aggregate
+        // container_ids from any code_interpreter_call we saw and list each.
+        try {
+          const containerIds = new Set<string>();
+          if (Array.isArray(output)) {
+            for (const item of output) {
+              if (item?.type === "code_interpreter_call" && typeof item.container_id === "string") {
+                containerIds.add(item.container_id);
+              }
+            }
+          }
+          for (const cid of containerIds) {
+            try {
+              const listed = await routerCall("GET", `/openai/containers/${encodeURIComponent(cid)}/files?api-version=2025-11-15-preview`);
+              const data = Array.isArray(listed?.data) ? listed.data : (Array.isArray(listed) ? listed : []);
+              for (const f of data) {
+                // Skip user-uploaded inputs; only collect assistant-produced files.
+                if (f && (f.source === "assistant" || f.source === undefined)) {
+                  collectFileRef(cid, f.id, f.path || f.filename);
+                }
+              }
+            } catch (listErr: any) {
+              log.warn(`foundry_code_execute: list files failed for ${cid.slice(0, 12)}...: ${listErr?.message || listErr}`);
+            }
+          }
+        } catch { /* best-effort */ }
         // Download every container file we discovered and write it to the
         // local workspace, so downstream tools (mesh_transfer_file, file_write,
         // mesh_send) can ship the bytes back to the parent.
+        const downloadedFiles: Array<{
+          path: string;
+          filename: string;
+          bytes: number;
+          file_id: string;
+          container_id: string;
+        }> = [];
+        const failedDownloads: Array<{
+          file_id: string;
+          container_id: string;
+          error: string;
+        }> = [];
         if (fileRefs.size > 0) {
           const fs = await import("node:fs");
           const path = await import("node:path");
           const workspaceDir = "/sandbox/.openclaw/workspace";
           try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
-          const downloaded: string[] = [];
+          const downloadedLines: string[] = [];
           for (const ref of fileRefs.values()) {
             const safeName = (ref.filename && /^[A-Za-z0-9._-]+$/.test(ref.filename))
               ? ref.filename
               : `${ref.file_id}.bin`;
             const dest = path.join(workspaceDir, safeName);
-            const dlPath = `/openai/containers/${encodeURIComponent(ref.container_id)}/files/${encodeURIComponent(ref.file_id)}/content`;
+            const dlPath = `/openai/containers/${encodeURIComponent(ref.container_id)}/files/${encodeURIComponent(ref.file_id)}/content?api-version=2025-11-15-preview`;
             try {
               const bytes = await routerCallBinary(dlPath, 60000);
               fs.writeFileSync(dest, bytes);
               log.info(`foundry_code_execute: saved ${safeName} (${bytes.length} bytes) from container ${ref.container_id.slice(0, 12)}...`);
-              downloaded.push(`- ${dest} (${bytes.length} bytes, file_id=${ref.file_id})`);
+              downloadedLines.push(`- ${dest} (${bytes.length} bytes, file_id=${ref.file_id})`);
+              downloadedFiles.push({
+                path: dest,
+                filename: safeName,
+                bytes: bytes.length,
+                file_id: ref.file_id,
+                container_id: ref.container_id,
+              });
             } catch (dlErr: any) {
               log.warn(`foundry_code_execute: download failed for ${ref.file_id}: ${dlErr?.message || dlErr}`);
-              downloaded.push(`- (download failed) file_id=${ref.file_id}: ${dlErr?.message || dlErr}`);
+              downloadedLines.push(`- (download failed) file_id=${ref.file_id}: ${dlErr?.message || dlErr}`);
+              failedDownloads.push({
+                file_id: ref.file_id,
+                container_id: ref.container_id,
+                error: String(dlErr?.message || dlErr),
+              });
             }
           }
-          if (downloaded.length > 0) {
-            textParts.push(`\nGenerated files (saved to local workspace):\n${downloaded.join("\n")}`);
+          if (downloadedLines.length > 0) {
+            textParts.push(`\nGenerated files (saved to local workspace):\n${downloadedLines.join("\n")}`);
           }
+        }
+        // Surface a structured tail block so the LLM can parse paths
+        // deterministically and route them to mesh_transfer_file.
+        if (downloadedFiles.length > 0 || failedDownloads.length > 0) {
+          textParts.push(`\n<downloaded_files>${JSON.stringify({
+            downloaded: downloadedFiles,
+            failed: failedDownloads,
+            hint: downloadedFiles.length > 0
+              ? "Use the `path` values directly with mesh_transfer_file or file_write — DO NOT cp/shutil.copy from inside Python."
+              : "No files downloaded. If a file was expected, retry with foundry_download_file(file_id, container_id).",
+          })}</downloaded_files>`);
         }
         return {
           content: [{
@@ -173,6 +265,81 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
         };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Foundry code execution failed: ${e.message}` }] };
+      }
+    },
+  });
+
+  // ── Foundry Download File: escape-hatch for missed container files ──
+  api.registerTool({
+    name: "foundry_download_file",
+    label: "Foundry Download File",
+    description:
+      "Download a single file from a Foundry code_interpreter container by " +
+      "file_id + container_id and save it to /sandbox/.openclaw/workspace/. " +
+      "Use this ONLY when foundry_code_execute did NOT auto-download a file " +
+      "you expected (e.g. the snippet wrote it to /mnt/data/ but the response " +
+      "lacked a container_file_citation annotation, or download failed in the " +
+      "main call). The ids are visible in the foundry_code_execute output " +
+      "(`code_interpreter_call.outputs[].file_id` / `container_id`). Returns " +
+      "the local path so you can hand it to mesh_transfer_file or file_write.",
+    parameters: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description: "Foundry container file id (e.g. cfile_abc123).",
+        },
+        container_id: {
+          type: "string",
+          description: "Foundry container id (e.g. cntr_abc123). Surfaced alongside file_id in the code_interpreter_call output.",
+        },
+        local_basename: {
+          type: "string",
+          description: "Optional output filename (e.g. 'chart.png'). If omitted, defaults to '<file_id>.bin'. Must be a single safe filename — no slashes.",
+        },
+      },
+      required: ["file_id", "container_id"],
+    },
+    async execute(_id: string, params: Record<string, unknown>) {
+      const fileId = String(params.file_id || "").trim();
+      const containerId = String(params.container_id || "").trim();
+      if (!fileId || !containerId) {
+        return { content: [{ type: "text", text: "foundry_download_file: file_id and container_id are required." }] };
+      }
+      const requestedName = typeof params.local_basename === "string"
+        ? params.local_basename.trim()
+        : "";
+      const safeName = (requestedName && /^[A-Za-z0-9._-]+$/.test(requestedName))
+        ? requestedName
+        : `${fileId}.bin`;
+      try {
+        const fs = await import("node:fs");
+        const path = await import("node:path");
+        const workspaceDir = "/sandbox/.openclaw/workspace";
+        try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
+        const dest = path.join(workspaceDir, safeName);
+        const dlPath = `/openai/containers/${encodeURIComponent(containerId)}/files/${encodeURIComponent(fileId)}/content?api-version=2025-11-15-preview`;
+        const bytes = await routerCallBinary(dlPath, 60000);
+        fs.writeFileSync(dest, bytes);
+        log.info(`foundry_download_file: saved ${safeName} (${bytes.length} bytes) from container ${containerId.slice(0, 12)}...`);
+        return {
+          content: [{
+            type: "text",
+            text: `Downloaded ${safeName} (${bytes.length} bytes) → ${dest}\n\n<downloaded_files>${JSON.stringify({
+              downloaded: [{
+                path: dest,
+                filename: safeName,
+                bytes: bytes.length,
+                file_id: fileId,
+                container_id: containerId,
+              }],
+              failed: [],
+              hint: "Use the `path` value directly with mesh_transfer_file or file_write.",
+            })}</downloaded_files>`,
+          }],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `foundry_download_file failed: ${e.message}` }] };
       }
     },
   });
