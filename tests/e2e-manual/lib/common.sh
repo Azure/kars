@@ -70,8 +70,8 @@ require_cluster() {
 }
 
 require_azureclaw_installed() {
-    if ! kubectl get crd clawsandboxes.azureclaw.io >/dev/null 2>&1; then
-        log_fail "AzureClaw CRDs not installed in this cluster (no clawsandboxes.azureclaw.io)"
+    if ! kubectl get crd clawsandboxes.azureclaw.azure.com >/dev/null 2>&1; then
+        log_fail "AzureClaw CRDs not installed in this cluster (no clawsandboxes.azureclaw.azure.com)"
         log_info "install with: helm upgrade --install azureclaw deploy/helm/azureclaw -n azureclaw-system --create-namespace"
         exit 2
     fi
