@@ -36,6 +36,7 @@ import {
   parentTrustedAmids,
   getCachedAmid,
   resolveAmidByName as _resolveAmidByName,
+  spawnedRoster,
 } from "../amid-cache.js";
 import { safeJson } from "../safe-json.js";
 import { validateMeshPayload } from "../mesh-payload-guard.js";
@@ -119,6 +120,15 @@ export interface AgtToolsDeps {
     outcome: "success" | "failed" | "timeout",
     startedAt: string,
   ) => Promise<void>;
+  /**
+   * Server-side blocking wait for the next non-internal inbox entry. Used
+   * by `azureclaw_mesh_inbox` (block_until_message) and `azureclaw_mesh_await`
+   * to obviate the LLM's poll-and-yield loop. Returns true on wake, false
+   * on timeout. Always resolves — never rejects. May be omitted by hosts
+   * that haven't wired the wake mechanism (older index.ts revisions); when
+   * absent, the blocking tool falls back to a single immediate read.
+   */
+  waitForInbox?: (timeoutMs: number) => Promise<boolean>;
 }
 
 export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
@@ -165,13 +175,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   api.registerTool({
     name: "azureclaw_spawn",
     label: "Spawn Sub-Agent",
-    description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files. Exchange data via azureclaw_mesh_send (include content in the message body). Sub-agents can also message EACH OTHER directly via mesh — you can instruct one sub-agent to forward its results to another sub-agent by name (e.g. 'send your analysis to the writer agent'). You don't need to relay everything yourself.",
+    description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files. Exchange data via azureclaw_mesh_send (include content in the message body). Sub-agents can also message EACH OTHER directly via mesh — you can instruct one sub-agent to forward its results to another sub-agent by name (e.g. 'send your analysis to the writer agent'). You don't need to relay everything yourself. ALWAYS pass a `role` describing the sub-agent's persona (e.g. 'data analyst', 'graphic designer', 'technical writer') — the platform builds a Peer roster from this and prepends it to every mesh task so siblings can resolve role references to canonical names without guessing.",
     parameters: {
       type: "object",
       properties: {
         name: { type: "string", description: "DNS-safe name for the sub-agent (lowercase alphanumeric + hyphens, e.g. 'auditor', 'analyst')" },
         model: { type: "string", description: "AI model deployment override. Omit to inherit the parent's model (recommended)." },
         governance: { type: "boolean", description: "Enable AGT governance + mesh communication (default: true)" },
+        role: { type: "string", description: "Short persona/role description for this sub-agent (e.g. 'data analyst', 'visualization engineer', 'technical writer'). Used by the platform to build a Peer roster shared with siblings so they can resolve role references to canonical names." },
       },
       required: ["name"],
     },
@@ -340,6 +351,19 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         // Collect known sibling names for context
         const siblings = [...amidToName.values()].filter(n => n !== agentName && n !== (process.env.SANDBOX_NAME || ""));
 
+        // Record this sibling's role in the spawn roster so subsequent
+        // azureclaw_mesh_send calls can prepend a deterministic "Peer roster:"
+        // block to outbound task content. The roster removes the LLM heuristic
+        // step of guessing which named peer matches a role reference like "the
+        // writer" or "the graphic designer" — siblings see canonical names.
+        if (typeof params.role === "string" && params.role.trim()) {
+          spawnedRoster.set(agentName, params.role.trim());
+        } else {
+          // Track the spawn even without a role so the roster lists every
+          // sibling. The role string falls back to the bare name.
+          spawnedRoster.set(agentName, "");
+        }
+
         return { content: [{ type: "text", text: JSON.stringify({
           ...result,
           phase: "Running",
@@ -405,7 +429,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     },
     async execute(_id: string, params: Record<string, unknown>) {
       let agentName = params.to_agent as string;
-      const msgContent = params.content as string;
+      let msgContent = params.content as string;
 
       // OFFLOAD HARDENING: native agents in offload sandboxes may call this
       // tool with their own sandbox name or an arbitrary sibling. Force
@@ -413,6 +437,31 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
         log.warn(`azureclaw_mesh_send: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
         agentName = "parent";
+      }
+
+      // Peer-roster injection (deterministic, parent-side). When we have
+      // 2+ spawned siblings, prepend a canonical roster block so the
+      // recipient's LLM never has to guess which named peer maps to a role
+      // reference like "the writer" or "the graphic designer". This sits
+      // outside the LLM loop on purpose — the parent already knows the
+      // role↔name mapping (it picked the names), so we encode it into the
+      // protocol rather than trusting the LLM to repeat it correctly.
+      // Skip when sending to 'parent' (no siblings to disambiguate) and
+      // when the content already starts with a `Peer roster:` block (idempotent).
+      if (agentName !== "parent" && spawnedRoster.size >= 2 && !/^Peer roster:/im.test(msgContent || "")) {
+        const rosterLines: string[] = [];
+        const myName = process.env.SANDBOX_NAME || "";
+        for (const [name, role] of spawnedRoster.entries()) {
+          if (name === myName) continue;
+          rosterLines.push(role ? `  - ${name} — ${role}` : `  - ${name}`);
+        }
+        if (rosterLines.length >= 2) {
+          const rosterBlock =
+            "Peer roster (use these EXACT agent names with mesh_send / mesh_transfer_file — never invent or substitute names):\n" +
+            rosterLines.join("\n") +
+            "\n\nWhen your task references a peer by role/persona (e.g. 'the writer', 'the analyst', 'the graphic designer'), route to the corresponding name in the roster above. If the roster does not disambiguate, send one mesh_send to 'parent' asking for the canonical name and wait for the reply — do not guess.\n\n---\n\n";
+          msgContent = rosterBlock + (msgContent || "");
+        }
       }
 
       // Guard: reject malformed file_transfer envelopes / cross-container
@@ -760,10 +809,17 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       "the tool is *peek-only* and shows only unread entries; messages stay " +
       "in the inbox so you can read them again. Pass mark_read=true once you " +
       "have acted on the contents to flag them as seen, or unread_only=false " +
-      "to also show entries you have already read on earlier turns. The " +
-      "response includes a `diagnostics` block with the gateway instance id " +
-      "and counters so you can tell apart 'no message has ever arrived' from " +
-      "'I already consumed the message earlier'.",
+      "to also show entries you have already read on earlier turns. " +
+      "**SERVER-SIDE BLOCKING:** When you are waiting for a sibling/parent " +
+      "to deliver something and the inbox is currently empty, set " +
+      "`block_until_message=true` (with optional `timeout_seconds`, default 120, " +
+      "max 300). The tool will sleep server-side until the next non-internal " +
+      "message lands or the timeout expires — NO need to poll repeatedly. " +
+      "This is the recommended pattern when your prompt says 'periodically " +
+      "check your inbox' — call once with block_until_message=true instead " +
+      "of looping. The response includes a `diagnostics` block with the " +
+      "gateway instance id and counters so you can tell apart 'no message " +
+      "has ever arrived' from 'I already consumed the message earlier'.",
     parameters: {
       type: "object",
       properties: {
@@ -779,6 +835,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           type: "number",
           description: "Maximum number of entries to return. Default 50.",
         },
+        block_until_message: {
+          type: "boolean",
+          description: "When true and the inbox is currently empty (after the unread_only filter), block server-side until a new non-internal message arrives or `timeout_seconds` elapses. Returns immediately if any matching message is already present. Default false (legacy peek behaviour).",
+        },
+        timeout_seconds: {
+          type: "number",
+          description: "Maximum seconds to block when `block_until_message=true`. Default 120, capped at 300 (5 minutes). Ignored when block_until_message is false.",
+        },
       },
     },
     async execute(_id: string, params: Record<string, unknown>) {
@@ -788,6 +852,10 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         const limit = typeof params.limit === "number" && params.limit > 0
           ? Math.floor(params.limit)
           : 50;
+        const blockUntilMessage = params.block_until_message === true;
+        const timeoutSeconds = typeof params.timeout_seconds === "number" && params.timeout_seconds > 0
+          ? Math.min(Math.floor(params.timeout_seconds), 300)
+          : 120;
 
         // ── 1. Filter out internal protocol/handshake messages from the
         //      view. They stay in the array (the mesh_send reply waiter
@@ -804,7 +872,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           "task_progress", "offload_progress",
         ]);
 
-        const visible = agtInbox.filter((m) => {
+        const computeVisible = (): typeof agtInbox => agtInbox.filter((m) => {
           try {
             const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
             if (INTERNAL_TYPES.has(parsed?.type)) return false;
@@ -813,7 +881,23 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           return true;
         });
 
-        const filtered = unreadOnly ? visible.filter((m) => !m.read_at) : visible;
+        let visible = computeVisible();
+        let filtered = unreadOnly ? visible.filter((m) => !m.read_at) : visible;
+
+        // ── 1b. Server-side blocking wait. When the agent is told to
+        //       "periodically check" for a peer message, the LLM otherwise
+        //       polls 3-5 times and gives up before the message lands.
+        //       This blocks server-side instead, costing zero LLM turns.
+        if (blockUntilMessage && filtered.length === 0 && deps.waitForInbox) {
+          const deadline = Date.now() + timeoutSeconds * 1000;
+          while (filtered.length === 0 && Date.now() < deadline) {
+            const remaining = Math.max(1, deadline - Date.now());
+            const woke = await deps.waitForInbox(remaining);
+            visible = computeVisible();
+            filtered = unreadOnly ? visible.filter((m) => !m.read_at) : visible;
+            if (!woke) break; // timeout fired
+          }
+        }
 
         // Take the most recent `limit` entries (chronological order kept).
         const slice = filtered.slice(-limit);
@@ -953,12 +1037,164 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           total_in_inbox: totalVisible,
           agt_relay_count: decoded.length,
           router_count: routerMessages.length,
-          filter: { unread_only: unreadOnly, limit, mark_read: markRead },
+          filter: { unread_only: unreadOnly, limit, mark_read: markRead, block_until_message: blockUntilMessage, timeout_seconds: blockUntilMessage ? timeoutSeconds : undefined },
           messages: allMessages,
           diagnostics: diag,
         }, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Inbox check failed: ${e.message}` }] };
+      }
+    },
+  });
+
+  // ── azureclaw_mesh_await ─────────────────────────────────────────────
+  // Server-side barrier: block until ALL named senders have delivered ≥1
+  // unread, non-internal message (or timeout). Returns the matched
+  // messages plus a `missing` list when partial. The intended pattern is
+  // for assembly steps that need multiple sibling outputs — call ONCE
+  // before assembly instead of polling mesh_inbox in a loop.
+  api.registerTool({
+    name: "azureclaw_mesh_await",
+    label: "Await Mesh Messages from Senders",
+    description:
+      "Block server-side until ALL listed senders have delivered ≥1 unread " +
+      "message via the AGT mesh (or until `timeout_seconds` elapses). USE " +
+      "THIS instead of polling `azureclaw_mesh_inbox` in a loop when your " +
+      "next step needs outputs from multiple siblings (e.g. writer needs " +
+      "both analyst's JSON and viz's images before it can assemble the " +
+      "brief). Returns the matched message ids per sender plus a `missing` " +
+      "list of senders that didn't deliver in time. The matched messages " +
+      "stay in the inbox — call `azureclaw_mesh_inbox` to read their " +
+      "contents (or pass `mark_read=true` here to flag them as seen on the " +
+      "way out). Internal protocol messages (handoff, file_transfer_ack, " +
+      "task_progress) do NOT satisfy the wait — only content-bearing " +
+      "messages count.",
+    parameters: {
+      type: "object",
+      properties: {
+        senders: {
+          type: "array",
+          items: { type: "string" },
+          description: "Agent names to wait for (matched against `from_agent`). The tool resolves once each named sender has at least one unread non-internal message in the inbox.",
+        },
+        timeout_seconds: {
+          type: "number",
+          description: "Maximum seconds to block. Default 180, capped at 600 (10 minutes).",
+        },
+        mark_read: {
+          type: "boolean",
+          description: "When true, mark the matched messages as read on resolve (or on timeout). Default false — matched messages remain unread so you can read them with mesh_inbox.",
+        },
+      },
+      required: ["senders"],
+    },
+    async execute(_id: string, params: Record<string, unknown>) {
+      try {
+        const sendersRaw = params.senders;
+        if (!Array.isArray(sendersRaw) || sendersRaw.length === 0) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "senders must be a non-empty array of agent names" }) }] };
+        }
+        const wantedSenders = sendersRaw
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim());
+        if (wantedSenders.length === 0) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "senders must contain at least one non-empty agent name" }) }] };
+        }
+        const wantedSet = new Set(wantedSenders.map((s) => s.toLowerCase()));
+        const timeoutSeconds = typeof params.timeout_seconds === "number" && params.timeout_seconds > 0
+          ? Math.min(Math.floor(params.timeout_seconds), 600)
+          : 180;
+        const markReadOnResolve = params.mark_read === true;
+
+        // Same internal-types filter as mesh_inbox — only content messages count.
+        const INTERNAL_TYPES = new Set([
+          "handoff_transfer", "handoff_verification", "handoff_ready",
+          "handoff:interrupt", "handoff:interrupt_ack",
+          "handoff:workspace_request", "handoff:workspace_response",
+          "handoff:workspace_inject", "handoff:workspace_inject_ack",
+          "handoff:resume", "handoff:resume_ack",
+          "file_transfer_ack",
+          "task_progress", "offload_progress",
+        ]);
+
+        const isInternal = (m: typeof agtInbox[number]): boolean => {
+          if (m.message_type && INTERNAL_TYPES.has(m.message_type)) return true;
+          try {
+            const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
+            if (parsed?.type && INTERNAL_TYPES.has(parsed.type)) return true;
+          } catch { /* not JSON */ }
+          return false;
+        };
+
+        // Returns map of sender -> matched-message-ids[] (unread, non-internal).
+        const computeMatches = (): Map<string, string[]> => {
+          const out = new Map<string, string[]>();
+          for (const m of agtInbox) {
+            if (m.read_at) continue;
+            if (isInternal(m)) continue;
+            const fromName = (m.from_agent || "").toLowerCase();
+            if (!wantedSet.has(fromName)) continue;
+            const list = out.get(fromName) ?? [];
+            list.push(m.id);
+            out.set(fromName, list);
+          }
+          return out;
+        };
+
+        let matches = computeMatches();
+        const startedAt = Date.now();
+        if (matches.size < wantedSet.size && deps.waitForInbox) {
+          const deadline = startedAt + timeoutSeconds * 1000;
+          while (matches.size < wantedSet.size && Date.now() < deadline) {
+            const remaining = Math.max(1, deadline - Date.now());
+            const woke = await deps.waitForInbox(remaining);
+            matches = computeMatches();
+            if (!woke) break;
+          }
+        }
+
+        const missing: string[] = [];
+        for (const wanted of wantedSet) if (!matches.has(wanted)) missing.push(wanted);
+
+        // Optionally flip read_at for matched entries.
+        let markedRead = 0;
+        if (markReadOnResolve) {
+          const allMatchedIds = new Set<string>();
+          for (const ids of matches.values()) for (const id of ids) allMatchedIds.add(id);
+          if (allMatchedIds.size > 0) {
+            const now = new Date().toISOString();
+            const newlyRead: string[] = [];
+            for (const m of agtInbox) {
+              if (allMatchedIds.has(m.id) && !m.read_at) {
+                m.read_at = now;
+                newlyRead.push(m.id);
+                markedRead += 1;
+              }
+            }
+            if (deps.markRead && newlyRead.length > 0) {
+              try { deps.markRead(newlyRead); } catch { /* best effort */ }
+            }
+          }
+        }
+
+        const matchedSummary: Record<string, string[]> = {};
+        for (const [sender, ids] of matches) matchedSummary[sender] = ids;
+
+        return { content: [{ type: "text", text: JSON.stringify({
+          status: missing.length === 0 ? "all_received" : "partial_timeout",
+          requested_senders: wantedSenders,
+          matched: matchedSummary,
+          missing,
+          mark_read: markReadOnResolve,
+          marked_read_count: markedRead,
+          waited_seconds: Math.round((Date.now() - startedAt) / 1000),
+          timeout_seconds: timeoutSeconds,
+          note: missing.length === 0
+            ? "All requested senders have delivered. Call azureclaw_mesh_inbox to read message contents."
+            : `Timeout: missing ${missing.join(", ")}. Call azureclaw_mesh_inbox to inspect what did arrive, then either retry mesh_await for the missing senders, or proceed with partial input.`,
+        }, null, 2) }] };
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `mesh_await failed: ${e.message}` }] };
       }
     },
   });
@@ -1233,6 +1469,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           amidToName.delete(amid);
           nameToAmid.delete(params.name as string);
         }
+        // Drop the destroyed sibling from the roster so future mesh_send
+        // calls don't advertise a peer that no longer exists.
+        spawnedRoster.delete(params.name as string);
 
         return { content: [{ type: "text", text: safeJson(result) }] };
       } catch (e: any) {

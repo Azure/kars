@@ -166,6 +166,10 @@ export class MeshConnection implements IMeshTransport {
     consume: boolean;
   }>();
 
+  // Inbox wakers — fired when a content (non-internal/non-claimed) message
+  // arrives, so server-side blocking inbox/await tools can wake immediately.
+  private inboxWakers = new Set<() => void>();
+
   constructor(config: ConnectionConfig) {
     this.config = config;
     this.maxInboxSize = config.maxInboxSize ?? 5000;
@@ -437,6 +441,42 @@ export class MeshConnection implements IMeshTransport {
       this.inbox.shift();
       this.stats.fifo_dropped += 1;
     }
+    // Wake any blocking inbox/await waiters. Internal/transport messages were
+    // already filtered upstream (handleTransportMessage absorbs them); anything
+    // that reaches pushInbox is a real content message.
+    if (this.inboxWakers.size > 0) {
+      const wakers = Array.from(this.inboxWakers);
+      this.inboxWakers.clear();
+      for (const w of wakers) {
+        try { w(); } catch { /* swallow — waker is best-effort */ }
+      }
+    }
+  }
+
+  /**
+   * Block up to `timeoutMs` until a new content message arrives in the inbox.
+   * Returns true if woken by a message, false on timeout. Used by mesh_inbox
+   * (block_until_message=true) and mesh_await to avoid LLM polling.
+   */
+  waitForInbox(timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const waker = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        this.inboxWakers.delete(waker);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        this.inboxWakers.delete(waker);
+        resolve(false);
+      }, Math.max(1, timeoutMs));
+      if (typeof (timer as any).unref === "function") (timer as any).unref();
+      this.inboxWakers.add(waker);
+    });
   }
 
   /**

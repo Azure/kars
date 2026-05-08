@@ -177,6 +177,68 @@ let agtConnected = false;
 let agtReconnectFailures = 0;
 const AGT_RECONNECT_MAX_BACKOFF = 300_000; // 5 min cap
 
+// ── Inbox wake mechanism (Patch S16.f.3 — server-side blocking inbox) ──
+// Tools that want to block until a peer message arrives register a one-shot
+// waker here. pushInbox() fires all registered wakers when a non-internal
+// message lands. The waker decides whether to resolve (if its predicate
+// matches) or stay registered for the next message. This obviates the LLM
+// poll-and-yield loop that was costing the demo an extra turn per inbox
+// poll, and that the LLM frequently abandoned after 3-5 polls.
+//
+// Internal protocol messages (handoff, file_transfer_ack, task_progress,
+// offload_progress) do NOT wake waiters — those are gateway plumbing, not
+// content the LLM is waiting for.
+const INBOX_WAKE_INTERNAL_TYPES = new Set<string>([
+  "handoff_transfer", "handoff_verification", "handoff_ready",
+  "handoff:interrupt", "handoff:interrupt_ack",
+  "handoff:workspace_request", "handoff:workspace_response",
+  "handoff:workspace_inject", "handoff:workspace_inject_ack",
+  "handoff:resume", "handoff:resume_ack",
+  "file_transfer_ack",
+  "task_progress", "offload_progress",
+  // Transport-level — already absorbed by meshHandleTransportMessage before
+  // pushInbox runs, but defensive in case a malformed envelope slips through.
+  "mesh:transfer_manifest", "mesh:transfer_chunk",
+]);
+
+const inboxWakers = new Set<() => void>();
+
+function fireInboxWakers(): void {
+  if (inboxWakers.size === 0) return;
+  // Snapshot to a list because resolved wakers self-remove via deleteWaker().
+  const snapshot = Array.from(inboxWakers);
+  for (const w of snapshot) {
+    try { w(); } catch { /* never let a waker crash pushInbox */ }
+  }
+}
+
+/**
+ * Register a one-shot waker that fires when the next non-internal inbox
+ * entry arrives OR when `timeoutMs` elapses. Returns a promise that
+ * resolves to true on wake, false on timeout. The waker is auto-removed
+ * either way.
+ */
+export function waitForInbox(timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const wake = (): void => {
+      if (settled) return;
+      settled = true;
+      inboxWakers.delete(wake);
+      clearTimeout(timer);
+      resolve(true);
+    };
+    inboxWakers.add(wake);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      inboxWakers.delete(wake);
+      resolve(false);
+    }, timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+  });
+}
+
 // Centralised inbox push: keep counters in lockstep with array growth so
 // the inbox tool can report meaningful diagnostics without scanning every
 // entry. All onMessage / error / handoff sites must call this instead of
@@ -193,6 +255,21 @@ function pushInbox(entry: {
   agtInbox.push(entry);
   inboxStats.received_total += 1;
   inboxStats.last_received_at = entry.timestamp;
+  // Wake any blocking inbox/await tool calls — but only for content-bearing
+  // messages, not gateway plumbing.
+  let isInternal = false;
+  if (entry.message_type && INBOX_WAKE_INTERNAL_TYPES.has(entry.message_type)) {
+    isInternal = true;
+  } else if (entry.content && typeof entry.content === "object") {
+    const t = (entry.content as { type?: string }).type;
+    if (t && INBOX_WAKE_INTERNAL_TYPES.has(t)) isInternal = true;
+  } else if (typeof entry.content === "string") {
+    try {
+      const parsed = JSON.parse(entry.content);
+      if (parsed?.type && INBOX_WAKE_INTERNAL_TYPES.has(parsed.type)) isInternal = true;
+    } catch { /* not JSON — treat as content */ }
+  }
+  if (!isInternal) fireInboxWakers();
 }
 
 // Offload request IDs currently being processed (either env-driven proactive
@@ -303,6 +380,7 @@ async function processTaskWithTools(
         inboxStats.last_read_at = new Date().toISOString();
       }
     },
+    waitForInbox,
   }, log);
 }
 
@@ -575,26 +653,38 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           timestamp: new Date().toISOString(),
           id: `agt-knock-${Date.now().toString(36)}`,
         });
-      } else if (type === 'session_desync') {
-        // Vendor patch #11: ratchet desync is recoverable — local session was
-        // cleared, next mesh_send to this peer will trigger a fresh KNOCK.
-        // Do NOT penalize trust (this is a protocol issue, not a security event).
-        log.warn(`AGT session_desync with '${fromName}' (${fromAmid.slice(0, 12)}): ${detail} — session cleared, next send will rekey`);
+      } else if (type === 'session_desync' || type === 'no_session' || type === 'decrypt_failed') {
+        // Vendor patches #11/#17: ratchet desync, no-session, and one-off
+        // decrypt failures are recoverable PROTOCOL events, not security
+        // events. The SDK self-heals via patch #17 (rebuild responder from
+        // fresh X3DH bundle on the peer's next send). Penalising trust
+        // here caused a "trust bleed" where every desync chain (often
+        // 3-10 messages mid-file-transfer) would drag a peer's score
+        // below threshold and then KNOCK-block them permanently.
+        // Surface a single advisory inbox entry per event for operator
+        // visibility, but do NOT touch trust score.
+        const advice = type === 'session_desync'
+          ? 'session cleared, next send will rekey via fresh X3DH'
+          : type === 'no_session'
+            ? 'peer sent without a fresh X3DH bundle; will recover on next x3dh-attached send'
+            : 'one-off decrypt failure; SDK will retry with fresh bundle on the next message';
+        log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail} — ${advice}`);
         pushInbox({
           from_amid: fromAmid,
           from_agent: fromName,
-          content: `⚠️ AGT session with ${fromName} was cleared due to ratchet desync (${detail}). The previous in-flight message was lost. Next mesh_send to this peer will re-establish a fresh encrypted session — please retry the message if it was important.`,
+          content: `ℹ️ AGT protocol event (${type}) with ${fromName}: ${detail}. ${advice}. Trust score unchanged.`,
           message_type: "session_event",
           timestamp: new Date().toISOString(),
-          id: `agt-desync-${Date.now().toString(36)}`,
+          id: `agt-${type}-${Date.now().toString(36)}`,
         });
       } else {
+        // Genuine security events: tampering, signature failures, etc.
         log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
         pushTrustToRouter(fromName, -0.5);
         pushInbox({
           from_amid: fromAmid,
           from_agent: fromName,
-          content: `⚠️ E2E DECRYPTION FAILURE: ${type} — ${detail}. Message was REJECTED (not delivered). This may indicate a session mismatch or tampering.`,
+          content: `⚠️ E2E SECURITY EVENT: ${type} — ${detail}. Message was REJECTED (not delivered).`,
           message_type: "security_event",
           timestamp: new Date().toISOString(),
           id: `agt-err-${Date.now().toString(36)}`,
@@ -2709,6 +2799,7 @@ const azureClawPlugin = definePluginEntry({
       handoffState,
       runHandoffOrchestration: _runHandoffOrchestration,
       recordMeshSession,
+      waitForInbox,
     });
 
     // ── HTTP fetch + Foundry tool registrations (S15.f.8) ──────────────
@@ -2716,13 +2807,23 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
-    registerFoundryTools(api, {
-      log,
-      config,
-      getFoundryProject: () => foundryProject,
-    });
-
-    if (!bannerAlreadyPrinted) log.info("Foundry tools registered: foundry_code_execute, foundry_image_generation, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
+    // Skip Foundry tool catalog when running against GitHub Models. GH Models
+    // has a hard 16k input-token cap per request — registering all 9 Foundry
+    // tools (~25k bytes of schemas + skill prompts) blows past the cap on
+    // every chat turn, surfacing as alternating 413 errors. The Foundry tools
+    // require a real Azure project anyway, so they're pure dead weight in
+    // GH Models mode. Keep agt-governance + azureclaw-spawn (model-agnostic).
+    const ghModelsMode = process.env.AZURECLAW_PROVIDER === "github-models";
+    if (!ghModelsMode) {
+      registerFoundryTools(api, {
+        log,
+        config,
+        getFoundryProject: () => foundryProject,
+      });
+      if (!bannerAlreadyPrinted) log.info("Foundry tools registered: foundry_code_execute, foundry_image_generation, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
+    } else if (!bannerAlreadyPrinted) {
+      log.info("GitHub Models mode: Foundry tool catalog skipped (16k token cap; Foundry skills require an Azure project)");
+    }
 
     registerOpenClawCommands(api, {
       log,

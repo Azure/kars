@@ -13,23 +13,43 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 | For | You need |
 |---|---|
-| Local mode (Foundry) | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
+| **Local mode (GitHub Copilot — recommended)** | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an active **GitHub Copilot** seat (Individual / Business / Enterprise). One device-code OAuth login at signup. **No Azure account, no PAT, no key files.** |
+| Local mode (Foundry / Azure OpenAI) | Docker Desktop, Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
 | Local mode (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
 | AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
 The CLI bootstraps everything else (Helm chart install, Foundry resource creation, ACR build/push, federated identity wiring). You do not need to provision any of it by hand.
 
-### Quickest path: GitHub Models (no Azure account)
+### Quickest path: GitHub Copilot (no Azure account, no PAT)
 
-If you just want to play with `azureclaw dev` and don't care about the Foundry-only features (Memory Store, agents, evaluations, indexes, inline Content Safety), you can run inference through **GitHub Models** with nothing but a GitHub PAT:
+If you have a GitHub Copilot seat — Individual, Business, or Enterprise — `azureclaw dev` is a one-step setup:
+
+1. Run `azureclaw dev`. The CLI prints a **device code** and a URL.
+2. Open <https://github.com/login/device> in your browser, paste the code, approve the AzureClaw client.
+3. Pick a model from the catalogue the CLI shows you — **Claude Opus 4.7**, **Claude Sonnet 4.5**, **GPT-5**, **GPT-4.1**, **Gemini 2.5 Pro**, **o4-mini**, etc. The router will use it for every chat completion the agent makes.
+
+That's it. No PAT to rotate, no API key on disk, no subscription to provision. The OAuth token is stored in `~/.azureclaw/` and refreshed automatically.
+
+**Why we recommend Copilot for the inner loop:**
+
+- **Frontier models, large contexts.** Claude Opus 4.7 / GPT-5 / Gemini 2.5 Pro through one auth surface — exactly the catalogue you'd compose by hand against three vendors.
+- **Native Anthropic shape for Claude.** AzureClaw routes Claude requests to Copilot's `/v1/messages` endpoint with no shape translation, preserving full tool-calling fidelity (no lossy OpenAI-to-Anthropic rewrites).
+- **One credential, no key sprawl.** The same OAuth token works for the parent agent and every sub-agent it spawns; the router refreshes it on its own.
+- **Sub-agent inheritance.** Spawned sub-agents automatically inherit the parent's provider, model, and credentials — no per-agent wiring.
+
+You can switch to Foundry or GitHub Models any time with `azureclaw credentials`.
+
+### Alternative: GitHub Models (no Azure account, smaller scale)
+
+If you don't have a Copilot seat and don't want to provision Foundry, GitHub Models works with just a PAT:
 
 1. Create a fine-grained PAT at <https://github.com/settings/personal-access-tokens/new> with the **`models:read`** scope.
-2. Run `azureclaw dev` and pick **GitHub Models** at the first prompt.
+2. Run `azureclaw dev` and pick **GitHub Models** at the provider prompt.
 3. Paste your PAT. The CLI verifies it against `https://models.github.ai/catalog/models` and saves it to `~/.azureclaw/`.
 
 Subsequent runs reuse the saved provider — no flag required. To override for one run only (without overwriting your saved provider), pass `--github-token <pat>`.
 
-> ⚠️ **Trade-offs in GitHub Models mode.** Foundry-only routes return `501 Not Implemented` (Memory Store, agents, evaluations, indexes, knowledge bases, datasets, deployments, connections). Inline Content Safety prompt-shield filtering is **not enforced** server-side — the router can only act on `prompt_filter_results` returned by the model, and GitHub Models doesn't return them. Subject to GitHub Models rate limits (free-tier; see [GitHub Models docs](https://docs.github.com/github-models)).
+> ⚠️ **Trade-offs in GitHub Models mode.** Foundry-only routes return `501 Not Implemented` (Memory Store, agents, evaluations, indexes, knowledge bases, datasets, deployments, connections). Inline Content Safety prompt-shield filtering is **not enforced** server-side — the router can only act on `prompt_filter_results` returned by the model, and GitHub Models doesn't return them. Smaller context windows and tighter rate limits than Copilot or Foundry — fine for trivial demos, frustrating for real agent loops. See [GitHub Models docs](https://docs.github.com/github-models) for current quotas.
 
 ### Don't have an Azure AI Foundry deployment yet?
 
@@ -80,38 +100,61 @@ The CLI is a Node 22 ESM build with a small Rust dependency for the local router
 ### 1.2 Launch a sandbox
 
 ```bash
-azureclaw dev --name hello
+azureclaw dev
 ```
 
-On the first run you are prompted to pick a provider:
+On the first run you are shown a **3-way provider picker**:
 
-- **Azure AI Foundry / Azure OpenAI** — full feature set. Asks for your endpoint, model deployment name, and resource-level API key. **The API key is the only credential local mode ever sees, and it is mounted from a local secret file — it never leaves your machine.**
-- **GitHub Models** — free, no Azure account needed. Asks only for your GitHub PAT (`models:read` scope). Endpoint is hardcoded to `https://models.github.ai/inference`. Default model is `gpt-4o-mini`. Foundry-only routes return `501`.
+```
+$ azureclaw dev
+
+  ╭────────────────────────────────────────────────╮
+  │  AzureClaw · Local Sandbox                     │
+  │  Secure AI Agent Runtime on Azure              │
+  ╰────────────────────────────────────────────────╯
+
+  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.
+  Copilot is the default (largest context). You can change later with `azureclaw credentials`.
+
+? Which inference provider do you want to use?
+❯ GitHub Copilot                    (recommended; needs an active Copilot seat — large context, Claude/GPT/Gemini)
+  Azure AI Foundry / Azure OpenAI   (full feature set: Memory Store, agents, Content Safety, etc.)
+  GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)
+```
+
+- **GitHub Copilot** *(default — recommended)*. The CLI prints a device code and a URL (`https://github.com/login/device`); you paste it, approve once, and the OAuth token is stored in `~/.azureclaw/`. The CLI then fetches the live model catalogue from the Copilot API and lets you pick — Claude Opus 4.7, Claude Sonnet 4.5, GPT-5, GPT-4.1, Gemini 2.5 Pro, o-series, etc. The router refreshes the token automatically. **No Azure account, no PAT, no key files.**
+- **Azure AI Foundry / Azure OpenAI** — full feature set. Asks for your endpoint, model deployment name, and resource-level API key. The API key is the only credential local mode ever sees, and it is mounted from a local secret file — it never leaves your machine. Required for Memory Store, agents, evaluations, indexes, and inline Content Safety.
+- **GitHub Models** — free, no Azure account needed. Asks only for your GitHub PAT (`models:read` scope). Endpoint is hardcoded to `https://models.github.ai/inference`. Default model is `gpt-4o-mini`. Foundry-only routes return `501`. Smaller context windows than Copilot.
 
 Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs.
 
 To switch providers later (or rotate keys), run **`azureclaw credentials`** — the same interactive prompt is exposed there too. The same command also handles channel tokens (Telegram, Slack, Discord) and third-party API keys (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI). Or scriptable: `azureclaw credentials set <key> <value>` / `list` / `remove`.
 
+After the provider picker, `azureclaw dev` also prompts for an **agent name** (default `dev-agent` — hit Enter to accept) and offers any saved channel tokens for one-tap wiring.
+
 The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router pod, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
+
+> 💡 **Picking a model with Copilot.** Claude Opus 4.7 is the largest-context option and the best default for tool-heavy agents. Sonnet 4.5 is faster and cheaper for routine tasks. GPT-5 is comparable on reasoning. Switching is `azureclaw credentials` → re-pick — the saved OAuth token is reused, only the model selection changes.
 
 ### 1.3 Talk to the agent
 
 ```bash
-azureclaw connect hello   # opens the TUI
+azureclaw connect dev-agent   # opens the TUI
 ```
 
 Or drive it from another terminal:
 
 ```bash
 azureclaw list               # see running sandboxes
-azureclaw logs hello -f      # tail logs (router + agent)
-azureclaw policy show hello  # what is allowed / denied / approval-gated
+azureclaw logs dev-agent -f      # tail logs (router + agent)
+azureclaw policy show dev-agent  # what is allowed / denied / approval-gated
+azureclaw operator           # live fleet TUI — agents, model, mesh peers, egress, audit
 ```
 
 When you are done:
 
 ```bash
-azureclaw destroy hello
+azureclaw destroy dev-agent
 ```
 
 ### 1.4 What you just ran

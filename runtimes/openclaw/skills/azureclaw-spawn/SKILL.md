@@ -25,12 +25,25 @@ Spawn secure isolated sub-agent sandboxes on AKS. Each sub-agent runs in its own
 
 ## Workflow
 
-1. **azureclaw_spawn** with name, model (default: gpt-4.1), governance: true
+1. **azureclaw_spawn** with `name`, `model` (default: parent's), `governance: true`, and **`role`** (the persona — e.g. `"data analyst"`, `"visualization engineer"`, `"technical writer"`). The platform tracks the role in a Peer roster and prepends it to every mesh_send so siblings can resolve role references to canonical names.
 2. **azureclaw_spawn_status** — poll every 5s until phase is "Running"
 3. **azureclaw_mesh_send** — send the task to the sub-agent
 4. Wait 30-60 seconds for the sub-agent to process and auto-reply
 5. **azureclaw_mesh_inbox** — read the sub-agent's response
 6. **azureclaw_spawn_destroy** — clean up when done
+
+### Multi-agent peer roster (CRITICAL for pipelines)
+
+When you spawn multiple sub-agents that will hand work to each other (e.g. `analyst → viz → writer`), always pass a `role` to every spawn. The platform automatically prepends a `Peer roster:` block to every mesh_send:
+
+```
+Peer roster (use these EXACT agent names with mesh_send / mesh_transfer_file ...):
+  - analyst — data analyst
+  - viz — visualization engineer
+  - writer — technical writer
+```
+
+This eliminates LLM guessing when sub-agents reference each other by role ("hand to the writer"). Without `role`, the roster lists names only and your sub-agents may misroute artifacts.
 
 ## File sharing between agents — CRITICAL
 

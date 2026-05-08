@@ -21,6 +21,7 @@ pub mod behavior_monitor;
 pub mod blocklist;
 pub mod budget;
 pub mod config;
+pub mod copilot_auth;
 pub mod egress_blocked;
 pub mod errors;
 pub mod forward_proxy;

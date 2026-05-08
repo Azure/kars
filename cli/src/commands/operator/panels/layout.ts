@@ -223,7 +223,7 @@ function buildRows(state: ClusterState): CrdRow[] {
   // ClawSandbox — uses SandboxInfo (no conditions; health field is authoritative).
   for (const s of state.sandboxes) {
     const rk = s.runtimeKind || "OpenClaw";
-    const status = `${rk}  ·  ${s.model || "-"}  ·  ${s.isolation || "-"}  ·  ${s.role}`;
+    const status = `${s.model || "-"}  ·  ${rk}  ·  ${s.isolation || "-"}  ·  ${s.role}`;
     rows.push({
       index: next(),
       kind: "ClawSandbox",

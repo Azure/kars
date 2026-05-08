@@ -33,55 +33,65 @@ require_azureclaw_installed
 
 name="failmodes-openclaw"
 ns=$(new_ns "failmodes")
+pod_ns=$(pod_ns_for "$name")
+export MANUAL_E2E_SCENARIO=failures
 
+metric_start "admit_${name}"
 cr_openclaw "$name" "$ns" | kubectl apply -f - >/dev/null
+metric_finish "admit_${name}" failures admitClawSandbox "sandbox=${name}"
 wait_for_clawsandbox_ready "$ns" "$name" || {
     log_fail "initial sandbox never became Ready"
-    cleanup_ns "$ns"; exit 1
+    cleanup_sandbox "$ns" "$name"; exit 1
 }
-pod=$(kubectl -n "$ns" get pod -l "azureclaw.io/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
+pod=$(kubectl -n "$pod_ns" get pod -l "azureclaw.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
 
 # 1. Router crash
 log_step "[1/3] killing inference-router container"
-kubectl -n "$ns" exec "$pod" -c inference-router -- sh -c 'kill 1' 2>/dev/null || true
+kubectl -n "$pod_ns" exec "$pod" -c inference-router -- sh -c 'kill 1' 2>/dev/null || true
 sleep 5
+metric_start "recover_router"
 if wait_for_clawsandbox_ready "$ns" "$name"; then
     log_pass "sandbox recovered after inference-router restart"
+    metric_finish "recover_router" failures recoveryRouterCrash "sandbox=${name}"
 else
     log_fail "sandbox did not return to Ready after router restart"
 fi
 
 # 2. Relay disconnect
-if kubectl -n agentmesh get deploy agentmesh-relay >/dev/null 2>&1; then
-    log_step "[2/3] scaling agentmesh-relay to 0 to simulate a network split"
-    orig_replicas=$(kubectl -n agentmesh get deploy agentmesh-relay -o jsonpath='{.spec.replicas}')
-    kubectl -n agentmesh scale deploy/agentmesh-relay --replicas=0 >/dev/null
+if kubectl -n agentmesh get deploy relay >/dev/null 2>&1; then
+    log_step "[2/3] scaling agentmesh relay to 0 to simulate a network split"
+    orig_replicas=$(kubectl -n agentmesh get deploy relay -o jsonpath='{.spec.replicas}')
+    kubectl -n agentmesh scale deploy/relay --replicas=0 >/dev/null
     sleep 10
     # Sandbox should remain Running but mesh ops fail closed.
-    if kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.phase}' | grep -q Running; then
+    if kubectl -n "$pod_ns" get pod "$pod" -o jsonpath='{.status.phase}' | grep -q Running; then
         log_pass "sandbox pod remained Running through relay outage (no crash loop)"
     else
         log_fail "sandbox pod went non-Running on relay outage"
     fi
-    kubectl -n agentmesh scale deploy/agentmesh-relay --replicas="${orig_replicas:-1}" >/dev/null
-    if kubectl -n agentmesh rollout status deploy/agentmesh-relay --timeout="${MANUAL_E2E_TIMEOUT:-300}s" >/dev/null 2>&1; then
-        log_pass "agentmesh-relay scaled back successfully"
+    kubectl -n agentmesh scale deploy/relay --replicas="${orig_replicas:-1}" >/dev/null
+    if kubectl -n agentmesh rollout status deploy/relay --timeout="${MANUAL_E2E_TIMEOUT:-300}s" >/dev/null 2>&1; then
+        log_pass "agentmesh relay scaled back successfully"
     else
-        log_fail "agentmesh-relay did not roll out after scale-up"
+        log_fail "agentmesh relay did not roll out after scale-up"
     fi
 else
-    log_skip "[2/3] agentmesh-relay not installed — mesh disconnect probe skipped"
+    log_skip "[2/3] agentmesh relay not installed — mesh disconnect probe skipped"
 fi
 
 # 3. OOM
 log_step "[3/3] inducing memory pressure inside the sandbox"
 # Allocate a 256MiB string in the sandbox shell. If limits are tight the
 # kernel kills it; if not, this is a no-op probe.
-kubectl -n "$ns" exec "$pod" -c openclaw -- sh -c \
+# Exec into openclaw is policy-banned by default — the OOM probe is a
+# legitimate destructive test, so flip the audited break-glass label.
+enable_break_glass "$pod_ns"
+kubectl -n "$pod_ns" exec "$pod" -c openclaw -- sh -c \
     'python3 -c "x=[bytearray(1024*1024) for _ in range(512)]" 2>&1 | head -2' \
     >/dev/null 2>&1 || true
+disable_break_glass "$pod_ns"
 sleep 5
-restart_count=$(kubectl -n "$ns" get pod "$pod" \
+restart_count=$(kubectl -n "$pod_ns" get pod "$pod" \
     -o jsonpath='{.status.containerStatuses[?(@.name=="openclaw")].restartCount}' 2>/dev/null || echo 0)
 log_info "openclaw container restartCount = ${restart_count}"
 if [[ "$restart_count" -ge 1 ]]; then
@@ -96,5 +106,5 @@ else
     log_fail "sandbox not Ready at end of failure-modes scenario"
 fi
 
-cleanup_ns "$ns"
+cleanup_sandbox "$ns" "$name"
 scenario_summary "Failure modes"

@@ -17,6 +17,7 @@ use crate::auth::WorkloadIdentityAuth;
 use crate::blocklist::Blocklist;
 use crate::budget::TokenBudgetTracker;
 use crate::config::Config;
+use crate::copilot_auth::CopilotTokenCache;
 use crate::egress_blocked::BlockedBuffer;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
@@ -63,6 +64,11 @@ pub use a2a::{A2aRouteState, a2a_routes};
 #[derive(Clone)]
 pub struct AppState {
     pub auth: Arc<WorkloadIdentityAuth>,
+    /// GitHub Copilot token cache. Constructed unconditionally (cheap, lazy)
+    /// — `proxy::forward()` only consults it when the upstream endpoint is
+    /// `api.githubcopilot.com`. When no GH token is configured and the
+    /// Copilot path is hit, the proxy returns a clean 502 instead of panicking.
+    pub copilot: Arc<CopilotTokenCache>,
     pub client: reqwest::Client,
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
@@ -168,6 +174,7 @@ impl AppState {
 
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
+            copilot: Arc::new(CopilotTokenCache::from_env()),
             client: client.clone(),
             config: Arc::new(config),
             budget,

@@ -29,8 +29,13 @@ source "${LIB_DIR}/common.sh"
 # id           script                                 description
 declare -a SCENARIOS=(
     "runtime|runtime_matrix.sh|Bring up every supported runtime and assert Ready"
+    "crds|crd_admission.sh|Admission + status for the 7 untested AzureClaw CRDs"
+    "inference|inference_smoke.sh|Agent → router → Foundry round-trip (per runtime)"
+    "foundry-bing|foundry_bing.sh|Foundry Bing grounding tool through the router"
+    "agt-mesh|agt_mesh.sh|AGT mesh: 1sub, 2sub-parallel, sibling, multiturn"
     "mesh|cross_runtime_mesh.sh|Cross-runtime AgentMesh round-trip"
     "governance|governance_lane.sh|Content Safety, Policy, Rate-Limit, Trust"
+    "egress|egress_lifecycle.sh|Egress allowlist: learn → enforce → approve → deny"
     "failures|failure_modes.sh|Router crash, relay disconnect, OOM"
     "isolation|multi_tenant_isolation.sh|NetworkPolicy + SA + token isolation"
 )
@@ -106,9 +111,77 @@ else
     done
 fi
 
+# ── Signal handling + cleanup ──────────────────────────────────────────
+# Without these, ^C is swallowed by the bash subshell that runs each
+# scenario and the run can't be aborted. We forward SIGINT/SIGTERM to
+# the current scenario child, then run a label-scoped sweep on EXIT to
+# remove any leftover CR namespaces and sandbox pod namespaces. The
+# sweep is opt-out via --keep-ns / MANUAL_E2E_KEEP_NS=1.
+SCENARIO_PID=""
+INTERRUPTED=0
+
+_forward_signal() {
+    local sig="$1"
+    INTERRUPTED=1
+    if [[ -n "$SCENARIO_PID" ]] && kill -0 "$SCENARIO_PID" 2>/dev/null; then
+        # Send to the whole process group of the scenario subshell.
+        kill -"$sig" "-$SCENARIO_PID" 2>/dev/null || kill -"$sig" "$SCENARIO_PID" 2>/dev/null || true
+    fi
+}
+trap '_forward_signal INT'  INT
+trap '_forward_signal TERM' TERM
+
+_cleanup_on_exit() {
+    local rc=$?
+    trap - INT TERM EXIT
+    if [[ "${MANUAL_E2E_KEEP_NS:-0}" == "1" ]]; then
+        echo "[INFO] --keep-ns set; skipping namespace sweep"
+        return $rc
+    fi
+    if (( INTERRUPTED == 1 )); then
+        echo "[INFO] interrupted — sweeping leftover manual-e2e namespaces…"
+    else
+        echo "[INFO] sweeping leftover manual-e2e namespaces…"
+    fi
+    # CR namespaces are labeled by the factory; pod namespaces are
+    # named azureclaw-<sandbox> and labeled by the controller. We match
+    # both via the same label so the sweep is scoped.
+    local ns_list
+    ns_list=$(kubectl get ns \
+        -l azureclaw.azure.com/test-suite=manual-e2e \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    if [[ -z "$ns_list" ]]; then
+        echo "[INFO] nothing to sweep"
+        return $rc
+    fi
+    # Drop CR finalizers first so deletion isn't blocked when the
+    # controller is unhealthy. Best-effort.
+    for ns in $ns_list; do
+        kubectl -n "$ns" get clawsandbox -o name 2>/dev/null | while read -r cr; do
+            kubectl -n "$ns" patch "$cr" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+        done
+    done
+    # shellcheck disable=SC2086
+    kubectl delete ns $ns_list --wait=false --ignore-not-found 2>&1 | sed 's/^/    /' || true
+    return $rc
+}
+trap _cleanup_on_exit EXIT
+
 # ── Pre-flight ─────────────────────────────────────────────────────────
 require_cluster
 require_azureclaw_installed
+
+# Reset metrics file for this run so percentile aggregation reflects
+# only scenarios from this invocation. Past runs are preserved as
+# *.jsonl.<timestamp> archives in the output dir.
+if [[ -s "${MANUAL_E2E_METRICS_FILE}" ]]; then
+    archive="${MANUAL_E2E_METRICS_FILE}.$(date +%Y%m%dT%H%M%S)"
+    mv "${MANUAL_E2E_METRICS_FILE}" "${archive}"
+    echo "[INFO] archived prior metrics → ${archive}"
+fi
+: > "${MANUAL_E2E_METRICS_FILE}"
+echo "[INFO] metrics file:   ${MANUAL_E2E_METRICS_FILE}"
+echo "[INFO] run id:         ${MANUAL_E2E_RUN_ID}"
 
 start_ts=$(date +%s)
 TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_SKIP=0
@@ -127,14 +200,30 @@ for s in "${selected[@]}"; do
     echo "════════════════════════════════════════════════════════════════"
     echo "▶ scenario: ${id} — ${desc}"
     echo "════════════════════════════════════════════════════════════════"
-    # Run in a subshell so counters reset per-scenario; capture exit.
-    if ( bash "$path" ); then
-        : # scenario_summary inside the script reports its own counts
-    else
-        rc=$?
-        echo "scenario '${id}' exited with code ${rc}" >&2
+    scen_start=$(_metrics_now_ms)
+    # Run scenario in its own process group (job control) so we can
+    # forward ^C cleanly. `wait` returns immediately on signal, letting
+    # the INT trap fire.
+    set +e
+    set -m
+    bash "$path" &
+    SCENARIO_PID=$!
+    set +m
+    wait "$SCENARIO_PID"
+    scen_rc=$?
+    SCENARIO_PID=""
+    set -e
+    if (( scen_rc != 0 )); then
+        echo "scenario '${id}' exited with code ${scen_rc}" >&2
         FAILED_SCENARIOS+=("$id")
         TOTAL_FAIL=$((TOTAL_FAIL + 1))
+    fi
+    scen_end=$(_metrics_now_ms)
+    metric_emit "$id" scenarioWallClock ms "$((scen_end - scen_start))" \
+        "exit=${scen_rc}"
+    if (( INTERRUPTED == 1 )); then
+        echo "[INFO] interrupted — stopping scenario loop"
+        break
     fi
 done
 
@@ -149,5 +238,9 @@ echo "  scenarios failed:   ${#FAILED_SCENARIOS[@]}"
 [[ ${#FAILED_SCENARIOS[@]} -gt 0 ]] && echo "  failures:           ${FAILED_SCENARIOS[*]}"
 echo "  elapsed:            ${elapsed}s"
 echo "════════════════════════════════════════════════════════════════"
+
+# Benchmark summary across every scenario run.
+metrics_summary "${MANUAL_E2E_METRICS_FILE}"
+echo "  raw metrics: ${MANUAL_E2E_METRICS_FILE}"
 
 [[ ${#FAILED_SCENARIOS[@]} -eq 0 ]] || exit 1

@@ -27,7 +27,7 @@ isolation. Run it before each release tag.
    helm upgrade --install azureclaw deploy/helm/azureclaw \
      -n azureclaw-system --create-namespace
    ```
-3. CRDs registered (`kubectl get crd clawsandboxes.azureclaw.io`).
+3. CRDs registered (`kubectl get crd clawsandboxes.azureclaw.azure.com`).
 4. `kubectl`, `bash`, and (for the cross-runtime mesh scenario) `yq`.
 5. AgentMesh relay + registry deployed in the `agentmesh` namespace if
    you want the mesh + governance scenarios. They are auto-installed by
@@ -87,6 +87,45 @@ aggregate at the end and exits non-zero if any scenario failed.
 | `AZURECLAW_E2E_PEER_A` / `_B` | `openclaw` / `oai-agents` | Peer choice for the `mesh` scenario. |
 | `AZURECLAW_E2E_GOV_RUNTIME` | `openclaw` | Sandbox runtime for the `governance` scenario. |
 | `AZURECLAW_E2E_BURST` | `60` | Request count for the rate-limit probe. |
+| `MANUAL_E2E_OUTDIR` | `/tmp/azureclaw-e2e-manual` | Where the metrics JSONL + archived runs live. |
+| `MANUAL_E2E_METRICS_FILE` | `${OUTDIR}/metrics.jsonl` | Override the metrics output path. |
+
+---
+
+## Benchmark metrics
+
+Every run emits one JSON-line per measured event to
+`${MANUAL_E2E_METRICS_FILE}` (default `/tmp/azureclaw-e2e-manual/metrics.jsonl`)
+and prints a `min/p50/avg/p95/max` summary table at the end.
+
+Captured out-of-the-box:
+
+| Metric | Unit | Where |
+|---|---|---|
+| `admitClawSandbox` | ms | wall-clock of `kubectl apply` for the CR (CRD validation + admission) |
+| `crdAccepted` / `crdRejected` | count | per-runtime accept/reject tally |
+| `ttiSandbox` | ms | from `wait_for_clawsandbox_ready` start to `phase=Running`/`Ready=True` |
+| `ttrPodRunning` | ms | from Ready to first pod observed `phase=Running` |
+| `ttfrInference` | ms | first router HTTP round-trip in the governance scenario |
+| `recoveryRouterCrash` | ms | time to return to Ready after killing the inference-router container |
+| `restartCount` | count | total container restart count for the sandbox pod at success |
+| `cleanupNs` | ms | namespace teardown latency |
+| `scenarioWallClock` | ms | total elapsed per scenario |
+
+Each row carries free-form `tags` (`runtime=`, `sandbox=`, `ns=`, `probe=`)
+so you can grep / aggregate per-runtime or per-probe later. Prior runs
+are preserved as `metrics.jsonl.<timestamp>` archives in the output
+directory — handy for tracking regression deltas across PRs.
+
+Add new measurements in your scenario with:
+
+```bash
+metric_start mylabel
+... do work ...
+metric_finish mylabel <scenario> <metricName> tag1=value tag2=value
+# or for direct counts:
+metric_emit <scenario> <metricName> count 1 tag1=value
+```
 
 ---
 
@@ -108,7 +147,7 @@ The runner expects every scenario to clean up its own namespaces unless
 ## Troubleshooting
 
 **`require_azureclaw_installed: not found`** — the manual runner sees no
-`azureclaw-system` namespace or no `clawsandboxes.azureclaw.io` CRD.
+`azureclaw-system` namespace or no `clawsandboxes.azureclaw.azure.com` CRD.
 Install the chart (see prerequisites).
 
 **`mesh` scenario says “agentmesh-relay/registry not installed”** — install
