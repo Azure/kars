@@ -58,28 +58,36 @@ for runtime in $RUNTIMES; do
 
     if wait_for_clawsandbox_ready "$ns" "$name"; then
         # Belt-and-braces: confirm at least one pod is Running in the
-        # controller-managed pod namespace (azureclaw-<name>).
+        # controller-managed pod namespace (azureclaw-<name>). Only run
+        # the sidecar / restart-count probes if we actually have a pod —
+        # otherwise jsonpath '.items[0]…' silently returns "" and we
+        # report a false [PASS].
         metric_start "podrun_${name}"
         if assert_pod_running "$pod_ns" "azureclaw.azure.com/sandbox=${name}"; then
             metric_finish "podrun_${name}" runtime ttrPodRunning "runtime=${runtime}" "sandbox=${name}"
-        fi
-        # And confirm the inference-router container is present in the pod
-        # spec (the CR factory above does not opt out of it).
-        if kubectl -n "$pod_ns" get pods -l "azureclaw.azure.com/sandbox=${name}" \
-              -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null \
-              | tr ' ' '\n' | grep -q '^inference-router$'; then
-            log_pass "${runtime}: inference-router sidecar present"
-        else
-            log_fail "${runtime}: inference-router sidecar missing from pod spec"
-        fi
+            if kubectl -n "$pod_ns" get pods -l "azureclaw.azure.com/sandbox=${name}" \
+                  -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null \
+                  | tr ' ' '\n' | grep -q '^inference-router$'; then
+                log_pass "${runtime}: inference-router sidecar present"
+            else
+                log_fail "${runtime}: inference-router sidecar missing from pod spec"
+            fi
 
-        # Restart-count snapshot (post-readiness) — useful for spotting
-        # crashloops that recovered just in time to flip Ready true.
-        local_restarts=$(kubectl -n "$pod_ns" get pods -l "azureclaw.azure.com/sandbox=${name}" \
-            -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}' 2>/dev/null \
-            | tr ' ' '\n' | awk 'BEGIN{s=0}{s+=$1}END{print s+0}')
-        metric_emit runtime restartCount count "${local_restarts:-0}" \
-            "runtime=${runtime}" "sandbox=${name}"
+            local_restarts=$(kubectl -n "$pod_ns" get pods -l "azureclaw.azure.com/sandbox=${name}" \
+                -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}' 2>/dev/null \
+                | tr ' ' '\n' | awk 'BEGIN{s=0}{s+=$1}END{print s+0}')
+            metric_emit runtime restartCount count "${local_restarts:-0}" \
+                "runtime=${runtime}" "sandbox=${name}"
+        else
+            # Surface why no pod is there: ClawSandbox was Ready but the
+            # controller never produced a deployment, or pods are stuck
+            # ImagePullBackOff / CrashLoopBackOff. Dump enough state to
+            # triage without re-running.
+            log_info "${runtime}: dumping pod-ns state for triage"
+            kubectl -n "$pod_ns" get all 2>&1 | sed 's/^/    /' || true
+            kubectl -n "$pod_ns" get events --sort-by=.lastTimestamp 2>&1 \
+                | tail -10 | sed 's/^/    /' || true
+        fi
     fi
 
     metric_start "cleanup_${name}"
