@@ -29,8 +29,13 @@ source "${LIB_DIR}/common.sh"
 # id           script                                 description
 declare -a SCENARIOS=(
     "runtime|runtime_matrix.sh|Bring up every supported runtime and assert Ready"
+    "crds|crd_admission.sh|Admission + status for the 7 untested AzureClaw CRDs"
+    "inference|inference_smoke.sh|Agent → router → Foundry round-trip (per runtime)"
+    "foundry-bing|foundry_bing.sh|Foundry Bing grounding tool through the router"
+    "agt-mesh|agt_mesh.sh|AGT mesh: 1sub, 2sub-parallel, sibling, multiturn"
     "mesh|cross_runtime_mesh.sh|Cross-runtime AgentMesh round-trip"
     "governance|governance_lane.sh|Content Safety, Policy, Rate-Limit, Trust"
+    "egress|egress_lifecycle.sh|Egress allowlist: learn → enforce → approve → deny"
     "failures|failure_modes.sh|Router crash, relay disconnect, OOM"
     "isolation|multi_tenant_isolation.sh|NetworkPolicy + SA + token isolation"
 )
