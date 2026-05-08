@@ -116,11 +116,30 @@ azureclaw dev
 
 On first run `azureclaw dev` shows a 3-way provider picker:
 
+```
+$ azureclaw dev
+
+  ╭────────────────────────────────────────────────╮
+  │  AzureClaw · Local Sandbox                     │
+  │  Secure AI Agent Runtime on Azure              │
+  ╰────────────────────────────────────────────────╯
+
+  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.
+  Copilot is the default (largest context). You can change later with `azureclaw credentials`.
+
+? Which inference provider do you want to use?
+❯ GitHub Copilot                    (recommended; needs an active Copilot seat — large context, Claude/GPT/Gemini)
+  Azure AI Foundry / Azure OpenAI   (full feature set: Memory Store, agents, Content Safety, etc.)
+  GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)
+```
+
 1. **GitHub Copilot** *(default)* — one device-code login at `https://github.com/login/device`, then pick from the Copilot model catalogue (Claude Opus 4.7, GPT-5, Gemini, …). No Azure, no PAT, no key files. **This is the fastest path to a working agent on a real frontier model.**
 2. **Azure AI Foundry / Azure OpenAI** — paste an endpoint, deployment, and resource-level API key. Required for Memory Store, agents, evaluations, and inline Content Safety.
 3. **GitHub Models** — paste a GitHub PAT with `models:read`. Free; small context windows.
 
 Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs. Switch later with `azureclaw credentials`.
+
+The first run also prompts for an **agent name** (default `dev-agent` — hit Enter to accept). Use that name in subsequent commands:
 
 ```bash
 # Talk to the agent (TUI auto-opens; or use the CLI directly)

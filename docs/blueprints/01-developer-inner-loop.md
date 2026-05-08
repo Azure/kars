@@ -81,9 +81,10 @@ git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm ci && npm run build && npm link
 
 # run a sandbox locally — Docker only, no Azure, no Kubernetes
+# (prompts for provider on first run, then for an agent name; default is `dev-agent`)
 azureclaw dev
 
-# talk to it (default sandbox name is `dev-agent`)
+# talk to it
 azureclaw connect dev-agent
 
 # tail logs (router + agent)

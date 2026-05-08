@@ -105,6 +105,23 @@ azureclaw dev
 
 On the first run you are shown a **3-way provider picker**:
 
+```
+$ azureclaw dev
+
+  ╭────────────────────────────────────────────────╮
+  │  AzureClaw · Local Sandbox                     │
+  │  Secure AI Agent Runtime on Azure              │
+  ╰────────────────────────────────────────────────╯
+
+  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.
+  Copilot is the default (largest context). You can change later with `azureclaw credentials`.
+
+? Which inference provider do you want to use?
+❯ GitHub Copilot                    (recommended; needs an active Copilot seat — large context, Claude/GPT/Gemini)
+  Azure AI Foundry / Azure OpenAI   (full feature set: Memory Store, agents, Content Safety, etc.)
+  GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)
+```
+
 - **GitHub Copilot** *(default — recommended)*. The CLI prints a device code and a URL (`https://github.com/login/device`); you paste it, approve once, and the OAuth token is stored in `~/.azureclaw/`. The CLI then fetches the live model catalogue from the Copilot API and lets you pick — Claude Opus 4.7, Claude Sonnet 4.5, GPT-5, GPT-4.1, Gemini 2.5 Pro, o-series, etc. The router refreshes the token automatically. **No Azure account, no PAT, no key files.**
 - **Azure AI Foundry / Azure OpenAI** — full feature set. Asks for your endpoint, model deployment name, and resource-level API key. The API key is the only credential local mode ever sees, and it is mounted from a local secret file — it never leaves your machine. Required for Memory Store, agents, evaluations, indexes, and inline Content Safety.
 - **GitHub Models** — free, no Azure account needed. Asks only for your GitHub PAT (`models:read` scope). Endpoint is hardcoded to `https://models.github.ai/inference`. Default model is `gpt-4o-mini`. Foundry-only routes return `501`. Smaller context windows than Copilot.
@@ -112,6 +129,8 @@ On the first run you are shown a **3-way provider picker**:
 Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs.
 
 To switch providers later (or rotate keys), run **`azureclaw credentials`** — the same interactive prompt is exposed there too. The same command also handles channel tokens (Telegram, Slack, Discord) and third-party API keys (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI). Or scriptable: `azureclaw credentials set <key> <value>` / `list` / `remove`.
+
+After the provider picker, `azureclaw dev` also prompts for an **agent name** (default `dev-agent` — hit Enter to accept) and offers any saved channel tokens for one-tap wiring.
 
 The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router pod, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
 
