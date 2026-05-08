@@ -179,6 +179,7 @@ fn record_metrics(
 ///
 /// - **Dev mode** (API key): Azure OpenAI `/openai/deployments/{model}/{path}?api-version=...`
 /// - **AKS mode** (Workload Identity / IMDS): Foundry `/openai/v1/{path}` with model in body
+#[allow(clippy::too_many_arguments)]
 pub async fn forward(
     auth: &WorkloadIdentityAuth,
     copilot: Option<&CopilotTokenCache>,
