@@ -65,6 +65,11 @@ If your runtime SDK reads its model endpoint from one of the well-known env vars
 
 Default. Uses the [OpenClaw](https://openclaw.ai) public plugin API + `tools.deny` config. **No OpenClaw source is modified, patched, or vendored.** Any upstream OpenClaw release is drop-in compatible. See **[Upstream alignment](upstream-alignment.md)** for the contract details.
 
+The OpenClaw adapter ships two multi-agent helpers on top of the platform mesh:
+
+- **Sub-agent inheritance.** `azureclaw_spawn` propagates the parent's provider, model, upstream endpoint, and credential into the child container — siblings run on the same backend with no per-spawn wiring (see [architecture.md → data path](architecture.md#the-data-path-of-one-external-call)).
+- **Peer roster.** Every spawn takes a `role` (e.g. `"data analyst"`, `"technical writer"`). Once two or more siblings exist the runtime auto-prepends a `Peer roster: name — role` block to every outbound `mesh_send` / `mesh_transfer_file`. Sub-agents resolve role references ("send the chart to the viz agent") against the roster instead of inventing names. Critical for `analyst → viz → writer`-style pipelines; agent-facing contract documented in `runtimes/openclaw/skills/azureclaw-spawn/SKILL.md`.
+
 ### `OpenAIAgents`
 
 OpenAI Agents Python SDK. The adapter pins `OPENAI_BASE_URL` to the router and substitutes a sentinel for `OPENAI_API_KEY`.

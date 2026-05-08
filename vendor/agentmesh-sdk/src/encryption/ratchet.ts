@@ -530,9 +530,19 @@ export class DoubleRatchetSession {
 
   /**
    * Helper: bytes to base64.
+   *
+   * Patch #13: chunked encoding to avoid V8 "Maximum call stack size exceeded".
+   * String.fromCharCode(...bytes) spreads each byte as a function arg; engines
+   * cap arg counts at ~125–250K, so any payload >~125 KB blows the stack.
+   * Ratchet ciphertexts of mesh chunks (≤512 KB) regularly cross this line.
    */
   private bytesToBase64(bytes: Uint8Array): string {
-    const binary = String.fromCharCode(...bytes);
+    if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+    }
     return btoa(binary);
   }
 
@@ -553,9 +563,21 @@ export class DoubleRatchetSession {
  * Serialize ratchet header for wire transport.
  */
 export function serializeRatchetHeader(header: RatchetHeader): RatchetHeaderSerialized {
-  const binary = String.fromCharCode(...header.dhPublicKey);
+  // Patch #13: same chunked base64 path as DoubleRatchetSession.bytesToBase64
+  const bytes = header.dhPublicKey;
+  let dhPublicKeyB64: string;
+  if (typeof Buffer !== "undefined") {
+    dhPublicKeyB64 = Buffer.from(bytes).toString("base64");
+  } else {
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+    }
+    dhPublicKeyB64 = btoa(binary);
+  }
   return {
-    dh_public_key: btoa(binary),
+    dh_public_key: dhPublicKeyB64,
     pn: header.previousChainLength,
     n: header.messageNumber,
   };

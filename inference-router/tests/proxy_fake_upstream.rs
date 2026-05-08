@@ -81,6 +81,7 @@ async fn api_key_mode_proxies_chat_completion_with_filter_results() {
 
     let (status, _headers, resp) = forward(
         &auth,
+        None,
         &client,
         &upstream,
         Method::POST,
@@ -157,6 +158,7 @@ async fn wi_mode_falls_back_to_imds_and_proxies_embeddings() {
 
     let (status, _headers, resp) = forward(
         &auth,
+        None,
         &client,
         &upstream,
         Method::POST,
@@ -224,6 +226,7 @@ async fn upstream_error_status_is_propagated() {
 
     let (status, _headers, resp) = forward(
         &auth,
+        None,
         &client,
         &upstream,
         Method::POST,

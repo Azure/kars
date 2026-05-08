@@ -43,6 +43,76 @@ export async function connectToAgent(ctx: ConnectAgentContext): Promise<void> {
   const sb = sandboxes[idx];
   if (!sb) return;
 
+  // ── AKS sandboxes: port-forward + WebUI URL (do NOT exec into pod) ──
+  // The `azureclaw-sandbox-exec-ban` ValidatingAdmissionPolicy denies
+  // exec/attach into the openclaw container. The legitimate flow (per
+  // the policy's own message and `azureclaw connect`) is:
+  //   1. read the gateway-token Secret (RBAC-gated)
+  //   2. kubectl port-forward to 18789
+  //   3. open WebUI at http://localhost:18789/#token=...
+  // We don't take over stdin or alternate buffer here — we just start
+  // the port-forward in the background and surface the URL in the
+  // activity log so the operator can click it from their terminal.
+  if (sb.runtime === "aks") {
+    const isAks = !devMode;
+    if (!isAks) {
+      // sb says aks but we're not pointed at AKS — refuse early.
+      activityLog.log(`{red-fg}✗ ${sb.name}: AKS sandbox but operator started with --dev. Run 'azureclaw connect ${sb.name}' from another terminal.{/}`);
+      render(); screen.render();
+      return;
+    }
+    const localPort = "18789";
+    const { execa } = await import("execa");
+
+    activityLog.log(`{cyan-fg}⟩ ${sb.name}: reading gateway-token Secret...{/}`);
+    render(); screen.render();
+    let gatewayToken = "";
+    try {
+      const { stdout: tokenB64 } = await execa("kubectl", kctl([
+        "get", "secret", "-n", sb.namespace, "gateway-token",
+        "-o", "jsonpath={.data.token}",
+      ], kubeContext), { stdio: "pipe" });
+      if (tokenB64.trim()) {
+        gatewayToken = Buffer.from(tokenB64.trim(), "base64").toString("utf-8").trim();
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
+      activityLog.log(`{red-fg}✗ ${sb.name}: gateway-token Secret not readable: ${msg}{/}`);
+      render(); screen.render();
+      return;
+    }
+    if (!gatewayToken) {
+      activityLog.log(`{red-fg}✗ ${sb.name}: gateway-token Secret empty. Sandbox running?{/}`);
+      render(); screen.render();
+      return;
+    }
+
+    activityLog.log(`{cyan-fg}⟩ ${sb.name}: starting port-forward localhost:${localPort} → 18789...{/}`);
+    render(); screen.render();
+    const pf = execa("kubectl", kctl([
+      "port-forward", "-n", sb.namespace,
+      `deploy/${sb.name}`, `${localPort}:18789`,
+    ], kubeContext), { stdio: ["ignore", "pipe", "pipe"] });
+    pf.stderr?.on("data", (chunk: Buffer) => {
+      const line = chunk.toString().trim();
+      if (line && /error|denied|unable|forbidden|refused|reset|EOF|lost connection|address already in use/i.test(line)) {
+        activityLog.log(`{red-fg}  [kubectl] ${line}{/}`);
+        render(); screen.render();
+      }
+    });
+    pf.catch(() => {
+      activityLog.log(`{yellow-fg}⏏ ${sb.name}: port-forward ended.{/}`);
+      render(); screen.render();
+    });
+
+    await new Promise(r => setTimeout(r, 1500));
+    const url = `http://localhost:${localPort}/#token=${gatewayToken}`;
+    activityLog.log(`{green-fg}→ ${sb.name}: ${url}{/}`);
+    activityLog.log(`{dim}  (Ctrl-click the URL in your terminal; port-forward stays alive.){/}`);
+    render(); screen.render();
+    return;
+  }
+
   setDialogOpen(true);
   setConnectedToAgent(true);
   const sessionId = `operator-${sb.name}`;
@@ -63,12 +133,13 @@ export async function connectToAgent(ctx: ConnectAgentContext): Promise<void> {
   process.stdin.removeAllListeners("data");
   process.stdin.removeAllListeners("keypress");
 
-  // Spawn PTY for proper TTY passthrough with colors
+  // Spawn PTY for proper TTY passthrough with colors. AKS path is
+  // handled above (port-forward); we only reach here for local Docker
+  // sandboxes where there is no admission policy to block exec.
   const nodePty = await import("node-pty");
-  const connectCmd = devMode ? "docker" : "kubectl";
-  const connectArgs = devMode
-    ? ["exec", "-it", sb.podName!, "openclaw", "tui"]
-    : kctl(["exec", "-it", "-n", sb.namespace, `deploy/${sb.name}`, "-c", "openclaw", "--", "openclaw", "tui"], kubeContext);
+  const connectCmd = "docker";
+  const connectArgs = ["exec", "-it", sb.podName!, "openclaw", "tui"];
+  void kctl; void kubeContext; // referenced only by AKS branch above
 
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;

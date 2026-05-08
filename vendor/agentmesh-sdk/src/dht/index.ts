@@ -427,12 +427,25 @@ export class DHTClient {
 
     const signature = await this.identity.sign(new TextEncoder().encode(data));
 
+    // Patch #13: chunked base64 — Ed25519 sigs are 64B so OK today, but kept
+    // safe in case signature schemes ever go larger.
+    let signatureB64: string;
+    if (typeof Buffer !== "undefined") {
+      signatureB64 = Buffer.from(signature).toString("base64");
+    } else {
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < signature.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, signature.subarray(i, i + CHUNK) as unknown as number[]);
+      }
+      signatureB64 = btoa(binary);
+    }
     const entry: DHTCapabilityEntry = {
       amid: this.identity.amid,
       capabilities,
       address: '', // Would be set by caller
       timestamp,
-      signature: btoa(String.fromCharCode(...signature)),
+      signature: signatureB64,
     };
 
     // Store under each capability key

@@ -7,7 +7,7 @@ import { existsSync } from "fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { loadConfig, promptAndSaveCredentials, CREDENTIALS_FILE, resolveSecret, getSecret } from "../config.js";
+import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -136,14 +136,18 @@ Notes:
         stepper.step("Checking credentials...");
         const githubToken = typeof options.githubToken === "string" ? options.githubToken.trim() : undefined;
         let creds = loadConfig();
-        let mountedSecretPath = CREDENTIALS_FILE;
+        // Always materialize a per-run secret tempfile from creds.apiKey.
+        // Avoids depending on the legacy ~/.azureclaw/credentials file
+        // (which can drift from secrets.json) and decouples reset semantics
+        // from the container mount path.
+        let mountedSecretPath: string;
 
         if (githubToken) {
           // Ephemeral GitHub Models override: don't touch saved creds. Build
           // an inline config and write the PAT to a per-run tempfile that
           // gets mounted instead of the saved credentials file.
           const ghModelsEndpoint = "https://models.github.ai/inference";
-          const ghDefaultModel = options.model !== "gpt-4.1" ? options.model : "gpt-4o-mini";
+          const ghDefaultModel = options.model !== "gpt-4.1" ? options.model : "openai/gpt-4.1";
           creds = {
             endpoint: ghModelsEndpoint,
             model: ghDefaultModel,
@@ -151,26 +155,119 @@ Notes:
             foundryProjectEndpoint: undefined,
             provider: "github-models",
           };
-          const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
-          const ghTmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-ghmodels-"));
-          mountedSecretPath = path.join(ghTmpDir, "azure-openai-key");
-          writeFileSync(mountedSecretPath, githubToken, "utf-8");
-          chmodSync(mountedSecretPath, 0o600);
           stepper.done("Credentials loaded (GitHub Models — ephemeral, not saved)");
-        } else if (!creds) {
-          // Stop spinner so inquirer interactive prompts display correctly
+        } else if (!creds || !creds.firstRunCompleted) {
+          // First-run (or first-run flag was reset for retesting): stop
+          // spinner so inquirer prompts display correctly, then show the
+          // 3-way provider picker (Copilot recommended, then GH Models,
+          // then Foundry).
           stepper.stop();
-          console.log(chalk.yellow("\n  No inference credentials found. Let's set them up."));
-          console.log(chalk.dim("  Choose between Azure AI Foundry / Azure OpenAI (full feature set) or GitHub Models (free, GitHub PAT).\n"));
+          console.log(chalk.yellow("\n  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options."));
+          console.log(chalk.dim("  Copilot is the default (largest context). You can change later with `azureclaw credentials`.\n"));
           creds = await promptAndSaveCredentials();
-          const providerLabel = creds.provider === "github-models" ? "GitHub Models" : "Azure AI Foundry";
-          stepper.done(`Credentials configured (${providerLabel})`);
+
+          // ── Optional: agent name + channel gap-fill ─────────────────
+          // Only ask if the user didn't pre-set them on the CLI. Defaults
+          // are sensible, so users can just hit Enter through everything.
+          const { default: inquirer } = await import("inquirer");
+          const usedNameDefault = options.name === "dev-agent";
+          if (usedNameDefault) {
+            const { agentName } = await inquirer.prompt([{
+              type: "input",
+              name: "agentName",
+              message: "Agent name:",
+              default: "dev-agent",
+              validate: (v: string) => /^[a-z0-9][a-z0-9-]*[a-z0-9]?$/i.test(v.trim())
+                ? true
+                : "Use letters, numbers, and dashes only (e.g. dev-agent, alice-bot)",
+            }]);
+            options.name = agentName.trim();
+          }
+
+          // Channel gap-fill: offer one choice per saved channel-token
+          // variant (e.g. telegram-token.dev, telegram-token.cloud become
+          // separate "telegram.dev" / "telegram.cloud" choices). Without
+          // variant-awareness we'd miss users who only have suffixed tokens
+          // — like the standard local setup with .dev + .cloud namespaces.
+          if (!options.channels) {
+            const stored = loadSecrets();
+            type ChannelChoice = { name: string; value: string };
+            const available: ChannelChoice[] = [];
+            const addChannel = (channel: string, baseKey: string, displayName: string) => {
+              const variants = listSecretVariants(baseKey);
+              for (const v of variants) {
+                const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
+                const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
+                available.push({ name: display, value: channelValue });
+              }
+              // Defensive: if loadSecrets sees a bare key but listSecretVariants
+              // missed it (shouldn't happen), still surface the channel.
+              if (variants.length === 0 && stored[baseKey]) {
+                available.push({ name: displayName, value: channel });
+              }
+            };
+            addChannel("telegram", "telegram-token", "Telegram");
+            addChannel("slack",    "slack-token",    "Slack");
+            addChannel("discord",  "discord-token",  "Discord");
+            if (available.length > 0) {
+              const { picked } = await inquirer.prompt([{
+                type: "checkbox",
+                name: "picked",
+                message: "Enable any channels? (Space to toggle, Enter to confirm)",
+                choices: available,
+              }]);
+              if (picked.length > 0) {
+                options.channels = picked.join(",");
+              }
+            } else {
+              console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
+            }
+          }
+
+          // Optional rebuild prompt. Defaults to no — first-time users want
+          // the cached image to come up fast. Power users testing local
+          // changes (e.g. plugin/entrypoint edits) can opt in here without
+          // remembering the --build flag.
+          if (!options.build) {
+            const { rebuild } = await inquirer.prompt([{
+              type: "confirm",
+              name: "rebuild",
+              message: "Rebuild sandbox image from local source? (slower, picks up plugin/entrypoint changes)",
+              default: false,
+            }]);
+            if (rebuild) options.build = true;
+          }
+
+          const newProviderLabel =
+            creds.provider === "github-models"
+              ? "GitHub Models"
+              : creds.provider === "github-copilot"
+                ? "GitHub Copilot"
+                : "Azure AI Foundry";
+          stepper.done(`Credentials configured (${newProviderLabel})`);
         } else {
-          const providerLabel = creds.provider === "github-models" ? "GitHub Models" : "Azure AI Foundry";
+          const providerLabel =
+            creds.provider === "github-models"
+              ? "GitHub Models"
+              : creds.provider === "github-copilot"
+                ? "GitHub Copilot"
+                : "Azure AI Foundry";
           stepper.done(`Credentials loaded (${providerLabel})`);
         }
+
+        // Materialize secret tempfile from the resolved creds.apiKey.
+        {
+          const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
+          const tmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-secret-"));
+          mountedSecretPath = path.join(tmpDir, "azure-openai-key");
+          writeFileSync(mountedSecretPath, creds.apiKey, "utf-8");
+          chmodSync(mountedSecretPath, 0o600);
+        }
+
         const isGithubModelsMode = creds.provider === "github-models";
-        const model = isGithubModelsMode
+        const isCopilotMode = creds.provider === "github-copilot";
+        const isManagedTokenProvider = isGithubModelsMode || isCopilotMode;
+        const model = isManagedTokenProvider
           ? creds.model
           : (options.model !== "gpt-4.1" ? options.model : creds.model);
 
@@ -318,8 +415,9 @@ Notes:
         let discoveredDeployments = "";
         // Discover deployed models via Azure CLI (ARM management API — only reliable way).
         // Data-plane /openai/deployments always returns 404; skip it.
-        // GitHub Models mode: skip entirely (the endpoint isn't an Azure resource).
-        if (!isGithubModelsMode) try {
+        // GitHub Models mode + Copilot mode: skip ARM-based deployment
+        // discovery (the endpoint isn't an Azure resource).
+        if (!isManagedTokenProvider) try {
           const accountName = new URL(creds.endpoint).hostname.split(".")[0];
           const { stdout: rgOut } = await execa("az", [
             "cognitiveservices", "account", "list",
@@ -555,10 +653,15 @@ Notes:
         stepper.update("Launching container...");
 
         // Parse channel variants: "telegram.cloud" → base "telegram", suffix "cloud"
-        // Used to resolve the correct dot-suffixed secret (e.g. telegram-token.cloud)
+        // Used to resolve the correct dot-suffixed secret (e.g. telegram-token.cloud).
+        // Trim + lowercase so "  Telegram , Slack" works the same as "telegram,slack".
         const channelVariants: Record<string, string | undefined> = {};
         if (options.channels) {
-          for (const ch of String(options.channels).split(",")) {
+          const parts = String(options.channels)
+            .split(",")
+            .map(s => s.trim().toLowerCase())
+            .filter(Boolean);
+          for (const ch of parts) {
             const dotIdx = ch.indexOf(".");
             if (dotIdx > 0) {
               channelVariants[ch.slice(0, dotIdx)] = ch.slice(dotIdx); // e.g. ".cloud"
@@ -569,6 +672,7 @@ Notes:
           // Rewrite --channels to base names for the entrypoint
           options.channels = Object.keys(channelVariants).join(",");
         }
+        const wantsWhatsapp = "whatsapp" in channelVariants;
 
         // Resolve a channel token, respecting dot-suffix variants from --channels
         const resolveChannelToken = (flagValue: string | undefined, baseKey: string, channel: string): string | undefined => {
@@ -661,6 +765,7 @@ Notes:
           "-e", `SANDBOX_NAME=${options.name}`,
           "-e", "AZURECLAW_DEV_MODE=true",
           ...(isGithubModelsMode ? ["-e", "AZURECLAW_PROVIDER=github-models"] : []),
+          ...(isCopilotMode ? ["-e", "AZURECLAW_PROVIDER=github-copilot"] : []),
           "-e", `DOCKER_NETWORK=${AGT_NETWORK}`,
           // Phase 2/F8 mitigations — env-gated suppression of false-positive
           // governance findings. Default-on in dev so research/citation
@@ -679,7 +784,7 @@ Notes:
           ...(resolveSecret(options.telegramAllowFrom, "telegram-allow-from") ? ["-e", `TELEGRAM_ALLOW_FROM=${resolveSecret(options.telegramAllowFrom, "telegram-allow-from")}`] : []),
           ...(resolveChannelToken(options.slackToken, "slack-token", "slack") ? ["-e", `SLACK_BOT_TOKEN=${resolveChannelToken(options.slackToken, "slack-token", "slack")}`] : []),
           ...(resolveChannelToken(options.discordToken, "discord-token", "discord") ? ["-e", `DISCORD_BOT_TOKEN=${resolveChannelToken(options.discordToken, "discord-token", "discord")}`] : []),
-          ...(process.env.WHATSAPP_ENABLED ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED}`] : []),
+          ...((wantsWhatsapp || process.env.WHATSAPP_ENABLED) ? ["-e", `WHATSAPP_ENABLED=${process.env.WHATSAPP_ENABLED ?? "true"}`] : []),
           // Third-party plugin API keys: CLI flag > secrets.json > host env var
           ...(resolveSecret(options.braveApiKey, "brave-api-key") ? ["-e", `BRAVE_API_KEY=${resolveSecret(options.braveApiKey, "brave-api-key")}`] : []),
           ...(resolveSecret(options.tavilyApiKey, "tavily-api-key") ? ["-e", `TAVILY_API_KEY=${resolveSecret(options.tavilyApiKey, "tavily-api-key")}`] : []),
@@ -780,7 +885,10 @@ Notes:
         section("Environment");
         kvLine("OS", "Azure Linux 3.0");
         kvLine("OpenClaw", "2026.3.13");
-        kvLine("Model", `${model} (Azure OpenAI)`);
+        kvLine(
+          "Model",
+          `${model} (${isGithubModelsMode ? "GitHub Models" : isCopilotMode ? "GitHub Copilot" : "Azure OpenAI"})`,
+        );
         kvLine("Endpoint", creds.endpoint);
         kvLine("Policy", `${options.policy} preset`);
         kvLine("Sandbox", options.name);

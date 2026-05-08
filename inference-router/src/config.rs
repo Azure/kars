@@ -74,6 +74,13 @@ pub struct Config {
     /// Registry URL (used in both modes — local points to colocated service,
     /// global points to the shared external registry).
     pub registry_url: Option<String>,
+
+    /// Explicit provider override (from `AZURECLAW_PROVIDER` env var).
+    /// When set to `"github-copilot"`, the router treats inference as
+    /// Copilot-API-bound regardless of the configured endpoint URLs.
+    /// Captured at config-load time so provider detection is a pure
+    /// function on the `Config` struct (testable without env hacks).
+    pub provider_override: Option<String>,
 }
 
 impl Config {
@@ -133,6 +140,11 @@ impl Config {
             registry_url: std::env::var("AGT_REGISTRY_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
+
+            provider_override: std::env::var("AZURECLAW_PROVIDER")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_lowercase()),
         })
     }
 
@@ -151,6 +163,33 @@ impl Config {
             .iter()
             .flatten()
             .any(|e| e.contains("models.github.ai") || e.contains("models.inference.ai.azure.com"))
+    }
+
+    /// Returns true when the configured endpoint points at the GitHub
+    /// Copilot API (`api.githubcopilot.com`) OR when the explicit
+    /// `AZURECLAW_PROVIDER=github-copilot` env var is set.
+    ///
+    /// In Copilot mode the proxy:
+    /// - skips the Azure `/openai/v1/` path prefix,
+    /// - exchanges the GitHub OAuth/PAT for a short-lived Copilot JWT
+    ///   instead of using the raw token,
+    /// - injects the Copilot integration headers (`Editor-Version`,
+    ///   `Copilot-Integration-Id`, `Editor-Plugin-Version`),
+    /// - forwards `/v1/messages` (Anthropic shape) and
+    ///   `/v1/chat/completions` (OpenAI shape) natively without translation.
+    pub fn is_github_copilot(&self) -> bool {
+        if self.provider_override.as_deref() == Some("github-copilot") {
+            return true;
+        }
+        let candidates = [
+            self.azure_openai_endpoint.as_deref(),
+            self.foundry_endpoint.as_deref(),
+            self.foundry_project_endpoint.as_deref(),
+        ];
+        candidates
+            .iter()
+            .flatten()
+            .any(|e| e.contains("api.githubcopilot.com"))
     }
 }
 
@@ -172,7 +211,14 @@ mod tests {
             token_budget_per_request: 0,
             registry_mode: RegistryMode::Local,
             registry_url: None,
+            provider_override: None,
         }
+    }
+
+    fn cfg_with_provider(endpoint: Option<&str>, provider: Option<&str>) -> Config {
+        let mut c = cfg(endpoint);
+        c.provider_override = provider.map(String::from);
+        c
     }
 
     #[test]
@@ -198,5 +244,31 @@ mod tests {
     #[test]
     fn returns_false_when_no_endpoint_set() {
         assert!(!cfg(None).is_github_models());
+    }
+
+    #[test]
+    fn detects_github_copilot_endpoint() {
+        assert!(cfg(Some("https://api.githubcopilot.com")).is_github_copilot());
+    }
+
+    #[test]
+    fn detects_github_copilot_via_provider_override() {
+        assert!(cfg_with_provider(None, Some("github-copilot")).is_github_copilot());
+    }
+
+    #[test]
+    fn does_not_match_foundry_endpoint_for_copilot() {
+        assert!(!cfg(Some("https://contoso.services.ai.azure.com")).is_github_copilot());
+    }
+
+    #[test]
+    fn does_not_match_github_models_endpoint_for_copilot() {
+        assert!(!cfg(Some("https://models.github.ai/inference")).is_github_copilot());
+    }
+
+    #[test]
+    fn provider_override_does_not_affect_github_models_detection() {
+        let c = cfg_with_provider(Some("https://contoso.openai.azure.com"), Some("github-copilot"));
+        assert!(!c.is_github_models());
     }
 }

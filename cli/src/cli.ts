@@ -6,6 +6,7 @@ import { upCommand } from "./commands/up.js";
 import { devCommand } from "./commands/dev.js";
 import { addCommand } from "./commands/add.js";
 import { credentialsCommand } from "./commands/credentials.js";
+import { configCommand } from "./commands/config.js";
 import { connectCommand } from "./commands/connect.js";
 import { statusCommand } from "./commands/status.js";
 import { listCommand } from "./commands/list.js";
@@ -55,6 +56,7 @@ export function createCli(): Command {
 
   // Configuration
   program.addCommand(credentialsCommand());
+  program.addCommand(configCommand());
   program.addCommand(modelCommand());
   program.addCommand(policyCommand());
   program.addCommand(egressCommand());

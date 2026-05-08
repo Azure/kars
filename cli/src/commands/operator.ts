@@ -134,7 +134,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [3, 40, 14, 10, 12, 12, 5, 6],
+    columnWidth: [3, 40, 14, 10, 18, 12, 5, 6],
     interactive: true,
     style: {
       border: { fg: "cyan" },

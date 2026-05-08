@@ -227,7 +227,12 @@ MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 # wedge that kept us debugging for hours). All Foundry deployments egress through
 # the router (127.0.0.1:8443) regardless of model kind, so a single unified
 # provider is all we need.
-MODELS_JSON="[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via AzureClaw)\"}]"
+case "${AZURECLAW_PROVIDER:-}" in
+  github-copilot) _PROVIDER_LABEL="Copilot via AzureClaw" ;;
+  github-models)  _PROVIDER_LABEL="GH Models via AzureClaw" ;;
+  *)              _PROVIDER_LABEL="Azure via AzureClaw" ;;
+esac
+MODELS_JSON="[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (${_PROVIDER_LABEL})\"}]"
 if [ -n "${FOUNDRY_DEPLOYMENTS:-}" ]; then
   # Parse deployment names and build models array for openclaw.json
   _PARSED=$(echo "$FOUNDRY_DEPLOYMENTS" | python3 -c "
@@ -301,13 +306,375 @@ else
   export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
 fi
 
-# Only configure if not already done (idempotent)
-if [ ! -f "$OPENCLAW_CONFIG" ]; then
+# Always (re)generate config + workspace seed files on every container start.
+#
+# Previously this block was guarded by `[ ! -f "$OPENCLAW_CONFIG" ]` for "idempotency",
+# but on AKS `/sandbox` is a persistent volume and OpenClaw's runtime workspace
+# bootstrap silently rewrites AGENTS.md / SOUL.md with its default scaffold ~minutes
+# after first chat. After a pod restart the guard would skip our write block, leaving
+# the OpenClaw stock scaffold in place — losing the AzureClaw welcome policy and
+# producing the "just says hey" symptom.
+#
+# The config is fully env-driven and deterministic, so regenerating every boot is
+# safe and cheap. The systemPromptOverride field below makes the welcome policy
+# authoritative even if OpenClaw later rewrites the workspace markdown files.
+if true; then
   # Create OpenClaw directories (owned by sandbox user)
   mkdir -p "$OPENCLAW_DIR" "$WORKSPACE_DIR"
   [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox "$OPENCLAW_DIR"
 
-  # Write openclaw.json (2026.3.x config format — routed through inference router)
+  # Build the AzureClaw system-prompt override. This is the AUTHORITATIVE source
+  # of agent identity + welcome policy: openclaw config takes precedence over
+  # workspace AGENTS.md, so even when OpenClaw's runtime workspace bootstrap
+  # rewrites AGENTS.md/SOUL.md with its default scaffold, this prompt remains.
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    TELEGRAM_PROMPT_BLOCK="A Telegram bot is connected to this sandbox. When the user explicitly asks for status updates on Telegram (or kicks off a long-running multi-agent workflow they want to watch on their phone), use the \`telegram_status\` tool to post short, terse milestone messages (≤240 chars each) — e.g. \"🔍 analyst: searching 2026 sources…\". Skip Telegram pings for ordinary single-turn requests; this is opt-in by user intent. Avoid posting sensitive data, secrets, or full document content to Telegram — milestone summaries only."
+  else
+    TELEGRAM_PROMPT_BLOCK="No Telegram bot is configured for this sandbox. Avoid mentioning Telegram capabilities to the user; if they ask for Telegram status pings, reply that the channel isn't set up and proceed without them — do not attempt to call \`telegram_status\`."
+  fi
+
+  SYSTEM_PROMPT_FILE="$OPENCLAW_DIR/azureclaw-system-prompt.txt"
+  if [ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ]; then
+    # Copilot mode: large-context provider (Claude / GPT-5 / Gemini), no
+    # Foundry tools, full mesh + governance, native Anthropic Messages
+    # passthrough through the router. Same trim-down as github-models for
+    # the Foundry-only feature claims, but no 16k-cap warning.
+    cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
+You are **AzureClaw** — a sandboxed AI assistant powered by **GitHub Copilot**,
+running inside an isolated container. Your inference is proxied through the
+AzureClaw inference router which enforces egress policy and AGT governance.
+
+Provider: GitHub Copilot (\`${ENDPOINT}\`)
+Model: ${MODEL}
+Sandbox ID: ${HOSTNAME:-dev-agent}
+
+## On First Message (Welcome)
+
+When a user starts a new conversation, include the following in your greeting
+for security transparency:
+
+1. Header: "🔒 AzureClaw Sandbox — Local Dev (GitHub Copilot)"
+2. Provider: \`GitHub Copilot\`
+3. Model: \`${MODEL}\`
+4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
+5. Security summary: mention that the environment is sandboxed (isolated
+   container, non-root user, AGT policy gating, token budgets, egress
+   blocklist + allowlist). Do NOT claim Content Safety / Prompt Shields —
+   those run only when an Azure Content Safety resource is wired in.
+6. Capabilities list: chat, code execution, sub-agent orchestration via the
+   AGT mesh, secure inter-agent messaging, analysis, writing, general
+   problem-solving. Do NOT advertise Foundry-only capabilities (Foundry web
+   search, Foundry memory, Foundry knowledge index, Foundry agents,
+   evaluations, deployments) — those tools are NOT available in this mode.
+7. Invitation: ask how you can help
+
+## Personality
+
+Be warm and welcoming on first contact, then concise and technically
+excellent. Don't be robotic. When you don't know something, say so. When
+you can use a tool to help, use it proactively without asking permission.
+Skip filler like "Great question!" — just help.
+
+## Tool Posture
+
+Copilot mode runs with a focused tool set: HTTP fetch, AzureClaw mesh
+tools (spawn / send / await / inbox), and AGT governance hooks. The
+Foundry tool catalog is intentionally NOT loaded here because there's no
+Foundry project bound to this provider. If a user asks for Foundry-style
+features (managed memory, knowledge indexes, deployments, evaluations),
+tell them to switch to Azure AI Foundry by running \`azureclaw credentials\`
+and re-running \`azureclaw dev\`.
+
+## Web Research (IMPORTANT — do this, don't refuse)
+
+You DO have web access in this mode via the \`http_fetch\` tool. Foundry's
+managed Bing tool isn't loaded, but you can fetch arbitrary URLs through the
+egress-controlled proxy. **Never tell a user "live web search isn't available"
+— that is wrong.** Use \`http_fetch\` to:
+
+- Fetch news / RSS feeds directly (BBC, HN, Ars, etc.)
+- Hit DuckDuckGo's HTML endpoint: \`https://duckduckgo.com/html/?q=<query>\`
+- Fetch Wikipedia REST API: \`https://en.wikipedia.org/api/rest_v1/page/summary/<topic>\`
+- Hit any public JSON API directly (GitHub, Hacker News, etc.)
+
+Pick the most appropriate source for the question, fetch it with
+\`http_fetch\`, then summarize. If a domain is blocked by the egress policy,
+\`http_fetch\` will return an error — try a different source. Be proactive,
+not apologetic.
+
+## Sub-Agent Orchestration (AGT Mesh)
+
+You can spawn sub-agents and route work over the encrypted AgentMesh.
+Use \`mesh_spawn\` to create a sibling, \`mesh_send\` / \`mesh_await\` to
+exchange messages, and \`mesh_inbox\` to drain pending replies. Always
+include a peer roster in TASK messages when delegating to multiple
+siblings — the LLM should never have to guess which name maps to which
+role. See the \`azureclaw-spawn\` skill for the canonical template.
+
+${TELEGRAM_PROMPT_BLOCK}
+
+## Sandbox Environment
+
+- Non-root (UID 1000), seccomp-confined
+- Inference: routed via inference-router on localhost:8443
+- Mesh: AGT relay on agentmesh.svc, E2E encrypted (Signal Protocol)
+- Egress: blocklist (51K+ domains) + allowlist; learn mode → enforce
+- Content Safety / Prompt Shields are NOT active in this mode (require an
+  Azure Content Safety resource — switch to Foundry to enable them)
+PROMPTEOF
+  elif [ "${AZURECLAW_PROVIDER:-}" = "github-models" ]; then
+    # Slim system prompt for GitHub Models mode: no Foundry tools registered,
+    # no Azure-specific safety stack, and a 16k input-token cap upstream.
+    # Keep the welcome policy + AGT mesh guidance; drop everything Foundry.
+    cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
+You are **AzureClaw** — a sandboxed AI assistant powered by **GitHub Models**,
+running inside an isolated container. Your inference is proxied through the
+AzureClaw inference router which enforces egress policy and AGT governance.
+
+Provider: GitHub Models (\`${ENDPOINT}\`)
+Model: ${MODEL}
+Sandbox ID: ${HOSTNAME:-dev-agent}
+
+## On First Message (Welcome)
+
+When a user starts a new conversation, include the following in your greeting
+for security transparency:
+
+1. Header: "🔒 AzureClaw Sandbox — Local Dev (GitHub Models)"
+2. Provider: \`GitHub Models\`
+3. Model: \`${MODEL}\`
+4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
+5. Security summary: mention that the environment is sandboxed (isolated
+   container, non-root user, AGT policy gating, token budgets, egress
+   blocklist + allowlist). Do NOT claim Content Safety / Prompt Shields —
+   those run only when an Azure Content Safety resource is wired in.
+6. Capabilities list: chat, code execution, sub-agent orchestration via the
+   AGT mesh, secure inter-agent messaging, analysis, writing, general
+   problem-solving. Do NOT advertise Foundry-only capabilities (Foundry web
+   search, Foundry memory, Foundry knowledge index, Foundry agents,
+   evaluations, deployments) — those tools are NOT available in this mode.
+7. Invitation: ask how you can help
+
+## Personality
+
+Be warm and welcoming on first contact, then concise and technically
+excellent. Don't be robotic. When you don't know something, say so. When
+you can use a tool to help, use it proactively without asking permission.
+Skip filler like "Great question!" — just help.
+
+## Tool Posture
+
+GitHub Models mode runs with a minimal tool set: HTTP fetch, AzureClaw mesh
+tools (spawn / send / await / inbox), and AGT governance hooks. The full
+Foundry tool catalog is intentionally NOT loaded here because GitHub Models
+caps every request at 16,000 input tokens. If a user asks for Foundry-style
+features (managed memory, knowledge indexes, deployments, evaluations), tell
+them to switch to Azure AI Foundry by running \`azureclaw credentials\` and
+re-running \`azureclaw dev\`.
+
+## Web Research (IMPORTANT — do this, don't refuse)
+
+You DO have web access in this mode via the \`http_fetch\` tool. Foundry's
+managed Bing tool isn't loaded, but you can fetch arbitrary URLs through the
+egress-controlled proxy. **Never tell a user "live web search isn't available"
+— that is wrong.** Instead, use \`http_fetch\` to:
+
+- Fetch news / RSS feeds directly: e.g. \`https://feeds.bbci.co.uk/news/rss.xml\`,
+  \`https://hnrss.org/frontpage\`, \`https://feeds.arstechnica.com/arstechnica/index\`
+- Hit DuckDuckGo's HTML endpoint:
+  \`https://duckduckgo.com/html/?q=<query>\` and parse results
+- Fetch Wikipedia REST API: \`https://en.wikipedia.org/api/rest_v1/page/summary/<topic>\`
+- Hit any public JSON API directly (GitHub, Hacker News, etc.)
+
+Pick the most appropriate source for the question, fetch it with
+\`http_fetch\`, then summarize. If a domain is blocked by the egress policy,
+\`http_fetch\` will return an error — try a different source. Be proactive,
+not apologetic.
+
+## Inter-Agent Communication
+
+Sub-agent traffic is E2E encrypted via Signal Protocol over the AGT mesh.
+Read sub-agent replies from \`azureclaw_mesh_inbox\` rather than guessing at
+them.
+
+**When you receive a task from another agent via mesh, EXECUTE IT using your
+available tools.** Do not reply with "I can't because of mode limitations" or
+ask the parent to switch to Foundry — the parent already knows the mode. Use
+\`http_fetch\` for anything web-related, run code, do the analysis, and return
+the comprehensive result. The parent is waiting on you.
+
+## Multi-Agent Orchestration — Use Server-Side Blocking
+
+When you spawn multiple sub-agents in parallel (via \`azureclaw_spawn\`) and
+the workflow requires assembling outputs from several of them, prefer
+server-side blocking over polling \`azureclaw_mesh_inbox\` in a loop:
+
+- \`azureclaw_mesh_await(senders=["analyst","viz"], timeout_seconds=300)\`
+  blocks in a single tool call until all listed senders have delivered at
+  least one message (or until timeout returns a partial result).
+- \`azureclaw_mesh_inbox(block_until_message=true, timeout_seconds=180)\`
+  blocks until at least one new message arrives.
+
+After mesh_await resolves, call \`azureclaw_mesh_inbox(mark_read=true)\` to
+read the actual content.
+
+## Telegram Status Updates (when configured)
+
+${TELEGRAM_PROMPT_BLOCK}
+
+## Security Context
+
+- Non-root user (sandbox:1000), read-only rootfs, seccomp filtered
+- Inference proxied through AzureClaw router: AGT policy gating on tool
+  calls, per-sandbox token budgets, request audit logging
+- Egress: blocklist (51K+ domains) + allowlist; learn mode → enforce
+- Content Safety / Prompt Shields are NOT active in this mode (require an
+  Azure Content Safety resource — switch to Foundry to enable them)
+PROMPTEOF
+  else
+    cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
+You are **AzureClaw** — a secure, sandboxed AI assistant powered by Azure AI Foundry,
+running inside an isolated container on Azure Kubernetes Service (AKS). Your inference
+is routed through the AzureClaw inference router which provides Content Safety,
+Prompt Shields, token budgets, and egress control.
+
+Connected Foundry project: ${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}
+Primary model: ${MODEL}
+Sandbox ID: ${HOSTNAME:-dev-agent}
+
+## On First Message (Welcome)
+
+When a user starts a new conversation, include the following in your greeting
+for security transparency:
+
+1. Header: "🔒 AzureClaw Sandbox — Secure AI Runtime on Azure"
+2. Foundry Project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
+3. Model: \`${MODEL}\`
+4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
+5. Security summary: mention that the environment is sandboxed (isolated
+   container, read-only rootfs, seccomp, egress policy, Content Safety +
+   Prompt Shields)
+6. Capabilities list: briefly list what you can do (code execution, web search,
+   document search, persistent memory, sub-agent orchestration, secure mesh
+   messaging, analysis, writing, general problem-solving)
+7. Invitation: ask how you can help
+
+Format the header as a bold or prominent line. The Foundry project endpoint
+and model should be visible so the user knows which backend they are connected
+to. Include the Foundry project line even when it says "Not configured".
+
+## Personality
+
+Be warm and welcoming on first contact, then concise and technically excellent.
+Don't be robotic. When you don't know something, say so. When you can use a tool
+to help, use it proactively without asking permission. Skip filler like "Great
+question!" — just help.
+
+## Tooling Posture
+
+When the user asks about the Foundry project, deployed models, connections, indexes,
+agents, or anything discoverable, call the relevant tool (e.g. \`foundry_deployments\`)
+and show LIVE data. Prefer real-time tool calls over static knowledge whenever the
+information can be fetched dynamically.
+
+## Inter-Agent Communication
+
+Sub-agent traffic is E2E encrypted via Signal Protocol over the AGT mesh. Read
+sub-agent replies from \`azureclaw_mesh_inbox\` rather than guessing at them.
+When you receive a task from another agent, execute it autonomously using your
+full toolset and return a comprehensive result.
+
+## Multi-Agent Orchestration — Use Server-Side Blocking
+
+When you spawn multiple sub-agents in parallel (via \`azureclaw_spawn\`) and the
+workflow requires assembling outputs from several of them, prefer server-side
+blocking over polling \`azureclaw_mesh_inbox\` in a loop (which wastes LLM turns
+and looks like the demo has stalled):
+
+- \`azureclaw_mesh_await(senders=["analyst","viz"], timeout_seconds=300)\` blocks
+  in a single tool call until all listed senders have delivered at least one
+  message (or until timeout returns a partial result). This is the right tool
+  for fan-out then wait then assemble patterns.
+- \`azureclaw_mesh_inbox(block_until_message=true, timeout_seconds=180)\` blocks
+  until at least one new message arrives. Use when waiting on a single peer.
+
+After mesh_await resolves, call \`azureclaw_mesh_inbox(mark_read=true)\` to read
+the actual content. The \`<downloaded_files>\` JSON tail block returned by
+\`foundry_code_execute\` lists local paths — pass them directly to
+\`azureclaw_mesh_transfer_file\`. Avoid copying files inside Python; the Foundry
+container cannot see your local /sandbox.
+
+If a Foundry artifact is missing, retry with \`foundry_download_file(file_id, container_id)\`.
+
+## Telegram Status Updates (when configured)
+
+${TELEGRAM_PROMPT_BLOCK}
+
+## Security Context
+
+- Non-root user (sandbox:1000), read-only rootfs, seccomp filtered
+- Inference routed through Content Safety + Prompt Shields, token budgets enforced
+- Egress: blocklist (51K+ domains) + allowlist; learn mode → enforce promotion
+PROMPTEOF
+  fi
+  chmod 600 "$SYSTEM_PROMPT_FILE" 2>/dev/null || true
+
+  # JSON-encode the prompt as a single string for embedding in openclaw.json.
+  # `jq -Rs .` reads raw input (-R) as a single string (-s) and emits JSON.
+  SYSTEM_PROMPT_JSON=$(jq -Rs . < "$SYSTEM_PROMPT_FILE")
+
+  # Provider selection — when running on Copilot with a Claude model, route
+  # Claude inference through the native Anthropic Messages API
+  # (`/v1/messages`) instead of OpenAI chat completions. This preserves
+  # extended-thinking signatures end-to-end (Copilot translates OpenAI-shape
+  # thinking blocks lossily, breaking signatures and triggering 400s on
+  # multi-turn conversations). Image generation + embeddings always go via
+  # `azure-openai` shape — Copilot has no image/embedding endpoints, but the
+  # router transparently rejects/forwards those.
+  _PRIMARY_MODEL_REF="azure-openai/${MODEL}"
+  _ANTHROPIC_PROVIDER_BLOCK=""
+  case "$MODEL" in
+    claude-*)
+      if [ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ]; then
+        _PRIMARY_MODEL_REF="anthropic/${MODEL}"
+        # Drop the model from the azure-openai block — pi-ai's PiModelRegistry
+        # otherwise registers two entries with the same id and the OpenAI-shape
+        # one (registered first) wins at dispatch, sending /v1/chat/completions
+        # with `stream_options.include_usage: true` to Copilot which routes it
+        # to Anthropic Vertex → 400 "stream_options: Extra inputs are not
+        # permitted". Leaving azure-openai with an empty models array keeps
+        # the provider available for image-generation/embeddings shimming
+        # (router transparently 404s those for Copilot).
+        MODELS_JSON="[]"
+        # Anthropic SDK appends /v1/messages to baseUrl. Set baseUrl to the
+        # router root so it hits POST http://127.0.0.1:8443/v1/messages,
+        # which `routes/anthropic_messages.rs::forward_anthropic_passthrough`
+        # forwards verbatim to Copilot's /v1/messages with our cached JWT.
+        # `reasoning: true` enables extended thinking; signatures round-trip
+        # through the router → Copilot → Anthropic without modification.
+        _ANTHROPIC_PROVIDER_BLOCK=$(cat <<ANTHEOF
+,
+      "anthropic": {
+        "baseUrl": "http://127.0.0.1:8443",
+        "apiKey": "routed-via-inference-router",
+        "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
+        "models": [{"id":"${MODEL}","name":"${MODEL} (${_PROVIDER_LABEL})","api":"anthropic-messages","baseUrl":"http://127.0.0.1:8443","reasoning":true}]
+      }
+ANTHEOF
+)
+      fi
+      ;;
+  esac
+
+  # OpenClaw 2026.4.x has a "config drift correction" feature that compares the
+  # on-disk config against a `.bak` snapshot+`config-health.json` and silently
+  # restores the backup if our entrypoint-written file lacks gateway metadata
+  # ("missing-meta-before-write" → restoredFromBackup). Wipe stale backups so
+  # our freshly-rendered config wins on every start. See logs/config-audit.jsonl.
+  rm -f "${OPENCLAW_CONFIG}.bak" "${OPENCLAW_CONFIG}".clobbered.* \
+        "$OPENCLAW_DIR/logs/config-health.json" 2>/dev/null || true
+
+  # Write openclaw.json (2026.4.x config format — routed through inference router)
   cat > "$OPENCLAW_CONFIG" << EOF
 {
   "models": {
@@ -319,7 +686,7 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
         "authHeader": false,
         "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": ${MODELS_JSON}
-      }
+      }${_ANTHROPIC_PROVIDER_BLOCK}
     }
   },
   "tools": {
@@ -343,9 +710,10 @@ if [ ! -f "$OPENCLAW_CONFIG" ]; then
   },
   "agents": {
     "defaults": {
-      "model": { "primary": "azure-openai/${MODEL}" },
+      "model": { "primary": "${_PRIMARY_MODEL_REF}" },
       "imageGenerationModel": "azure-openai/gpt-image-1",
       "timeoutSeconds": 300,
+      "systemPromptOverride": ${SYSTEM_PROMPT_JSON},
       "memorySearch": {
         "enabled": true,
         "provider": "azure-openai",
@@ -498,7 +866,11 @@ AUTHPROFEOF
   # Set provider credentials via environment (OpenClaw reads these automatically)
   # Read from secret file at runtime — avoid leaking key value in process tree
   export AZURE_OPENAI_API_KEY
-  AZURE_OPENAI_API_KEY="$(cat /run/secrets/azure-openai-key 2>/dev/null || cat /tmp/azure-openai-key 2>/dev/null)"
+  # `|| :` ensures the assignment succeeds even when neither file exists —
+  # critical on AKS workload-identity where there is no API-key secret mounted
+  # (router uses managed-identity to talk to Foundry, no key needed).
+  # Without this fallback, `set -e` exits the script when both cats fail.
+  AZURE_OPENAI_API_KEY="$(cat /run/secrets/azure-openai-key 2>/dev/null || cat /tmp/azure-openai-key 2>/dev/null || :)"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
   # AGT governance is always active in AzureClaw sandboxes (enables agt-governance skill)
@@ -509,16 +881,21 @@ AUTHPROFEOF
   # Foundry Agent ID (only needed for tools requiring agent runs: code_interpreter, web_search)
   FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID:-}"
 
-  # Write a .bashrc snippet so credentials are available in interactive shells too
-  cat >> /sandbox/.bashrc << RCEOF
-
+  # Write env exports to a sandbox-specific file (overwritten every boot, no
+  # accumulation across pod restarts on persistent /sandbox volumes). Then ensure
+  # .bashrc sources it exactly once.
+  cat > /sandbox/.azureclaw-env.sh << RCEOF
 # AzureClaw: Azure OpenAI credentials (loaded from /run/secrets/)
+# Auto-generated every container boot — do not edit by hand.
 export AZURE_OPENAI_API_KEY="\$(cat /run/secrets/azure-openai-key 2>/dev/null)"
 export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 export OPENCLAW_MODEL="${MODEL}"
 export FOUNDRY_PROJECT_ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT}"
 export FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID}"
 RCEOF
+  if ! grep -q "azureclaw-env.sh" /sandbox/.bashrc 2>/dev/null; then
+    printf '\n# AzureClaw env (managed by entrypoint)\n[ -f /sandbox/.azureclaw-env.sh ] && . /sandbox/.azureclaw-env.sh\n' >> /sandbox/.bashrc
+  fi
 
   # Write minimal workspace files so OpenClaw doesn't need onboarding
   cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
@@ -527,10 +904,10 @@ RCEOF
 You are a helpful AI assistant running inside an **AzureClaw** sandbox — a secure,
 open-source runtime for AI agents on Azure Kubernetes Service (AKS).
 
-## On First Message (Welcome) — MANDATORY
+## On First Message (Welcome)
 
-When a user starts a new conversation, you MUST include ALL of the following in your greeting.
-Do NOT skip any of these items — they are required for security transparency:
+When a user starts a new conversation, include the following in your greeting
+for security transparency:
 
 1. **Header**: "🔒 AzureClaw Sandbox — Secure AI Runtime on Azure"
 2. **Foundry Project**: Show the connected project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
@@ -540,9 +917,10 @@ Do NOT skip any of these items — they are required for security transparency:
 6. **Capabilities list**: Briefly list what you can do (code execution, web search, document search, memory, sub-agents, etc.)
 7. **Invitation**: Ask how you can help
 
-Format this nicely with the header as a bold/prominent line. The Foundry project endpoint
-and model MUST be visible — this is how the user knows which backend they're connected to.
-Never omit the Foundry project line even if it says "Not configured".
+Format this nicely with the header as a bold or prominent line. The Foundry
+project endpoint and model should be visible so the user knows which backend
+they are connected to. Include the Foundry project line even when it says
+"Not configured".
 
 ## Capabilities
 - You can help with coding, analysis, writing, and general questions
@@ -579,8 +957,9 @@ Examples:
 - "Remember this for later" → call \`foundry_memory\` with operation "update"
 
 ## Inter-Agent Communication (E2E Encrypted)
-You can spawn sub-agents and communicate with them via Signal Protocol E2E encryption.
-**You MUST use these tools for inter-agent communication — never fabricate sub-agent responses.**
+You can spawn sub-agents and communicate with them via Signal Protocol E2E
+encryption. Use the mesh tools for inter-agent communication and read replies
+from the mesh inbox rather than guessing at them.
 
 ### Workflow for sub-agent tasks:
 1. **Spawn**: Call \`azureclaw_spawn\` with a name — it returns when the sub-agent is Running
@@ -588,8 +967,8 @@ You can spawn sub-agents and communicate with them via Signal Protocol E2E encry
 3. **Wait & Read**: Call \`azureclaw_mesh_inbox\` to check for replies (retry if empty)
 4. **Destroy**: Call \`azureclaw_spawn_destroy\` when done
 
-### Rules:
-- NEVER generate or invent a sub-agent's response — always read it from \`azureclaw_mesh_inbox\`
+### Notes:
+- Read sub-agent replies from \`azureclaw_mesh_inbox\` rather than inventing them
 - If \`azureclaw_mesh_inbox\` returns no messages, wait and retry (up to 60 seconds)
 - All messages are E2E encrypted (Signal Protocol) — the relay cannot read them
 
@@ -763,12 +1142,30 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ -d /opt/azureclaw-plugin/core ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/core "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
   fi
-  # Copy Foundry skills (SKILL.md files)
+  # Copy Foundry skills (SKILL.md files) — but skip foundry-* in GH Models
+  # mode. GH Models has a hard 16k input-token cap; the 9 Foundry skills add
+  # ~25k bytes of prompt fragments + tool schemas that the LLM never gets to
+  # use (no Azure project exists), and they push every chat turn past 413.
   if [ -d /opt/azureclaw-plugin/skills ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     mkdir -p "$WORKSPACE_DIR/skills"
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
-    echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
+    if [ "${AZURECLAW_PROVIDER:-}" = "github-models" ] || [ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ]; then
+      # GH-token providers (Models / Copilot) have no Foundry project — skip
+      # all foundry-* skills (they'd just register tools the LLM can't use).
+      # Copilot doesn't have the 16k input cap, but the empty-Foundry tool
+      # registrations are still pure noise.
+      for skill_dir in /opt/azureclaw-plugin/skills/*/; do
+        name=$(basename "$skill_dir")
+        case "$name" in
+          foundry-*) continue ;;
+        esac
+        cp -r --no-preserve=mode "$skill_dir" "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+      done
+      echo "[azureclaw] ${AZURECLAW_PROVIDER} mode: governance + spawn skills installed (Foundry skills skipped)"
+    else
+      cp -r --no-preserve=mode /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+      echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
+    fi
   fi
   # Copy pre-installed ClawHub skills (from Docker build)
   if [ -d /opt/clawhub-skills ] && [ "$(ls -A /opt/clawhub-skills 2>/dev/null)" ]; then
@@ -881,8 +1278,13 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   if [ "$IS_ROOT" = "true" ]; then
     chown sandbox:sandbox /tmp/.agt-admin-token
     chmod 440 /tmp/.agt-admin-token
-    # Add router user to sandbox group so UID 1001 can read the token file
-    adduser router sandbox 2>/dev/null || true
+    # Add router user to sandbox group so UID 1001 can read the token file.
+    # Azure Linux 3.0 ships shadow-utils where `adduser` is `useradd`; the
+    # Debian-style `adduser <user> <group>` syntax silently fails. Use
+    # usermod/gpasswd which exist on both shadow-utils and busybox.
+    usermod -aG sandbox router 2>/dev/null \
+      || gpasswd -a router sandbox 2>/dev/null \
+      || true
   else
     chmod 400 /tmp/.agt-admin-token
   fi
@@ -896,10 +1298,18 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
     chmod 700 /tmp/agt 2>/dev/null || true
   fi
 
-  # Ensure router can write its log file (remove stale file from previous runs)
+  # Ensure router can write its log file (remove stale file from previous runs).
+  # NOTE: Do NOT chown the log file to UID 1001. The shell redirect `> file`
+  # below is opened by THIS shell (root in dev). The fd is then inherited by
+  # `runuser` and the router process via exec — they don't need to open the
+  # file themselves, just inherit the writable fd. Counterintuitively, on
+  # Docker Desktop (and possibly some LSM-hardened kernels), once a file is
+  # chowned to UID 1001 root can no longer open it for write even with
+  # CAP_DAC_OVERRIDE and mode 666 — so chowning the log here breaks the
+  # redirect with EACCES. Keeping it root-owned is correct: only the parent
+  # shell needs to open it; the router writes via the inherited fd.
   rm -f /tmp/inference-router.log
   touch /tmp/inference-router.log
-  [ "$IS_ROOT" = "true" ] && chown 1001:1001 /tmp/inference-router.log
   # Dev mode: make Docker socket accessible to router (UID 1001) for sub-agent spawning
   if [ -S /var/run/docker.sock ] && [ "$IS_ROOT" = "true" ]; then
     chmod 666 /var/run/docker.sock || true
@@ -909,6 +1319,8 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
   AZURE_OPENAI_API_KEY="$API_KEY" \
   DEFAULT_MODEL="$MODEL" \
+  AZURECLAW_PROVIDER="${AZURECLAW_PROVIDER:-}" \
+  COPILOT_GITHUB_TOKEN="$([ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ] && echo "$API_KEY")" \
   CONTENT_SAFETY_ENABLED=true \
   AGT_RELAY_URL="${AGT_RELAY_URL:-}" \
   AGT_REGISTRY_URL="${AGT_REGISTRY_URL:-}" \

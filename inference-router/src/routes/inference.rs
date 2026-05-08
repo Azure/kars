@@ -50,8 +50,11 @@ pub fn inference_routes() -> Router<AppState> {
         )
         // OpenAI-compatible endpoint: extracts model from body, defaults to gpt-image-1
         .route("/v1/images/generations", post(images_generations_v1))
-        // Anthropic Messages API translation: Anthropic SDK -> Foundry chat
+        // Anthropic Messages API: native passthrough for Copilot, translation
+        // for Foundry/GH Models. Both `/v1/messages` (canonical) and
+        // `/anthropic/v1/messages` (legacy) are accepted.
         .route("/anthropic/v1/messages", post(anthropic_messages))
+        .route("/v1/messages", post(anthropic_messages))
 }
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
 /// These are proxied to the Foundry project endpoint, authenticated via IMDS with ai.azure.com audience.
@@ -210,6 +213,7 @@ async fn completions(
     let upstream = state.upstream_config(sandbox_name);
     match proxy::forward(
         &state.auth,
+        Some(&state.copilot),
         &state.client,
         &upstream,
         axum::http::Method::POST,
@@ -286,6 +290,7 @@ async fn responses(
 
     match proxy::forward(
         &state.auth,
+        Some(&state.copilot),
         &state.client,
         &upstream,
         axum::http::Method::POST,
@@ -347,6 +352,7 @@ async fn embeddings(
 
     match proxy::forward(
         &state.auth,
+        Some(&state.copilot),
         &state.client,
         &upstream,
         axum::http::Method::POST,
@@ -414,6 +420,7 @@ async fn images_generations(
 
     match proxy::forward(
         &state.auth,
+        Some(&state.copilot),
         &state.client,
         &upstream,
         axum::http::Method::POST,
