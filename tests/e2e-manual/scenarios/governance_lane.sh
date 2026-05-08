@@ -58,13 +58,27 @@ wait_for_clawsandbox_ready "$ns" "$name" || {
 pod=$(kubectl -n "$pod_ns" get pod -l "azureclaw.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
 [[ -n "$pod" ]] || { log_fail "no pod"; cleanup_sandbox "$ns" "$name"; exit 1; }
 
+# The openclaw container is exec-banned by ValidatingAdmissionPolicy
+# (azureclaw-sandbox-exec-ban). Talk to the inference-router via
+# port-forward — the canonical operator path the policy recommends.
+PF_PORT=18743
+kubectl -n "$pod_ns" port-forward "pod/${pod}" "${PF_PORT}:8443" >/tmp/_pf.log 2>&1 &
+PF_PID=$!
+trap 'kill '"${PF_PID}"' 2>/dev/null || true' EXIT
+# Wait until the forwarder is actually listening.
+for _ in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 1 "http://127.0.0.1:${PF_PORT}/healthz" 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+
 router_call() {
     # $1 = path, $2 = JSON body
-    kubectl -n "$pod_ns" exec "$pod" -c openclaw -- \
-        curl -sS -o /tmp/_body.json -w '%{http_code}' \
+    curl -sS -o /tmp/_body.json -w '%{http_code}' --max-time 10 \
         -H 'content-type: application/json' \
-        -X POST "http://127.0.0.1:8443${1}" \
-        --data "${2}" || echo "000"
+        -X POST "http://127.0.0.1:${PF_PORT}${1}" \
+        --data "${2}" 2>/dev/null || echo "000"
 }
 
 # 1. Content Safety

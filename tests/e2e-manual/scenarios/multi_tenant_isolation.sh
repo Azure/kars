@@ -52,6 +52,13 @@ pod_b=$(kubectl -n "$pod_ns_b" get pod -l "azureclaw.azure.com/sandbox=${name_b}
 ip_b=$(kubectl -n "$pod_ns_b" get pod "$pod_b" -o jsonpath='{.status.podIP}')
 log_info "tenant A pod=${pod_a} (ns=${pod_ns_a})  →  tenant B IP=${ip_b} (ns=${pod_ns_b})"
 
+# Isolation probes need to run inside the agent container to validate
+# what the agent itself can reach. Default ValidatingAdmissionPolicy
+# blocks exec into openclaw — flip the audited break-glass label on
+# tenant A's pod ns for the duration of this scenario, restore on exit.
+enable_break_glass "$pod_ns_a"
+trap 'disable_break_glass "$pod_ns_a"' EXIT
+
 # 1. NetworkPolicy isolation.
 log_step "[1/3] cross-tenant TCP probe (A → B) must fail"
 # UID 1000 in the sandbox is iptables-restricted to loopback + DNS;

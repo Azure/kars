@@ -118,6 +118,23 @@ cleanup_sandbox() {
     cleanup_ns "$(pod_ns_for "$name")"
 }
 
+# Toggle the audited break-glass label on a sandbox pod namespace so
+# tests can `kubectl exec` into the openclaw container. Production-grade
+# admission policy (azureclaw-sandbox-exec-ban) blocks exec/attach into
+# the agent runtime container by default; the label is the documented
+# emergency-override path. Bypasses are audited at the apiserver layer.
+enable_break_glass() {
+    local pod_ns="$1"
+    kubectl label namespace "$pod_ns" \
+        azureclaw.azure.com/break-glass=true --overwrite >/dev/null 2>&1 || true
+}
+
+disable_break_glass() {
+    local pod_ns="$1"
+    kubectl label namespace "$pod_ns" \
+        azureclaw.azure.com/break-glass- >/dev/null 2>&1 || true
+}
+
 # ── Wait helpers ────────────────────────────────────────────────────────
 wait_until() {
     # Usage: wait_until <timeout-sec> <description> -- <cmd ...>

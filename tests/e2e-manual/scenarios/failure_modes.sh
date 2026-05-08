@@ -83,9 +83,13 @@ fi
 log_step "[3/3] inducing memory pressure inside the sandbox"
 # Allocate a 256MiB string in the sandbox shell. If limits are tight the
 # kernel kills it; if not, this is a no-op probe.
+# Exec into openclaw is policy-banned by default — the OOM probe is a
+# legitimate destructive test, so flip the audited break-glass label.
+enable_break_glass "$pod_ns"
 kubectl -n "$pod_ns" exec "$pod" -c openclaw -- sh -c \
     'python3 -c "x=[bytearray(1024*1024) for _ in range(512)]" 2>&1 | head -2' \
     >/dev/null 2>&1 || true
+disable_break_glass "$pod_ns"
 sleep 5
 restart_count=$(kubectl -n "$pod_ns" get pod "$pod" \
     -o jsonpath='{.status.containerStatuses[?(@.name=="openclaw")].restartCount}' 2>/dev/null || echo 0)
