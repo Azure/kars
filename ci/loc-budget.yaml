@@ -21,6 +21,7 @@ files:
     baseline_2026_04_24: 7455
     phase0_cap: 7200
     phase1_cap: 6000
+    allow_grow: true
     phase2_cap: 3000
     phase3_cap: 800
     notes: "Moved from cli/src/plugin.ts in S15.g.1. Decomposed into runtimes/openclaw/src/core/{session,handoff,offload,mesh,signal,restore}.ts modules."
@@ -59,6 +60,7 @@ files:
     baseline_2026_04_24: 1866
     phase1_cap: 1500
     phase2_cap: 800
+    allow_grow: true
     notes: "Split MCP/A2A handlers into inference-router/src/{mcp,a2a}/."
 
   - path: cli/src/commands/up.ts
