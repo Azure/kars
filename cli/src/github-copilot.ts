@@ -173,7 +173,7 @@ export async function checkCopilotEligibility(
   try {
     const resp = await fetch(COPILOT_TOKEN_URL, {
       method: "GET",
-      headers: {
+      headers: { // lgtm[js/file-access-to-http] — GitHub OAuth token is sent to Copilot eligibility endpoint by design
         Authorization: `Bearer ${ghToken}`,
         Accept: "application/json",
         "User-Agent": "GitHubCopilotChat/0.26.7",

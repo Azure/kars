@@ -98,7 +98,7 @@ export async function fetchCatalog(pat: string): Promise<FetchCatalogResult | Fe
   try {
     const resp = await fetch(CATALOG_URL, {
       method: "GET",
-      headers: {
+      headers: { // lgtm[js/file-access-to-http] — PAT read from user config is sent to GitHub's models API by design
         "Authorization": `Bearer ${pat}`,
         "Accept": "application/vnd.github+json",
         "User-Agent": "azureclaw-cli",

@@ -260,7 +260,7 @@ Notes:
           const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
           const tmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-secret-"));
           mountedSecretPath = path.join(tmpDir, "azure-openai-key");
-          writeFileSync(mountedSecretPath, creds.apiKey, "utf-8");
+          writeFileSync(mountedSecretPath, creds.apiKey, "utf-8"); // lgtm[js/http-to-file-access] — secret tempfile mounted into the dev container; 0o600 below
           chmodSync(mountedSecretPath, 0o600);
         }
 
