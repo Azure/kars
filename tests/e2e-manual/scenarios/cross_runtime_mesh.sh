@@ -53,17 +53,19 @@ name_a="mesh-a-${peer_a//[._]/-}"
 name_b="mesh-b-${peer_b//[._]/-}"
 ns_a=$(new_ns "mesh-a-${peer_a//[._]/-}")
 ns_b=$(new_ns "mesh-b-${peer_b//[._]/-}")
+pod_ns_a=$(pod_ns_for "$name_a")
+pod_ns_b=$(pod_ns_for "$name_b")
 
 # Plant peer A with B in its allowlist.
 cr_dispatch "$peer_a" "$name_a" "$ns_a" \
   | yq eval ".spec.agt.mesh.enabled = true | .spec.agt.mesh.peers = [{\"name\": \"${name_b}\", \"tier\": \"trusted\"}]" - 2>/dev/null \
   | kubectl apply -f - >/dev/null \
-  || { log_fail "could not apply peer A (yq required for this scenario)"; cleanup_ns "$ns_a"; cleanup_ns "$ns_b"; exit 1; }
+  || { log_fail "could not apply peer A (yq required for this scenario)"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
 cr_dispatch "$peer_b" "$name_b" "$ns_b" \
   | yq eval ".spec.agt.mesh.enabled = true | .spec.agt.mesh.peers = [{\"name\": \"${name_a}\", \"tier\": \"trusted\"}]" - 2>/dev/null \
   | kubectl apply -f - >/dev/null \
-  || { log_fail "could not apply peer B"; cleanup_ns "$ns_a"; cleanup_ns "$ns_b"; exit 1; }
+  || { log_fail "could not apply peer B"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
 log_pass "applied both peers"
 
@@ -81,11 +83,11 @@ assert_contains "registry registration for peer B" "$name_b" "$relay_logs"
 # `mesh_send` via the OpenClaw plugin (or the runtime's mesh_tools). The
 # exact surface differs per runtime; for openclaw we have a shell tool.
 log_step "triggering mesh_send from peer A → peer B"
-pod_a=$(kubectl -n "$ns_a" get pod -l "azureclaw.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
+pod_a=$(kubectl -n "$pod_ns_a" get pod -l "azureclaw.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
 if [[ -z "$pod_a" ]]; then
     log_fail "could not find peer-A pod"
 else
-    if kubectl -n "$ns_a" exec "$pod_a" -c openclaw -- \
+    if kubectl -n "$pod_ns_a" exec "$pod_a" -c openclaw -- \
         sh -c "echo '{\"to\":\"${name_b}\",\"text\":\"manual-e2e-ping\"}' > /tmp/mesh-send.json && curl -s --unix-socket /tmp/openclaw.sock http://localhost/mesh/send -d @/tmp/mesh-send.json" \
         >/dev/null 2>&1; then
         log_pass "mesh_send invoked on peer A"
@@ -101,7 +103,7 @@ sleep 5
 relay_after=$(kubectl -n agentmesh logs deploy/relay --tail=500 2>/dev/null || echo "")
 assert_contains "relay routed an envelope between peers" "${name_a}" "$relay_after"
 
-cleanup_ns "$ns_a"
-cleanup_ns "$ns_b"
+cleanup_sandbox "$ns_a" "$name_a"
+cleanup_sandbox "$ns_b" "$name_b"
 
 scenario_summary "Cross-runtime AgentMesh round-trip"
