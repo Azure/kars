@@ -14,6 +14,9 @@ use reqwest::Client;
 use std::time::Instant;
 
 use crate::auth::WorkloadIdentityAuth;
+use crate::copilot_auth::{
+    self, COPILOT_INTEGRATION_ID, CopilotTokenCache, EDITOR_PLUGIN_VERSION, EDITOR_VERSION,
+};
 use crate::metrics;
 use std::sync::Arc;
 
@@ -38,17 +41,27 @@ fn token_audience(endpoint: &str) -> &'static str {
 }
 
 /// Sanitize request headers — strip credentials and hop-by-hop headers,
-/// then inject Azure auth.
+/// then inject auth + provider-specific static headers.
+///
+/// When `endpoint` is a GitHub Copilot URL, also injects the three static
+/// headers Copilot's ingress requires (`Editor-Version`,
+/// `Copilot-Integration-Id`, `Editor-Plugin-Version`). Without these,
+/// Copilot returns 400 "missing required header" or routes to the wrong
+/// model behind the scenes.
 fn build_upstream_headers(
     request_headers: &HeaderMap,
     _auth: &WorkloadIdentityAuth,
     token: &str,
+    endpoint: &str,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     for (name, value) in request_headers.iter() {
         match name.as_str() {
             "authorization" | "api-key" | "x-api-key" => continue,
             "host" | "connection" | "transfer-encoding" | "content-length" => continue,
+            // Don't pass through Copilot's own static headers from the inbound
+            // request — we always emit our own canonical values below.
+            "editor-version" | "copilot-integration-id" | "editor-plugin-version" => continue,
             _ => {
                 headers.insert(name.clone(), value.clone());
             }
@@ -57,6 +70,7 @@ fn build_upstream_headers(
 
     // Both API-key and Entra modes use Authorization: Bearer for the unified
     // /openai/v1/ endpoint format. Azure OpenAI accepts API keys as Bearer tokens.
+    // Copilot also uses Bearer (with the exchanged Copilot JWT).
     headers.insert(
         "authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
@@ -64,7 +78,61 @@ fn build_upstream_headers(
     headers
         .entry("content-type")
         .or_insert(HeaderValue::from_static("application/json"));
+
+    if is_copilot_endpoint(endpoint) {
+        headers.insert(
+            "editor-version",
+            HeaderValue::from_static(EDITOR_VERSION),
+        );
+        headers.insert(
+            "copilot-integration-id",
+            HeaderValue::from_static(COPILOT_INTEGRATION_ID),
+        );
+        headers.insert(
+            "editor-plugin-version",
+            HeaderValue::from_static(EDITOR_PLUGIN_VERSION),
+        );
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_static(copilot_auth::USER_AGENT),
+        );
+    }
+
     Ok(headers)
+}
+
+/// Returns true if the endpoint is a GitHub Copilot endpoint
+/// (`https://api.githubcopilot.com`). Copilot is OpenAI-API + Anthropic-API
+/// compatible *but* requires its own short-lived JWT (exchanged from the
+/// user's GitHub OAuth token) and three static integration headers.
+pub fn is_copilot_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("api.githubcopilot.com")
+}
+
+/// Acquire the right auth token for a given upstream endpoint.
+///
+/// - GitHub Copilot endpoints → exchanged Copilot JWT (cached, refreshed proactively).
+/// - Everything else → Azure auth (API key in dev mode, WI/IMDS in AKS mode).
+///
+/// Returning `Result<String>` lets the caller surface a clean 502 if the
+/// Copilot token cache is uninitialised or the GitHub token is missing —
+/// rather than panicking inside `forward()`.
+pub async fn token_for_endpoint(
+    auth: &WorkloadIdentityAuth,
+    copilot: Option<&CopilotTokenCache>,
+    endpoint: &str,
+) -> Result<String> {
+    if is_copilot_endpoint(endpoint) {
+        match copilot {
+            Some(cache) => cache.get_jwt().await,
+            None => anyhow::bail!(
+                "Copilot endpoint configured but no CopilotTokenCache available — \
+                 set COPILOT_GITHUB_TOKEN or mount /run/secrets/copilot-github-token"
+            ),
+        }
+    } else {
+        auth.get_token(token_audience(endpoint)).await
+    }
 }
 
 /// Record Prometheus metrics from a completed request.
@@ -116,6 +184,7 @@ fn record_metrics(
 /// - **AKS mode** (Workload Identity / IMDS): Foundry `/openai/v1/{path}` with model in body
 pub async fn forward(
     auth: &WorkloadIdentityAuth,
+    copilot: Option<&CopilotTokenCache>,
     client: &Client,
     upstream: &UpstreamConfig,
     method: Method,
@@ -127,19 +196,20 @@ pub async fn forward(
 
     let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)?;
 
-    let mode = if auth.is_api_key_mode() {
+    let mode = if is_copilot_endpoint(&upstream.endpoint) {
+        "copilot"
+    } else if auth.is_api_key_mode() {
         "dev"
     } else {
         "foundry"
     };
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = %mode, "Forwarding inference");
 
-    let token = auth
-        .get_token(token_audience(&upstream.endpoint))
+    let token = token_for_endpoint(auth, copilot, &upstream.endpoint)
         .await
         .context("Failed to acquire auth token")?;
 
-    let headers = build_upstream_headers(request_headers, auth, &token)?;
+    let headers = build_upstream_headers(request_headers, auth, &token, &upstream.endpoint)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
 
@@ -332,6 +402,7 @@ async fn send_with_retry(
 /// and token metrics transparently.
 pub async fn forward_stream(
     auth: Arc<WorkloadIdentityAuth>,
+    copilot: Option<Arc<CopilotTokenCache>>,
     client: Client,
     upstream: UpstreamConfig,
     path: &str,
@@ -340,20 +411,28 @@ pub async fn forward_stream(
 ) -> Result<(
     StatusCode,
     HeaderMap,
-    impl futures::Stream<Item = Result<Bytes, reqwest::Error>>,
+    futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
 )> {
     // Inject stream_options.include_usage into request body so the final
-    // SSE chunk contains a `usage` object with token counts.
-    let body_with_usage = inject_stream_usage(request_body);
+    // SSE chunk contains a `usage` object with token counts. ONLY for
+    // OpenAI-shape paths — Anthropic Messages API (/v1/messages) rejects
+    // unknown top-level fields with `stream_options: Extra inputs are not
+    // permitted` (req_vrtx_*). Anthropic streams already include usage in
+    // their `message_delta` events.
+    let is_anthropic_shape = path.contains("messages");
+    let body_with_usage = if is_anthropic_shape {
+        request_body
+    } else {
+        inject_stream_usage(request_body)
+    };
     let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
-    let token = auth
-        .get_token(token_audience(&upstream.endpoint))
+    let token = token_for_endpoint(&auth, copilot.as_deref(), &upstream.endpoint)
         .await
         .context("Failed to acquire auth token")?;
-    let headers = build_upstream_headers(&request_headers, &auth, &token)?;
+    let headers = build_upstream_headers(&request_headers, &auth, &token, &upstream.endpoint)?;
 
     let start = Instant::now();
 
@@ -398,6 +477,26 @@ pub async fn forward_stream(
         ])
         .inc();
 
+    // On non-success, the upstream body is a short JSON error (not an SSE
+    // stream). Eagerly drain it, log the contents (capped), and forward as a
+    // single chunk so callers see the actual reason. Without this we only
+    // see "status=413" and have to guess at causes (token cap? bytes cap?
+    // schema break?). Cap at 4 KiB so a misbehaving upstream can't blow logs.
+    if !status.is_success() {
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        let preview = String::from_utf8_lossy(&body_bytes);
+        let preview_trimmed: String = preview.chars().take(2048).collect();
+        tracing::warn!(
+            sandbox = %upstream.sandbox_name,
+            status = %status.as_u16(),
+            body_len = body_bytes.len(),
+            body = %preview_trimmed,
+            "Upstream returned non-success status"
+        );
+        let stream = futures::stream::once(async move { Ok::<_, reqwest::Error>(body_bytes) });
+        return Ok((status, response_headers, stream.boxed()));
+    }
+
     // Wrap the byte stream to intercept the final SSE chunk for token metrics
     let sandbox_name = upstream.sandbox_name.clone();
     let model = upstream.deployment.clone();
@@ -423,13 +522,24 @@ pub async fn forward_stream(
                     metrics::INFERENCE_LATENCY
                         .with_label_values(&[&sandbox_name, &model])
                         .observe(latency.as_secs_f64());
-                    // Record token usage
-                    if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                    // Record token usage. OpenAI-shape uses prompt_tokens /
+                    // completion_tokens; Anthropic Messages-shape (e.g. native
+                    // /v1/messages SSE from Copilot) uses input_tokens /
+                    // output_tokens — accept either.
+                    let input_tokens = usage
+                        .get("prompt_tokens")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64()));
+                    let output_tokens = usage
+                        .get("completion_tokens")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
+                    if let Some(input) = input_tokens {
                         metrics::TOKENS_USED
                             .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
                             .inc_by(input as u64);
                     }
-                    if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                    if let Some(output) = output_tokens {
                         metrics::TOKENS_USED
                             .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
                             .inc_by(output as u64);
@@ -440,7 +550,7 @@ pub async fn forward_stream(
         chunk
     });
 
-    Ok((status, response_headers, metered))
+    Ok((status, response_headers, metered.boxed()))
 }
 
 /// Inject `stream_options: { include_usage: true }` into the request body
@@ -472,18 +582,22 @@ fn is_github_models_endpoint(endpoint: &str) -> bool {
 
 /// Build the upstream URL and optionally inject model into request body.
 /// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
+///
+/// Routing rules:
+///  - GitHub Copilot (`api.githubcopilot.com`): no path rewrite; OpenClaw
+///    sends OpenAI-shape to `/chat/completions` and Anthropic-shape to
+///    `/v1/messages`. We forward those paths unchanged.
+///  - GitHub Models: no path rewrite either — OpenAI-compat under root.
+///  - Foundry / Azure OpenAI: prepend `/openai/v1/` (unified endpoint).
 fn build_upstream_url(
     _auth: &WorkloadIdentityAuth,
     upstream: &UpstreamConfig,
     path: &str,
     request_body: Bytes,
 ) -> Result<(String, Bytes)> {
-    // GitHub Models exposes OpenAI-compatible routes directly under the
-    // endpoint (no Azure-style `/openai/v1/` prefix). Detect and skip the
-    // rewrite for those endpoints; everything else goes via the unified
-    // `/openai/v1/` format that works for both Azure OpenAI (api-key) and
-    // Foundry project (Entra) endpoints.
-    let url = if is_github_models_endpoint(&upstream.endpoint) {
+    let url = if is_github_models_endpoint(&upstream.endpoint)
+        || is_copilot_endpoint(&upstream.endpoint)
+    {
         format!(
             "{}/{}",
             upstream.endpoint.trim_end_matches('/'),

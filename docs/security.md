@@ -221,7 +221,7 @@ Honesty matters. AzureClaw does not — and cannot — protect against:
 - **A compromised cluster operator who controls Kata-less nodes.** Without Kata + AMD SEV-SNP, a cluster operator can read pod memory. Move to confidential isolation if your threat model includes the cluster operator.
 - **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. See **[`docs/internal/threat-model.md`](../docs/internal/threat-model.md)** for the per-route walkthrough.
 - **The model knowing your API surface.** Prompt injection is real. Treat any output from the model as untrusted; the router enforces this assumption, but you must too in your tools and plugins.
-- **Inline prompt-shield filtering on GitHub Models (`azureclaw dev --github-token` / `provider: "github-models"`).** GitHub Models does not return Foundry's `prompt_filter_results` in responses, so the router cannot enforce inline Content Safety actions. Use Foundry / Azure OpenAI in any environment where inline prompt-shield is part of your threat model. The CLI logs and `~/.azureclaw/config.json` make the chosen provider explicit so this is auditable.
+- **Inline prompt-shield filtering on GitHub Copilot (`provider: "github-copilot"`) and GitHub Models (`azureclaw dev --github-token` / `provider: "github-models"`).** Neither provider returns Foundry's `prompt_filter_results` in responses, so the router cannot enforce inline Content Safety actions on completions from either backend. Use Foundry / Azure OpenAI in any environment where inline prompt-shield is part of your threat model. The CLI logs and `~/.azureclaw/config.json` make the chosen provider explicit so this is auditable.
 
 ---
 

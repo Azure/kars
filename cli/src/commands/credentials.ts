@@ -168,14 +168,11 @@ export function credentialsCommand(): Command {
         value = answer.secret;
       }
 
-      // Strip "bot" prefix from Telegram tokens — grammY prepends it, so
-      // storing "bot123:ABC" would cause "botbot123:ABC" in API URLs (404).
-      if (baseKey === "telegram-token" && value!.startsWith("bot")) {
-        value = value!.slice(3);
-      }
-
+      // Note: `setSecret` runs `normalizeSecretValue` so Telegram `bot`
+      // prefix stripping happens uniformly across all write paths.
       setSecret(key, value!);
-      const masked = value!.length > 8 ? "••••" + value!.slice(-4) : "••••";
+      const stored = (await import("../config.js")).getSecret(key) ?? value!;
+      const masked = stored.length > 8 ? "••••" + stored.slice(-4) : "••••";
       console.log(chalk.green(`  ✔ ${key} = ${masked}`));
       console.log(chalk.dim(`  Saved to ${SECRETS_FILE}`));
       if (info || baseInfo) {

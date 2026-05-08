@@ -120,6 +120,7 @@ pub(super) async fn chat_completions(
             // then send the converted result as a single SSE data frame.
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
             let auth = state.auth.clone();
+            let copilot = state.copilot.clone();
             let client = state.client.clone();
             let upstream = upstream.clone();
             let headers = headers.clone();
@@ -130,6 +131,7 @@ pub(super) async fn chat_completions(
                 // Send keepalive comments every 5 seconds while waiting
                 let forward_fut = proxy::forward(
                     &auth,
+                    Some(&copilot),
                     &client,
                     &upstream,
                     axum::http::Method::POST,
@@ -197,6 +199,7 @@ pub(super) async fn chat_completions(
         // Non-streaming: buffered request/response (no timeout concern)
         match proxy::forward(
             &state.auth,
+            Some(&state.copilot),
             &state.client,
             &upstream,
             axum::http::Method::POST,
@@ -246,6 +249,7 @@ pub(super) async fn chat_completions(
         let budget = state.budget.clone();
         match proxy::forward_stream(
             state.auth.clone(),
+            Some(state.copilot.clone()),
             state.client.clone(),
             upstream.clone(),
             "chat/completions",
@@ -285,6 +289,7 @@ pub(super) async fn chat_completions(
                     let responses_body = chat_to_responses_body(&body);
                     match proxy::forward(
                         &state.auth,
+                        Some(&state.copilot),
                         &state.client,
                         &upstream,
                         axum::http::Method::POST,
@@ -406,6 +411,7 @@ pub(super) async fn chat_completions(
         // Buffered — extract token usage for budget tracking
         let result = proxy::forward(
             &state.auth,
+            Some(&state.copilot),
             &state.client,
             &upstream,
             axum::http::Method::POST,
@@ -439,6 +445,7 @@ pub(super) async fn chat_completions(
                 let responses_body = chat_to_responses_body(&body);
                 match proxy::forward(
                     &state.auth,
+                    Some(&state.copilot),
                     &state.client,
                     &upstream,
                     axum::http::Method::POST,

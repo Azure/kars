@@ -244,15 +244,25 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
             "exec", containerName, "printenv",
           ], { stdio: "pipe", timeout: 5000 });
           const chs: string[] = [];
+          let openclawModel: string | undefined;
+          let defaultModel: string | undefined;
           for (const line of envOut.split("\n")) {
             if (line.startsWith("TELEGRAM_BOT_TOKEN=")) chs.push("TG");
             else if (line.startsWith("SLACK_BOT_TOKEN=")) chs.push("SL");
             else if (line.startsWith("DISCORD_BOT_TOKEN=")) chs.push("DC");
+            else if (line.startsWith("OPENCLAW_MODEL=")) {
+              openclawModel = line.split("=")[1]?.trim();
+            }
             else if (line.startsWith("DEFAULT_MODEL=")) {
-              const val = line.split("=")[1]?.trim();
-              if (val) model = val;
+              defaultModel = line.split("=")[1]?.trim();
             }
           }
+          // OPENCLAW_MODEL is the primary signal (set on parent + propagated to
+          // sub-agents via inference-router/src/spawn/docker.rs). DEFAULT_MODEL
+          // is a legacy fallback that's set on the parent only. Without this
+          // ordering, sub-agents fall back to the hardcoded "gpt-4.1".
+          const resolved = openclawModel || defaultModel;
+          if (resolved) model = resolved;
           channels = chs.join(",") || "-";
         } catch { /* env probe fail */ }
 

@@ -53,6 +53,7 @@ All commands also inherit Commander.js built-in `--help`.
 ### Configuration
 
 - [credentials](#azureclaw-credentials)
+- [config](#azureclaw-config)
 - [model](#azureclaw-model)
 - [policy](#azureclaw-policy)
 - [egress](#azureclaw-egress)
@@ -163,14 +164,15 @@ Runs a fully-policy-enforced sandbox locally via Docker for inner-loop
 development. Same model routing, same egress policies, and the same
 AGT governance layer as AKS — but on your laptop.
 
-**Two inference providers** are supported. On first run you'll be asked
+**Three inference providers** are supported. On first run you'll be asked
 to pick one; your choice is saved to `~/.azureclaw/config.json` and
 reused on subsequent runs:
 
 | Provider | Requires | Saved as | Trade-offs |
 |---|---|---|---|
+| **GitHub Copilot** *(default)* | An active GitHub Copilot seat (Individual / Business / Enterprise). Auth is interactive **device-code OAuth** — no PAT to manage | `provider: "github-copilot"` | Frontier model catalogue (Claude Opus / Sonnet, GPT-5, GPT-4.1, Gemini, o-series), large context windows, native Anthropic-shape passthrough for Claude. Foundry-only routes (Memory Store, agents, evaluations, indexes, Content Safety inline) return `501`. Inline `prompt_filter_results` not enforced (Copilot doesn't return them). Subject to Copilot quota on your seat. |
 | **Azure AI Foundry / Azure OpenAI** | Existing Foundry or Azure OpenAI resource + API key | `provider: "foundry"` | Full feature set: Memory Store, agents, evaluations, Content Safety inline, indexes |
-| **GitHub Models** | A GitHub PAT with `models:read` scope | `provider: "github-models"` | Free, no Azure subscription needed. Foundry-only routes (Memory Store, agents, evaluations, indexes, Content Safety inline) return `501`. Subject to GitHub Models rate limits. |
+| **GitHub Models** | A GitHub PAT with `models:read` scope | `provider: "github-models"` | Free, no Azure subscription needed. Smaller context windows. Foundry-only routes (Memory Store, agents, evaluations, indexes, Content Safety inline) return `501`. Subject to GitHub Models rate limits. |
 
 **Usage:**
 ```
@@ -181,9 +183,9 @@ azureclaw dev [options]
 | Flag | Default | Description |
 |---|---|---|
 | `--name <name>` | `dev-agent` | Sandbox name |
-| `--model <model>` | `gpt-4.1` (Foundry) / `gpt-4o-mini` (GitHub Models) | Model deployment name |
+| `--model <model>` | `claude-opus-4.7` (Copilot) / `gpt-4.1` (Foundry) / `gpt-4o-mini` (GitHub Models) | Model deployment / catalogue name |
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
-| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use this for ephemeral runs that shouldn't overwrite your saved provider. To make GitHub Models your default, run `azureclaw dev` without this flag and pick GitHub Models at the prompt. |
+| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use this for ephemeral runs that shouldn't overwrite your saved provider. To make GitHub Models your default, run `azureclaw dev` without this flag and pick GitHub Models at the prompt. For Copilot, run `azureclaw credentials` and pick Copilot — the device-code flow runs interactively. |
 | `--image <image>` | `azureclaw-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
@@ -745,18 +747,23 @@ echo $?  # 0=match 2=drift 3=missing baseline
 
 Manages AzureClaw credentials (inference provider, channel tokens,
 third-party API keys). Invoking without a subcommand opens an interactive
-guided prompt that lets you pick between **Azure AI Foundry / Azure OpenAI**
-and **GitHub Models** for inference, save channel tokens (Telegram, Slack,
-Discord), and configure third-party API keys (Brave, Tavily, Exa,
-Firecrawl, Perplexity, OpenAI). Use `credentials set` / `list` / `remove`
-for scripting. Use `credentials update` to patch a running AKS sandbox's
-K8s Secret without restarting the pod (unless you want a restart).
+guided prompt that lets you pick between **GitHub Copilot** *(default,
+recommended)*, **Azure AI Foundry / Azure OpenAI**, and **GitHub Models**
+for inference, save channel tokens (Telegram, Slack, Discord), and configure
+third-party API keys (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI).
+Use `credentials set` / `list` / `remove` for scripting. Use
+`credentials update` to patch a running AKS sandbox's K8s Secret without
+restarting the pod (unless you want a restart).
 
 The inference provider you pick is saved to `~/.azureclaw/config.json`
-(field `provider: "foundry" | "github-models"`); the API key / GitHub PAT
-is saved alongside in `~/.azureclaw/secrets.json` under the key
-`azure-openai-key`. Switch providers any time by re-running this command
-and picking the other option.
+(field `provider: "github-copilot" | "foundry" | "github-models"`); the
+credential is saved alongside in `~/.azureclaw/secrets.json` under the key
+`azure-openai-key`. For Copilot the value is a GitHub OAuth token obtained
+through an interactive **device-code flow** (the CLI prints a code and
+opens `https://github.com/login/device` in your browser); the router
+exchanges it for a short-lived Copilot JWT at runtime — you never see or
+manage the JWT yourself. Switch providers any time by re-running this
+command and picking another option.
 
 **Usage:**
 ```
@@ -822,6 +829,41 @@ azureclaw credentials update my-agent --brave-api-key $KEY --no-restart
 ```
 
 **See also:** [docs/channels-plugins.md](channels-plugins.md)
+
+---
+
+### `azureclaw config`
+
+Inspects and edits the local CLI configuration at `~/.azureclaw/config.json`. This is the file `azureclaw dev` and `azureclaw credentials` write to, holding your provider choice, endpoint, and default model. The command is a thin viewer + per-provider model picker — it doesn't touch secrets (use `azureclaw credentials` for those) and it doesn't talk to your cluster (it's purely local).
+
+**Usage:**
+```
+azureclaw config <subcommand> [arguments]
+```
+
+**Subcommands:**
+| Subcommand | Description |
+|---|---|
+| `show` | Print the effective local configuration (provider, endpoint, model). For `github-models`, also validates the saved model against the live catalog. |
+| `model [model-id]` | Pick or set the local default inference model. Provider-aware: presents the curated Copilot catalog for `github-copilot`, the live tool-capable catalog for `github-models`, or accepts a free-form deployment name for `foundry`. Omit the argument for an interactive picker. |
+| `reset` | Clear the local configuration file (does not touch saved secrets). |
+
+**Examples:**
+```bash
+# Show what's currently saved
+azureclaw config show
+
+# Switch the local default model interactively
+azureclaw config model
+
+# Set it directly (Copilot / Models style id)
+azureclaw config model claude-opus-4.7
+
+# Set it directly (Foundry deployment name)
+azureclaw config model gpt-4.1
+```
+
+**See also:** [`azureclaw credentials`](#azureclaw-credentials), [`azureclaw model`](#azureclaw-model) (per-sandbox).
 
 ---
 

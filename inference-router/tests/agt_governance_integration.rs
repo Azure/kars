@@ -38,6 +38,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
     let governance = Arc::new(Governance::new(sandbox));
     AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
+        copilot: Arc::new(azureclaw_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),
         config: Arc::new(Config {
             port: 0,
@@ -52,6 +53,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
             token_budget_per_request: 100_000,
             registry_mode: RegistryMode::Local,
             registry_url: None,
+            provider_override: None,
         }),
         budget: TokenBudgetTracker::new(1_000_000, 100_000),
         policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,

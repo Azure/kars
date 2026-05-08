@@ -234,8 +234,14 @@ export class X3DHKeyExchange {
  * Serialize X3DH initiator message for wire transport.
  */
 export function serializeX3DHMessage(msg: X3DHInitiatorMessage): X3DHInitiatorMessageSerialized {
-  const toBase64 = (bytes: Uint8Array) => {
-    const binary = String.fromCharCode(...bytes);
+  // Patch #13: chunked base64 — see ratchet.ts/session.ts bytesToBase64 helpers
+  const toBase64 = (bytes: Uint8Array): string => {
+    if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+    }
     return btoa(binary);
   };
 

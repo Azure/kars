@@ -1,4 +1,19 @@
 'use strict';
+// Patch #13: chunked binary-string builder for safe base64 encoding.
+// Replaces String.fromCharCode(...bytes) which overflows V8 arg limit
+// (~125-250K) on payloads >~125 KB. Used by ratchet/session ciphertexts.
+function __bmsdkB64Bin(bytes) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("binary");
+  }
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return binary;
+}
+
 
 var chunkBPYP43TA_cjs = require('./chunk-BPYP43TA.cjs');
 var chunkUBUGIENK_cjs = require('./chunk-UBUGIENK.cjs');
@@ -197,7 +212,7 @@ async function generateOneTimePrekeys(startId, count) {
 }
 function serializePrekeyBundle(bundle) {
   const toBase642 = (bytes) => {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   };
   return {
@@ -435,7 +450,7 @@ var PrekeyManager = class {
       throw new Error("No state to serialize");
     }
     const toBase642 = (bytes) => {
-      const binary = String.fromCharCode(...bytes);
+      const binary = __bmsdkB64Bin(bytes);
       return btoa(binary);
     };
     const oneTimePrekeys = {};
@@ -616,7 +631,7 @@ var X3DHKeyExchange = class {
 };
 function serializeX3DHMessage(msg) {
   const toBase642 = (bytes) => {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   };
   return {
@@ -971,7 +986,7 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   }
   /**
@@ -987,7 +1002,7 @@ var DoubleRatchetSession = class _DoubleRatchetSession {
   }
 };
 function serializeRatchetHeader(header) {
-  const binary = String.fromCharCode(...header.dhPublicKey);
+  const binary = __bmsdkB64Bin(header.dhPublicKey);
   return {
     dh_public_key: btoa(binary),
     pn: header.previousChainLength,
@@ -1381,7 +1396,7 @@ var SessionManager = class {
    * Helper: bytes to base64.
    */
   bytesToBase64(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   }
   /**
@@ -1780,7 +1795,7 @@ var KnockProtocol = class {
    * Base64 encode bytes.
    */
   base64Encode(bytes) {
-    const binary = String.fromCharCode(...bytes);
+    const binary = __bmsdkB64Bin(bytes);
     return btoa(binary);
   }
   /**
@@ -2951,24 +2966,86 @@ var AgentMeshClient = class _AgentMeshClient {
             }
           }
         } else if (parsed.type === "encrypted" && parsed.x3dh) {
+          // PATCH #17 (cjs mirror): see dist/index.js for full doc.
+          this.acceptedX3dhFingerprints = this.acceptedX3dhFingerprints || new Map();
+          const fingerprint = typeof parsed.x3dh === "string" ? parsed.x3dh : JSON.stringify(parsed.x3dh);
+          const lastFingerprint = this.acceptedX3dhFingerprints.get(fromAmid);
+          let sessionId = this.activeSessions.get(fromAmid);
+          let decrypted;
+          let teardownReason = null;
           try {
-            const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
-            const sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
-            this.activeSessions.set(fromAmid, sessionId);
-            const decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
-            this.emitE2EVerified(fromAmid);
-            for (const handler of this.messageHandlers) {
+            if (!sessionId) {
+              const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
+              sessionId = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
+              this.activeSessions.set(fromAmid, sessionId);
+              this.acceptedX3dhFingerprints.set(fromAmid, fingerprint);
+              decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+            } else {
               try {
-                handler(fromAmid, decrypted);
-              } catch {
+                decrypted = await this.sessionManager.decryptMessage(sessionId, parsed);
+              } catch (firstErr) {
+                if (lastFingerprint && lastFingerprint === fingerprint) {
+                  teardownReason = firstErr?.message || "ratchet desync (same x3dh fingerprint)";
+                  throw firstErr;
+                }
+                const x3dhMsg = deserializeX3DHMessage(parsed.x3dh);
+                let candidateSid = null;
+                try {
+                  candidateSid = await this.sessionManager.acceptSession(fromAmid, x3dhMsg);
+                  decrypted = await this.sessionManager.decryptMessage(candidateSid, parsed);
+                } catch (candidateErr) {
+                  if (candidateSid && this.sessionManager.closeSession) {
+                    try { await this.sessionManager.closeSession(candidateSid, "rebuild-failed"); } catch {}
+                  }
+                  for (const handler of this.errorHandlers) {
+                    try { handler("decrypt_failed", fromAmid, candidateErr?.message || "rebuild candidate decrypt failed"); } catch {}
+                  }
+                  return;
+                }
+                const oldSid = sessionId;
+                this.activeSessions.set(fromAmid, candidateSid);
+                this.acceptedX3dhFingerprints.set(fromAmid, fingerprint);
+                if (this.sessionCache && this.sessionCache.clearByAmid) {
+                  try { this.sessionCache.clearByAmid(fromAmid); } catch {}
+                }
+                if (oldSid && this.sessionManager.closeSession) {
+                  try { await this.sessionManager.closeSession(oldSid, "rebuilt"); } catch {}
+                }
+                console.log(`[AGT] Patch #18 (cjs): rebuilt session for ${fromAmid} via fresh X3DH (desync recovered)`);
               }
             }
+            if (this.knockAcceptedPeers
+                && !this.knockAcceptedPeers.has(fromAmid)
+                && this.acceptedX3dhFingerprints.has(fromAmid)
+                && (!this.isBlocked || !this.isBlocked(fromAmid))) {
+              this.knockAcceptedPeers.add(fromAmid);
+            }
+            this.emitE2EVerified(fromAmid);
+            for (const handler of this.messageHandlers) {
+              try { handler(fromAmid, decrypted); } catch {}
+            }
           } catch (e) {
-            console.error("[AGT] E2E decrypt failed \u2014 message REJECTED (not delivered):", e?.message || e);
-            for (const handler of this.errorHandlers) {
+            if (teardownReason) {
               try {
-                handler("decrypt_failed", fromAmid, e?.message || "unknown");
-              } catch {
+                this.activeSessions.delete(fromAmid);
+                if (this.sessionCache && this.sessionCache.clearByAmid) this.sessionCache.clearByAmid(fromAmid);
+                if (this.pendingX3DH && this.pendingX3DH.delete) this.pendingX3DH.delete(fromAmid);
+                if (this.protocolSessions && this.protocolSessions.getSessionsForPeer && this.protocolSessions.closeSession) {
+                  for (const s of this.protocolSessions.getSessionsForPeer(fromAmid)) {
+                    try { this.protocolSessions.closeSession(s.id); } catch {}
+                  }
+                }
+                if (sessionId && this.sessionManager.closeSession) {
+                  try { await this.sessionManager.closeSession(sessionId, "desync"); } catch {}
+                }
+              } catch {}
+              for (const handler of this.errorHandlers) {
+                try { handler("session_desync", fromAmid, teardownReason); } catch {}
+              }
+            } else {
+              console.error("[AGT] E2E decrypt failed \u2014 message REJECTED (not delivered):", e?.message || e);
+              for (const handler of this.errorHandlers) {
+                try { handler("decrypt_failed", fromAmid, e?.message || "unknown"); } catch {}
               }
             }
           }
@@ -2986,9 +3063,26 @@ var AgentMeshClient = class _AgentMeshClient {
               }
             } catch (decErr) {
               console.error("[AGT] E2E decrypt failed for existing session \u2014 message REJECTED:", decErr?.message || decErr);
+              // PATCH #17 (cjs mirror): tear down local session on
+              // ratchet desync so the next outbound establishSession()
+              // produces a fresh X3DH bundle.
+              try {
+                this.activeSessions.delete(fromAmid);
+                if (this.pendingX3DH && this.pendingX3DH.delete) this.pendingX3DH.delete(fromAmid);
+                if (this.sessionCache && this.sessionCache.clearByAmid) this.sessionCache.clearByAmid(fromAmid);
+                if (this.acceptedX3dhFingerprints && this.acceptedX3dhFingerprints.delete) this.acceptedX3dhFingerprints.delete(fromAmid);
+                if (this.protocolSessions && this.protocolSessions.getSessionsForPeer && this.protocolSessions.closeSession) {
+                  for (const s of this.protocolSessions.getSessionsForPeer(fromAmid)) {
+                    try { this.protocolSessions.closeSession(s.id); } catch {}
+                  }
+                }
+                if (sessionId && this.sessionManager.closeSession) {
+                  try { this.sessionManager.closeSession(sessionId, "desync"); } catch {}
+                }
+              } catch {}
               for (const handler of this.errorHandlers) {
                 try {
-                  handler("decrypt_failed", fromAmid, decErr?.message || "unknown");
+                  handler("session_desync", fromAmid, decErr?.message || "ratchet desync");
                 } catch {
                 }
               }
@@ -3667,7 +3761,7 @@ function parsePEM(pem) {
   return bytes;
 }
 function toPEM(der) {
-  const binary = String.fromCharCode(...der);
+  const binary = __bmsdkB64Bin(der);
   const base64 = btoa(binary);
   const lines = [];
   for (let i = 0; i < base64.length; i += 64) {
@@ -4897,7 +4991,7 @@ var DHTClient = class {
       address: "",
       // Would be set by caller
       timestamp,
-      signature: btoa(String.fromCharCode(...signature))
+      signature: btoa(__bmsdkB64Bin(signature))
     };
     for (const capability of capabilities) {
       const key = `capability:${capability}`;
