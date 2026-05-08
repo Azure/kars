@@ -110,6 +110,18 @@ fi
 require_cluster
 require_azureclaw_installed
 
+# Reset metrics file for this run so percentile aggregation reflects
+# only scenarios from this invocation. Past runs are preserved as
+# *.jsonl.<timestamp> archives in the output dir.
+if [[ -s "${MANUAL_E2E_METRICS_FILE}" ]]; then
+    archive="${MANUAL_E2E_METRICS_FILE}.$(date +%Y%m%dT%H%M%S)"
+    mv "${MANUAL_E2E_METRICS_FILE}" "${archive}"
+    echo "[INFO] archived prior metrics → ${archive}"
+fi
+: > "${MANUAL_E2E_METRICS_FILE}"
+echo "[INFO] metrics file:   ${MANUAL_E2E_METRICS_FILE}"
+echo "[INFO] run id:         ${MANUAL_E2E_RUN_ID}"
+
 start_ts=$(date +%s)
 TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_SKIP=0
 FAILED_SCENARIOS=()
@@ -127,15 +139,20 @@ for s in "${selected[@]}"; do
     echo "════════════════════════════════════════════════════════════════"
     echo "▶ scenario: ${id} — ${desc}"
     echo "════════════════════════════════════════════════════════════════"
+    scen_start=$(_metrics_now_ms)
     # Run in a subshell so counters reset per-scenario; capture exit.
     if ( bash "$path" ); then
         : # scenario_summary inside the script reports its own counts
+        scen_rc=0
     else
-        rc=$?
-        echo "scenario '${id}' exited with code ${rc}" >&2
+        scen_rc=$?
+        echo "scenario '${id}' exited with code ${scen_rc}" >&2
         FAILED_SCENARIOS+=("$id")
         TOTAL_FAIL=$((TOTAL_FAIL + 1))
     fi
+    scen_end=$(_metrics_now_ms)
+    metric_emit "$id" scenarioWallClock ms "$((scen_end - scen_start))" \
+        "exit=${scen_rc}"
 done
 
 end_ts=$(date +%s)
@@ -149,5 +166,9 @@ echo "  scenarios failed:   ${#FAILED_SCENARIOS[@]}"
 [[ ${#FAILED_SCENARIOS[@]} -gt 0 ]] && echo "  failures:           ${FAILED_SCENARIOS[*]}"
 echo "  elapsed:            ${elapsed}s"
 echo "════════════════════════════════════════════════════════════════"
+
+# Benchmark summary across every scenario run.
+metrics_summary "${MANUAL_E2E_METRICS_FILE}"
+echo "  raw metrics: ${MANUAL_E2E_METRICS_FILE}"
 
 [[ ${#FAILED_SCENARIOS[@]} -eq 0 ]] || exit 1
