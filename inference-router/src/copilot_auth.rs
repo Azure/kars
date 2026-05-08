@@ -95,7 +95,10 @@ impl CopilotTokenCache {
             });
 
         if github_token.is_some() {
-            tracing::info!("Copilot auth: GitHub token loaded ({} chars)", github_token.as_deref().unwrap_or("").len());
+            tracing::info!(
+                "Copilot auth: GitHub token loaded ({} chars)",
+                github_token.as_deref().unwrap_or("").len()
+            );
         } else {
             tracing::debug!("Copilot auth: no GitHub token configured (Copilot path will 401)");
         }

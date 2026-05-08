@@ -268,7 +268,10 @@ mod tests {
 
     #[test]
     fn provider_override_does_not_affect_github_models_detection() {
-        let c = cfg_with_provider(Some("https://contoso.openai.azure.com"), Some("github-copilot"));
+        let c = cfg_with_provider(
+            Some("https://contoso.openai.azure.com"),
+            Some("github-copilot"),
+        );
         assert!(!c.is_github_models());
     }
 }

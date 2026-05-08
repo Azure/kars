@@ -80,10 +80,7 @@ fn build_upstream_headers(
         .or_insert(HeaderValue::from_static("application/json"));
 
     if is_copilot_endpoint(endpoint) {
-        headers.insert(
-            "editor-version",
-            HeaderValue::from_static(EDITOR_VERSION),
-        );
+        headers.insert("editor-version", HeaderValue::from_static(EDITOR_VERSION));
         headers.insert(
             "copilot-integration-id",
             HeaderValue::from_static(COPILOT_INTEGRATION_ID),
