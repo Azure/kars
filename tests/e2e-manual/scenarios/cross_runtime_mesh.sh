@@ -60,23 +60,53 @@ pod_ns_b=$(pod_ns_for "$name_b")
 # (InferencePolicy + ClawSandbox); only the ClawSandbox carries the
 # governance block, so use `select(.kind == "ClawSandbox")` to scope
 # the patch and `with()`/passthrough for the rest.
+#
+# Admission requires `spec.governance.toolPolicyRef.name` whenever
+# `governance.enabled=true`, so we apply a sibling ToolPolicy CR
+# (minimum-valid: just `appliesTo: {}`) into the same CR namespace
+# and reference it by name.
+_apply_mesh_toolpolicy() {
+    local cr_ns="$1"
+    local tp_name="$2"
+    cat <<YAML | kubectl apply -f - >/dev/null
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: ${tp_name}
+  namespace: ${cr_ns}
+  labels:
+    azureclaw.azure.com/test-suite: manual-e2e
+spec:
+  appliesTo: {}
+YAML
+}
+
 _mesh_overlay() {
+    local tp_name="$1"
     yq eval '
         select(.kind == "ClawSandbox")
             | .spec.governance.enabled = true
             | .spec.governance.registryMode = "global"
+            | .spec.governance.toolPolicyRef.name = "'"${tp_name}"'"
         ,
         select(.kind != "ClawSandbox")
     ' -
 }
 
+tp_a="mesh-a-toolpolicy"
+tp_b="mesh-b-toolpolicy"
+_apply_mesh_toolpolicy "$ns_a" "$tp_a" \
+  || { log_fail "could not apply ToolPolicy for peer A"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
+_apply_mesh_toolpolicy "$ns_b" "$tp_b" \
+  || { log_fail "could not apply ToolPolicy for peer B"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
+
 cr_dispatch "$peer_a" "$name_a" "$ns_a" \
-  | _mesh_overlay \
+  | _mesh_overlay "$tp_a" \
   | kubectl apply -f - >/dev/null \
   || { log_fail "could not apply peer A (yq required for this scenario)"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
 cr_dispatch "$peer_b" "$name_b" "$ns_b" \
-  | _mesh_overlay \
+  | _mesh_overlay "$tp_b" \
   | kubectl apply -f - >/dev/null \
   || { log_fail "could not apply peer B"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
