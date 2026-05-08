@@ -16,8 +16,17 @@
 # Common metadata block. Caller must set:
 #   $1 = name
 #   $2 = namespace
+#
+# Emits the sibling InferencePolicy FIRST so that when kubectl applies
+# the multi-doc stream, the policy exists by the time the controller
+# reconciles the ClawSandbox. Otherwise the sandbox latches to
+# `Degraded / InferencePolicyNotFound` and never recovers (controller
+# does not re-reconcile when the dependent appears later — see
+# https://github.com/Azure/azureclaw/issues TBD).
 _meta() {
+    _inference_policy "$1" "$2"
     cat <<EOF
+---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
@@ -83,7 +92,6 @@ spec:
     openclaw: {}
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_openai_agents() {
@@ -96,7 +104,6 @@ spec:
       pythonVersion: "3.12"
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_anthropic() {
@@ -109,7 +116,6 @@ spec:
       pythonVersion: "3.12"
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_maf_python() {
@@ -122,7 +128,6 @@ spec:
       language: python
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_langgraph_python() {
@@ -135,7 +140,6 @@ spec:
       language: python
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_langgraph_typescript() {
@@ -148,7 +152,6 @@ spec:
       language: typescript
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_pydantic_ai() {
@@ -161,7 +164,6 @@ spec:
       pythonVersion: "3.12"
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 # BYO with intentional config so byo-strict admission rejects it
@@ -177,7 +179,6 @@ spec:
       image: "mcr.microsoft.com/oss/v2/library/busybox:latest"
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 # Mesh-enabled OpenClaw with explicit allow for the named peer.
@@ -197,7 +198,6 @@ spec:
           tier: ${4:-trusted}
 EOF
     _sandbox_tail "$1"
-    _inference_policy "$1" "$2"
 }
 
 cr_dispatch() {
