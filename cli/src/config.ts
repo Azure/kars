@@ -10,7 +10,7 @@ import chalk from "chalk";
 import ora from "ora";
 import inquirer from "inquirer";
 import { mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync } from "fs";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -27,7 +27,6 @@ import {
 } from "./github-models.js";
 import {
   COPILOT_API_ENDPOINT,
-  COPILOT_PAT_CREATE_URL,
   COPILOT_MODELS,
   buildCopilotChoices,
   checkCopilotEligibility,
@@ -406,7 +405,7 @@ async function promptGithubCopilot(
         console.log(chalk.cyan("  └───────────────────────────────────────────────────────\n"));
         try {
           const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-          execSync(`${opener} "${verificationUri}"`, { stdio: "ignore" });
+          execFileSync(opener, [verificationUri], { stdio: "ignore" });
         } catch { /* user can copy/paste */ }
       });
     } catch (e) {
@@ -460,7 +459,7 @@ async function promptGithubCopilot(
   writeFileSync(CONFIG_FILE, JSON.stringify(configObj, null, 2), "utf-8");
   chmodSync(CONFIG_FILE, 0o600);
   setSecret("azure-openai-key", apiKey);
-  writeFileSync(CREDENTIALS_FILE, apiKey, "utf-8");
+  writeFileSync(CREDENTIALS_FILE, apiKey, "utf-8"); // lgtm[js/http-to-file-access] — OAuth token persisted to 0o600 user-private file by design
   chmodSync(CREDENTIALS_FILE, 0o600);
 
   return { endpoint, model, apiKey, provider: "github-copilot", firstRunCompleted: true };
@@ -770,9 +769,14 @@ export { CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE };
  * file exists.
  */
 export function resetFirstRunFlag(): boolean {
-  if (!existsSync(CONFIG_FILE)) return false;
+  let raw: string;
   try {
-    const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+    raw = readFileSync(CONFIG_FILE, "utf-8");
+  } catch {
+    return false;
+  }
+  try {
+    const config = JSON.parse(raw);
     delete config.firstRunCompleted;
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
     chmodSync(CONFIG_FILE, 0o600);

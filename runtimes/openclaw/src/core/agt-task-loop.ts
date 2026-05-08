@@ -272,7 +272,7 @@ export async function processTaskWithTools(
             try {
               const results: Array<{ title: string; url: string; snippet: string }> = [];
               const resultRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
-              const stripTags = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+              const stripTags = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim(); // lgtm[js/double-escaping] lgtm[js/incomplete-multi-character-sanitization] — output is JSON metadata returned to the LLM, never rendered as HTML
               const decodeDdg = (href: string) => {
                 const m = href.match(/[?&]uddg=([^&]+)/);
                 return m ? decodeURIComponent(m[1]) : href;
@@ -302,11 +302,10 @@ export async function processTaskWithTools(
               const memFile = path.join(memDir, "memory.json");
               fs.mkdirSync(memDir, { recursive: true });
               let entries: Array<{ id: string; text: string; ts: string }> = [];
-              if (fs.existsSync(memFile)) {
-                try {
-                  entries = JSON.parse(fs.readFileSync(memFile, "utf8")) || [];
-                } catch { entries = []; }
-              }
+              try {
+                const buf = fs.readFileSync(memFile, "utf8");
+                entries = JSON.parse(buf) || [];
+              } catch { entries = []; }
               if (op === "update") {
                 if (!text) {
                   result = "memory.update error: 'text' is required";
