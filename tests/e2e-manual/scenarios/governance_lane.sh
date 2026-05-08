@@ -51,7 +51,7 @@ wait_for_clawsandbox_ready "$ns" "$name" || {
     exit 1
 }
 
-pod=$(kubectl -n "$ns" get pod -l "azureclaw.io/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
+pod=$(kubectl -n "$ns" get pod -l "azureclaw.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
 [[ -n "$pod" ]] || { log_fail "no pod"; cleanup_ns "$ns"; exit 1; }
 
 router_call() {

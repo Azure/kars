@@ -6,19 +6,71 @@
 #
 # Sourced by scenarios/*.sh. Every helper writes its YAML to stdout so
 # callers can pipe to `kubectl apply -f -`.
+#
+# S13 phase2-config-authority-refs: ClawSandbox.spec now requires
+# `runtime`, `sandbox`, and `inferenceRef`. Each helper therefore emits
+# *two* documents — a sibling InferencePolicy and the ClawSandbox itself
+# — separated by `---`. The test harness `kubectl apply -f -` consumes
+# both in one round-trip.
 
 # Common metadata block. Caller must set:
 #   $1 = name
 #   $2 = namespace
 _meta() {
     cat <<EOF
-apiVersion: azureclaw.io/v1alpha1
+apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox
 metadata:
   name: ${1}
   namespace: ${2}
   labels:
-    azureclaw.io/test-suite: manual-e2e
+    azureclaw.azure.com/test-suite: manual-e2e
+EOF
+}
+
+# Sibling InferencePolicy + the runtime-agnostic spec.sandbox /
+# spec.inferenceRef tail. Inserted at the bottom of every CR helper so
+# the manifest validates against the v1alpha1 schema.
+#   $1 = sandbox name
+#   $2 = namespace
+_inference_policy() {
+    cat <<EOF
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: ${1}-inference
+  namespace: ${2}
+  labels:
+    azureclaw.azure.com/sandbox: ${1}
+    azureclaw.azure.com/test-suite: manual-e2e
+spec:
+  appliesTo:
+    sandboxName: ${1}
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  tokenBudget:
+    dailyTokens: 100000
+    perRequestTokens: 32000
+EOF
+}
+
+# Common spec.sandbox + spec.inferenceRef tail. Indented under spec:
+# (no leading dashes — caller has already opened the document).
+_sandbox_tail() {
+    cat <<EOF
+  sandbox:
+    isolation: enhanced
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+  inferenceRef:
+    name: ${1}-inference
 EOF
 }
 
@@ -30,6 +82,8 @@ spec:
     kind: OpenClaw
     openclaw: {}
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_openai_agents() {
@@ -41,6 +95,8 @@ spec:
     openaiAgents:
       pythonVersion: "3.12"
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_anthropic() {
@@ -52,6 +108,8 @@ spec:
     anthropic:
       pythonVersion: "3.12"
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_maf_python() {
@@ -61,8 +119,10 @@ spec:
   runtime:
     kind: MicrosoftAgentFramework
     microsoftAgentFramework:
-      language: Python
+      language: python
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_langgraph_python() {
@@ -72,8 +132,10 @@ spec:
   runtime:
     kind: LangGraph
     langGraph:
-      language: Python
+      language: python
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_langgraph_typescript() {
@@ -83,8 +145,10 @@ spec:
   runtime:
     kind: LangGraph
     langGraph:
-      language: TypeScript
+      language: typescript
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_pydantic_ai() {
@@ -96,6 +160,8 @@ spec:
     pydanticAi:
       pythonVersion: "3.12"
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 # BYO with intentional config so byo-strict admission rejects it
@@ -110,6 +176,8 @@ spec:
     byo:
       image: "mcr.microsoft.com/oss/v2/library/busybox:latest"
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 # Mesh-enabled OpenClaw with explicit allow for the named peer.
@@ -128,6 +196,8 @@ spec:
         - name: ${3}
           tier: ${4:-trusted}
 EOF
+    _sandbox_tail "$1"
+    _inference_policy "$1" "$2"
 }
 
 cr_dispatch() {

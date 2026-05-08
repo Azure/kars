@@ -51,10 +51,10 @@ for runtime in $RUNTIMES; do
 
     if wait_for_clawsandbox_ready "$ns" "$name"; then
         # Belt-and-braces: confirm at least one pod is Running in the namespace.
-        assert_pod_running "$ns" "azureclaw.io/sandbox=${name}"
+        assert_pod_running "$ns" "azureclaw.azure.com/sandbox=${name}"
         # And confirm the inference-router container is present in the pod
         # spec (the CR factory above does not opt out of it).
-        if kubectl -n "$ns" get pods -l "azureclaw.io/sandbox=${name}" \
+        if kubectl -n "$ns" get pods -l "azureclaw.azure.com/sandbox=${name}" \
               -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null \
               | tr ' ' '\n' | grep -q '^inference-router$'; then
             log_pass "${runtime}: inference-router sidecar present"

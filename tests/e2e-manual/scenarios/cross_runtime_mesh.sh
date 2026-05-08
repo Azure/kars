@@ -37,9 +37,9 @@ require_cluster
 require_azureclaw_installed
 require_cli kubectl
 
-if ! kubectl -n agentmesh get deploy agentmesh-relay >/dev/null 2>&1 \
-   || ! kubectl -n agentmesh get deploy agentmesh-registry >/dev/null 2>&1; then
-    log_skip "agentmesh-relay/registry not installed in 'agentmesh' namespace — install AzureClaw with mesh enabled"
+if ! kubectl -n agentmesh get deploy relay >/dev/null 2>&1 \
+   || ! kubectl -n agentmesh get deploy registry >/dev/null 2>&1; then
+    log_skip "agentmesh relay/registry not installed in 'agentmesh' namespace — install AzureClaw with mesh enabled"
     scenario_summary "Cross-runtime AgentMesh round-trip"
     exit 0
 fi
@@ -72,7 +72,7 @@ wait_for_clawsandbox_ready "$ns_b" "$name_b" || true
 
 # Step 1 — registry registration
 log_step "checking AgentMesh registry for both peers"
-relay_logs=$(kubectl -n agentmesh logs deploy/agentmesh-registry --tail=500 2>/dev/null || echo "")
+relay_logs=$(kubectl -n agentmesh logs deploy/registry --tail=500 2>/dev/null || echo "")
 assert_contains "registry registration for peer A" "$name_a" "$relay_logs"
 assert_contains "registry registration for peer B" "$name_b" "$relay_logs"
 
@@ -81,7 +81,7 @@ assert_contains "registry registration for peer B" "$name_b" "$relay_logs"
 # `mesh_send` via the OpenClaw plugin (or the runtime's mesh_tools). The
 # exact surface differs per runtime; for openclaw we have a shell tool.
 log_step "triggering mesh_send from peer A → peer B"
-pod_a=$(kubectl -n "$ns_a" get pod -l "azureclaw.io/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
+pod_a=$(kubectl -n "$ns_a" get pod -l "azureclaw.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
 if [[ -z "$pod_a" ]]; then
     log_fail "could not find peer-A pod"
 else
@@ -98,7 +98,7 @@ fi
 # Step 3 — inbox arrival on B
 log_step "checking inbox on peer B for the round-trip message"
 sleep 5
-relay_after=$(kubectl -n agentmesh logs deploy/agentmesh-relay --tail=500 2>/dev/null || echo "")
+relay_after=$(kubectl -n agentmesh logs deploy/relay --tail=500 2>/dev/null || echo "")
 assert_contains "relay routed an envelope between peers" "${name_a}" "$relay_after"
 
 cleanup_ns "$ns_a"

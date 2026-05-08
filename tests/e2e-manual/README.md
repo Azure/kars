@@ -27,7 +27,7 @@ isolation. Run it before each release tag.
    helm upgrade --install azureclaw deploy/helm/azureclaw \
      -n azureclaw-system --create-namespace
    ```
-3. CRDs registered (`kubectl get crd clawsandboxes.azureclaw.io`).
+3. CRDs registered (`kubectl get crd clawsandboxes.azureclaw.azure.com`).
 4. `kubectl`, `bash`, and (for the cross-runtime mesh scenario) `yq`.
 5. AgentMesh relay + registry deployed in the `agentmesh` namespace if
    you want the mesh + governance scenarios. They are auto-installed by
@@ -108,7 +108,7 @@ The runner expects every scenario to clean up its own namespaces unless
 ## Troubleshooting
 
 **`require_azureclaw_installed: not found`** — the manual runner sees no
-`azureclaw-system` namespace or no `clawsandboxes.azureclaw.io` CRD.
+`azureclaw-system` namespace or no `clawsandboxes.azureclaw.azure.com` CRD.
 Install the chart (see prerequisites).
 
 **`mesh` scenario says “agentmesh-relay/registry not installed”** — install
