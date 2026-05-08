@@ -100,7 +100,7 @@ The CLI is a Node 22 ESM build with a small Rust dependency for the local router
 ### 1.2 Launch a sandbox
 
 ```bash
-azureclaw dev --name hello
+azureclaw dev
 ```
 
 On the first run you are shown a **3-way provider picker**:
@@ -120,22 +120,22 @@ The CLI then builds (or pulls cached) the local sandbox image and starts a singl
 ### 1.3 Talk to the agent
 
 ```bash
-azureclaw connect hello   # opens the TUI
+azureclaw connect dev-agent   # opens the TUI
 ```
 
 Or drive it from another terminal:
 
 ```bash
 azureclaw list               # see running sandboxes
-azureclaw logs hello -f      # tail logs (router + agent)
-azureclaw policy show hello  # what is allowed / denied / approval-gated
+azureclaw logs dev-agent -f      # tail logs (router + agent)
+azureclaw policy show dev-agent  # what is allowed / denied / approval-gated
 azureclaw operator           # live fleet TUI — agents, model, mesh peers, egress, audit
 ```
 
 When you are done:
 
 ```bash
-azureclaw destroy hello
+azureclaw destroy dev-agent
 ```
 
 ### 1.4 What you just ran

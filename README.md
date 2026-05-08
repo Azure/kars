@@ -111,7 +111,7 @@ git clone https://github.com/Azure/azureclaw.git && cd azureclaw
 cd cli && npm ci && npm run build && npm link
 
 # Launch a sandbox locally — Docker only, no Azure, no AKS
-azureclaw dev --name hello
+azureclaw dev
 ```
 
 On first run `azureclaw dev` shows a 3-way provider picker:
@@ -124,7 +124,7 @@ Your choice is saved to `~/.azureclaw/config.json` and reused on subsequent runs
 
 ```bash
 # Talk to the agent (TUI auto-opens; or use the CLI directly)
-azureclaw connect hello
+azureclaw connect dev-agent
 ```
 
 Every tool call the agent makes is governed by the same router code path that runs in production.

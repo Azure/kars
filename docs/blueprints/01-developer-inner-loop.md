@@ -62,13 +62,13 @@ sequenceDiagram
   participant Img as Sandbox image
   participant Router as Router (in-image)
 
-  Dev->>CLI: azureclaw dev --name hello
+  Dev->>CLI: azureclaw dev
   CLI->>Docker: build image (cached)
   CLI->>Docker: run container
   Docker->>Img: ENTRYPOINT
   Img->>Router: start on 127.0.0.1:8443
   Img->>Img: start agent runtime
-  Dev->>CLI: azureclaw connect hello
+  Dev->>CLI: azureclaw connect dev-agent
   CLI->>Img: TUI / WebSocket
   Note over Dev,Router: every prompt goes through<br/>the same policy / audit / safety<br/>code path as in production
 ```
@@ -81,20 +81,20 @@ git clone https://github.com/Azure/azureclaw.git
 cd azureclaw/cli && npm ci && npm run build && npm link
 
 # run a sandbox locally — Docker only, no Azure, no Kubernetes
-azureclaw dev --name hello
+azureclaw dev
 
-# talk to it
-azureclaw connect hello
+# talk to it (default sandbox name is `dev-agent`)
+azureclaw connect dev-agent
 
 # tail logs (router + agent)
-azureclaw logs hello -f
+azureclaw logs dev-agent -f
 
 # inspect / change policy
-azureclaw policy show hello
-azureclaw policy apply ./my-tool-policy.yaml --sandbox hello
+azureclaw policy show dev-agent
+azureclaw policy apply ./my-tool-policy.yaml --sandbox dev-agent
 
 # tear down
-azureclaw destroy hello
+azureclaw destroy dev-agent
 ```
 
 On the first run you are prompted to pick an inference provider — **GitHub Copilot** (default), Azure AI Foundry, or GitHub Models — and the matching credential. For Copilot the CLI runs an interactive **device-code OAuth flow** (`https://github.com/login/device`) using the public Copilot client id; the router exchanges your OAuth token for a short-lived Copilot JWT at runtime, so you never see or manage the JWT yourself. **The credential you pick is the only one dev mode ever sees, and it never leaves your laptop.** If you skip the prompt, the sandbox starts with a stub model — useful for offline plugin / policy work.
