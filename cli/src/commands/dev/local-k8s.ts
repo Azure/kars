@@ -915,9 +915,24 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     console.log("");
     console.log(chalk.dim("  Gateway token (copy if the URL hash is stripped):"));
     console.log(`    ${gwToken}`);
+  } else {
+    console.log("");
+    console.log(
+      chalk.yellow(
+        "  ⚠ gateway token not yet written — the openclaw container is still " +
+          "initializing. Once ready, run 'azureclaw connect " +
+          opts.name +
+          "' to get a clickable login URL.",
+      ),
+    );
   }
   console.log("");
-  await openBrowser(webUrlWithToken);
+  // Only auto-open when we have a token; opening a tokenless URL just
+  // lands on "unauthorized: gateway token missing" which is worse UX
+  // than printing the connect command above.
+  if (gwToken) {
+    await openBrowser(webUrlWithToken);
+  }
 
   console.log(chalk.bold("  Next steps:"));
   console.log(
@@ -1547,10 +1562,14 @@ async function startSandboxConnect(
   const ns = `azureclaw-${name}`;
   const localPort = 18789;
 
-  // Best-effort token read. Don't fail the whole step if it's missing —
-  // the WebUI URL still works for inspection, just without auth pre-fill.
+  // The token is written by entrypoint.sh AFTER plugin init + bashrc setup
+  // (~line 1229), which can take 60-120s on first run since openclaw also
+  // does a cold npm install. We wait up to 3 minutes — anything less and
+  // the auto-opened browser hits "unauthorized: gateway token missing"
+  // even though the gateway will start fine moments later.
   let token = "";
-  for (let i = 0; i < 30; i++) {
+  const maxAttempts = 180;
+  for (let i = 0; i < maxAttempts; i++) {
     try {
       const { stdout } = await execa(tools.kubectl, [
         "exec",
