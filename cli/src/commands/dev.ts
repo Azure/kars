@@ -1032,5 +1032,79 @@ Notes:
       }
     });
 
+  // `azureclaw dev down [--target local-k8s] [--keep-cluster]`
+  // Tears down the local-k8s dev environment created by `azureclaw dev
+  // --target local-k8s`. For Docker target, `azureclaw destroy` already
+  // does the right thing — `dev down` is local-k8s-specific.
+  cmd
+    .command("down")
+    .description("Tear down a local-k8s dev environment (cluster + Headlamp port-forward)")
+    .option(
+      "--target <target>",
+      "Which target to tear down (only 'local-k8s' is currently supported)",
+      "local-k8s",
+    )
+    .option(
+      "--cluster-name <name>",
+      "Kind cluster name to delete",
+      "azureclaw-dev",
+    )
+    .option(
+      "--keep-cluster",
+      "Stop the port-forward and uninstall Headlamp, but keep the kind cluster running",
+      false,
+    )
+    .action(async (options: { target: string; clusterName: string; keepCluster: boolean }) => {
+      if (options.target !== "local-k8s") {
+        console.error(
+          chalk.red(`  --target ${options.target} is not supported by 'dev down'.`),
+        );
+        console.error(
+          chalk.dim("  For Docker dev sandboxes, use 'azureclaw destroy <name>' instead."),
+        );
+        process.exit(1);
+      }
+      const { execa } = await import("execa");
+      console.log(chalk.bold("\nTearing down local-k8s dev environment…\n"));
+
+      // Always: kill any lingering port-forward on :4466.
+      try {
+        const { stdout } = await execa("lsof", ["-ti", ":4466"]);
+        const pids = stdout.trim().split(/\s+/).filter(Boolean);
+        for (const pid of pids) {
+          try {
+            await execa("kill", [pid]);
+            console.log(chalk.green(`  ✓ killed port-forward PID ${pid}`));
+          } catch {
+            /* already gone */
+          }
+        }
+      } catch {
+        console.log(chalk.dim("  • no port-forward listening on :4466"));
+      }
+
+      if (options.keepCluster) {
+        console.log(
+          chalk.green("\n  ✓ Done. Cluster '") +
+            chalk.bold(options.clusterName) +
+            chalk.green("' is still running. Use --no-keep-cluster to delete it.\n"),
+        );
+        return;
+      }
+
+      // Delete the kind cluster (idempotent — kind handles "doesn't exist").
+      try {
+        await execa("kind", ["delete", "cluster", "--name", options.clusterName], {
+          stdio: "inherit",
+        });
+        console.log(chalk.green(`\n  ✓ Cluster '${options.clusterName}' deleted.\n`));
+      } catch (err) {
+        console.error(
+          chalk.red(`\n  Failed to delete cluster: ${(err as Error).message}\n`),
+        );
+        process.exit(1);
+      }
+    });
+
   return cmd;
 }
