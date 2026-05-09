@@ -191,29 +191,15 @@ async function ensureCluster(
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
   if (await clusterExists(kind, name, env)) return;
-  // The default kindest/node image is fine for our use case; pinning is
-  // a Phase-2 hardening concern alongside the values-local-dev overlay.
-  //
-  // We pass an inline kind config that pre-clears the control-plane
-  // NoSchedule taint. Without this, kubelet starts the node tainted and
-  // CoreDNS / local-path-provisioner / Headlamp all emit "FailedScheduling
-  // — untolerated taint" events at startup before the chart's untaint
-  // step lands. The pods recover within ~30 s but the noisy red events
-  // sit in Headlamp's event view forever, scaring first-time users.
-  // Pre-clearing at node creation eliminates the race entirely.
-  const kindConfig = `kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-  - role: control-plane
-    kubeadmConfigPatches:
-      - |
-        kind: InitConfiguration
-        nodeRegistration:
-          taints: []
-`;
-  await execa(kind, ["create", "cluster", "--name", name, "--config", "-"], {
+  // Kind v0.20+ on single-node clusters automatically removes the
+  // control-plane NoSchedule taint as a post-init step (it runs
+  // `kubectl taint nodes --all node-role.kubernetes.io/control-plane-`
+  // inside the node container). So we don't need an inline kubeadm patch
+  // — and using one (e.g. InitConfiguration with `taints: []`) actually
+  // breaks creation because kind's untaint step then fails with
+  // "taint not found" and aborts.
+  await execa(kind, ["create", "cluster", "--name", name], {
     stdio: ["pipe", "inherit", "inherit"],
-    input: kindConfig,
     env,
   });
 }
