@@ -20,7 +20,6 @@ import {
   getDefaultPairing,
   type StoredPairing,
 } from "./pairing.js";
-import { MeshConnection } from "./connection.js";
 import {
   createMeshTransport,
   type MeshTransportConfig,
