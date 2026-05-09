@@ -186,8 +186,27 @@ async function ensureCluster(
   if (await clusterExists(kind, name, env)) return;
   // The default kindest/node image is fine for our use case; pinning is
   // a Phase-2 hardening concern alongside the values-local-dev overlay.
-  await execa(kind, ["create", "cluster", "--name", name], {
-    stdio: "inherit",
+  //
+  // We pass an inline kind config that pre-clears the control-plane
+  // NoSchedule taint. Without this, kubelet starts the node tainted and
+  // CoreDNS / local-path-provisioner / Headlamp all emit "FailedScheduling
+  // — untolerated taint" events at startup before the chart's untaint
+  // step lands. The pods recover within ~30 s but the noisy red events
+  // sit in Headlamp's event view forever, scaring first-time users.
+  // Pre-clearing at node creation eliminates the race entirely.
+  const kindConfig = `kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          taints: []
+`;
+  await execa(kind, ["create", "cluster", "--name", name, "--config", "-"], {
+    stdio: ["pipe", "inherit", "inherit"],
+    input: kindConfig,
     env,
   });
 }
@@ -854,16 +873,27 @@ kind: ConfigMap
 metadata:
   name: azureclaw-headlamp-plugin
   namespace: headlamp
-binaryData: {}
 data:
   main.js: |
 ${indent(mainContent, 4)}
   package.json: |
 ${indent(pkgContent, 4)}
 `;
+  // server-side apply is idempotent and handles "binaryData: {}" reliably
+  // — the previous client-side apply path occasionally fell back to
+  // create on re-run because empty-map fields confuse the merger.
   await execa(
     tools.kubectl,
-    ["--context", ctx, "apply", "-f", "-"],
+    [
+      "--context",
+      ctx,
+      "apply",
+      "--server-side",
+      "--force-conflicts",
+      "--field-manager=azureclaw-cli",
+      "-f",
+      "-",
+    ],
     { input: cmYaml, stdio: ["pipe", "inherit", "inherit"] },
   );
 

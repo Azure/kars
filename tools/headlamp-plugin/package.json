@@ -1,5 +1,5 @@
 {
-  "name": "@azureclaw/headlamp-plugin",
+  "name": "azureclaw",
   "version": "0.1.0",
   "private": true,
   "description": "AzureClaw sidebar + CRD views for the Headlamp dashboard.",
@@ -10,6 +10,11 @@
     "test": "headlamp-plugin test",
     "lint": "headlamp-plugin lint",
     "format": "headlamp-plugin format"
+  },
+  "headlamp": {
+    "plugin": {
+      "compatibleHeadlampVersion": ">=0.20.0"
+    }
   },
   "headlampPlugin": {
     "displayName": "AzureClaw"

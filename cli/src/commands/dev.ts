@@ -176,6 +176,60 @@ Notes:
         }
       }
 
+      // ── First-run common prompts (apply to BOTH targets) ──────────
+      // Creds + agent name + (docker-only) channels and rebuild are all
+      // useful regardless of target. We collected just `target` above;
+      // now collect creds and name so local-k8s users get the same
+      // welcome experience as docker users. Channels and the rebuild
+      // confirm stay docker-specific (local-k8s doesn't wire channel
+      // env vars and doesn't have a single "the" sandbox image — it
+      // ships three).
+      const isFirstRun = !credsForFirstRun || !credsForFirstRun.firstRunCompleted;
+      const ephemeralGhToken =
+        typeof options.githubToken === "string" && options.githubToken.trim().length > 0;
+
+      if (isFirstRun && !ephemeralGhToken) {
+        // Collect creds first — same provider picker docker mode used.
+        console.log(
+          chalk.yellow(
+            "\n  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.",
+          ),
+        );
+        console.log(
+          chalk.dim(
+            "  Copilot is the default (largest context). You can change later with `azureclaw credentials`.\n",
+          ),
+        );
+        const newCreds = await promptAndSaveCredentials();
+
+        // Agent name — only ask if user accepted the default.
+        const { default: inquirer } = await import("inquirer");
+        if (options.name === "dev-agent") {
+          const { agentName } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "agentName",
+              message: "Agent name:",
+              default: "dev-agent",
+              validate: (v: string) =>
+                /^[a-z0-9][a-z0-9-]*[a-z0-9]?$/i.test(v.trim())
+                  ? true
+                  : "Use letters, numbers, and dashes only (e.g. dev-agent, alice-bot)",
+            },
+          ]);
+          options.name = agentName.trim();
+        }
+
+        // Echo the chosen provider so the user can confirm at a glance.
+        const providerLabel =
+          newCreds.provider === "github-models"
+            ? "GitHub Models"
+            : newCreds.provider === "github-copilot"
+              ? "GitHub Copilot"
+              : "Azure AI Foundry";
+        console.log(chalk.green(`  ✓ Credentials saved (${providerLabel})\n`));
+      }
+
       // ── Target dispatch ───────────────────────────────────────────
       // local-k8s mode is a clean alternative to the docker stack: kind
       // cluster + helm-installed chart. It deliberately doesn't go
@@ -251,32 +305,20 @@ Notes:
           };
           stepper.done("Credentials loaded (GitHub Models — ephemeral, not saved)");
         } else if (!creds || !creds.firstRunCompleted) {
-          // First-run (or first-run flag was reset for retesting): stop
-          // spinner so inquirer prompts display correctly, then show the
-          // 3-way provider picker (Copilot recommended, then GH Models,
-          // then Foundry).
+          // ── Docker-only first-run extras ────────────────────────────
+          // Creds + agent name were already collected by the
+          // common-prompt block before target dispatch. This branch only
+          // runs in docker mode (local-k8s returns earlier). It handles
+          // the channel + rebuild prompts that don't apply to local-k8s.
           stepper.stop();
-          console.log(chalk.yellow("\n  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options."));
-          console.log(chalk.dim("  Copilot is the default (largest context). You can change later with `azureclaw credentials`.\n"));
-          creds = await promptAndSaveCredentials();
-
-          // ── Optional: agent name + channel gap-fill ─────────────────
-          // Only ask if the user didn't pre-set them on the CLI. Defaults
-          // are sensible, so users can just hit Enter through everything.
-          const { default: inquirer } = await import("inquirer");
-          const usedNameDefault = options.name === "dev-agent";
-          if (usedNameDefault) {
-            const { agentName } = await inquirer.prompt([{
-              type: "input",
-              name: "agentName",
-              message: "Agent name:",
-              default: "dev-agent",
-              validate: (v: string) => /^[a-z0-9][a-z0-9-]*[a-z0-9]?$/i.test(v.trim())
-                ? true
-                : "Use letters, numbers, and dashes only (e.g. dev-agent, alice-bot)",
-            }]);
-            options.name = agentName.trim();
+          // Re-load — promptAndSaveCredentials wrote to disk.
+          creds = loadConfig();
+          if (!creds) {
+            throw new Error(
+              "Internal error: credentials missing after first-run prompt.",
+            );
           }
+          const { default: inquirer } = await import("inquirer");
 
           // Channel gap-fill: offer one choice per saved channel-token
           // variant (e.g. telegram-token.dev, telegram-token.cloud become
