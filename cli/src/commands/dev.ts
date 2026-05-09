@@ -49,6 +49,22 @@ NOT overwrite your saved credentials.
       "Policy preset: minimal | developer | web | azure",
       "developer"
     )
+    // ── Target / runtime ──────────────────────────────────────────────
+    .option(
+      "--target <target>",
+      "Where to run the sandbox: docker (default, fast) | local-k8s (kind+helm, mirrors AKS layout)",
+      "docker"
+    )
+    .option(
+      "--cluster-name <name>",
+      "Kind cluster name (only used with --target local-k8s)",
+      "azureclaw-dev"
+    )
+    .option(
+      "--ephemeral",
+      "(local-k8s only) destroy the kind cluster on exit",
+      false
+    )
     // ── Provider override ─────────────────────────────────────────────
     .option(
       "--github-token <pat>",
@@ -115,6 +131,38 @@ Notes:
       if (options.policy && !policyPresets.includes(options.policy)) {
         console.error(chalk.red(`\n  Error: --policy must be one of: ${policyPresets.join(" | ")} (got "${options.policy}").\n`));
         process.exit(1);
+      }
+
+      // ── Target dispatch ───────────────────────────────────────────
+      // local-k8s mode is a clean alternative to the docker stack: kind
+      // cluster + helm-installed chart. It deliberately doesn't go
+      // through the docker-compose path below — the two have different
+      // bringup semantics, and conflating them muddies error reporting.
+      const targets = ["docker", "local-k8s"];
+      if (!targets.includes(options.target)) {
+        console.error(
+          chalk.red(
+            `\n  Error: --target must be one of: ${targets.join(" | ")} (got "${options.target}").\n`,
+          ),
+        );
+        process.exit(1);
+      }
+      if (options.target === "local-k8s") {
+        const { runLocalK8s } = await import("./dev/local-k8s.js");
+        try {
+          await runLocalK8s({
+            name: options.name,
+            clusterName: options.clusterName,
+            image: options.image,
+            ephemeral: !!options.ephemeral,
+            noBuild: !options.build,
+          });
+          return;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error(chalk.red(`\n  local-k8s dev failed: ${msg}\n`));
+          process.exit(1);
+        }
       }
 
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
