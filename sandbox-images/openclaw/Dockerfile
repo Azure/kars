@@ -50,6 +50,17 @@ COPY cli/policies/ /opt/azureclaw-plugin/policies/
 # Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
 
+# Optional: install upstream Microsoft AGT SDK when MESH_PROVIDER=agt build arg
+# is passed. Not installed by default so vendored builds stay slim and offline.
+ARG MESH_PROVIDER=vendored
+RUN if [ "$MESH_PROVIDER" = "agt" ]; then \
+      cd /opt/azureclaw-plugin && \
+      npm install --omit=dev --ignore-scripts --no-save \
+        '@microsoft/agent-governance-sdk@^3.5.0' ; \
+    else \
+      echo "MESH_PROVIDER=$MESH_PROVIDER — skipping @microsoft/agent-governance-sdk install" ; \
+    fi
+
 # Install vendored SDK with its dependencies (libsodium-wrappers etc.)
 COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/package-lock.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
 COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
