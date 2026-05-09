@@ -1,0 +1,20 @@
+{
+  "name": "azureclaw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AzureClaw sidebar + CRD views for the Headlamp dashboard.",
+  "license": "MIT",
+  "scripts": {
+    "build": "headlamp-plugin build",
+    "start": "headlamp-plugin start",
+    "test": "headlamp-plugin test",
+    "lint": "headlamp-plugin lint",
+    "format": "headlamp-plugin format"
+  },
+  "headlampPlugin": {
+    "displayName": "AzureClaw"
+  },
+  "devDependencies": {
+    "@kinvolk/headlamp-plugin": "^0.13.0"
+  }
+}
