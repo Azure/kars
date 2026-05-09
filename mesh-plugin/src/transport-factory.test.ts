@@ -4,10 +4,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveMeshProvider, createMeshTransport } from "./transport-factory.js";
 import { __setAgtSdkForTesting } from "./agt-transport.js";
-import type { IMeshIdentity } from "./transport-interface.js";
 
-const agtIdentity: IMeshIdentity = {
-  agentId: "did:agentmesh:factory-test",
+const agtUnifiedIdentity = {
+  amid: "did:agentmesh:factory-test",
+  did: "did:agentmesh:factory-test",
   signingPrivateKey: new Uint8Array(32),
   signingPublicKey: new Uint8Array(32),
 };
@@ -63,7 +63,7 @@ describe("createMeshTransport", () => {
       {
         relayUrl: "ws://r",
         registryUrl: "http://reg",
-        agtIdentity,
+        identity: agtUnifiedIdentity,
       },
       { AZURECLAW_MESH_PROVIDER: "agt" },
     );
@@ -71,21 +71,16 @@ describe("createMeshTransport", () => {
     expect(t.agentId).toBe("did:agentmesh:factory-test");
   });
 
-  it("rejects provider=agt without agtIdentity", async () => {
+  it("rejects provider=vendored without sdkIdentity", async () => {
     await expect(
       createMeshTransport(
-        { relayUrl: "ws://r", registryUrl: "http://reg" },
-        { AZURECLAW_MESH_PROVIDER: "agt" },
-      ),
-    ).rejects.toThrow(/agtIdentity/);
-  });
-
-  it("rejects provider=vendored without vendoredIdentity", async () => {
-    await expect(
-      createMeshTransport(
-        { relayUrl: "ws://r", registryUrl: "http://reg" },
+        {
+          relayUrl: "ws://r",
+          registryUrl: "http://reg",
+          identity: agtUnifiedIdentity,
+        },
         {},
       ),
-    ).rejects.toThrow(/vendoredIdentity/);
+    ).rejects.toThrow(/sdkIdentity/);
   });
 });

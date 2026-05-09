@@ -1075,13 +1075,29 @@ export class MeshConnection implements IMeshTransport {
 
   async discover(opts?: {
     capability?: string;
+    capabilities?: string[];
     limit?: number;
   }): Promise<Array<{ amid: string; displayName?: string; capabilities?: string[] }>> {
     if (!this.client) throw new Error("Not connected to relay");
 
-    // Multi-capability fan-out when no capability filter is specified. The
-    // registry's search requires `capability = ANY(capabilities)` — there's
-    // no "list all" endpoint — so we aggregate well-known labels.
+    // Multi-capability fan-out when an explicit list is provided OR when no
+    // capability filter is specified. The registry's search requires
+    // `capability = ANY(capabilities)` — there's no "list all" endpoint —
+    // so we aggregate well-known labels (or the caller's list).
+    if (opts?.capabilities && opts.capabilities.length > 0) {
+      const seen = new Map<string, { amid: string; displayName?: string; capabilities?: string[] }>();
+      await Promise.all(
+        opts.capabilities.map(async (cap) => {
+          try {
+            const batch = await this.discover({ capability: cap, limit: opts?.limit ?? 50 });
+            for (const a of batch) {
+              if (a.amid && !seen.has(a.amid)) seen.set(a.amid, a);
+            }
+          } catch { /* best-effort aggregation */ }
+        }),
+      );
+      return Array.from(seen.values()).slice(0, opts?.limit ?? 50);
+    }
     if (!opts?.capability) {
       const seeds = [
         "azureclaw-agent",
