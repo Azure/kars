@@ -1179,6 +1179,22 @@ if [ -d /opt/azureclaw-plugin ]; then
     cp -r --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
   fi
+  # Mesh provider selector — Phase 2 of upstream-AGT migration. Defaults to
+  # the vendored AgentMesh SDK so existing deployments are unaffected. Set
+  # AZURECLAW_MESH_PROVIDER=agt at the pod env (via Helm value mesh.provider)
+  # to switch to @microsoft/agent-governance-sdk.
+  AZURECLAW_MESH_PROVIDER="${AZURECLAW_MESH_PROVIDER:-vendored}"
+  case "${AZURECLAW_MESH_PROVIDER}" in
+    agt|AGT)
+      AZURECLAW_MESH_PROVIDER="agt"
+      echo "[azureclaw] mesh provider: agt (@microsoft/agent-governance-sdk)"
+      ;;
+    *)
+      AZURECLAW_MESH_PROVIDER="vendored"
+      echo "[azureclaw] mesh provider: vendored (@agentmesh/sdk)"
+      ;;
+  esac
+  export AZURECLAW_MESH_PROVIDER
   # Copy AGT policies if governance enabled
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then
     mkdir -p "$OPENCLAW_DIR/policies"

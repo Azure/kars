@@ -130,6 +130,16 @@ meshPeer:
   relayUrl: ""              # Override relay URL (default: ws://agentmesh-relay.agentmesh.svc.cluster.local:8765)
   clusterName: ""           # Display name shown to external agents during pairing
 
+# AgentMesh transport provider toggle.
+#   "vendored" — use the vendored Rust relay+registry (deploy/agentmesh.yaml)
+#                and the vendored @agentmesh/sdk (default; backwards-compatible).
+#   "agt"      — use the upstream Microsoft AGT relay+registry
+#                (deploy/agentmesh-agt.yaml) and @microsoft/agent-governance-sdk.
+# The chart only injects AZURECLAW_MESH_PROVIDER into sandbox pods via the
+# controller; operators must apply the matching mesh manifest separately.
+mesh:
+  provider: "vendored"      # "vendored" | "agt"
+
 # Foundry configuration (set by azureclaw up --foundry-endpoint)
 foundry:
   endpoint: ""            # e.g. https://my-resource.services.ai.azure.com — AI Services base

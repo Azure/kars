@@ -1,0 +1,160 @@
+# AGT upstream relay + registry — Phase 4 of the agentmesh provider swap.
+#
+# This manifest deploys the upstream Microsoft Agent Governance Toolkit
+# (AGT) Python relay+registry instead of our vendored Rust implementations.
+#
+# Selection: kubectl apply ONLY ONE of agentmesh.yaml OR agentmesh-agt.yaml.
+# Both expose the same Service names (agentmesh-registry, agentmesh-relay)
+# in the same namespace (agentmesh), so the inference router and the
+# sandbox plugin connect identically. The wire protocol (AgentMesh Wire
+# v1.0) is shared between vendored and upstream — confirmed in upstream
+# MeshClient header which calls out AzureClaw compatibility features.
+#
+# Image source: build from the AGT clone at
+#   /agent-governance-toolkit/agent-governance-python/agent-mesh/docker/Dockerfile
+# with --build-arg COMPONENT=registry|relay, then tag and push as:
+#   azureclawacr.azurecr.io/agentmesh-registry-agt:latest
+#   azureclawacr.azurecr.io/agentmesh-relay-agt:latest
+#
+# Registry HTTP port: 8082 (upstream default). Relay WebSocket port: 8083.
+# We re-map these to the same Service ports our router/router-helpers expect
+# (registry 8080, relay 8765) so no router-side change is needed.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentmesh
+  labels:
+    azureclaw.azure.com/managed: "true"
+    azureclaw.azure.com/mesh-provider: "agt"
+---
+# AGT upstream registry (Python FastAPI)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: agentmesh
+  labels:
+    azureclaw.azure.com/mesh-provider: agt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentmesh-registry
+  template:
+    metadata:
+      labels:
+        app: agentmesh-registry
+        azureclaw.azure.com/mesh-provider: agt
+    spec:
+      containers:
+        - name: registry
+          image: azureclawacr.azurecr.io/agentmesh-registry-agt:latest
+          ports:
+            - containerPort: 8082
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8082"
+            - name: LOG_LEVEL
+              value: "info"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8082
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-registry
+  namespace: agentmesh
+spec:
+  selector:
+    app: agentmesh-registry
+  ports:
+    # Keep the external port at 8080 so router/router-helpers and existing
+    # ConfigMaps don't need to change. The container actually listens on 8082.
+    - port: 8080
+      targetPort: 8082
+---
+# AGT upstream relay (Python FastAPI WebSocket)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: agentmesh
+  labels:
+    azureclaw.azure.com/mesh-provider: agt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentmesh-relay
+  template:
+    metadata:
+      labels:
+        app: agentmesh-relay
+        azureclaw.azure.com/mesh-provider: agt
+    spec:
+      containers:
+        - name: relay
+          image: azureclawacr.azurecr.io/agentmesh-relay-agt:latest
+          ports:
+            - containerPort: 8083
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8083"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: REGISTRY_URL
+              value: "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"
+            - name: REQUIRE_REGISTRATION
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8083
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-relay
+  namespace: agentmesh
+spec:
+  selector:
+    app: agentmesh-relay
+  ports:
+    # Keep external port 8765 (matches existing router config) → container 8083.
+    - port: 8765
+      targetPort: 8083

@@ -169,6 +169,11 @@ export class MeshConnection implements IMeshTransport {
   // Inbox wakers — fired when a content (non-internal/non-claimed) message
   // arrives, so server-side blocking inbox/await tools can wake immediately.
   private inboxWakers = new Set<() => void>();
+  /** IMeshTransport handler arrays — invoked from onClientMessage and onKnock. */
+  private messageHandlers: Array<(from: string, payload: unknown) => void> = [];
+  private knockHandlers: Array<
+    (from: string, intent: unknown) => Promise<{ accept: boolean }>
+  > = [];
 
   constructor(config: ConnectionConfig) {
     this.config = config;
@@ -181,6 +186,37 @@ export class MeshConnection implements IMeshTransport {
 
   get amid(): string {
     return this.config.identity.amid;
+  }
+
+  /** IMeshTransport interface — alias for amid (DID/AMID are equivalent here). */
+  get agentId(): string {
+    return this.config.identity.amid;
+  }
+
+  /** IMeshTransport interface — register a high-level message handler. */
+  onMessage(handler: (fromAmid: string, payload: unknown) => void): void {
+    this.messageHandlers.push(handler);
+  }
+
+  /** IMeshTransport interface — register a KNOCK gating handler. */
+  onKnock(
+    handler: (
+      fromAmid: string,
+      intent: unknown,
+    ) => Promise<{ accept: boolean }>,
+  ): void {
+    this.knockHandlers.push(handler);
+  }
+
+  /** IMeshTransport interface — query plaintext-peer membership. */
+  isPlaintextPeer(amid: string): boolean {
+    return (this.config.plaintextPeers ?? []).includes(amid);
+  }
+
+  /** IMeshTransport interface — passthrough to the underlying SDK client. */
+  sendHeartbeat(): void {
+    const c = this.client as unknown as { sendHeartbeat?: () => void } | null;
+    c?.sendHeartbeat?.();
   }
 
   // ── Connect ──────────────────────────────────────────────────────────
@@ -226,10 +262,22 @@ export class MeshConnection implements IMeshTransport {
       this.onClientMessage(from, content);
     });
 
-    // Auto-accept KNOCKs. AzureClaw gating lives at the controller/router,
-    // not in the mesh transport. Without this, peers that initiate Signal
-    // sessions get rejected.
-    this.client.onKnock(async () => ({ accept: true }));
+    // Auto-accept KNOCKs by default. Higher-level gating runs through the
+    // registered knockHandlers (added via IMeshTransport.onKnock); if any
+    // returns { accept: false } we reject. The router/controller still owns
+    // policy gating at the infrastructure layer.
+    this.client.onKnock(async (from: string, intent: unknown) => {
+      for (const handler of this.knockHandlers) {
+        try {
+          const result = await handler(from, intent);
+          if (!result.accept) return { accept: false };
+        } catch (e) {
+          console.error("[mesh] knock handler threw:", e);
+          return { accept: false };
+        }
+      }
+      return { accept: true };
+    });
 
     console.log(
       `[mesh] Connecting to relay via SDK: ${this.config.relayUrl} ` +
@@ -507,6 +555,16 @@ export class MeshConnection implements IMeshTransport {
 
     const final: unknown = transportResult !== null ? transportResult : content;
     const ts = new Date().toISOString();
+
+    // Fan out to IMeshTransport.onMessage handlers first (Phase 2 callers
+    // that subscribe via the transport interface rather than the inbox).
+    for (const handler of this.messageHandlers) {
+      try {
+        handler(from, final);
+      } catch (e) {
+        console.error("[mesh] message handler threw:", e);
+      }
+    }
 
     const claimed = this.deliverToWaiters(from, final);
     if (!claimed) {
@@ -1017,13 +1075,29 @@ export class MeshConnection implements IMeshTransport {
 
   async discover(opts?: {
     capability?: string;
+    capabilities?: string[];
     limit?: number;
   }): Promise<Array<{ amid: string; displayName?: string; capabilities?: string[] }>> {
     if (!this.client) throw new Error("Not connected to relay");
 
-    // Multi-capability fan-out when no capability filter is specified. The
-    // registry's search requires `capability = ANY(capabilities)` — there's
-    // no "list all" endpoint — so we aggregate well-known labels.
+    // Multi-capability fan-out when an explicit list is provided OR when no
+    // capability filter is specified. The registry's search requires
+    // `capability = ANY(capabilities)` — there's no "list all" endpoint —
+    // so we aggregate well-known labels (or the caller's list).
+    if (opts?.capabilities && opts.capabilities.length > 0) {
+      const seen = new Map<string, { amid: string; displayName?: string; capabilities?: string[] }>();
+      await Promise.all(
+        opts.capabilities.map(async (cap) => {
+          try {
+            const batch = await this.discover({ capability: cap, limit: opts?.limit ?? 50 });
+            for (const a of batch) {
+              if (a.amid && !seen.has(a.amid)) seen.set(a.amid, a);
+            }
+          } catch { /* best-effort aggregation */ }
+        }),
+      );
+      return Array.from(seen.values()).slice(0, opts?.limit ?? 50);
+    }
     if (!opts?.capability) {
       const seeds = [
         "azureclaw-agent",
