@@ -43,6 +43,14 @@ export interface LocalK8sOptions {
    * and the controller mounts it via `envFrom` (TELEGRAM_BOT_TOKEN, etc).
    */
   channels?: string;
+  /**
+   * If true, force-rebuild any sandbox/router/controller image whose
+   * arch doesn't match the host (e.g. cached linux/amd64 from a prior
+   * `azureclaw push` on an Apple Silicon laptop) — or that the user
+   * explicitly asked to rebuild via the `--build` flag in the
+   * common first-run prompt.
+   */
+  forceRebuild?: boolean;
 }
 
 /**
@@ -304,6 +312,132 @@ async function localImageExists(runtime: string, image: string): Promise<boolean
   }
 }
 
+/**
+ * Returns the OCI architecture of a local image (e.g. "amd64", "arm64"),
+ * or null if the image isn't present.
+ */
+async function imageArch(runtime: string, image: string): Promise<string | null> {
+  try {
+    const { stdout } = await execa(runtime, [
+      "image", "inspect", image, "--format", "{{.Architecture}}",
+    ]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Maps Node.js process.arch → OCI/Docker arch token.
+ */
+function hostDockerArch(): string {
+  const a = process.arch;
+  if (a === "x64") return "amd64";
+  if (a === "arm64") return "arm64";
+  return a;
+}
+
+/**
+ * Build the three local-dev images (sandbox, controller, inference-router)
+ * with --platform pinned to the host arch. Used by local-k8s when:
+ *   - the user passed --build, OR
+ *   - the cached image has the wrong arch (running an amd64 image
+ *     under Rosetta on Apple Silicon crashes openclaw with
+ *     `rt_tgsigqueueinfo failed in pend_signal`), OR
+ *   - the image is missing entirely.
+ *
+ * Returns the list of images that were built (for logging).
+ */
+async function rebuildDevImages(
+  runtime: string,
+  repoRoot: string,
+  archToken: string,
+  forceAll: boolean,
+): Promise<string[]> {
+  const platform = `linux/${archToken}`;
+  type Spec = { name: string; tag: string; build: () => Promise<void> };
+  const specs: Spec[] = [
+    {
+      name: "inference-router",
+      tag: "azureclaw-inference-router:dev",
+      build: async () => {
+        await execa(runtime, [
+          "build",
+          "--platform", platform,
+          "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
+          "-t", "azureclaw-inference-router:dev",
+          "-f", path.join(repoRoot, "inference-router/Dockerfile"),
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
+    {
+      name: "controller",
+      tag: "azureclaw-controller:dev",
+      build: async () => {
+        await execa(runtime, [
+          "build",
+          "--platform", platform,
+          "-t", "azureclaw-controller:dev",
+          "-f", path.join(repoRoot, "controller/Dockerfile"),
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
+    {
+      name: "sandbox",
+      tag: "azureclaw-sandbox:dev",
+      build: async () => {
+        // Base image first if not present (heavy — only built once).
+        const baseTag = "azureclaw-sandbox-base:dev";
+        const azureLinux = "mcr.microsoft.com/azurelinux/base/core:3.0";
+        if (!(await localImageExists(runtime, baseTag)) ||
+            (await imageArch(runtime, baseTag)) !== archToken) {
+          await execa(runtime, ["pull", "--platform", platform, azureLinux], { stdio: "pipe" }).catch(() => undefined);
+          await execa(runtime, [
+            "build",
+            "--platform", platform,
+            "--build-arg", `AZURELINUX_BASE=${azureLinux}`,
+            "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`,
+            "-t", baseTag,
+            "-f", path.join(repoRoot, "sandbox-images/openclaw/Dockerfile.base"),
+            repoRoot,
+          ], { stdio: "inherit" });
+        }
+        await execa(runtime, [
+          "build",
+          "--platform", platform,
+          "--build-arg", `SANDBOX_BASE_IMAGE=${baseTag}`,
+          "--build-arg", `INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:dev`,
+          "-t", "azureclaw-sandbox:dev",
+          "-f", path.join(repoRoot, "sandbox-images/openclaw/Dockerfile"),
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
+  ];
+
+  const built: string[] = [];
+  for (const s of specs) {
+    const arch = await imageArch(runtime, s.tag);
+    const archMismatch = arch !== null && arch !== archToken;
+    const missing = arch === null;
+    if (!forceAll && !missing && !archMismatch) continue;
+    if (archMismatch) {
+      console.log(chalk.dim(
+        `  ${s.tag} is ${arch}, host is ${archToken} — rebuilding for ${platform}.`,
+      ));
+    } else if (missing) {
+      console.log(chalk.dim(`  ${s.tag} not present — building for ${platform}.`));
+    } else {
+      console.log(chalk.dim(`  Rebuilding ${s.tag} for ${platform} (--build).`));
+    }
+    await s.build();
+    built.push(s.tag);
+  }
+  return built;
+}
+
 async function loadImageIfPresent(
   kind: string,
   runtime: string,
@@ -498,7 +632,7 @@ async function provisionDevCreds(
 }
 
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 11 });
+  const stepper = new Stepper({ totalSteps: 12 });
 
   stepper.step("Checking local tooling (kind / kubectl / helm / container runtime)…");
   const tools = await ensureTooling();
@@ -529,6 +663,28 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   stepper.step(`Ensuring kind cluster '${opts.clusterName}' exists…`);
   await ensureCluster(tools.kind, opts.clusterName, tools.env);
   stepper.done(`kind cluster '${opts.clusterName}' is ready`);
+
+  // Ensure the three local-dev images exist AND match the host arch.
+  // Without this, a cached linux/amd64 image left over from
+  // `azureclaw push` (which builds for AKS) would crash openclaw under
+  // Rosetta on an Apple Silicon laptop with
+  // `rt_tgsigqueueinfo failed in pend_signal`.
+  if (!opts.noBuild) {
+    const archToken = hostDockerArch();
+    const repoRootForBuild = findRepoRoot(process.cwd());
+    stepper.step(`Checking image arch (host=${archToken})…`);
+    const built = await rebuildDevImages(
+      tools.runtime,
+      repoRootForBuild,
+      archToken,
+      opts.forceRebuild === true,
+    );
+    if (built.length === 0) {
+      stepper.done(`images already match host arch (${archToken})`);
+    } else {
+      stepper.done(`rebuilt ${built.length} image(s) for linux/${archToken}`);
+    }
+  }
 
   // The values-local-dev overlay pins all images to local "dev" tags
   // with imagePullPolicy=Never, so we MUST load all three images that

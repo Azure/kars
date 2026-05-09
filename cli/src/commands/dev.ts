@@ -265,6 +265,23 @@ Notes:
             console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
           }
         }
+
+        // Rebuild prompt — applies to BOTH targets. Cached images can
+        // be stale (wrong arch after an `azureclaw push` that always
+        // builds linux/amd64; or out-of-date plugin/entrypoint code).
+        // Defaults to no — first-time users want fast bringup. Power
+        // users testing local changes can opt in here without
+        // remembering the --build flag. Skipped if --build was passed
+        // explicitly.
+        if (!options.build) {
+          const { rebuild } = await inquirer.prompt([{
+            type: "confirm",
+            name: "rebuild",
+            message: "Rebuild sandbox image from local source? (slower, picks up plugin/entrypoint changes)",
+            default: false,
+          }]);
+          if (rebuild) options.build = true;
+        }
       }
 
       // ── Target dispatch ───────────────────────────────────────────
@@ -289,10 +306,8 @@ Notes:
             clusterName: options.clusterName,
             image: options.image,
             ephemeral: !!options.ephemeral,
-            // For local-k8s we always attempt image load — the loader
-            // is idempotent and silently skips if no candidate matches.
-            // The --build flag is docker-mode specific.
             noBuild: false,
+            forceRebuild: options.build === true,
             channels: typeof options.channels === "string" ? options.channels : undefined,
           });
           return;
@@ -358,19 +373,8 @@ Notes:
           }
           const { default: inquirer } = await import("inquirer");
 
-          // Optional rebuild prompt. Defaults to no — first-time users want
-          // the cached image to come up fast. Power users testing local
-          // changes (e.g. plugin/entrypoint edits) can opt in here without
-          // remembering the --build flag.
-          if (!options.build) {
-            const { rebuild } = await inquirer.prompt([{
-              type: "confirm",
-              name: "rebuild",
-              message: "Rebuild sandbox image from local source? (slower, picks up plugin/entrypoint changes)",
-              default: false,
-            }]);
-            if (rebuild) options.build = true;
-          }
+          // Optional rebuild prompt is now hoisted to the common
+          // first-run block — applies to both targets.
 
           const newProviderLabel =
             creds.provider === "github-models"
@@ -407,13 +411,32 @@ Notes:
 
 
         // ── Image resolution ─────────────────────────────────────────
+        // Map Node.js `process.arch` → Docker platform arch token.
+        // Docker uses linux/amd64 and linux/arm64; Node reports x64
+        // and arm64. We force --platform on every dev build so the
+        // image always matches the host (and won't trip Rosetta).
+        const dockerArch = process.arch === "x64" ? "amd64" : process.arch === "arm64" ? "arm64" : process.arch;
+        const dockerPlatform = `linux/${dockerArch}`;
+
         stepper.step("Resolving sandbox image...");
         let imageExists = false;
         if (!options.build) {
           stepper.update("Checking for sandbox image...");
           try {
-            await execa("docker", ["image", "inspect", image], { stdio: "pipe" });
-            imageExists = true;
+            const { stdout: cachedArch } = await execa("docker", [
+              "image", "inspect", image, "--format", "{{.Architecture}}",
+            ], { stdio: "pipe" });
+            if (cachedArch.trim() === dockerArch) {
+              imageExists = true;
+            } else {
+              // Stale image from a prior `azureclaw push` (which always
+              // builds linux/amd64 for AKS) or a different host. Force
+              // rebuild — running an amd64 sandbox under Rosetta on
+              // Apple Silicon crashes with "rt_tgsigqueueinfo failed".
+              console.log(chalk.dim(
+                `  Cached ${image} is ${cachedArch.trim()}, host is ${dockerArch} — will rebuild.`,
+              ));
+            }
           } catch {
             // Not found — will build
           }
@@ -428,7 +451,7 @@ Notes:
           } catch {
             stepper.update(`Pulling base image (${baseImage})...`);
             try {
-              await execa("docker", ["pull", baseImage], { stdio: "pipe" });
+              await execa("docker", ["pull", "--platform", dockerPlatform, baseImage], { stdio: "pipe" });
             } catch {
               stepper.fail("Could not pull base image");
               console.log(chalk.yellow(`
@@ -471,6 +494,7 @@ Notes:
             console.log(chalk.dim("  Building sandbox base image (this is the slow one — only needed once)...\n"));
             await execa("docker", [
               "build",
+              "--platform", dockerPlatform,
               "--build-arg", `AZURELINUX_BASE=${baseImage}`,
               "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`,
               "-t", SANDBOX_BASE_IMAGE,
@@ -496,6 +520,7 @@ Notes:
             console.log(chalk.dim("  Building inference-router (Rust)...\n"));
             await execa("docker", [
               "build",
+              "--platform", dockerPlatform,
               "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
               "-t", routerImage,
               "-f", routerDockerfile,
@@ -509,6 +534,7 @@ Notes:
           console.log(chalk.dim("  Building sandbox image...\n"));
           await execa("docker", [
             "build",
+            "--platform", dockerPlatform,
             "--build-arg", `SANDBOX_BASE_IMAGE=${SANDBOX_BASE_IMAGE}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
             "-t", "azureclaw-sandbox:dev",
@@ -525,7 +551,7 @@ Notes:
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
             await execa("docker", [
-              "build", "--build-arg", `CACHE_BUST=${Date.now()}`,
+              "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
               "-t", "agentmesh-relay:dev",
               path.join(repoRoot, "vendor/agentmesh-relay"),
             ], { stdio: "inherit" });
@@ -535,7 +561,7 @@ Notes:
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-registry (Rust + React)...\n"));
             await execa("docker", [
-              "build", "--build-arg", `CACHE_BUST=${Date.now()}`,
+              "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
               "-t", "agentmesh-registry:dev",
               path.join(repoRoot, "vendor/agentmesh-registry"),
             ], { stdio: "inherit" });
