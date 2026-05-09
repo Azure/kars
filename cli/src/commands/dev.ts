@@ -155,7 +155,10 @@ Notes:
             clusterName: options.clusterName,
             image: options.image,
             ephemeral: !!options.ephemeral,
-            noBuild: !options.build,
+            // For local-k8s we always attempt image load — the loader
+            // is idempotent and silently skips if no candidate matches.
+            // The --build flag is docker-mode specific.
+            noBuild: false,
           });
           return;
         } catch (e) {

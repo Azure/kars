@@ -1,0 +1,67 @@
+# Local development overlay for kind-based dev mode.
+#
+# Usage:
+#   helm install azureclaw ./deploy/helm/azureclaw \
+#     -f deploy/helm/azureclaw/values.yaml \
+#     -f deploy/helm/azureclaw/values-local-dev.yaml
+#
+# This file is what makes the Helm chart usable on a laptop:
+#   * pulls images from the local kind node cache (no ACR access)
+#   * cuts replicas to 1 so a single-node kind cluster doesn't
+#     pile up Pending pods
+#   * disables Foundry-only features (Content Safety, Prompt Shields)
+#     because there is no Azure backend in local-k8s mode
+#   * keeps the controller alive without a leader-election pair
+#
+# Production values.yaml stays untouched.
+
+controller:
+  image:
+    repository: azureclaw-controller
+    tag: "dev"
+    pullPolicy: Never
+  replicas: 1
+  # Single-replica controllers must skip leader election or the
+  # deployment will deadlock on Lease acquisition in a 1-node cluster.
+  extraEnv:
+    - name: LEADER_ELECTION_ENABLED
+      value: "false"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+inferenceRouter:
+  image:
+    repository: azureclaw-inference-router
+    tag: "dev"
+    pullPolicy: Never
+  replicas: 1
+  azure:
+    openai:
+      # Local-k8s dev points at the in-cluster fake router (Phase 3).
+      # Empty here is fine for Phase 2 — the per-sandbox sidecar still
+      # needs a value to start, and we override it via inferenceRef
+      # at sandbox creation time.
+      endpoint: "http://azureclaw-fake-router.azureclaw-system.svc.cluster.local"
+      deploymentName: "gpt-4.1"
+    contentSafety:
+      enabled: false
+    promptShields:
+      enabled: false
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+sandbox:
+  image:
+    repository: azureclaw-sandbox
+    tag: "dev"
+    pullPolicy: Never

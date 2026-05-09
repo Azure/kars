@@ -95,6 +95,46 @@ async function loadImageIntoKind(
   );
 }
 
+async function dockerImageExists(docker: string, image: string): Promise<boolean> {
+  try {
+    await execa(docker, ["image", "inspect", image]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function loadImageIfPresent(
+  kind: string,
+  docker: string,
+  clusterName: string,
+  /** Desired tag inside kind (matches values-local-dev.yaml). */
+  targetImage: string,
+  /** Fallback tags to retag-from if `targetImage` itself isn't local. */
+  candidateAliases: string[] = [],
+): Promise<{ loaded: boolean; reason?: string }> {
+  const tryLoad = async (img: string): Promise<boolean> => {
+    if (!(await dockerImageExists(docker, img))) return false;
+    if (img !== targetImage) {
+      // Retag to the canonical name so values-local-dev.yaml's
+      // `imagePullPolicy: Never` finds it.
+      await execa(docker, ["tag", img, targetImage]);
+    }
+    await loadImageIntoKind(kind, clusterName, targetImage);
+    return true;
+  };
+
+  for (const candidate of [targetImage, ...candidateAliases]) {
+    if (await tryLoad(candidate)) {
+      return { loaded: true };
+    }
+  }
+  return {
+    loaded: false,
+    reason: `'${targetImage}' (and aliases: ${candidateAliases.join(", ") || "<none>"}) not found locally — build via 'make images'`,
+  };
+}
+
 function findRepoRoot(start: string): string {
   let cur = start;
   while (cur !== "/" && !existsSync(path.join(cur, "Cargo.toml"))) {
@@ -113,23 +153,24 @@ async function helmInstall(
   kubectl: string,
   release: string,
   chartDir: string,
+  valuesOverlay: string | null,
 ): Promise<void> {
   // We render-then-apply (rather than `helm install`) to keep failures
   // visible: `kubectl apply -f -` shows precisely which resources didn't
   // accept admission. Phase 4 may switch to `helm install --atomic` once
   // CRDs and the values overlay are stable.
-  const { stdout } = await execa(helm, [
+  const args = [
     "template",
     release,
     chartDir,
     "--namespace",
     "azureclaw-system",
-    "--set",
-    "controller.image.pullPolicy=Never",
-    "--set",
-    "router.image.pullPolicy=Never",
     "--include-crds",
-  ]);
+  ];
+  if (valuesOverlay) {
+    args.push("-f", valuesOverlay);
+  }
+  const { stdout } = await execa(helm, args);
   await execa(
     kubectl,
     ["apply", "-f", "-", "--server-side", "--force-conflicts"],
@@ -153,19 +194,72 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   await ensureCluster(tools.kind, opts.clusterName);
   stepper.done(`kind cluster '${opts.clusterName}' is ready`);
 
-  stepper.step(`Loading sandbox image '${opts.image}' into the cluster…`);
+  // The values-local-dev overlay pins all images to local "dev" tags
+  // with imagePullPolicy=Never, so we MUST load all three images that
+  // the chart references — sandbox, controller, inference-router.
+  // Missing any of them turns the helm install into an ErrImageNeverPull
+  // loop with no useful diagnostics.
+  stepper.step("Loading AzureClaw images into the kind cluster…");
   if (opts.noBuild) {
     stepper.done("skipped image load (--no-build)");
   } else {
-    await loadImageIntoKind(tools.kind, opts.clusterName, opts.image);
-    stepper.done(`image '${opts.image}' loaded into kind`);
+    const images: { target: string; aliases: string[] }[] = [
+      {
+        target: opts.image,
+        aliases: [
+          "azureclawacr.azurecr.io/openclaw-sandbox:latest",
+          "azureclaw.azurecr.io/openclaw-sandbox:latest",
+        ],
+      },
+      {
+        target: "azureclaw-controller:dev",
+        aliases: [
+          "azureclawacr.azurecr.io/azureclaw-controller:latest",
+          "azureclaw.azurecr.io/azureclaw-controller:latest",
+        ],
+      },
+      {
+        target: "azureclaw-inference-router:dev",
+        aliases: [
+          "azureclawacr.azurecr.io/azureclaw-inference-router:latest",
+          "azureclaw.azurecr.io/azureclaw-inference-router:latest",
+        ],
+      },
+    ];
+    const missing: string[] = [];
+    for (const img of images) {
+      const result = await loadImageIfPresent(
+        tools.kind,
+        tools.docker,
+        opts.clusterName,
+        img.target,
+        img.aliases,
+      );
+      if (!result.loaded) {
+        missing.push(result.reason ?? img.target);
+      }
+    }
+    if (missing.length > 0) {
+      console.warn(
+        chalk.yellow(
+          `  ⚠ some images missing from local docker; the deployment will fail until you build them:\n     - ${missing.join("\n     - ")}\n     Hint: 'make images' or 'make build && make images' from repo root.`,
+        ),
+      );
+    }
+    stepper.done(`loaded ${images.length - missing.length}/${images.length} images`);
   }
 
-  stepper.step("Helm-installing the AzureClaw chart…");
+  stepper.step("Helm-installing the AzureClaw chart (with local-dev overlay)…");
   const repoRoot = findRepoRoot(process.cwd());
   const chartDir = path.join(repoRoot, "deploy", "helm", "azureclaw");
   if (!existsSync(chartDir)) {
     throw new Error(`AzureClaw helm chart not found at ${chartDir}`);
+  }
+  const valuesOverlay = path.join(chartDir, "values-local-dev.yaml");
+  if (!existsSync(valuesOverlay)) {
+    throw new Error(
+      `Expected local-dev overlay at ${valuesOverlay} — your checkout is incomplete.`,
+    );
   }
   // Ensure the namespace exists before applying namespaced resources.
   try {
@@ -173,7 +267,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   } catch {
     // Namespace already exists — proceed.
   }
-  await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir);
+  await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir, valuesOverlay);
   stepper.done("chart applied");
 
   stepper.step("Verifying controller deployment is rolling out…");
@@ -189,16 +283,14 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         "deployment/azureclaw-controller",
         "-n",
         "azureclaw-system",
-        "--timeout=60s",
+        "--timeout=120s",
       ],
       { stdio: "inherit" },
     );
   } catch {
-    // Phase 1: surface the warning rather than failing — the rest of the
-    // bringup may still succeed once images are properly pinned in Phase 2.
     console.warn(
       chalk.yellow(
-        "  ⚠ controller deployment did not become ready within 60s — check 'kubectl describe deployment/azureclaw-controller -n azureclaw-system'.",
+        "  ⚠ controller deployment did not become ready within 120s — check 'kubectl describe deployment/azureclaw-controller -n azureclaw-system'.",
       ),
     );
   }
@@ -218,7 +310,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   if (opts.ephemeral) {
     console.log(
       chalk.dim(
-        `  --ephemeral: cluster will NOT be destroyed automatically in Phase 1.\n  Run 'kind delete cluster --name ${opts.clusterName}' when finished.`,
+        `  --ephemeral: cluster will NOT be destroyed automatically yet.\n  Run 'kind delete cluster --name ${opts.clusterName}' when finished.`,
       ),
     );
   }
