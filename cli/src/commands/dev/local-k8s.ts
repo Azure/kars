@@ -125,6 +125,43 @@ async function detectRuntime(): Promise<{ name: ContainerRuntime; path: string }
   );
 }
 
+const MIN_KIND_MAJOR = 0;
+const MIN_KIND_MINOR = 20;
+
+async function ensureKindVersion(kindBin: string): Promise<void> {
+  let raw: string;
+  try {
+    const { stdout } = await execa(kindBin, ["--version"]);
+    raw = stdout.trim();
+  } catch (err) {
+    throw new Error(
+      `Failed to run \`${kindBin} --version\`: ${(err as Error).message}. ` +
+        `AzureClaw needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
+    );
+  }
+  const m = raw.match(/v?(\d+)\.(\d+)\.(\d+)/);
+  if (!m) {
+    throw new Error(
+      `Could not parse kind version from output: "${raw}". ` +
+        `AzureClaw needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
+    );
+  }
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  const tooOld =
+    major < MIN_KIND_MAJOR ||
+    (major === MIN_KIND_MAJOR && minor < MIN_KIND_MINOR);
+  if (tooOld) {
+    throw new Error(
+      `kind v${major}.${minor}.${m[3]} is too old. AzureClaw needs ` +
+        `v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+ (the post-init untaint ` +
+        `step for single-node control-plane clusters was introduced in ` +
+        `v0.20). Upgrade with \`brew upgrade kind\` or ` +
+        `\`go install sigs.k8s.io/kind@latest\`.`,
+    );
+  }
+}
+
 async function ensureTooling(): Promise<Tooling> {
   // Resolved up front so we fail with one actionable error per missing
   // dependency, instead of an opaque ENOENT mid-bringup.
@@ -134,6 +171,7 @@ async function ensureTooling(): Promise<Tooling> {
     which("helm"),
     detectRuntime(),
   ]);
+  await ensureKindVersion(kind);
   // kind needs KIND_EXPERIMENTAL_PROVIDER=podman|nerdctl to talk to
   // anything other than docker; for docker the var must be unset (or
   // empty) so kind uses its default.
