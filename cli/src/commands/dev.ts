@@ -1093,9 +1093,17 @@ Notes:
       }
 
       // Delete the kind cluster (idempotent — kind handles "doesn't exist").
+      // Detect the runtime so we hand kind the right
+      // KIND_EXPERIMENTAL_PROVIDER. If we don't, a cluster created under
+      // podman/nerdctl is invisible to kind when we shell out without
+      // the env var, and the delete silently no-ops while the user
+      // thinks they reclaimed resources.
       try {
+        const { detectRuntimeEnv } = await import("./dev/local-k8s.js");
+        const env = await detectRuntimeEnv();
         await execa("kind", ["delete", "cluster", "--name", options.clusterName], {
           stdio: "inherit",
+          env,
         });
         console.log(chalk.green(`\n  ✓ Cluster '${options.clusterName}' deleted.\n`));
       } catch (err) {

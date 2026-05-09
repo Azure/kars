@@ -38,11 +38,28 @@ export interface LocalK8sOptions {
   noBuild: boolean;
 }
 
+/**
+ * Container runtime backing kind. kind ≥0.20 supports docker (default),
+ * podman, and nerdctl via the `KIND_EXPERIMENTAL_PROVIDER` env var. The
+ * runtime affects three things:
+ *  1. The `KIND_EXPERIMENTAL_PROVIDER` env var kind reads at startup.
+ *  2. The image-load fallback path: docker has a shared daemon so we
+ *     pipe `docker save` straight into the node's `ctr import`. Podman
+ *     and nerdctl behave the same way (`<runtime> save | <runtime>
+ *     exec -i node ctr import -`) but the binary differs.
+ *  3. The `<runtime> exec` invocation used to introspect node state and
+ *     pipe images.
+ */
+export type ContainerRuntime = "docker" | "podman" | "nerdctl";
+
 interface Tooling {
   kind: string;
   kubectl: string;
   helm: string;
-  docker: string;
+  runtime: string;
+  runtimeName: ContainerRuntime;
+  /** Env injected into every kind/runtime call. */
+  env: NodeJS.ProcessEnv;
 }
 
 async function which(bin: string): Promise<string> {
@@ -56,48 +73,148 @@ async function which(bin: string): Promise<string> {
   }
 }
 
+async function whichOptional(bin: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execa("which", [bin]);
+    return stdout.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+const RUNTIME_PRIORITY: ContainerRuntime[] = ["docker", "podman", "nerdctl"];
+
+async function detectRuntime(): Promise<{ name: ContainerRuntime; path: string }> {
+  // Honour an explicit override so power users can force a specific
+  // runtime even when several are installed.
+  const override = process.env.AZURECLAW_DEV_RUNTIME?.toLowerCase();
+  if (
+    override === "docker" ||
+    override === "podman" ||
+    override === "nerdctl"
+  ) {
+    const p = await whichOptional(override);
+    if (!p) {
+      throw new Error(
+        `AZURECLAW_DEV_RUNTIME=${override} but the '${override}' binary is not on PATH.`,
+      );
+    }
+    return { name: override, path: p };
+  }
+
+  // Prefer docker → podman → nerdctl. Docker has the most CI mileage and
+  // matches every existing dev's setup; podman/nerdctl get picked up
+  // automatically only when docker is absent.
+  for (const candidate of RUNTIME_PRIORITY) {
+    const p = await whichOptional(candidate);
+    if (p) return { name: candidate, path: p };
+  }
+
+  throw new Error(
+    "No container runtime found on PATH. Install Docker Desktop, colima, " +
+      "podman (with `podman machine` on macOS), or nerdctl, then retry. " +
+      "Set AZURECLAW_DEV_RUNTIME=docker|podman|nerdctl to override " +
+      "autodetection.",
+  );
+}
+
 async function ensureTooling(): Promise<Tooling> {
   // Resolved up front so we fail with one actionable error per missing
   // dependency, instead of an opaque ENOENT mid-bringup.
-  const [kind, kubectl, helm, docker] = await Promise.all([
+  const [kind, kubectl, helm, runtime] = await Promise.all([
     which("kind"),
     which("kubectl"),
     which("helm"),
-    which("docker"),
+    detectRuntime(),
   ]);
-  return { kind, kubectl, helm, docker };
+  // kind needs KIND_EXPERIMENTAL_PROVIDER=podman|nerdctl to talk to
+  // anything other than docker; for docker the var must be unset (or
+  // empty) so kind uses its default.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (runtime.name === "docker") {
+    delete env.KIND_EXPERIMENTAL_PROVIDER;
+  } else {
+    env.KIND_EXPERIMENTAL_PROVIDER = runtime.name;
+  }
+  return {
+    kind,
+    kubectl,
+    helm,
+    runtime: runtime.path,
+    runtimeName: runtime.name,
+    env,
+  };
 }
 
-async function clusterExists(kind: string, name: string): Promise<boolean> {
-  const { stdout } = await execa(kind, ["get", "clusters"]);
+/**
+ * Public helper used by `azureclaw dev down` so it can issue
+ * `kind delete cluster` against a cluster created under podman or
+ * nerdctl. Returns a copy of `process.env` with
+ * `KIND_EXPERIMENTAL_PROVIDER` set/cleared based on what's installed.
+ * Falls back to `process.env` (i.e. lets kind default to docker) if
+ * no runtime is installed — `dev down` should be best-effort.
+ */
+export async function detectRuntimeEnv(): Promise<NodeJS.ProcessEnv> {
+  try {
+    const r = await detectRuntime();
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (r.name === "docker") {
+      delete env.KIND_EXPERIMENTAL_PROVIDER;
+    } else {
+      env.KIND_EXPERIMENTAL_PROVIDER = r.name;
+    }
+    return env;
+  } catch {
+    return process.env;
+  }
+}
+
+async function clusterExists(
+  kind: string,
+  name: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const { stdout } = await execa(kind, ["get", "clusters"], { env });
   return stdout.split(/\r?\n/).map((s) => s.trim()).includes(name);
 }
 
-async function ensureCluster(kind: string, name: string): Promise<void> {
-  if (await clusterExists(kind, name)) return;
+async function ensureCluster(
+  kind: string,
+  name: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  if (await clusterExists(kind, name, env)) return;
   // The default kindest/node image is fine for our use case; pinning is
   // a Phase-2 hardening concern alongside the values-local-dev overlay.
   await execa(kind, ["create", "cluster", "--name", name], {
     stdio: "inherit",
+    env,
   });
 }
 
 async function loadImageIntoKind(
   kind: string,
+  runtime: string,
   clusterName: string,
   image: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<void> {
   // `kind load docker-image` has a known issue where it can silently fail
   // to surface an image into the node's containerd (the import succeeds at
   // the kind layer but `crictl images` doesn't show it — observed on
   // multiple OS/arch combos and tracked in kind#3795). We use it as the
-  // primary path, then verify by piping a `docker save` straight into
+  // primary path, then verify by piping a `<runtime> save` straight into
   // the node's `ctr` as a fallback. The fallback is idempotent.
+  //
+  // The kind subcommand is named `load docker-image` regardless of the
+  // backing runtime — kind reuses the docker terminology even when
+  // talking to podman or nerdctl. The save/exec pipe below uses the
+  // detected runtime binary so it works under all three.
   try {
     await execa(
       kind,
       ["load", "docker-image", image, "--name", clusterName],
-      { stdio: "inherit" },
+      { stdio: "inherit", env },
     );
   } catch {
     // fall through to the ctr import path
@@ -105,7 +222,7 @@ async function loadImageIntoKind(
 
   // Verify the image is on the node; if not, push it via ctr.
   const node = `${clusterName}-control-plane`;
-  const present = await execa("docker", [
+  const present = await execa(runtime, [
     "exec",
     node,
     "crictl",
@@ -118,9 +235,9 @@ async function loadImageIntoKind(
 
   if (present) return;
 
-  const save = execa("docker", ["save", image]);
+  const save = execa(runtime, ["save", image]);
   const importProc = execa(
-    "docker",
+    runtime,
     ["exec", "-i", node, "ctr", "-n=k8s.io", "images", "import", "-"],
     { stdio: ["pipe", "inherit", "inherit"] },
   );
@@ -128,9 +245,9 @@ async function loadImageIntoKind(
   await Promise.all([save, importProc]);
 }
 
-async function dockerImageExists(docker: string, image: string): Promise<boolean> {
+async function localImageExists(runtime: string, image: string): Promise<boolean> {
   try {
-    await execa(docker, ["image", "inspect", image]);
+    await execa(runtime, ["image", "inspect", image]);
     return true;
   } catch {
     return false;
@@ -139,21 +256,23 @@ async function dockerImageExists(docker: string, image: string): Promise<boolean
 
 async function loadImageIfPresent(
   kind: string,
-  docker: string,
+  runtime: string,
   clusterName: string,
   /** Desired tag inside kind (matches values-local-dev.yaml). */
   targetImage: string,
+  env: NodeJS.ProcessEnv,
   /** Fallback tags to retag-from if `targetImage` itself isn't local. */
   candidateAliases: string[] = [],
 ): Promise<{ loaded: boolean; reason?: string }> {
   const tryLoad = async (img: string): Promise<boolean> => {
-    if (!(await dockerImageExists(docker, img))) return false;
+    if (!(await localImageExists(runtime, img))) return false;
     if (img !== targetImage) {
       // Retag to the canonical name so values-local-dev.yaml's
-      // `imagePullPolicy: Never` finds it.
-      await execa(docker, ["tag", img, targetImage]);
+      // `imagePullPolicy: Never` finds it. `image tag` works the same
+      // under docker, podman, and nerdctl.
+      await execa(runtime, ["tag", img, targetImage]);
     }
-    await loadImageIntoKind(kind, clusterName, targetImage);
+    await loadImageIntoKind(kind, runtime, clusterName, targetImage, env);
     return true;
   };
 
@@ -331,10 +450,10 @@ async function provisionDevCreds(
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const stepper = new Stepper({ totalSteps: 8 });
 
-  stepper.step("Checking local tooling (kind / kubectl / helm / docker)…");
+  stepper.step("Checking local tooling (kind / kubectl / helm / container runtime)…");
   const tools = await ensureTooling();
   stepper.done(
-    `tooling ready: ${path.basename(tools.kind)}, ${path.basename(tools.kubectl)}, ${path.basename(tools.helm)}`,
+    `tooling ready: ${path.basename(tools.kind)}, ${path.basename(tools.kubectl)}, ${path.basename(tools.helm)}, ${tools.runtimeName}`,
   );
 
   // Load creds up-front so we fail fast (and with a friendly pointer to
@@ -358,7 +477,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   stepper.done(`creds: ${providerLabel} (${creds.endpoint})`);
 
   stepper.step(`Ensuring kind cluster '${opts.clusterName}' exists…`);
-  await ensureCluster(tools.kind, opts.clusterName);
+  await ensureCluster(tools.kind, opts.clusterName, tools.env);
   stepper.done(`kind cluster '${opts.clusterName}' is ready`);
 
   // The values-local-dev overlay pins all images to local "dev" tags
@@ -397,9 +516,10 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     for (const img of images) {
       const result = await loadImageIfPresent(
         tools.kind,
-        tools.docker,
+        tools.runtime,
         opts.clusterName,
         img.target,
+        tools.env,
         img.aliases,
       );
       if (!result.loaded) {
@@ -409,7 +529,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     if (missing.length > 0) {
       console.warn(
         chalk.yellow(
-          `  ⚠ some images missing from local docker; the deployment will fail until you build them:\n     - ${missing.join("\n     - ")}\n     Hint: 'make images' or 'make build && make images' from repo root.`,
+          `  ⚠ some images missing from local ${tools.runtimeName}; the deployment will fail until you build them:\n     - ${missing.join("\n     - ")}\n     Hint: 'make images' or 'make build && make images' from repo root.`,
         ),
       );
     }

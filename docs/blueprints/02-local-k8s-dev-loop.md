@@ -99,7 +99,8 @@ azureclaw dev down --keep-cluster       # only stop port-forward
 The CLI handles:
 
 - Kind cluster create (idempotent — re-runs reuse).
-- Cross-arch image load (kind load → fallback `docker save | ctr images import`).
+- Cross-arch image load (kind load → fallback `<runtime> save | ctr images import`).
+- Container runtime auto-detection (docker → podman → nerdctl, in order of preference). Override with `AZURECLAW_DEV_RUNTIME=docker|podman|nerdctl`. kind is invoked with `KIND_EXPERIMENTAL_PROVIDER` set automatically when needed.
 - Node label `azureclaw.azure.com/pool=sandbox` so sandboxes schedule on the single node.
 - Helm chart render with a per-run overlay containing the dev secret name.
 - Headlamp install via official chart.
