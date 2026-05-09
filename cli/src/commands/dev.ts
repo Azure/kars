@@ -133,6 +133,49 @@ Notes:
         process.exit(1);
       }
 
+      // ── First-run target prompt ──────────────────────────────────
+      // Brand-new user with no saved creds AND no explicit --target
+      // flag: ask docker vs local-k8s up front, before we get into
+      // creds collection. Once they've run dev once, we trust the
+      // explicit --target (or the default "docker"). Detect "no
+      // --target was passed" by scanning argv directly — commander
+      // applies the default before we see the option, so options.target
+      // alone can't tell us.
+      const targetWasExplicit = process.argv.some(
+        (a) => a === "--target" || a.startsWith("--target="),
+      );
+      const credsForFirstRun = loadConfig();
+      if (!targetWasExplicit && (!credsForFirstRun || !credsForFirstRun.firstRunCompleted)) {
+        const { default: inquirer } = await import("inquirer");
+        console.log(chalk.yellow("\n  👋 First time running `azureclaw dev`. Where should the sandbox run?"));
+        const { chosenTarget } = await inquirer.prompt([
+          {
+            type: "list",
+            name: "chosenTarget",
+            message: "Pick a runtime target:",
+            default: "docker",
+            choices: [
+              {
+                name: "Docker             (recommended; fast bringup, single container — perfect for prompt iteration)",
+                value: "docker",
+              },
+              {
+                name: "Local Kubernetes   (kind cluster + Helm chart + Headlamp dashboard — mirrors AKS exactly, slower bringup)",
+                value: "local-k8s",
+              },
+            ],
+          },
+        ]);
+        options.target = chosenTarget;
+        if (chosenTarget === "local-k8s") {
+          console.log(
+            chalk.dim(
+              "  Tip: pass `--target docker` next time to skip this prompt and use Docker again.",
+            ),
+          );
+        }
+      }
+
       // ── Target dispatch ───────────────────────────────────────────
       // local-k8s mode is a clean alternative to the docker stack: kind
       // cluster + helm-installed chart. It deliberately doesn't go
