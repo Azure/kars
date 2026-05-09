@@ -907,14 +907,17 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
 
   console.log("");
   console.log(chalk.bold("  OpenClaw WebUI:"));
-  // Print URL without chalk — terminals auto-detect bare http:// links;
-  // ANSI codes break that detection in most emulators.
-  console.log(`    ${webUrl}`);
+  // Embed the gateway token as a URL fragment so the user can click the
+  // link and skip the manual token paste. Matches docker-mode behavior.
+  const webUrlWithToken = gwToken ? `${webUrl}#token=${gwToken}` : webUrl;
+  console.log(`    ${webUrlWithToken}`);
   if (gwToken) {
-    console.log(chalk.dim(`    (gateway token: ${gwToken.slice(0, 12)}…)`));
+    console.log("");
+    console.log(chalk.dim("  Gateway token (copy if the URL hash is stripped):"));
+    console.log(`    ${gwToken}`);
   }
   console.log("");
-  await openBrowser(webUrl);
+  await openBrowser(webUrlWithToken);
 
   console.log(chalk.bold("  Next steps:"));
   console.log(
