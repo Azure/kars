@@ -21,7 +21,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import * as path from "node:path";
 import * as os from "node:os";
-import { existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, writeFileSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { Stepper } from "../../stepper.js";
 import { loadConfig, type AzureClawConfig } from "../../config.js";
 
@@ -329,7 +329,7 @@ async function provisionDevCreds(
 }
 
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 7 });
+  const stepper = new Stepper({ totalSteps: 8 });
 
   stepper.step("Checking local tooling (kind / kubectl / helm / docker)…");
   const tools = await ensureTooling();
@@ -535,6 +535,13 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   await installHeadlamp(tools, opts.clusterName);
   stepper.done("Headlamp installed");
 
+  // Phase 5: side-load the AzureClaw Headlamp plugin (CRD views).
+  // Built into a ConfigMap and volume-mounted at /headlamp/plugins/azureclaw
+  // so it survives pod restarts.
+  stepper.step("Installing AzureClaw Headlamp plugin…");
+  await installAzureclawPlugin(tools, opts.clusterName);
+  stepper.done("AzureClaw plugin installed");
+
   // Open Headlamp in the user's browser. Port-forward runs detached so
   // it survives the CLI command exiting; user kills it via `azureclaw dev down`
   // (Phase 6) or `pkill -f 'port-forward.*headlamp'`.
@@ -659,6 +666,177 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
   // that binds the 'headlamp' ServiceAccount to cluster-admin, so we don't
   // need to create our own. We just need to mint tokens against that SA.
 }
+
+/**
+ * Side-load the AzureClaw Headlamp plugin.
+ *
+ * Strategy: package `tools/headlamp-plugin/dist/main.js` + `package.json`
+ * into a ConfigMap, then patch the Headlamp deployment to mount the
+ * ConfigMap at `/headlamp/plugins/azureclaw`. This survives pod restarts
+ * (`kubectl cp` would not — it writes to ephemeral container fs).
+ *
+ * If the plugin hasn't been built yet we fall back to building it on
+ * demand via `npm run build` so first-time devs don't have to remember
+ * an extra step. If the build fails (no `node_modules`) we print a
+ * helpful warning and skip — the dashboard still works for built-in
+ * resources.
+ */
+async function installAzureclawPlugin(
+  tools: Tooling,
+  clusterName: string,
+): Promise<void> {
+  const repoRoot = findRepoRoot(process.cwd());
+  const pluginDir = path.join(repoRoot, "tools", "headlamp-plugin");
+  const distDir = path.join(pluginDir, "dist");
+  const mainJs = path.join(distDir, "main.js");
+  const pkgJson = path.join(pluginDir, "package.json");
+
+  if (!existsSync(mainJs)) {
+    console.log(
+      chalk.dim("    plugin not built yet — running 'npm run build' in tools/headlamp-plugin…"),
+    );
+    if (!existsSync(path.join(pluginDir, "node_modules"))) {
+      try {
+        await execa("npm", ["install", "--no-audit", "--no-fund"], {
+          cwd: pluginDir,
+          stdio: "inherit",
+        });
+      } catch (err) {
+        console.warn(
+          chalk.yellow(
+            `    ⚠ npm install failed (${(err as Error).message}); skipping plugin install. ` +
+              "Run 'cd tools/headlamp-plugin && npm install && npm run build' manually then re-run this command.",
+          ),
+        );
+        return;
+      }
+    }
+    try {
+      await execa("npm", ["run", "build"], { cwd: pluginDir, stdio: "inherit" });
+    } catch (err) {
+      console.warn(
+        chalk.yellow(
+          `    ⚠ plugin build failed (${(err as Error).message}); skipping plugin install.`,
+        ),
+      );
+      return;
+    }
+  }
+
+  // Build the ConfigMap. Headlamp expects each plugin to be a sub-dir
+  // under /headlamp/plugins/<name>/ containing main.js + package.json.
+  const ctx = `kind-${clusterName}`;
+  const mainContent = readFileSync(mainJs, "utf8");
+  const pkgContent = readFileSync(pkgJson, "utf8");
+
+  const cmYaml = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azureclaw-headlamp-plugin
+  namespace: headlamp
+binaryData: {}
+data:
+  main.js: |
+${indent(mainContent, 4)}
+  package.json: |
+${indent(pkgContent, 4)}
+`;
+  await execa(
+    tools.kubectl,
+    ["--context", ctx, "apply", "-f", "-"],
+    { input: cmYaml, stdio: ["pipe", "inherit", "inherit"] },
+  );
+
+  // Patch the Headlamp Deployment to add the ConfigMap as a volume +
+  // mount it at /headlamp/plugins/azureclaw. Use strategic merge patch
+  // so we don't clobber existing volumes/mounts.
+  //
+  // NB: 'plugins' on the chart is at /build/plugins (the in-image
+  // shipped plugins dir). User plugins go to /headlamp-plugins —
+  // discoverable via the chart's --plugins-dir arg. To stay
+  // compatible with both layouts we patch the container's args
+  // explicitly to point at our mount, then mount our CM on top.
+  //
+  // Simpler approach: mount the CM at /headlamp-plugins/azureclaw
+  // and rewrite the -plugins-dir arg to /headlamp-plugins.
+  const patch = JSON.stringify({
+    spec: {
+      template: {
+        spec: {
+          volumes: [
+            {
+              name: "azureclaw-plugin",
+              configMap: { name: "azureclaw-headlamp-plugin" },
+            },
+          ],
+          containers: [
+            {
+              name: "headlamp",
+              args: [
+                "-in-cluster",
+                "-in-cluster-context-name=main",
+                "-plugins-dir=/headlamp-plugins",
+                "-session-ttl=86400",
+              ],
+              volumeMounts: [
+                {
+                  name: "azureclaw-plugin",
+                  mountPath: "/headlamp-plugins/azureclaw",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+
+  await execa(tools.kubectl, [
+    "--context",
+    ctx,
+    "patch",
+    "deployment",
+    "headlamp",
+    "-n",
+    "headlamp",
+    "--type=strategic",
+    "-p",
+    patch,
+  ]);
+
+  // Wait for the new pod to come up.
+  try {
+    await execa(
+      tools.kubectl,
+      [
+        "--context",
+        ctx,
+        "rollout",
+        "status",
+        "deployment/headlamp",
+        "-n",
+        "headlamp",
+        "--timeout=90s",
+      ],
+      { stdio: "inherit" },
+    );
+  } catch {
+    console.warn(
+      chalk.yellow(
+        "    ⚠ Headlamp rollout did not complete in 90s after plugin patch — check 'kubectl get pods -n headlamp'.",
+      ),
+    );
+  }
+}
+
+function indent(s: string, n: number): string {
+  const pad = " ".repeat(n);
+  return s
+    .split("\n")
+    .map((l) => pad + l)
+    .join("\n");
+}
+
 
 /**
  * Start `kubectl port-forward` for Headlamp in the background. We
