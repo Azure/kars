@@ -329,7 +329,7 @@ async function provisionDevCreds(
 }
 
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 6 });
+  const stepper = new Stepper({ totalSteps: 7 });
 
   stepper.step("Checking local tooling (kind / kubectl / helm / docker)…");
   const tools = await ensureTooling();
@@ -416,11 +416,12 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     stepper.done(`loaded ${images.length - missing.length}/${images.length} images`);
   }
 
-  // Sandboxes are scheduled with `nodeSelector: azureclaw.azure.com/pool=sandbox`
-  // and a matching toleration. On a single-node kind cluster we apply the
-  // label + taint to the control-plane node so the scheduler picks it.
-  // (Production AKS uses a dedicated sandbox node pool — same selector,
-  // different mechanism.)
+  // Sandboxes are scheduled with `nodeSelector: azureclaw.azure.com/pool=sandbox`.
+  // On a single-node kind cluster we just label the control-plane node — no
+  // taint, because tainting would also block system workloads (Headlamp,
+  // controller, etc.) from scheduling on the only node we have.
+  // (Production AKS uses a dedicated sandbox node pool with the matching
+  // taint + sandbox toleration; in dev we don't have isolation to enforce.)
   try {
     const node = `${opts.clusterName}-control-plane`;
     await execa(tools.kubectl, [
@@ -430,13 +431,18 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       "azureclaw.azure.com/pool=sandbox",
       "--overwrite",
     ]);
-    await execa(tools.kubectl, [
-      "taint",
-      "node",
-      node,
-      "azureclaw.azure.com/sandbox=true:NoSchedule",
-      "--overwrite",
-    ]);
+    // Best-effort: if a previous run added the NoSchedule taint, remove it
+    // so Headlamp/controller can still schedule.
+    try {
+      await execa(tools.kubectl, [
+        "taint",
+        "node",
+        node,
+        "azureclaw.azure.com/sandbox-",
+      ]);
+    } catch {
+      // taint not present — fine
+    }
   } catch {
     // Best-effort: if the node naming differs the user can fix manually.
   }
@@ -522,21 +528,226 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   }
   stepper.done("controller rollout check finished");
 
+  // Phase 4: Headlamp dashboard for local-k8s observability.
+  // We treat Headlamp as a hard dependency of the local-k8s target — the
+  // whole point is to give devs a UI without spinning up AKS / Portal.
+  stepper.step("Installing Headlamp dashboard…");
+  await installHeadlamp(tools, opts.clusterName);
+  stepper.done("Headlamp installed");
+
+  // Open Headlamp in the user's browser. Port-forward runs detached so
+  // it survives the CLI command exiting; user kills it via `azureclaw dev down`
+  // (Phase 6) or `pkill -f 'port-forward.*headlamp'`.
+  const headlampPort = 4466;
+  const headlampUrl = `http://localhost:${headlampPort}/`;
+  await startHeadlampPortForward(tools, headlampPort);
+  await openBrowser(headlampUrl);
+
   console.log("");
   console.log(chalk.green("  ✓ Local-k8s dev environment is ready."));
+  console.log("");
+  console.log(chalk.bold("  Headlamp dashboard:"));
+  console.log(`    ${chalk.cyan(headlampUrl)}  (token printed below)`);
+  console.log("");
+  await printHeadlampToken(tools);
   console.log("");
   console.log(chalk.bold("  Next steps:"));
   console.log(
     `    kubectl get pods -A --context kind-${opts.clusterName}`,
   );
   console.log(
-    `    kubectl apply -f examples/basic-agent/clawsandbox.yaml -n azureclaw-${opts.name}`,
+    `    kubectl apply -f examples/basic-agent/clawsandbox.yaml -n azureclaw-system`,
   );
   console.log("");
   if (opts.ephemeral) {
     console.log(
       chalk.dim(
         `  --ephemeral: cluster will NOT be destroyed automatically yet.\n  Run 'kind delete cluster --name ${opts.clusterName}' when finished.`,
+      ),
+    );
+  }
+}
+
+/**
+ * Install Headlamp via its official Helm chart. Idempotent — re-running
+ * does an upgrade.
+ *
+ * Using NodePort + a short-lived port-forward (Phase 4) keeps us out of
+ * Ingress controller territory; Phase 6 may add an opt-in ingress for
+ * users who want a stable URL.
+ */
+async function installHeadlamp(tools: Tooling, clusterName: string): Promise<void> {
+  // Ensure the headlamp namespace exists. `helm install --create-namespace`
+  // can't be used because we use template-and-apply to keep diagnostics clean.
+  try {
+    await execa(tools.kubectl, [
+      "--context",
+      `kind-${clusterName}`,
+      "create",
+      "namespace",
+      "headlamp",
+    ]);
+  } catch {
+    // already exists — fine
+  }
+
+  // Add the Headlamp Helm repo (idempotent).
+  try {
+    await execa(tools.helm, [
+      "repo",
+      "add",
+      "headlamp",
+      "https://kubernetes-sigs.github.io/headlamp/",
+    ]);
+  } catch {
+    // already added — fine
+  }
+  await execa(tools.helm, ["repo", "update", "headlamp"]);
+
+  // Render-and-apply (consistent with how we apply the azureclaw chart).
+  const { stdout } = await execa(tools.helm, [
+    "template",
+    "headlamp",
+    "headlamp/headlamp",
+    "--namespace",
+    "headlamp",
+    "--set",
+    "config.useNodeInternalDNS=false",
+  ]);
+  await execa(
+    tools.kubectl,
+    [
+      "--context",
+      `kind-${clusterName}`,
+      "apply",
+      "-f",
+      "-",
+      "--server-side",
+      "--force-conflicts",
+    ],
+    {
+      input: stdout,
+      stdio: ["pipe", "inherit", "inherit"],
+    },
+  );
+
+  // Wait for headlamp to be ready (best-effort 90s).
+  try {
+    await execa(
+      tools.kubectl,
+      [
+        "--context",
+        `kind-${clusterName}`,
+        "rollout",
+        "status",
+        "deployment/headlamp",
+        "-n",
+        "headlamp",
+        "--timeout=90s",
+      ],
+      { stdio: "inherit" },
+    );
+  } catch {
+    console.warn(
+      chalk.yellow(
+        "  ⚠ Headlamp deployment did not become ready within 90s — check 'kubectl get pods -n headlamp'.",
+      ),
+    );
+  }
+
+  // Headlamp's Helm chart already creates a ClusterRoleBinding 'headlamp-admin'
+  // that binds the 'headlamp' ServiceAccount to cluster-admin, so we don't
+  // need to create our own. We just need to mint tokens against that SA.
+}
+
+/**
+ * Start `kubectl port-forward` for Headlamp in the background. We
+ * detach via 'spawn' (not execa.{detached}) so the CLI process can
+ * exit while leaving the forward running. The user kills it with
+ * `azureclaw dev down --target local-k8s` (Phase 6).
+ */
+async function startHeadlampPortForward(
+  tools: Tooling,
+  localPort: number,
+): Promise<void> {
+  // Best-effort: kill any existing port-forward on the same port to avoid
+  // EADDRINUSE on re-runs. We don't fail if there's nothing to kill.
+  try {
+    const { stdout } = await execa("lsof", ["-ti", `:${localPort}`]);
+    const pids = stdout.trim().split(/\s+/).filter(Boolean);
+    for (const pid of pids) {
+      try {
+        await execa("kill", [pid]);
+      } catch {
+        // process already gone
+      }
+    }
+  } catch {
+    // lsof returns non-zero when nothing matches — fine
+  }
+
+  const { spawn } = await import("node:child_process");
+  const child = spawn(
+    tools.kubectl,
+    [
+      "port-forward",
+      "-n",
+      "headlamp",
+      "service/headlamp",
+      `${localPort}:80`,
+    ],
+    {
+      detached: true,
+      stdio: "ignore",
+    },
+  );
+  child.unref();
+
+  // Give the forward ~1.5s to bind so the browser open below doesn't
+  // race the listener.
+  await new Promise((r) => setTimeout(r, 1500));
+}
+
+/**
+ * Cross-platform `open <url>`. Best-effort — if it fails the URL is
+ * already printed to stdout for the user to click manually.
+ */
+async function openBrowser(url: string): Promise<void> {
+  const cmd =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+        ? "start"
+        : "xdg-open";
+  try {
+    await execa(cmd, [url], { stdio: "ignore" });
+  } catch {
+    // user can click the printed URL
+  }
+}
+
+/**
+ * Print the Headlamp service-account token. Headlamp's auth is a plain
+ * Bearer token — we mint one for the cluster-admin SA we bound above
+ * and dump it for the user to paste into the Headlamp login screen.
+ */
+async function printHeadlampToken(tools: Tooling): Promise<void> {
+  try {
+    const { stdout } = await execa(tools.kubectl, [
+      "create",
+      "token",
+      "headlamp",
+      "-n",
+      "headlamp",
+      "--duration=24h",
+    ]);
+    console.log(chalk.bold("  Headlamp login token:"));
+    console.log(`    ${chalk.dim(stdout.trim())}`);
+  } catch (err) {
+    console.warn(
+      chalk.yellow(
+        `  ⚠ could not mint Headlamp token (${(err as Error).message}); ` +
+          "run 'kubectl create token headlamp -n headlamp --duration=24h' manually.",
       ),
     );
   }
