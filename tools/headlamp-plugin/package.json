@@ -11,15 +11,10 @@
     "lint": "headlamp-plugin lint",
     "format": "headlamp-plugin format"
   },
-  "headlamp": {
-    "plugin": {
-      "compatibleHeadlampVersion": ">=0.20.0"
-    }
-  },
   "headlampPlugin": {
     "displayName": "AzureClaw"
   },
-  "dependencies": {
+  "devDependencies": {
     "@kinvolk/headlamp-plugin": "^0.13.0"
   }
 }
