@@ -46,6 +46,9 @@
     "@agentmesh/sdk": "file:../vendor/agentmesh-sdk",
     "ws": "^8.18"
   },
+  "optionalDependencies": {
+    "@microsoft/agent-governance-sdk": "^3.5.0"
+  },
   "devDependencies": {
     "@types/node": "^25.6.0",
     "@types/ws": "^8",

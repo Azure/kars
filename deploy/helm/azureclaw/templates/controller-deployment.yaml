@@ -110,6 +110,13 @@ spec:
             # registration provisioned.
             - name: AZURECLAW_DISABLE_ENTRA_AUTH
               value: {{ if .Values.azure.entraAuth.enabled }}"0"{{ else }}"1"{{ end }}
+            # Mesh transport provider — passed through to every sandbox as
+            # AZURECLAW_MESH_PROVIDER. "vendored" (default) selects the
+            # patched Rust relay + @agentmesh/sdk; "agt" selects upstream
+            # Microsoft Agent Governance Toolkit relay + SDK. Operators must
+            # apply the matching deploy/agentmesh{,-agt}.yaml manifest.
+            - name: AZURECLAW_MESH_PROVIDER
+              value: {{ .Values.mesh.provider | default "vendored" | quote }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
