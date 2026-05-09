@@ -116,5 +116,57 @@ export interface IMeshTransport {
 
   // ── Liveness ─────────────────────────────────────────────────
   sendHeartbeat(): void;
+
+  // ── Reputation / lookup (registry RPC) ───────────────────────
+  /**
+   * Look up a peer's registry record by AMID.
+   * Returns `null` when the registry is unreachable or the AMID is unknown.
+   * `reputationScore` is on a 0..1 scale; the caller normalises to whatever
+   * threshold scheme it uses.
+   */
+  lookup(amid: string): Promise<{ reputationScore?: number; displayName?: string; capabilities?: string[] } | null>;
+
+  /**
+   * Submit a reputation review for a completed mesh interaction.
+   * `score` is 0..1. Returns true iff the registry accepted the review.
+   * Best-effort: never throws — registry-down paths return false.
+   */
+  submitReputation(toAmid: string, sessionId: string, score: number, tags?: string[]): Promise<boolean>;
+
+  // ── Governance toggles ───────────────────────────────────────
+  /**
+   * Enable strict KNOCK enforcement: reject encrypted messages from peers
+   * that have not completed a KNOCK handshake. AGT-backed transports always
+   * enforce this and treat the call as a no-op for compatibility.
+   */
+  enableKnockEnforcement(): void;
+
+  // ── Diagnostic event hooks ───────────────────────────────────
+  /**
+   * Surface protocol-layer errors. `kind` is one of:
+   *   - `"ws"`              WebSocket error (handshake or mid-stream)
+   *   - `"decrypt_failed"`  message decrypt threw or session was missing
+   *   - `"no_session"`      encrypted message arrived but no X3DH session exists
+   *   - `"session_desync"`  ratchet desync (recoverable on next send)
+   *   - `"knock_rejected"`  policy/trust rejected an inbound KNOCK
+   * Multiple handlers may be registered; thrown handler errors are swallowed.
+   */
+  onError(handler: (kind: string, fromAmid: string, detail: string) => void): void;
+
+  /**
+   * Fires the first time a peer's encrypted channel is verified end-to-end
+   * (X3DH + Double Ratchet completed and we successfully decrypted a frame).
+   * `isFirstPeer` is true only for the very first verified peer of the
+   * client's lifetime; subsequent peers fire with `false`.
+   */
+  onE2EVerified(handler: (peerAmid: string, isFirstPeer: boolean) => void): void;
+
+  /**
+   * Fires when the underlying WebSocket transitions from connected to
+   * disconnected. `reason` is `"client"` for caller-initiated disconnects,
+   * `"server"` for relay-side / network drops, and `"ws-error"` for an
+   * error event on an already-connected socket.
+   */
+  onDisconnect(handler: (reason: "client" | "server" | "ws-error", code?: number) => void): void;
 }
 

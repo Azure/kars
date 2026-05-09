@@ -76,6 +76,16 @@ interface AgtMeshClient {
   addPlaintextPeer(peerId: string): void;
   removePlaintextPeer(peerId: string): void;
   isPlaintextPeer(peerId: string): boolean;
+  // Phase 2 event hooks (added in azureclaw-meshclient-event-hooks AGT branch)
+  onError?: (
+    handler: (kind: string, from: string, detail: string) => void,
+  ) => void;
+  onDisconnect?: (
+    handler: (reason: "client" | "server" | "ws-error", code?: number) => void,
+  ) => void;
+  onE2EVerified?: (
+    handler: (peerAmid: string, isFirstPeer: boolean) => void,
+  ) => void;
 }
 
 let agtSdkPromise: Promise<AgtSdkModule> | null = null;
@@ -146,6 +156,12 @@ export class AgtTransport implements IMeshTransport {
   private readonly _plaintextPeers: Set<string>;
   private _connected = false;
   private readonly inbox: LocalInbox;
+
+  // Phase 2 diagnostic hooks — fan out from AGT MeshClient callbacks
+  // (registered in connect() once the client exists).
+  private readonly _errorHandlers: Array<(kind: string, fromAmid: string, detail: string) => void> = [];
+  private readonly _e2eVerifiedHandlers: Array<(peerAmid: string, isFirstPeer: boolean) => void> = [];
+  private readonly _disconnectHandlers: Array<(reason: "client" | "server" | "ws-error", code?: number) => void> = [];
 
   constructor(options: AgtTransportOptions) {
     this.options = options;
@@ -221,6 +237,26 @@ export class AgtTransport implements IMeshTransport {
         }
       }
       return true;
+    });
+
+    // Bridge AGT MeshClient diagnostic hooks (added on the AGT side in
+    // branch `azureclaw-meshclient-event-hooks`). When AGT is too old to
+    // expose these the methods are absent — we silently skip and the
+    // runtime continues without them.
+    this.client.onError?.((kind, from, detail) => {
+      for (const h of this._errorHandlers) {
+        try { h(kind, from, detail); } catch { /* swallow */ }
+      }
+    });
+    this.client.onE2EVerified?.((peer, first) => {
+      for (const h of this._e2eVerifiedHandlers) {
+        try { h(peer, first); } catch { /* swallow */ }
+      }
+    });
+    this.client.onDisconnect?.((reason, code) => {
+      for (const h of this._disconnectHandlers) {
+        try { h(reason, code); } catch { /* swallow */ }
+      }
     });
 
     await this.client.connect();
@@ -552,6 +588,92 @@ export class AgtTransport implements IMeshTransport {
       // ACK is best-effort; the sender will retry.
     }
     return { savedPath, fileName, sizeBytes: buf.length };
+  }
+
+  // ── Reputation / lookup (registry REST) ──────────────────────────
+  //
+  // AGT B's MeshClient does not expose registry RPCs — that surface lives
+  // in shadow-discovery (src/discovery.ts). For runtime parity with the
+  // vendored AgentMeshClient we hit the registry's REST API directly.
+  // The wire shape matches our vendored agentmesh-registry: a GET on
+  // `/registry/lookup/<amid>` returns `{reputationScore, displayName, capabilities, ...}`
+  // and a POST on `/registry/feedback` accepts `{from, to, sessionId, score, tags}`.
+
+  async lookup(
+    amid: string,
+  ): Promise<{ reputationScore?: number; displayName?: string; capabilities?: string[] } | null> {
+    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    try {
+      const resp = await fetch(`${registryUrl}/registry/lookup/${encodeURIComponent(amid)}`);
+      if (!resp.ok) return null;
+      const r = (await resp.json()) as Record<string, unknown>;
+      return {
+        reputationScore:
+          typeof r.reputationScore === "number"
+            ? (r.reputationScore as number)
+            : typeof r.reputation_score === "number"
+              ? (r.reputation_score as number)
+              : undefined,
+        displayName:
+          typeof r.displayName === "string"
+            ? (r.displayName as string)
+            : typeof r.display_name === "string"
+              ? (r.display_name as string)
+              : undefined,
+        capabilities: Array.isArray(r.capabilities)
+          ? (r.capabilities as string[])
+          : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async submitReputation(
+    toAmid: string,
+    sessionId: string,
+    score: number,
+    tags: string[] = [],
+  ): Promise<boolean> {
+    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    try {
+      const resp = await fetch(`${registryUrl}/registry/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: this.agentId,
+          to: toAmid,
+          session_id: sessionId,
+          score,
+          tags,
+        }),
+      });
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * No-op: AGT MeshClient always enforces KNOCK gating. Kept for IMeshTransport
+   * parity with the vendored adapter (which has a per-instance toggle).
+   */
+  enableKnockEnforcement(): void {
+    /* always-on in AGT */
+  }
+
+  // ── Diagnostic event hooks (registered before connect; bridged in connect) ──
+
+  onError(handler: (kind: string, fromAmid: string, detail: string) => void): void {
+    this._errorHandlers.push(handler);
+  }
+
+  onE2EVerified(handler: (peerAmid: string, isFirstPeer: boolean) => void): void {
+    this._e2eVerifiedHandlers.push(handler);
+  }
+
+  onDisconnect(handler: (reason: "client" | "server" | "ws-error", code?: number) => void): void {
+    this._disconnectHandlers.push(handler);
   }
 }
 
