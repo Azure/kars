@@ -228,6 +228,43 @@ Notes:
               ? "GitHub Copilot"
               : "Azure AI Foundry";
         console.log(chalk.green(`  ✓ Credentials saved (${providerLabel})\n`));
+
+        // ── Channels (works for both targets — local-k8s now ships
+        // `<name>-credentials` secret too, so Telegram/Slack/Discord
+        // tokens land in the sandbox via envFrom just like docker
+        // env vars do). Skip if the user already passed --channels.
+        if (!options.channels) {
+          const stored = loadSecrets();
+          type ChannelChoice = { name: string; value: string };
+          const available: ChannelChoice[] = [];
+          const addChannel = (channel: string, baseKey: string, displayName: string) => {
+            const variants = listSecretVariants(baseKey);
+            for (const v of variants) {
+              const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
+              const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
+              available.push({ name: display, value: channelValue });
+            }
+            if (variants.length === 0 && stored[baseKey]) {
+              available.push({ name: displayName, value: channel });
+            }
+          };
+          addChannel("telegram", "telegram-token", "Telegram");
+          addChannel("slack",    "slack-token",    "Slack");
+          addChannel("discord",  "discord-token",  "Discord");
+          if (available.length > 0) {
+            const { picked } = await inquirer.prompt([{
+              type: "checkbox",
+              name: "picked",
+              message: "Enable any channels? (Space to toggle, Enter to confirm)",
+              choices: available,
+            }]);
+            if (picked.length > 0) {
+              options.channels = picked.join(",");
+            }
+          } else {
+            console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
+          }
+        }
       }
 
       // ── Target dispatch ───────────────────────────────────────────
@@ -256,6 +293,7 @@ Notes:
             // is idempotent and silently skips if no candidate matches.
             // The --build flag is docker-mode specific.
             noBuild: false,
+            channels: typeof options.channels === "string" ? options.channels : undefined,
           });
           return;
         } catch (e) {
@@ -319,46 +357,6 @@ Notes:
             );
           }
           const { default: inquirer } = await import("inquirer");
-
-          // Channel gap-fill: offer one choice per saved channel-token
-          // variant (e.g. telegram-token.dev, telegram-token.cloud become
-          // separate "telegram.dev" / "telegram.cloud" choices). Without
-          // variant-awareness we'd miss users who only have suffixed tokens
-          // — like the standard local setup with .dev + .cloud namespaces.
-          if (!options.channels) {
-            const stored = loadSecrets();
-            type ChannelChoice = { name: string; value: string };
-            const available: ChannelChoice[] = [];
-            const addChannel = (channel: string, baseKey: string, displayName: string) => {
-              const variants = listSecretVariants(baseKey);
-              for (const v of variants) {
-                const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
-                const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
-                available.push({ name: display, value: channelValue });
-              }
-              // Defensive: if loadSecrets sees a bare key but listSecretVariants
-              // missed it (shouldn't happen), still surface the channel.
-              if (variants.length === 0 && stored[baseKey]) {
-                available.push({ name: displayName, value: channel });
-              }
-            };
-            addChannel("telegram", "telegram-token", "Telegram");
-            addChannel("slack",    "slack-token",    "Slack");
-            addChannel("discord",  "discord-token",  "Discord");
-            if (available.length > 0) {
-              const { picked } = await inquirer.prompt([{
-                type: "checkbox",
-                name: "picked",
-                message: "Enable any channels? (Space to toggle, Enter to confirm)",
-                choices: available,
-              }]);
-              if (picked.length > 0) {
-                options.channels = picked.join(",");
-              }
-            } else {
-              console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
-            }
-          }
 
           // Optional rebuild prompt. Defaults to no — first-time users want
           // the cached image to come up fast. Power users testing local

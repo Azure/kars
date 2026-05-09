@@ -23,7 +23,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { existsSync, writeFileSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { Stepper } from "../../stepper.js";
-import { loadConfig, type AzureClawConfig } from "../../config.js";
+import { loadConfig, getSecret, type AzureClawConfig } from "../../config.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -36,6 +36,13 @@ export interface LocalK8sOptions {
   ephemeral: boolean;
   /** Skip image build assumption — caller already built/loaded. */
   noBuild: boolean;
+  /**
+   * Optional comma-separated channel list (e.g. "telegram", "slack.dev").
+   * Same syntax docker-mode uses; we resolve each entry to a `<channel>-token[.variant]`
+   * secret, materialise it into the per-sandbox `<name>-credentials` secret,
+   * and the controller mounts it via `envFrom` (TELEGRAM_BOT_TOKEN, etc).
+   */
+  channels?: string;
 }
 
 /**
@@ -467,7 +474,7 @@ async function provisionDevCreds(
 }
 
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 8 });
+  const stepper = new Stepper({ totalSteps: 11 });
 
   stepper.step("Checking local tooling (kind / kubectl / helm / container runtime)…");
   const tools = await ensureTooling();
@@ -697,12 +704,44 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   console.log("");
   await printHeadlampToken(tools);
   console.log("");
+
+  // ── Phase 9: auto-create sandbox + WebUI port-forward ─────────────
+  // Mirrors docker-mode UX: at this point the user has answered
+  // creds + name + channels, so go all the way and bring up THEIR
+  // sandbox, not just the platform. Saves the manual `kubectl apply
+  // -f examples/...` + `azureclaw connect <name>` dance.
+  stepper.step(`Creating sandbox '${opts.name}'…`);
+  await autoCreateSandbox(tools, opts, creds);
+  stepper.done(`sandbox CR applied (azureclaw-${opts.name})`);
+
+  stepper.step("Waiting for sandbox pod to be ready…");
+  await waitForSandboxReady(tools, opts.name);
+  stepper.done("sandbox pod is Running");
+
+  stepper.step("Reading gateway token + starting WebUI port-forward…");
+  const { url: webUrl, token: gwToken } = await startSandboxConnect(
+    tools,
+    opts.name,
+  );
+  stepper.done("WebUI ready");
+
+  console.log("");
+  console.log(chalk.bold("  OpenClaw WebUI:"));
+  // Print URL without chalk — terminals auto-detect bare http:// links;
+  // ANSI codes break that detection in most emulators.
+  console.log(`    ${webUrl}`);
+  if (gwToken) {
+    console.log(chalk.dim(`    (gateway token: ${gwToken.slice(0, 12)}…)`));
+  }
+  console.log("");
+  await openBrowser(webUrl);
+
   console.log(chalk.bold("  Next steps:"));
   console.log(
-    `    kubectl get pods -A --context kind-${opts.clusterName}`,
+    `    azureclaw connect ${opts.name}   ${chalk.dim("# re-open the WebUI later")}`,
   );
   console.log(
-    `    kubectl apply -f examples/basic-agent/clawsandbox.yaml -n azureclaw-system`,
+    `    kubectl get pods -A --context kind-${opts.clusterName}`,
   );
   console.log("");
   if (opts.ephemeral) {
@@ -1079,4 +1118,304 @@ async function printHeadlampToken(tools: Tooling): Promise<void> {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 9: auto-create sandbox + WebUI port-forward
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve a comma-separated channel string ("telegram,slack.dev") to a
+ * map of channel→token. Mirrors the docker-mode resolver in dev.ts so
+ * users get the same dot-suffix variant semantics on both targets.
+ *
+ * Returns only channels that have a saved token; missing channels are
+ * silently skipped (the user-facing prompt already filters to channels
+ * with tokens, so a missing one means the user typed --channels
+ * manually).
+ */
+function resolveChannelTokens(
+  channels: string | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!channels) return out;
+  const parts = String(channels)
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  for (const ch of parts) {
+    const dotIdx = ch.indexOf(".");
+    const base = dotIdx > 0 ? ch.slice(0, dotIdx) : ch;
+    const suffix = dotIdx > 0 ? ch.slice(dotIdx) : "";
+    if (base !== "telegram" && base !== "slack" && base !== "discord") continue;
+    const baseKey = `${base}-token`;
+    const token =
+      (suffix ? getSecret(baseKey + suffix) : undefined) ?? getSecret(baseKey);
+    if (token) out[base] = token;
+  }
+  return out;
+}
+
+/**
+ * Auto-create the sandbox in the cluster: a one-shot YAML bundle with
+ * the namespace, optional credentials Secret (telegram/slack/discord
+ * tokens), the InferencePolicy CR, and the ClawSandbox CR. Server-side
+ * apply so re-running `azureclaw dev` is idempotent.
+ *
+ * The InferencePolicy `provider` field is just a tag — the actual
+ * upstream is governed by the controller env (set by the per-run
+ * dynamic overlay in `provisionDevCreds`). All upstream auth flows
+ * (Foundry / GitHub Models / GitHub Copilot) end up in the same
+ * `azure-openai` provider tag here.
+ */
+async function autoCreateSandbox(
+  tools: Tooling,
+  opts: LocalK8sOptions,
+  creds: AzureClawConfig,
+): Promise<void> {
+  const ns = `azureclaw-${opts.name}`;
+  const policyName = `${opts.name}-inference`;
+
+  // Channels: convert tokens to a base64-encoded Secret block. The
+  // controller mounts `<name>-credentials` via `envFrom: secretRef`
+  // when present (see reconciler/mod.rs ~line 1170), so TELEGRAM_BOT_TOKEN
+  // / SLACK_BOT_TOKEN / DISCORD_BOT_TOKEN flow into the sandbox the
+  // same way docker mode passes them via `-e`.
+  const channelTokens = resolveChannelTokens(opts.channels);
+  const credsBlock =
+    Object.keys(channelTokens).length > 0
+      ? [
+          "---",
+          "apiVersion: v1",
+          "kind: Secret",
+          "metadata:",
+          `  name: ${opts.name}-credentials`,
+          `  namespace: ${ns}`,
+          "type: Opaque",
+          "stringData:",
+          ...(channelTokens.telegram
+            ? [`  TELEGRAM_BOT_TOKEN: "${channelTokens.telegram}"`]
+            : []),
+          ...(channelTokens.slack
+            ? [`  SLACK_BOT_TOKEN: "${channelTokens.slack}"`]
+            : []),
+          ...(channelTokens.discord
+            ? [`  DISCORD_BOT_TOKEN: "${channelTokens.discord}"`]
+            : []),
+          "",
+        ].join("\n")
+      : "";
+
+  const yaml = [
+    "---",
+    "apiVersion: v1",
+    "kind: Namespace",
+    "metadata:",
+    `  name: ${ns}`,
+    "  labels:",
+    `    azureclaw.azure.com/sandbox: ${opts.name}`,
+    credsBlock,
+    "---",
+    "apiVersion: azureclaw.azure.com/v1alpha1",
+    "kind: InferencePolicy",
+    "metadata:",
+    `  name: ${policyName}`,
+    "  namespace: azureclaw-system",
+    "  labels:",
+    `    azureclaw.azure.com/sandbox: ${opts.name}`,
+    "spec:",
+    "  appliesTo:",
+    `    sandboxName: ${opts.name}`,
+    "  modelPreference:",
+    "    primary:",
+    "      provider: azure-openai",
+    `      deployment: ${creds.model || "gpt-4.1"}`,
+    "  contentSafety:",
+    "    requirePromptShields: false",
+    "  tokenBudget:",
+    "    dailyTokens: 500000",
+    "    perRequestTokens: 128000",
+    "---",
+    "apiVersion: azureclaw.azure.com/v1alpha1",
+    "kind: ClawSandbox",
+    "metadata:",
+    `  name: ${opts.name}`,
+    "  namespace: azureclaw-system",
+    "spec:",
+    "  runtime:",
+    "    kind: OpenClaw",
+    "    openclaw:",
+    '      version: "2026.3.13"',
+    `      image: ${opts.image}`,
+    "      config:",
+    "        agent:",
+    `          model: "azure/${creds.model || "gpt-4.1"}"`,
+    "  sandbox:",
+    '    isolation: "enhanced"',
+    '    seccompProfile: "azureclaw-strict"',
+    "    readOnlyRootFilesystem: true",
+    "    runAsNonRoot: true",
+    "    allowPrivilegeEscalation: false",
+    "    writablePaths:",
+    "      - /sandbox",
+    "      - /tmp",
+    "  inferenceRef:",
+    `    name: ${policyName}`,
+    "  networkPolicy:",
+    "    defaultDeny: true",
+    "    approvalRequired: false",
+    "    allowedEndpoints: []",
+    "",
+  ].join("\n");
+
+  await execa(
+    tools.kubectl,
+    [
+      "--context",
+      `kind-${opts.clusterName}`,
+      "apply",
+      "--server-side",
+      "--force-conflicts",
+      "--field-manager=azureclaw-cli",
+      "-f",
+      "-",
+    ],
+    { input: yaml, stdio: ["pipe", "inherit", "inherit"] },
+  );
+}
+
+/**
+ * Wait for the controller to materialise the per-sandbox deployment and
+ * for that deployment's pod to become Ready. Two-phase poll: first the
+ * deployment object has to exist (the controller needs to reconcile the
+ * CR we just applied), then `rollout status` blocks until pods Ready.
+ *
+ * On a fresh kind cluster this typically takes 20-60s — the controller
+ * has to build the namespace, NetworkPolicy, ConfigMap, Deployment,
+ * Service, and the seccomp installer DaemonSet on the node has to
+ * project the profile before the sandbox pod can mount it.
+ */
+async function waitForSandboxReady(
+  tools: Tooling,
+  name: string,
+): Promise<void> {
+  const ns = `azureclaw-${name}`;
+  const ctx = ["--context", `kind-${ /* clusterName isn't on Tooling */ ""}`];
+  // Strip the empty context arg if cluster name isn't tracked here —
+  // current-context is set during `ensureCluster` to kind-<clusterName>
+  // already, so we don't actually need --context for these calls.
+  void ctx;
+
+  // Phase 1: poll until the deployment object exists.
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    try {
+      await execa(tools.kubectl, [
+        "get",
+        "deployment",
+        name,
+        "-n",
+        ns,
+      ]);
+      break;
+    } catch {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  if (Date.now() >= deadline) {
+    throw new Error(
+      `controller did not create deployment '${name}' in namespace '${ns}' within 120s. ` +
+        `Check 'kubectl logs -n azureclaw-system deploy/azureclaw-controller'.`,
+    );
+  }
+
+  // Phase 2: rollout status (blocks until pods Ready, has its own timeout).
+  await execa(
+    tools.kubectl,
+    [
+      "rollout",
+      "status",
+      `deployment/${name}`,
+      "-n",
+      ns,
+      "--timeout=180s",
+    ],
+    { stdio: "inherit" },
+  );
+}
+
+/**
+ * Read the gateway token from the running sandbox pod and start a
+ * background port-forward to its OpenClaw gateway (18789). Mirrors the
+ * docker-mode UX where `dev` returns a clickable URL.
+ *
+ * The gateway token is written by entrypoint.sh to /tmp/gateway-token
+ * inside the openclaw container after plugin init. Without it the WebUI
+ * loads but rejects every request with 401.
+ *
+ * The port-forward is spawned **detached** so it survives the CLI
+ * exiting; teardown is handled by `azureclaw dev down` (which kills
+ * any port-forward processes targeting the kind cluster).
+ */
+async function startSandboxConnect(
+  tools: Tooling,
+  name: string,
+): Promise<{ url: string; token: string }> {
+  const ns = `azureclaw-${name}`;
+  const localPort = 18789;
+
+  // Best-effort token read. Don't fail the whole step if it's missing —
+  // the WebUI URL still works for inspection, just without auth pre-fill.
+  let token = "";
+  for (let i = 0; i < 30; i++) {
+    try {
+      const { stdout } = await execa(tools.kubectl, [
+        "exec",
+        "-n",
+        ns,
+        `deploy/${name}`,
+        "-c",
+        "openclaw",
+        "--",
+        "cat",
+        "/tmp/gateway-token",
+      ]);
+      const trimmed = stdout.trim();
+      if (trimmed) {
+        token = trimmed;
+        break;
+      }
+    } catch {
+      // pod may still be starting; retry
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  // Detached port-forward. Match the headlamp port-forward pattern so
+  // `azureclaw dev down` can clean it up uniformly.
+  const { spawn } = await import("node:child_process");
+  const pf = spawn(
+    tools.kubectl,
+    [
+      "port-forward",
+      "-n",
+      ns,
+      `deploy/${name}`,
+      `${localPort}:18789`,
+    ],
+    {
+      detached: true,
+      stdio: "ignore",
+      env: tools.env,
+    },
+  );
+  pf.unref();
+
+  // Give kubectl a moment to bind the port before printing the URL.
+  await new Promise(r => setTimeout(r, 1500));
+
+  const url = token
+    ? `http://localhost:${localPort}/#token=${token}`
+    : `http://localhost:${localPort}/`;
+  return { url, token };
 }
