@@ -173,6 +173,54 @@ export function connectCommand(): Command {
           return;
         }
 
+        // Detect an already-running port-forward (the most common cause
+        // of EADDRINUSE here is the user re-running `azureclaw connect`
+        // while a previous invocation is still alive in another terminal,
+        // or after `azureclaw dev` already opened the WebUI). If port
+        // 18789 is open AND speaks HTTP, just print the URL + open the
+        // browser instead of erroring out with a Node stack trace.
+        const isPortServingHttp = await (async (): Promise<boolean> => {
+          const net = await import("node:net");
+          const tcpOpen = await new Promise<boolean>((resolve) => {
+            const sock = net.createConnection({ host: "127.0.0.1", port: Number(localPort) });
+            const done = (v: boolean) => { sock.destroy(); resolve(v); };
+            sock.once("connect", () => done(true));
+            sock.once("error", () => done(false));
+            setTimeout(() => done(false), 500);
+          });
+          if (!tcpOpen) return false;
+          try {
+            // Any HTTP response (even 401/404) confirms it's an HTTP
+            // server. fetch() with a short AbortController timeout.
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 1500);
+            const r = await fetch(`http://127.0.0.1:${localPort}/`, { signal: ctrl.signal });
+            clearTimeout(t);
+            return r.status > 0;
+          } catch {
+            return false;
+          }
+        })();
+
+        if (isPortServingHttp) {
+          const url = `http://localhost:${localPort}/#token=${gatewayToken}`;
+          console.log();
+          console.log(chalk.dim(`  Port ${localPort} is already serving HTTP — reusing existing port-forward.`));
+          console.log();
+          console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(url)}`);
+          console.log();
+          console.log(chalk.dim(`  Gateway token: ${gatewayToken}`));
+          console.log();
+          // Best-effort browser open; don't fail if it errors.
+          try {
+            const opener = process.platform === "darwin" ? "open"
+              : process.platform === "win32" ? "start"
+              : "xdg-open";
+            await execa(opener, [url], { stdio: "ignore", detached: true });
+          } catch { /* user can click the link */ }
+          return;
+        }
+
         // Start port-forward — pipe stderr so we can surface kubectl errors
         // when the connection drops. Without this, all the user sees is
         // "Disconnected." with no diagnostic.

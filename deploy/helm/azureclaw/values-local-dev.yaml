@@ -1,0 +1,71 @@
+# Local development overlay for kind-based dev mode.
+#
+# Usage (the CLI does this for you — see cli/src/commands/dev/local-k8s.ts):
+#   helm install azureclaw ./deploy/helm/azureclaw \
+#     -f deploy/helm/azureclaw/values.yaml \
+#     -f deploy/helm/azureclaw/values-local-dev.yaml \
+#     -f <per-run dynamic overlay with creds + endpoint>
+#
+# This file is what makes the Helm chart usable on a laptop:
+#   * pulls images from the local kind node cache (no ACR access)
+#   * cuts replicas to 1 so a single-node kind cluster doesn't
+#     pile up Pending pods
+#   * disables Foundry-only features (Content Safety, Prompt Shields)
+#     because there is no Azure backend in local-k8s mode
+#   * keeps the controller alive without a leader-election pair
+#
+# This file does NOT set inferenceRouter.azure.openai.endpoint or any
+# credentials — those are written into a per-run overlay by the CLI from
+# `loadConfig()` (Foundry / GitHub Models / GitHub Copilot). The router
+# image is the real `azureclaw-inference-router` (same as AKS); only the
+# auth path differs (API key instead of workload identity, auto-detected
+# in `inference-router/src/auth.rs`).
+#
+# Production values.yaml stays untouched.
+
+controller:
+  image:
+    repository: azureclaw-controller
+    tag: "dev"
+    pullPolicy: Never
+  replicas: 1
+  # Single-replica controllers must skip leader election or the
+  # deployment will deadlock on Lease acquisition in a 1-node cluster.
+  # Real inference creds (AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY /
+  # AZURECLAW_PROVIDER / COPILOT_GITHUB_TOKEN) are appended in the
+  # per-run dynamic overlay built by the CLI.
+  extraEnv:
+    - name: LEADER_ELECTION_ENABLED
+      value: "false"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+inferenceRouter:
+  image:
+    repository: azureclaw-inference-router
+    tag: "dev"
+    pullPolicy: Never
+  replicas: 1
+  azure:
+    contentSafety:
+      enabled: false
+    promptShields:
+      enabled: false
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+sandbox:
+  image:
+    repository: azureclaw-sandbox
+    tag: "dev"
+    pullPolicy: Never

@@ -49,6 +49,22 @@ NOT overwrite your saved credentials.
       "Policy preset: minimal | developer | web | azure",
       "developer"
     )
+    // ── Target / runtime ──────────────────────────────────────────────
+    .option(
+      "--target <target>",
+      "Where to run the sandbox: docker (default, fast) | local-k8s (kind+helm, mirrors AKS layout)",
+      "docker"
+    )
+    .option(
+      "--cluster-name <name>",
+      "Kind cluster name (only used with --target local-k8s)",
+      "azureclaw-dev"
+    )
+    .option(
+      "--ephemeral",
+      "(local-k8s only) destroy the kind cluster on exit",
+      false
+    )
     // ── Provider override ─────────────────────────────────────────────
     .option(
       "--github-token <pat>",
@@ -117,6 +133,191 @@ Notes:
         process.exit(1);
       }
 
+      // ── First-run target prompt ──────────────────────────────────
+      // Brand-new user with no saved creds AND no explicit --target
+      // flag: ask docker vs local-k8s up front, before we get into
+      // creds collection. Once they've run dev once, we trust the
+      // explicit --target (or the default "docker"). Detect "no
+      // --target was passed" by scanning argv directly — commander
+      // applies the default before we see the option, so options.target
+      // alone can't tell us.
+      const targetWasExplicit = process.argv.some(
+        (a) => a === "--target" || a.startsWith("--target="),
+      );
+      const credsForFirstRun = loadConfig();
+      if (!targetWasExplicit && (!credsForFirstRun || !credsForFirstRun.firstRunCompleted)) {
+        const { default: inquirer } = await import("inquirer");
+        console.log(chalk.yellow("\n  👋 First time running `azureclaw dev`. Where should the sandbox run?"));
+        const { chosenTarget } = await inquirer.prompt([
+          {
+            type: "list",
+            name: "chosenTarget",
+            message: "Pick a runtime target:",
+            default: "docker",
+            choices: [
+              {
+                name: "Docker             (recommended; fast bringup, single container — perfect for prompt iteration)",
+                value: "docker",
+              },
+              {
+                name: "Local Kubernetes   (kind cluster + Helm chart + Headlamp dashboard — mirrors AKS exactly, slower bringup)",
+                value: "local-k8s",
+              },
+            ],
+          },
+        ]);
+        options.target = chosenTarget;
+        if (chosenTarget === "local-k8s") {
+          console.log(
+            chalk.dim(
+              "  Tip: pass `--target docker` next time to skip this prompt and use Docker again.",
+            ),
+          );
+        }
+      }
+
+      // ── First-run common prompts (apply to BOTH targets) ──────────
+      // Creds + agent name + (docker-only) channels and rebuild are all
+      // useful regardless of target. We collected just `target` above;
+      // now collect creds and name so local-k8s users get the same
+      // welcome experience as docker users. Channels and the rebuild
+      // confirm stay docker-specific (local-k8s doesn't wire channel
+      // env vars and doesn't have a single "the" sandbox image — it
+      // ships three).
+      const isFirstRun = !credsForFirstRun || !credsForFirstRun.firstRunCompleted;
+      const ephemeralGhToken =
+        typeof options.githubToken === "string" && options.githubToken.trim().length > 0;
+
+      if (isFirstRun && !ephemeralGhToken) {
+        // Collect creds first — same provider picker docker mode used.
+        console.log(
+          chalk.yellow(
+            "\n  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.",
+          ),
+        );
+        console.log(
+          chalk.dim(
+            "  Copilot is the default (largest context). You can change later with `azureclaw credentials`.\n",
+          ),
+        );
+        const newCreds = await promptAndSaveCredentials();
+
+        // Agent name — only ask if user accepted the default.
+        const { default: inquirer } = await import("inquirer");
+        if (options.name === "dev-agent") {
+          const { agentName } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "agentName",
+              message: "Agent name:",
+              default: "dev-agent",
+              validate: (v: string) =>
+                /^[a-z0-9][a-z0-9-]*[a-z0-9]?$/i.test(v.trim())
+                  ? true
+                  : "Use letters, numbers, and dashes only (e.g. dev-agent, alice-bot)",
+            },
+          ]);
+          options.name = agentName.trim();
+        }
+
+        // Echo the chosen provider so the user can confirm at a glance.
+        const providerLabel =
+          newCreds.provider === "github-models"
+            ? "GitHub Models"
+            : newCreds.provider === "github-copilot"
+              ? "GitHub Copilot"
+              : "Azure AI Foundry";
+        console.log(chalk.green(`  ✓ Credentials saved (${providerLabel})\n`));
+
+        // ── Channels (works for both targets — local-k8s now ships
+        // `<name>-credentials` secret too, so Telegram/Slack/Discord
+        // tokens land in the sandbox via envFrom just like docker
+        // env vars do). Skip if the user already passed --channels.
+        if (!options.channels) {
+          const stored = loadSecrets();
+          type ChannelChoice = { name: string; value: string };
+          const available: ChannelChoice[] = [];
+          const addChannel = (channel: string, baseKey: string, displayName: string) => {
+            const variants = listSecretVariants(baseKey);
+            for (const v of variants) {
+              const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
+              const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
+              available.push({ name: display, value: channelValue });
+            }
+            if (variants.length === 0 && stored[baseKey]) {
+              available.push({ name: displayName, value: channel });
+            }
+          };
+          addChannel("telegram", "telegram-token", "Telegram");
+          addChannel("slack",    "slack-token",    "Slack");
+          addChannel("discord",  "discord-token",  "Discord");
+          if (available.length > 0) {
+            const { picked } = await inquirer.prompt([{
+              type: "checkbox",
+              name: "picked",
+              message: "Enable any channels? (Space to toggle, Enter to confirm)",
+              choices: available,
+            }]);
+            if (picked.length > 0) {
+              options.channels = picked.join(",");
+            }
+          } else {
+            console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
+          }
+        }
+
+        // Rebuild prompt — applies to BOTH targets. Cached images can
+        // be stale (wrong arch after an `azureclaw push` that always
+        // builds linux/amd64; or out-of-date plugin/entrypoint code).
+        // Defaults to no — first-time users want fast bringup. Power
+        // users testing local changes can opt in here without
+        // remembering the --build flag. Skipped if --build was passed
+        // explicitly.
+        if (!options.build) {
+          const { rebuild } = await inquirer.prompt([{
+            type: "confirm",
+            name: "rebuild",
+            message: "Rebuild sandbox image from local source? (slower, picks up plugin/entrypoint changes)",
+            default: false,
+          }]);
+          if (rebuild) options.build = true;
+        }
+      }
+
+      // ── Target dispatch ───────────────────────────────────────────
+      // local-k8s mode is a clean alternative to the docker stack: kind
+      // cluster + helm-installed chart. It deliberately doesn't go
+      // through the docker-compose path below — the two have different
+      // bringup semantics, and conflating them muddies error reporting.
+      const targets = ["docker", "local-k8s"];
+      if (!targets.includes(options.target)) {
+        console.error(
+          chalk.red(
+            `\n  Error: --target must be one of: ${targets.join(" | ")} (got "${options.target}").\n`,
+          ),
+        );
+        process.exit(1);
+      }
+      if (options.target === "local-k8s") {
+        const { runLocalK8s } = await import("./dev/local-k8s.js");
+        try {
+          await runLocalK8s({
+            name: options.name,
+            clusterName: options.clusterName,
+            image: options.image,
+            ephemeral: !!options.ephemeral,
+            noBuild: false,
+            forceRebuild: options.build === true,
+            channels: typeof options.channels === "string" ? options.channels : undefined,
+          });
+          return;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error(chalk.red(`\n  local-k8s dev failed: ${msg}\n`));
+          process.exit(1);
+        }
+      }
+
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
       const stepper = new Stepper({ totalSteps: 4 });
@@ -157,86 +358,23 @@ Notes:
           };
           stepper.done("Credentials loaded (GitHub Models — ephemeral, not saved)");
         } else if (!creds || !creds.firstRunCompleted) {
-          // First-run (or first-run flag was reset for retesting): stop
-          // spinner so inquirer prompts display correctly, then show the
-          // 3-way provider picker (Copilot recommended, then GH Models,
-          // then Foundry).
+          // ── Docker-only first-run extras ────────────────────────────
+          // Creds + agent name were already collected by the
+          // common-prompt block before target dispatch. This branch only
+          // runs in docker mode (local-k8s returns earlier). It handles
+          // the channel + rebuild prompts that don't apply to local-k8s.
           stepper.stop();
-          console.log(chalk.yellow("\n  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options."));
-          console.log(chalk.dim("  Copilot is the default (largest context). You can change later with `azureclaw credentials`.\n"));
-          creds = await promptAndSaveCredentials();
-
-          // ── Optional: agent name + channel gap-fill ─────────────────
-          // Only ask if the user didn't pre-set them on the CLI. Defaults
-          // are sensible, so users can just hit Enter through everything.
+          // Re-load — promptAndSaveCredentials wrote to disk.
+          creds = loadConfig();
+          if (!creds) {
+            throw new Error(
+              "Internal error: credentials missing after first-run prompt.",
+            );
+          }
           const { default: inquirer } = await import("inquirer");
-          const usedNameDefault = options.name === "dev-agent";
-          if (usedNameDefault) {
-            const { agentName } = await inquirer.prompt([{
-              type: "input",
-              name: "agentName",
-              message: "Agent name:",
-              default: "dev-agent",
-              validate: (v: string) => /^[a-z0-9][a-z0-9-]*[a-z0-9]?$/i.test(v.trim())
-                ? true
-                : "Use letters, numbers, and dashes only (e.g. dev-agent, alice-bot)",
-            }]);
-            options.name = agentName.trim();
-          }
 
-          // Channel gap-fill: offer one choice per saved channel-token
-          // variant (e.g. telegram-token.dev, telegram-token.cloud become
-          // separate "telegram.dev" / "telegram.cloud" choices). Without
-          // variant-awareness we'd miss users who only have suffixed tokens
-          // — like the standard local setup with .dev + .cloud namespaces.
-          if (!options.channels) {
-            const stored = loadSecrets();
-            type ChannelChoice = { name: string; value: string };
-            const available: ChannelChoice[] = [];
-            const addChannel = (channel: string, baseKey: string, displayName: string) => {
-              const variants = listSecretVariants(baseKey);
-              for (const v of variants) {
-                const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
-                const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
-                available.push({ name: display, value: channelValue });
-              }
-              // Defensive: if loadSecrets sees a bare key but listSecretVariants
-              // missed it (shouldn't happen), still surface the channel.
-              if (variants.length === 0 && stored[baseKey]) {
-                available.push({ name: displayName, value: channel });
-              }
-            };
-            addChannel("telegram", "telegram-token", "Telegram");
-            addChannel("slack",    "slack-token",    "Slack");
-            addChannel("discord",  "discord-token",  "Discord");
-            if (available.length > 0) {
-              const { picked } = await inquirer.prompt([{
-                type: "checkbox",
-                name: "picked",
-                message: "Enable any channels? (Space to toggle, Enter to confirm)",
-                choices: available,
-              }]);
-              if (picked.length > 0) {
-                options.channels = picked.join(",");
-              }
-            } else {
-              console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
-            }
-          }
-
-          // Optional rebuild prompt. Defaults to no — first-time users want
-          // the cached image to come up fast. Power users testing local
-          // changes (e.g. plugin/entrypoint edits) can opt in here without
-          // remembering the --build flag.
-          if (!options.build) {
-            const { rebuild } = await inquirer.prompt([{
-              type: "confirm",
-              name: "rebuild",
-              message: "Rebuild sandbox image from local source? (slower, picks up plugin/entrypoint changes)",
-              default: false,
-            }]);
-            if (rebuild) options.build = true;
-          }
+          // Optional rebuild prompt is now hoisted to the common
+          // first-run block — applies to both targets.
 
           const newProviderLabel =
             creds.provider === "github-models"
@@ -273,13 +411,32 @@ Notes:
 
 
         // ── Image resolution ─────────────────────────────────────────
+        // Map Node.js `process.arch` → Docker platform arch token.
+        // Docker uses linux/amd64 and linux/arm64; Node reports x64
+        // and arm64. We force --platform on every dev build so the
+        // image always matches the host (and won't trip Rosetta).
+        const dockerArch = process.arch === "x64" ? "amd64" : process.arch === "arm64" ? "arm64" : process.arch;
+        const dockerPlatform = `linux/${dockerArch}`;
+
         stepper.step("Resolving sandbox image...");
         let imageExists = false;
         if (!options.build) {
           stepper.update("Checking for sandbox image...");
           try {
-            await execa("docker", ["image", "inspect", image], { stdio: "pipe" });
-            imageExists = true;
+            const { stdout: cachedArch } = await execa("docker", [
+              "image", "inspect", image, "--format", "{{.Architecture}}",
+            ], { stdio: "pipe" });
+            if (cachedArch.trim() === dockerArch) {
+              imageExists = true;
+            } else {
+              // Stale image from a prior `azureclaw push` (which always
+              // builds linux/amd64 for AKS) or a different host. Force
+              // rebuild — running an amd64 sandbox under Rosetta on
+              // Apple Silicon crashes with "rt_tgsigqueueinfo failed".
+              console.log(chalk.dim(
+                `  Cached ${image} is ${cachedArch.trim()}, host is ${dockerArch} — will rebuild.`,
+              ));
+            }
           } catch {
             // Not found — will build
           }
@@ -294,7 +451,7 @@ Notes:
           } catch {
             stepper.update(`Pulling base image (${baseImage})...`);
             try {
-              await execa("docker", ["pull", baseImage], { stdio: "pipe" });
+              await execa("docker", ["pull", "--platform", dockerPlatform, baseImage], { stdio: "pipe" });
             } catch {
               stepper.fail("Could not pull base image");
               console.log(chalk.yellow(`
@@ -337,6 +494,7 @@ Notes:
             console.log(chalk.dim("  Building sandbox base image (this is the slow one — only needed once)...\n"));
             await execa("docker", [
               "build",
+              "--platform", dockerPlatform,
               "--build-arg", `AZURELINUX_BASE=${baseImage}`,
               "--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`,
               "-t", SANDBOX_BASE_IMAGE,
@@ -362,6 +520,7 @@ Notes:
             console.log(chalk.dim("  Building inference-router (Rust)...\n"));
             await execa("docker", [
               "build",
+              "--platform", dockerPlatform,
               "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
               "-t", routerImage,
               "-f", routerDockerfile,
@@ -375,6 +534,7 @@ Notes:
           console.log(chalk.dim("  Building sandbox image...\n"));
           await execa("docker", [
             "build",
+            "--platform", dockerPlatform,
             "--build-arg", `SANDBOX_BASE_IMAGE=${SANDBOX_BASE_IMAGE}`,
             "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
             "-t", "azureclaw-sandbox:dev",
@@ -391,7 +551,7 @@ Notes:
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
             await execa("docker", [
-              "build", "--build-arg", `CACHE_BUST=${Date.now()}`,
+              "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
               "-t", "agentmesh-relay:dev",
               path.join(repoRoot, "vendor/agentmesh-relay"),
             ], { stdio: "inherit" });
@@ -401,7 +561,7 @@ Notes:
             stepper.stop();
             console.log(chalk.dim("  Building agentmesh-registry (Rust + React)...\n"));
             await execa("docker", [
-              "build", "--build-arg", `CACHE_BUST=${Date.now()}`,
+              "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
               "-t", "agentmesh-registry:dev",
               path.join(repoRoot, "vendor/agentmesh-registry"),
             ], { stdio: "inherit" });
@@ -934,6 +1094,88 @@ Notes:
         const message =
           error instanceof Error ? error.message : String(error);
         console.error(chalk.red(`  ${message}\n`));
+        process.exit(1);
+      }
+    });
+
+  // `azureclaw dev down [--target local-k8s] [--keep-cluster]`
+  // Tears down the local-k8s dev environment created by `azureclaw dev
+  // --target local-k8s`. For Docker target, `azureclaw destroy` already
+  // does the right thing — `dev down` is local-k8s-specific.
+  cmd
+    .command("down")
+    .description("Tear down a local-k8s dev environment (cluster + Headlamp port-forward)")
+    .option(
+      "--target <target>",
+      "Which target to tear down (only 'local-k8s' is currently supported)",
+      "local-k8s",
+    )
+    .option(
+      "--cluster-name <name>",
+      "Kind cluster name to delete",
+      "azureclaw-dev",
+    )
+    .option(
+      "--keep-cluster",
+      "Stop the port-forward and uninstall Headlamp, but keep the kind cluster running",
+      false,
+    )
+    .action(async (options: { target: string; clusterName: string; keepCluster: boolean }) => {
+      if (options.target !== "local-k8s") {
+        console.error(
+          chalk.red(`  --target ${options.target} is not supported by 'dev down'.`),
+        );
+        console.error(
+          chalk.dim("  For Docker dev sandboxes, use 'azureclaw destroy <name>' instead."),
+        );
+        process.exit(1);
+      }
+      const { execa } = await import("execa");
+      console.log(chalk.bold("\nTearing down local-k8s dev environment…\n"));
+
+      // Always: kill any lingering port-forward on :4466.
+      try {
+        const { stdout } = await execa("lsof", ["-ti", ":4466"]);
+        const pids = stdout.trim().split(/\s+/).filter(Boolean);
+        for (const pid of pids) {
+          try {
+            await execa("kill", [pid]);
+            console.log(chalk.green(`  ✓ killed port-forward PID ${pid}`));
+          } catch {
+            /* already gone */
+          }
+        }
+      } catch {
+        console.log(chalk.dim("  • no port-forward listening on :4466"));
+      }
+
+      if (options.keepCluster) {
+        console.log(
+          chalk.green("\n  ✓ Done. Cluster '") +
+            chalk.bold(options.clusterName) +
+            chalk.green("' is still running. Use --no-keep-cluster to delete it.\n"),
+        );
+        return;
+      }
+
+      // Delete the kind cluster (idempotent — kind handles "doesn't exist").
+      // Detect the runtime so we hand kind the right
+      // KIND_EXPERIMENTAL_PROVIDER. If we don't, a cluster created under
+      // podman/nerdctl is invisible to kind when we shell out without
+      // the env var, and the delete silently no-ops while the user
+      // thinks they reclaimed resources.
+      try {
+        const { detectRuntimeEnv } = await import("./dev/local-k8s.js");
+        const env = await detectRuntimeEnv();
+        await execa("kind", ["delete", "cluster", "--name", options.clusterName], {
+          stdio: "inherit",
+          env,
+        });
+        console.log(chalk.green(`\n  ✓ Cluster '${options.clusterName}' deleted.\n`));
+      } catch (err) {
+        console.error(
+          chalk.red(`\n  Failed to delete cluster: ${(err as Error).message}\n`),
+        );
         process.exit(1);
       }
     });
