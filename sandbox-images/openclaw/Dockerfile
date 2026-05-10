@@ -27,9 +27,23 @@ FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 FROM ${SANDBOX_BASE_IMAGE} AS cli-builder
 
 WORKDIR /build
+# mesh-plugin is a file: dep of runtimes/openclaw (npm resolves
+# `@azureclaw/mesh` to `../../mesh-plugin`). It must be present at
+# /build/mesh-plugin BEFORE `npm ci` runs, or tsc fails to resolve
+# the import. We copy the pre-built dist so npm doesn't need to run
+# mesh-plugin's `prepare` script (which needs tsc as a devDep).
+COPY mesh-plugin/package.json mesh-plugin/package-lock.json ./mesh-plugin/
+COPY mesh-plugin/dist/ ./mesh-plugin/dist/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/tsconfig.json ./runtimes/openclaw/
 COPY runtimes/openclaw/src/ ./runtimes/openclaw/src/
-RUN cd runtimes/openclaw && npm ci --ignore-scripts && npm run build
+# NPM_CONFIG_IGNORE_SCRIPTS=true propagates to nested installs of
+# file: deps; --ignore-scripts on the outer command alone does not.
+# Belt-and-braces: also strip mesh-plugin's `prepare` script, which
+# would otherwise try to invoke tsc (missing in this stage).
+RUN node -e "const f='./mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));" && \
+    cd runtimes/openclaw && \
+    NPM_CONFIG_IGNORE_SCRIPTS=true npm ci --ignore-scripts && \
+    npm run build
 
 # ─── Runtime Stage (overlay on base) ─────────────────────────────────────────
 
