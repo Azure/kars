@@ -1831,4 +1831,5 @@ export const activate = register;
 
 // Re-export for consumers
 export { decodeToken } from "./pairing.js";
+export { createMeshTransport } from "./transport-factory.js";
 export type * from "./types.js";

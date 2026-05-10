@@ -1174,9 +1174,12 @@ if [ -d /opt/azureclaw-plugin ]; then
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
     echo "[azureclaw] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
   fi
-  # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
+  # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps.
+  # `-L` dereferences symlinks: the @azureclaw/mesh entry is a `file:` dep
+  # symlink → /mesh-plugin. Without -L, cp keeps the symlink and Node fails
+  # to resolve `@azureclaw/mesh` at runtime ("mesh provider swap failed").
   if [ -d /opt/azureclaw-plugin/node_modules ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
+    cp -rL --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
   fi
   # Mesh provider selector — Phase 2 of upstream-AGT migration. Defaults to

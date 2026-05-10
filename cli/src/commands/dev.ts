@@ -28,7 +28,10 @@ const AGT_REGISTRY = "azureclaw-agt-registry";
 // identical (container names, network, sandbox env-var names).
 const MESH_PORTS = {
   vendored: { relay: 8765, registry: 8080, healthPath: "/v1/health" },
-  agt: { relay: 8083, registry: 8082, healthPath: "/healthz" },
+  // AGT relay/registry expose `/health` (NOT `/healthz` — that route only
+  // exists on the trust-engine/policy-server/audit-collector/api-gateway
+  // components per agent-governance-python/agent-mesh/src/agentmesh/server/__init__.py).
+  agt: { relay: 8083, registry: 8082, healthPath: "/health" },
 } as const;
 type MeshProvider = keyof typeof MESH_PORTS;
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "Private/Repos/agt/agent-governance-toolkit");
@@ -861,6 +864,10 @@ Notes:
               "run", "-d",
               "--name", AGT_RELAY,
               "--network", AGT_NETWORK,
+              // Suppress upstream AGT Dockerfile HEALTHCHECK probing /healthz
+              // (the relay/registry expose /health, not /healthz — the misnamed
+              // upstream healthcheck spams 404s in the logs).
+              ...(meshProvider === "agt" ? ["--no-healthcheck"] : []),
               ...relayEnv,
               "agentmesh-relay:dev",
             ], { stdio: "pipe" });
@@ -887,6 +894,7 @@ Notes:
               "run", "-d",
               "--name", AGT_REGISTRY,
               "--network", AGT_NETWORK,
+              ...(meshProvider === "agt" ? ["--no-healthcheck"] : []),
               ...registryEnv,
               "agentmesh-registry:dev",
             ], { stdio: "pipe" });

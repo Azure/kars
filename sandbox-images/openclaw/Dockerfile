@@ -61,6 +61,16 @@ COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes
 COPY runtimes/openclaw/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
+# mesh-plugin is referenced by the runtime as a `file:../../mesh-plugin` dep.
+# `npm ci` below creates a symlink at
+# /opt/azureclaw-plugin/node_modules/@azureclaw/mesh → ../../../../mesh-plugin
+# which resolves to /mesh-plugin. Stage the prebuilt mesh-plugin there so the
+# symlink is not dangling at runtime. Without this the runtime falls back to
+# the vendored SDK silently (`mesh provider swap failed, staying on vendored`).
+COPY mesh-plugin/package.json /mesh-plugin/package.json
+COPY mesh-plugin/dist/ /mesh-plugin/dist/
+RUN node -e "const f='/mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));"
+
 # Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
 

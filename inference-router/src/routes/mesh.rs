@@ -27,10 +27,17 @@ pub fn mesh_routes() -> Router<AppState> {
         // Inter-agent mesh (E2E encrypted via AGT relay only — no plaintext HTTP)
         .route("/agt/mesh/inbox", get(agt_mesh_inbox))
         // AGT relay proxy (WebSocket + HTTP registry)
+        // Both /agt/relay (vendored SDK convention) and /agt/relay/ws (AGT
+        // upstream MeshClient convention — appends "/ws" to relayUrl) are
+        // accepted so the same proxy serves both transports.
         .route("/agt/relay", get(agt_relay_proxy))
+        .route("/agt/relay/ws", get(agt_relay_proxy))
         .route(
             "/agt/registry/{*path}",
-            get(agt_registry_proxy).post(agt_registry_proxy),
+            get(agt_registry_proxy)
+                .post(agt_registry_proxy)
+                .put(agt_registry_proxy)
+                .delete(agt_registry_proxy),
         )
         // Blocklist (read-only, informational)
         .route("/blocklist/status", get(blocklist_status))
@@ -41,8 +48,25 @@ pub fn mesh_routes() -> Router<AppState> {
 /// The plugin (UID 1000) can only reach localhost. The router (UID 1001) proxies
 /// WebSocket connections to the relay at agentmesh-relay.agentmesh.svc.cluster.local:8765.
 async fn agt_relay_proxy(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    let relay_url = std::env::var("AGT_RELAY_URL")
+    let relay_base = std::env::var("AGT_RELAY_URL")
         .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
+
+    // AGT upstream relay (Python FastAPI) only accepts WS upgrades on /ws.
+    // The vendored Rust relay accepts /. Default behavior: append /ws when
+    // provider=agt OR when the URL has no path; vendored callers can opt out
+    // by setting AGT_RELAY_URL with an explicit path (e.g. ws://host:port/).
+    let provider = std::env::var("AZURECLAW_MESH_PROVIDER")
+        .unwrap_or_else(|_| "vendored".into())
+        .trim()
+        .to_lowercase();
+    let needs_ws_suffix = provider == "agt"
+        && !relay_base.trim_end_matches('/').ends_with("/ws")
+        && !relay_base.contains("/ws?");
+    let relay_url = if needs_ws_suffix {
+        format!("{}/ws", relay_base.trim_end_matches('/'))
+    } else {
+        relay_base
+    };
 
     let mesh_metrics = state.mesh_metrics.clone();
     ws.on_upgrade(move |client_socket| async move {
@@ -288,7 +312,9 @@ async fn agt_registry_proxy(
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
     // Allowlist valid registry API paths — prevent path traversal.
-    // Paths arrive as the wildcard after /agt/registry/, e.g. "registry/search".
+    // Paths arrive as the wildcard after /agt/registry/, e.g.:
+    //   - "registry/search"  (vendored AgentMesh SDK convention)
+    //   - "v1/agents"        (AGT upstream RegistryClient convention)
     let valid_prefixes = [
         "registry/",
         "lookup",
@@ -299,6 +325,7 @@ async fn agt_registry_proxy(
         "agents",
         "health",
         "sessions",
+        "v1/",
     ];
     let path_valid =
         valid_prefixes.iter().any(|prefix| path.starts_with(prefix)) && !path.contains("..");
@@ -306,7 +333,16 @@ async fn agt_registry_proxy(
         return errors::flat(StatusCode::BAD_REQUEST, "Invalid registry path").into_response();
     }
 
-    let mut url = format!("{}/v1/{}", registry_url.trim_end_matches('/'), path);
+    // Two callers reach this proxy with different conventions:
+    //   - vendored SDK: sends paths like "registry/register", "registry/prekeys"
+    //     → router prepends /v1/ to reach the vendored registry's /v1/registry/*.
+    //   - AGT SDK: sends fully-qualified "v1/agents", "v1/discover" etc.
+    //     → forward verbatim (AGT registry exposes /v1/agents, NOT /v1/v1/agents).
+    let mut url = if path.starts_with("v1/") || path == "health" {
+        format!("{}/{}", registry_url.trim_end_matches('/'), path)
+    } else {
+        format!("{}/v1/{}", registry_url.trim_end_matches('/'), path)
+    };
     // Forward query parameters (critical for search/lookup)
     if let Some(qs) = query.0 {
         url.push('?');
