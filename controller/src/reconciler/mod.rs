@@ -1091,15 +1091,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Default "vendored" preserves byte-identical behaviour for
         // existing deployments. Unknown values fall back to vendored at
         // the plugin layer.
-        let mesh_provider = std::env::var("AZURECLAW_MESH_PROVIDER")
-            .unwrap_or_else(|_| "vendored".to_string());
+        let mesh_provider =
+            std::env::var("AZURECLAW_MESH_PROVIDER").unwrap_or_else(|_| "vendored".to_string());
         let mesh_provider_norm = match mesh_provider.to_ascii_lowercase().as_str() {
             "agt" => "agt",
             _ => "vendored",
         };
-        openclaw_env.push(
-            json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}),
-        );
+        openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
