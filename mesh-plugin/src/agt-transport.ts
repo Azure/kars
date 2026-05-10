@@ -30,43 +30,10 @@ import * as crypto from "node:crypto";
 
 const MAX_FILE_SIZE = 30 * 1024 * 1024;
 
-// ── Registry fetch retry policy (port of vendored SDK patch #12) ──
-//
-// Matches the vendored @agentmesh/sdk policy: bounded retries with
-// exponential backoff. Used for ALL registry HTTP calls (lookup,
-// feedback, discovery) so transient network glitches don't surface
-// as silent registry failures.
-const REGISTRY_RETRY_DELAYS_MS = [250, 750, 2000] as const;
-
-async function fetchWithRetry(
-  url: string,
-  init?: RequestInit,
-  retries: number = REGISTRY_RETRY_DELAYS_MS.length,
-): Promise<Response> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0) {
-      const delay =
-        REGISTRY_RETRY_DELAYS_MS[
-          Math.min(attempt - 1, REGISTRY_RETRY_DELAYS_MS.length - 1)
-        ];
-      await new Promise((r) => setTimeout(r, delay));
-    }
-    try {
-      const resp = await fetch(url, init);
-      // Retry on 502/503/504 (transient upstream); fail-fast on 4xx.
-      if (resp.status >= 500 && resp.status < 600 && attempt < retries) {
-        lastErr = new Error(`registry transient ${resp.status}`);
-        continue;
-      }
-      return resp;
-    } catch (err) {
-      lastErr = err;
-      if (attempt === retries) throw err;
-    }
-  }
-  throw lastErr ?? new Error("registry fetch failed");
-}
+// All registry HTTP plumbing (retries, base64url marshalling, error
+// classes) lives in @microsoft/agent-governance-sdk's RegistryClient
+// now (upstream port of vendored SDK patch #12). We reach it via
+// MeshClient.getRegistry() — see lookup() below.
 
 // ── Lazy SDK loading (optional dependency) ───────────────────────
 //
@@ -89,6 +56,32 @@ interface AgtX3DHKeyManager {
   ): Array<{ keyId: number; publicKey: Uint8Array }>;
 }
 
+interface AgtRegistryClient {
+  register(
+    did: string,
+    identityKey: Uint8Array,
+    capabilities?: string[],
+    metadata?: Record<string, string>,
+  ): Promise<void>;
+  getAgent(did: string): Promise<{
+    did: string;
+    capabilities: string[];
+    metadata: Record<string, string>;
+    reputationScore: number;
+  } | null>;
+  discover(
+    capability: string,
+    limit?: number,
+  ): Promise<
+    Array<{
+      did: string;
+      capabilities: string[];
+      reputationScore: number;
+      lastSeen: Date;
+    }>
+  >;
+}
+
 interface AgtMeshClientOptions {
   relayUrl: string;
   registryUrl: string;
@@ -98,6 +91,10 @@ interface AgtMeshClientOptions {
   wsFactory?: (url: string) => unknown;
   plaintextPeers?: string[];
   knockTimeout?: number;
+  capabilities?: string[];
+  registrationMetadata?: Record<string, string>;
+  oneTimePrekeyCount?: number;
+  autoRegister?: boolean;
 }
 
 interface AgtMeshClient {
@@ -114,6 +111,20 @@ interface AgtMeshClient {
   addPlaintextPeer(peerId: string): void;
   removePlaintextPeer(peerId: string): void;
   isPlaintextPeer(peerId: string): boolean;
+  // Registry helpers (added in azureclaw-meshclient-event-hooks AGT branch).
+  getRegistry?: () => AgtRegistryClient | null;
+  discover?: (
+    capability: string,
+    limit?: number,
+  ) => Promise<
+    Array<{
+      did: string;
+      capabilities: string[];
+      reputationScore: number;
+      lastSeen: Date;
+    }>
+  >;
+  registerSelf?: () => Promise<void>;
   // Phase 2 event hooks (added in azureclaw-meshclient-event-hooks AGT branch)
   onError?: (
     handler: (kind: string, from: string, detail: string) => void,
@@ -178,8 +189,13 @@ export interface AgtTransportOptions {
   wsFactory?: (url: string) => unknown;
   plaintextPeers?: string[];
   knockTimeout?: number;
-  /** Number of one-time prekeys to mint at connect. Default: 10. */
+  /** Number of one-time prekeys to mint at connect. Default: 20. */
   oneTimePreKeyCount?: number;
+  /**
+   * Capabilities to publish at registration time. The displayName is
+   * auto-included by MeshClient, so adding it here is unnecessary.
+   */
+  capabilities?: string[];
 }
 
 export class AgtTransport implements IMeshTransport {
@@ -227,22 +243,36 @@ export class AgtTransport implements IMeshTransport {
     if (this.isConnected) return;
     const sdk = await loadAgtSdk();
 
+    // X3DH key manager — MeshClient.registerSelf() will call
+    // generateSignedPreKey() and generateOneTimePreKeys() itself, so
+    // we don't need to mint keys here.
     const keyManager = new sdk.X3DHKeyManager(
       this.options.identity.signingPrivateKey,
       this.options.identity.signingPublicKey,
     );
-    keyManager.generateSignedPreKey();
-    keyManager.generateOneTimePreKeys(this.options.oneTimePreKeyCount ?? 10);
+
+    // Resolve effective capabilities + displayName for this connect
+    // call. The displayName is auto-included as a capability by the
+    // upstream MeshClient so peers can find this agent via
+    // registry.discover(displayName).
+    const displayName = opts?.displayName ?? this.options.displayName;
+    const capabilities = [
+      ...(this.options.capabilities ?? []),
+      ...(opts?.capabilities ?? []),
+    ];
 
     this.client = new sdk.MeshClient({
       relayUrl: this.options.relayUrl,
       registryUrl: this.options.registryUrl,
       keyManager,
       agentDid: this.options.identity.agentId,
-      displayName: opts?.displayName ?? this.options.displayName,
+      displayName,
       wsFactory: this.options.wsFactory,
       plaintextPeers: [...this._plaintextPeers],
       knockTimeout: this.options.knockTimeout,
+      capabilities,
+      oneTimePrekeyCount: this.options.oneTimePreKeyCount ?? 20,
+      autoRegister: true,
     });
 
     // Bridge SDK callbacks → our handler arrays + LocalInbox.
@@ -350,53 +380,43 @@ export class AgtTransport implements IMeshTransport {
   /**
    * Discovery via the AGT registry REST API.
    *
-   * Supports both single-capability (legacy MeshConnection.discover)
-   * and multi-capability (Phase 2 caller convenience). Results are
-   * deduplicated by AMID/DID and capped at `limit` (default 50).
+   * Calls MeshClient.discover(capability) which wraps GET /v1/discover
+   * (returns {results,total}). Multi-capability lookups are issued in
+   * parallel and deduplicated by DID. Empty capability list returns an
+   * empty array — AGT's /v1/discover requires a `capability` query
+   * parameter, so "list all" is not supported.
    */
   async discover(opts?: {
     capability?: string;
     capabilities?: string[];
     limit?: number;
   }): Promise<DiscoveredPeer[]> {
+    if (!this.client?.discover) {
+      throw new Error("AgtTransport.discover: MeshClient.discover unavailable");
+    }
     const limit = opts?.limit ?? 50;
-    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
-
     const caps: string[] = [];
     if (opts?.capabilities) caps.push(...opts.capabilities);
     if (opts?.capability) caps.push(opts.capability);
-
-    if (caps.length === 0) {
-      // No capability filter → list all (best effort; not all registries support this).
-      try {
-        const resp = await fetchWithRetry(`${registryUrl}/agents?limit=${limit}`);
-        if (!resp.ok) return [];
-        const data = (await resp.json()) as Array<Record<string, unknown>>;
-        return data.slice(0, limit).map(mapAgent);
-      } catch {
-        return [];
-      }
-    }
+    if (caps.length === 0) return [];
 
     const seen = new Map<string, DiscoveredPeer>();
-    await Promise.all(
-      caps.map(async (cap) => {
-        try {
-          const resp = await fetchWithRetry(
-            `${registryUrl}/agents?capability=${encodeURIComponent(cap)}&limit=${limit}`,
-          );
-          if (!resp.ok) return;
-          const data = (await resp.json()) as Array<Record<string, unknown>>;
-          for (const a of data) {
-            const mapped = mapAgent(a);
-            if (mapped.amid && !seen.has(mapped.amid))
-              seen.set(mapped.amid, mapped);
-          }
-        } catch {
-          // best-effort — registry may be down
-        }
-      }),
+    const results = await Promise.all(
+      caps.map((cap) => this.client!.discover!(cap, limit).catch(() => [])),
     );
+    for (const list of results) {
+      for (const r of list) {
+        if (!seen.has(r.did)) {
+          seen.set(r.did, {
+            amid: r.did,
+            // The displayName was registered as a capability; pick the
+            // first capability that doesn't look like a query token.
+            displayName: pickDisplayName(r.capabilities),
+            capabilities: r.capabilities,
+          });
+        }
+      }
+    }
     return Array.from(seen.values()).slice(0, limit);
   }
 
@@ -404,14 +424,13 @@ export class AgtTransport implements IMeshTransport {
     this.client?.sendHeartbeat();
   }
 
-  /** Resolve a friendly name → AMID via registry search. */
+  /** Resolve a friendly name → AMID via registry capability search. */
   async resolveAmid(name: string): Promise<string | null> {
-    const byCap = await this.discover({ capability: name });
-    const match = byCap.find(
+    const matches = await this.discover({ capability: name });
+    const exact = matches.find(
       (a) => a.displayName === name || a.capabilities?.includes(name),
     );
-    if (match?.amid) return match.amid;
-    return null;
+    return exact?.amid ?? null;
   }
 
   // ── Inbox surface (delegated to LocalInbox) ───────────────────
@@ -628,41 +647,27 @@ export class AgtTransport implements IMeshTransport {
     return { savedPath, fileName, sizeBytes: buf.length };
   }
 
-  // ── Reputation / lookup (registry REST) ──────────────────────────
+  // ── Reputation / lookup (AGT registry REST) ─────────────────────
   //
-  // AGT B's MeshClient does not expose registry RPCs — that surface lives
-  // in shadow-discovery (src/discovery.ts). For runtime parity with the
-  // vendored AgentMeshClient we hit the registry's REST API directly.
-  // The wire shape matches our vendored agentmesh-registry: a GET on
-  // `/registry/lookup/<amid>` returns `{reputationScore, displayName, capabilities, ...}`
-  // and a POST on `/registry/feedback` accepts `{from, to, sessionId, score, tags}`.
+  // Uses MeshClient.getRegistry() to call the AGT-native endpoints:
+  //   GET  /v1/agents/{did}                 → record (capabilities, metadata, reputation_score)
+  //   POST /v1/agents/{did}/reputation      → submit feedback (score 0..1)
+  // These replace the vendored /registry/lookup and /registry/feedback
+  // routes that AGT does not expose.
 
   async lookup(
     amid: string,
   ): Promise<{ reputationScore?: number; displayName?: string; capabilities?: string[] } | null> {
-    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    const reg = this.client?.getRegistry?.();
+    if (!reg) return null;
     try {
-      const resp = await fetchWithRetry(
-        `${registryUrl}/registry/lookup/${encodeURIComponent(amid)}`,
-      );
-      if (!resp.ok) return null;
-      const r = (await resp.json()) as Record<string, unknown>;
+      const rec = await reg.getAgent(amid);
+      if (!rec) return null;
       return {
-        reputationScore:
-          typeof r.reputationScore === "number"
-            ? (r.reputationScore as number)
-            : typeof r.reputation_score === "number"
-              ? (r.reputation_score as number)
-              : undefined,
+        reputationScore: rec.reputationScore,
         displayName:
-          typeof r.displayName === "string"
-            ? (r.displayName as string)
-            : typeof r.display_name === "string"
-              ? (r.display_name as string)
-              : undefined,
-        capabilities: Array.isArray(r.capabilities)
-          ? (r.capabilities as string[])
-          : undefined,
+          rec.metadata?.display_name ?? pickDisplayName(rec.capabilities),
+        capabilities: rec.capabilities,
       };
     } catch {
       return null;
@@ -675,22 +680,22 @@ export class AgtTransport implements IMeshTransport {
     score: number,
     tags: string[] = [],
   ): Promise<boolean> {
+    // AGT's POST /v1/agents/{did}/reputation expects {score: 0..1, reason}.
+    // Vendored callers pass arbitrary integer/range scores — clamp + scale
+    // into [0, 1] so we don't silently 422 on the AGT side.
+    const clamped = Math.max(0, Math.min(1, score > 1 ? score / 100 : score));
+    const reason = tags.length > 0 ? `session=${sessionId} tags=${tags.join(",")}` : `session=${sessionId}`;
     const registryUrl = this.options.registryUrl.replace(/\/$/, "");
     try {
-      const resp = await fetchWithRetry(`${registryUrl}/registry/feedback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          from: this.agentId,
-          to: toAmid,
-          session_id: sessionId,
-          score,
-          tags,
-        }),
-      });
+      const resp = await fetch(
+        `${registryUrl}/v1/agents/${encodeURIComponent(toAmid)}/reputation`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ score: clamped, reason }),
+        },
+      );
       if (!resp.ok) {
-        // Port of vendored SDK patch #7: log non-2xx so silent registry
-        // rejections (auth, schema mismatch) surface in the sandbox logs.
         let body = "";
         try {
           body = (await resp.text()).slice(0, 512);
@@ -735,17 +740,11 @@ export class AgtTransport implements IMeshTransport {
   }
 }
 
-function mapAgent(a: Record<string, unknown>): DiscoveredPeer {
-  return {
-    amid: String(a.amid ?? a.agent_id ?? a.did ?? a.id ?? ""),
-    displayName:
-      typeof a.displayName === "string"
-        ? a.displayName
-        : typeof a.display_name === "string"
-          ? (a.display_name as string)
-          : undefined,
-    capabilities: Array.isArray(a.capabilities)
-      ? (a.capabilities as string[])
-      : undefined,
-  };
+function pickDisplayName(capabilities: string[] | undefined): string | undefined {
+  if (!capabilities || capabilities.length === 0) return undefined;
+  // Convention: MeshClient registers displayName as the first capability.
+  // Fall back to the first non-DID-looking entry otherwise.
+  const first = capabilities[0];
+  if (first && !first.startsWith("did:")) return first;
+  return capabilities.find((c) => !c.startsWith("did:"));
 }
