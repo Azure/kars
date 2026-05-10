@@ -42,14 +42,16 @@ which adapter to instantiate. Both adapters expose the **same**
 >   doesn't expose) — fixes landed in `agt-transport.ts` this commit.
 > - **5 patches with different-but-equivalent solutions** in AGT — no
 >   functional regression.
-> - **2 real gaps in AGT** that block moving fully upstream: receiver-side
->   X3DH bootstrap (G1) and auto-reconnect loop (G2). Both are well-scoped
->   fixes to `mesh-client.ts`.
+> - **2 real gaps in AGT** that blocked moving fully upstream: receiver-side
+>   X3DH bootstrap (G1) and auto-reconnect loop (G2).
 >
-> The 3 event hooks we already added on the local AGT branch are a
-> prerequisite for cleanly implementing G2. With G1 + G2 fixed in AGT
-> and merged upstream, we can drop `vendor/agentmesh-{sdk,relay,registry}`
-> entirely. See [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt-upstream-stack).
+> Both G1 and G2 are now **fixed on the local AGT branch**
+> `azureclaw-meshclient-event-hooks` (commit `d75ea37b`, held locally,
+> NOT pushed pending coordination with the AGT team for an upstream PR).
+> Together with the 3 event hooks already on that branch, this means
+> the AGT SDK is feature-complete for the upstream-only scenario from
+> AzureClaw's perspective. AGT TS test suite: 398/398 pass.
+> See [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt-upstream-stack).
 
 ---
 
@@ -337,12 +339,12 @@ Legend:
 | **#2** | `base64Decode` crashed on `x25519:` / `ed25519:` key prefixes | `identity.ts:464+` strips prefix before decode (helper present) | ✅ |
 | **#3** | X3DH→Double-Ratchet handoff: peer's `signedPreKey` not passed as initial DH; `Session.initializeResponder()` used wrong keypair | `channel.ts:46-49` (sender) and `:85-88` (receiver) pass the correct keypair into the ratchet | ✅ |
 | **#4a** | KNOCK frame must be sent on the wire when `establishSession()` is called (vendored did X3DH locally only) | `mesh-client.ts:247-256` sends a `knock` frame as part of `establishSession()` | ✅ |
-| **#4b** | First encrypted message must auto-bootstrap the **responder** session (extract X3DH `establishment` from frame, call `initializeResponder` on the fly) | `mesh-client.ts:393-470` (`handleMessage`) finds no session and fires `onError("no_session", …)`. `acceptSession(peer, establishment)` exists but the `establishment` data is never carried on the wire by `knock` / `knock_accept` / `message` frames. **No way to bootstrap responder from wire alone.** Same gap exists in the Python `bridge.py` (`accept_secure_channel` requires caller-supplied `establishment`). | ❌ Gap-G1 |
+| **#4b** | First encrypted message must auto-bootstrap the **responder** session (extract X3DH `establishment` from frame, call `initializeResponder` on the fly) | **Fixed locally on AGT branch `azureclaw-meshclient-event-hooks`** (commit `d75ea37b`): sender now embeds `establishment` in the `knock` frame; `handleKnock` auto-calls `acceptSession()` when present. Backwards-compatible with legacy peers that omit the field. | ✅ (local AGT branch) |
 | **#5** | KNOCK race: encrypted message arrives between `knock` send and `knock_accept` receipt → silently dropped | `mesh-client.ts:57` (`knockPending` Map) + `:397-410` (handleMessage awaits resolution) — same fix already in AGT | ✅ |
 | **#6** | Connect-then-prekey-upload race: registry rejects prekeys before `register` resolves | AGT MeshClient does no registry HTTP itself — sequencing is the consumer's responsibility (our adapter handles this) | ✋ adapter |
 | **#7** | `submitReputation()` swallowed registry 4xx/5xx errors | AGT MeshClient has no `submitReputation`; reputation lives at `/v1/agents/{did}/reputation` on AGT registry. Our adapter logs status + body on non-2xx (landed in this commit) | ✋ adapter |
 | **#8** | After transport-connect failed, `client.connected` was left at `true` causing reconnect deadlock | AGT collapses transport+client; `connected` is set inside `ws.onopen` only and reset by `onclose`. Edge case: open→immediate-close before connect-frame ack leaves the connect promise resolved but `connected = false`. Subsequent `send()` throws "Not connected to relay" — recoverable via manual `reconnect()`. | ⚠️ minor edge |
-| **#9** | Auto-reconnect: `RelayTransport` defaulted to 5 attempts → agents went mesh-deaf forever | `mesh-client.ts:156-167` exposes `reconnect()` as a manual method only. **No auto-reconnect loop on `ws.onclose`.** Consumers must subscribe to `onDisconnect` and decide. | ❌ Gap-G2 |
+| **#9** | Auto-reconnect: `RelayTransport` defaulted to 5 attempts → agents went mesh-deaf forever | **Fixed locally on AGT branch `azureclaw-meshclient-event-hooks`** (commit `d75ea37b`): MeshClient now auto-reconnects on non-1000 close with exponential backoff (1s → 60s cap, ±20% jitter), defaults to `maxReconnectAttempts: Infinity`. Opt-out via `autoReconnect: false`. | ✅ (local AGT branch) |
 | **#12** | Registry `fetch` had no retry on transient network failure | AGT MeshClient has no fetch. Our adapter (`agt-transport.ts`) now uses `fetchWithRetry` (3 attempts, 250/750/2000ms backoff, transient-5xx aware) for `lookup`, `submitReputation`, and discovery (landed in this commit) | ✋ adapter |
 
 ### Vendored relay patches → AGT Python relay
@@ -363,50 +365,59 @@ Legend:
 | Registry-3 | `feedback_count` SQL referenced wrong table name | AGT registry uses an in-memory store (`store.py`) — not affected by the SQL bug. AGT in-memory implementation is correct. | ➖ different impl |
 | Registry-4 | Op-hardening (graceful shutdown, stale cleanup, validation caps, TOCTOU) | AGT registry uses Pydantic models with `Field(ge=0.0, le=1.0)` validation (`app.py:47`) and FastAPI handles graceful shutdown. Stale cleanup is implicit via the freshness window. TOCTOU: AGT in-memory store uses dict ops which are atomic in CPython — different concurrency model than our vendored Postgres registry. | ✅ different impl, equivalent guarantees |
 
-### Real gaps blocking the move-upstream scenario
+### Real gaps blocking the move-upstream scenario (now fixed locally)
 
-Two genuine issues in AGT itself that need upstream PRs before we can
-remove `vendor/`:
+Two genuine issues in AGT itself were identified. **Both are now fixed
+on the local AGT branch `azureclaw-meshclient-event-hooks`** (commit
+`d75ea37b`), held locally pending coordination with the AGT team for an
+upstream PR. AGT TS test suite: 398/398 pass.
 
-#### Gap-G1: receiver-side X3DH bootstrap
+#### Gap-G1: receiver-side X3DH bootstrap — ✅ fixed locally
 
 **Vendored A:** when the first encrypted message arrives from a peer
 with no prior session, `handleMessage` extracts the X3DH `establishment`
 data embedded in the frame and calls `Session.initializeResponder()` to
 auto-create the responder side of the channel.
 
-**AGT B:** the `acceptSession(peerId, establishment)` API exists in both
-TS (`mesh-client.ts:277`) and Python (`bridge.py:accept_secure_channel`),
-but `ChannelEstablishment` is **never serialized onto the wire** — neither
-in the `knock_accept` frame nor in the first `message` frame. The
-responder has no way to obtain it. Result: any fresh encrypted session
-will fail with `"No encrypted session with X. Call establishSession() first."`
-on first receive.
+**AGT B (before fix):** the `acceptSession(peerId, establishment)` API
+existed but `ChannelEstablishment` was never serialized onto the wire.
+Any fresh encrypted session failed on first receive.
 
-**Required AGT change:** extend `mesh-client.ts:520-528` (knock_accept) or
-`mesh-client.ts:206-219` (first `message` frame) to carry
-`establishment` (initiator IK pubkey, ephemeral pubkey, used OTK id),
-and have `handleMessage` auto-bootstrap responder when present and no
-prior session exists. Same change needed in Python `bridge.py` and in
-the relay frame schemas if validated server-side.
+**Local fix on AGT branch (commit `d75ea37b`):**
+- `establishSession()` now creates the channel BEFORE sending KNOCK and
+  embeds the establishment as `{ ik, ek, otk? }` (base64) on the frame.
+- `handleKnock()` auto-calls `acceptSession()` when an accepted KNOCK
+  carries `establishment` and no prior session exists.
+- Backwards-compatible: legacy peers that don't embed `establishment`
+  still go through the manual `acceptSession()` path.
+- Malformed `establishment` rejects the KNOCK and fires
+  `onError("knock", ...)`.
 
-#### Gap-G2: no auto-reconnect loop in MeshClient
+Tests: `tests/mesh-client-knock-bootstrap.test.ts` (5/5 pass).
+
+#### Gap-G2: no auto-reconnect loop in MeshClient — ✅ fixed locally
 
 **Vendored A:** `RelayTransport` schedules a reconnect on every
 `ws.onclose` that wasn't a clean client-initiated `1000`. Patch #9 sets
 the default to `maxReconnectAttempts = Infinity` with exponential
-backoff capped at 60s. Result: mesh-deafness from transient network
-glitches is impossible.
+backoff capped at 60s.
 
-**AGT B:** `MeshClient.reconnect()` exists (`mesh-client.ts:156-167`)
-but is never called automatically. Consumers must observe
-`onDisconnect` (a hook we added on the local AGT branch) and decide to
-call `reconnect()` themselves.
+**AGT B (before fix):** `MeshClient.reconnect()` existed but was never
+called automatically. Network blips left agents mesh-deaf forever.
 
-**Required AGT change:** add an opt-in (or default-on) auto-reconnect
-loop on `ws.onclose` with the same parameters as patch #9. This is hard
-to implement correctly outside MeshClient because the WebSocket
-lifecycle isn't observable from outside.
+**Local fix on AGT branch (commit `d75ea37b`):**
+- New options: `autoReconnect` (default `true`),
+  `maxReconnectAttempts` (default `Infinity`),
+  `reconnectBaseDelayMs` (default `1000`),
+  `reconnectMaxDelayMs` (default `60000`).
+- `ws.onclose` schedules a reconnect with exponential backoff + ±20%
+  jitter on any non-1000 / non-client-initiated close.
+- `disconnect()` cancels any pending reconnect timer and sends
+  explicit close code 1000.
+- After `maxReconnectAttempts`, fires
+  `onError("ws", ..., "auto-reconnect gave up after N attempts")`.
+
+Tests: `tests/mesh-client-auto-reconnect.test.ts` (6/6 pass).
 
 ### Soft / minor
 
@@ -416,8 +427,8 @@ lifecycle isn't observable from outside.
   upstream improvement.
 - **Relay-4 (close-code semantics):** AGT uses `4001-4003` for protocol
   errors, not lifecycle signals. Clients cannot distinguish supersede
-  from network drop. Couples with Gap-G2 — once AGT has auto-reconnect,
-  it should also signal supersede to suppress storms.
+  from network drop. With G2 now fixed, the gap is reduced to a
+  storm-suppression hint rather than a functional issue.
 - **SDK-#8 fast-fail handshake edge:** AGT resolves the connect promise
   inside `ws.onopen` even if `ws.onclose` fires immediately after. Defensive
   fix: only resolve once the relay's first `connected` ack arrives.
@@ -429,12 +440,14 @@ lifecycle isn't observable from outside.
 | AGT already has it (✅) | 8 | No action needed |
 | Adapter responsibility (✋) | 3 | Landed in this commit (#7, #12); #6 was already correct in adapter |
 | Different model, equivalent (➖ / ⚠️) | 5 | Documented; no functional regression expected |
-| Real gaps in AGT (❌) | **2** | **G1** + **G2** — block upstream-only scenario; need PRs to AGT |
+| Real gaps in AGT — fixed on local branch (✅ local) | **2** | **G1** + **G2** — `azureclaw-meshclient-event-hooks` `d75ea37b`, pending upstream PR |
 
-The 2 real gaps (G1, G2) are well-scoped fixes to `mesh-client.ts`. The
-3 diagnostic event hooks we already added on the local AGT branch
-(`azureclaw-meshclient-event-hooks`) are a prerequisite for cleanly
-implementing G2 (auto-reconnect needs `onDisconnect` to be observable).
+The 2 real gaps (G1, G2) and the 3 diagnostic event hooks are all
+implemented on the local AGT branch `azureclaw-meshclient-event-hooks`
+(commits `e5f4346f` for hooks, `d75ea37b` for G1+G2). The branch is
+held locally — NOT pushed — pending coordination with the AGT team for
+an upstream PR. From AzureClaw's perspective, AGT is now
+feature-complete for the upstream-only scenario.
 
 ### Adapter-side fixes landed in this commit
 
