@@ -15,6 +15,8 @@
 
 import { amidToName, nameToAmid } from "./amid-cache.js";
 import { routerCall, routerCallStrict } from "./router-client.js";
+import { getMeshRegistry } from "./mesh-registry.js";
+import { routerUrl } from "./router-client.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -184,12 +186,8 @@ export async function runHandoffOrchestration(
         const subAmidMap = new Map<string, string>(); // name → amid
         for (const snap of subSnaps) {
           try {
-            const regResp = await _routerCall("GET",
-              `/agt/registry/registry/search?capability=${encodeURIComponent(snap.name)}`,
-              undefined, 5000, authH);
-            const candidates = (regResp?.results || []).filter(
-              (a: any) => a.display_name === snap.name && a.status === "online"
-            );
+            const candidates = (await getMeshRegistry(routerUrl).search(snap.name, { timeoutMs: 5000 }))
+              .filter((a) => a.display_name === snap.name && a.status === "online");
             if (candidates.length === 0) continue;
 
             const subAmid = candidates[0].amid;
@@ -341,10 +339,8 @@ export async function runHandoffOrchestration(
     while (Date.now() - spawnStart < 90_000) {
       await new Promise(r => setTimeout(r, 2000));
       try {
-        const searchResult = await _routerCall("GET",
-          `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
-        const agents = searchResult?.results || [];
-        const match = agents.find((a: any) =>
+        const agents = await getMeshRegistry(routerUrl).search(targetName, { timeoutMs: 5000 });
+        const match = agents.find((a) =>
           a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
         );
         if (match?.amid) {
@@ -387,10 +383,8 @@ export async function runHandoffOrchestration(
 
     while (Date.now() - discoverStart < DISCOVER_TIMEOUT) {
       try {
-        const searchResult = await _routerCall("GET",
-          `/agt/registry/registry/search?capability=${encodeURIComponent(targetName)}`);
-        const agents = searchResult?.results || [];
-        const match = agents.find((a: any) =>
+        const agents = await getMeshRegistry(routerUrl).search(targetName, { timeoutMs: 5000 });
+        const match = agents.find((a) =>
           a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
         );
         if (match?.amid) {

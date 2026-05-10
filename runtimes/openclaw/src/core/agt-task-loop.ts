@@ -1015,26 +1015,19 @@ export async function processTaskWithTools(
               // capability tags). We post-filter for staleness because the
               // upstream registry doesn't prune offline agents from search
               // results — see graveyard analysis in agt-tools/agt.ts:1260.
-              let registryRaw = "";
+              const registryParsed: { results: any[]; filtered_stale?: number; error?: string } = { results: [] };
               try {
-                const registryBase = routerUrl("/agt/registry");
-                registryRaw = await new Promise<string>((resolve, reject) => {
-                  const req = http.get(`${registryBase}/registry/search?capability=${encodeURIComponent(pattern)}`, { timeout: 10000 }, (res) => {
-                    let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
-                  });
-                  req.on("error", reject);
-                  req.on("timeout", () => { req.destroy(); reject(new Error("Registry lookup timeout")); });
-                });
+                const { getMeshRegistry } = await import("./mesh-registry.js");
+                const reg = getMeshRegistry(routerUrl);
+                registryParsed.results = await reg.search(pattern, { timeoutMs: 10000 });
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
               } catch (regErr: any) {
-                registryRaw = JSON.stringify({ agents: [], error: regErr?.message || String(regErr) });
+                registryParsed.error = regErr?.message || String(regErr);
               }
 
               // Apply the same 90s staleness filter parents use, so sub-agents
               // don't see graveyard entries either.
-              let registryParsed: any;
-              try { registryParsed = JSON.parse(registryRaw); } catch { registryParsed = registryRaw; }
-              if (registryParsed && Array.isArray(registryParsed.results)) {
+              {
                 const STALE_AFTER_MS = 90_000;
                 const now = Date.now();
                 const before = registryParsed.results.length;

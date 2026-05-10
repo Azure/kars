@@ -110,6 +110,7 @@ import {
   verifyTrustedByName as _verifyTrustedByName,
   isAmidVerified,
 } from "./core/amid-cache.js";
+import { getMeshRegistry } from "./core/mesh-registry.js";
 
 // Thin wrappers so internal callers don't need to thread `routerUrl` through.
 async function resolveAmidByName(
@@ -864,9 +865,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // messages from anonymous-tier agents (not verified via OAuth/Entra).
           if (process.env.REQUIRE_VERIFIED_TIER === "true") {
             try {
-              const lookupResult = await _routerCall("GET",
-                `/agt/registry/v1/registry/lookup?amid=${encodeURIComponent(fromAmid)}`);
-              const senderTier = lookupResult?.tier || "anonymous";
+              const entry = await getMeshRegistry(routerUrl).lookup(fromAmid, { timeoutMs: 5000 });
+              const senderTier = (entry as { tier?: string } | null)?.tier || "anonymous";
               if (senderTier === "anonymous") {
                 log.warn(`AGT tier gate DENIED: '${fromName}' is anonymous (require_verified_tier=true)`);
                 if (agtMeshClient) {
@@ -1776,13 +1776,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     const subStart = Date.now();
                     while (Date.now() - subStart < 90_000) {
                       try {
-                        const searchResult = await _routerCall("GET",
-                          `/agt/registry/registry/search?capability=${encodeURIComponent(spawned.name)}`);
-                        const candidates = (searchResult?.results || []).filter((a: any) =>
+                        const results = await getMeshRegistry(routerUrl).search(spawned.name, { timeoutMs: 5000 });
+                        const candidates = results.filter((a) =>
                           a.display_name === spawned.name && a.status === "online"
                         );
-                        // Pick the first candidate that is NOT a stale AMID
-                        const match = candidates.find((a: any) => !staleAmids.has(a.amid));
+                        const match = candidates.find((a) => !staleAmids.has(a.amid));
                         if (match?.amid) {
                           subAmid = match.amid;
                           log.info(`🔍 Found NEW AMID for '${spawned.name}': ${match.amid.slice(0, 12)}...${spawned.original_amid ? ` (old was ${spawned.original_amid.slice(0, 12)}...)` : ""}`);
@@ -2189,19 +2187,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             req.on("error", () => {});
             req.end();
           } catch { /* best effort */ }
-          // Registry heartbeat: update last_seen so other agents see us as online
+          // Registry heartbeat: update last_seen so other agents see us as online.
+          // Vendored registry exposes /registry/heartbeat; AGT uses WS liveness so
+          // the heartbeat impl is a no-op. The provider abstraction picks the right path.
           if (agtIdentity) {
             try {
-              const http = await import("node:http");
-              const body = JSON.stringify({ amid: agtIdentity.amid });
-              const req = http.request(routerUrl("/agt/registry/registry/heartbeat"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-                timeout: 3000,
-              }, () => {});
-              req.on("error", () => {});
-              req.write(body);
-              req.end();
+              await getMeshRegistry(routerUrl).heartbeat?.(agtIdentity.amid, []);
             } catch { /* best effort */ }
           }
         }

@@ -40,6 +40,7 @@ import {
 } from "../amid-cache.js";
 import { safeJson } from "../safe-json.js";
 import { validateMeshPayload } from "../mesh-payload-guard.js";
+import { getMeshRegistry } from "../mesh-registry.js";
 import type { HandoffProgress, AgtInboxEntry } from "../agt-handoff.js";
 
 // Re-suppress unused warnings for imports retained for symmetry with plugin.ts.
@@ -394,13 +395,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         // Best-effort registry probe — don't fail status on registry hiccups.
         let mesh_registered = false;
         try {
-          const search: any = await routerCall(
-            "GET",
-            `/agt/registry/registry/search?capability=${encodeURIComponent(name)}`,
-          );
-          const agents = (search && Array.isArray(search.results)) ? search.results : [];
+          const agents = await getMeshRegistry(routerUrl).search(name, { timeoutMs: 5000 });
           mesh_registered = agents.some(
-            (a: any) => a.display_name === name || (a.capabilities || []).includes(name),
+            (a) => a.display_name === name || (a.capabilities || []).includes(name),
           );
         } catch { /* registry unavailable — report as not-registered */ }
         const enriched = {
@@ -1509,11 +1506,8 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     async execute(_id: string, params: Record<string, unknown>) {
       const query = (params.query as string) || "*";
       try {
-        const searchUrl = query === "*"
-          ? "/agt/registry/registry/search?capability=azureclaw-agent"
-          : `/agt/registry/registry/search?capability=${encodeURIComponent(query)}`;
-        const result = await routerCall("GET", searchUrl);
-        const agents = (result as any)?.results || [];
+        const searchCap = query === "*" ? "azureclaw-agent" : query;
+        const agents = await getMeshRegistry(routerUrl).search(searchCap, { timeoutMs: 5000 });
 
         // Filter graveyard entries. The agentmesh registry (vendor/agentmesh-registry)
         // does NOT prune offline agents from `search_capabilities` results — every
