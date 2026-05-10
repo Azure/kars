@@ -34,16 +34,22 @@ which adapter to instantiate. Both adapters expose the **same**
 > shape level. Phase 2's goal — letting the runtime import a single
 > factory and stay provider-agnostic — is met.
 >
-> The **AGT path is NOT yet functionally complete on the wire.** A deep
-> audit of every vendored patch against AGT's `MeshClient` found
-> **5 protocol-level gaps** that prevent AGT from interoperating with our
-> vendored relay/registry without further changes (see
-> [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt) below).
-> Phase 3 (default flip + cross-provider interop) cannot proceed until
-> those gaps are closed in AGT.
+> A deep audit of every vendored patch against AGT's full upstream stack
+> (TS SDK + Python relay + Python registry) found:
 >
-> The 3 event hooks we added on the local AGT branch are necessary but
-> **not sufficient** — diagnostic hooks alone don't fix the wire protocol.
+> - **8 patches already fixed in AGT** — no porting needed.
+> - **3 patches that are adapter-only** (registry RPCs AGT deliberately
+>   doesn't expose) — fixes landed in `agt-transport.ts` this commit.
+> - **5 patches with different-but-equivalent solutions** in AGT — no
+>   functional regression.
+> - **2 real gaps in AGT** that block moving fully upstream: receiver-side
+>   X3DH bootstrap (G1) and auto-reconnect loop (G2). Both are well-scoped
+>   fixes to `mesh-client.ts`.
+>
+> The 3 event hooks we already added on the local AGT branch are a
+> prerequisite for cleanly implementing G2. With G1 + G2 fixed in AGT
+> and merged upstream, we can drop `vendor/agentmesh-{sdk,relay,registry}`
+> entirely. See [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt-upstream-stack).
 
 ---
 
@@ -142,11 +148,19 @@ Both A and B benefit from this server-side fix; no SDK-side changes needed.
 
 ### 6. Relay (E2E encrypted message routing)
 
-Relay is also a **service** (`agentmesh-relay`). Both SDKs are intended
-to speak the same WebSocket wire protocol — but per [Gap G5](#gap-g5-connect-frame-incompatibility),
-**AGT's connect frame is currently incompatible with our vendored relay's
-auth requirements**. Wire-protocol parity for `connect` is a Phase 3
-prerequisite.
+Relay is a **service**, but A and B ship different relay implementations:
+- **A** uses our vendored Rust relay (`vendor/agentmesh-relay/`), per-frame
+  Ed25519-signed connect, raw-timestamp signature verification.
+- **B** uses AGT's Python FastAPI relay
+  (`agent-governance-python/agent-mesh/src/agentmesh/relay/app.py`),
+  shared-secret token auth (`AGENTMESH_RELAY_TOKEN`), no per-frame
+  signature verification.
+
+When we move fully upstream, the AGT relay replaces ours. The two
+relays are **wire-incompatible** (different connect frame schemas),
+which means A and B cannot share a single relay deployment. This is by
+design — each provider speaks to its matching server. See the audit
+below for per-feature gap analysis.
 
 | Frame type | Direction | A | B |
 |---|---|---|---|
@@ -292,178 +306,146 @@ providers** — same signing key, same SHA-256, same AMID.
 
 ---
 
-## Patch-by-patch audit (vendored vs AGT)
+## Patch-by-patch audit (vendored vs AGT upstream stack)
 
-Every patch in `vendor/agentmesh-sdk/`, `vendor/agentmesh-relay/`, and
-`vendor/agentmesh-registry/` was checked against AGT's TypeScript and Rust
-trees. Citations point to the file/line where AGT either has the fix
-already, or where the equivalent code is missing/wrong.
+This audit answers the question: **when we move fully upstream to the
+AGT stack (AGT TS SDK + AGT Python relay + AGT Python registry), do we
+lose any correctness or robustness fixes that exist in our vendored
+patches?** AGT will eventually replace `vendor/agentmesh-{sdk,relay,registry}`
+entirely, so each vendored patch needs an equivalent on the AGT side or
+a documented decision that the issue doesn't apply.
+
+The AGT components audited:
+
+- **TS SDK**: `agent-governance-typescript/src/encryption/{mesh-client.ts, x3dh.ts, channel.ts}` (and `identity.ts`)
+- **Python relay**: `agent-governance-python/agent-mesh/src/agentmesh/relay/app.py`
+- **Python registry**: `agent-governance-python/agent-mesh/src/agentmesh/registry/{app.py, store.py}`
 
 Legend:
 
-- ✅ **Already correct in AGT** — no port needed
-- ✋ **Adapter-side compensation** — gap is on AGT but our `agt-transport.ts` works around it
-- ❌ **Gap (blocks Phase 3)** — protocol-level mismatch that must be fixed in AGT before the swap can carry production traffic
-- ➖ **N/A** — server-side (relay/registry) patch; both providers share the same patched server
+- ✅ **AGT has the equivalent fix already** — no port needed
+- ❌ **Gap in AGT** — must be patched upstream before moving off vendored
+- ⚠️ **Different model / partial** — AGT solves the same problem differently; verify it's acceptable
+- ✋ **Adapter responsibility** — AGT MeshClient deliberately doesn't expose this surface; consumer wraps it (we ship this in `agt-transport.ts`)
+- ➖ **N/A** — patch addresses something specific to vendored impl that doesn't apply to AGT
 
-### Vendored SDK patches (`vendor/agentmesh-sdk/README.md`)
+### Vendored SDK patches → AGT TS SDK
 
-| # | Patch | Vendored fix | AGT status | Verdict |
-|---|---|---|---|---|
-| **#1** | `PrekeyManager.buildBundle()` emits empty signature + drops public keys | Re-sign signed prekey, persist X25519 public keys | `agent-governance-typescript/src/encryption/x3dh.ts:109-126` always signs and `getPublicBundle()` always populated | ✅ |
-| **#2** | `base64Decode` crashes on `x25519:` / `ed25519:` key prefixes from registry | Strip prefix before decode | `agent-governance-typescript/src/identity.ts:464+` ports the prefix-strip helper | ✅ |
-| **#3** | X3DH→Double-Ratchet handoff: peer's `signedPreKey` not passed as initial DH | `respondToSession` takes `signedPrekey` param; `Session.initializeResponder()` uses it | `agent-governance-typescript/src/encryption/channel.ts:46-49` (sender) and `:85-88` (receiver) pass the correct keypair | ✅ |
-| **#4a** | Sender side of KNOCK protocol: `establishSession()` did X3DH locally but never sent the KNOCK frame to relay | Send KNOCK + embed X3DH params in first message | AGT `mesh-client.ts:247-256` sends KNOCK frame, but **does NOT embed X3DH `establishment` in the first message** — receiver never gets the responder material. See [Gap G1](#gap-g1-receiver-side-x3dh-bootstrap). | ❌ |
-| **#4b** | Receiver side of KNOCK: first encrypted message must auto-create the responder session from embedded X3DH params | Vendored `handleMessage` extracts establishment data and bootstraps `Session.initializeResponder` on the fly | AGT `mesh-client.ts:393-470` requires the caller to manually invoke `acceptSession(peerId, establishment)`; there is no path from a `message` frame to session creation | ❌ |
-| **#5** | KNOCK race: encrypted message arrives between `knock` send and `knock_accept` receipt → dropped | `knockPending` Map; `handleMessage` waits for resolution before decrypting | AGT `mesh-client.ts:57` (`knockPending` Map) + `:397-410` (handleMessage await) — same fix already in place | ✅ |
-| **#6** | Connect-then-prekey-upload race: registry rejects prekeys before `register` resolves | Sequence `register()` → `uploadPrekeys()` strictly | AGT MeshClient does **no** registry HTTP at all (see [Gap G3](#gap-g3-registry-rpcs-not-in-meshclient)) — sequence enforced in our adapter. | ✋ adapter-side |
-| **#7** | `submitReputation()` swallowed registry errors (no logging on 4xx/5xx) | Log status + body on non-200 | AGT MeshClient has no `submitReputation`. Our adapter (`mesh-plugin/src/agt-transport.ts:640+`) does the POST; **logging on non-200 was missing — fixed in this commit (see below).** | ✋ adapter-side |
-| **#8** | After `transport.connect()` fails, `client.connected` was left at `true` causing reconnect deadlock | Reset on transport-fail | AGT collapses transport+client (single `MeshClient`); `connected = true` is set inside `ws.onopen` only, and `onclose` resets it. The exact deadlock from vendored doesn't apply, but a related issue exists: a fast-fail mid-handshake (open → immediate close) leaves no observer signalling reject(). [Verified low-impact](#gap-g4-fast-fail-handshake-edge); not blocking. | ⚠️ minor |
-| **#9** | Auto-reconnect: vendored `RelayTransport` defaulted to 5 attempts → agents went mesh-deaf forever | `maxReconnectAttempts = Infinity`, exponential backoff capped at 60s | AGT `mesh-client.ts:156-167` exposes `reconnect()` as a manual method only. **No auto-reconnect loop on `ws.onclose`.** See [Gap G2](#gap-g2-no-auto-reconnect-loop). | ❌ |
-| **#12** | Registry `fetch` had no retry on transient network failure | Bounded retry with exponential backoff | AGT MeshClient has no fetch. Our adapter (`agt-transport.ts:334`, `:607`, `:640`) does single-shot fetches **without retry — fixed in this commit (see below).** | ✋ adapter-side |
+| # | Patch summary | AGT equivalent | Verdict |
+|---|---|---|---|
+| **#1** | `PrekeyManager.buildBundle()` emitted empty signature, dropped public keys | `x3dh.ts:109-126` always signs the prekey; `getPublicBundle()` always populates X25519 pubkeys | ✅ |
+| **#2** | `base64Decode` crashed on `x25519:` / `ed25519:` key prefixes | `identity.ts:464+` strips prefix before decode (helper present) | ✅ |
+| **#3** | X3DH→Double-Ratchet handoff: peer's `signedPreKey` not passed as initial DH; `Session.initializeResponder()` used wrong keypair | `channel.ts:46-49` (sender) and `:85-88` (receiver) pass the correct keypair into the ratchet | ✅ |
+| **#4a** | KNOCK frame must be sent on the wire when `establishSession()` is called (vendored did X3DH locally only) | `mesh-client.ts:247-256` sends a `knock` frame as part of `establishSession()` | ✅ |
+| **#4b** | First encrypted message must auto-bootstrap the **responder** session (extract X3DH `establishment` from frame, call `initializeResponder` on the fly) | `mesh-client.ts:393-470` (`handleMessage`) finds no session and fires `onError("no_session", …)`. `acceptSession(peer, establishment)` exists but the `establishment` data is never carried on the wire by `knock` / `knock_accept` / `message` frames. **No way to bootstrap responder from wire alone.** Same gap exists in the Python `bridge.py` (`accept_secure_channel` requires caller-supplied `establishment`). | ❌ Gap-G1 |
+| **#5** | KNOCK race: encrypted message arrives between `knock` send and `knock_accept` receipt → silently dropped | `mesh-client.ts:57` (`knockPending` Map) + `:397-410` (handleMessage awaits resolution) — same fix already in AGT | ✅ |
+| **#6** | Connect-then-prekey-upload race: registry rejects prekeys before `register` resolves | AGT MeshClient does no registry HTTP itself — sequencing is the consumer's responsibility (our adapter handles this) | ✋ adapter |
+| **#7** | `submitReputation()` swallowed registry 4xx/5xx errors | AGT MeshClient has no `submitReputation`; reputation lives at `/v1/agents/{did}/reputation` on AGT registry. Our adapter logs status + body on non-2xx (landed in this commit) | ✋ adapter |
+| **#8** | After transport-connect failed, `client.connected` was left at `true` causing reconnect deadlock | AGT collapses transport+client; `connected` is set inside `ws.onopen` only and reset by `onclose`. Edge case: open→immediate-close before connect-frame ack leaves the connect promise resolved but `connected = false`. Subsequent `send()` throws "Not connected to relay" — recoverable via manual `reconnect()`. | ⚠️ minor edge |
+| **#9** | Auto-reconnect: `RelayTransport` defaulted to 5 attempts → agents went mesh-deaf forever | `mesh-client.ts:156-167` exposes `reconnect()` as a manual method only. **No auto-reconnect loop on `ws.onclose`.** Consumers must subscribe to `onDisconnect` and decide. | ❌ Gap-G2 |
+| **#12** | Registry `fetch` had no retry on transient network failure | AGT MeshClient has no fetch. Our adapter (`agt-transport.ts`) now uses `fetchWithRetry` (3 attempts, 250/750/2000ms backoff, transient-5xx aware) for `lookup`, `submitReputation`, and discovery (landed in this commit) | ✋ adapter |
 
-### Vendored relay patches (`vendor/agentmesh-relay/README.md`)
+### Vendored relay patches → AGT Python relay
 
-The relay is a **server** (Rust). Both A and B speak to the same
-`agentmesh-relay` instance, so server patches benefit both.
+| # | Patch summary | AGT equivalent | Verdict |
+|---|---|---|---|
+| Relay-1 | Raw timestamp signature verification (chrono `to_rfc3339()` `Z` vs `+00:00` mismatch broke Ed25519 verify) | AGT relay does **not** verify per-frame signatures. Auth model is shared-secret token only (`AGENTMESH_RELAY_TOKEN` at `app.py:117-127`). Different security model — weaker against compromised tokens but immune to the chrono bug. | ➖ different model (flag for security review) |
+| Relay-2 | Session-aware connection (ghost cleanup): on duplicate connect for same AMID, close old socket with `4001 SessionReplaced` | AGT relay (`app.py:130`) overwrites `self._connections[agent_did]` without explicitly closing the old socket. Old WS lingers until heartbeat timeout (90s, `OFFLINE_THRESHOLD`). Functionally similar but slower cleanup; client cannot distinguish supersede from drop. | ⚠️ slower / no explicit close code |
+| Relay-3 | HTTP `/health` endpoint | AGT relay has `/health` at `app.py:87` returning `{"status":"healthy","connected_agents":n}` | ✅ |
+| Relay-4 | Explicit close codes (`4001 SessionReplaced`, `4002 PingTimeout`) so client can suppress reconnect storms | AGT relay uses `4001 first-frame-error`, `4002 missing-from`, `4003 auth-fail` (different semantics — error responses, not lifecycle signals). No SessionReplaced or PingTimeout codes. | ⚠️ different semantics |
 
-| # | Patch | Server-side or client-coupled? |
+### Vendored registry patches → AGT Python registry
+
+| # | Patch summary | AGT equivalent | Verdict |
+|---|---|---|---|
+| Registry-1 | Raw timestamp Ed25519 signature verification (mirror of relay fix) | AGT registry `app.py:54-98` (`verify_ed25519_timestamp_auth`) verifies Ed25519 over the **raw timestamp string** (`vk.verify(timestamp_str.encode("utf-8"), sig)` at line 94). Identical approach, never had the chrono bug. | ✅ |
+| Registry-2 | Ghost cleanup + heartbeat + 5-minute freshness window for online status | AGT registry tracks `last_seen` per agent (`store.py:29`) and computes `online = (now - last_seen) < 90s` (`app.py:236`). Tighter window (90s vs 5min) but same approach. | ✅ (tighter window) |
+| Registry-3 | `feedback_count` SQL referenced wrong table name | AGT registry uses an in-memory store (`store.py`) — not affected by the SQL bug. AGT in-memory implementation is correct. | ➖ different impl |
+| Registry-4 | Op-hardening (graceful shutdown, stale cleanup, validation caps, TOCTOU) | AGT registry uses Pydantic models with `Field(ge=0.0, le=1.0)` validation (`app.py:47`) and FastAPI handles graceful shutdown. Stale cleanup is implicit via the freshness window. TOCTOU: AGT in-memory store uses dict ops which are atomic in CPython — different concurrency model than our vendored Postgres registry. | ✅ different impl, equivalent guarantees |
+
+### Real gaps blocking the move-upstream scenario
+
+Two genuine issues in AGT itself that need upstream PRs before we can
+remove `vendor/`:
+
+#### Gap-G1: receiver-side X3DH bootstrap
+
+**Vendored A:** when the first encrypted message arrives from a peer
+with no prior session, `handleMessage` extracts the X3DH `establishment`
+data embedded in the frame and calls `Session.initializeResponder()` to
+auto-create the responder side of the channel.
+
+**AGT B:** the `acceptSession(peerId, establishment)` API exists in both
+TS (`mesh-client.ts:277`) and Python (`bridge.py:accept_secure_channel`),
+but `ChannelEstablishment` is **never serialized onto the wire** — neither
+in the `knock_accept` frame nor in the first `message` frame. The
+responder has no way to obtain it. Result: any fresh encrypted session
+will fail with `"No encrypted session with X. Call establishSession() first."`
+on first receive.
+
+**Required AGT change:** extend `mesh-client.ts:520-528` (knock_accept) or
+`mesh-client.ts:206-219` (first `message` frame) to carry
+`establishment` (initiator IK pubkey, ephemeral pubkey, used OTK id),
+and have `handleMessage` auto-bootstrap responder when present and no
+prior session exists. Same change needed in Python `bridge.py` and in
+the relay frame schemas if validated server-side.
+
+#### Gap-G2: no auto-reconnect loop in MeshClient
+
+**Vendored A:** `RelayTransport` schedules a reconnect on every
+`ws.onclose` that wasn't a clean client-initiated `1000`. Patch #9 sets
+the default to `maxReconnectAttempts = Infinity` with exponential
+backoff capped at 60s. Result: mesh-deafness from transient network
+glitches is impossible.
+
+**AGT B:** `MeshClient.reconnect()` exists (`mesh-client.ts:156-167`)
+but is never called automatically. Consumers must observe
+`onDisconnect` (a hook we added on the local AGT branch) and decide to
+call `reconnect()` themselves.
+
+**Required AGT change:** add an opt-in (or default-on) auto-reconnect
+loop on `ws.onclose` with the same parameters as patch #9. This is hard
+to implement correctly outside MeshClient because the WebSocket
+lifecycle isn't observable from outside.
+
+### Soft / minor
+
+- **Relay-2 (slower ghost cleanup):** AGT will keep stale connections
+  for up to 90s before the heartbeat check evicts them. Vendored closes
+  immediately with `4001`. Acceptable for now; would be a nice-to-have
+  upstream improvement.
+- **Relay-4 (close-code semantics):** AGT uses `4001-4003` for protocol
+  errors, not lifecycle signals. Clients cannot distinguish supersede
+  from network drop. Couples with Gap-G2 — once AGT has auto-reconnect,
+  it should also signal supersede to suppress storms.
+- **SDK-#8 fast-fail handshake edge:** AGT resolves the connect promise
+  inside `ws.onopen` even if `ws.onclose` fires immediately after. Defensive
+  fix: only resolve once the relay's first `connected` ack arrives.
+
+### Summary
+
+| Class | Count | Status |
 |---|---|---|
-| Raw timestamp signature verification (`chrono::DateTime::to_rfc3339()` `Z` vs `+00:00` mismatch) | Server stores raw timestamp string and verifies signature over those exact bytes | ➖ Server-side — both providers benefit. **Coupled requirement on the client:** the SDK must send the `timestamp` field as a *string* (not a re-serialized `DateTime`). AGT `mesh-client.ts:102-106` **does not send a `timestamp` at all** in the connect frame — see [Gap G5](#gap-g5-connect-frame-incompatibility). | ❌ (client-side coupling) |
-| Session-aware connection (ghost connection cleanup) | When a new session for the same AMID arrives, the old socket is closed with code `4001 SessionReplaced` | ➖ Server-side. **Coupled requirement on the client:** to avoid reconnect storms after supersede, client should distinguish `4001` from generic disconnect. AGT `mesh-client.ts:131-132` only distinguishes `1000` (normal) from non-`1000` (server). | ⚠️ partial |
-| HTTP `/health` endpoint | Pure server-side health check | ➖ Server-side. No SDK coupling. | ✅ |
-| Explicit close codes (`SessionReplaced=4001`, `PingTimeout=4002`) | Both providers receive these via `ws.onclose.code` | ➖ Server-side. AGT does not currently special-case `4002`. | ⚠️ partial |
+| AGT already has it (✅) | 8 | No action needed |
+| Adapter responsibility (✋) | 3 | Landed in this commit (#7, #12); #6 was already correct in adapter |
+| Different model, equivalent (➖ / ⚠️) | 5 | Documented; no functional regression expected |
+| Real gaps in AGT (❌) | **2** | **G1** + **G2** — block upstream-only scenario; need PRs to AGT |
 
-### Vendored registry patches (`vendor/agentmesh-registry/README.md`)
-
-| # | Patch | Server-side or client-coupled? |
-|---|---|---|
-| Raw timestamp signature verification (mirror of relay fix) | Server-side | ➖ Server-side. **Coupled requirement:** clients must send `timestamp` as a string in registry POSTs (registration, prekey upload, feedback). AGT MeshClient does not register at all → adapter handles. | ✋ adapter-side |
-| Ghost cleanup + heartbeat + 5-minute freshness window | Server-side | ➖ Server-side | ✅ |
-| `feedback_count` SQL referenced wrong table name | Server-side bug fix | ➖ Server-side | ✅ |
-| Op-hardening (graceful shutdown, stale cleanup, validation caps, TOCTOU) | Server-side | ➖ Server-side | ✅ |
-
-### Critical gaps (block Phase 3)
-
-#### Gap G1: receiver-side X3DH bootstrap
-
-**Vendored A:** when the first encrypted message arrives from a peer with
-no session, `handleMessage` extracts the X3DH `establishment` data
-embedded in the frame and calls `Session.initializeResponder()` to
-auto-create the responder side of the channel. From the consumer's POV,
-encryption "just works" the first time a message arrives.
-
-**AGT B:** `mesh-client.ts:393-470` (`handleMessage`) finds no session,
-fires `onError("no_session", ...)`, and drops the message. The only way
-to bootstrap the responder side is to call `acceptSession(peerId, establishment)`
-manually — but the establishment data is never extracted from the wire
-because AGT's `message` frame schema doesn't carry it.
-
-**Required fix in AGT:** extend the `message` frame to optionally carry
-`establishment: ChannelEstablishment` (sent only on the first encrypted
-send to a peer), and have `handleMessage` auto-call `acceptSession` when
-present and no prior session exists.
-
-#### Gap G2: no auto-reconnect loop
-
-**Vendored A:** `RelayTransport` schedules a reconnect on every `ws.onclose`
-that wasn't a clean client-initiated `1000`. Patch #9 sets the default
-to `maxReconnectAttempts = Infinity` with exponential backoff capped at
-60s. Result: mesh-deafness from transient network glitches is impossible.
-
-**AGT B:** `MeshClient.reconnect()` exists but is never called automatically.
-Consumers must observe `onDisconnect` and decide to call `reconnect()`
-themselves — and AGT 3.5.0 doesn't even export `onDisconnect` (we added
-that hook on `azureclaw-meshclient-event-hooks`).
-
-**Required fix in AGT:** add an opt-in (or default-on) auto-reconnect
-loop with the same parameters as patch #9. Implementing this in the
-adapter is fragile because the adapter has no insight into the WebSocket
-lifecycle from outside.
-
-#### Gap G3: registry RPCs not in MeshClient
-
-**Vendored A:** `AgentMeshClient` has built-in registry RPCs:
-`register()`, `uploadPrekeys()`, `searchByDisplayName()`,
-`fetchPrekeyBundle()`, `lookup()`, `submitReputation()`. They run
-during `connect()` and on demand.
-
-**AGT B:** `MeshClient` declares `options.registryUrl` but never reads it.
-The class is pure transport. `IdentityRegistry` (`identity.ts:407`) is an
-in-memory map for delegation chain validation, not a registry HTTP client.
-
-**Compensation:** our `agt-transport.ts` adapter does the registry HTTP
-calls directly (`/agents/search`, `/registry/lookup`, `/registry/feedback`).
-This is sustainable for the swap, but it means **AGT's MeshClient is
-non-trivial to use without wrapping it** — every consumer has to
-reimplement registration, prekey upload, peer-bundle fetch.
-
-**Open design question for AGT team:** should this surface live on
-`MeshClient` (matching vendored A and our adapter), or on a separate
-`RegistryClient` published alongside? Either is acceptable — but it
-needs to exist somewhere standard.
-
-#### Gap G4: fast-fail handshake edge
-
-**Vendored A:** `RelayTransport.connect()` distinguishes "ws never opened"
-(rejects connect()) from "ws opened then closed" (sets state correctly).
-
-**AGT B:** `mesh-client.ts:99-138` only rejects on `onerror` if `!connected`.
-If `onopen` fires then `onclose` fires before the connect-frame is
-delivered, `connected` is briefly `true` and gets reset by `onclose` —
-but the connect-promise still resolves successfully because `resolve()`
-is called inside `onopen`. Consumer thinks connect succeeded; subsequent
-sends will throw "Not connected to relay".
-
-**Severity:** observed only under specific timing pathologies (relay
-crashing during handshake). Not a blocker but worth fixing alongside G2.
-
-#### Gap G5: connect frame incompatibility
-
-**Most severe gap.** AGT `mesh-client.ts:102-106` sends:
-
-```json
-{ "v": 1, "type": "connect", "from": "did:agentmesh:abc..." }
-```
-
-Our vendored relay (`vendor/agentmesh-relay/src/types.rs:13-24`) requires:
-
-```rust
-Connect {
-    protocol: String,
-    amid: Amid,
-    public_key: String,         // base64 Ed25519 pubkey
-    signature: String,          // Ed25519 sig over timestamp
-    timestamp: String,          // raw ISO string
-    p2p_capable: bool,
-}
-```
-
-Serde's tagged-enum deserialization rejects unknown shapes — AGT's
-connect frame fails parsing on our relay and the WebSocket closes
-immediately. **This means the AGT path cannot establish a connection
-to our vendored relay at all.**
-
-The corollary: AGT either (a) was designed against a different relay
-implementation, or (b) expects the relay to accept unauthenticated
-connect frames (which `vendor/agentmesh-relay/` doesn't).
-
-**Required fix in AGT:** extend the connect frame to include
-`protocol`, `public_key`, `signature`, `timestamp`. The signature must
-be Ed25519 over the raw `timestamp` string. This is also the prerequisite
-for relay patch #1 (raw-timestamp signature verification) to work for
-provider B.
+The 2 real gaps (G1, G2) are well-scoped fixes to `mesh-client.ts`. The
+3 diagnostic event hooks we already added on the local AGT branch
+(`azureclaw-meshclient-event-hooks`) are a prerequisite for cleanly
+implementing G2 (auto-reconnect needs `onDisconnect` to be observable).
 
 ### Adapter-side fixes landed in this commit
 
-The two ✋ items above (`#7` reputation logging, `#12` registry fetch
-retry) are adapter-only — they don't require AGT changes. They are
-applied in `mesh-plugin/src/agt-transport.ts` as part of this audit:
+The ✋ items are adapter-only — they don't require AGT changes. They
+are applied in `mesh-plugin/src/agt-transport.ts`:
 
-- `submitReputation` now logs status code + body on non-2xx.
-- `lookup`, `submitReputation`, and the discovery search RPC now retry
-  on transient network failure: 3 attempts, exponential backoff
-  (250ms / 750ms / 2000ms).
+- `submitReputation` now logs status code + body on non-2xx and logs
+  network errors (vendored swallowed both).
+- `lookup`, `submitReputation`, and discovery search now use a
+  bounded-retry policy: 3 attempts, exponential backoff
+  (250ms / 750ms / 2000ms), retries on transient 5xx.
 
 ---
 
@@ -518,36 +500,45 @@ is pure transport). Our adapter implements them via REST.
 - Runtime swapped to use the factory.
 - Side-by-side compat test pins the contract.
 - AGT local branch with the 3 missing event hooks.
-- **Patch-by-patch audit committed (this section)** — finds 5 protocol-level gaps blocking Phase 3.
+- **Patch-by-patch audit committed (this section)** — finds 2 protocol-level gaps in AGT (G1, G2) blocking the upstream-only scenario.
 - **Adapter fixes for ✋ items**: reputation logging (#7) + registry fetch retry (#12) ported into `agt-transport.ts`.
 
-### Phase 3 (BLOCKED on AGT-upstream work)
+### Phase 3 (cross-provider deployment)
+
+A and B can run side by side **only with their own server stacks**:
+- A: vendored relay + vendored registry
+- B: AGT Python relay + AGT Python registry
+
+A↔B cross-provider chat is not supported (different relay wire formats
+by design). Each provider talks to its own service. This is acceptable
+because the swap unit is the entire sandbox, not individual messages.
+
+To test cross-provider in dev:
+1. Deploy AGT relay+registry into the kind cluster alongside the vendored ones (different namespaces).
+2. Set `AZURECLAW_MESH_PROVIDER=agt` on a sandbox + point its router at AGT's relay/registry URLs.
+3. Run two sandboxes (one A, one B) and verify each works end-to-end with a peer of the same provider.
+
+### Phase 4 (move fully upstream — gated on G1 + G2)
 
 Cannot proceed until the AGT team accepts patches for:
 
 - **G1** — receiver-side X3DH bootstrap (auto-create responder session from embedded establishment data)
 - **G2** — auto-reconnect loop with exponential backoff (`Infinity` attempts, 60s cap)
-- **G5** — connect-frame compatibility with our vendored relay (signed timestamp, public key)
 
 Optional but recommended:
-- **G3** — registry RPC surface (or a separate `RegistryClient`)
-- **G4** — fast-fail handshake edge (defensive)
-- Relay close-code handling (4001 SessionReplaced, 4002 PingTimeout)
+- Relay-2 — eager ghost cleanup with explicit `4001 SessionReplaced` close code
+- Relay-4 — distinct close codes for supersede vs ping-timeout vs network drop
+- SDK-#8 — defensive fast-fail handshake fix
 
-Once these land in `@microsoft/agent-governance-sdk`:
+Once G1 + G2 land in `@microsoft/agent-governance-sdk`:
 
 1. Bump the `optionalDependencies` pin to the new minor.
-2. Cross-test in dev: A-parent ↔ B-child and B-parent ↔ A-child.
-3. Flip default `AZURECLAW_MESH_PROVIDER=agt` in the sandbox image.
-4. Soak ≥ 1 week with both providers running side by side.
-
-### Phase 4 (cleanup — only after Phase 3)
-- Drop `vendor/agentmesh-sdk/` (5 protocol patches no longer needed).
-- Drop `connection.ts` (vendored adapter).
-- Keep `agt-transport.ts` only.
-- Remove `AZURECLAW_MESH_PROVIDER` env var (now single-provider).
-- Vendored relay + registry stay (server-side patches), unless those PRs
-  also merge upstream.
+2. Verify in dev: B-only end-to-end works for spawn → KNOCK → encrypted reply roundtrip with the AGT relay+registry.
+3. Soak with `AZURECLAW_MESH_PROVIDER=agt` as default for ≥ 1 week.
+4. Drop `vendor/agentmesh-sdk/`, `vendor/agentmesh-relay/`, `vendor/agentmesh-registry/`.
+5. Drop `connection.ts` (vendored adapter); keep `agt-transport.ts` only.
+6. Remove `AZURECLAW_MESH_PROVIDER` env var (now single-provider).
+7. Switch dev infra to deploy AGT relay+registry instead of vendored ones.
 
 ---
 
@@ -570,20 +561,21 @@ AGT side: **387/387 pass**.
 ## Open questions / known limitations
 
 1. **Reputation API standardization.** Our adapter assumes registry
-   `/registry/lookup/{amid}` and `/registry/feedback`. AGT may eventually
-   propose its own registry shape; if so, the adapter is the only file
-   that needs to change.
+   `/registry/lookup/{amid}` and `/registry/feedback`. AGT registry uses
+   `/v1/agents/{did}/reputation` with a different shape (EWMA score
+   updates). When we move to AGT registry, the adapter's reputation
+   methods need re-targeting; the contract via IMeshTransport stays
+   the same.
 
 2. **`enableKnockEnforcement` semantics.** AGT B is always-on. If a
    future use case needs to disable enforcement (e.g., trusted-network
    testing), AGT would need a runtime toggle. Out of scope for now.
 
-3. **Cross-provider interop testing.** Phase 3 was originally scoped to
-   verify A↔B interop. The audit (see [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt))
-   shows this is **currently impossible** — gap G5 means AGT cannot even
-   connect to the vendored relay. Once AGT lands the connect-frame fix,
-   wire compatibility should follow naturally because both sides target
-   the same Rust services.
+3. **Cross-provider message interop is not a goal.** A and B speak to
+   different relay implementations. The swap unit is the sandbox, not
+   the message. There is no scenario where an A sandbox sends a message
+   directly to a B sandbox — both endpoints in any conversation must be
+   the same provider.
 
 4. **AGT version pinning.** We pin `^3.5.0` in `optionalDependencies`.
    Once the AGT team releases the version with our event hooks, bump to
