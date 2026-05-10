@@ -347,10 +347,12 @@ export function getMeshRegistry(
   const provider = (process.env.AZURECLAW_MESH_PROVIDER || "vendored")
     .trim()
     .toLowerCase();
-  // Sub-agents may set AGT_REGISTRY_URL to a direct URL (bypassing the
-  // router). Otherwise we route through the inference-router's proxy.
-  const base = (process.env.AGT_REGISTRY_URL || routerUrl("/agt/registry"))
-    .replace(/\/+$/, "");
+  // Runtime (UID 1000) is iptables-confined to localhost. AGT_REGISTRY_URL
+  // is set by the sandbox launcher as the router's UPSTREAM target — it
+  // points at the real registry which the runtime cannot reach directly
+  // (ECONNREFUSED, then silent empty results from the catch-all). Always
+  // route through the local inference-router proxy.
+  const base = routerUrl("/agt/registry").replace(/\/+$/, "");
   if (cached && cached.provider === provider && cached.base === base) {
     return cached.impl;
   }
