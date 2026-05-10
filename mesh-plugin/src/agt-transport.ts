@@ -30,6 +30,44 @@ import * as crypto from "node:crypto";
 
 const MAX_FILE_SIZE = 30 * 1024 * 1024;
 
+// ── Registry fetch retry policy (port of vendored SDK patch #12) ──
+//
+// Matches the vendored @agentmesh/sdk policy: bounded retries with
+// exponential backoff. Used for ALL registry HTTP calls (lookup,
+// feedback, discovery) so transient network glitches don't surface
+// as silent registry failures.
+const REGISTRY_RETRY_DELAYS_MS = [250, 750, 2000] as const;
+
+async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  retries: number = REGISTRY_RETRY_DELAYS_MS.length,
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      const delay =
+        REGISTRY_RETRY_DELAYS_MS[
+          Math.min(attempt - 1, REGISTRY_RETRY_DELAYS_MS.length - 1)
+        ];
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    try {
+      const resp = await fetch(url, init);
+      // Retry on 502/503/504 (transient upstream); fail-fast on 4xx.
+      if (resp.status >= 500 && resp.status < 600 && attempt < retries) {
+        lastErr = new Error(`registry transient ${resp.status}`);
+        continue;
+      }
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries) throw err;
+    }
+  }
+  throw lastErr ?? new Error("registry fetch failed");
+}
+
 // ── Lazy SDK loading (optional dependency) ───────────────────────
 //
 // The upstream SDK is an *optional* npm dependency: vendored deployments
@@ -331,7 +369,7 @@ export class AgtTransport implements IMeshTransport {
     if (caps.length === 0) {
       // No capability filter → list all (best effort; not all registries support this).
       try {
-        const resp = await fetch(`${registryUrl}/agents?limit=${limit}`);
+        const resp = await fetchWithRetry(`${registryUrl}/agents?limit=${limit}`);
         if (!resp.ok) return [];
         const data = (await resp.json()) as Array<Record<string, unknown>>;
         return data.slice(0, limit).map(mapAgent);
@@ -344,7 +382,7 @@ export class AgtTransport implements IMeshTransport {
     await Promise.all(
       caps.map(async (cap) => {
         try {
-          const resp = await fetch(
+          const resp = await fetchWithRetry(
             `${registryUrl}/agents?capability=${encodeURIComponent(cap)}&limit=${limit}`,
           );
           if (!resp.ok) return;
@@ -604,7 +642,9 @@ export class AgtTransport implements IMeshTransport {
   ): Promise<{ reputationScore?: number; displayName?: string; capabilities?: string[] } | null> {
     const registryUrl = this.options.registryUrl.replace(/\/$/, "");
     try {
-      const resp = await fetch(`${registryUrl}/registry/lookup/${encodeURIComponent(amid)}`);
+      const resp = await fetchWithRetry(
+        `${registryUrl}/registry/lookup/${encodeURIComponent(amid)}`,
+      );
       if (!resp.ok) return null;
       const r = (await resp.json()) as Record<string, unknown>;
       return {
@@ -637,7 +677,7 @@ export class AgtTransport implements IMeshTransport {
   ): Promise<boolean> {
     const registryUrl = this.options.registryUrl.replace(/\/$/, "");
     try {
-      const resp = await fetch(`${registryUrl}/registry/feedback`, {
+      const resp = await fetchWithRetry(`${registryUrl}/registry/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -648,8 +688,26 @@ export class AgtTransport implements IMeshTransport {
           tags,
         }),
       });
-      return resp.ok;
-    } catch {
+      if (!resp.ok) {
+        // Port of vendored SDK patch #7: log non-2xx so silent registry
+        // rejections (auth, schema mismatch) surface in the sandbox logs.
+        let body = "";
+        try {
+          body = (await resp.text()).slice(0, 512);
+        } catch {
+          /* body read failure is non-fatal */
+        }
+        console.warn(
+          `[agt-transport] submitReputation rejected: ${resp.status} ${resp.statusText}` +
+            (body ? ` body=${body}` : ""),
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn(
+        `[agt-transport] submitReputation network error: ${(err as Error).message}`,
+      );
       return false;
     }
   }
