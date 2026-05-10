@@ -34,23 +34,30 @@ which adapter to instantiate. Both adapters expose the **same**
 > shape level. Phase 2's goal — letting the runtime import a single
 > factory and stay provider-agnostic — is met.
 >
-> A deep audit of every vendored patch against AGT's full upstream stack
-> (TS SDK + Python relay + Python registry) found:
+> A deep audit of every vendored patch (SDK #1-#18, relay #1-#4,
+> registry #1-#4) against AGT's full upstream stack found:
 >
-> - **8 patches already fixed in AGT** — no porting needed.
+> - **12 patches already fixed in AGT** — no porting needed.
 > - **3 patches that are adapter-only** (registry RPCs AGT deliberately
 >   doesn't expose) — fixes landed in `agt-transport.ts` this commit.
-> - **5 patches with different-but-equivalent solutions** in AGT — no
+> - **7 patches with different-but-equivalent solutions** in AGT — no
 >   functional regression.
-> - **2 real gaps in AGT** that blocked moving fully upstream: receiver-side
->   X3DH bootstrap (G1) and auto-reconnect loop (G2).
+> - **5 real gaps in AGT** that blocked moving fully upstream:
+>   - G1: receiver-side X3DH bootstrap (vendored #4b)
+>   - G2: auto-reconnect loop (vendored #9)
+>   - G3: decrypt-fail session teardown (vendored #13)
+>   - G4: pre-KNOCK encrypted-message buffer (vendored #16)
+>   - G5: eager ghost-connection close on relay rebind (vendored relay #2)
 >
-> Both G1 and G2 are now **fixed on the local AGT branch**
-> `azureclaw-meshclient-event-hooks` (commit `d75ea37b`, held locally,
-> NOT pushed pending coordination with the AGT team for an upstream PR).
-> Together with the 3 event hooks already on that branch, this means
-> the AGT SDK is feature-complete for the upstream-only scenario from
-> AzureClaw's perspective. AGT TS test suite: 398/398 pass.
+> **All five gaps are fixed on the local AGT branch**
+> `azureclaw-meshclient-event-hooks` (G1+G2 commit `d75ea37b`, G3+G4+G5
+> commit `3a96a0f2`), held locally, NOT pushed pending coordination
+> with the AGT team for an upstream PR. Together with the 3 event hooks
+> already on that branch, this means the AGT SDK is feature-complete
+> for the upstream-only scenario from AzureClaw's perspective,
+> **including reliable chunked file-transfer (mesh_file_transfer)
+> which requires G3 + G4 to avoid silent stalls**. AGT TS test suite:
+> 405/405 pass. AGT Python relay test suite: 18/18 pass.
 > See [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt-upstream-stack).
 
 ---
@@ -231,7 +238,11 @@ on both sides.
 | Send blob ≤ 10MB | `sendFile(toAmid, name, mime, bytes)` | `sendFile(toAmid, name, mime, bytes)` |
 | Receive | Comes through `onMessage` with `type: "file"` | Same |
 
-Both implementations chunk and re-assemble identically; wire format matches.
+Both implementations chunk and re-assemble identically; wire format
+matches. **Reliability under load requires gaps G3 (decrypt-fail
+teardown) and G4 (pre-KNOCK buffer) — chunked transfers amplify any
+silent-drop or ratchet-drift bug into a stuck transfer with no error
+surface. Both gaps are fixed on the local AGT branch.**
 
 ---
 
@@ -345,14 +356,22 @@ Legend:
 | **#7** | `submitReputation()` swallowed registry 4xx/5xx errors | AGT MeshClient has no `submitReputation`; reputation lives at `/v1/agents/{did}/reputation` on AGT registry. Our adapter logs status + body on non-2xx (landed in this commit) | ✋ adapter |
 | **#8** | After transport-connect failed, `client.connected` was left at `true` causing reconnect deadlock | AGT collapses transport+client; `connected` is set inside `ws.onopen` only and reset by `onclose`. Edge case: open→immediate-close before connect-frame ack leaves the connect promise resolved but `connected = false`. Subsequent `send()` throws "Not connected to relay" — recoverable via manual `reconnect()`. | ⚠️ minor edge |
 | **#9** | Auto-reconnect: `RelayTransport` defaulted to 5 attempts → agents went mesh-deaf forever | **Fixed locally on AGT branch `azureclaw-meshclient-event-hooks`** (commit `d75ea37b`): MeshClient now auto-reconnects on non-1000 close with exponential backoff (1s → 60s cap, ±20% jitter), defaults to `maxReconnectAttempts: Infinity`. Opt-out via `autoReconnect: false`. | ✅ (local AGT branch) |
+| **#10** | `initiateSession` idempotent — calling twice for same peer must not race / spawn duplicate X3DH | `mesh-client.ts:295-296` `establishSession`: `const existing = this.sessions.get(peerId); if (existing) return existing;` — early-return on existing session | ✅ |
+| **#11** | `wsFactory` injection + `plaintextPeers` allowlist (tests + mesh-bootstrap peers that haven't done X3DH yet) | `mesh-client.ts:20` `WebSocketFactory` type, `:29` `wsFactory?` option, `:31` `plaintextPeers?` option, `:90` field, `:100-110` `addPlaintextPeer/removePlaintextPeer/isPlaintextPeer`, `:118-119` factory used by `connect()` | ✅ |
 | **#12** | Registry `fetch` had no retry on transient network failure | AGT MeshClient has no fetch. Our adapter (`agt-transport.ts`) now uses `fetchWithRetry` (3 attempts, 250/750/2000ms backoff, transient-5xx aware) for `lookup`, `submitReputation`, and discovery (landed in this commit) | ✋ adapter |
+| **#13** | Decrypt failure on existing session ⇒ ratchet is irrecoverable; must delete session + fire `session_desync` so caller can re-establish | **Fixed locally on AGT branch `azureclaw-meshclient-event-hooks`** (commit `3a96a0f2`): decrypt-catch in `handleMessage` now tears down session (`closeSession` + `knockAccepted.delete`) and fires `onError("session_desync", ...)`. `onError` type union extended with `"session_desync"` kind. | ✅ (local AGT branch — **Gap G3**) |
+| **#14** | `messageBytes` undefined: `new TextEncoder().encode(...)` result was discarded; vendored dist build encoded `undefined` into the payload | Vendor-specific dist bug. AGT TS is source-built from typed `const messageBytes = new TextEncoder().encode(...)` — the value is always assigned. | ➖ N/A (vendored-dist-only bug) |
+| **#15** | Re-attach X3DH `establishment` on every encrypted message so a responder that lost its session can rebuild on the fly (defensive against ratchet drift after restart) | AGT architectural difference: KNOCK frame carries `establishment` once; encrypted `message` frames are KNOCK-less. Combined with G3 teardown + G4 buffering, the architectural choice is acceptable — receiver re-handshakes via KNOCK rather than per-message X3DH replay. | ➖ different model |
+| **#16** | Pre-KNOCK encrypted-message buffer (race: relay reorders frames so `message` arrives before `knock`) | **Fixed locally on AGT branch `azureclaw-meshclient-event-hooks`** (commit `3a96a0f2`): per-peer buffer (default cap 5, TTL 3000ms). `handleMessage` no-session path buffers; `handleKnock` accept-path drains; reject-path drops. Disabled by `preKnockBufferSize: 0`. | ✅ (local AGT branch — **Gap G4**) |
+| **#17** | `String.fromCharCode(...bytes)` stack overflow for large frames (spread of >100k args) | AGT uses `Buffer.from(data).toString("base64")` throughout. The single `String.fromCharCode` call (`mesh-client.ts:694`) is a one-char-at-a-time loop with no spread — no stack-overflow risk. | ✅ |
+| **#18** | Advanced fingerprint-aware session rebuild + per-peer mutex (`acceptedX3dhFingerprints` Map, transactional candidate-session swap) | G3 teardown covers the recovery angle. Without vendored #15's "re-attach X3DH on every send" pattern, AGT does not need the candidate-session swap; simpler model where caller re-runs `establishSession()` after `session_desync` is adequate. Per-peer mutex is partially addressed by `establishSession`'s idempotent early-return (#10) plus G4's buffer ordering. | ⚠️ different model, simpler equivalent |
 
 ### Vendored relay patches → AGT Python relay
 
 | # | Patch summary | AGT equivalent | Verdict |
 |---|---|---|---|
 | Relay-1 | Raw timestamp signature verification (chrono `to_rfc3339()` `Z` vs `+00:00` mismatch broke Ed25519 verify) | AGT relay does **not** verify per-frame signatures. Auth model is shared-secret token only (`AGENTMESH_RELAY_TOKEN` at `app.py:117-127`). Different security model — weaker against compromised tokens but immune to the chrono bug. | ➖ different model (flag for security review) |
-| Relay-2 | Session-aware connection (ghost cleanup): on duplicate connect for same AMID, close old socket with `4001 SessionReplaced` | AGT relay (`app.py:130`) overwrites `self._connections[agent_did]` without explicitly closing the old socket. Old WS lingers until heartbeat timeout (90s, `OFFLINE_THRESHOLD`). Functionally similar but slower cleanup; client cannot distinguish supersede from drop. | ⚠️ slower / no explicit close code |
+| Relay-2 | Session-aware connection (ghost cleanup): on duplicate connect for same AMID, close old socket with `4001 SessionReplaced` | **Fixed locally on AGT branch `azureclaw-meshclient-event-hooks`** (commit `3a96a0f2`): old socket now closed eagerly with code 1000 `session_replaced` before dict overwrite. `finally` cleanup compares socket identity so the new connection survives the old handler's unwind. Code 1000 is intentional — clients won't auto-reconnect-storm against an already-reconnected peer. | ✅ (local AGT branch — **Gap G5**) |
 | Relay-3 | HTTP `/health` endpoint | AGT relay has `/health` at `app.py:87` returning `{"status":"healthy","connected_agents":n}` | ✅ |
 | Relay-4 | Explicit close codes (`4001 SessionReplaced`, `4002 PingTimeout`) so client can suppress reconnect storms | AGT relay uses `4001 first-frame-error`, `4002 missing-from`, `4003 auth-fail` (different semantics — error responses, not lifecycle signals). No SessionReplaced or PingTimeout codes. | ⚠️ different semantics |
 
@@ -367,10 +386,11 @@ Legend:
 
 ### Real gaps blocking the move-upstream scenario (now fixed locally)
 
-Two genuine issues in AGT itself were identified. **Both are now fixed
-on the local AGT branch `azureclaw-meshclient-event-hooks`** (commit
-`d75ea37b`), held locally pending coordination with the AGT team for an
-upstream PR. AGT TS test suite: 398/398 pass.
+Five genuine issues in AGT itself were identified. **All five are now
+fixed on the local AGT branch `azureclaw-meshclient-event-hooks`**
+(commits `d75ea37b` for G1+G2; `3a96a0f2` for G3+G4+G5), held locally
+pending coordination with the AGT team for an upstream PR. AGT TS test
+suite: 405/405 pass. AGT Python relay test suite: 18/18 pass.
 
 #### Gap-G1: receiver-side X3DH bootstrap — ✅ fixed locally
 
@@ -419,35 +439,113 @@ called automatically. Network blips left agents mesh-deaf forever.
 
 Tests: `tests/mesh-client-auto-reconnect.test.ts` (6/6 pass).
 
+#### Gap-G3: decrypt-fail must tear down session — ✅ fixed locally
+
+**Vendored A:** when Double Ratchet decryption fails for an existing
+session, vendored patch #13 deletes the session immediately and fires a
+`session_desync` event. Caller can re-run `establishSession()` to
+recover.
+
+**AGT B (before fix):** `handleMessage` decrypt-catch only fired
+`onError("decrypt", ...)` and left the broken session in
+`this.sessions`. Every subsequent message from that peer failed the
+same way until the process restarted.
+
+**Local fix on AGT branch (commit `3a96a0f2`):**
+- `onError` type union extended with `"session_desync"` kind.
+- Decrypt-catch path: `closeSession(from)` + `knockAccepted.delete(from)`
+  + `onError("session_desync", from, detail)`.
+- Idiomatic recovery: caller listens for `session_desync` and calls
+  `establishSession(peerDid)` to rebuild the channel.
+
+Tests: `tests/mesh-client-session-desync.test.ts` (2/2 pass) plus
+adjustment to event-hooks test for legacy fire-decrypt path.
+
+#### Gap-G4: pre-KNOCK encrypted-message buffer — ✅ fixed locally
+
+**Vendored A:** vendored patch #16 buffers encrypted frames for a peer
+that has not yet completed KNOCK, capped at 5 entries with 3000ms TTL.
+On accepted KNOCK, the buffer drains through the normal decryption
+path. Without this, the relay can reorder frames so the encrypted
+`message` arrives before the matching `knock` and is silently dropped.
+
+**AGT B (before fix):** `knockPending` is only set by the sender. On
+the responder, `handleMessage`'s no-session path returned without
+buffering — first message lost on every fresh handshake under reorder.
+
+**Local fix on AGT branch (commit `3a96a0f2`):**
+- New options: `preKnockBufferSize` (default 5, set 0 to disable),
+  `preKnockBufferTtlMs` (default 3000).
+- Class field `preKnockBuffer: Map<peerDid, Array<{frame, timer}>>`.
+- `handleMessage` no-session path calls `bufferPreKnockFrame`.
+- `handleKnock` accept-path calls `await drainPreKnockBuffer`; reject
+  path calls `dropPreKnockBuffer`.
+- `disconnect()` drains all buffers (no leaked setTimeout handles).
+- Plaintext peers (set via `addPlaintextPeer`) bypass the buffer.
+
+Tests: `tests/mesh-client-pre-knock-buffer.test.ts` (5/5 pass).
+
+#### Gap-G5: eager ghost-connection close on relay rebind — ✅ fixed locally
+
+**Vendored A:** vendored relay patch #2 closes the old WebSocket
+explicitly with code `4001 SessionReplaced` when a new connection for
+the same DID arrives. Old client cannot route messages anymore;
+operational visibility on rebind.
+
+**AGT B (before fix):** `relay/app.py:130` overwrote
+`self._connections[agent_did]` without closing the old socket. Stale
+connection lingered until the 90s heartbeat-eviction timer fired —
+messages could be routed to a dead socket for up to 90 seconds.
+
+**Local fix on AGT branch (commit `3a96a0f2`):**
+- Before the dict overwrite, fetch existing entry and call
+  `await existing.ws.close(code=1000, reason="session_replaced")`
+  (best-effort, wrapped in try/except).
+- Code 1000 (Normal Closure) chosen so the OLD client treats it as
+  clean — won't trigger a G2 auto-reconnect race against the NEW
+  client (which is the same agent that just rebound).
+- `finally` cleanup compares socket identity (`current.ws is ws`) so
+  the old socket's handler-unwind doesn't accidentally delete the new
+  connection's entry.
+
+Tests: `tests/test_relay.py::TestGhostConnectionCleanup` (1/1 pass);
+full relay test suite 18/18 pass.
+
 ### Soft / minor
 
-- **Relay-2 (slower ghost cleanup):** AGT will keep stale connections
-  for up to 90s before the heartbeat check evicts them. Vendored closes
-  immediately with `4001`. Acceptable for now; would be a nice-to-have
-  upstream improvement.
 - **Relay-4 (close-code semantics):** AGT uses `4001-4003` for protocol
-  errors, not lifecycle signals. Clients cannot distinguish supersede
-  from network drop. With G2 now fixed, the gap is reduced to a
-  storm-suppression hint rather than a functional issue.
+  errors, not lifecycle signals. With G5 now fixed (code 1000 for
+  ghost-replace) and G2 fixed (auto-reconnect), the close-code semantic
+  gap reduces to a non-issue for the supersede case. Vendored's
+  `4002 PingTimeout` distinction remains unmapped — clients can't
+  tell a heartbeat-timeout drop apart from a network drop, but both
+  paths are handled identically (G2 reconnect).
 - **SDK-#8 fast-fail handshake edge:** AGT resolves the connect promise
   inside `ws.onopen` even if `ws.onclose` fires immediately after. Defensive
   fix: only resolve once the relay's first `connected` ack arrives.
+- **SDK-#18 advanced fingerprint rebuild:** simpler `closeSession` +
+  caller-initiated re-establish (G3) covers the recovery path. The
+  vendored transactional candidate-session swap is only required when
+  every message re-attaches X3DH (vendored patch #15) — AGT's
+  KNOCK-once model doesn't need it.
 
 ### Summary
 
 | Class | Count | Status |
 |---|---|---|
-| AGT already has it (✅) | 8 | No action needed |
+| AGT already has it (✅) | 12 | No action needed (#1, #2, #3, #4a, #5, #10, #11, #17, Relay-3, Registry-1, Registry-2, Registry-4) |
 | Adapter responsibility (✋) | 3 | Landed in this commit (#7, #12); #6 was already correct in adapter |
-| Different model, equivalent (➖ / ⚠️) | 5 | Documented; no functional regression expected |
-| Real gaps in AGT — fixed on local branch (✅ local) | **2** | **G1** + **G2** — `azureclaw-meshclient-event-hooks` `d75ea37b`, pending upstream PR |
+| Different model, equivalent (➖ / ⚠️) | 7 | Documented; no functional regression expected (#8 edge, #14 dist-only, #15 KNOCK-once, #18 simpler, Relay-1 token-auth, Relay-4 close-codes, Registry-3 store impl) |
+| Real gaps in AGT — fixed on local branch (✅ local) | **5** | **G1 + G2** (`d75ea37b`), **G3 + G4 + G5** (`3a96a0f2`) — `azureclaw-meshclient-event-hooks`, pending upstream PR |
 
-The 2 real gaps (G1, G2) and the 3 diagnostic event hooks are all
-implemented on the local AGT branch `azureclaw-meshclient-event-hooks`
-(commits `e5f4346f` for hooks, `d75ea37b` for G1+G2). The branch is
-held locally — NOT pushed — pending coordination with the AGT team for
-an upstream PR. From AzureClaw's perspective, AGT is now
-feature-complete for the upstream-only scenario.
+The 5 real gaps and the 3 diagnostic event hooks are all implemented on
+the local AGT branch `azureclaw-meshclient-event-hooks` (commits
+`e5f4346f` for hooks, `d75ea37b` for G1+G2, `3a96a0f2` for G3+G4+G5).
+The branch is held locally — NOT pushed — pending coordination with the
+AGT team for an upstream PR. From AzureClaw's perspective, AGT is now
+feature-complete for the upstream-only scenario, including chunked
+file-transfer reliability (G3 + G4 are required for robust
+mesh_file_transfer under decrypt-fail and frame-reorder conditions).
 
 ### Adapter-side fixes landed in this commit
 
