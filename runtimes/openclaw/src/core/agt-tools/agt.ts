@@ -148,6 +148,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const status: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+      // routerCall does NOT throw on HTTP 4xx — it resolves with the parsed
+      // error body. When the sub-agent pod/container is gone the router
+      // returns 404 with { error: "Container '<name>' not found..." }. Without
+      // this check, status?.phase is undefined → "Unknown" → not in
+      // POD_DEAD_PHASES → the mesh_send retry loop spins forever polling
+      // /v1/discover every 2s for a dead peer, blocking the LLM event loop.
+      if (status && typeof status === "object" && typeof status.error === "string" && !status.phase) {
+        const errMsg: string = status.error;
+        if (/not found|no such container|HTTP 404/i.test(errMsg)) {
+          return { alive: false, reason: "sub-agent sandbox not found (deleted or never spawned)" };
+        }
+      }
       const phase: string = status?.phase || "Unknown";
       if (POD_DEAD_PHASES.has(phase)) {
         return { alive: false, phase, reason: `sub-agent phase is ${phase}` };
@@ -551,7 +563,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               break;
             } catch (e: any) {
               const msg = (e && e.message) || "";
-              if (msg.includes("prekey")) {
+              // Only retry on transient "prekey bundle not yet published"
+              // errors — NOT on permanent X3DH/Signal failures (signature
+              // verification, bundle malformed, identity-key mismatch).
+              // Those need to bubble up so the caller sees the real cause
+              // instead of an infinite "waiting for prekeys" heartbeat.
+              const isTransientMissingBundle =
+                /no\s+pre[-_]?key\s+bundle/i.test(msg) ||
+                /prekey\s*bundle\s+not\s+(yet\s+)?(published|found|available)/i.test(msg) ||
+                /pre[-_]?keys?\s+not\s+(yet\s+)?(published|found|available)/i.test(msg) ||
+                /waiting\s+for\s+prekeys/i.test(msg) ||
+                /404/.test(msg);
+              if (isTransientMissingBundle) {
                 // Child registered but hasn't uploaded prekeys yet — keep waiting.
                 if (Date.now() >= nextHeartbeatAt) {
                   const elapsed = Math.round((Date.now() - waitStart) / 1000);
