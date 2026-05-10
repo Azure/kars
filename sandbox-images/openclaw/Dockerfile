@@ -52,11 +52,24 @@ RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
 
 # Optional: install upstream Microsoft AGT SDK when MESH_PROVIDER=agt build arg
 # is passed. Not installed by default so vendored builds stay slim and offline.
+# AGT_SDK_TARBALL: when set (dev mode pinning a locally-patched AGT branch) the
+# build context must contain `.agt-sdk/<tarball-name>`. The CLI stages this for
+# `azureclaw dev --mesh-provider agt --build`. The directory always exists with
+# at least a .keep file so the COPY never fails.
 ARG MESH_PROVIDER=vendored
+ARG AGT_SDK_TARBALL=
+COPY .agt-sdk/ /opt/azureclaw-agt-sdk/
 RUN if [ "$MESH_PROVIDER" = "agt" ]; then \
       cd /opt/azureclaw-plugin && \
-      npm install --omit=dev --ignore-scripts --no-save \
-        '@microsoft/agent-governance-sdk@^3.5.0' ; \
+      if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ]; then \
+        echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
+        npm install --omit=dev --ignore-scripts --no-save \
+          "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ; \
+      else \
+        echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
+        npm install --omit=dev --ignore-scripts --no-save \
+          '@microsoft/agent-governance-sdk@^3.5.0' ; \
+      fi ; \
     else \
       echo "MESH_PROVIDER=$MESH_PROVIDER — skipping @microsoft/agent-governance-sdk install" ; \
     fi
