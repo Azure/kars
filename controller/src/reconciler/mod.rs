@@ -138,10 +138,10 @@ struct Context {
     /// - `dev_copilot_github_token`: GitHub PAT for the GitHub Copilot
     ///   path (`inference-router/src/copilot_auth.rs`); only meaningful
     ///   when `dev_provider == "github-copilot"`.
-    /// All three are populated from the controller's own env at startup,
-    /// which the local-k8s overlay sources from a `azureclaw-dev-creds`
-    /// Secret in the `azureclaw-system` namespace. See
-    /// `cli/src/commands/dev/local-k8s.ts`.
+    ///   All three are populated from the controller's own env at startup,
+    ///   which the local-k8s overlay sources from a `azureclaw-dev-creds`
+    ///   Secret in the `azureclaw-system` namespace. See
+    ///   `cli/src/commands/dev/local-k8s.ts`.
     dev_openai_api_key: String,
     dev_provider: String,
     dev_copilot_github_token: String,
@@ -2337,7 +2337,7 @@ pub async fn run(client: Client) -> Result<()> {
     if !dev_openai_api_key.is_empty() || !dev_provider.is_empty() {
         tracing::info!(
             provider = %if dev_provider.is_empty() { "azure-openai" } else { dev_provider.as_str() },
-            copilot_token = dev_copilot_github_token.is_empty().then_some("absent").unwrap_or("present"),
+            copilot_token = if dev_copilot_github_token.is_empty() { "absent" } else { "present" },
             "Dev-mode inference creds detected — router sidecars will receive API-key auth instead of workload identity"
         );
     }
