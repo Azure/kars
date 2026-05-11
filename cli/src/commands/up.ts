@@ -46,6 +46,7 @@ export function upCommand(): Command {
     .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
     .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
+    .option("-m, --mesh-provider <provider>", "Mesh stack to deploy: 'vendored' (default) or 'agt'. Selects which deploy/agentmesh-*.yaml manifest to install and which mesh.provider value to set on the helm release.", "vendored")
     // ── Output / lifecycle ────────────────────────────────────────────
     .option("--dry-run", "Show what would be done without executing", false)
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
@@ -764,6 +765,7 @@ Auto-resume:
           "--set", `runtimes.pydanticAi.image=${acrLoginServer}/azureclaw-runtime-pydantic-ai:latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
+          "--set", `mesh.provider=${(options.meshProvider as string | undefined) ?? "vendored"}`,
           "--wait",
           "--timeout", "5m",
           // Take ownership of fields previously written by `kubectl apply`
@@ -863,7 +865,11 @@ Auto-resume:
         const { deployAgentMesh } = await import("./up/agentmesh_deploy.js");
         const meshResult = await deployAgentMesh(
           { repoRoot, acr, acrLoginServer, baseName, rg, stepper },
-          { globalRegistry: options.globalRegistry, exposeRegistry: options.exposeRegistry },
+          {
+            globalRegistry: options.globalRegistry,
+            exposeRegistry: options.exposeRegistry,
+            meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "vendored",
+          },
         );
         const registryMode = meshResult.registryMode;
         const globalRegistryUrl = meshResult.globalRegistryUrl;
