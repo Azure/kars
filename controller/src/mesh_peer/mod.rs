@@ -15,8 +15,8 @@
 //! for offload data transfer is handled by the offload sandbox itself.
 
 use anyhow::{Context as _, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
@@ -306,7 +306,10 @@ async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> 
             let public_key = BASE64_URL.encode(pk_bytes);
 
             let mut metadata = std::collections::HashMap::new();
-            metadata.insert("display_name".to_string(), "azureclaw-controller".to_string());
+            metadata.insert(
+                "display_name".to_string(),
+                "azureclaw-controller".to_string(),
+            );
             // Carry the vendored-style AMID as metadata so legacy UI/tools
             // that still surface it have something to display. The AGT
             // primary identifier is `did`.
@@ -969,10 +972,7 @@ async fn connect_and_listen(
                 // leave `last_heartbeat` un-updated, eventually evicting us.
                 Provider::Agt => serde_json::to_string(&AgtFrame::Heartbeat).unwrap_or_default(),
             };
-            if ping_tx
-                .send(WsMessage::Text(frame_json.into()))
-                .is_err()
-            {
+            if ping_tx.send(WsMessage::Text(frame_json.into())).is_err() {
                 break;
             }
         }
@@ -1177,7 +1177,9 @@ async fn handle_message(
     text: &str,
 ) -> Result<()> {
     match state.provider {
-        Provider::Vendored => handle_vendored_frame(state, out_tx, connected, terminate_tx, text).await,
+        Provider::Vendored => {
+            handle_vendored_frame(state, out_tx, connected, terminate_tx, text).await
+        }
         Provider::Agt => handle_agt_frame(state, out_tx, terminate_tx, text).await,
     }
 }
@@ -1245,7 +1247,9 @@ async fn handle_agt_frame(
         }
     };
     match frame {
-        AgtFrame::Message { from, id, payload, .. } => {
+        AgtFrame::Message {
+            from, id, payload, ..
+        } => {
             // The AGT relay forwards `message` frames verbatim, so `from`
             // is whatever the sender claimed. AGT's trust model assumes
             // the relay layer is honest (the relay sees the WebSocket-level

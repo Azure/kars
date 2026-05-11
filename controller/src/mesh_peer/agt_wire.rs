@@ -126,9 +126,7 @@ mod tests {
 
     #[test]
     fn ack_frame_roundtrip() {
-        let f = AgtFrame::Ack {
-            id: "msg-7".into(),
-        };
+        let f = AgtFrame::Ack { id: "msg-7".into() };
         let json = serde_json::to_string(&f).unwrap();
         assert_eq!(json, r#"{"type":"ack","id":"msg-7"}"#);
     }

@@ -397,10 +397,7 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
         let url = if provider == "agt" {
             format!("{}/v1/agents/{}", base, agent_amid)
         } else {
-            format!(
-                "{}/v1/registry/reputation/score?amid={}",
-                base, agent_amid
-            )
+            format!("{}/v1/registry/reputation/score?amid={}", base, agent_amid)
         };
         match state
             .client
