@@ -988,6 +988,23 @@ Notes:
           stepper.step("Connecting to global registry...");
           const registryUrl = options.globalRegistry as string;
 
+          // Validate URL scheme — registryUrl may originate from a config file
+          // or env var; reject anything that isn't http(s) before issuing
+          // outbound requests (CodeQL js/file-access-to-http hardening).
+          {
+            let parsed: URL;
+            try {
+              parsed = new URL(registryUrl);
+            } catch {
+              throw new Error(`--global-registry must be a valid URL: ${registryUrl}`);
+            }
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+              throw new Error(
+                `--global-registry must use http(s); got ${parsed.protocol}`,
+              );
+            }
+          }
+
           // Rewrite localhost URLs for Docker containers — localhost inside
           // the container refers to the container itself, not the host.
           const containerRegistryUrl = registryUrl.replace(

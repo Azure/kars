@@ -1084,6 +1084,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
         }
 
+        // Strict-mode tool definitions: when the controller is launched with
+        // AZURECLAW_STRICT_TOOLS=1 (e.g. via the Helm chart's `strictTools`
+        // value), propagate it into every sandbox's openclaw container.
+        // The runtime additionally gates strict mode on (a) non-slim provider
+        // and (b) GPT-family model — see runtimes/openclaw/src/core/agt-task-tools.ts
+        // applyStrict(). Anthropic / Claude / Gemini deployments via Foundry's
+        // OpenAI-compat shim are auto-excluded at the runtime layer regardless
+        // of this flag, so it's safe to enable cluster-wide. Default OFF to
+        // preserve byte-identical behaviour for existing deployments.
+        if let Ok(strict_tools) = std::env::var("AZURECLAW_STRICT_TOOLS")
+            && (strict_tools == "1" || strict_tools.eq_ignore_ascii_case("true"))
+            && is_openclaw
+        {
+            openclaw_env.push(json!({"name": "AZURECLAW_STRICT_TOOLS", "value": "1"}));
+        }
+
         // Phase 4 of the agentmesh provider swap: propagate the controller's
         // AZURECLAW_MESH_PROVIDER (set by Helm value `mesh.provider`) into
         // every sandbox pod. The mesh-plugin transport factory reads this
@@ -1105,7 +1121,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // (AGT only accepts `/ws`) → relay returns 403 Forbidden in a
         // tight reconnect loop. Push the same normalized value into the
         // router env so both containers agree on the provider.
-        router_agt_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
+        router_agt_env
+            .push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
@@ -1130,16 +1147,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 // display_name. Without this, `mesh_send(to_agent="parent")`
                 // hits the registry as the capability "parent" and resolves
                 // to 0 agents, breaking back-replies on AGT.
-                if let Some((first_name, _)) = peers
-                    .split(',')
-                    .next()
-                    .and_then(|p| p.split_once(':'))
+                if let Some((first_name, _)) =
+                    peers.split(',').next().and_then(|p| p.split_once(':'))
                 {
                     let first_name = first_name.trim();
                     if !first_name.is_empty() {
-                        openclaw_env.push(
-                            json!({"name": "PARENT_SANDBOX", "value": first_name}),
-                        );
+                        openclaw_env.push(json!({"name": "PARENT_SANDBOX", "value": first_name}));
                     }
                 }
             }
