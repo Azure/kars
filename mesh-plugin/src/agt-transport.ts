@@ -135,6 +135,13 @@ interface AgtMeshClient {
   onE2EVerified?: (
     handler: (peerAmid: string, isFirstPeer: boolean) => void,
   ) => void;
+  /**
+   * Fetch peer's prekey bundle from the registry and run X3DH to seed
+   * the Signal session. Idempotent — returns the existing MeshSession
+   * if one is already cached. Required before the first `send()` to a
+   * peer or `client.send()` throws "No encrypted session…".
+   */
+  establishSessionWithPeer: (peerId: string) => Promise<unknown>;
 }
 
 let agtSdkPromise: Promise<AgtSdkModule> | null = null;
@@ -345,6 +352,25 @@ export class AgtTransport implements IMeshTransport {
 
   async send(toAmid: string, payload: unknown): Promise<string | undefined> {
     if (!this.client) throw new Error("AgtTransport not connected");
+    // AGT MeshClient.send() throws "No encrypted session — call establishSession() first"
+    // if no Signal session exists for the peer. Unlike the vendored SDK, send()
+    // does NOT auto-bootstrap the X3DH handshake. We do it here so callers
+    // (azureclaw_mesh_send, sub-agent spawn, etc.) see vendored-equivalent
+    // send-with-first-contact semantics. establishSessionWithPeer() is
+    // idempotent — returns the cached MeshSession when one already exists,
+    // so this is cheap on the hot path.
+    if (!this._plaintextPeers.has(toAmid)) {
+      try {
+        await this.client.establishSessionWithPeer(toAmid);
+      } catch (e: any) {
+        // Surface the real error verbatim — the caller's retry loop matches
+        // on /prekey/i, so a generic "prekey bootstrap failed" wrapper hides
+        // permanent errors (bad-key / X3DH failures) inside an infinite poll.
+        const inner = e?.message || String(e);
+        try { console.error(`[agt-transport] establishSessionWithPeer(${toAmid.slice(0, 12)}…) failed: ${inner}`); } catch { /* logger may be off */ }
+        throw e instanceof Error ? e : new Error(inner);
+      }
+    }
     await this.client.send(toAmid, payload);
     return undefined;
   }

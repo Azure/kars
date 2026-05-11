@@ -602,12 +602,27 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
 }
 
 /// Look up an agent's AMID from the registry by searching for its sandbox name.
+///
+/// Provider-aware: uses AGT's `/v1/discover` when `AZURECLAW_MESH_PROVIDER=agt`,
+/// otherwise the vendored `/v1/registry/search` path. Without this dispatch
+/// the AGT registry returns 404 to every operator-panel/reputation refresh
+/// (~once/30s per agent) — cosmetic 404 spam in registry logs and a wasted
+/// round-trip on every call.
 pub(super) async fn lookup_parent_amid(
     client: &reqwest::Client,
     registry_url: &str,
     sandbox_name: &str,
 ) -> Option<String> {
     let base = registry_url.trim_end_matches('/');
+    let provider = std::env::var("AZURECLAW_MESH_PROVIDER")
+        .unwrap_or_else(|_| "vendored".into())
+        .trim()
+        .to_lowercase();
+
+    if provider == "agt" {
+        return lookup_parent_amid_agt(client, base, sandbox_name).await;
+    }
+
     let resp = client
         .get(&format!(
             "{}/v1/registry/search?capability={}",
@@ -635,6 +650,74 @@ pub(super) async fn lookup_parent_amid(
             })
             .and_then(|a| a.get("amid").and_then(|v| v.as_str()).map(String::from))
     })
+}
+
+/// AGT registry variant: `GET /v1/discover?capability=<name>` returns
+/// `{results: [{did, capabilities, last_seen, ...}, ...]}` — display name lives
+/// in the per-agent record, not in the discover hit, so we have to fetch each
+/// candidate's `/v1/agents/{did}` record to disambiguate. In practice the
+/// registry returns at most a handful of hits for any given sandbox name.
+async fn lookup_parent_amid_agt(
+    client: &reqwest::Client,
+    base: &str,
+    sandbox_name: &str,
+) -> Option<String> {
+    let resp = client
+        .get(&format!(
+            "{}/v1/discover?capability={}&limit=10",
+            base, sandbox_name
+        ))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let hits = body.get("results")?.as_array()?.clone();
+
+    let mut best: Option<(String, String)> = None;
+    for hit in hits.iter() {
+        let Some(did) = hit.get("did").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let rec_resp = client
+            .get(&format!("{}/v1/agents/{}", base, did))
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await;
+        let display_ok = match rec_resp {
+            Ok(r) if r.status().is_success() => r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|rec| {
+                    rec.get("metadata")
+                        .and_then(|m| m.get("display_name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s == sandbox_name)
+                })
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !display_ok {
+            continue;
+        }
+        let last_seen = hit
+            .get("last_seen")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        match &best {
+            None => best = Some((did.to_string(), last_seen)),
+            Some((_, prev_seen)) if last_seen > *prev_seen => {
+                best = Some((did.to_string(), last_seen));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(did, _)| did)
 }
 
 /// GET /blocklist/status — blocklist health and domain count.

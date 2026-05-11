@@ -2381,6 +2381,17 @@ let revokeShutdownRegistered = false;
 function registerRevokeShutdownHook(log: { info: (m: string) => void; warn: (m: string) => void }) {
   if (revokeShutdownRegistered) return;
   revokeShutdownRegistered = true;
+  // AGT registry has no `/v1/registry/revoke` endpoint — agents are pruned
+  // via the relay's WS-disconnect path + 90s last_seen filter on the
+  // receiver side. Skip the hook entirely in AGT mode to avoid a 404
+  // (and the 2s shutdown delay it adds) on every pod termination.
+  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "vendored")
+    .trim()
+    .toLowerCase();
+  if (provider === "agt") {
+    log.info("AGT self-revoke hook skipped (no revoke endpoint in AGT registry)");
+    return;
+  }
   let revokeInFlight = false;
   const revoke = async () => {
     if (revokeInFlight) return;
