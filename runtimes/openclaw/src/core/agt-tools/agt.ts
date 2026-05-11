@@ -448,6 +448,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         agentName = "parent";
       }
 
+      // Alias 'parent' → actual parent sandbox display_name. Sub-agent LLMs
+      // routinely call mesh_send(to_agent="parent") for back-replies, but the
+      // AGT registry has no agent named/capability="parent" — discover returns
+      // 0 → "no prekey bundle" → send fails. The parent is the first entry in
+      // AGT_TRUSTED_PEERS (controller-seeded), exposed both as PARENT_SANDBOX
+      // env and as the agt-parent-name Symbol (set during runtime init from
+      // AGT_TRUSTED_PEERS[0]). Skip in offload mode — there 'parent' is a
+      // protocol-level routing token handled by the offload worker, not a
+      // mesh recipient name.
+      if (agentName === "parent" && !process.env.OFFLOAD_REQUEST_ID) {
+        const parentNameSym = (process as any)[Symbol.for("agt-parent-name")];
+        const parentDisplayName = process.env.PARENT_SANDBOX || parentNameSym;
+        if (parentDisplayName && typeof parentDisplayName === "string") {
+          log.info(`azureclaw_mesh_send: alias 'parent' → '${parentDisplayName}'`);
+          agentName = parentDisplayName;
+        }
+      }
+
       // Peer-roster injection (deterministic, parent-side). When we have
       // 2+ spawned siblings, prepend a canonical roster block so the
       // recipient's LLM never has to guess which named peer maps to a role
@@ -1243,6 +1261,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
         log.warn(`azureclaw_mesh_transfer_file: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
         agentName = "parent";
+      }
+
+      // Alias 'parent' → actual parent sandbox display_name (same rationale
+      // as azureclaw_mesh_send above). Without this, file transfers to
+      // 'parent' from regular spawned sub-agents fail with no prekey bundle.
+      if (agentName === "parent" && !process.env.OFFLOAD_REQUEST_ID) {
+        const parentNameSym = (process as any)[Symbol.for("agt-parent-name")];
+        const parentDisplayName = process.env.PARENT_SANDBOX || parentNameSym;
+        if (parentDisplayName && typeof parentDisplayName === "string") {
+          log.info(`azureclaw_mesh_transfer_file: alias 'parent' → '${parentDisplayName}'`);
+          agentName = parentDisplayName;
+        }
       }
 
       if (!deps.meshClient() || !deps.identity()) {

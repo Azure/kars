@@ -1122,6 +1122,26 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             });
             if let Some(peers) = valid_peers {
                 openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+                // The first entry in trusted_peers is the parent (spawner
+                // seeds it that way — see inference-router spawn helper).
+                // Expose it as PARENT_SANDBOX so the openclaw runtime can
+                // alias the literal recipient name 'parent' (which LLMs
+                // routinely use for back-replies) to the parent's real
+                // display_name. Without this, `mesh_send(to_agent="parent")`
+                // hits the registry as the capability "parent" and resolves
+                // to 0 agents, breaking back-replies on AGT.
+                if let Some((first_name, _)) = peers
+                    .split(',')
+                    .next()
+                    .and_then(|p| p.split_once(':'))
+                {
+                    let first_name = first_name.trim();
+                    if !first_name.is_empty() {
+                        openclaw_env.push(
+                            json!({"name": "PARENT_SANDBOX", "value": first_name}),
+                        );
+                    }
+                }
             }
             // Validate registry mode: must be "local" or "global"
             let reg_mode = match governance_config.registry_mode.as_deref() {
