@@ -2847,14 +2847,16 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
-    // Skip Foundry tool catalog when running against GitHub Models. GH Models
-    // has a hard 16k input-token cap per request — registering all 9 Foundry
-    // tools (~25k bytes of schemas + skill prompts) blows past the cap on
-    // every chat turn, surfacing as alternating 413 errors. The Foundry tools
-    // require a real Azure project anyway, so they're pure dead weight in
-    // GH Models mode. Keep agt-governance + azureclaw-spawn (model-agnostic).
-    const ghModelsMode = process.env.AZURECLAW_PROVIDER === "github-models";
-    if (!ghModelsMode) {
+    // Skip Foundry tool catalog when running against GH-token providers
+    // (`github-models` or `github-copilot`). Foundry tools require an Azure
+    // project the GH-token paths don't have, so registering them is pure dead
+    // weight: in `github-models` mode they blow past the 16k input-token cap;
+    // in `github-copilot` mode they bloat sub-agent prompts (~25k bytes of
+    // schemas) and tempt the model to call tools that will 404. Keep
+    // agt-governance + azureclaw-spawn (model-agnostic).
+    const provider = process.env.AZURECLAW_PROVIDER;
+    const ghTokenMode = provider === "github-models" || provider === "github-copilot";
+    if (!ghTokenMode) {
       registerFoundryTools(api, {
         log,
         config,
@@ -2862,7 +2864,7 @@ const azureClawPlugin = definePluginEntry({
       });
       if (!bannerAlreadyPrinted) log.info("Foundry tools registered: foundry_code_execute, foundry_image_generation, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
     } else if (!bannerAlreadyPrinted) {
-      log.info("GitHub Models mode: Foundry tool catalog skipped (16k token cap; Foundry skills require an Azure project)");
+      log.info(`${provider} mode: Foundry tool catalog skipped (no Foundry project bound; skills require an Azure project)`);
     }
 
     registerOpenClawCommands(api, {

@@ -73,7 +73,8 @@ export async function processTaskWithTools(
   const model = process.env.OPENCLAW_MODEL || process.env.MODEL || "gpt-4.1";
 
   const tools = getTaskTools();
-  const slim = process.env.AZURECLAW_PROVIDER === "github-models";
+  const provider = process.env.AZURECLAW_PROVIDER;
+  const slim = provider === "github-models" || provider === "github-copilot";
 
   const offloadToolBlock = slim
     ? "- file_write: write text content to a file (preferred over shell redirection, which is blocked)\n- exec_command: run shell commands (read-only ops; avoid `>`, `>>`, `<<`, `<<<` — use file_write instead). Run Python with `python3 -c '...'` or by writing a script via file_write then executing it.\n- http_fetch: HTTP requests through the egress-controlled security proxy\n- web_search: real-time web search via DuckDuckGo (egress-proxied; returns title/url/snippet list)\n- memory: local persistent memory (operations: 'update' to store a fact, 'search' to query, 'list' to dump). Backed by /sandbox/.openclaw/memory.json — per-container, no peer sync.\n- mesh_send: send an E2E encrypted message to the parent (to_agent is locked to 'parent' in offload mode)\n- mesh_inbox: check for incoming messages from the parent (pass `block_until_message=true` to wait server-side)\n- discover: list agents in the mesh (informational)"
@@ -88,7 +89,7 @@ export async function processTaskWithTools(
     : "Offload-mode conventions:\n1. Outbound mesh messages always go to 'parent'. The mesh_send tool rewrites any other to_agent to 'parent'.\n2. Place every output artifact (markdown, JSON, CSV, HTML, PDF, PNG, TXT) in /sandbox/.openclaw/workspace/ via the file_write tool. Files there are harvested and shipped back at offload_done.\n3. foundry_code_execute writes to Foundry's ephemeral /mnt/data/. The wrapper auto-downloads anything saved there and surfaces the local paths under `<downloaded_files>`. Use those `path` values directly. If a file you expected is missing, retry with foundry_download_file(file_id, container_id).\n4. Execute the task immediately — no preamble, just act. Be concise.";
 
   const slimSubAgentNote = slim
-    ? "\n\nMode note (GitHub Models slim): you are running on GitHub Models. The Foundry tool catalog is NOT available, but you have full equivalents: web_search (DuckDuckGo) for live information, exec_command for Python and shell, http_fetch for any HTTP, memory for local persistence, and the full mesh toolset. Never reply that a task is impossible because of mode limitations — do the work with the tools you have."
+    ? `\n\nMode note (${provider === "github-copilot" ? "GitHub Copilot" : "GitHub Models"} slim): you are running on a GitHub-token provider. The Foundry tool catalog is NOT available, but you have full equivalents: web_search (DuckDuckGo) for live information, exec_command for Python and shell, http_fetch for any HTTP, memory for local persistence, and the full mesh toolset. Never reply that a task is impossible because of mode limitations — do the work with the tools you have.`
     : "";
 
   const offloadPrompt =

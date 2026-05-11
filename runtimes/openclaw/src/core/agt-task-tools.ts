@@ -264,16 +264,19 @@ export const TASK_TOOLS: any[] = [
 /**
  * Returns the tool list visible to a sub-agent's LLM.
  *
- * In GitHub Models slim mode (`AZURECLAW_PROVIDER=github-models`), Foundry-only
- * tools (foundry_web_search, foundry_code_execute, foundry_file_search,
- * foundry_memory, foundry_image_generation, foundry_download_file) are hidden
- * because the inference router has no Foundry endpoint to call. A
- * DuckDuckGo-backed `web_search` tool is appended so the model still has live
- * web access.
+ * In GH-token slim modes (`AZURECLAW_PROVIDER=github-models` or
+ * `github-copilot`), Foundry-only tools (foundry_web_search,
+ * foundry_code_execute, foundry_file_search, foundry_memory,
+ * foundry_image_generation, foundry_download_file) are hidden because the
+ * inference router has no Foundry endpoint to call — exposing them just
+ * burns context with verbose JSON-schema and tempts the model to call tools
+ * that will 404. A DuckDuckGo-backed `web_search` tool is appended so the
+ * model still has live web access.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getTaskTools(): any[] {
-  if (process.env.AZURECLAW_PROVIDER === "github-models") {
+  const provider = process.env.AZURECLAW_PROVIDER;
+  if (provider === "github-models" || provider === "github-copilot") {
     const FOUNDRY = new Set([
       "foundry_web_search",
       "foundry_code_execute",
