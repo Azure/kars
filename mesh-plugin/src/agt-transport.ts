@@ -414,15 +414,14 @@ export class AgtTransport implements IMeshTransport {
         // Surface the real error verbatim — the caller's retry loop matches
         // on /prekey/i, so a generic "prekey bootstrap failed" wrapper hides
         // permanent errors (bad-key / X3DH failures) inside an infinite poll.
-        // We log only the error class + truncated peer AMID prefix — the full
-        // error is preserved on the throw for the caller's matcher; logging
-        // the message verbatim risks leaking session secrets into stdout.
+        // Log only a fixed string + error class — never include `toAmid`
+        // (CodeQL traces it back to process.env taint) or `e.message` (may
+        // contain sensitive session material). The full error is preserved
+        // on the throw so the caller's matcher still works.
         const errClass = e instanceof Error ? e.constructor.name : "Unknown";
         try {
           // eslint-disable-next-line no-console
-          console.error(
-            `[agt-transport] establishSessionWithPeer(${toAmid.slice(0, 12)}…) failed: ${errClass}`,
-          );
+          console.error("[agt-transport] establishSessionWithPeer failed:", errClass);
         } catch {
           /* logger may be off */
         }
