@@ -363,6 +363,17 @@ export class AgtTransport implements IMeshTransport {
           // Best-effort. A dead WS will be detected by onClose and
           // trigger reconnect; the next connect resets this loop.
         }
+        // Registry presence ping. The AGT registry has no
+        // server-side path that updates `last_seen` (see
+        // agentmesh/registry/app.py — `update_last_seen()` exists in
+        // store.py but is dead code in production). Without this,
+        // every alive agent looks "stale" 90s after spawn and gets
+        // filtered out of discover. Required for sibling
+        // peer-discovery in the openclaw runtime (azureclaw_discover
+        // tool, runtimes/openclaw/src/core/agt-tools/agt.ts:~1579).
+        // Best-effort; swallow errors so a flaky registry never
+        // brings down message delivery.
+        void this.pingRegistryPresence();
       }, 30_000);
       // Don't keep the Node event loop alive solely for the ticker.
       const timer = this.heartbeatTimer as unknown as { unref?: () => void };
@@ -784,6 +795,44 @@ export class AgtTransport implements IMeshTransport {
         `[agt-transport] submitReputation network error: ${(err as Error).message}`,
       );
       return false;
+    }
+  }
+
+  /**
+   * Bump our own `last_seen` on the AGT registry so we remain
+   * discoverable. AGT registry has no autonomous presence model and
+   * never updates `last_seen` after register, so without this every
+   * agent silently goes stale 90s after spawn (see app.py heartbeat
+   * endpoint comment + agt-tools/agt.ts STALE_AFTER_MS).
+   *
+   * Best-effort: 404 is treated as fatal-once (registry forgot us —
+   * our register-on-reconnect path will fix it on next connect),
+   * everything else is logged + swallowed.
+   */
+  private async pingRegistryPresence(): Promise<void> {
+    if (!this.client?.isConnected) return;
+    const did = this.options.identity.agentId;
+    if (!did) return;
+    const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    try {
+      const resp = await fetch(
+        `${registryUrl}/v1/agents/${encodeURIComponent(did)}/heartbeat`,
+        { method: "POST" },
+      );
+      if (!resp.ok && resp.status !== 404) {
+        // 404 is benign — happens during the small window between
+        // a registry restart and our re-register. Anything else is
+        // worth surfacing once.
+        console.warn(
+          `[agt-transport] registry heartbeat ${resp.status} ${resp.statusText}`,
+        );
+      }
+    } catch (err) {
+      // Network error — registry pod restart, transient DNS, etc.
+      // Mesh send keeps working; the next tick will retry.
+      console.warn(
+        `[agt-transport] registry heartbeat error: ${(err as Error).message}`,
+      );
     }
   }
 
