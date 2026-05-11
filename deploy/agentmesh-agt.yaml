@@ -61,12 +61,12 @@ spec:
               value: "info"
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8082
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8082
             initialDelaySeconds: 10
             periodSeconds: 30
@@ -129,12 +129,12 @@ spec:
               value: "true"
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8083
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8083
             initialDelaySeconds: 5
             periodSeconds: 30

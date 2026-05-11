@@ -219,6 +219,139 @@ export class MeshConnection implements IMeshTransport {
     c?.sendHeartbeat?.();
   }
 
+  // ── Reputation / lookup / KNOCK toggle (delegate to vendored SDK) ────
+
+  /**
+   * Look up a peer's registry record. Vendored SDK exposes `lookup(amid)`
+   * directly; we forward any rejection as `null` so callers can treat
+   * "registry down" and "unknown amid" identically.
+   */
+  async lookup(
+    amid: string,
+  ): Promise<{ reputationScore?: number; displayName?: string; capabilities?: string[] } | null> {
+    const c = this.client as unknown as {
+      lookup?: (a: string) => Promise<unknown>;
+    } | null;
+    if (!c?.lookup) return null;
+    try {
+      const r = (await c.lookup(amid)) as Record<string, unknown> | null;
+      if (!r) return null;
+      return {
+        reputationScore:
+          typeof r.reputationScore === "number"
+            ? (r.reputationScore as number)
+            : undefined,
+        displayName:
+          typeof r.displayName === "string"
+            ? (r.displayName as string)
+            : typeof r.display_name === "string"
+              ? (r.display_name as string)
+              : undefined,
+        capabilities: Array.isArray(r.capabilities)
+          ? (r.capabilities as string[])
+          : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** IMeshTransport — forward reputation submission to the vendored SDK. */
+  async submitReputation(
+    toAmid: string,
+    sessionId: string,
+    score: number,
+    tags: string[] = [],
+  ): Promise<boolean> {
+    const c = this.client as unknown as {
+      submitReputation?: (
+        a: string,
+        s: string,
+        n: number,
+        t?: string[],
+      ) => Promise<boolean>;
+    } | null;
+    if (!c?.submitReputation) return false;
+    try {
+      return await c.submitReputation(toAmid, sessionId, score, tags);
+    } catch {
+      return false;
+    }
+  }
+
+  /** IMeshTransport — toggle KNOCK enforcement on the vendored client. */
+  enableKnockEnforcement(): void {
+    const c = this.client as unknown as {
+      enableKnockEnforcement?: () => void;
+    } | null;
+    c?.enableKnockEnforcement?.();
+  }
+
+  // ── Diagnostic event hooks ──────────────────────────────────────────
+  //
+  // Vendored AgentMeshClient already exposes onError/onE2EVerified/onDisconnect.
+  // We capture whatever the SDK gives us, normalise the shape, and replay
+  // into the caller's handler. If the SDK ever drops one of these methods
+  // we silently no-op rather than break the Phase 2 wiring.
+
+  private _errorHandlers: Array<(kind: string, fromAmid: string, detail: string) => void> = [];
+  private _e2eVerifiedHandlers: Array<(peerAmid: string, isFirstPeer: boolean) => void> = [];
+  private _disconnectHandlers: Array<(reason: "client" | "server" | "ws-error", code?: number) => void> = [];
+  private _hooksRegistered = false;
+
+  onError(handler: (kind: string, fromAmid: string, detail: string) => void): void {
+    this._errorHandlers.push(handler);
+    this._registerHooksOnce();
+  }
+
+  onE2EVerified(handler: (peerAmid: string, isFirstPeer: boolean) => void): void {
+    this._e2eVerifiedHandlers.push(handler);
+    this._registerHooksOnce();
+  }
+
+  onDisconnect(handler: (reason: "client" | "server" | "ws-error", code?: number) => void): void {
+    this._disconnectHandlers.push(handler);
+    this._registerHooksOnce();
+  }
+
+  /**
+   * Bind to the SDK's callbacks at most once. Safe to call before connect()
+   * — when the SDK client is created in doConnect(), it'll call back into
+   * `_bindSdkHooks` once available. We re-call this from doConnect() too.
+   */
+  private _registerHooksOnce(): void {
+    if (this._hooksRegistered || !this.client) return;
+    this._bindSdkHooks();
+  }
+
+  private _bindSdkHooks(): void {
+    if (this._hooksRegistered || !this.client) return;
+    const c = this.client as unknown as {
+      onError?: (h: (k: string, f: string, d: string) => void) => void;
+      onE2EVerified?: (h: (p: string, first: boolean) => void) => void;
+      onDisconnect?: (h: (r: string, code?: number) => void) => void;
+    };
+    c.onError?.((kind, from, detail) => {
+      for (const h of this._errorHandlers) {
+        try { h(kind, from, detail); } catch { /* swallow */ }
+      }
+    });
+    c.onE2EVerified?.((peer, first) => {
+      for (const h of this._e2eVerifiedHandlers) {
+        try { h(peer, first); } catch { /* swallow */ }
+      }
+    });
+    c.onDisconnect?.((reason, code) => {
+      const r = (reason === "client" || reason === "server" || reason === "ws-error")
+        ? reason
+        : "server";
+      for (const h of this._disconnectHandlers) {
+        try { h(r, code); } catch { /* swallow */ }
+      }
+    });
+    this._hooksRegistered = true;
+  }
+
   // ── Connect ──────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
@@ -261,6 +394,10 @@ export class MeshConnection implements IMeshTransport {
     this.client.onMessage((from: string, content: unknown) => {
       this.onClientMessage(from, content);
     });
+
+    // Bind any pre-registered diagnostic hooks (onError, onE2EVerified,
+    // onDisconnect) now that the SDK client exists.
+    this._bindSdkHooks();
 
     // Auto-accept KNOCKs by default. Higher-level gating runs through the
     // registered knockHandlers (added via IMeshTransport.onKnock); if any

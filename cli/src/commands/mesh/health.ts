@@ -61,32 +61,58 @@ export async function findDuplicateListeners(ports: number[]): Promise<Array<{ p
   return results;
 }
 
-/** Check registry health via HTTP /v1/health endpoint. */
+/** Check registry health via HTTP /health endpoint.
+ *
+ * Path compat: AGT registry only exposes `/health`; the vendored Rust
+ * registry exposes both `/health` and `/v1/health`. Hitting `/health`
+ * works against both, so probe that first. We still display the vendored
+ * `agents_registered`/`agents_online` counters when present (AGT returns
+ * just `{status, service}`).
+ */
 export async function checkRegistryHealth(port: number): Promise<boolean> {
-  try {
-    const resp = await fetch(`http://localhost:${port}/v1/health`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (resp.ok) {
+  for (const probePath of ["/health", "/v1/health"]) {
+    try {
+      const resp = await fetch(`http://localhost:${port}${probePath}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) continue;
       const body = await resp.json() as Record<string, unknown>;
-      checkLine(true, `Registry healthy (${body.agents_registered ?? 0} agents, ${body.agents_online ?? 0} online)`);
+      if (typeof body.agents_registered === "number") {
+        checkLine(true, `Registry healthy (${body.agents_registered} agents, ${body.agents_online ?? 0} online)`);
+      } else {
+        checkLine(true, `Registry healthy (${(body.service as string | undefined) ?? "agentmesh-registry"})`);
+      }
       return true;
-    }
-    checkLine(false, `Registry returned HTTP ${resp.status}`);
-    return false;
-  } catch (e: unknown) {
-    checkLine(false, `Registry not reachable: ${e instanceof Error ? e.message : String(e)}`);
-    return false;
+    } catch { /* try next path */ }
   }
+  checkLine(false, `Registry not reachable on localhost:${port}`);
+  return false;
 }
 
-/** Check relay health via WebSocket upgrade (not just TCP connect). */
+/** Check relay health via WebSocket upgrade (not just TCP connect).
+ *
+ * Path compat: AGT relay only accepts WS upgrades on `/ws`; the
+ * vendored Rust relay accepts WS on `/`. Try `/ws` first; if the relay
+ * 404s (vendored), fall back to `/`.
+ */
 export async function checkRelayHealth(port: number): Promise<boolean> {
+  for (const probePath of ["/ws", "/"]) {
+    const ok = await tryWsUpgrade(port, probePath);
+    if (ok) {
+      checkLine(true, `Relay healthy (WebSocket upgrade on localhost:${port}${probePath})`);
+      return true;
+    }
+  }
+  checkLine(false, `Relay not reachable on localhost:${port} (tried /ws and /)`);
+  return false;
+}
+
+function tryWsUpgrade(port: number, probePath: string): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.request({
       hostname: "127.0.0.1",
       port,
-      path: "/",
+      path: probePath,
       method: "GET",
       headers: {
         "Upgrade": "websocket",
@@ -98,33 +124,16 @@ export async function checkRelayHealth(port: number): Promise<boolean> {
     });
 
     req.on("upgrade", (_res, socket) => {
-      checkLine(true, `Relay healthy (WebSocket upgrade on localhost:${port})`);
       socket.destroy();
       resolve(true);
     });
 
     req.on("response", (res) => {
-      // Got an HTTP response instead of upgrade — relay is serving but not WS
-      if (res.statusCode === 101) {
-        checkLine(true, `Relay healthy (localhost:${port})`);
-        resolve(true);
-      } else {
-        checkLine(false, `Relay returned HTTP ${res.statusCode} (expected WebSocket upgrade)`);
-        resolve(false);
-      }
+      resolve(res.statusCode === 101);
     });
 
-    req.on("error", (e) => {
-      checkLine(false, `Relay not reachable: ${e.message}`);
-      resolve(false);
-    });
-
-    req.on("timeout", () => {
-      checkLine(false, `Relay timeout on localhost:${port}`);
-      req.destroy();
-      resolve(false);
-    });
-
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
     req.end();
   });
 }

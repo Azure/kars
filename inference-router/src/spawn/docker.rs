@@ -165,6 +165,17 @@ pub(super) fn docker_create_body(
         }
     }
 
+    // Propagate mesh provider selection so spawned sub-agents use the same
+    // SDK / wire shape as the parent. Without this, an AGT-mode parent
+    // spawns vendored-mode children that connect to the AGT relay's wrong
+    // path (root vs `/ws`) and get 403, and call vendored registry URLs
+    // (`/registry/search`) on the AGT registry which 404s.
+    if let Ok(mesh_provider) = std::env::var("AZURECLAW_MESH_PROVIDER")
+        && !mesh_provider.is_empty()
+    {
+        env.push(format!("AZURECLAW_MESH_PROVIDER={}", mesh_provider));
+    }
+
     let mut labels = serde_json::Map::new();
     labels.insert("azureclaw.parent".into(), serde_json::json!(parent_name));
     labels.insert("azureclaw.spawned-by".into(), serde_json::json!("agent"));

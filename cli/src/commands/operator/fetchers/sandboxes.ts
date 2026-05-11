@@ -39,8 +39,8 @@ export async function fetchSandboxes(kubeContext?: string): Promise<SandboxInfo[
 export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxInfo[]> {
   try {
     const [sandboxResult, ipResult] = await Promise.allSettled([
-      execa("kubectl", kctl(["get", "clawsandbox", "-A", "-o", "json"], kubeContext), { stdio: "pipe" }),
-      execa("kubectl", kctl(["get", "inferencepolicy", "-A", "-o", "json"], kubeContext), { stdio: "pipe" }),
+      execa("kubectl", kctl(["get", "clawsandbox", "-A", "-o", "json"], kubeContext), { stdio: "pipe", timeout: 8000 }),
+      execa("kubectl", kctl(["get", "inferencepolicy", "-A", "-o", "json"], kubeContext), { stdio: "pipe", timeout: 8000 }),
     ]);
     if (sandboxResult.status !== "fulfilled") return [];
     const data = JSON.parse(sandboxResult.value.stdout);

@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build": "tsc && cp -r skills dist/skills && cp openclaw.plugin.json dist/",
+    "prepare": "tsc && cp -r skills dist/skills && cp openclaw.plugin.json dist/",
     "test": "vitest run",
     "lint": "oxlint src/",
     "typecheck": "tsc --noEmit",

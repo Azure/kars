@@ -140,6 +140,20 @@ meshPeer:
 mesh:
   provider: "vendored"      # "vendored" | "agt"
 
+# Strict-mode tool definitions for sandbox agents.
+# When enabled, sandbox agents send OpenAI strict-mode tool schemas
+# (strict: true + additionalProperties: false + all params required) to
+# the LLM. This grammar-constrains the model's tool-call argument JSON at
+# decode time, eliminating multi-KB string-escape corruption failures on
+# mesh_send, file_write, foundry_code_execute, and 12 other tools.
+# Runtime additionally gates on GPT-family model (gpt-4o/4.1/5/o1/o3/o4)
+# and non-slim provider, so Anthropic / Claude / Gemini deployments via
+# Foundry's OpenAI-compat shim are auto-excluded. Default OFF for
+# backward compatibility — opt in once you've verified your deployment
+# uses a supported model.
+strictTools:
+  enabled: false
+
 # Foundry configuration (set by azureclaw up --foundry-endpoint)
 foundry:
   endpoint: ""            # e.g. https://my-resource.services.ai.azure.com — AI Services base

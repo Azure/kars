@@ -52,6 +52,15 @@ export async function recordMeshSession(
   startedAt: string,
 ): Promise<void> {
   if (!identity || !meshClient) return;
+  // AGT mode: registry has no `/v1/registry/reputation/session` endpoint.
+  // Per-agent reputation is already submitted via MeshClient.submitReputation
+  // (see mesh-plugin agt-transport.ts) — this session-counter call is a
+  // vendored-only artifact. Skipping avoids the 404 spam (once per mesh
+  // reply, ~2/sec under load) in registry logs.
+  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "vendored")
+    .trim()
+    .toLowerCase();
+  if (provider === "agt") return;
   try {
     const [timestamp, signature] = await identity.signTimestamp();
     const http = await import("node:http");

@@ -35,6 +35,7 @@ import {
 import { attachAuthSubcommand } from "./mesh/auth.js";
 import { attachPromoteSubcommand } from "./mesh/promote.js";
 import { attachSetupTrustSubcommand } from "./mesh/setup-trust.js";
+import { attachProviderSubcommand } from "./mesh/provider.js";
 
 export function meshCommand(): Command {
   const cmd = new Command("mesh");
@@ -51,6 +52,11 @@ export function meshCommand(): Command {
   // mesh setup-trust — provision the api://agentmesh Entra app reg
   // -----------------------------------------------------------------------
   attachSetupTrustSubcommand(cmd);
+
+  // -----------------------------------------------------------------------
+  // mesh provider — switch a live cluster between vendored ↔ AGT
+  // -----------------------------------------------------------------------
+  attachProviderSubcommand(cmd);
 
   // -----------------------------------------------------------------------
   // mesh status

@@ -162,6 +162,16 @@ fi
 # fires before the sub-agent finishes booting.
 if [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
   echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
+  # Trust scoring is meaningless without OAuth identity: every peer registers
+  # as anonymous (registry score 0), so a non-zero AGT_TRUST_THRESHOLD would
+  # reject all sibling-to-sibling KNOCKs even after a successful X3DH handshake.
+  # When Entra is intentionally disabled by the operator, fail-open the trust
+  # gate (threshold=0). Policy evaluation in onKnock still runs, and the SDK's
+  # KNOCK/X3DH still proves cryptographic identity end-to-end.
+  if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
+    echo "[entrypoint] AGT_SKIP_ENTRA=1 overrides AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
+  fi
+  export AGT_TRUST_THRESHOLD=0
 elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
    [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
    [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
@@ -210,6 +220,12 @@ elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_F
     export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
   else
     echo "[entrypoint] Entra token exchange failed after ${_ELAPSED}s (${_ATTEMPT} attempts) — agent will register as anonymous tier"
+    # Same fail-open reasoning as the AGT_SKIP_ENTRA branch above: a non-zero
+    # trust threshold would block all sibling KNOCKs in anonymous-tier mode.
+    if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
+      echo "[entrypoint] Entra exchange failed: overriding AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
+    fi
+    export AGT_TRUST_THRESHOLD=0
   fi
   unset _FED_TOKEN _TOKEN_RESP _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
 fi
@@ -1174,9 +1190,12 @@ if [ -d /opt/azureclaw-plugin ]; then
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
     echo "[azureclaw] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
   fi
-  # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps
+  # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps.
+  # `-L` dereferences symlinks: the @azureclaw/mesh entry is a `file:` dep
+  # symlink → /mesh-plugin. Without -L, cp keeps the symlink and Node fails
+  # to resolve `@azureclaw/mesh` at runtime ("mesh provider swap failed").
   if [ -d /opt/azureclaw-plugin/node_modules ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
+    cp -rL --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
   fi
   # Mesh provider selector — Phase 2 of upstream-AGT migration. Defaults to

@@ -138,10 +138,10 @@ struct Context {
     /// - `dev_copilot_github_token`: GitHub PAT for the GitHub Copilot
     ///   path (`inference-router/src/copilot_auth.rs`); only meaningful
     ///   when `dev_provider == "github-copilot"`.
-    /// All three are populated from the controller's own env at startup,
-    /// which the local-k8s overlay sources from a `azureclaw-dev-creds`
-    /// Secret in the `azureclaw-system` namespace. See
-    /// `cli/src/commands/dev/local-k8s.ts`.
+    ///   All three are populated from the controller's own env at startup,
+    ///   which the local-k8s overlay sources from a `azureclaw-dev-creds`
+    ///   Secret in the `azureclaw-system` namespace. See
+    ///   `cli/src/commands/dev/local-k8s.ts`.
     dev_openai_api_key: String,
     dev_provider: String,
     dev_copilot_github_token: String,
@@ -1084,6 +1084,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
         }
 
+        // Strict-mode tool definitions: when the controller is launched with
+        // AZURECLAW_STRICT_TOOLS=1 (e.g. via the Helm chart's `strictTools`
+        // value), propagate it into every sandbox's openclaw container.
+        // The runtime additionally gates strict mode on (a) non-slim provider
+        // and (b) GPT-family model — see runtimes/openclaw/src/core/agt-task-tools.ts
+        // applyStrict(). Anthropic / Claude / Gemini deployments via Foundry's
+        // OpenAI-compat shim are auto-excluded at the runtime layer regardless
+        // of this flag, so it's safe to enable cluster-wide. Default OFF to
+        // preserve byte-identical behaviour for existing deployments.
+        if let Ok(strict_tools) = std::env::var("AZURECLAW_STRICT_TOOLS")
+            && (strict_tools == "1" || strict_tools.eq_ignore_ascii_case("true"))
+            && is_openclaw
+        {
+            openclaw_env.push(json!({"name": "AZURECLAW_STRICT_TOOLS", "value": "1"}));
+        }
+
         // Phase 4 of the agentmesh provider swap: propagate the controller's
         // AZURECLAW_MESH_PROVIDER (set by Helm value `mesh.provider`) into
         // every sandbox pod. The mesh-plugin transport factory reads this
@@ -1091,15 +1107,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Default "vendored" preserves byte-identical behaviour for
         // existing deployments. Unknown values fall back to vendored at
         // the plugin layer.
-        let mesh_provider = std::env::var("AZURECLAW_MESH_PROVIDER")
-            .unwrap_or_else(|_| "vendored".to_string());
+        let mesh_provider =
+            std::env::var("AZURECLAW_MESH_PROVIDER").unwrap_or_else(|_| "vendored".to_string());
         let mesh_provider_norm = match mesh_provider.to_ascii_lowercase().as_str() {
             "agt" => "agt",
             _ => "vendored",
         };
-        openclaw_env.push(
-            json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}),
-        );
+        openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
+        // The router container is separate from openclaw on AKS, and the
+        // router's own mesh code paths (relay WS upgrade path, registry
+        // discover endpoint) branch on AZURECLAW_MESH_PROVIDER. Without
+        // this the router defaults to "vendored" → upgrades WS on `/`
+        // (AGT only accepts `/ws`) → relay returns 403 Forbidden in a
+        // tight reconnect loop. Push the same normalized value into the
+        // router env so both containers agree on the provider.
+        router_agt_env
+            .push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
@@ -1116,6 +1139,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             });
             if let Some(peers) = valid_peers {
                 openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+                // The first entry in trusted_peers is the parent (spawner
+                // seeds it that way — see inference-router spawn helper).
+                // Expose it as PARENT_SANDBOX so the openclaw runtime can
+                // alias the literal recipient name 'parent' (which LLMs
+                // routinely use for back-replies) to the parent's real
+                // display_name. Without this, `mesh_send(to_agent="parent")`
+                // hits the registry as the capability "parent" and resolves
+                // to 0 agents, breaking back-replies on AGT.
+                if let Some((first_name, _)) =
+                    peers.split(',').next().and_then(|p| p.split_once(':'))
+                {
+                    let first_name = first_name.trim();
+                    if !first_name.is_empty() {
+                        openclaw_env.push(json!({"name": "PARENT_SANDBOX", "value": first_name}));
+                    }
+                }
             }
             // Validate registry mode: must be "local" or "global"
             let reg_mode = match governance_config.registry_mode.as_deref() {
@@ -2339,7 +2378,7 @@ pub async fn run(client: Client) -> Result<()> {
     if !dev_openai_api_key.is_empty() || !dev_provider.is_empty() {
         tracing::info!(
             provider = %if dev_provider.is_empty() { "azure-openai" } else { dev_provider.as_str() },
-            copilot_token = dev_copilot_github_token.is_empty().then_some("absent").unwrap_or("present"),
+            copilot_token = if dev_copilot_github_token.is_empty() { "absent" } else { "present" },
             "Dev-mode inference creds detected — router sidecars will receive API-key auth instead of workload identity"
         );
     }

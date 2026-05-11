@@ -96,7 +96,7 @@ export async function fetchClusterHealth(devMode: boolean, kubeContext?: string)
       `jsonpath={range .items[*]}{.metadata.name}|{.metadata.labels.agentpool}|` +
       `{.status.conditions[?(@.type=="Ready")].status}|{.status.nodeInfo.kubeletVersion}|` +
       `{.status.nodeInfo.osImage}|{.status.nodeInfo.containerRuntimeVersion}{"\\n"}{end}`,
-    ], kubeContext), { stdio: "pipe" }),
+    ], kubeContext), { stdio: "pipe", timeout: 10000 }),
     // 2: kubectl top nodes
     execa("kubectl", kctl(["top", "nodes", "--no-headers"], kubeContext),
       { stdio: "pipe", timeout: 10000 }),
@@ -105,20 +105,20 @@ export async function fetchClusterHealth(devMode: boolean, kubeContext?: string)
       "get", "resourcequotas", "-A", "-o",
       `jsonpath={range .items[*]}{.metadata.namespace}|{.status.used.cpu}|{.status.hard.cpu}|` +
       `{.status.used.memory}|{.status.hard.memory}{"\\n"}{end}`,
-    ], kubeContext), { stdio: "pipe" }),
+    ], kubeContext), { stdio: "pipe", timeout: 10000 }),
     // 4: PVCs
     execa("kubectl", kctl([
       "get", "pvc", "-A", "-o",
       `jsonpath={range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|` +
       `{.spec.resources.requests.storage}{"\\n"}{end}`,
-    ], kubeContext), { stdio: "pipe" }),
+    ], kubeContext), { stdio: "pipe", timeout: 10000 }),
     // 5: Warning events
     execa("kubectl", kctl([
       "get", "events", "-A", "--field-selector", "type=Warning",
       "--sort-by=.lastTimestamp", "-o",
       `jsonpath={range .items[-8:]}{.lastTimestamp}|{.reason}|` +
       `{.involvedObject.kind}/{.involvedObject.name}|{.message}{"\\n"}{end}`,
-    ], kubeContext), { stdio: "pipe" }),
+    ], kubeContext), { stdio: "pipe", timeout: 10000 }),
   ]);
 
   // Parse API latency
