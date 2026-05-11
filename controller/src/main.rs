@@ -235,6 +235,9 @@ async fn main() -> Result<()> {
                 "false" | "0" | "no" | "off"
             );
             if enabled {
+                // The peer reads AZURECLAW_MESH_PROVIDER internally and picks
+                // the vendored or AGT wire envelope. Federation features
+                // (pair, cloud_offload) work on both providers.
                 tracing::info!("Mesh peer enabled — starting relay connection");
                 mesh_peer::run(client).await
             } else {

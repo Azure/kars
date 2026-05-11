@@ -52,6 +52,7 @@ pub(super) async fn handle_offload_request(
 ) -> Result<()> {
     // Phase 1: Validate pairing
     send_to_peer(
+        state,
         out_tx,
         from_amid,
         &FederationMessage::OffloadStatus {
@@ -67,6 +68,7 @@ pub(super) async fn handle_offload_request(
         Ok(p) => p,
         Err(e) => {
             send_to_peer(
+                state,
                 out_tx,
                 from_amid,
                 &FederationMessage::OffloadError {
@@ -82,6 +84,7 @@ pub(super) async fn handle_offload_request(
 
     // Phase 2: Create offload sandbox
     send_to_peer(
+        state,
         out_tx,
         from_amid,
         &FederationMessage::OffloadStatus {
@@ -211,6 +214,7 @@ pub(super) async fn handle_offload_request(
             Ok(o) => o,
             Err(e) => {
                 send_to_peer(
+                    state,
                     out_tx,
                     from_amid,
                     &FederationMessage::OffloadError {
@@ -229,6 +233,7 @@ pub(super) async fn handle_offload_request(
             if !s.contains("already exists") && !s.contains("AlreadyExists") {
                 tracing::error!(sandbox = %sandbox_name, "Failed to create {label}: {e}");
                 send_to_peer(
+                    state,
                     out_tx,
                     from_amid,
                     &FederationMessage::OffloadError {
@@ -264,6 +269,7 @@ pub(super) async fn handle_offload_request(
         Ok(o) => o,
         Err(e) => {
             send_to_peer(
+                state,
                 out_tx,
                 from_amid,
                 &FederationMessage::OffloadError {
@@ -292,6 +298,7 @@ pub(super) async fn handle_offload_request(
                 "Failed to create offload sandbox: {e}"
             );
             send_to_peer(
+                state,
                 out_tx,
                 from_amid,
                 &FederationMessage::OffloadError {
@@ -324,6 +331,7 @@ pub(super) async fn handle_offload_request(
 
     // Phase 3: CRD created — notify requester sandbox is being scheduled
     send_to_peer(
+        state,
         out_tx,
         from_amid,
         &FederationMessage::OffloadStatus {
