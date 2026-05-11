@@ -39,13 +39,52 @@ export function pushCommand(): Command {
       const { execa } = await import("execa");
       const blue = chalk.hex("#0078D4");
 
-      const meshProvider: "vendored" | "agt" =
-        options.meshProvider === "agt" ? "agt" : "vendored";
       if (options.meshProvider && !["vendored", "agt"].includes(options.meshProvider)) {
         console.error(
           chalk.red(`\n  Error: --mesh-provider must be vendored | agt (got "${options.meshProvider}")\n`),
         );
         process.exit(1);
+      }
+
+      // If user didn't pass --mesh-provider explicitly, auto-detect from the
+      // live helm release. This prevents accidentally downgrading a cluster
+      // that's already on AGT back to vendored (which would also drop the
+      // locally-packed AGT SDK from the sandbox image and break mesh send).
+      let meshProvider: "vendored" | "agt";
+      const meshProviderExplicit = process.argv.some(
+        (a) => a === "-m" || a === "--mesh-provider" || a.startsWith("--mesh-provider="),
+      );
+      if (meshProviderExplicit) {
+        meshProvider = options.meshProvider === "agt" ? "agt" : "vendored";
+      } else {
+        let detected: "vendored" | "agt" | null = null;
+        try {
+          const { stdout } = await execa(
+            "helm",
+            ["get", "values", "azureclaw", "-n", "azureclaw-system", "-o", "json"],
+            { reject: false },
+          );
+          const values = JSON.parse(stdout || "{}");
+          const v = values?.mesh?.provider;
+          if (v === "agt" || v === "vendored") detected = v;
+        } catch {
+          /* helm or cluster unreachable — fall through to default */
+        }
+        if (detected) {
+          meshProvider = detected;
+          if (detected === "agt") {
+            console.log(
+              chalk.yellow(
+                `  Auto-detected mesh.provider=agt on live cluster — building sandbox with AGT SDK tarball.`,
+              ),
+            );
+            console.log(
+              chalk.dim(`  (Pass --mesh-provider=vendored to override.)`),
+            );
+          }
+        } else {
+          meshProvider = "vendored";
+        }
       }
 
       // Resolve AGT repo path (only used when meshProvider=agt)
