@@ -224,6 +224,22 @@ export class AgtTransport implements IMeshTransport {
   private readonly _e2eVerifiedHandlers: Array<(peerAmid: string, isFirstPeer: boolean) => void> = [];
   private readonly _disconnectHandlers: Array<(reason: "client" | "server" | "ws-error", code?: number) => void> = [];
 
+  // Auto-heartbeat ticker. The AGT Python relay
+  // (agentmesh/relay/app.py) marks a connection stale after
+  // OFFLINE_THRESHOLD = 90s without a `heartbeat` frame and routes
+  // subsequent messages to its OFFLINE STORE instead of live delivery.
+  // Stored frames are only replayed on (re)connect via _deliver_pending,
+  // so a long-lived connection that never reconnects loses every message
+  // that was stored while it was "stale". The AGT MeshClient exposes
+  // sendHeartbeat() but does NOT auto-schedule it, so we run our own
+  // 30s ticker here (matches relay's HEARTBEAT_INTERVAL constant).
+  // The vendored Rust relay has no time-based stale check (only checks
+  // for broken channels), which is why vendored mode worked without
+  // this. Required for AGT mode reply-path symmetry — without this,
+  // any reply that arrives >90s after the recipient's last connect
+  // is silently swallowed by the relay.
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(options: AgtTransportOptions) {
     this.options = options;
     this._plaintextPeers = new Set(options.plaintextPeers ?? []);
@@ -336,9 +352,28 @@ export class AgtTransport implements IMeshTransport {
 
     await this.client.connect();
     this._connected = true;
+
+    // Start auto-heartbeat ticker (see field comment for rationale).
+    if (this.heartbeatTimer === null) {
+      this.heartbeatTimer = setInterval(() => {
+        try {
+          this.client?.sendHeartbeat();
+        } catch {
+          // Best-effort. A dead WS will be detected by onClose and
+          // trigger reconnect; the next connect resets this loop.
+        }
+      }, 30_000);
+      // Don't keep the Node event loop alive solely for the ticker.
+      const timer = this.heartbeatTimer as unknown as { unref?: () => void };
+      timer.unref?.();
+    }
   }
 
   async disconnect(): Promise<void> {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     if (this.client) {
       try {
         await this.client.disconnect();
