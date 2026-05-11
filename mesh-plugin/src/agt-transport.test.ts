@@ -17,6 +17,7 @@ interface FakeClient {
   addPlaintextPeer: Mock;
   removePlaintextPeer: Mock;
   isPlaintextPeer: Mock;
+  establishSessionWithPeer: Mock;
   __msgHandler?: (from: string, payload: unknown, isPlaintext: boolean) => void;
   __knockHandler?: (from: string, intent: unknown) => Promise<boolean>;
 }
@@ -42,6 +43,7 @@ function makeFakeClient(): FakeClient {
     addPlaintextPeer: vi.fn(),
     removePlaintextPeer: vi.fn(),
     isPlaintextPeer: vi.fn(() => false),
+    establishSessionWithPeer: vi.fn(async () => {}),
   };
   return c;
 }

@@ -21,6 +21,21 @@ const AGT_POSTGRES = "azureclaw-agt-postgres";
 const AGT_RELAY = "azureclaw-agt-relay";
 const AGT_REGISTRY = "azureclaw-agt-registry";
 
+// Mesh provider port matrix.
+//   vendored: Rust relay/registry from vendor/ + Postgres backing store
+//   agt:      Microsoft AGT Python relay/registry (in-memory, no Postgres)
+// These differ in port + health-check path; everything else in the wiring is
+// identical (container names, network, sandbox env-var names).
+const MESH_PORTS = {
+  vendored: { relay: 8765, registry: 8080, healthPath: "/v1/health" },
+  // AGT relay/registry expose `/health` (NOT `/healthz` — that route only
+  // exists on the trust-engine/policy-server/audit-collector/api-gateway
+  // components per agent-governance-python/agent-mesh/src/agentmesh/server/__init__.py).
+  agt: { relay: 8083, registry: 8082, healthPath: "/health" },
+} as const;
+type MeshProvider = keyof typeof MESH_PORTS;
+const DEFAULT_AGT_REPO = path.join(os.homedir(), "Private/Repos/agt/agent-governance-toolkit");
+
 export function devCommand(): Command {
   const cmd = new Command("dev");
 
@@ -93,6 +108,19 @@ NOT overwrite your saved credentials.
     )
     // ── Mesh federation ───────────────────────────────────────────────
     .option(
+      "--mesh-provider <provider>",
+      "Mesh stack: vendored (Rust + Postgres, default) or agt (Microsoft AGT Python, in-memory)",
+      "vendored"
+    )
+    .option(
+      "--agt-repo <path>",
+      `Path to the agent-governance-toolkit checkout (only used when --mesh-provider=agt). Defaults to $AZURECLAW_AGT_REPO or ${DEFAULT_AGT_REPO}`
+    )
+    .option(
+      "--agt-sdk-tarball <path>",
+      "Path to a locally-packed @microsoft/agent-governance-sdk .tgz to install in the sandbox image (test patched AGT SDK end-to-end). Only used with --mesh-provider=agt --build."
+    )
+    .option(
       "--global-registry <url>",
       "Use a shared external registry (enables handoff). Skips local relay/registry/postgres."
     )
@@ -114,11 +142,22 @@ NOT overwrite your saved credentials.
 Flag groups:
   Identity:           --name, --model, --policy
   Image build:        --image, --build, --build-base, --base-image
-  Mesh federation:    --global-registry
+  Mesh federation:    --mesh-provider, --agt-repo, --agt-sdk-tarball,
+                      --global-registry
   Channels:           --channels, --telegram-*, --slack-token, --discord-token
   Skills + plugins:   --skills, --brave-api-key, --tavily-api-key,
                       --exa-api-key, --firecrawl-api-key,
                       --perplexity-api-key, --openai-api-key
+
+Mesh provider selection:
+  --mesh-provider=vendored (default): builds and runs the Rust relay +
+    Rust registry from vendor/ with a Postgres backing store. Uses the
+    8 vendored SDK patches for full E2E reliability.
+  --mesh-provider=agt: builds and runs the Microsoft AGT Python relay
+    + Python registry from the local agent-governance-toolkit checkout
+    (--agt-repo). Registry is in-memory (no Postgres). Combine with
+    --agt-sdk-tarball to test a locally-patched @microsoft/agent-governance-sdk
+    inside the sandbox image.
 
 Notes:
   - Channels, skills, and plugin API keys are OpenClaw-specific. For
@@ -130,6 +169,13 @@ Notes:
       const policyPresets = ["minimal", "developer", "web", "azure"];
       if (options.policy && !policyPresets.includes(options.policy)) {
         console.error(chalk.red(`\n  Error: --policy must be one of: ${policyPresets.join(" | ")} (got "${options.policy}").\n`));
+        process.exit(1);
+      }
+
+      // Validate --mesh-provider value early (before any prompts), but
+      // resolve final value AFTER first-run prompts (which may set it).
+      if (options.meshProvider && !["vendored", "agt"].includes(options.meshProvider)) {
+        console.error(chalk.red(`\n  Error: --mesh-provider must be one of: vendored | agt (got "${options.meshProvider}").\n`));
         process.exit(1);
       }
 
@@ -282,6 +328,110 @@ Notes:
           }]);
           if (rebuild) options.build = true;
         }
+
+        // ── Mesh source prompt (local docker vs remote AKS) ─────────
+        // Default to "local" — docker-compose'd relay/registry on the
+        // user's laptop. "Remote" picks up an existing port-forward
+        // (or auto-spawns one) against a previously-provisioned AKS
+        // mesh, so the dev sandbox federates with whatever is already
+        // running in the cluster. Only ask if the user did NOT pass
+        // --global-registry explicitly (advanced flow).
+        const globalRegistryExplicit = process.argv.some(
+          a => a === "--global-registry" || a.startsWith("--global-registry="),
+        );
+        if (!globalRegistryExplicit) {
+          const { loadContext } = await import("../config.js");
+          const cachedCtx = loadContext();
+          const cachedRegistryUrl = cachedCtx?.globalRegistryUrl;
+          const aksAvailable = !!cachedCtx?.aksCluster;
+
+          // Compose the remote-option label dynamically so the user
+          // sees what would happen if they pick it: re-use cached
+          // tunnel, or spawn one against the known AKS cluster.
+          const remoteLabel = cachedRegistryUrl
+            ? `Remote  (reuse port-forward to AKS: ${cachedRegistryUrl})`
+            : aksAvailable
+              ? `Remote  (auto port-forward to AKS cluster: ${cachedCtx!.aksCluster})`
+              : "Remote  (port-forward to existing AKS mesh — requires `azureclaw up` first)";
+
+          const { default: inquirer } = await import("inquirer");
+          const { meshSource } = await inquirer.prompt([{
+            type: "list",
+            name: "meshSource",
+            message: "Where should the mesh live?",
+            default: "local",
+            choices: [
+              {
+                name: "Local   (recommended; spin up relay + registry in Docker on this laptop)",
+                value: "local",
+              },
+              { name: remoteLabel, value: "remote" },
+            ],
+          }]);
+
+          if (meshSource === "remote") {
+            if (!cachedRegistryUrl && !aksAvailable) {
+              console.log(chalk.yellow(
+                "\n  ⚠ No cached AKS deployment context found. Falling back to local mesh.",
+              ));
+              console.log(chalk.dim(
+                "    Run `azureclaw up` first to provision an AKS cluster, then re-run `azureclaw dev`.\n",
+              ));
+            } else {
+              // Default port aligns with `azureclaw mesh promote --port-forward`
+              // (registry on 18080, relay on 18765). The downstream
+              // global-registry block (around line 922) does the actual
+              // health check + auto-spawn if the tunnels aren't already
+              // up — so we just have to point it at the right URL.
+              options.globalRegistry = cachedRegistryUrl ?? "http://localhost:18080";
+              console.log(chalk.dim(
+                `  → Will federate with remote mesh at ${options.globalRegistry}\n`,
+              ));
+            }
+          }
+        }
+
+        // ── Mesh provider prompt ────────────────────────────────────
+        // Default to vendored (battle-tested). Only ask if the user did
+        // NOT pass --mesh-provider explicitly. We detect "explicit" by
+        // scanning argv since commander already applied the default.
+        // If the user picked "remote" mesh above, also skip — the
+        // provider is whatever is already running in the cluster.
+        const meshProviderExplicit = process.argv.some(
+          a => a === "--mesh-provider" || a.startsWith("--mesh-provider="),
+        );
+        if (!meshProviderExplicit && !options.globalRegistry) {
+          // Detect whether the AGT repo is available locally — only offer
+          // AGT as a choice if the user actually has the toolkit checked
+          // out, otherwise they'd hit a hard error in the build step.
+          const candidateAgtRepo: string = options.agtRepo
+            ?? process.env.AZURECLAW_AGT_REPO
+            ?? DEFAULT_AGT_REPO;
+          const agtAvailable = existsSync(
+            path.join(candidateAgtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile"),
+          );
+          if (agtAvailable) {
+            const { provider } = await inquirer.prompt([{
+              type: "list",
+              name: "provider",
+              message: "Mesh provider for inter-agent messaging:",
+              choices: [
+                {
+                  name: "vendored — Rust relay + registry + Postgres (default, battle-tested)",
+                  value: "vendored",
+                },
+                {
+                  name: "agt — Microsoft Agent Governance Toolkit (Python, in-memory, upstream target)",
+                  value: "agt",
+                },
+              ],
+              default: "vendored",
+            }]);
+            options.meshProvider = provider;
+          }
+          // If AGT repo is missing, silently keep the vendored default —
+          // don't pester users who don't have AGT cloned locally.
+        }
       }
 
       // ── Target dispatch ───────────────────────────────────────────
@@ -309,6 +459,7 @@ Notes:
             noBuild: false,
             forceRebuild: options.build === true,
             channels: typeof options.channels === "string" ? options.channels : undefined,
+            meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "vendored",
           });
           return;
         } catch (e) {
@@ -321,6 +472,31 @@ Notes:
       banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
       const stepper = new Stepper({ totalSteps: 4 });
+
+      // Resolve mesh provider now that all interactive prompts have run.
+      const meshProvider: MeshProvider = (options.meshProvider ?? "vendored") as MeshProvider;
+      const meshPorts = MESH_PORTS[meshProvider];
+      const agtRepo: string = options.agtRepo
+        ?? process.env.AZURECLAW_AGT_REPO
+        ?? DEFAULT_AGT_REPO;
+      if (meshProvider === "agt" && options.build) {
+        if (!existsSync(path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile"))) {
+          console.error(chalk.red(`\n  Error: --mesh-provider=agt --build requires the agent-governance-toolkit checkout.`));
+          console.error(chalk.red(`  Looked for: ${path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile")}`));
+          console.error(chalk.red(`  Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.\n`));
+          process.exit(1);
+        }
+      }
+      if (options.agtSdkTarball) {
+        if (meshProvider !== "agt") {
+          console.error(chalk.red(`\n  Error: --agt-sdk-tarball requires --mesh-provider=agt.\n`));
+          process.exit(1);
+        }
+        if (!existsSync(options.agtSdkTarball)) {
+          console.error(chalk.red(`\n  Error: --agt-sdk-tarball not found: ${options.agtSdkTarball}\n`));
+          process.exit(1);
+        }
+      }
 
       try {
         let image = options.image;
@@ -532,11 +708,55 @@ Notes:
           stepper.update("Building sandbox image (plugin + entrypoint overlay)...");
           stepper.stop();
           console.log(chalk.dim("  Building sandbox image...\n"));
+
+          // Stage the AGT SDK tarball into .agt-sdk/ (build context) when
+          // --mesh-provider=agt --agt-sdk-tarball is set. The Dockerfile
+          // ALWAYS copies .agt-sdk/ (.keep ensures it never fails); the
+          // RUN step picks up $AGT_SDK_TARBALL only when actually staged.
+          const sandboxBuildArgs = [
+            "--build-arg", `SANDBOX_BASE_IMAGE=${SANDBOX_BASE_IMAGE}`,
+            "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
+            "--build-arg", `MESH_PROVIDER=${meshProvider}`,
+          ];
+          const fsMod = await import("node:fs");
+          const agtSdkStagingDir = path.join(repoRoot, ".agt-sdk");
+          // Always clean previous staged tarballs to keep build context tight
+          for (const f of fsMod.readdirSync(agtSdkStagingDir)) {
+            if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
+              fsMod.unlinkSync(path.join(agtSdkStagingDir, f));
+            }
+          }
+          if (meshProvider === "agt" && options.agtSdkTarball) {
+            const tarballBasename = path.basename(options.agtSdkTarball);
+            fsMod.copyFileSync(
+              options.agtSdkTarball,
+              path.join(agtSdkStagingDir, tarballBasename),
+            );
+            sandboxBuildArgs.push("--build-arg", `AGT_SDK_TARBALL=${tarballBasename}`);
+            console.log(chalk.dim(`  Staged AGT SDK tarball: ${tarballBasename}\n`));
+          } else if (meshProvider === "agt") {
+            // Try to auto-discover a packed tarball next to the AGT repo
+            try {
+              const tsDir = path.join(agtRepo, "agent-governance-typescript");
+              const candidates = fsMod.readdirSync(tsDir).filter(
+                f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
+              );
+              if (candidates.length > 0) {
+                const tarballBasename = candidates[0];
+                fsMod.copyFileSync(
+                  path.join(tsDir, tarballBasename),
+                  path.join(agtSdkStagingDir, tarballBasename),
+                );
+                sandboxBuildArgs.push("--build-arg", `AGT_SDK_TARBALL=${tarballBasename}`);
+                console.log(chalk.dim(`  Auto-discovered AGT SDK tarball: ${tarballBasename}\n`));
+              }
+            } catch { /* AGT repo missing TS dir — fall through to npm install */ }
+          }
+
           await execa("docker", [
             "build",
             "--platform", dockerPlatform,
-            "--build-arg", `SANDBOX_BASE_IMAGE=${SANDBOX_BASE_IMAGE}`,
-            "--build-arg", `INFERENCE_ROUTER_IMAGE=${routerImage}`,
+            ...sandboxBuildArgs,
             "-t", "azureclaw-sandbox:dev",
             "-f", dockerfilePath,
             repoRoot,
@@ -545,27 +765,60 @@ Notes:
           image = "azureclaw-sandbox:dev";
           stepper.done("Sandbox image built");
 
-          // Build AGT relay + registry images if --build
+          // Build mesh relay + registry images. Branch on --mesh-provider:
+          //   vendored → Rust relay/registry from vendor/
+          //   agt      → Microsoft AGT Python relay/registry from agentmesh-toolkit
           {
-            stepper.update("Building AGT relay image (Rust)...");
-            stepper.stop();
-            console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
-            await execa("docker", [
-              "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
-              "-t", "agentmesh-relay:dev",
-              path.join(repoRoot, "vendor/agentmesh-relay"),
-            ], { stdio: "inherit" });
-            console.log();
+            if (meshProvider === "vendored") {
+              stepper.update("Building vendored relay image (Rust)...");
+              stepper.stop();
+              console.log(chalk.dim("  Building agentmesh-relay (Rust)...\n"));
+              await execa("docker", [
+                "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
+                "-t", "agentmesh-relay:dev",
+                path.join(repoRoot, "vendor/agentmesh-relay"),
+              ], { stdio: "inherit" });
+              console.log();
 
-            stepper.update("Building AGT registry image (Rust + React)...");
-            stepper.stop();
-            console.log(chalk.dim("  Building agentmesh-registry (Rust + React)...\n"));
-            await execa("docker", [
-              "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
-              "-t", "agentmesh-registry:dev",
-              path.join(repoRoot, "vendor/agentmesh-registry"),
-            ], { stdio: "inherit" });
-            console.log();
+              stepper.update("Building vendored registry image (Rust + React)...");
+              stepper.stop();
+              console.log(chalk.dim("  Building agentmesh-registry (Rust + React)...\n"));
+              await execa("docker", [
+                "build", "--platform", dockerPlatform, "--build-arg", `CACHE_BUST=${Date.now()}`,
+                "-t", "agentmesh-registry:dev",
+                path.join(repoRoot, "vendor/agentmesh-registry"),
+              ], { stdio: "inherit" });
+              console.log();
+            } else {
+              // agt: single Dockerfile, COMPONENT build-arg switches relay vs registry.
+              // Build context MUST be the AGT repo root (Dockerfile uses
+              // absolute paths from there).
+              const agtDockerfile = path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile");
+
+              stepper.update("Building AGT relay image (Python)...");
+              stepper.stop();
+              console.log(chalk.dim("  Building agentmesh-relay (Python from local AGT)...\n"));
+              await execa("docker", [
+                "build", "--platform", dockerPlatform,
+                "--build-arg", "COMPONENT=relay",
+                "-t", "agentmesh-relay:dev",
+                "-f", agtDockerfile,
+                agtRepo,
+              ], { stdio: "inherit" });
+              console.log();
+
+              stepper.update("Building AGT registry image (Python)...");
+              stepper.stop();
+              console.log(chalk.dim("  Building agentmesh-registry (Python from local AGT)...\n"));
+              await execa("docker", [
+                "build", "--platform", dockerPlatform,
+                "--build-arg", "COMPONENT=registry",
+                "-t", "agentmesh-registry:dev",
+                "-f", agtDockerfile,
+                agtRepo,
+              ], { stdio: "inherit" });
+              console.log();
+            }
           }
         } else {
           stepper.done("Sandbox image found");
@@ -614,8 +867,8 @@ Notes:
         }
 
         if (!useGlobalRegistry) {
-          // Local registry mode — deploy relay/registry/postgres locally
-          stepper.step("Starting AGT infrastructure (local registry)...");
+          // Local registry mode — deploy relay/registry/(postgres) locally
+          stepper.step(`Starting mesh infrastructure (${meshProvider})...`);
 
           // Helper: check if a container exists and is running
           async function isContainerRunning(name: string): Promise<boolean> {
@@ -627,77 +880,130 @@ Notes:
             } catch { return false; }
           }
 
-          // Start PostgreSQL (registry backend)
-          if (!(await isContainerRunning(AGT_POSTGRES))) {
-            stepper.update("Starting PostgreSQL...");
-            try { await execa("docker", ["rm", "-fv", AGT_POSTGRES], { stdio: "pipe" }); } catch {}
-            await execa("docker", [
-              "run", "-d",
-              "--name", AGT_POSTGRES,
-              "--network", AGT_NETWORK,
-              "-e", "POSTGRES_DB=agentmesh",
-              "-e", "POSTGRES_USER=agentmesh",
-              "-e", "POSTGRES_PASSWORD=agentmesh-dev",
-              "postgres:15-alpine",
-            ], { stdio: "pipe" });
-            // Wait for postgres to accept connections
-            for (let i = 0; i < 15; i++) {
-              try {
-                await execa("docker", [
-                  "exec", AGT_POSTGRES, "pg_isready", "-U", "agentmesh",
-                ], { stdio: "pipe" });
-                break;
-              } catch { await new Promise(r => setTimeout(r, 1000)); }
+          // Postgres is only used by the vendored Rust registry. The AGT
+          // Python registry keeps state in-memory.
+          if (meshProvider === "vendored") {
+            if (!(await isContainerRunning(AGT_POSTGRES))) {
+              stepper.update("Starting PostgreSQL...");
+              try { await execa("docker", ["rm", "-fv", AGT_POSTGRES], { stdio: "pipe" }); } catch {}
+              await execa("docker", [
+                "run", "-d",
+                "--name", AGT_POSTGRES,
+                "--network", AGT_NETWORK,
+                "-e", "POSTGRES_DB=agentmesh",
+                "-e", "POSTGRES_USER=agentmesh",
+                "-e", "POSTGRES_PASSWORD=agentmesh-dev",
+                "postgres:15-alpine",
+              ], { stdio: "pipe" });
+              for (let i = 0; i < 15; i++) {
+                try {
+                  await execa("docker", [
+                    "exec", AGT_POSTGRES, "pg_isready", "-U", "agentmesh",
+                  ], { stdio: "pipe" });
+                  break;
+                } catch { await new Promise(r => setTimeout(r, 1000)); }
+              }
             }
+          } else {
+            // AGT mode — tear down any stale postgres from a previous
+            // vendored run to avoid name confusion in `docker ps`.
+            try { await execa("docker", ["rm", "-fv", AGT_POSTGRES], { stdio: "pipe" }); } catch {}
           }
 
-          // Start AGT Relay (WebSocket message relay)
+          // Start mesh relay (vendored Rust binds 8765, AGT Python binds 8083)
           if (!(await isContainerRunning(AGT_RELAY))) {
-            stepper.update("Starting AGT relay...");
+            stepper.update(`Starting ${meshProvider} relay...`);
             try { await execa("docker", ["rm", "-f", AGT_RELAY], { stdio: "pipe" }); } catch {}
+            const relayEnv = meshProvider === "vendored"
+              ? [
+                  "-e", "RUST_LOG=agentmesh_relay=info",
+                  "-e", `RELAY_ADDR=0.0.0.0:${meshPorts.relay}`,
+                ]
+              : [
+                  "-e", "AGENTMESH_COMPONENT=relay",
+                  "-e", "HOST=0.0.0.0",
+                  "-e", `PORT=${meshPorts.relay}`,
+                  "-e", "LOG_LEVEL=info",
+                ];
             await execa("docker", [
               "run", "-d",
               "--name", AGT_RELAY,
               "--network", AGT_NETWORK,
-              "-e", "RUST_LOG=agentmesh_relay=info",
-              "-e", "RELAY_ADDR=0.0.0.0:8765",
+              // Suppress upstream AGT Dockerfile HEALTHCHECK probing /healthz
+              // (the relay/registry expose /health, not /healthz — the misnamed
+              // upstream healthcheck spams 404s in the logs).
+              ...(meshProvider === "agt" ? ["--no-healthcheck"] : []),
+              ...relayEnv,
               "agentmesh-relay:dev",
             ], { stdio: "pipe" });
           }
 
-          // Start AGT Registry (agent discovery + prekey storage)
+          // Start mesh registry (vendored uses Postgres; AGT is in-memory)
           if (!(await isContainerRunning(AGT_REGISTRY))) {
-            stepper.update("Starting AGT registry...");
+            stepper.update(`Starting ${meshProvider} registry...`);
             try { await execa("docker", ["rm", "-f", AGT_REGISTRY], { stdio: "pipe" }); } catch {}
+            const registryEnv = meshProvider === "vendored"
+              ? [
+                  "-e", `DATABASE_URL=postgres://agentmesh:agentmesh-dev@${AGT_POSTGRES}:5432/agentmesh`,
+                  "-e", "HOST=0.0.0.0",
+                  "-e", `PORT=${meshPorts.registry}`,
+                  "-e", "RUST_LOG=agentmesh_registry=info,actix_web=info",
+                ]
+              : [
+                  "-e", "AGENTMESH_COMPONENT=registry",
+                  "-e", "HOST=0.0.0.0",
+                  "-e", `PORT=${meshPorts.registry}`,
+                  "-e", "LOG_LEVEL=info",
+                ];
             await execa("docker", [
               "run", "-d",
               "--name", AGT_REGISTRY,
               "--network", AGT_NETWORK,
-              "-e", `DATABASE_URL=postgres://agentmesh:agentmesh-dev@${AGT_POSTGRES}:5432/agentmesh`,
-              "-e", "HOST=0.0.0.0",
-              "-e", "PORT=8080",
-              "-e", "RUST_LOG=agentmesh_registry=info,actix_web=info",
+              ...(meshProvider === "agt" ? ["--no-healthcheck"] : []),
+              ...registryEnv,
               "agentmesh-registry:dev",
             ], { stdio: "pipe" });
           }
 
           // Health check — wait for registry to be ready
-          stepper.update("Waiting for AGT services...");
-          for (let i = 0; i < 15; i++) {
+          stepper.update("Waiting for mesh services...");
+          for (let i = 0; i < 30; i++) {
             try {
               await execa("docker", [
-                "exec", AGT_REGISTRY, "curl", "-sf", "http://localhost:8080/v1/health",
+                "exec", AGT_REGISTRY, "curl", "-sf",
+                `http://localhost:${meshPorts.registry}${meshPorts.healthPath}`,
               ], { stdio: "pipe" });
               agtReady = true;
               break;
             } catch { await new Promise(r => setTimeout(r, 1000)); }
           }
 
-          stepper.done(agtReady ? "AGT infrastructure ready (relay + registry + postgres)" : "AGT infrastructure started (health check pending)");
+          const readyMsg = meshProvider === "vendored"
+            ? "mesh infrastructure ready (vendored: relay + registry + postgres)"
+            : "mesh infrastructure ready (agt: relay + registry, in-memory)";
+          const pendingMsg = `mesh infrastructure started (${meshProvider}, health check pending)`;
+          stepper.done(agtReady ? readyMsg : pendingMsg);
         } else if (useGlobalRegistry) {
           // Global registry mode — skip local deployment, verify connectivity
           stepper.step("Connecting to global registry...");
           const registryUrl = options.globalRegistry as string;
+
+          // Validate URL scheme — registryUrl may originate from a config file
+          // or env var; reject anything that isn't http(s) before issuing
+          // outbound requests (CodeQL js/file-access-to-http hardening).
+          {
+            let parsed: URL;
+            try {
+              parsed = new URL(registryUrl);
+            } catch {
+              throw new Error(`--global-registry must be a valid URL: ${registryUrl}`);
+            }
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+              throw new Error(
+                `--global-registry must use http(s); got ${parsed.protocol}`,
+              );
+            }
+          }
 
           // Rewrite localhost URLs for Docker containers — localhost inside
           // the container refers to the container itself, not the host.
@@ -709,17 +1015,29 @@ Notes:
             stepper.update(`Rewriting ${registryUrl} → ${containerRegistryUrl} for container access`);
           }
 
-          // Health check from the host (validates port-forward / tunnel is up)
+          // Health check from the host (validates port-forward / tunnel is up).
+          // AGT registry exposes /health; vendored exposes both /health and
+          // /v1/health — probe /health first, fall back for older clusters.
           stepper.update(`Checking ${registryUrl}...`);
+          async function probeRegistry(url: string): Promise<Response | null> {
+            for (const probe of ["/health", "/v1/health"]) {
+              try {
+                const r = await fetch(`${url.replace(/\/$/, "")}${probe}`, {
+                  signal: AbortSignal.timeout(10000),
+                });
+                if (r.ok) return r;
+              } catch { /* try next */ }
+            }
+            return null;
+          }
+          let initial: Response | null = null;
           try {
-            const healthUrl = `${registryUrl.replace(/\/$/, "")}/v1/health`;
-            const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(10000) });
-            agtReady = resp.ok;
-            stepper.done(agtReady
-              ? `Global registry connected (${registryUrl}) — handoff enabled`
-              : `Global registry returned ${resp.status} — may not be ready`
-            );
-          } catch (e: any) {
+            initial = await probeRegistry(registryUrl);
+          } catch { /* fall through to auto-promote */ }
+          if (initial?.ok) {
+            agtReady = true;
+            stepper.done(`Global registry connected (${registryUrl}) — handoff enabled`);
+          } else {
             // Registry not reachable — attempt auto-promote
             stepper.done(`Global registry not reachable — attempting mesh promote...`);
             try {
@@ -771,11 +1089,9 @@ Notes:
               if (pids.Relay) portPidMap.push({ port: relayPort, pid: pids.Relay });
               await killStaleListeners(portPidMap);
 
-              // Re-check after promote
-              const retryResp = await fetch(`${registryUrl.replace(/\/$/, "")}/v1/health`, {
-                signal: AbortSignal.timeout(5000),
-              });
-              agtReady = retryResp.ok;
+              // Re-check after promote (same /health → /v1/health fallback)
+              const retry = await probeRegistry(registryUrl);
+              agtReady = !!retry?.ok;
               if (agtReady) {
                 stepper.update(`Auto-promoted mesh tunnels — registry connected`);
               }
@@ -865,14 +1181,17 @@ Notes:
             "-e", `AGT_RELAY_URL=${containerRelayUrl}`,
             "-e", "AGT_REGISTRY_MODE=global",
             "-e", "AGT_GOVERNANCE_ENABLED=true",
+            "-e", `AZURECLAW_MESH_PROVIDER=${meshProvider}`,
           );
         } else {
-          // Local registry mode — router connects to colocated containers
+          // Local registry mode — router connects to colocated containers.
+          // Ports differ between providers (see MESH_PORTS).
           agtEnvArgs.push(
-            "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:8765`,
-            "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:8080`,
+            "-e", `AGT_RELAY_URL=ws://${AGT_RELAY}:${meshPorts.relay}`,
+            "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:${meshPorts.registry}`,
             "-e", "AGT_REGISTRY_MODE=local",
             "-e", "AGT_GOVERNANCE_ENABLED=true",
+            "-e", `AZURECLAW_MESH_PROVIDER=${meshProvider}`,
           );
         }
 

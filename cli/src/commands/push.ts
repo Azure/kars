@@ -6,7 +6,10 @@ import chalk from "chalk";
 import ora from "ora";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { loadContext } from "../config.js";
+
+const DEFAULT_AGT_REPO = path.join(os.homedir(), "Private/Repos/agt/agent-governance-toolkit");
 
 export function pushCommand(): Command {
   const cmd = new Command("push");
@@ -17,9 +20,85 @@ export function pushCommand(): Command {
     .option("--only <image>", "Build only one image: controller, router, sandbox, sandbox-base, relay, registry")
     .option("--include-base", "Include sandbox-base in a full push (skipped by default — rebuild only when upgrading OpenClaw/Python/Go)")
     .option("--apply", "Restart deployments after push so pods pick up new images")
+    .option(
+      "-m, --mesh-provider <provider>",
+      "Mesh stack to build: vendored (Rust + Postgres, default) or agt (Microsoft AGT Python, in-memory). " +
+        "When 'agt', builds relay/registry from --agt-repo and tags them as agentmesh-{relay,registry}-agt:latest. " +
+        "On --apply with 'agt', also swaps deploy/agentmesh.yaml → deploy/agentmesh-agt.yaml and flips helm 'mesh.provider'.",
+      "vendored",
+    )
+    .option(
+      "--agt-repo <path>",
+      `Path to the agent-governance-toolkit checkout (only used when --mesh-provider=agt). Defaults to $AZURECLAW_AGT_REPO or ${DEFAULT_AGT_REPO}`,
+    )
+    .option(
+      "--agt-sdk-tarball <path>",
+      "Path to a locally-packed @microsoft/agent-governance-sdk .tgz to install in the sandbox image. Only used with --mesh-provider=agt.",
+    )
     .action(async (options) => {
       const { execa } = await import("execa");
       const blue = chalk.hex("#0078D4");
+
+      if (options.meshProvider && !["vendored", "agt"].includes(options.meshProvider)) {
+        console.error(
+          chalk.red(`\n  Error: --mesh-provider must be vendored | agt (got "${options.meshProvider}")\n`),
+        );
+        process.exit(1);
+      }
+
+      // If user didn't pass --mesh-provider explicitly, auto-detect from the
+      // live helm release. This prevents accidentally downgrading a cluster
+      // that's already on AGT back to vendored (which would also drop the
+      // locally-packed AGT SDK from the sandbox image and break mesh send).
+      let meshProvider: "vendored" | "agt";
+      const meshProviderExplicit = process.argv.some(
+        (a) => a === "-m" || a === "--mesh-provider" || a.startsWith("--mesh-provider="),
+      );
+      if (meshProviderExplicit) {
+        meshProvider = options.meshProvider === "agt" ? "agt" : "vendored";
+      } else {
+        let detected: "vendored" | "agt" | null = null;
+        try {
+          const { stdout } = await execa(
+            "helm",
+            ["get", "values", "azureclaw", "-n", "azureclaw-system", "-o", "json"],
+            { reject: false },
+          );
+          const values = JSON.parse(stdout || "{}");
+          const v = values?.mesh?.provider;
+          if (v === "agt" || v === "vendored") detected = v;
+        } catch {
+          /* helm or cluster unreachable — fall through to default */
+        }
+        if (detected) {
+          meshProvider = detected;
+          if (detected === "agt") {
+            console.log(
+              chalk.yellow(
+                `  Auto-detected mesh.provider=agt on live cluster — building sandbox with AGT SDK tarball.`,
+              ),
+            );
+            console.log(
+              chalk.dim(`  (Pass --mesh-provider=vendored to override.)`),
+            );
+          }
+        } else {
+          meshProvider = "vendored";
+        }
+      }
+
+      // Resolve AGT repo path (only used when meshProvider=agt)
+      const agtRepo: string =
+        options.agtRepo || process.env.AZURECLAW_AGT_REPO || DEFAULT_AGT_REPO;
+      const agtDockerfileRel = "agent-governance-python/agent-mesh/docker/Dockerfile";
+      if (meshProvider === "agt") {
+        if (!fs.existsSync(path.join(agtRepo, agtDockerfileRel))) {
+          console.error(chalk.red(`\n  --mesh-provider=agt requires the AGT repo.`));
+          console.error(chalk.red(`  Looked for: ${path.join(agtRepo, agtDockerfileRel)}`));
+          console.error(chalk.red(`  Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.\n`));
+          process.exit(1);
+        }
+      }
 
       // Resolve ACR from context or flag
       const ctx = loadContext();
@@ -55,21 +134,111 @@ export function pushCommand(): Command {
         process.exit(1);
       }
 
+      // Define all images. Mesh relay/registry vary by provider:
+      //   vendored → Rust relay/registry from vendor/agentmesh-{relay,registry}
+      //              tagged agentmesh-{relay,registry}:latest (matches deploy/agentmesh.yaml)
+      //   agt      → AGT Python (single Dockerfile, COMPONENT=relay|registry build-arg)
+      //              tagged agentmesh-{relay,registry}-agt:latest (matches deploy/agentmesh-agt.yaml)
+      const meshImages = meshProvider === "agt"
+        ? [
+            {
+              name: "relay",
+              tag: "agentmesh-relay-agt:latest",
+              dockerfile: path.join(agtRepo, agtDockerfileRel),
+              absoluteContext: agtRepo,
+              buildArgs: ["--build-arg", "COMPONENT=relay", "--build-arg", `CACHE_BUST=${Date.now()}`],
+            },
+            {
+              name: "registry",
+              tag: "agentmesh-registry-agt:latest",
+              dockerfile: path.join(agtRepo, agtDockerfileRel),
+              absoluteContext: agtRepo,
+              buildArgs: ["--build-arg", "COMPONENT=registry", "--build-arg", `CACHE_BUST=${Date.now()}`],
+            },
+          ]
+        : [
+            {
+              name: "relay",
+              tag: "agentmesh-relay:latest",
+              dockerfile: "vendor/agentmesh-relay/Dockerfile",
+              context: "vendor/agentmesh-relay",
+              buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`],
+            },
+            {
+              name: "registry",
+              tag: "agentmesh-registry:latest",
+              dockerfile: "vendor/agentmesh-registry/Dockerfile",
+              context: "vendor/agentmesh-registry",
+              buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`],
+            },
+          ];
+
+      // Stage the AGT SDK tarball into .agt-sdk/ (build context). Same logic
+      // as cli/src/commands/dev.ts: the sandbox Dockerfile always COPYs
+      // .agt-sdk/ (the .keep file ensures it never fails); the RUN step
+      // installs the tarball only when AGT_SDK_TARBALL is set.
+      const sandboxBuildArgs: string[] = [
+        "--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
+        "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
+        "--build-arg", `SANDBOX_CACHE_BUST=${Date.now()}`,
+        "--build-arg", `MESH_PROVIDER=${meshProvider}`,
+      ];
+      const agtSdkStagingDir = path.join(repoRoot, ".agt-sdk");
+      if (fs.existsSync(agtSdkStagingDir)) {
+        for (const f of fs.readdirSync(agtSdkStagingDir)) {
+          if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
+            fs.unlinkSync(path.join(agtSdkStagingDir, f));
+          }
+        }
+      }
+      if (meshProvider === "agt") {
+        let tarballPath: string | null = null;
+        if (options.agtSdkTarball) {
+          if (!fs.existsSync(options.agtSdkTarball)) {
+            console.error(chalk.red(`\n  Error: --agt-sdk-tarball not found: ${options.agtSdkTarball}\n`));
+            process.exit(1);
+          }
+          tarballPath = options.agtSdkTarball;
+        } else {
+          // Auto-discover: a packed tarball next to the AGT TS workspace
+          try {
+            const tsDir = path.join(agtRepo, "agent-governance-typescript");
+            const candidates = fs.readdirSync(tsDir).filter(
+              f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
+            );
+            if (candidates.length > 0) {
+              tarballPath = path.join(tsDir, candidates[0]);
+              console.log(chalk.dim(`  Auto-discovered AGT SDK tarball: ${candidates[0]}`));
+            }
+          } catch {
+            /* AGT repo missing TS dir — fall through to npm install */
+          }
+        }
+        if (tarballPath) {
+          if (!fs.existsSync(agtSdkStagingDir)) fs.mkdirSync(agtSdkStagingDir, { recursive: true });
+          const basename = path.basename(tarballPath);
+          fs.copyFileSync(tarballPath, path.join(agtSdkStagingDir, basename));
+          sandboxBuildArgs.push("--build-arg", `AGT_SDK_TARBALL=${basename}`);
+        }
+      }
+
       // Define all images
-      const images: Array<{ name: string; tag: string; dockerfile: string; context?: string; buildArgs?: string[] }> = [
+      const images: Array<{
+        name: string;
+        tag: string;
+        dockerfile: string;
+        context?: string;
+        absoluteContext?: string;
+        buildArgs?: string[];
+      }> = [
         { name: "controller", tag: "azureclaw-controller:latest", dockerfile: "controller/Dockerfile" },
         { name: "router", tag: "azureclaw-inference-router:latest", dockerfile: "inference-router/Dockerfile",
           buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox-base", tag: "azureclaw-sandbox-base:latest", dockerfile: "sandbox-images/openclaw/Dockerfile.base",
           buildArgs: ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
-          buildArgs: ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
-                      "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
-                      "--build-arg", `SANDBOX_CACHE_BUST=${Date.now()}`] },
-        { name: "relay", tag: "agentmesh-relay:latest", dockerfile: "vendor/agentmesh-relay/Dockerfile", context: "vendor/agentmesh-relay",
-          buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
-        { name: "registry", tag: "agentmesh-registry:latest", dockerfile: "vendor/agentmesh-registry/Dockerfile", context: "vendor/agentmesh-registry",
-          buildArgs: ["--build-arg", `CACHE_BUST=${Date.now()}`] },
+          buildArgs: sandboxBuildArgs },
+        ...meshImages,
         // Multi-runtime adapter images — must match controller defaults in
         // `controller/src/reconciler/runtime.rs` (DEFAULT_*_IMAGE constants).
         { name: "runtime-openai-agents", tag: "azureclaw-runtime-openai-agents:latest",
@@ -117,13 +286,23 @@ export function pushCommand(): Command {
       for (const img of targets) {
         const spin = ora(`Building ${img.tag}...`).start();
         try {
+          // Dockerfile path: absolute if provided absolute (AGT case), else relative to repoRoot
+          const dockerfilePath = path.isAbsolute(img.dockerfile)
+            ? img.dockerfile
+            : path.join(repoRoot, img.dockerfile);
+          // Build context: absolute override > relative > repoRoot
+          const buildContext = img.absoluteContext
+            ? img.absoluteContext
+            : img.context
+              ? path.join(repoRoot, img.context)
+              : repoRoot;
           const args = [
             "build", "--platform", "linux/amd64",
             "--provenance=false", "--sbom=false",
-            "-f", path.join(repoRoot, img.dockerfile),
+            "-f", dockerfilePath,
             "-t", `${acrLoginServer}/${img.tag}`,
             ...(img.buildArgs || []),
-            img.context ? path.join(repoRoot, img.context) : repoRoot,
+            buildContext,
           ];
           await execa("docker", args, { stdio: "pipe" });
           spin.text = `Pushing ${img.tag}...`;
@@ -157,6 +336,73 @@ export function pushCommand(): Command {
       // Rollout restart if --apply
       if (options.apply) {
         const ns = "azureclaw-system";
+
+        // If --mesh-provider=agt was selected, swap the agentmesh manifest
+        // and flip the helm 'mesh.provider' value BEFORE restarting the
+        // controller so its newly-rolled pod reads AZURECLAW_MESH_PROVIDER=agt.
+        if (meshProvider === "agt" && (!options.only || options.only === "relay" || options.only === "registry")) {
+          const meshSpin = ora("Swapping mesh manifest → AGT (deploy/agentmesh-agt.yaml)...").start();
+          try {
+            // Best-effort: tear down vendored stack (Postgres + vendored relay/registry)
+            // before applying the AGT manifest. Ignore errors if vendored isn't installed.
+            const vendoredManifest = path.join(repoRoot, "deploy/agentmesh.yaml");
+            const agtManifest = path.join(repoRoot, "deploy/agentmesh-agt.yaml");
+            if (fs.existsSync(vendoredManifest)) {
+              await execa("kubectl", ["delete", "-f", vendoredManifest, "--ignore-not-found"], { stdio: "pipe" }).catch(() => {});
+            }
+            if (!fs.existsSync(agtManifest)) {
+              throw new Error(`AGT manifest missing: ${agtManifest}`);
+            }
+            await execa("kubectl", ["apply", "-f", agtManifest], { stdio: "pipe" });
+            meshSpin.succeed("AGT mesh manifest applied");
+          } catch (e: any) {
+            meshSpin.fail(`Mesh manifest swap failed: ${e.message?.split("\n")[0]}`);
+          }
+
+          // Flip the helm value so the controller injects AZURECLAW_MESH_PROVIDER=agt
+          // into all newly-spawned sandbox pods. Uses --reuse-values so other helm
+          // overrides set by `azureclaw up` survive.
+          const helmSpin = ora("Setting helm mesh.provider=agt...").start();
+          try {
+            await execa("helm", [
+              "upgrade", "azureclaw", path.join(repoRoot, "deploy/helm/azureclaw"),
+              "--namespace", ns,
+              "--reuse-values",
+              "--set", "mesh.provider=agt",
+            ], { stdio: "pipe" });
+            helmSpin.succeed("helm mesh.provider=agt");
+          } catch (e: any) {
+            helmSpin.fail(`helm upgrade failed: ${e.message?.split("\n")[0]} (apply manually: helm upgrade azureclaw deploy/helm/azureclaw --reuse-values --set mesh.provider=agt)`);
+          }
+        } else if (meshProvider === "vendored" && (!options.only || options.only === "relay" || options.only === "registry")) {
+          // Reverse direction: apply vendored manifest if currently on AGT.
+          // Detected by checking for the agentmesh-agt deployment.
+          try {
+            const { stdout } = await execa("kubectl", ["get", "deploy", "-n", "agentmesh", "-o", "name"], { stdio: "pipe" });
+            const onAgt = stdout.includes("registry") && !stdout.includes("postgres");
+            if (onAgt) {
+              const meshSpin = ora("Swapping mesh manifest → vendored (deploy/agentmesh.yaml)...").start();
+              try {
+                const agtManifest = path.join(repoRoot, "deploy/agentmesh-agt.yaml");
+                const vendoredManifest = path.join(repoRoot, "deploy/agentmesh.yaml");
+                if (fs.existsSync(agtManifest)) {
+                  await execa("kubectl", ["delete", "-f", agtManifest, "--ignore-not-found"], { stdio: "pipe" }).catch(() => {});
+                }
+                await execa("kubectl", ["apply", "-f", vendoredManifest], { stdio: "pipe" });
+                meshSpin.succeed("vendored mesh manifest applied");
+                await execa("helm", [
+                  "upgrade", "azureclaw", path.join(repoRoot, "deploy/helm/azureclaw"),
+                  "--namespace", ns, "--reuse-values", "--set", "mesh.provider=vendored",
+                ], { stdio: "pipe" }).catch(() => {});
+              } catch (e: any) {
+                meshSpin.fail(`Mesh swap failed: ${e.message?.split("\n")[0]}`);
+              }
+            }
+          } catch {
+            /* agentmesh ns not present yet — skip silently */
+          }
+        }
+
         // Restart controller (manages all sandbox pods)
         const spin = ora("Restarting deployments...").start();
         try {

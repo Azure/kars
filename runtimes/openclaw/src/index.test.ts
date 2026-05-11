@@ -446,11 +446,15 @@ describe("tool execute — error handling", () => {
     expect(text).toContain("List failed");
   });
 
-  it("azureclaw_discover returns error when router is unreachable", async () => {
+  it("azureclaw_discover returns empty list when router is unreachable", async () => {
     const tool = tools.get("azureclaw_discover")!;
     const result = await tool.execute("test-id", { query: "test" });
     const text = result.content[0].text;
-    expect(text).toContain("Discovery failed");
+    // mesh-registry abstraction swallows transport errors and returns []
+    // — registry hiccups must not break tool calls.
+    const parsed = JSON.parse(text);
+    expect(parsed.agents).toEqual([]);
+    expect(parsed.count).toBe(0);
   });
 });
 

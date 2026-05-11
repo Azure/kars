@@ -378,23 +378,56 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 
     let sandbox_name: &str = &state.sandbox_name;
     let base = registry_url.trim_end_matches('/');
+    let provider = std::env::var("AZURECLAW_MESH_PROVIDER")
+        .unwrap_or_else(|_| "vendored".into())
+        .trim()
+        .to_lowercase();
 
     // Step 1: Look up our AMID from the registry
     let amid = lookup_parent_amid(&state.client, &registry_url, sandbox_name).await;
 
-    // Step 2: If we found our AMID, fetch reputation score
+    // Step 2: If we found our AMID, fetch reputation score.
+    //
+    // Vendored registry exposes `/v1/registry/reputation/score?amid=X`.
+    // AGT registry has no such endpoint — the `reputation_score` is embedded
+    // in the per-agent record returned by `/v1/agents/{did}`. Dispatch on
+    // provider; without this the operator panel's ~30s polling produces a
+    // 404 per refresh per agent in registry logs.
     let registry = if let Some(ref agent_amid) = amid {
+        let url = if provider == "agt" {
+            format!("{}/v1/agents/{}", base, agent_amid)
+        } else {
+            format!("{}/v1/registry/reputation/score?amid={}", base, agent_amid)
+        };
         match state
             .client
-            .get(&format!(
-                "{}/v1/registry/reputation/score?amid={}",
-                base, agent_amid
-            ))
+            .get(&url)
             .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
+            Ok(resp) if resp.status().is_success() => {
+                let body: Option<serde_json::Value> = resp.json().await.ok();
+                if provider == "agt" {
+                    // Surface a vendored-shaped payload to keep the operator
+                    // panel + CLI fetchers schema-agnostic. AGT agent record
+                    // has `reputation_score: f64` in [0, 1]; vendored has
+                    // `score: i64`.
+                    body.map(|rec| {
+                        let score = rec
+                            .get("reputation_score")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        serde_json::json!({
+                            "score": score,
+                            "tier": rec.get("metadata").and_then(|m| m.get("tier")),
+                            "raw": rec,
+                        })
+                    })
+                } else {
+                    body
+                }
+            }
             Ok(resp) => {
                 tracing::debug!(status = %resp.status(), "Registry reputation lookup returned non-200");
                 None

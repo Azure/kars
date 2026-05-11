@@ -64,7 +64,7 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "file_write",
-      description: "Write text content directly to a file inside the sandbox. Use this (NOT exec_command with shell redirection) whenever you need to save an artifact — it bypasses the shell redirect policy. Path must be absolute and under /sandbox/ or /tmp/. Parent directories are created automatically. Overwrites existing files.",
+      description: "Write text content directly to a file inside the sandbox. Use this whenever you need to save an artifact LOCALLY (e.g. so foundry_code_execute can read it, or as the source for mesh_transfer_file). Path must be absolute and under /sandbox/ or /tmp/. Parent directories are created automatically. Overwrites existing files. **SIZE LIMIT — read carefully:** the `content` argument is part of the tool-call JSON arguments string; if it exceeds ~4 KB the LLM occasionally emits malformed escapes and the call fails to parse. For artifacts larger than ~4 KB use `foundry_code_execute` with `json.dump(data, open('/mnt/data/x.json','w'))` (or write/append the file in chunks) and then ship the resulting file via `mesh_transfer_file`. NEVER pass a multi-kilobyte JSON blob inline as a `mesh_send` payload — siblings expect FILES for anything over a few KB.",
       parameters: {
         type: "object",
         properties: {
@@ -96,7 +96,7 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "foundry_web_search",
-      description: "Search the web in real-time via Azure AI Foundry's Bing grounding. Returns answers with inline URL citations. Runs server-side — no egress policy exceptions needed. Use for current events, news, recent changes, verifying facts, or any query needing up-to-date information.",
+      description: "Search the web in real-time via Azure AI Foundry's Bing grounding. Returns answers with inline URL citations. Runs server-side — no egress policy exceptions needed. Use for current events, news, recent changes, verifying facts, or any query needing up-to-date information. WORKFLOW HINT for downstream delivery: once you've collected enough sources, ASSEMBLE the final structured artifact using `foundry_code_execute` (build a Python dict and `json.dump` it to `/mnt/data/<name>.json` — the wrapper downloads it to `/sandbox/.openclaw/workspace/<name>.json`). Then ship that file with `mesh_transfer_file`. DO NOT try to stuff multi-kilobyte JSON into a `mesh_send` payload or a `file_write` content arg — tool-call argument JSON corrupts at scale. Files only.",
       parameters: {
         type: "object",
         properties: {
@@ -186,7 +186,7 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "mesh_send",
-      description: "Send an E2E encrypted TEXT/JSON message to any agent in the mesh — siblings, parent, or any discovered agent. Auto-discovers the target by name. Use for peer-to-peer text or JSON. To send a FILE / IMAGE / BINARY, use `mesh_transfer_file` instead — peer agents run in separate containers and cannot read your /sandbox or /tmp paths, so a file_transfer envelope must contain real base64 bytes. Plain JSON metadata is accepted; envelopes with stand-in file_data (e.g. `<base64-image-data>`) are rejected.\n\nROUTING: `to_agent` MUST be the explicit downstream peer named in your task (e.g. `to_agent='writer'` when the task says \"hand to writer\" or describes a pipeline like analyst→viz→writer). Do NOT default to `to_agent='parent'` for sibling-bound text/JSON; parent will not forward to the named sibling and the sibling will time out waiting. Use `to_agent='parent'` only when the task explicitly says to return to parent/spawner, you are the FINAL agent in the pipeline, or no downstream peer is named.",
+      description: "Send a SHORT E2E encrypted TEXT/JSON message to another agent — siblings, parent, or any discovered agent. Auto-discovers the target by name. **SIZE LIMIT: keep `message` under ~2 KB.** This is for control-plane chatter: status pings, acknowledgements, small metadata, clarification questions, pointers (e.g. \"artifact.json ready, see mesh_transfer_file\"). For anything substantive (multi-source research JSON, full briefs, code, base64 anything, anything with embedded escaped JSON) build the artifact as a FILE with `foundry_code_execute` and ship it via `mesh_transfer_file`. Stuffing multi-kilobyte JSON into `message` is the #1 cause of `tool_failure` — the LLM corrupts its own tool-call arguments string and the call never reaches the wire.\n\nROUTING: `to_agent` MUST be the explicit downstream peer named in your task (e.g. `to_agent='writer'` when the task says \"hand to writer\" or describes a pipeline like analyst→viz→writer). Do NOT default to `to_agent='parent'` for sibling-bound text/JSON; parent will not forward to the named sibling and the sibling will time out waiting. Use `to_agent='parent'` only when the task explicitly says to return to parent/spawner, you are the FINAL agent in the pipeline, or no downstream peer is named.",
       parameters: {
         type: "object",
         properties: {
@@ -264,16 +264,183 @@ export const TASK_TOOLS: any[] = [
 /**
  * Returns the tool list visible to a sub-agent's LLM.
  *
- * In GitHub Models slim mode (`AZURECLAW_PROVIDER=github-models`), Foundry-only
- * tools (foundry_web_search, foundry_code_execute, foundry_file_search,
- * foundry_memory, foundry_image_generation, foundry_download_file) are hidden
- * because the inference router has no Foundry endpoint to call. A
- * DuckDuckGo-backed `web_search` tool is appended so the model still has live
- * web access.
+ * In GH-token slim modes (`AZURECLAW_PROVIDER=github-models` or
+ * `github-copilot`), Foundry-only tools (foundry_web_search,
+ * foundry_code_execute, foundry_file_search, foundry_memory,
+ * foundry_image_generation, foundry_download_file) are hidden because the
+ * inference router has no Foundry endpoint to call — exposing them just
+ * burns context with verbose JSON-schema and tempts the model to call tools
+ * that will 404. A DuckDuckGo-backed `web_search` tool is appended so the
+ * model still has live web access.
+ *
+ * **Strict mode** (`AZURECLAW_STRICT_TOOLS=1`): adds `strict: true` +
+ * `additionalProperties: false` to tools whose schemas already satisfy the
+ * OpenAI strict-mode constraints (all params required, no free-form objects).
+ * This makes the model's outer tool-call arguments JSON grammar-constrained
+ * at decode time, eliminating the multi-KB escape-corruption failures that
+ * affect mesh_send, file_write, and foundry_code_execute. Disabled in slim
+ * mode because not every upstream provider behind GitHub Models / Copilot
+ * implements strict mode consistently. Default OFF; flip the env var to opt
+ * in. Backward compatible — when the flag is unset the behaviour is
+ * byte-identical to the pre-strict release.
  */
+// Tools that go strict by simply adding the flag + `additionalProperties:false`
+// (every property already in `required`, no free-form objects).
+const STRICT_ELIGIBLE = new Set([
+  "exec_command",
+  "file_write",
+  "foundry_web_search",
+  "foundry_code_execute",
+  "foundry_memory",
+  "foundry_file_search",
+  "mesh_send",
+]);
+
+// Tools whose base schema has optional params — strict mode requires every
+// property in `required` and optionals expressed as nullable. The schemas
+// below are functionally equivalent to the base schema (handlers already
+// treat null and undefined identically via `args.x || default` and `typeof`
+// guards) but reshaped to satisfy OpenAI strict-mode constraints.
+//
+// http_fetch is intentionally absent — its `headers` field is a free-form
+// key-value object which strict mode forbids (every nested object must
+// enumerate all properties + set additionalProperties:false). Refactoring
+// headers to an enumerated allow-list would change semantics, so http_fetch
+// stays non-strict for now.
+//
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const STRICT_SCHEMA_OVERRIDES: Record<string, any> = {
+  mesh_transfer_file: {
+    type: "object",
+    properties: {
+      to_agent: { type: "string", description: "Name of the target agent" },
+      file_path: { type: "string", description: "Path to the file to send (relative to /sandbox/.openclaw/workspace, or absolute under /sandbox)" },
+      description: { type: ["string", "null"], description: "Optional human-readable description for the recipient (null if not needed)" },
+    },
+    required: ["to_agent", "file_path", "description"],
+    additionalProperties: false,
+  },
+  mesh_inbox: {
+    type: "object",
+    properties: {
+      unread_only: { type: ["boolean", "null"], description: "If true (default) return only entries not yet marked read. null = default true." },
+      mark_read: { type: ["boolean", "null"], description: "If true mark returned entries as read. null = default false (peek-only)." },
+      limit: { type: ["number", "null"], description: "Maximum number of entries to return. null = default 50." },
+      block_until_message: { type: ["boolean", "null"], description: "If true block server-side until next non-internal message arrives. null = default false." },
+      timeout_seconds: { type: ["number", "null"], description: "Max seconds to block when block_until_message=true. null = default 120, capped at 300." },
+    },
+    required: ["unread_only", "mark_read", "limit", "block_until_message", "timeout_seconds"],
+    additionalProperties: false,
+  },
+  mesh_await: {
+    type: "object",
+    properties: {
+      senders: { type: "array", items: { type: "string" }, description: "Agent names to wait for. The tool resolves once each named sender has at least one unread non-internal message in the inbox." },
+      timeout_seconds: { type: ["number", "null"], description: "Max seconds to block. null = default 180, capped at 600." },
+      mark_read: { type: ["boolean", "null"], description: "If true mark matched messages as read on resolve. null = default false." },
+    },
+    required: ["senders", "timeout_seconds", "mark_read"],
+    additionalProperties: false,
+  },
+  discover: {
+    type: "object",
+    properties: {
+      pattern: { type: ["string", "null"], description: "Glob pattern to filter agents. null = default '*' for all." },
+    },
+    required: ["pattern"],
+    additionalProperties: false,
+  },
+  foundry_image_generation: {
+    type: "object",
+    properties: {
+      prompt: { type: "string", description: "Text description of the image to generate." },
+      quality: { type: ["string", "null"], enum: ["low", "medium", "high", null], description: "Image quality. null = default medium." },
+      size: { type: ["string", "null"], enum: ["1024x1024", "1024x1536", "1536x1024", null], description: "Image dimensions. null = default 1024x1024." },
+    },
+    required: ["prompt", "quality", "size"],
+    additionalProperties: false,
+  },
+  foundry_download_file: {
+    type: "object",
+    properties: {
+      file_id: { type: "string", description: "Foundry container file id (e.g. cfile_abc123)." },
+      container_id: { type: "string", description: "Foundry container id (e.g. cntr_abc123)." },
+      local_basename: { type: ["string", "null"], description: "Optional output filename (no slashes). null = default '<file_id>.bin'." },
+    },
+    required: ["file_id", "container_id", "local_basename"],
+    additionalProperties: false,
+  },
+  web_search: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "The search query." },
+      max_results: { type: ["number", "null"], description: "Maximum results to return. null = default 8, max 20." },
+    },
+    required: ["query", "max_results"],
+    additionalProperties: false,
+  },
+  memory: {
+    type: "object",
+    properties: {
+      operation: { type: "string", enum: ["search", "update", "list"], description: "Operation: 'update' to add a fact, 'search' to query by substring, 'list' to dump all entries." },
+      text: { type: ["string", "null"], description: "For 'update': the fact to remember. For 'search': substring to match. null/ignored for 'list'." },
+    },
+    required: ["operation", "text"],
+    additionalProperties: false,
+  },
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyStrict(tool: any): any {
+  const name = tool?.function?.name;
+  if (!name) return tool;
+  const override = STRICT_SCHEMA_OVERRIDES[name];
+  if (override) {
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        strict: true,
+        parameters: override,
+      },
+    };
+  }
+  if (!STRICT_ELIGIBLE.has(name)) return tool;
+  const params = tool.function.parameters;
+  if (!params || params.type !== "object") return tool;
+  return {
+    ...tool,
+    function: {
+      ...tool.function,
+      strict: true,
+      parameters: {
+        ...params,
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getTaskTools(): any[] {
-  if (process.env.AZURECLAW_PROVIDER === "github-models") {
+  const provider = process.env.AZURECLAW_PROVIDER;
+  const slim = provider === "github-models" || provider === "github-copilot";
+  // Strict mode is opt-in (env-flag) AND only applied on the Foundry path
+  // because slim-mode providers vary in strict-schema support.
+  // Additionally, only enable when the configured model is a known
+  // OpenAI-family deployment that supports strict mode — Anthropic /
+  // Claude / Gemini / Mistral models exposed via Foundry's OpenAI-compat
+  // shim do NOT implement strict and the shim's behaviour is version-
+  // dependent (silent ignore vs schema reject). Default to off for anything
+  // outside the GPT family.
+  const model = (process.env.AZURECLAW_MODEL || process.env.OPENCLAW_MODEL || process.env.OPENAI_MODEL || "").toLowerCase();
+  const STRICT_MODEL_RE = /^(gpt-4o|gpt-4\.1|gpt-5|o1|o3|o4)/;
+  const modelOk = STRICT_MODEL_RE.test(model);
+  const strict = !slim && modelOk && process.env.AZURECLAW_STRICT_TOOLS === "1";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const maybeStrict = (t: any) => (strict ? applyStrict(t) : t);
+
+  if (slim) {
     const FOUNDRY = new Set([
       "foundry_web_search",
       "foundry_code_execute",
@@ -283,11 +450,10 @@ export function getTaskTools(): any[] {
       "foundry_download_file",
     ]);
     return [
-      ...TASK_TOOLS.filter((t) => !FOUNDRY.has(t.function?.name)),
+      ...TASK_TOOLS.filter((t) => !FOUNDRY.has(t.function?.name)).map(maybeStrict),
       WEB_SEARCH_TOOL,
       MEMORY_TOOL,
     ];
   }
-  // Foundry mode: unchanged from the original TASK_TOOLS list.
-  return TASK_TOOLS;
+  return TASK_TOOLS.map(maybeStrict);
 }

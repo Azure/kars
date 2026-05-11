@@ -292,7 +292,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
         console.log(chalk.green("  ✓ ") + chalk.bold("Registry promoted to global (port-forward)."));
         console.log(chalk.dim("    Tunnels are running in the background."));
         console.log(chalk.dim(`    PIDs saved to ${pidFile}`));
-        console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/v1/health`));
+        console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/health`));
         console.log(chalk.dim(`    Then:  azureclaw dev --global-registry ${globalRegistryUrl}`));
         console.log(chalk.dim(`    Stop:  azureclaw mesh demote`));
         console.log();
@@ -405,7 +405,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
       console.log(chalk.green("  ✓ ") + chalk.bold("Registry promoted to global."));
       console.log(chalk.dim("    Using sslip.io for DNS (auto-resolved, no setup needed)."));
       console.log(chalk.dim("    HTTP only — secured by LoadBalancer IP allowlist."));
-      console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/v1/health`));
+      console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/health`));
       console.log(chalk.dim(`    Then:  azureclaw dev --global-registry ${globalRegistryUrl}`));
       console.log();
     });
