@@ -1098,6 +1098,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             _ => "vendored",
         };
         openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
+        // The router container is separate from openclaw on AKS, and the
+        // router's own mesh code paths (relay WS upgrade path, registry
+        // discover endpoint) branch on AZURECLAW_MESH_PROVIDER. Without
+        // this the router defaults to "vendored" → upgrades WS on `/`
+        // (AGT only accepts `/ws`) → relay returns 403 Forbidden in a
+        // tight reconnect loop. Push the same normalized value into the
+        // router env so both containers agree on the provider.
+        router_agt_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
