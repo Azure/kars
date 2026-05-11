@@ -51,6 +51,14 @@ export interface LocalK8sOptions {
    * common first-run prompt.
    */
   forceRebuild?: boolean;
+  /**
+   * Mesh stack to deploy in the local kind cluster. 'vendored' (default)
+   * uses the Rust relay + Postgres registry; 'agt' uses the Microsoft
+   * AGT Python relay. The chosen value is forwarded to the helm chart
+   * via --set mesh.provider= so the controller spawns sandboxes with
+   * the matching AZURECLAW_MESH_PROVIDER env var.
+   */
+  meshProvider?: "vendored" | "agt";
 }
 
 /**
@@ -490,6 +498,7 @@ async function helmInstall(
   release: string,
   chartDir: string,
   valuesOverlays: string[],
+  setArgs: string[] = [],
 ): Promise<void> {
   // We render-then-apply (rather than `helm install`) to keep failures
   // visible: `kubectl apply -f -` shows precisely which resources didn't
@@ -505,6 +514,9 @@ async function helmInstall(
   ];
   for (const overlay of valuesOverlays) {
     args.push("-f", overlay);
+  }
+  for (const kv of setArgs) {
+    args.push("--set", kv);
   }
   const { stdout } = await execa(helm, args);
   await execa(
@@ -796,10 +808,11 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // rollout (no second restart needed).
   const credsOverlay = await provisionDevCreds(tools.kubectl, creds);
   try {
+    const meshProvider = opts.meshProvider ?? "vendored";
     await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir, [
       valuesOverlay,
       credsOverlay,
-    ]);
+    ], [`mesh.provider=${meshProvider}`]);
   } finally {
     // The overlay only references the API key by name (secretKeyRef);
     // the file itself contains no secret material, but we still clean up

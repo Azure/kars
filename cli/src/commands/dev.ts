@@ -395,6 +395,7 @@ Notes:
             noBuild: false,
             forceRebuild: options.build === true,
             channels: typeof options.channels === "string" ? options.channels : undefined,
+            meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "vendored",
           });
           return;
         } catch (e) {
