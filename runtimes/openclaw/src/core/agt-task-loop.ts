@@ -330,6 +330,7 @@ export async function processTaskWithTools(
             } catch (e) {
               result = `memory error: ${(e as Error).message}`;
             }
+          } else if (fnName === "foundry_web_search" || fnName === "foundry_code_execute" || fnName === "foundry_file_search") {
             log.info(`AGT sub-agent ${fnName}: ${JSON.stringify(args).slice(0, 200)}`);
             // Guard: Foundry's code-interpreter container has its OWN /sandbox and /tmp
             // that are NOT the agent's filesystem. Writing/copying to those paths from
