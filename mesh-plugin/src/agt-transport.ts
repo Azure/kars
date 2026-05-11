@@ -388,15 +388,33 @@ export class AgtTransport implements IMeshTransport {
 
   async send(toAmid: string, payload: unknown): Promise<string | undefined> {
     if (!this.client) throw new Error("AgtTransport not connected");
-    // AGT MeshClient.send() auto-bootstraps the X3DH handshake on first
-    // contact (see @agentmesh/sdk AgentMeshClient.send → establishSession
-    // fall-through when no activeSession/sessionCache entry exists). We
-    // used to call establishSessionWithPeer() here as a pre-bootstrap, but
-    // that method does not exist on AgentMeshClient — the real method name
-    // is establishSession() and send() invokes it internally. Calling it
-    // explicitly here also isn't idempotent (it unconditionally starts a
-    // new X3DH + writes activeSessions.set), so the right thing to do is
-    // simply call send() and let the SDK manage session lifecycle.
+    // @microsoft/agent-governance-sdk MeshClient.send() throws
+    // "No encrypted session with <peer>. Call establishSession() first."
+    // when no SecureChannel exists for the peer — it does NOT auto-bootstrap
+    // X3DH (unlike e.g. @agentmesh/sdk). establishSessionWithPeer() is the
+    // SDK's high-level helper that fetches the prekey bundle from the
+    // registry and runs the X3DH+KNOCK flow; it's idempotent (returns the
+    // cached MeshSession when one already exists — see SDK mesh-client.js
+    // L230-245), so this is cheap on the hot path.
+    if (!this._plaintextPeers.has(toAmid)) {
+      try {
+        await this.client.establishSessionWithPeer!(toAmid);
+      } catch (e: unknown) {
+        // Surface the real error verbatim — the caller's retry loop matches
+        // on /prekey/i, so a generic "prekey bootstrap failed" wrapper hides
+        // permanent errors (bad-key / X3DH failures) inside an infinite poll.
+        const inner = e instanceof Error ? e.message : String(e);
+        try {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[agt-transport] establishSessionWithPeer(${toAmid.slice(0, 12)}…) failed: ${inner}`,
+          );
+        } catch {
+          /* logger may be off */
+        }
+        throw e instanceof Error ? e : new Error(inner);
+      }
+    }
     await this.client.send(toAmid, payload);
     return undefined;
   }
