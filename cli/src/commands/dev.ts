@@ -329,14 +329,78 @@ Notes:
           if (rebuild) options.build = true;
         }
 
+        // ── Mesh source prompt (local docker vs remote AKS) ─────────
+        // Default to "local" — docker-compose'd relay/registry on the
+        // user's laptop. "Remote" picks up an existing port-forward
+        // (or auto-spawns one) against a previously-provisioned AKS
+        // mesh, so the dev sandbox federates with whatever is already
+        // running in the cluster. Only ask if the user did NOT pass
+        // --global-registry explicitly (advanced flow).
+        const globalRegistryExplicit = process.argv.some(
+          a => a === "--global-registry" || a.startsWith("--global-registry="),
+        );
+        if (!globalRegistryExplicit) {
+          const { loadContext } = await import("../config.js");
+          const cachedCtx = loadContext();
+          const cachedRegistryUrl = cachedCtx?.globalRegistryUrl;
+          const aksAvailable = !!cachedCtx?.aksCluster;
+
+          // Compose the remote-option label dynamically so the user
+          // sees what would happen if they pick it: re-use cached
+          // tunnel, or spawn one against the known AKS cluster.
+          const remoteLabel = cachedRegistryUrl
+            ? `Remote  (reuse port-forward to AKS: ${cachedRegistryUrl})`
+            : aksAvailable
+              ? `Remote  (auto port-forward to AKS cluster: ${cachedCtx!.aksCluster})`
+              : "Remote  (port-forward to existing AKS mesh — requires `azureclaw up` first)";
+
+          const { default: inquirer } = await import("inquirer");
+          const { meshSource } = await inquirer.prompt([{
+            type: "list",
+            name: "meshSource",
+            message: "Where should the mesh live?",
+            default: "local",
+            choices: [
+              {
+                name: "Local   (recommended; spin up relay + registry in Docker on this laptop)",
+                value: "local",
+              },
+              { name: remoteLabel, value: "remote" },
+            ],
+          }]);
+
+          if (meshSource === "remote") {
+            if (!cachedRegistryUrl && !aksAvailable) {
+              console.log(chalk.yellow(
+                "\n  ⚠ No cached AKS deployment context found. Falling back to local mesh.",
+              ));
+              console.log(chalk.dim(
+                "    Run `azureclaw up` first to provision an AKS cluster, then re-run `azureclaw dev`.\n",
+              ));
+            } else {
+              // Default port aligns with `azureclaw mesh promote --port-forward`
+              // (registry on 18080, relay on 18765). The downstream
+              // global-registry block (around line 922) does the actual
+              // health check + auto-spawn if the tunnels aren't already
+              // up — so we just have to point it at the right URL.
+              options.globalRegistry = cachedRegistryUrl ?? "http://localhost:18080";
+              console.log(chalk.dim(
+                `  → Will federate with remote mesh at ${options.globalRegistry}\n`,
+              ));
+            }
+          }
+        }
+
         // ── Mesh provider prompt ────────────────────────────────────
         // Default to vendored (battle-tested). Only ask if the user did
         // NOT pass --mesh-provider explicitly. We detect "explicit" by
         // scanning argv since commander already applied the default.
+        // If the user picked "remote" mesh above, also skip — the
+        // provider is whatever is already running in the cluster.
         const meshProviderExplicit = process.argv.some(
           a => a === "--mesh-provider" || a.startsWith("--mesh-provider="),
         );
-        if (!meshProviderExplicit) {
+        if (!meshProviderExplicit && !options.globalRegistry) {
           // Detect whether the AGT repo is available locally — only offer
           // AGT as a choice if the user actually has the toolkit checked
           // out, otherwise they'd hit a hard error in the build step.
@@ -934,17 +998,29 @@ Notes:
             stepper.update(`Rewriting ${registryUrl} → ${containerRegistryUrl} for container access`);
           }
 
-          // Health check from the host (validates port-forward / tunnel is up)
+          // Health check from the host (validates port-forward / tunnel is up).
+          // AGT registry exposes /health; vendored exposes both /health and
+          // /v1/health — probe /health first, fall back for older clusters.
           stepper.update(`Checking ${registryUrl}...`);
+          async function probeRegistry(url: string): Promise<Response | null> {
+            for (const probe of ["/health", "/v1/health"]) {
+              try {
+                const r = await fetch(`${url.replace(/\/$/, "")}${probe}`, {
+                  signal: AbortSignal.timeout(10000),
+                });
+                if (r.ok) return r;
+              } catch { /* try next */ }
+            }
+            return null;
+          }
+          let initial: Response | null = null;
           try {
-            const healthUrl = `${registryUrl.replace(/\/$/, "")}/v1/health`;
-            const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(10000) });
-            agtReady = resp.ok;
-            stepper.done(agtReady
-              ? `Global registry connected (${registryUrl}) — handoff enabled`
-              : `Global registry returned ${resp.status} — may not be ready`
-            );
-          } catch (e: any) {
+            initial = await probeRegistry(registryUrl);
+          } catch { /* fall through to auto-promote */ }
+          if (initial?.ok) {
+            agtReady = true;
+            stepper.done(`Global registry connected (${registryUrl}) — handoff enabled`);
+          } else {
             // Registry not reachable — attempt auto-promote
             stepper.done(`Global registry not reachable — attempting mesh promote...`);
             try {
@@ -996,11 +1072,9 @@ Notes:
               if (pids.Relay) portPidMap.push({ port: relayPort, pid: pids.Relay });
               await killStaleListeners(portPidMap);
 
-              // Re-check after promote
-              const retryResp = await fetch(`${registryUrl.replace(/\/$/, "")}/v1/health`, {
-                signal: AbortSignal.timeout(5000),
-              });
-              agtReady = retryResp.ok;
+              // Re-check after promote (same /health → /v1/health fallback)
+              const retry = await probeRegistry(registryUrl);
+              agtReady = !!retry?.ok;
               if (agtReady) {
                 stepper.update(`Auto-promoted mesh tunnels — registry connected`);
               }
