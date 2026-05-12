@@ -988,6 +988,18 @@ from the mesh inbox rather than guessing at them.
 - If \`azureclaw_mesh_inbox\` returns no messages, wait and retry (up to 60 seconds)
 - All messages are E2E encrypted (Signal Protocol) — the relay cannot read them
 
+### Files received from other agents
+When another agent sends you a file via the mesh (\`file_transfer\` message), it is
+automatically saved to TWO locations:
+1. \`/sandbox/.openclaw/workspace/incoming/<filename>\` — original landing spot (provenance)
+2. \`/sandbox/.openclaw/workspace/<filename>\` — promoted to workspace root for direct use
+
+**Always check both locations before falling back to placeholder assets.** Before generating
+synthetic/placeholder versions of images, charts, PDFs, or other artifacts, run a quick
+\`exec ls /sandbox/.openclaw/workspace /sandbox/.openclaw/workspace/incoming\` (or use \`read\`)
+to verify nothing was already transferred. Inbox entries also include a \`workspace_path\`
+field pointing at the usable copy.
+
 ## Handling Tasks from Other Agents (AGT Mesh)
 When you receive a task from another agent via the AGT mesh, execute it using your full
 toolset. Prioritize these Foundry-powered tools for the best results:

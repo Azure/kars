@@ -1034,9 +1034,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           success = stat.size === buf.length;
           savedPath = destPath;
 
+          // Also promote to workspace root so the file is immediately visible to the
+          // agent without it needing to know about the incoming/ directory. This mirrors
+          // the handoff:workspace_inject behavior (~line 1314) and prevents the LLM from
+          // falling back to placeholder assets when real AGT-transferred files exist.
+          let promotedPath = "";
+          try {
+            const wsRoot = "/sandbox/.openclaw/workspace";
+            const rootDest = path.join(wsRoot, safeName);
+            if (!fs.existsSync(rootDest)) {
+              fs.copyFileSync(destPath, rootDest);
+              promotedPath = rootDest;
+            }
+          } catch { /* best effort */ }
+
           log.info(
             `📁 File received from '${fromName}': ${safeName} ` +
-            `(${(buf.length / 1024).toFixed(1)} KB) → ${destPath}`
+            `(${(buf.length / 1024).toFixed(1)} KB) → ${destPath}` +
+            (promotedPath ? ` (also at ${promotedPath})` : "")
           );
 
           // Update the inbox entry with save path (already pushed above)
@@ -1046,6 +1061,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               type: "file_transfer",
               file_name: safeName,
               saved_to: destPath,
+              workspace_path: promotedPath || destPath,
               size_bytes: buf.length,
               description: message.description || "",
               from_agent: fromName,
