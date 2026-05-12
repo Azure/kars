@@ -10,40 +10,24 @@ is licensed to you under their original license terms set forth below.
 
 ---------------------------------------------------------
 
-1. AgentMesh Registry v0.3.0
-   Source:      https://github.com/amitayks/agentmesh/tree/main/registry
-   Vendored at: vendor/agentmesh-registry/
+1. Microsoft Agent Governance Toolkit (AGT) — JS SDK, relay, and registry
+   Source:      https://github.com/microsoft/agent-governance-toolkit
+   Packages:    @microsoft/agent-governance-sdk; AGT AgentMesh relay; AGT AgentMesh registry
    License:     MIT
-   Copyright:   Copyright (c) 2024 amitayks/agentmesh contributors
-   Modifications (vendor/agentmesh-registry/README.md):
-     Patch 1 — Raw timestamp signature verification: keep timestamp as String
-               to match SDK's Z-suffix ISO 8601 format; fixes 401 on prekey upload.
-     Patch 2 — Ghost agent cleanup + heartbeat + search freshness: replace-on-
-               register deduplication, POST /v1/registry/heartbeat endpoint,
-               search limited to agents seen within 5 minutes.
-     Patch 3 — feedback_count always 0: wrong table name in reputation queries
-               (reputation_feedbacks → reputation_feedback); switched to
-               sqlx::query_as to target correct table.
-     Patch 4 — Operational hardening: graceful SIGTERM shutdown, 7-day stale
-               agent cleanup task, honest 503 from /v1/health on DB failure,
-               input validation caps (50 capabilities, 100 prekeys, 100 search),
-               TOCTOU race fix in delete_stale_by_display_name, startup panic
-               fix for missing static directory.
+   Copyright:   Copyright (c) Microsoft Corporation
 
    MIT License
-   
-   Copyright (c) 2024 amitayks/agentmesh contributors
-   
+
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
    in the Software without restriction, including without limitation the rights
    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
    copies of the Software, and to permit persons to whom the Software is
    furnished to do so, subject to the following conditions:
-   
+
    The above copyright notice and this permission notice shall be included in all
    copies or substantial portions of the Software.
-   
+
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -54,105 +38,7 @@ is licensed to you under their original license terms set forth below.
 
 ---------------------------------------------------------
 
-2. AgentMesh Relay v0.3.0
-   Source:      https://github.com/amitayks/agentmesh/tree/main/relay
-   Vendored at: vendor/agentmesh-relay/
-   License:     MIT
-   Copyright:   Copyright (c) 2024 amitayks/agentmesh contributors
-   Modifications (vendor/agentmesh-relay/README.md):
-     Patch 1 — Raw timestamp signature verification: keep Connect.timestamp as
-               String; verify raw bytes to match Ed25519 signature from JS SDK.
-     Patch 2 — Session-aware connection management: added ConnectionEntry with
-               session_id UUID; unregister() requires session_id to prevent stale
-               handler from removing live connection (ghost connection fix).
-     Patch 3 — HTTP health endpoint on port 8766: eliminates K8s tcpSocket probe
-               WebSocket handshake warnings; returns JSON with connection stats.
-     Patch 4 — Explicit close reason error codes: SESSION_REPLACED and
-               PING_TIMEOUT ErrorCode variants stop auto-reconnect storms.
-
-   MIT License
-   
-   Copyright (c) 2024 amitayks/agentmesh contributors
-   
-   Permission is hereby granted, free of charge, to any person obtaining a copy
-   of this software and associated documentation files (the "Software"), to deal
-   in the Software without restriction, including without limitation the rights
-   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-   copies of the Software, and to permit persons to whom the Software is
-   furnished to do so, subject to the following conditions:
-   
-   The above copyright notice and this permission notice shall be included in all
-   copies or substantial portions of the Software.
-   
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-   SOFTWARE.
-
----------------------------------------------------------
-
-3. AgentMesh SDK (@agentmesh/sdk) v0.1.2
-   Source:      https://github.com/amitayks/agentmesh/tree/main/agentmesh-js
-                npm: @agentmesh/sdk (published by amitaykeisar)
-   Vendored at: vendor/agentmesh-sdk/
-   License:     MIT
-   Copyright:   Copyright (c) 2024 AgentMesh / amitaykeisar contributors
-   Modifications (vendor/agentmesh-sdk/README.md):
-     Patch 1 — PrekeyManager.buildBundle(): fixed empty signature (re-sign via
-               identity.sign()) and missing one-time prekeys.
-     Patch 2 — base64Decode key-type prefix crash: strip x25519:/ed25519: prefix
-               before atob() across prekey.ts, client.ts, session/index.ts.
-     Patch 3 — X3DH→Double Ratchet handoff: pass peerBundle.signedPrekey as
-               initial peer ratchet key in initiateSession().
-     Patch 4 — KNOCK protocol not wired to relay transport: establishSession()
-               now sends KNOCK via transport.send() before session activation.
-     Patch 5 — KNOCK race condition: added knockPendingPeers Map; messages for
-               in-flight KNOCK await resolution instead of immediate rejection.
-     Patch 6 — connect() prekey/register order: reverted to register()→
-               uploadPrekeys() (registry requires registration first); added
-               sender-side retry in plugin.ts for prekey errors.
-     Patch 7 — submitReputation silent error swallowing: log HTTP status +
-               body on non-200; surface actual failure reason in logs.
-     Patch 8 — connect() stale connected state blocks reconnect: check
-               transport.connect() return value before setting this.connected;
-               disconnect() before retry in plugin.ts reconnect paths.
-     Patch 9 — bytesToBase64 stack overflow on large payloads (>100 KB):
-               replaced spread-operator fromCharCode with Buffer.toString('base64').
-     Patch 10 — initiateSession 'Active session already exists' crash on reuse:
-                returns {reused:true} for existing sessions; establishSession
-                syncs activeSessions and returns early.
-     Patch 11 — wsFactory + plaintextPeers extensibility hooks: wsFactory
-                injects proxy-aware WebSocket; plaintextPeers bypasses Signal
-                E2E for legacy wire format peers.
-
-   MIT License
-   
-   Copyright (c) 2024 AgentMesh / amitaykeisar contributors
-   
-   Permission is hereby granted, free of charge, to any person obtaining a copy
-   of this software and associated documentation files (the "Software"), to deal
-   in the Software without restriction, including without limitation the rights
-   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-   copies of the Software, and to permit persons to whom the Software is
-   furnished to do so, subject to the following conditions:
-   
-   The above copyright notice and this permission notice shall be included in all
-   copies or substantial portions of the Software.
-   
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-   SOFTWARE.
-
----------------------------------------------------------
-
-4. Python Sandbox Wheels (vendor/sandbox-wheels/)
+2. Python Sandbox Wheels (vendor/sandbox-wheels/)
    Source:      Various upstream Python packages bundled as pre-built wheels
    Vendored at: vendor/sandbox-wheels/
    Total packages: 104 distinct distributions across 131 wheel files
@@ -162,7 +48,7 @@ is licensed to you under their original license terms set forth below.
    license. Where multiple packages share an identical license text, the
    license body is reproduced once with the full list of covered packages.
 
-   4.1. Packages sharing Apache 2.0 license text (11 packages):
+   2.1. Packages sharing Apache 2.0 license text (11 packages):
         - aiosignal v1.4.0  [https://github.com/aio-libs/aiosignal]
         - distro v1.9.0  [https://github.com/python-distro/distro]
         - frozenlist v1.8.0  [https://github.com/aio-libs/frozenlist]

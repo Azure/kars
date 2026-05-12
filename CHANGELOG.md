@@ -9,14 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Default mesh provider is now `agt`** across the entire stack (helm
-  chart, controller, sandbox, CLI, runtime, mesh-plugin factory). The
-  patched vendored fork in `vendor/` remains available as an opt-in via
-  `AZURECLAW_MESH_PROVIDER=vendored` or `--mesh-provider=vendored`, but
-  fresh deploys go to Microsoft's upstream AGT Python relay+registry by
-  default. The dual-provider plumbing (`Provider` enum,
-  `createMeshTransport()` factory, both manifests, both adapters) stays
-  intact — only the default changes.
+- **Phase 5.2 completed the AGT-only mesh migration.** AzureClaw now runs
+  Microsoft AGT AgentMesh exclusively: the historical vendored AgentMesh SDK
+  and relay/registry forks were removed after upstream AGT PR #2090 merged
+  all 18 AzureClaw gap-closing patches.
+- The OpenClaw runtime and `mesh-plugin` no longer depend on `@agentmesh/sdk`;
+  identity, signing, and verification use Node.js native `crypto` helpers
+  re-exported by `@azureclaw/mesh`, while transport uses
+  `@microsoft/agent-governance-sdk`.
+- The controller and inference-router dropped the `Provider::Vendored` branch.
+  Helm `mesh.provider` is AGT-only and no longer documents or renders a
+  vendored provider path.
 
 ### Added
 

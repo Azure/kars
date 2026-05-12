@@ -96,7 +96,7 @@ When `spec.governance.enabled: true`, AGT governance runs **natively inside the 
 | `RateLimiter` | 500 req/sec global, 50/sec per-agent default. Token bucket with burst. |
 | `BehaviorMonitor` | Burst detection (100/60s), failure tracking (20), denial tracking (10/60s). |
 
-Sub-µs evaluation latency. Plugin-side AGT only handles E2E-encrypted mesh transport via `@agentmesh/sdk`; every governance decision goes through the router.
+Sub-µs evaluation latency. Plugin-side AGT only handles E2E-encrypted mesh transport through `@microsoft/agent-governance-sdk`; every governance decision goes through the router.
 
 The router exposes four provider seams (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider`), three with in-tree implementations and one (`MeshProvider`) by-design plugin-side. See **[Architecture — provider seams](architecture.md)** if you need to plug in a custom backend.
 
@@ -127,7 +127,7 @@ flowchart LR
 
 Inter-agent communication uses [Signal Protocol](https://signal.org/docs/) (X3DH + Double Ratchet) over a small relay/registry that AzureClaw operates. The relay sees only ciphertext and routing metadata. KNOCK-gated session establishment evaluates per-peer trust score against `AGT_TRUST_THRESHOLD`.
 
-Failed decrypt is a `security_event`, not a downgrade — there is no plaintext fallback. The cryptographic primitives are libsodium; we vendor a small forked SDK with eight bug-fix patches documented in `vendor/agentmesh-sdk/README.md`.
+Failed decrypt is a `security_event`, not a downgrade — there is no plaintext fallback. The cryptographic primitives are provided by the AGT mesh stack; AzureClaw no longer carries a forked AgentMesh SDK.
 
 #### Trust tiers and the `api://agentmesh` prerequisite
 
