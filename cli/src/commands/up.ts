@@ -46,7 +46,7 @@ export function upCommand(): Command {
     .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
     .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
-    .option("-m, --mesh-provider <provider>", "Mesh stack to deploy: 'agt' (default) or 'vendored'. Selects which deploy/agentmesh-*.yaml manifest to install and which mesh.provider value to set on the helm release.", "agt")
+    .option("-m, --mesh-provider <provider>", "Mesh stack to deploy. Only 'agt' is supported (vendored Rust relay/registry were removed in Phase 5.2). Kept as a flag for backward-compatible scripts.", "agt")
     // ── Output / lifecycle ────────────────────────────────────────────
     .option("--dry-run", "Show what would be done without executing", false)
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
@@ -559,9 +559,11 @@ Auto-resume:
              "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
           );
 
-          // AgentMesh components (relay + registry for E2E encrypted inter-agent comms)
-          await buildPush("vendor/agentmesh-relay/Dockerfile", "agentmesh-relay:latest", [], "vendor/agentmesh-relay");
-          await buildPush("vendor/agentmesh-registry/Dockerfile", "agentmesh-registry:latest", [], "vendor/agentmesh-registry");
+          // AgentMesh relay+registry images are no longer built by `azureclaw up`.
+          // After Phase 5.2 the vendored Rust forks were removed; the AGT
+          // mesh manifest pulls upstream Microsoft AGT images, or rebuild
+          // locally via `azureclaw push --only relay --apply` (requires an
+          // AGT repo checkout passed via --agt-repo).
 
           // Multi-runtime adapter images. Tags must match the controller's
           // DEFAULT_*_IMAGE constants in `reconciler/runtime.rs`. Skipped
@@ -868,7 +870,7 @@ Auto-resume:
           {
             globalRegistry: options.globalRegistry,
             exposeRegistry: options.exposeRegistry,
-            meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "agt",
+            meshProvider: "agt",
           },
         );
         const registryMode = meshResult.registryMode;

@@ -141,10 +141,6 @@ describe("sandbox Dockerfile — image-level hardening (s7)", () => {
     expect(dockerfile).toMatch(/chmod -R a-w [^\n]*\/opt\/azureclaw-plugin/);
   });
 
-  it("makes /opt/azureclaw-vendored-sdk read-only at image build time", () => {
-    expect(dockerfile).toMatch(/chmod -R a-w [^\n]*\/opt\/azureclaw-vendored-sdk/);
-  });
-
   it("restores read/traverse bits after the a-w lockdown", () => {
     // Without a+rX, a subsequent `cp -r` from the source fails with "Permission denied"
     // because sandbox (UID 1000) cannot even enter the directory.

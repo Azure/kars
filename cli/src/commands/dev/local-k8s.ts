@@ -52,13 +52,12 @@ export interface LocalK8sOptions {
    */
   forceRebuild?: boolean;
   /**
-   * Mesh stack to deploy in the local kind cluster. 'agt' (default, Phase 5)
-   * uses the Microsoft AGT Python relay + registry; 'vendored' uses the
-   * patched Rust relay + Postgres registry. The chosen value is forwarded
-   * to the helm chart via --set mesh.provider= so the controller spawns
-   * sandboxes with the matching AZURECLAW_MESH_PROVIDER env var.
+   * Mesh stack to deploy in the local kind cluster. Only 'agt' is supported
+   * after Phase 5.2 (vendored Rust relay/registry were removed). Kept as a
+   * field for backward-compatible scripts and to preserve the multi-provider
+   * framework for future implementations.
    */
-  meshProvider?: "vendored" | "agt";
+  meshProvider?: "agt";
   /**
    * Path to the agent-governance-toolkit checkout, used to build AGT relay
    * + registry images when meshProvider==="agt". Defaults to
@@ -665,80 +664,60 @@ async function provisionDevCreds(
 }
 
 /**
- * Build the AGT or vendored mesh relay+registry images locally, load them
- * into the kind cluster, and `kubectl apply` the matching manifest with
- * image refs rewritten to the local tags + imagePullPolicy=Never so the
- * cluster does not try to pull from ACR.
+ * Build the AGT mesh relay+registry images locally, load them into the
+ * kind cluster, and `kubectl apply` the manifest with image refs rewritten
+ * to the local tags + imagePullPolicy=Never so the cluster does not try to
+ * pull from ACR.
  *
- * Both manifests use the same Service names (agentmesh-relay:8765,
- * agentmesh-registry:8080) in namespace "agentmesh", so the controller's
- * default env wiring resolves identically regardless of provider.
+ * Services are named (agentmesh-relay:8765, agentmesh-registry:8080) in
+ * namespace "agentmesh", matching the controller's default env wiring.
  */
 async function deployAgentMesh(
   tools: Tooling,
   clusterName: string,
   repoRoot: string,
-  meshProvider: "vendored" | "agt",
+  meshProvider: "agt",
   agtRepo: string | undefined,
   archToken: string,
 ): Promise<void> {
+  void meshProvider;
   const platform = `linux/${archToken}`;
   const localTag = (component: "relay" | "registry"): string =>
-    meshProvider === "agt"
-      ? `agentmesh-${component}-agt:dev`
-      : `agentmesh-${component}:dev`;
+    `agentmesh-${component}-agt:dev`;
 
-  // ── Build relay + registry images locally ─────────────────────────
-  if (meshProvider === "agt") {
-    if (!agtRepo) {
-      throw new Error(
-        "--mesh-provider=agt requires --agt-repo or $AZURECLAW_AGT_REPO pointing at an agent-governance-toolkit checkout.",
-      );
-    }
-    const agtDockerfile = path.join(
-      agtRepo,
-      "agent-governance-python/agent-mesh/docker/Dockerfile",
+  // ── Build relay + registry images locally (AGT Python) ────────────
+  if (!agtRepo) {
+    throw new Error(
+      "--mesh-provider=agt requires --agt-repo or $AZURECLAW_AGT_REPO pointing at an agent-governance-toolkit checkout.",
     );
-    if (!existsSync(agtDockerfile)) {
-      throw new Error(
-        `AGT Dockerfile not found at ${agtDockerfile}. Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.`,
-      );
-    }
-    for (const component of ["relay", "registry"] as const) {
-      console.log(chalk.dim(`  Building agentmesh-${component} (AGT Python)…`));
-      await execa(
-        tools.runtime,
-        [
-          "build",
-          "--platform",
-          platform,
-          "--build-arg",
-          `COMPONENT=${component}`,
-          "-t",
-          localTag(component),
-          "-f",
-          agtDockerfile,
-          agtRepo,
-        ],
-        { stdio: "inherit" },
-      );
-    }
-  } else {
-    for (const component of ["relay", "registry"] as const) {
-      console.log(chalk.dim(`  Building agentmesh-${component} (Rust)…`));
-      await execa(
-        tools.runtime,
-        [
-          "build",
-          "--platform",
-          platform,
-          "-t",
-          localTag(component),
-          path.join(repoRoot, `vendor/agentmesh-${component}`),
-        ],
-        { stdio: "inherit" },
-      );
-    }
+  }
+  const agtDockerfile = path.join(
+    agtRepo,
+    "agent-governance-python/agent-mesh/docker/Dockerfile",
+  );
+  if (!existsSync(agtDockerfile)) {
+    throw new Error(
+      `AGT Dockerfile not found at ${agtDockerfile}. Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.`,
+    );
+  }
+  for (const component of ["relay", "registry"] as const) {
+    console.log(chalk.dim(`  Building agentmesh-${component} (AGT Python)…`));
+    await execa(
+      tools.runtime,
+      [
+        "build",
+        "--platform",
+        platform,
+        "--build-arg",
+        `COMPONENT=${component}`,
+        "-t",
+        localTag(component),
+        "-f",
+        agtDockerfile,
+        agtRepo,
+      ],
+      { stdio: "inherit" },
+    );
   }
 
   // ── Load images into kind ─────────────────────────────────────────
@@ -751,10 +730,7 @@ async function deployAgentMesh(
   }
 
   // ── Rewrite manifest: swap ACR image refs → local tags, set Never ──
-  const manifestPath =
-    meshProvider === "agt"
-      ? path.join(repoRoot, "deploy", "agentmesh-agt.yaml")
-      : path.join(repoRoot, "deploy", "agentmesh.yaml");
+  const manifestPath = path.join(repoRoot, "deploy", "agentmesh-agt.yaml");
   if (!existsSync(manifestPath)) {
     throw new Error(`Mesh manifest not found at ${manifestPath}`);
   }
@@ -763,27 +739,17 @@ async function deployAgentMesh(
   // image references that we swap for the local kind-loaded tags. Using
   // String.replaceAll avoids regex-anchor pitfalls flagged by CodeQL.
   const acrPrefix = "azureclawacr.azurecr.io";
-  const repls: { from: string; to: string }[] =
-    meshProvider === "agt"
-      ? [
-          { from: `${acrPrefix}/agentmesh-relay-agt:latest`, to: localTag("relay") },
-          { from: `${acrPrefix}/agentmesh-registry-agt:latest`, to: localTag("registry") },
-        ]
-      : [
-          { from: `${acrPrefix}/agentmesh-relay:latest`, to: localTag("relay") },
-          { from: `${acrPrefix}/agentmesh-registry:latest`, to: localTag("registry") },
-          // Vendored stack also pulls postgres from ACR mirror — fall back
-          // to the upstream image so kind can pull it directly.
-          { from: `${acrPrefix}/postgres:16-alpine`, to: "postgres:16-alpine" },
-        ];
+  const repls: { from: string; to: string }[] = [
+    { from: `${acrPrefix}/agentmesh-relay-agt:latest`, to: localTag("relay") },
+    { from: `${acrPrefix}/agentmesh-registry-agt:latest`, to: localTag("registry") },
+  ];
   for (const r of repls) {
     manifest = manifest.replaceAll(r.from, r.to);
   }
   // Pin imagePullPolicy=Never for the local images so kind never tries to
-  // reach a registry. Postgres in the vendored path is left as the default
-  // (IfNotPresent → upstream pull).
+  // reach a registry.
   manifest = manifest.replace(
-    /(\n\s+image:\s+agentmesh-(?:relay|registry)(?:-agt)?:dev\b[^\n]*)/g,
+    /(\n\s+image:\s+agentmesh-(?:relay|registry)-agt:dev\b[^\n]*)/g,
     `$1\n          imagePullPolicy: Never`,
   );
 
@@ -1019,8 +985,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   //      remote AKS cluster via `azureclaw mesh promote --port-forward`,
   //      or a shared dev URL) is already reachable — no need to deploy
   //      a second local copy. Federation/handoff scenarios live here.
-  //   3. Default: build + deploy AGT (or vendored) relay+registry into
-  //      the kind cluster.
+  //   3. Default: build + deploy AGT relay+registry into the kind cluster.
   const meshProvider = opts.meshProvider ?? "agt";
   if (opts.noMesh === true) {
     stepper.step("Skipping agentmesh deployment (--no-mesh)…");
