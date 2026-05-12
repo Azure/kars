@@ -194,6 +194,18 @@ pub mod reason {
     /// the controller. Until the runtime confirms the upstream store
     /// exists, we cannot honestly report `Ready=True`.
     pub const AWAITING_FOUNDRY_PROVISIONING: &str = "AwaitingFoundryProvisioning";
+    /// `crd-well-oiled-machine` Slice 0 — `AwaitingRouterEnforcement`:
+    /// the controller has compiled the spec and published the
+    /// artifact ConfigMap, but the router has not yet echoed back the
+    /// loaded digest (or, for today, the router does not yet consume
+    /// this CRD kind at all — InferencePolicy in Slice 0, McpServer
+    /// plural in Slice 4, etc.). Until the data-plane confirmation
+    /// closure of principles.md §3 is wired, the controller emits
+    /// `Ready=False` / reason=`AwaitingRouterEnforcement` and stamps
+    /// `phase=Compiled`. Each slice that wires its router-side
+    /// informer deletes the corresponding call site (§5 "delete on
+    /// contact").
+    pub const AWAITING_ROUTER_ENFORCEMENT: &str = "AwaitingRouterEnforcement";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.

@@ -306,10 +306,24 @@ All four follow the same `compile → version_hash → SSA ConfigMap → patch_s
 
 Every reconcile ends with a `patch_status` call. The status block always carries:
 
-- `phase` — `Ready` / `Degraded` / (heavyweight CRDs add `Progressing`).
+- `phase` — see vocabulary table below.
 - `observedGeneration` — `metadata.generation` of the spec the reconciler saw.
 - `conditions[]` — at least `Ready`, `Progressing`, `Degraded`. Reasons are taxonomy-controlled — see [Conditions reference](conditions.md).
 - For compile pattern: `versionHash`, the `*-Ref` pointing at the produced `ConfigMap`/`Secret`, and `lastCompiledAt` / `lastProbedAt`.
+
+### Phase vocabulary
+
+The `status.phase` string is part of the public contract: `azureclaw connect`, `kubectl wait`, GitOps tooling and the Headlamp plugin all branch on it. The taxonomy is closed — reconcilers must use one of these values (constants live in `controller/src/status/phase.rs`):
+
+| Phase | Meaning | `Ready` condition | When the controller stamps it |
+|---|---|---|---|
+| `Pending` | Controller accepted the CR but has not yet produced a compiled artifact (waiting on an admit step or finalizer cleanup). | `False` | Reserved for async admission flows; not stamped by Slice 0 reconcilers. |
+| `Compiled` | Spec parsed, `ConfigMap` written, but the **router has not yet echoed back the loaded digest**. The artifact exists; the data plane is not yet enforcing it. | `False` (reason `AwaitingRouterEnforcement`) | Slice 0 — `InferencePolicy`, `ClawMemory`. Each reconciler also emits a `Warning` Event with reason `PolicyNotEnforced` so operators see the gap in `kubectl describe`. |
+| `Ready` | Spec compiled **and** the consuming component (router, runtime, etc.) has confirmed it is enforcing the artifact. `kubectl wait --for=condition=Ready` must only return at this point. | `True` | `ToolPolicy` (runtime-side enforcement is co-located), `McpServer` (singular today; see Slice 4), `A2AAgent`, `ClawSandbox`, `TrustGraph`. |
+| `Degraded` | Spec is valid but a dependency is failing (Foundry 5xx, JWKS fetch timeout, etc.). Retry will help — the reconciler requeues at `REQUEUE_FAIL`. | `False` (reason describes the dependency) | Any reconciler on transient failure. |
+| `Failed` | Spec is invalid and will not converge without user editing the CR (validation, signature mismatch, malformed reference). | `False` | Any reconciler on permanent failure. |
+
+The `Compiled` state is the load-bearing honesty value introduced in `docs/internal/crd-well-oiled-machine/slice-0-honesty-events.md`. Each subsequent slice (2 = `InferencePolicy`, 3 = `ClawMemory`, …) deletes its `Compiled`/`AwaitingRouterEnforcement` call site once the router-side informer or runtime echo is wired, flipping the success path back to `Ready=True`.
 
 Requeue cadence is per-reconciler:
 

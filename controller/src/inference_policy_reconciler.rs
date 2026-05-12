@@ -59,6 +59,7 @@ use crate::inference_policy::{InferencePolicy, InferencePolicyStatus};
 use crate::inference_policy_compile::{compile_to_profile, version_hash};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PhaseEventReporter};
 
 /// Field manager for SSA patches emitted by this reconciler. Distinct
 /// from S1 `…/mcp`, S2 `…/toolpolicy`, S3 `…/a2aagent` per §10.4 #1
@@ -95,6 +96,7 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    phase_reporter: PhaseEventReporter,
 }
 
 async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -167,11 +169,39 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
     );
+    // Honesty rule (principles.md §3, slice-0-honesty-events):
+    // The InferencePolicy spec body (`tokenBudget`, `contentSafety`,
+    // `modelPreference`) is parsed and a profile ConfigMap is
+    // written, but the router does not yet consume it — Slice 2
+    // wires the router-side enforcement. Stamping `Ready` here lies
+    // to `kubectl wait --for=condition=Ready`; stamp `Compiled`
+    // instead and publish a `PolicyNotEnforced` Warning Event so the
+    // user can grep `kubectl describe` for the explanation.
     let phase = if degraded.is_some() {
-        "Degraded"
+        PHASE_DEGRADED
     } else {
-        "Ready"
+        PHASE_COMPILED
     };
+
+    if degraded.is_none()
+        && let Err(e) = ctx
+            .phase_reporter
+            .warn_policy_not_enforced(
+                policy.as_ref(),
+                "CompileProfile",
+                "InferencePolicy spec is parsed and the profile ConfigMap is written, but the \
+                 router does not yet consume it. Token budget, content safety, and model \
+                 preference are not enforced on model calls until the Slice 2 router-side \
+                 informer lands. Tracking: crd-well-oiled-machine slice-2-inference-policy.",
+            )
+            .await
+    {
+        tracing::warn!(
+            inferencepolicy = %name,
+            error = %e,
+            "InferencePolicyEventPublishFailed",
+        );
+    }
 
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
@@ -246,20 +276,32 @@ fn build_conditions(
             ));
         }
         None => {
+            // Honesty rule (crd-well-oiled-machine principles.md §3,
+            // slice-0-honesty-events): the profile ConfigMap is
+            // written but the router does not yet consume it. We
+            // CANNOT report `Ready=True` here — `kubectl wait
+            // --for=condition=Ready` would return immediately for a
+            // policy that is doing nothing. Stamp
+            // `Ready=False` / `AwaitingRouterEnforcement` and keep
+            // `Progressing=True` until Slice 2 wires the router-side
+            // informer; at that point delete this branch's
+            // `AwaitingRouterEnforcement` reason and flip back to
+            // `Ready=True` / `Reconciled` after the router echoes the
+            // loaded digest.
             out.push(conditions::preserve_transition_time(
                 prior_ready,
                 conditions::TYPE_READY,
-                cond_status::TRUE,
-                reason::RECONCILED,
-                "InferencePolicy compiled and published",
+                cond_status::FALSE,
+                reason::AWAITING_ROUTER_ENFORCEMENT,
+                "profile ConfigMap published; router-side enforcement lands in Slice 2",
                 observed_generation,
             ));
             out.push(conditions::preserve_transition_time(
                 prior_progressing,
                 conditions::TYPE_PROGRESSING,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "compile complete",
+                cond_status::TRUE,
+                reason::AWAITING_ROUTER_ENFORCEMENT,
+                "awaiting router-side enforcement",
                 observed_generation,
             ));
             out.push(conditions::preserve_transition_time(
@@ -384,7 +426,10 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let ctx = Arc::new(Ctx {
+        client: client.clone(),
+        phase_reporter: PhaseEventReporter::new(client, "InferencePolicy"),
+    });
     Controller::new(policies, kube::runtime::watcher::Config::default())
         .run(
             |x, ctx| async move {
@@ -429,6 +474,10 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_success() {
+        // Slice 0 honesty rule: until Slice 2 wires the router-side
+        // informer, success means `Ready=False` /
+        // `AwaitingRouterEnforcement` because the profile ConfigMap
+        // is written but the router does not yet consume it.
         let conds = build_conditions(&[], Some(1), None);
         assert_eq!(conds.len(), 3);
         let types: Vec<&str> = conds.iter().map(|c| c.type_.as_str()).collect();
@@ -439,7 +488,13 @@ mod tests {
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
             .unwrap();
-        assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
         let degraded = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_DEGRADED)

@@ -10,6 +10,7 @@
 //! everything we write into `.status`.
 
 pub mod conditions;
+pub mod phase;
 
 use crate::crd::ClawSandbox;
 use kube::ResourceExt;
