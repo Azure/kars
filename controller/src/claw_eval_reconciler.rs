@@ -45,6 +45,7 @@ use crate::claw_eval::{ClawEval, ClawEvalStatus};
 use crate::claw_eval_compile::{compile_to_binding, version_hash};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_EVAL;
 const FINALIZER: &str = "azureclaw.azure.com/claweval-cleanup";
@@ -142,9 +143,9 @@ async fn reconcile(eval: Arc<ClawEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
     );
     let phase = if degraded.is_some() {
-        "Degraded"
+        PHASE_DEGRADED
     } else {
-        "Ready"
+        PHASE_READY
     };
 
     // SSA requires apiVersion + kind in the patch body — without

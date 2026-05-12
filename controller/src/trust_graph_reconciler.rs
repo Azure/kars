@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 use crate::trust_graph::{TrustGraph, TrustGraphStatus};
 use crate::trust_graph_compile::{CompileResult, compile_trust_graph};
 
@@ -173,9 +174,9 @@ async fn reconcile(tg: Arc<TrustGraph>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let new_conditions =
         build_conditions(&prior_conditions, observed_generation, degraded_for_cond);
     let phase = if degraded.is_some() {
-        "Degraded"
+        PHASE_DEGRADED
     } else {
-        "Ready"
+        PHASE_READY
     };
 
     let status_patch = json!({

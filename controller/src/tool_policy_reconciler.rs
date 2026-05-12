@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 use crate::tool_policy::{ToolPolicy, ToolPolicyStatus};
 use crate::tool_policy_compile::{compile_to_profile, version_hash};
 
@@ -163,9 +164,17 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             .map(|(reason, msg)| (*reason, msg.as_str())),
     );
     let phase = if degraded.is_some() {
-        "Degraded"
+        PHASE_DEGRADED
     } else {
-        "Ready"
+        // Slice 0 honesty rule: ToolPolicy keeps `Ready` today
+        // because its enforcement is **runtime-side** (openclaw
+        // plugin allow/deny via AGT profile); the controller is the
+        // SoT for the profile bytes and the runtime consumes them
+        // directly. No router-side data plane is in the loop, so
+        // there is nothing to await. If/when Slice 4 introduces a
+        // controller→router push for tool policies, flip to
+        // `PHASE_COMPILED` + emit a `PolicyNotEnforced` event.
+        PHASE_READY
     };
 
     // SSA requires apiVersion + kind in the patch body — without

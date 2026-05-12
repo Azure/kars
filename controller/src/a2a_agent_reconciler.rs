@@ -55,6 +55,7 @@ use crate::a2a_agent::{A2AAgent, A2AAgentStatus};
 use crate::a2a_agent_compile::{compile_agent_card, version_hash};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 
 /// Field manager for SSA patches emitted by this reconciler. Distinct
 /// from S1 `…/mcp` and S2 `…/toolpolicy` per §10.4 #1 — surfaces
@@ -173,9 +174,9 @@ async fn reconcile(agent: Arc<A2AAgent>, ctx: Arc<Ctx>) -> Result<Action, Reconc
             .map(|(reason, msg)| (*reason, msg.as_str())),
     );
     let phase = if degraded.is_some() {
-        "Degraded"
+        PHASE_DEGRADED
     } else {
-        "Ready"
+        PHASE_READY
     };
 
     // SSA requires apiVersion + kind in the patch body — without

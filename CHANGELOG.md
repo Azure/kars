@@ -5,6 +5,37 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — `crd-well-oiled-machine`
+
+### Slice 0 — honesty events
+
+- **`status.phase=Compiled` introduced** as the load-bearing distinction
+  between "controller wrote the artifact" and "data plane is enforcing the
+  artifact". `InferencePolicy` and `ClawMemory` now stamp `Compiled` on the
+  success path (instead of `Ready`) and the `Ready` condition is `False` with
+  reason `AwaitingRouterEnforcement`. Each reconciler also emits a `Warning`
+  Event (`reason=PolicyNotEnforced`) so operators see the gap in
+  `kubectl describe` and `kubectl get events`. `kubectl wait
+  --for=condition=Ready` no longer returns immediately for policies that the
+  router is not yet consuming.
+- **`McpServer` emits a `LimitedSupport` Warning Event** on every successful
+  reconcile pointing at the upcoming Slice 4 plural-MCP migration. The
+  singular `spec.mcp` binding continues to work; the event is purely
+  informational.
+- **`ToolPolicy`** keeps `phase=Ready` (its enforcement is runtime-side, not
+  router-side) but now uses the shared `PHASE_READY`/`PHASE_DEGRADED`
+  constants from `controller/src/status/phase.rs` instead of string literals.
+- New module `controller/src/status/phase.rs` carries the closed phase
+  vocabulary (`Pending`/`Compiled`/`Ready`/`Degraded`/`Failed`) and a
+  `PhaseEventReporter` wrapping `kube::runtime::events::Recorder` for
+  `Warning` Event publishing. 7 unit tests pin the vocabulary, reason
+  constants, and `ObjectReference` shape.
+- New condition reason `AwaitingRouterEnforcement` registered in
+  `controller/src/status/conditions.rs::reason`.
+- Headlamp plugin `phaseToStatus()` now branches explicitly on `Compiled` →
+  amber/warning (previously fell through to the default warning branch).
+- New phase vocabulary table in `docs/api/lifecycle.md`.
+
 ## [Unreleased] — Phase 5 (AGT default + local-k8s mesh)
 
 ### Changed

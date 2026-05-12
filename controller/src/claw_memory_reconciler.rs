@@ -17,18 +17,26 @@
 //!
 //! The controller does **not** create the upstream Azure AI Foundry
 //! Memory Store — that happens runtime-side via the CLI plugin and
-//! the router's `/memory_stores/*` proxy on first use (S7+ wiring).
-//! Therefore, on a successful binding compile, the controller reports:
+//! the router's `/memory_stores/*` proxy on first use (Slice 3
+//! wiring). Therefore, on a successful binding compile, the
+//! controller reports:
 //!
-//! - `phase = "Pending"` (not `"Ready"`)
+//! - `phase = "Compiled"` (not `"Ready"`)
 //! - `Ready = False` / reason `AwaitingFoundryProvisioning`
 //! - `Progressing = True` / reason `AwaitingFoundryProvisioning`
+//! - A `Warning` Event with reason `PolicyNotEnforced` pointing at
+//!   the Slice 3 tracking issue (see
+//!   `crate::status::phase::PhaseEventReporter::warn_policy_not_enforced`).
 //!
 //! Reporting `Ready=True` after only writing the binding ConfigMap is
 //! a lie: the router will still 404 on `/memory_stores/<name>` until
 //! the runtime path provisions the store. `kubectl wait
 //! --for=condition=Ready` must block here — flipping it `True`
-//! prematurely was the bug this module guards against.
+//! prematurely was the bug this module guards against. The new
+//! `Compiled` phase (introduced by Slice 0 of
+//! `crd-well-oiled-machine`) is the canonical signal for "spec parsed
+//! but data plane not yet enforcing" and replaces the previous
+//! `Pending`-forever apology.
 //!
 //! When binding write itself fails, phase is `Failed` (not
 //! `Degraded`), `Ready=False`, `Degraded=True`.
@@ -62,6 +70,7 @@ use crate::claw_memory::{ClawMemory, ClawMemoryStatus};
 use crate::claw_memory_compile::{compile_to_binding, version_hash};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_COMPILED, PHASE_FAILED, PhaseEventReporter};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_MEMORY;
 const FINALIZER: &str = "azureclaw.azure.com/clawmemory-cleanup";
@@ -88,6 +97,7 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    phase_reporter: PhaseEventReporter,
 }
 
 async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -159,22 +169,46 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
     );
-    // Honesty rule (see module docstring + claw_memory.rs §"Scope (S5)"):
+    // Honesty rule (principles.md §3, slice-0-honesty-events):
     // The controller only compiles a binding ConfigMap. Creating the
     // upstream Azure AI Foundry Memory Store is the runtime path's job
     // (CLI plugin → router `/memory_stores/*` proxy), and is not wired
-    // in this slice. Until S7 lands a sandbox-side informer that
+    // in this slice. Until Slice 3 lands a sandbox-side informer that
     // confirms the upstream store exists and stamps `foundryStoreId`,
     // we MUST NOT report `phase=Ready` / `Ready=True` — doing so makes
     // operators believe the store is provisioned when the router will
-    // still 404 on `/memory_stores/<name>`. Report `Pending` instead so
-    // `kubectl wait --for=condition=Ready` blocks until the upstream
-    // store is real.
+    // still 404 on `/memory_stores/<name>`. Report `Compiled` instead
+    // and publish a `PolicyNotEnforced` Warning Event so the user sees
+    // *why* in `kubectl describe`. `kubectl wait
+    // --for=condition=Ready` continues to block.
     let phase = if degraded.is_some() {
-        "Failed"
+        PHASE_FAILED
     } else {
-        "Pending"
+        PHASE_COMPILED
     };
+
+    if degraded.is_none() {
+        // Slice 0: surface the gap loudly. Slice 3 will delete this
+        // call site when ClawMemory becomes router-echoed.
+        if let Err(e) = ctx
+            .phase_reporter
+            .warn_policy_not_enforced(
+                memory.as_ref(),
+                "CompileBinding",
+                "ClawMemory binding ConfigMap is compiled but the upstream Azure AI Foundry \
+                 Memory Store has not been provisioned yet. The router will 404 on \
+                 /memory_stores/<name> until the runtime path (Slice 3) creates the store. \
+                 Tracking: crd-well-oiled-machine slice-3-claw-memory.",
+            )
+            .await
+        {
+            tracing::warn!(
+                clawmemory = %name,
+                error = %e,
+                "ClawMemoryEventPublishFailed",
+            );
+        }
+    }
 
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
@@ -390,7 +424,10 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let ctx = Arc::new(Ctx {
+        client: client.clone(),
+        phase_reporter: PhaseEventReporter::new(client, "ClawMemory"),
+    });
     Controller::new(memories, kube::runtime::watcher::Config::default())
         .run(
             |x, ctx| async move {

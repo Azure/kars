@@ -147,6 +147,12 @@ function phaseToStatus(phase: string | undefined): StatusKind {
   if (!phase) return "";
   if (phase === "Ready" || phase === "Provisioned" || phase === "Active") return "success";
   if (phase === "Degraded" || phase === "Failed" || phase === "Error") return "error";
+  // `Compiled` is the crd-well-oiled-machine Slice 0 honesty value:
+  // controller wrote the artifact ConfigMap but the router has not
+  // echoed a loaded digest yet. Render amber/warning so operators
+  // see at a glance that the policy is parsed but NOT live. Falls
+  // back to "warning" for any unknown phase (defensive default).
+  if (phase === "Compiled" || phase === "Pending") return "warning";
   return "warning";
 }
 
