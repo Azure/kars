@@ -49,9 +49,10 @@ import * as crypto from "node:crypto";
 // OpenClaw's plugin loader runs through this module twice in some setups
 // (tool-registry pass + agent-session pass), and a hot-reload during dev
 // re-imports it again. Without a singleton, each pass would build its own
-// `MeshConnection`, upload its own prekeys, and open its own WebSocket —
-// exactly the duplicate-message / "session already exists" bug pattern
-// documented in `vendor/agentmesh-sdk/README.md` patch #10.
+// transport, upload its own prekeys, and open its own WebSocket — exactly
+// the duplicate-message / "session already exists" bug pattern that the
+// vendored fork's patch #10 originally fixed (preserved here at the
+// adapter boundary).
 //
 // `Symbol.for(...)` lookups are process-global so all imports share the
 // same state object. Module-level `let`s mirror the singleton for the

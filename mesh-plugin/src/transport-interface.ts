@@ -7,16 +7,10 @@
  * Extracted from MeshConnection's public surface so the AGT adapter
  * implements the same contract without changing callers.
  *
- * Phase 1: MeshConnection implements IMeshTransport (vendored @agentmesh/sdk).
- * Phase 2: AgtTransport implements IMeshTransport (@microsoft/agent-governance-sdk 3.5.0).
- * Phase 3: Swap implementation behind AZURECLAW_MESH_PROVIDER flag.
- * Phase 5: Extended with the full surface index.ts uses (inbox / file
- *          transfer / discover / sendWithAck / waitForMessage / pingPeer /
- *          resolveAmid). AgtTransport composes a LocalInbox to satisfy
- *          the inbox half; file/ping/ack helpers are app-layer protocols
- *          on top of plain `send`, so both transports share the same
- *          implementations (delegated through the interface).
- * Phase 7: Drop vendored fork.
+ * Phase 5.2: Vendored fork removed; AgtTransport
+ * (@microsoft/agent-governance-sdk) is the only implementation, plus
+ * the LocalInbox composition for file transfer / discover / sendWithAck
+ * / waitForMessage / pingPeer / resolveAmid.
  */
 
 import type { InboxDiagnostics, InboxMessage } from "./local-inbox.js";

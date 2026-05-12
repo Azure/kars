@@ -24,7 +24,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentmesh/sdk": "^0.1.2",
     "@azure/identity": "^4.0.0",
     "@azure/keyvault-secrets": "^4.8.0",
     "blessed": "^0.1.81",

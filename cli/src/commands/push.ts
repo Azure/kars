@@ -95,8 +95,7 @@ export function pushCommand(): Command {
         process.exit(1);
       }
 
-      // Define mesh images. Only AGT is supported now; the vendored
-      // Rust relay/registry from vendor/agentmesh-{relay,registry} were
+      // Define mesh images. Only AGT is supported; the vendored fork was
       // removed in Phase 5.2. Tagged agentmesh-{relay,registry}-agt:latest
       // to match deploy/agentmesh-agt.yaml.
       const meshImages = agtRepoMissing

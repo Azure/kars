@@ -9,8 +9,9 @@
 //! The router is a **proxy** for mesh traffic, not a Signal-protocol
 //! participant. End-to-end encryption between agents is performed in the
 //! sandbox by the **agent** (today: OpenClaw + the TypeScript
-//! `mesh-plugin/` + vendored `@agentmesh/sdk`). Keys live with the agent;
-//! the router only sees opaque ciphertext over the relay WebSocket.
+//! `mesh-plugin/` + the Microsoft AGT SDK via `@azureclaw/mesh`). Keys
+//! live with the agent; the router only sees opaque ciphertext over the
+//! relay WebSocket.
 //!
 //! Concretely, the router's mesh role is:
 //! 1. Forward the relay WebSocket (`forward_proxy` + `routes/mesh.rs`).

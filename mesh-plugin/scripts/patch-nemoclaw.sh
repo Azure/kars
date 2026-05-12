@@ -14,8 +14,7 @@
 # All edits are idempotent — safe to re-run after `git pull` on either repo.
 #
 # Effects on the target NemoClaw tree:
-#   1. Copy mesh-plugin/dist + vendored @agentmesh/sdk into
-#      <nemoclaw>/scripts/azureclaw-mesh/
+#   1. Copy mesh-plugin/dist into <nemoclaw>/scripts/azureclaw-mesh/
 #   2. Patch Dockerfile: add COPY line for the plugin (after openclaw plugins install)
 #   3. Patch dist/lib/sandbox-build-context.js: stage azureclaw-mesh into build ctx
 
@@ -35,7 +34,6 @@ die()  { printf '\033[0;31m[patch-nemoclaw]\033[0m %s\n' "$*" >&2; exit 1; }
 [ -f "$NEMOCLAW_PATH/dist/lib/sandbox-build-context.js" ] \
     || die "Not a built NemoClaw tree (run npm run build in NemoClaw first): $NEMOCLAW_PATH"
 [ -d "$PLUGIN_DIR/dist" ]                   || die "Run 'npm run build' in $PLUGIN_DIR first (dist/ missing)"
-[ -d "$REPO_ROOT/vendor/agentmesh-sdk" ]    || die "Vendored SDK missing: $REPO_ROOT/vendor/agentmesh-sdk"
 
 log "NemoClaw tree: $NEMOCLAW_PATH"
 log "Mesh plugin:   $PLUGIN_DIR"
@@ -49,9 +47,10 @@ cp -r "$PLUGIN_DIR/skills/"*     "$DST/skills/"
 cp    "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_DIR/package.json" "$DST/"
 [ -f "$PLUGIN_DIR/package-lock.json" ] && cp "$PLUGIN_DIR/package-lock.json" "$DST/"
 
-# ── 1b. Resolve runtime deps (ws, @agentmesh/sdk) ─────────────────────────
-# The plugin requires `ws` at runtime. Without this step, fresh NemoClaw
-# builds would fail to load the plugin with "Cannot find module 'ws'".
+# ── 1b. Resolve runtime deps (ws, @microsoft/agent-governance-sdk) ─────────
+# The plugin requires `ws` and the AGT SDK at runtime. Without this step,
+# fresh NemoClaw builds would fail to load the plugin with "Cannot find
+# module 'ws'" or similar.
 log "Resolving plugin runtime deps (npm install --omit=dev)"
 (
     cd "$DST"
@@ -61,12 +60,6 @@ log "Resolving plugin runtime deps (npm install --omit=dev)"
         npm install --omit=dev --no-audit --no-fund --no-package-lock --silent
     fi
 )
-
-# ── 1c. Overlay vendored @agentmesh/sdk (our 11 patches) ──────────────────
-log "Overlaying vendored @agentmesh/sdk"
-mkdir -p "$DST/node_modules/@agentmesh"
-rm -rf "$DST/node_modules/@agentmesh/sdk"
-cp -r "$REPO_ROOT/vendor/agentmesh-sdk" "$DST/node_modules/@agentmesh/sdk"
 
 # ── 2. Patch Dockerfile (idempotent) ────────────────────────────────────────
 DOCKERFILE="$NEMOCLAW_PATH/Dockerfile"
