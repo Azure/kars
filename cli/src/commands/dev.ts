@@ -7,7 +7,7 @@ import { existsSync } from "fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants } from "../config.js";
+import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type AzureClawConfig } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
   "azureclaw-sandbox:dev";
@@ -236,21 +236,103 @@ Notes:
         typeof options.githubToken === "string" && options.githubToken.trim().length > 0;
 
       if (isFirstRun && !ephemeralGhToken) {
-        // Collect creds first — same provider picker docker mode used.
-        console.log(
-          chalk.yellow(
-            "\n  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.",
-          ),
-        );
-        console.log(
-          chalk.dim(
-            "  Copilot is the default (largest context). You can change later with `azureclaw credentials`.\n",
-          ),
-        );
-        const newCreds = await promptAndSaveCredentials();
+        const { default: inquirer } = await import("inquirer");
+
+        // Always start with the provider picker — gives the user a
+        // chance to test Copilot vs Foundry vs Models even when there
+        // are existing creds for a different provider. After the pick:
+        //   • if we have existing creds for that exact provider, offer
+        //     a reuse confirm,
+        //   • otherwise launch the same flow `azureclaw credentials`
+        //     uses (forced to the chosen provider), which prompts and
+        //     persists to ~/.azureclaw/.
+        const { provider: chosenProvider } = await inquirer.prompt([
+          {
+            type: "list",
+            name: "provider",
+            message: "Which inference provider do you want to use?",
+            default: credsForFirstRun?.provider ?? "github-copilot",
+            choices: [
+              {
+                name: "GitHub Copilot                    (recommended; needs an active Copilot seat — large context, Claude/GPT/Gemini)",
+                value: "github-copilot",
+              },
+              {
+                name: "Azure AI Foundry / Azure OpenAI   (full feature set: Memory Store, agents, Content Safety, etc.)",
+                value: "foundry",
+              },
+              {
+                name: "GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)",
+                value: "github-models",
+              },
+            ],
+          },
+        ]);
+
+        const providerLabelFor = (p: AzureClawConfig["provider"]): string =>
+          p === "github-models"
+            ? "GitHub Models"
+            : p === "github-copilot"
+              ? "GitHub Copilot"
+              : "Azure AI Foundry";
+
+        let newCreds: AzureClawConfig;
+        const haveMatchingCreds =
+          credsForFirstRun && credsForFirstRun.provider === chosenProvider;
+
+        if (haveMatchingCreds) {
+          const detail =
+            chosenProvider === "foundry"
+              ? ` (${credsForFirstRun.endpoint})`
+              : "";
+          const { reuse } = await inquirer.prompt([
+            {
+              type: "confirm",
+              name: "reuse",
+              message: `Use existing ${providerLabelFor(chosenProvider)} credentials${detail}?`,
+              default: true,
+            },
+          ]);
+          if (reuse) {
+            console.log(
+              chalk.dim(
+                "    Change with `azureclaw credentials` at any time.\n",
+              ),
+            );
+            const { markFirstRunCompleted } = await import("../config.js");
+            markFirstRunCompleted();
+            newCreds = credsForFirstRun;
+          } else {
+            console.log(
+              chalk.yellow(
+                `\n  Configuring fresh ${providerLabelFor(chosenProvider)} credentials:`,
+              ),
+            );
+            newCreds = await promptAndSaveCredentials({ provider: chosenProvider });
+          }
+        } else {
+          if (credsForFirstRun) {
+            console.log(
+              chalk.dim(
+                `\n  No saved ${providerLabelFor(chosenProvider)} credentials (current: ${providerLabelFor(credsForFirstRun.provider)}). Let's configure them.\n`,
+              ),
+            );
+          } else {
+            console.log(
+              chalk.yellow(
+                `\n  👋 First time — let's set up ${providerLabelFor(chosenProvider)}.`,
+              ),
+            );
+            console.log(
+              chalk.dim(
+                "  These will be saved to ~/.azureclaw/, same as `azureclaw credentials`.\n",
+              ),
+            );
+          }
+          newCreds = await promptAndSaveCredentials({ provider: chosenProvider });
+        }
 
         // Agent name — only ask if user accepted the default.
-        const { default: inquirer } = await import("inquirer");
         if (options.name === "dev-agent") {
           const { agentName } = await inquirer.prompt([
             {
@@ -274,44 +356,12 @@ Notes:
             : newCreds.provider === "github-copilot"
               ? "GitHub Copilot"
               : "Azure AI Foundry";
-        console.log(chalk.green(`  ✓ Credentials saved (${providerLabel})\n`));
+        console.log(chalk.green(`  ✓ Credentials ready (${providerLabel})\n`));
 
-        // ── Channels (works for both targets — local-k8s now ships
-        // `<name>-credentials` secret too, so Telegram/Slack/Discord
-        // tokens land in the sandbox via envFrom just like docker
-        // env vars do). Skip if the user already passed --channels.
-        if (!options.channels) {
-          const stored = loadSecrets();
-          type ChannelChoice = { name: string; value: string };
-          const available: ChannelChoice[] = [];
-          const addChannel = (channel: string, baseKey: string, displayName: string) => {
-            const variants = listSecretVariants(baseKey);
-            for (const v of variants) {
-              const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
-              const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
-              available.push({ name: display, value: channelValue });
-            }
-            if (variants.length === 0 && stored[baseKey]) {
-              available.push({ name: displayName, value: channel });
-            }
-          };
-          addChannel("telegram", "telegram-token", "Telegram");
-          addChannel("slack",    "slack-token",    "Slack");
-          addChannel("discord",  "discord-token",  "Discord");
-          if (available.length > 0) {
-            const { picked } = await inquirer.prompt([{
-              type: "checkbox",
-              name: "picked",
-              message: "Enable any channels? (Space to toggle, Enter to confirm)",
-              choices: available,
-            }]);
-            if (picked.length > 0) {
-              options.channels = picked.join(",");
-            }
-          } else {
-            console.log(chalk.dim("  No channel tokens saved yet. Run `azureclaw credentials` later to add Telegram/Slack/Discord.\n"));
-          }
-        }
+        // ── Channels: prompt moved below the first-run block so it
+        // fires on every run (a user who adds a Telegram token via
+        // `azureclaw credentials` after first-run should still get the
+        // channel attached on the next `azureclaw dev`).
 
         // Rebuild prompt — applies to BOTH targets. Cached images can
         // be stale (wrong arch after an `azureclaw push` that always
@@ -355,6 +405,11 @@ Notes:
               ? `Remote  (auto port-forward to AKS cluster: ${cachedCtx!.aksCluster})`
               : "Remote  (port-forward to existing AKS mesh — requires `azureclaw up` first)";
 
+          const localLabel =
+            options.target === "local-k8s"
+              ? "Local   (recommended; relay + registry in the kind cluster alongside the sandbox)"
+              : "Local   (recommended; spin up relay + registry in Docker on this laptop)";
+
           const { default: inquirer } = await import("inquirer");
           const { meshSource } = await inquirer.prompt([{
             type: "list",
@@ -363,7 +418,7 @@ Notes:
             default: "local",
             choices: [
               {
-                name: "Local   (recommended; spin up relay + registry in Docker on this laptop)",
+                name: localLabel,
                 value: "local",
               },
               { name: remoteLabel, value: "remote" },
@@ -397,6 +452,48 @@ Notes:
         // removed). No prompt needed; the default and the flag both resolve
         // to "agt".
         options.meshProvider = "agt";
+      }
+
+      // ── Channels (works for both targets, on every run) ───────────
+      // local-k8s ships a `<name>-credentials` Secret with the channel
+      // tokens; docker mode passes them via `-e`. Either way we always
+      // want to ask: a user who set their Telegram token via
+      // `azureclaw credentials` AFTER first-run completed would otherwise
+      // never see the channel attached — `isFirstRun` is now false and
+      // the channels prompt used to be gated on it. Skip only when the
+      // user already passed `--channels` explicitly (CI / scripted use).
+      if (!options.channels) {
+        const stored = loadSecrets();
+        type ChannelChoice = { name: string; value: string };
+        const available: ChannelChoice[] = [];
+        const addChannel = (channel: string, baseKey: string, displayName: string) => {
+          const variants = listSecretVariants(baseKey);
+          for (const v of variants) {
+            const channelValue = v.label === "default" ? channel : `${channel}.${v.label}`;
+            const display = v.label === "default" ? displayName : `${displayName} (${v.label})`;
+            available.push({ name: display, value: channelValue });
+          }
+          if (variants.length === 0 && stored[baseKey]) {
+            available.push({ name: displayName, value: channel });
+          }
+        };
+        addChannel("telegram", "telegram-token", "Telegram");
+        addChannel("slack",    "slack-token",    "Slack");
+        addChannel("discord",  "discord-token",  "Discord");
+        if (available.length > 0) {
+          const { default: inquirer } = await import("inquirer");
+          const { picked } = await inquirer.prompt([{
+            type: "checkbox",
+            name: "picked",
+            message: "Enable any channels? (Space to toggle, Enter to confirm — leave empty to skip)",
+            choices: available,
+          }]);
+          if (picked.length > 0) {
+            options.channels = picked.join(",");
+          }
+        }
+        // Note: if no channels are stored at all, we say nothing — that
+        // hint message belongs to the first-run welcome block above.
       }
 
       // ── Target dispatch ───────────────────────────────────────────
