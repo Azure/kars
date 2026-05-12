@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::behavior_monitor::BehaviorMonitor;
 use crate::metrics;
+use crate::policy_status::{PolicyKind, PolicyStatusRegistry};
 use crate::rate_limiter::RateLimiter;
 
 mod trust_ops;
@@ -112,11 +113,31 @@ pub struct Governance {
     pub(crate) trust_graph: crate::a2a::trust_graph_projection::TrustGraphProjection,
     start_time: Instant,
     policy_rule_count: AtomicU64,
+    /// Per-CRD policy load status. Slice 1 of `crd-well-oiled-machine`:
+    /// the AGT engine writes a `PolicyKind::AgtProfile` row here on
+    /// every successful `load_policies_from_dir`. `GET /internal/policy-status`
+    /// reads it; future slices add their own kinds. Shared via
+    /// `Arc<PolicyStatusRegistry>` with `AppState`.
+    pub policy_status: std::sync::Arc<PolicyStatusRegistry>,
 }
 
 impl Governance {
     /// Initialize governance from environment variables.
     pub fn new(sandbox_name: &str) -> Self {
+        Self::new_with_status(
+            sandbox_name,
+            std::sync::Arc::new(PolicyStatusRegistry::new()),
+        )
+    }
+
+    /// Initialize governance with a shared [`PolicyStatusRegistry`].
+    /// Production callers use the default `new()` helper; tests and
+    /// `AppState::new` use this variant to share one registry instance
+    /// with the HTTP layer.
+    pub fn new_with_status(
+        sandbox_name: &str,
+        policy_status: std::sync::Arc<PolicyStatusRegistry>,
+    ) -> Self {
         let trust_threshold: u32 = std::env::var("AGT_TRUST_THRESHOLD")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -234,6 +255,7 @@ impl Governance {
                 p
             },
             start_time: Instant::now(),
+            policy_status,
         }
     }
 
@@ -257,28 +279,33 @@ impl Governance {
                 dir,
                 "Policy directory not found — starting with empty policy"
             );
+            // No directory → no profile. Record `None` so the controller
+            // can distinguish "no profile mounted yet" from "profile
+            // loaded with digest X".
+            self.policy_status.record_error(
+                PolicyKind::AgtProfile,
+                dir,
+                "policy directory not found",
+            );
             return Ok(0);
         }
 
         let mut total_rules = 0;
+        // Collect files in deterministic order so the aggregate digest
+        // is independent of filesystem listing order. Without sorting,
+        // two routers seeing the same files could echo different
+        // digests, defeating the controller's match check.
+        let mut yaml_files: Vec<std::path::PathBuf> = Vec::new();
+        let mut read_err: Option<String> = None;
         match std::fs::read_dir(path) {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.extension().is_some_and(|e| e == "yaml" || e == "yml") {
-                        match self.policy.load_from_file(p.to_str().unwrap_or_default()) {
-                            Ok(()) => {
-                                // Count actual rules inside the file, not just files
-                                let rules_in_file = Self::count_rules_in_file(&p);
-                                tracing::info!(file = %p.display(), rules = rules_in_file, "Loaded policy file");
-                                total_rules += rules_in_file;
-                            }
-                            Err(e) => {
-                                tracing::warn!(file = %p.display(), error = %e, "Failed to load policy");
-                            }
-                        }
+                        yaml_files.push(p);
                     }
                 }
+                yaml_files.sort();
             }
             Err(e) => {
                 // Surface silent permission/IO failures — without this, a
@@ -286,11 +313,69 @@ impl Governance {
                 // legitimately-empty policy directory and silently disables
                 // governance enforcement.
                 tracing::warn!(dir, error = %e, "Policy reload: read_dir failed (perms?)");
+                read_err = Some(format!("read_dir failed: {e}"));
             }
         }
+
+        // Aggregate canonical bytes: per-file, `len(name)\0name\0len(bytes)\0bytes\0`.
+        // Length-prefixing prevents collisions like `("ab", "c")` vs
+        // `("a", "bc")` producing the same hash if we just concatenated.
+        let mut canonical: Vec<u8> = Vec::new();
+        for p in &yaml_files {
+            match std::fs::read(p) {
+                Ok(bytes) => {
+                    let name = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .as_bytes();
+                    canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                    canonical.extend_from_slice(name);
+                    canonical.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+                    canonical.extend_from_slice(&bytes);
+                    match self.policy.load_from_file(p.to_str().unwrap_or_default()) {
+                        Ok(()) => {
+                            let rules_in_file = Self::count_rules_in_file(p);
+                            tracing::info!(file = %p.display(), rules = rules_in_file, "Loaded policy file");
+                            total_rules += rules_in_file;
+                        }
+                        Err(e) => {
+                            tracing::warn!(file = %p.display(), error = %e, "Failed to load policy");
+                            // Stash the first per-file load failure as
+                            // the registry error — operator UX cue.
+                            if read_err.is_none() {
+                                read_err = Some(format!("{}: {}", p.display(), e));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(file = %p.display(), error = %e, "Failed to read policy file");
+                    if read_err.is_none() {
+                        read_err = Some(format!("{}: {}", p.display(), e));
+                    }
+                }
+            }
+        }
+
         self.policy_rule_count
             .store(total_rules as u64, Ordering::Relaxed);
         metrics::AGT_POLICY_RULES.set(total_rules as i64);
+
+        // Update the status registry. Empty directory + no read error
+        // ⇒ record success with the digest of an empty buffer — that's
+        // a real "I loaded nothing, on purpose" state, distinct from
+        // "I couldn't read the directory".
+        match read_err {
+            Some(err) => {
+                self.policy_status
+                    .record_error(PolicyKind::AgtProfile, dir, &err);
+            }
+            None => {
+                self.policy_status
+                    .record_success(PolicyKind::AgtProfile, dir, &canonical);
+            }
+        }
         Ok(total_rules)
     }
 

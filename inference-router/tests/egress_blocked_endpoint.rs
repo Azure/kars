@@ -30,7 +30,12 @@ use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider, S
 use azureclaw_inference_router::routes::{AppState, egress_routes};
 
 fn test_state() -> AppState {
-    let governance = Arc::new(Governance::new("sb-test"));
+    let policy_status =
+        Arc::new(azureclaw_inference_router::policy_status::PolicyStatusRegistry::new());
+    let governance = Arc::new(Governance::new_with_status(
+        "sb-test",
+        policy_status.clone(),
+    ));
     AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
         copilot: Arc::new(azureclaw_inference_router::copilot_auth::CopilotTokenCache::from_env()),
@@ -67,6 +72,7 @@ fn test_state() -> AppState {
         handoff_session: HandoffSession::new(),
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
+        policy_status,
     }
 }
 

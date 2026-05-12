@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1a — router `PolicyStatusRegistry` + `GET /internal/policy-status`
+
+Foundation for the principles.md §3 invariant ("Ready ⇔ router echoes the
+exact published digest"). The controller-side digest-confirmation poller
+ships in Slice 1b; this PR delivers the data-plane half of the contract
+together with its first real producer (AGT).
+
+- New module `inference-router/src/policy_status.rs` exposes
+  `PolicyStatusRegistry` — an in-memory map keyed by `PolicyKind`
+  (only `AgtProfile` today) storing `digest`, `source_path`,
+  `loaded_at`, `last_error`. `record_success` / `record_error`
+  preserve the prior digest on error so transient reload failures
+  don't fake a "no policy loaded" state. 8 unit tests pin the
+  registry behavior including UTF-8-safe error truncation at
+  char boundaries.
+- New route `GET /internal/policy-status` (handler in
+  `inference-router/src/routes/internal.rs`) returns
+  `{schema_version: 1, count, entries: [...]}` with RFC 3339
+  `loaded_at`. Mounted on the `protected` axum router so it
+  inherits admin-token + `ADMIN_ALLOW_IPS` middleware alongside
+  the existing `egress_routes()` / `spawn_routes()`. 5 unit tests
+  cover the response envelope and the hand-rolled RFC 3339
+  formatter (no chrono dep). 4 integration tests in
+  `tests/policy_status_endpoint.rs` exercise the full axum stack
+  including an end-to-end producer→consumer test that loads a real
+  AGT policy file through `Governance::load_policies_from_dir` and
+  asserts the digest surfaces on the route.
+- `Governance::load_policies_from_dir` now records into the
+  registry as a side effect of every reload cycle. Aggregate
+  canonical digest is **length-prefixed**:
+  `u64-BE-len(name) || name || u64-BE-len(bytes) || bytes`
+  concatenated per file, files sorted by path. The length prefix
+  prevents `("ab","c") vs ("a","bc")` collisions; the sort makes
+  the digest deterministic across `read_dir` ordering. The
+  controller poller (Slice 1b) MUST replicate this exact
+  serialization on the publish side.
+- `Governance::new_with_status()` constructor accepts a shared
+  `Arc<PolicyStatusRegistry>`; the existing `new()` continues to
+  work for callers that don't need digest echo (constructs a
+  private registry). `AppState` carries one registry per process,
+  shared with `Governance` so every reload echoes to the route.
+- Empty policy directory → `record_success` with the digest of
+  zero bytes (a real "loaded nothing on purpose" state, distinct
+  from "couldn't read the directory" which records an error with
+  null digest).
+
 ### Slice 0 — honesty events
 
 - **`status.phase=Compiled` introduced** as the load-bearing distinction

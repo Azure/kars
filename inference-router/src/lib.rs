@@ -31,6 +31,7 @@ pub mod mcp;
 pub mod mesh;
 pub mod metrics;
 pub mod policy_envelope;
+pub mod policy_status;
 pub mod providers;
 pub mod proxy;
 pub mod rate_limiter;
