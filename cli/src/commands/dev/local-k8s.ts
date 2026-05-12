@@ -759,22 +759,25 @@ async function deployAgentMesh(
     throw new Error(`Mesh manifest not found at ${manifestPath}`);
   }
   let manifest = readFileSync(manifestPath, "utf8");
+  // Plain-string replacements (no regex) — the manifest contains fixed ACR
+  // image references that we swap for the local kind-loaded tags. Using
+  // String.replaceAll avoids regex-anchor pitfalls flagged by CodeQL.
   const acrPrefix = "azureclawacr.azurecr.io";
-  const repls: { from: RegExp; to: string }[] =
+  const repls: { from: string; to: string }[] =
     meshProvider === "agt"
       ? [
-          { from: new RegExp(`${acrPrefix}/agentmesh-relay-agt:latest`, "g"), to: localTag("relay") },
-          { from: new RegExp(`${acrPrefix}/agentmesh-registry-agt:latest`, "g"), to: localTag("registry") },
+          { from: `${acrPrefix}/agentmesh-relay-agt:latest`, to: localTag("relay") },
+          { from: `${acrPrefix}/agentmesh-registry-agt:latest`, to: localTag("registry") },
         ]
       : [
-          { from: new RegExp(`${acrPrefix}/agentmesh-relay:latest`, "g"), to: localTag("relay") },
-          { from: new RegExp(`${acrPrefix}/agentmesh-registry:latest`, "g"), to: localTag("registry") },
+          { from: `${acrPrefix}/agentmesh-relay:latest`, to: localTag("relay") },
+          { from: `${acrPrefix}/agentmesh-registry:latest`, to: localTag("registry") },
           // Vendored stack also pulls postgres from ACR mirror — fall back
           // to the upstream image so kind can pull it directly.
-          { from: new RegExp(`${acrPrefix}/postgres:16-alpine`, "g"), to: "postgres:16-alpine" },
+          { from: `${acrPrefix}/postgres:16-alpine`, to: "postgres:16-alpine" },
         ];
   for (const r of repls) {
-    manifest = manifest.replace(r.from, r.to);
+    manifest = manifest.replaceAll(r.from, r.to);
   }
   // Pin imagePullPolicy=Never for the local images so kind never tries to
   // reach a registry. Postgres in the vendored path is left as the default
