@@ -130,15 +130,14 @@ meshPeer:
   relayUrl: ""              # Override relay URL (default: ws://agentmesh-relay.agentmesh.svc.cluster.local:8765)
   clusterName: ""           # Display name shown to external agents during pairing
 
-# AgentMesh transport provider toggle.
-#   "vendored" — use the vendored Rust relay+registry (deploy/agentmesh.yaml)
-#                and the vendored @agentmesh/sdk (default; backwards-compatible).
-#   "agt"      — use the upstream Microsoft AGT relay+registry
-#                (deploy/agentmesh-agt.yaml) and @microsoft/agent-governance-sdk.
+# AgentMesh transport.
 # The chart only injects AZURECLAW_MESH_PROVIDER into sandbox pods via the
 # controller; operators must apply the matching mesh manifest separately.
+# Only `agt` (upstream Microsoft AGT relay+registry, deploy/agentmesh-agt.yaml,
+# @microsoft/agent-governance-sdk) is supported. The vendored fork was removed
+# in Phase 5.2.
 mesh:
-  provider: "vendored"      # "vendored" | "agt"
+  provider: "agt"
 
 # Strict-mode tool definitions for sandbox agents.
 # When enabled, sandbox agents send OpenAI strict-mode tool schemas

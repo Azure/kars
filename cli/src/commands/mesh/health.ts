@@ -61,49 +61,32 @@ export async function findDuplicateListeners(ports: number[]): Promise<Array<{ p
   return results;
 }
 
-/** Check registry health via HTTP /health endpoint.
- *
- * Path compat: AGT registry only exposes `/health`; the vendored Rust
- * registry exposes both `/health` and `/v1/health`. Hitting `/health`
- * works against both, so probe that first. We still display the vendored
- * `agents_registered`/`agents_online` counters when present (AGT returns
- * just `{status, service}`).
- */
+/** Check registry health via HTTP /health endpoint. AGT registry exposes
+ *  `/health` and returns `{status, service}`. */
 export async function checkRegistryHealth(port: number): Promise<boolean> {
-  for (const probePath of ["/health", "/v1/health"]) {
-    try {
-      const resp = await fetch(`http://localhost:${port}${probePath}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!resp.ok) continue;
+  try {
+    const resp = await fetch(`http://localhost:${port}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (resp.ok) {
       const body = await resp.json() as Record<string, unknown>;
-      if (typeof body.agents_registered === "number") {
-        checkLine(true, `Registry healthy (${body.agents_registered} agents, ${body.agents_online ?? 0} online)`);
-      } else {
-        checkLine(true, `Registry healthy (${(body.service as string | undefined) ?? "agentmesh-registry"})`);
-      }
+      checkLine(true, `Registry healthy (${(body.service as string | undefined) ?? "agentmesh-registry"})`);
       return true;
-    } catch { /* try next path */ }
-  }
+    }
+  } catch { /* fall through to failure */ }
   checkLine(false, `Registry not reachable on localhost:${port}`);
   return false;
 }
 
 /** Check relay health via WebSocket upgrade (not just TCP connect).
- *
- * Path compat: AGT relay only accepts WS upgrades on `/ws`; the
- * vendored Rust relay accepts WS on `/`. Try `/ws` first; if the relay
- * 404s (vendored), fall back to `/`.
- */
+ *  AGT relay accepts WS upgrades on `/ws`. */
 export async function checkRelayHealth(port: number): Promise<boolean> {
-  for (const probePath of ["/ws", "/"]) {
-    const ok = await tryWsUpgrade(port, probePath);
-    if (ok) {
-      checkLine(true, `Relay healthy (WebSocket upgrade on localhost:${port}${probePath})`);
-      return true;
-    }
+  const ok = await tryWsUpgrade(port, "/ws");
+  if (ok) {
+    checkLine(true, `Relay healthy (WebSocket upgrade on localhost:${port}/ws)`);
+    return true;
   }
-  checkLine(false, `Relay not reachable on localhost:${port} (tried /ws and /)`);
+  checkLine(false, `Relay not reachable on localhost:${port}/ws`);
   return false;
 }
 

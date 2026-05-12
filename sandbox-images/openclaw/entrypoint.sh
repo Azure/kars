@@ -988,6 +988,18 @@ from the mesh inbox rather than guessing at them.
 - If \`azureclaw_mesh_inbox\` returns no messages, wait and retry (up to 60 seconds)
 - All messages are E2E encrypted (Signal Protocol) — the relay cannot read them
 
+### Files received from other agents
+When another agent sends you a file via the mesh (\`file_transfer\` message), it is
+automatically saved to TWO locations:
+1. \`/sandbox/.openclaw/workspace/incoming/<filename>\` — original landing spot (provenance)
+2. \`/sandbox/.openclaw/workspace/<filename>\` — promoted to workspace root for direct use
+
+**Always check both locations before falling back to placeholder assets.** Before generating
+synthetic/placeholder versions of images, charts, PDFs, or other artifacts, run a quick
+\`exec ls /sandbox/.openclaw/workspace /sandbox/.openclaw/workspace/incoming\` (or use \`read\`)
+to verify nothing was already transferred. Inbox entries also include a \`workspace_path\`
+field pointing at the usable copy.
+
 ## Handling Tasks from Other Agents (AGT Mesh)
 When you receive a task from another agent via the AGT mesh, execute it using your full
 toolset. Prioritize these Foundry-powered tools for the best results:
@@ -1190,29 +1202,18 @@ if [ -d /opt/azureclaw-plugin ]; then
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
     echo "[azureclaw] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
   fi
-  # Copy node_modules for AGT SDK (@agentmesh/sdk) and other runtime deps.
+  # Copy node_modules so the plugin can resolve runtime deps (ws, etc).
   # `-L` dereferences symlinks: the @azureclaw/mesh entry is a `file:` dep
   # symlink → /mesh-plugin. Without -L, cp keeps the symlink and Node fails
-  # to resolve `@azureclaw/mesh` at runtime ("mesh provider swap failed").
+  # to resolve `@azureclaw/mesh` at runtime.
   if [ -d /opt/azureclaw-plugin/node_modules ]; then
     cp -rL --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
-    echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
+    echo "[azureclaw] @azureclaw/mesh runtime deps available"
   fi
-  # Mesh provider selector — Phase 2 of upstream-AGT migration. Defaults to
-  # the vendored AgentMesh SDK so existing deployments are unaffected. Set
-  # AZURECLAW_MESH_PROVIDER=agt at the pod env (via Helm value mesh.provider)
-  # to switch to @microsoft/agent-governance-sdk.
-  AZURECLAW_MESH_PROVIDER="${AZURECLAW_MESH_PROVIDER:-vendored}"
-  case "${AZURECLAW_MESH_PROVIDER}" in
-    agt|AGT)
-      AZURECLAW_MESH_PROVIDER="agt"
-      echo "[azureclaw] mesh provider: agt (@microsoft/agent-governance-sdk)"
-      ;;
-    *)
-      AZURECLAW_MESH_PROVIDER="vendored"
-      echo "[azureclaw] mesh provider: vendored (@agentmesh/sdk)"
-      ;;
-  esac
+  # Mesh provider — only `agt` is supported (@microsoft/agent-governance-sdk
+  # via @azureclaw/mesh). The vendored fork was removed in Phase 5.2.
+  AZURECLAW_MESH_PROVIDER="agt"
+  echo "[azureclaw] mesh provider: agt (@microsoft/agent-governance-sdk)"
   export AZURECLAW_MESH_PROVIDER
   # Copy AGT policies if governance enabled
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ] && [ -d /opt/azureclaw-plugin/policies ]; then

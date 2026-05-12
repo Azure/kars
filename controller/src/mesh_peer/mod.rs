@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::api::core::v1::Secret;
@@ -47,18 +47,10 @@ use agt_wire::{AgtFrame, AgtRegisterAgentRequest};
 
 /// Which AgentMesh implementation the controller should speak to.
 ///
-/// Selected at startup from `AZURECLAW_MESH_PROVIDER` (default `vendored`).
-/// The two providers use **incompatible wire protocols** — see
-/// [`agt_wire`] for the AGT envelope and [`RelayMessage`] for the vendored
-/// envelope. Every wire-touching helper in this module branches on
-/// `state.provider` to pick the right serializer/parser.
+/// Selected at startup from `AZURECLAW_MESH_PROVIDER` (default `agt`).
+/// Kept as an enum so the multi-provider framework shape remains intact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    /// Patched Rust relay + `@agentmesh/sdk` from `vendor/`. Connect frame
-    /// carries `amid`/`signature`/`public_key`/`timestamp`; messages use
-    /// `send`/`receive` frames; keepalive is JSON-level `ping`; registry
-    /// at `POST /v1/registry/register`.
-    Vendored,
     /// Upstream AGT relay/registry from the agent-governance-toolkit.
     /// Connect frame carries `from` (and optional shared-secret `token`);
     /// messages use a single `message` frame (relay forwards verbatim, no
@@ -69,23 +61,27 @@ pub enum Provider {
 
 impl Provider {
     /// Read the provider selection from `AZURECLAW_MESH_PROVIDER`. Defaults
-    /// to `Vendored` for backward compatibility. Unknown values fall back
-    /// to `Vendored` with a warning so a typo doesn't silently break a
-    /// production cluster.
+    /// to `Agt` (upstream `@microsoft/agent-governance-sdk`) — Phase 5 of
+    /// the AGT migration. Unknown values fall back to `Agt` with a warning.
     pub fn from_env() -> Self {
         match std::env::var("AZURECLAW_MESH_PROVIDER")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
         {
-            "agt" => Provider::Agt,
-            "" | "vendored" => Provider::Vendored,
+            "" | "agt" => Provider::Agt,
+            "vendored" => {
+                tracing::warn!(
+                    "AZURECLAW_MESH_PROVIDER=vendored is no longer supported; defaulting to agt"
+                );
+                Provider::Agt
+            }
             other => {
                 tracing::warn!(
-                    "Unknown AZURECLAW_MESH_PROVIDER={other} — defaulting to vendored. \
-                     Valid values: vendored, agt."
+                    "Unknown AZURECLAW_MESH_PROVIDER={other} — defaulting to agt. \
+                     Valid value: agt."
                 );
-                Provider::Vendored
+                Provider::Agt
             }
         }
     }
@@ -129,36 +125,6 @@ impl MeshIdentity {
             signing_key,
             verifying_key,
         }
-    }
-
-    /// Sign a timestamp string for relay authentication.
-    pub fn sign_timestamp(&self, timestamp: &str) -> String {
-        let signature = self.signing_key.sign(timestamp.as_bytes());
-        BASE64.encode(signature.to_bytes())
-    }
-
-    /// Get base64-encoded public key.
-    pub fn public_key_b64(&self) -> String {
-        BASE64.encode(self.verifying_key.to_bytes())
-    }
-
-    /// Get base64-encoded X25519 (Curve25519) public key, derived from the
-    /// Ed25519 verifying key via the canonical twisted-Edwards →
-    /// Montgomery conversion.
-    ///
-    /// **Why this is safe even though we don't derive the matching X25519
-    /// secret key:** the controller's mesh peer channel does not perform
-    /// Signal-protocol E2E encryption — federation messages are carried
-    /// inside `encrypted_payload` as plain base64 JSON. The registry
-    /// stores `exchange_public_key` for peers who *would* X3DH against
-    /// us; since no peer does so on this channel today, the matching
-    /// secret is unused. Registering the conversion of the Ed25519
-    /// public key gives the registry a well-formed Curve25519 point
-    /// without committing the controller to a key custody it doesn't
-    /// need.
-    pub fn x25519_public_key_b64(&self) -> String {
-        let mont = self.verifying_key.to_montgomery();
-        BASE64.encode(mont.to_bytes())
     }
 }
 
@@ -239,24 +205,20 @@ const DEFAULT_REGISTRY_URL: &str = "http://agentmesh-registry.agentmesh.svc.clus
 
 /// Register the controller's mesh identity with the AgentMesh registry.
 ///
-/// **Why we have to do this.** The vendored registry-verify patch
-/// (`vendor/agentmesh-relay`) makes the relay reject any WebSocket
-/// `connect` whose AMID is not registered. Sandbox sub-agents register
-/// themselves on boot via the JS SDK; the Rust controller mesh peer was
-/// never updated to match, which produced a flap loop in production:
+/// **Why we have to do this.** The relay rejects any WebSocket `connect`
+/// whose DID is not registered. Sandbox sub-agents register themselves on
+/// boot via the SDK; the Rust controller mesh peer must match that behavior
+/// to avoid a flap loop in production:
 ///
 /// ```text
 /// connect → relay rejects ("Agent not registered") →
 /// reconnect_backoff → connect → ...
 /// ```
 ///
-/// Re-registration is idempotent on the registry side (it upserts by
-/// AMID/DID and re-verifies the signature each time on vendored). We call
-/// this once per leader-tenure, before opening the relay WebSocket.
-///
-/// The AGT registry uses a totally different shape (`POST /v1/agents`
-/// with `did`/`public_key`/no signature) so the provider branches here.
+/// Re-registration is idempotent for controller purposes. We call this once
+/// per leader-tenure, before opening the relay WebSocket.
 async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> Result<()> {
+    let Provider::Agt = provider;
     let base =
         std::env::var("MESH_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string());
     let base = base.trim_end_matches('/').to_string();
@@ -266,89 +228,47 @@ async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> 
         .build()
         .context("Failed to build reqwest client")?;
 
-    match provider {
-        Provider::Vendored => {
-            let url = format!("{base}/v1/registry/register");
-            // The registry verifies the timestamp signature and a 5-minute window;
-            // generate the timestamp here so retries always send a fresh one.
-            let timestamp = Utc::now().to_rfc3339();
-            let signature = identity.sign_timestamp(&timestamp);
+    let url = format!("{base}/v1/agents");
+    let public_key = BASE64_URL.encode(identity.verifying_key.to_bytes());
 
-            let body = json!({
-                "amid": identity.amid,
-                "signing_public_key": identity.public_key_b64(),
-                "exchange_public_key": identity.x25519_public_key_b64(),
-                "display_name": "azureclaw-controller",
-                "capabilities": ["offload", "pairing"],
-                "timestamp": timestamp,
-                "signature": signature,
-            });
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "display_name".to_string(),
+        "azureclaw-controller".to_string(),
+    );
+    metadata.insert("amid".to_string(), identity.amid.clone());
 
-            let resp = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("POST {url} failed"))?;
+    let body = AgtRegisterAgentRequest {
+        did: agt_did_for_identity(identity),
+        public_key,
+        capabilities: vec!["offload".into(), "pairing".into()],
+        metadata,
+    };
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Registry rejected registration ({status}): {text}");
-            }
-            Ok(())
-        }
-        Provider::Agt => {
-            let url = format!("{base}/v1/agents");
-            // AGT uses base64url (no padding) for `public_key`; the vendored
-            // helper returns standard-padded base64 so re-encode here.
-            let pk_bytes = identity.verifying_key.to_bytes();
-            let public_key = BASE64_URL.encode(pk_bytes);
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url} failed"))?;
 
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert(
-                "display_name".to_string(),
-                "azureclaw-controller".to_string(),
-            );
-            // Carry the vendored-style AMID as metadata so legacy UI/tools
-            // that still surface it have something to display. The AGT
-            // primary identifier is `did`.
-            metadata.insert("amid".to_string(), identity.amid.clone());
-
-            let body = AgtRegisterAgentRequest {
-                did: agt_did_for_identity(identity),
-                public_key,
-                capabilities: vec!["offload".into(), "pairing".into()],
-                metadata,
-            };
-
-            let resp = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("POST {url} failed"))?;
-
-            let status = resp.status();
-            // 201 = newly registered, 200 = OK; 409 = already registered
-            // (idempotent — AGT registry returns 409 instead of upsert).
-            // Treat 409 as success so re-registration on leader failover
-            // doesn't fail-loop.
-            if status.is_success() || status.as_u16() == 409 {
-                Ok(())
-            } else {
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("AGT registry rejected registration ({status}): {text}");
-            }
-        }
+    let status = resp.status();
+    // 201 = newly registered, 200 = OK; 409 = already registered
+    // (idempotent — AGT registry returns 409 instead of upsert).
+    // Treat 409 as success so re-registration on leader failover
+    // doesn't fail-loop.
+    if status.is_success() || status.as_u16() == 409 {
+        Ok(())
+    } else {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("AGT registry rejected registration ({status}): {text}");
     }
 }
 
 /// Build the AGT DID for the controller's mesh identity. The AGT spec
-/// uses `did:agentmesh:<base64url-of-public-key>` (we mirror the format
-/// the JS SDK emits in `vendor/agentmesh-sdk` `buildDid()`). Keeping it
-/// derived from the public key means every leader replica converges on
-/// the same DID without coordination.
+/// uses `did:agentmesh:<base64url-of-public-key>`. Keeping it derived from
+/// the public key means every leader replica converges on the same DID
+/// without coordination.
 pub(crate) fn agt_did_for_identity(identity: &MeshIdentity) -> String {
     let pk_bytes = identity.verifying_key.to_bytes();
     format!("did:agentmesh:{}", BASE64_URL.encode(pk_bytes))
@@ -392,49 +312,6 @@ async fn register_with_registry_with_retry(provider: Provider, identity: &MeshId
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Relay protocol messages (subset needed for controller)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RelayMessage {
-    Connect {
-        protocol: String,
-        amid: String,
-        public_key: String,
-        signature: String,
-        timestamp: String,
-        #[serde(default)]
-        p2p_capable: bool,
-    },
-    Connected {
-        session_id: String,
-        pending_messages: u32,
-    },
-    Send {
-        to: String,
-        encrypted_payload: String,
-        message_type: String,
-    },
-    Receive {
-        from: String,
-        encrypted_payload: String,
-        message_type: String,
-        timestamp: String,
-    },
-    Ping {
-        timestamp: String,
-    },
-    Pong {
-        timestamp: String,
-    },
-    Error {
-        code: String,
-        message: String,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -567,9 +444,7 @@ struct MeshPeerState {
     client: Client,
     relay_url: String,
     cluster_name: String,
-    /// Mesh provider selector — picks the wire envelope shape used by
-    /// every helper that touches the relay/registry. Set once at startup
-    /// from `AZURECLAW_MESH_PROVIDER`.
+    /// Mesh provider selector. Set once at startup from `AZURECLAW_MESH_PROVIDER`.
     provider: Provider,
     /// Persistent outbox for background tasks (pod watchers, resumed watchers)
     /// to send messages to peers via the active relay connection. Survives
@@ -731,14 +606,8 @@ async fn try_acquire_lease(client: &Client, namespace: &str) -> bool {
 /// replicas connecting as the same AMID causes connection fighting).
 pub async fn run(client: Client) -> Result<()> {
     let provider = Provider::from_env();
-    let relay_url = std::env::var("MESH_RELAY_URL").unwrap_or_else(|_| match provider {
-        Provider::Vendored => "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into(),
-        // AGT relay listens on /ws (vendored listens on /). When the operator
-        // doesn't override MESH_RELAY_URL we point at the AGT service by
-        // default — same service name, different path, so the deploy/agentmesh-agt.yaml
-        // Service can use the same DNS name as deploy/agentmesh.yaml.
-        Provider::Agt => "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765/ws".into(),
-    });
+    let relay_url = std::env::var("MESH_RELAY_URL")
+        .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765/ws".into());
     let cluster_name = std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "azureclaw-cluster".into());
     let namespace =
         std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
@@ -816,13 +685,9 @@ pub async fn run(client: Client) -> Result<()> {
         }
 
         // Register with the AgentMesh registry before opening the relay
-        // socket. The vendored relay rejects connects whose AMID is not in
-        // the registry; without this call the relay loops in a flap of
-        // "Agent not registered" rejects. Registration is idempotent; we
-        // attempt it on every leader tenure so a registry restart that
-        // wipes its cache (or a stale-Secret-only-known-here race) is
-        // self-healing. The provider branch picks vendored
-        // `/v1/registry/register` (signed) vs AGT `/v1/agents` (DID + pk).
+        // socket. Without this call, the relay can reject connects for an
+        // unknown DID. Registration is idempotent enough for leader failover;
+        // we attempt it on every leader tenure so registry restarts self-heal.
         register_with_registry_with_retry(state.provider, &state.identity).await;
 
         // Connect and listen, renewing the lease periodically
@@ -912,84 +777,50 @@ async fn connect_and_listen(
         .await
         .context("Failed to connect to relay")?;
 
-    // Authenticate — provider-specific connect frame.
-    match state.provider {
-        Provider::Vendored => {
-            let timestamp = chrono::Utc::now().to_rfc3339();
-            let signature = state.identity.sign_timestamp(&timestamp);
-            let connect_msg = RelayMessage::Connect {
-                protocol: "agentmesh/0.2".into(),
-                amid: state.identity.amid.clone(),
-                public_key: state.identity.public_key_b64(),
-                signature,
-                timestamp,
-                p2p_capable: false,
-            };
-            ws_stream
-                .send(WsMessage::Text(serde_json::to_string(&connect_msg)?.into()))
-                .await?;
-        }
-        Provider::Agt => {
-            // AGT's connect frame is much simpler — `from` + optional
-            // shared-secret `token`. Token is read from env so the same
-            // controller image works against authenticated or unauthenticated
-            // AGT relays. AGT relay sends NO `connected` ack; we mark the
-            // connection ready as soon as the frame is flushed (see below).
-            let token = std::env::var("AGENTMESH_RELAY_TOKEN")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let connect_msg = AgtFrame::Connect {
-                from: agt_did_for_identity(&state.identity),
-                token,
-            };
-            ws_stream
-                .send(WsMessage::Text(serde_json::to_string(&connect_msg)?.into()))
-                .await?;
-        }
-    }
+    // Authenticate with AGT: `from` + optional shared-secret `token`.
+    // Token is read from env so the same controller image works against
+    // authenticated or unauthenticated AGT relays. AGT relay sends NO
+    // `connected` ack; we mark the connection ready as soon as the frame
+    // is flushed (see below).
+    let token = std::env::var("AGENTMESH_RELAY_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let connect_msg = AgtFrame::Connect {
+        from: agt_did_for_identity(&state.identity),
+        token,
+    };
+    ws_stream
+        .send(WsMessage::Text(serde_json::to_string(&connect_msg)?.into()))
+        .await?;
 
     // Channel for outgoing messages — handlers and keepalive send through this.
     // The main loop owns the WebSocket and writes from this channel, ensuring
     // auto-queued Pong frames are flushed on every write/read cycle.
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<WsMessage>();
 
-    // Spawn keepalive — provider-specific frame type.
+    // Spawn AGT keepalive.
     let ping_tx = out_tx.clone();
-    let ping_provider = state.provider;
     let ping_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let frame_json = match ping_provider {
-                Provider::Vendored => serde_json::to_string(&RelayMessage::Ping {
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                })
-                .unwrap_or_default(),
-                // AGT relay's OFFLINE_THRESHOLD is 90 s; HEARTBEAT_INTERVAL
-                // is 30 s. Sending `{type:"heartbeat"}` bumps the server's
-                // `last_heartbeat` timestamp without expecting a reply.
-                // Sending vendored's `ping` against AGT would trigger an
-                // `{type:"error", detail:"Unknown frame type: ping"}` and
-                // leave `last_heartbeat` un-updated, eventually evicting us.
-                Provider::Agt => serde_json::to_string(&AgtFrame::Heartbeat).unwrap_or_default(),
-            };
+            // AGT relay's OFFLINE_THRESHOLD is 90 s; HEARTBEAT_INTERVAL
+            // is 30 s. Sending `{type:"heartbeat"}` bumps the server's
+            // `last_heartbeat` timestamp without expecting a reply.
+            let frame_json = serde_json::to_string(&AgtFrame::Heartbeat).unwrap_or_default();
             if ping_tx.send(WsMessage::Text(frame_json.into())).is_err() {
                 break;
             }
         }
     });
 
-    // Connection-ready flag: set true when we receive RelayMessage::Connected.
-    // The outbox drain waits on this so we don't push messages before the
-    // relay has authenticated us.
+    // Connection-ready flag. The outbox drain waits on this so we don't push
+    // messages before the relay has authenticated us.
     let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // AGT relay does NOT send a `connected` ack frame — the spec is "if no
     // error within a few hundred ms, you're in". Flip the flag immediately
-    // for AGT so background-task sends can drain. Vendored still waits for
-    // the `Connected` frame inside handle_message.
-    if state.provider == Provider::Agt {
-        connected.store(true, Ordering::Release);
-    }
+    // so background-task sends can drain.
+    connected.store(true, Ordering::Release);
 
     // Terminal-error signal: spawned message handlers push a reason here when
     // they see a fatal relay error (SESSION_REPLACED, PING_TIMEOUT). The main
@@ -1007,11 +838,10 @@ async fn connect_and_listen(
                             WsMessage::Text(text) => {
                                 let state_clone = state.clone();
                                 let tx_clone = out_tx.clone();
-                                let connected_clone = connected.clone();
                                 let term_clone = terminate_tx.clone();
                                 tokio::spawn(async move {
                                     if let Err(e) =
-                                        handle_message(&state_clone, &tx_clone, &connected_clone, &term_clone, &text).await
+                                        handle_message(&state_clone, &tx_clone, &term_clone, &text).await
                                     {
                                         tracing::warn!("Error handling message: {e:#}");
                                     }
@@ -1089,12 +919,8 @@ async fn connect_and_listen(
     Ok(())
 }
 
-/// Serialize a FederationMessage into the relay wire format and send it over
-/// the current WebSocket. Branches on `state.provider`:
-/// - Vendored: `{type:"send", to, encrypted_payload:b64(json), message_type:"message"}`
-/// - AGT: `{type:"message", to, from, id, payload:b64(json)}` — relay forwards
-///   verbatim, so `from` must be set by the sender, and a unique `id` is
-///   required for ack-based delivery semantics.
+/// Serialize a FederationMessage into the AGT relay wire format and send it
+/// over the current WebSocket.
 async fn serialize_and_send_outbound(
     state: &Arc<MeshPeerState>,
     ws_stream: &mut tokio_tungstenite::WebSocketStream<
@@ -1103,27 +929,14 @@ async fn serialize_and_send_outbound(
     out: &OutboundMsg,
 ) -> Result<()> {
     let json = serde_json::to_string(&out.msg)?;
-    let frame_json = match state.provider {
-        Provider::Vendored => {
-            let b64 = BASE64.encode(json.as_bytes());
-            let send_msg = RelayMessage::Send {
-                to: out.to.clone(),
-                encrypted_payload: b64,
-                message_type: "message".into(),
-            };
-            serde_json::to_string(&send_msg)?
-        }
-        Provider::Agt => {
-            let payload = BASE64.encode(json.as_bytes());
-            let frame = AgtFrame::Message {
-                to: out.to.clone(),
-                from: agt_did_for_identity(&state.identity),
-                id: format!("ctrl-{}", new_msg_id()),
-                payload,
-            };
-            serde_json::to_string(&frame)?
-        }
+    let payload = BASE64.encode(json.as_bytes());
+    let frame = AgtFrame::Message {
+        to: out.to.clone(),
+        from: agt_did_for_identity(&state.identity),
+        id: format!("ctrl-{}", new_msg_id()),
+        payload,
     };
+    let frame_json = serde_json::to_string(&frame)?;
     ws_stream.send(WsMessage::Text(frame_json.into())).await?;
     Ok(())
 }
@@ -1164,73 +977,16 @@ fn enqueue_outbound(
         .map_err(|_| anyhow::anyhow!("mesh outbox closed (receiver dropped)"))
 }
 
-/// Handle a single relay message. Provider-aware: parses the vendored
-/// `RelayMessage` envelope OR the AGT `AgtFrame` envelope based on
-/// `state.provider`. For AGT, each successfully-processed `message`
-/// frame triggers an `ack` reply so the relay can purge it from its
-/// inbox — without this, AGT redelivers on reconnect.
+/// Handle a single AGT relay message. Each successfully-processed `message`
+/// frame triggers an `ack` reply so the relay can purge it from its inbox —
+/// without this, AGT redelivers on reconnect.
 async fn handle_message(
     state: &Arc<MeshPeerState>,
     out_tx: &tokio::sync::mpsc::UnboundedSender<WsMessage>,
-    connected: &Arc<std::sync::atomic::AtomicBool>,
     terminate_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     text: &str,
 ) -> Result<()> {
-    match state.provider {
-        Provider::Vendored => {
-            handle_vendored_frame(state, out_tx, connected, terminate_tx, text).await
-        }
-        Provider::Agt => handle_agt_frame(state, out_tx, terminate_tx, text).await,
-    }
-}
-
-async fn handle_vendored_frame(
-    state: &Arc<MeshPeerState>,
-    out_tx: &tokio::sync::mpsc::UnboundedSender<WsMessage>,
-    connected: &Arc<std::sync::atomic::AtomicBool>,
-    terminate_tx: &tokio::sync::mpsc::UnboundedSender<String>,
-    text: &str,
-) -> Result<()> {
-    let msg: RelayMessage = serde_json::from_str(text)?;
-    match msg {
-        RelayMessage::Connected {
-            session_id,
-            pending_messages,
-        } => {
-            tracing::info!(
-                session_id = %session_id,
-                pending = pending_messages,
-                "Connected to relay as {}",
-                state.identity.amid
-            );
-            connected.store(true, Ordering::Release);
-        }
-        RelayMessage::Receive {
-            from,
-            encrypted_payload,
-            message_type,
-            ..
-        } => {
-            if message_type == "message" || message_type == "optimistic_message" {
-                handle_peer_message(state, out_tx, &from, &encrypted_payload).await?;
-            } else {
-                tracing::debug!(from = %from, msg_type = %message_type, "Ignoring relay message");
-            }
-        }
-        RelayMessage::Pong { .. } => {}
-        RelayMessage::Error { code, message } => {
-            tracing::warn!(code = %code, "Relay error: {message}");
-            // SESSION_REPLACED: our main connection was just killed by a newer
-            // session for the same AMID (usually self-inflicted by a rogue
-            // second WS). PING_TIMEOUT: relay gave up on us. Both are fatal —
-            // trigger reconnect instead of silently continuing with a dead WS.
-            if code == "SESSION_REPLACED" || code == "PING_TIMEOUT" {
-                let _ = terminate_tx.send(format!("relay error {code}: {message}"));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    handle_agt_frame(state, out_tx, terminate_tx, text).await
 }
 
 async fn handle_agt_frame(
@@ -1270,9 +1026,9 @@ async fn handle_agt_frame(
         AgtFrame::Error { detail } => {
             tracing::warn!("AGT relay error: {detail}");
             // AGT's auth-fail / missing-from / unknown-frame errors are all
-            // fatal — there's no point retrying the same frame. Mirror the
-            // vendored handling: trigger a reconnect via the terminate
-            // channel so the outer loop's backoff kicks in.
+            // fatal — there's no point retrying the same frame. Trigger a
+            // reconnect via the terminate channel so the outer loop's backoff
+            // kicks in.
             if detail.contains("Authentication failed")
                 || detail.contains("Missing 'from'")
                 || detail.contains("session_replaced")
@@ -1398,7 +1154,6 @@ fn hex_sha256(input: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Send a message to a peer via the current WebSocket (used in request handlers).
-/// Provider-aware — see [`serialize_and_send_outbound`].
 async fn send_to_peer(
     state: &Arc<MeshPeerState>,
     out_tx: &tokio::sync::mpsc::UnboundedSender<WsMessage>,
@@ -1406,27 +1161,14 @@ async fn send_to_peer(
     msg: &FederationMessage,
 ) -> Result<()> {
     let json = serde_json::to_string(msg)?;
-    let frame_json = match state.provider {
-        Provider::Vendored => {
-            let b64 = BASE64.encode(json.as_bytes());
-            let send_msg = RelayMessage::Send {
-                to: to_amid.to_string(),
-                encrypted_payload: b64,
-                message_type: "message".into(),
-            };
-            serde_json::to_string(&send_msg)?
-        }
-        Provider::Agt => {
-            let payload = BASE64.encode(json.as_bytes());
-            let frame = AgtFrame::Message {
-                to: to_amid.to_string(),
-                from: agt_did_for_identity(&state.identity),
-                id: format!("ctrl-{}", new_msg_id()),
-                payload,
-            };
-            serde_json::to_string(&frame)?
-        }
+    let payload = BASE64.encode(json.as_bytes());
+    let frame = AgtFrame::Message {
+        to: to_amid.to_string(),
+        from: agt_did_for_identity(&state.identity),
+        id: format!("ctrl-{}", new_msg_id()),
+        payload,
     };
+    let frame_json = serde_json::to_string(&frame)?;
     out_tx
         .send(WsMessage::Text(frame_json.into()))
         .context("WebSocket channel closed")?;
@@ -1466,51 +1208,10 @@ mod tests {
     }
 
     #[test]
-    fn x25519_public_key_is_32_bytes_base64() {
-        let identity = MeshIdentity::from_bytes(&[7u8; 32]);
-        let encoded = identity.x25519_public_key_b64();
-        let decoded = BASE64.decode(&encoded).expect("valid base64");
-        assert_eq!(decoded.len(), 32, "X25519 public key must be 32 bytes");
-    }
-
-    #[test]
-    fn x25519_public_key_is_deterministic_for_same_signing_key() {
-        let a = MeshIdentity::from_bytes(&[9u8; 32]);
-        let b = MeshIdentity::from_bytes(&[9u8; 32]);
-        assert_eq!(a.x25519_public_key_b64(), b.x25519_public_key_b64());
-    }
-
-    #[test]
-    fn x25519_public_key_differs_from_ed25519_public_key() {
-        // The Montgomery conversion produces a different bit pattern than
-        // the Ed25519 verifying key, so the two registry fields cannot be
-        // accidentally equated.
-        let identity = MeshIdentity::from_bytes(&[1u8; 32]);
-        assert_ne!(identity.public_key_b64(), identity.x25519_public_key_b64());
-    }
-
-    #[test]
     fn different_keys_produce_different_amids() {
         let id1 = MeshIdentity::generate();
         let id2 = MeshIdentity::generate();
         assert_ne!(id1.amid, id2.amid);
-    }
-
-    #[test]
-    fn sign_timestamp_produces_valid_base64() {
-        let identity = MeshIdentity::generate();
-        let sig = identity.sign_timestamp("2026-04-15T13:00:00Z");
-        assert!(BASE64.decode(&sig).is_ok());
-        // Ed25519 signature is 64 bytes → 88 base64 chars
-        assert_eq!(BASE64.decode(&sig).unwrap().len(), 64);
-    }
-
-    #[test]
-    fn public_key_b64_is_32_bytes() {
-        let identity = MeshIdentity::generate();
-        let pk = identity.public_key_b64();
-        let bytes = BASE64.decode(&pk).unwrap();
-        assert_eq!(bytes.len(), 32);
     }
 
     #[test]

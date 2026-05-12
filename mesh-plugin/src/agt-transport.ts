@@ -8,13 +8,10 @@
  * Package: @microsoft/agent-governance-sdk (^3.5.0)
  * Module:  @microsoft/agent-governance-sdk/dist/encryption (or default export)
  *
- * Replaces the vendored @agentmesh/sdk for all mesh operations when
- * AZURECLAW_MESH_PROVIDER=agt is set.
- *
- * Wire compatibility: speaks AgentMesh Wire Protocol v1.0 — same wire as
- * our vendored relay. Upstream MeshClient already includes the AzureClaw
- * compatibility features (plaintextPeers, wsFactory hook, KNOCK pending
- * queue). See agent-governance-typescript/src/encryption/mesh-client.ts.
+ * Sole mesh transport implementation. Wire compatibility: speaks
+ * AgentMesh Wire Protocol v1.0. Upstream MeshClient includes the
+ * AzureClaw compatibility features (plaintextPeers, wsFactory hook,
+ * KNOCK pending queue). See agent-governance-typescript/src/encryption/mesh-client.ts.
  */
 
 import type {
@@ -402,11 +399,11 @@ export class AgtTransport implements IMeshTransport {
     // @microsoft/agent-governance-sdk MeshClient.send() throws
     // "No encrypted session with <peer>. Call establishSession() first."
     // when no SecureChannel exists for the peer — it does NOT auto-bootstrap
-    // X3DH (unlike e.g. @agentmesh/sdk). establishSessionWithPeer() is the
-    // SDK's high-level helper that fetches the prekey bundle from the
-    // registry and runs the X3DH+KNOCK flow; it's idempotent (returns the
-    // cached MeshSession when one already exists — see SDK mesh-client.js
-    // L230-245), so this is cheap on the hot path.
+    // X3DH. establishSessionWithPeer() is the SDK's high-level helper that
+    // fetches the prekey bundle from the registry and runs the X3DH+KNOCK
+    // flow; it's idempotent (returns the cached MeshSession when one
+    // already exists — see SDK mesh-client.js L230-245), so this is cheap
+    // on the hot path.
     if (!this._plaintextPeers.has(toAmid)) {
       try {
         await this.client.establishSessionWithPeer!(toAmid);

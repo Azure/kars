@@ -29,7 +29,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentmesh/sdk": "^0.1.2",
     "@azureclaw/mesh": "file:../../mesh-plugin",
     "commander": "^13.0.0"
   },

@@ -128,8 +128,7 @@ jobs:
       - name: "Build mesh-plugin (file: dep of runtime)"
         working-directory: mesh-plugin
         run: |
-          cd ../vendor/agentmesh-sdk && npm install --ignore-scripts
-          cd ../../mesh-plugin && npm install && npm run build
+          npm install && npm run build
       - run: npm install
       - run: npm run typecheck
       - run: npm run lint
@@ -150,7 +149,6 @@ jobs:
         with:
           node-version: "22"
       - run: npm install
-      - run: cd ../vendor/agentmesh-sdk && npm install --ignore-scripts
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
@@ -284,8 +282,6 @@ jobs:
           hadolint $IGNORE inference-router/Dockerfile
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile.base
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile
-          hadolint $IGNORE vendor/agentmesh-relay/Dockerfile
-          hadolint $IGNORE vendor/agentmesh-registry/Dockerfile
 
   chaos-tier:
     name: Chaos Tier (fault injection)

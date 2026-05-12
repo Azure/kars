@@ -1635,11 +1635,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         const searchCap = query === "*" ? "azureclaw-agent" : query;
         const STALE_AFTER_MS = 90_000;
 
-        // Filter graveyard entries. The agentmesh registry (vendor/agentmesh-registry)
-        // does NOT prune offline agents from `search_capabilities` results — every
-        // sandbox that ever registered remains in the index until manually
-        // revoked, and the controller-side `azureclaw destroy` path was missing
-        // a deregistration call for a long time. Without filtering, a brand-new
+        // Filter graveyard entries. The agentmesh registry does NOT prune
+        // offline agents from `search_capabilities` results — every sandbox
+        // that ever registered remains in the index until manually revoked,
+        // and the controller-side `azureclaw destroy` path was missing a
+        // deregistration call for a long time. Without filtering, a brand-new
         // top-level agent calling discover sees ALL historical sandboxes (we've
         // observed 170+ stale entries in a single dev cluster), which:
         //   1. Confuses the LLM into trying to mesh_send to long-dead AMIDs

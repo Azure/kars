@@ -145,19 +145,13 @@ image-sandbox: image-router ## Build sandbox Docker image (slim overlay — fast
 		-t $(REGISTRY)/openclaw-sandbox:latest \
 		-f sandbox-images/openclaw/Dockerfile .
 
-image-relay: ## Build AgentMesh relay image
-	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG) \
-		-t $(REGISTRY)/agentmesh-relay:latest \
-		-f vendor/agentmesh-relay/Dockerfile vendor/agentmesh-relay
+# AgentMesh relay + registry images for the AGT provider are now built
+# from the upstream microsoft/agent-governance-toolkit repository — see
+# deploy/agentmesh-agt.yaml and cli/src/commands/dev/local-k8s.ts
+# (deployAgentMesh helper) for the build invocation. The Makefile no
+# longer owns these targets after the Phase 5.2 vendored fork removal.
 
-image-registry: ## Build AgentMesh registry image
-	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG) \
-		-t $(REGISTRY)/agentmesh-registry:latest \
-		-f vendor/agentmesh-registry/Dockerfile vendor/agentmesh-registry
-
-push: ## Push all images to ACR (controller + router + sandbox-base + sandbox + relay + registry + runtimes)
+push: ## Push all images to ACR (controller + router + sandbox-base + sandbox + runtimes)
 	docker push $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG)
 	docker push $(REGISTRY)/azureclaw-controller:latest
 	docker push $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG)
@@ -166,10 +160,6 @@ push: ## Push all images to ACR (controller + router + sandbox-base + sandbox + 
 	docker push $(REGISTRY)/azureclaw-sandbox-base:latest
 	docker push $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG)
 	docker push $(REGISTRY)/openclaw-sandbox:latest
-	docker push $(REGISTRY)/agentmesh-relay:$(IMAGE_TAG)
-	docker push $(REGISTRY)/agentmesh-relay:latest
-	docker push $(REGISTRY)/agentmesh-registry:$(IMAGE_TAG)
-	docker push $(REGISTRY)/agentmesh-registry:latest
 
 push-runtimes: ## Push all runtime adapter images to ACR
 	docker push $(REGISTRY)/azureclaw-runtime-anthropic:$(IMAGE_TAG)

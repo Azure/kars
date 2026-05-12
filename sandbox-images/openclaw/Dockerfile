@@ -83,37 +83,21 @@ RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
 ARG MESH_PROVIDER=vendored
 ARG AGT_SDK_TARBALL=
 COPY .agt-sdk/ /opt/azureclaw-agt-sdk/
-RUN if [ "$MESH_PROVIDER" = "agt" ]; then \
-      cd /opt/azureclaw-plugin && \
-      if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ]; then \
-        echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
-        npm install --omit=dev --ignore-scripts --no-save \
-          "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ; \
-      else \
-        echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
-        npm install --omit=dev --ignore-scripts --no-save \
-          '@microsoft/agent-governance-sdk@^3.5.0' ; \
-      fi ; \
+RUN cd /opt/azureclaw-plugin && \
+    if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ]; then \
+      echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
+      npm install --omit=dev --ignore-scripts --no-save \
+        "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ; \
     else \
-      echo "MESH_PROVIDER=$MESH_PROVIDER — skipping @microsoft/agent-governance-sdk install" ; \
+      echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
+      npm install --omit=dev --ignore-scripts --no-save \
+        '@microsoft/agent-governance-sdk@^3.5.0' ; \
     fi
-
-# Install vendored SDK with its dependencies (libsodium-wrappers etc.)
-COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/package-lock.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
-COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
-COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
-RUN cd /opt/azureclaw-vendored-sdk && npm ci --omit=dev --ignore-scripts
-
-# Overlay vendored SDK into plugin node_modules (patched dist + deps)
-RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
-    cp -r /opt/azureclaw-vendored-sdk/dist /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
-    cp /opt/azureclaw-vendored-sdk/package.json /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
-    cp -r /opt/azureclaw-vendored-sdk/node_modules/* /opt/azureclaw-plugin/node_modules/ 2>/dev/null || true
 
 # Harden image-level code: root-owned, read-only — prevents agent from tampering
 # with the master copy that gets re-installed on every container start.
-RUN chmod -R a-w /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk && \
-    chmod -R a+rX /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk
+RUN chmod -R a-w /opt/azureclaw-plugin && \
+    chmod -R a+rX /opt/azureclaw-plugin
 
 # Build a pruned dist-runtime/extensions/ tree mirroring dist/, but containing
 # only the 3 always-required runtime cores. Files are hardlinked (`cp -al`)
