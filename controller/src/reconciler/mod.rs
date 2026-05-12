@@ -1100,29 +1100,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AZURECLAW_STRICT_TOOLS", "value": "1"}));
         }
 
-        // Phase 4 of the agentmesh provider swap: propagate the controller's
-        // AZURECLAW_MESH_PROVIDER (set by Helm value `mesh.provider`) into
-        // every sandbox pod. The mesh-plugin transport factory reads this
-        // env var to choose between the vendored and upstream AGT SDK.
-        // Default "vendored" preserves byte-identical behaviour for
-        // existing deployments. Unknown values fall back to vendored at
-        // the plugin layer.
-        let mesh_provider =
-            std::env::var("AZURECLAW_MESH_PROVIDER").unwrap_or_else(|_| "vendored".to_string());
-        let mesh_provider_norm = match mesh_provider.to_ascii_lowercase().as_str() {
-            "agt" => "agt",
-            _ => "vendored",
-        };
-        openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
+        // AGT is the only supported mesh provider in this phase. Keep the
+        // env var explicit so OpenClaw and the router agree on the protocol.
+        openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": "agt"}));
         // The router container is separate from openclaw on AKS, and the
-        // router's own mesh code paths (relay WS upgrade path, registry
-        // discover endpoint) branch on AZURECLAW_MESH_PROVIDER. Without
-        // this the router defaults to "vendored" → upgrades WS on `/`
-        // (AGT only accepts `/ws`) → relay returns 403 Forbidden in a
-        // tight reconnect loop. Push the same normalized value into the
-        // router env so both containers agree on the provider.
-        router_agt_env
-            .push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
+        // router's own mesh code paths read AZURECLAW_MESH_PROVIDER. Push
+        // the same value into the router env so both containers agree.
+        router_agt_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": "agt"}));
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));

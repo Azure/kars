@@ -4,7 +4,7 @@
 //! AGT relay/registry wire-protocol shapes.
 //!
 //! The AGT relay (`agent-governance-toolkit/.../agent-mesh/src/agentmesh/relay/app.py`)
-//! speaks a different envelope from the vendored Rust relay:
+//! speaks this JSON envelope:
 //!
 //! | Frame      | Shape                                                              |
 //! |------------|--------------------------------------------------------------------|
@@ -22,9 +22,8 @@
 //! - The relay sends NO `connected` ack after the connect handshake. The
 //!   client should treat itself as connected immediately if no `error`
 //!   frame arrives within a short window.
-//! - The AGT registry uses `POST /v1/agents` with a totally different body
-//!   shape from the vendored `/v1/registry/register` (no signature, single
-//!   `public_key` field, `did` instead of `amid`).
+//! - The AGT registry uses `POST /v1/agents` with a single `public_key`
+//!   field and `did` as the primary identifier.
 
 use serde::{Deserialize, Serialize};
 
@@ -164,7 +163,7 @@ mod tests {
         assert_eq!(json["public_key"], "abcd1234");
         assert!(json["capabilities"].is_array());
         assert_eq!(json["metadata"]["display_name"], "azureclaw-controller");
-        // Must NOT have vendored fields
+        // Must NOT have legacy registry fields
         assert!(json.get("amid").is_none());
         assert!(json.get("signing_public_key").is_none());
         assert!(json.get("signature").is_none());

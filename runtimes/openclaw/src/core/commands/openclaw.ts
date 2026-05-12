@@ -418,18 +418,8 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
       // Policy check mode: /azureclaw-agt check shell:rm -rf /
       if (args.startsWith("check ")) {
         const action = args.slice(6).trim();
-        if (deps.policy()) {
-          const decision = deps.policy().evaluate(action);
-          return {
-            text: [
-              `**AGT Policy Check** (via @agentmesh/sdk)`,
-              `Action: \`${action}\``,
-              `Decision: **${decision.effect}**`,
-              decision.effect === "deny" ? "Blocked by AGT policy" : "Allowed",
-            ].join("\n"),
-          };
-        }
-        // Fallback to router-native policy
+        // Application-layer fast path: small inline allow/deny table via mesh transport.
+        // For full policy semantics we delegate to the router-native engine.
         try {
           const http = await import("node:http");
           const postData = JSON.stringify({ action });
@@ -448,9 +438,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
       }
 
       // Status mode
-      const sdkStatus = deps.policy() ? "active (@agentmesh/sdk)" : "unavailable (using router-native)";
-      const trustStatus = deps.trustStore() ? "active (Ed25519, 0-1000 scale)" : "unavailable";
-      const auditStatus = deps.auditLogger() ? "active (hash-chain)" : "unavailable";
+      const sdkStatus = "router-native (mesh transport via @azureclaw/mesh)";
+      const trustStatus = deps.meshClient() ? "active (Ed25519 via node:crypto, 0-1000 scale)" : "unavailable";
+      const auditStatus = "router-native (hash-chain)";
       const meshStatus = deps.meshClient()
         ? (deps.meshClient().isConnected ? "connected (E2E encrypted)" : "initialized (not connected)")
         : "unavailable";
@@ -469,7 +459,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
           text: [
             "**AzureClaw AGT Governance**",
             "",
-            "**Application Layer** (plugin, @agentmesh/sdk):",
+            "**Application Layer** (plugin, @azureclaw/mesh + node:crypto):",
             `  Identity: ${identityStatus}`,
             `  Mesh client: ${meshStatus}`,
             `  Policy engine: ${sdkStatus}`,

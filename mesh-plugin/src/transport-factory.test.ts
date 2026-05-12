@@ -13,23 +13,12 @@ const agtUnifiedIdentity = {
 };
 
 describe("resolveMeshProvider", () => {
-  it("defaults to vendored when env var is unset", () => {
-    expect(resolveMeshProvider({})).toBe("vendored");
-  });
-  it("returns agt for AZURECLAW_MESH_PROVIDER=agt (case-insensitive)", () => {
+  it("returns 'agt' regardless of env (vendored provider removed in Phase 5.2)", () => {
+    expect(resolveMeshProvider({})).toBe("agt");
     expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "agt" })).toBe("agt");
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "AGT" })).toBe("agt");
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: " agt " })).toBe(
-      "agt",
-    );
-  });
-  it("falls back to vendored on unknown values", () => {
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "fancy" })).toBe(
-      "vendored",
-    );
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "" })).toBe(
-      "vendored",
-    );
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "vendored" })).toBe("agt");
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "fancy" })).toBe("agt");
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "" })).toBe("agt");
   });
 });
 
@@ -58,7 +47,7 @@ describe("createMeshTransport", () => {
     });
   });
 
-  it("constructs an AgtTransport when provider=agt", async () => {
+  it("constructs an AgtTransport", async () => {
     const t = await createMeshTransport(
       {
         relayUrl: "ws://r",
@@ -71,16 +60,15 @@ describe("createMeshTransport", () => {
     expect(t.agentId).toBe("did:agentmesh:factory-test");
   });
 
-  it("rejects provider=vendored without sdkIdentity", async () => {
-    await expect(
-      createMeshTransport(
-        {
-          relayUrl: "ws://r",
-          registryUrl: "http://reg",
-          identity: agtUnifiedIdentity,
-        },
-        {},
-      ),
-    ).rejects.toThrow(/sdkIdentity/);
+  it("ignores legacy provider=vendored and still returns AgtTransport", async () => {
+    const t = await createMeshTransport(
+      {
+        relayUrl: "ws://r",
+        registryUrl: "http://reg",
+        identity: agtUnifiedIdentity,
+      },
+      { AZURECLAW_MESH_PROVIDER: "vendored" },
+    );
+    expect(t.constructor.name).toBe("AgtTransport");
   });
 });

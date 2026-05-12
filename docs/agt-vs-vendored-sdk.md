@@ -1,66 +1,48 @@
-# AGT vs Vendored AgentMesh SDK — Side-by-Side Analysis
+# AGT vs Vendored AgentMesh SDK — Historical Side-by-Side Analysis
 
-> **Status:** Phase 2 complete. Runtime can swap between the vendored
-> `@agentmesh/sdk` (default) and Microsoft's `@microsoft/agent-governance-sdk`
-> via the `AZURECLAW_MESH_PROVIDER` environment variable.
+> ## Phase 5.2 outcome
 >
-> **Audience:** AzureClaw maintainers + AGT upstream team. This document is
-> the source of truth for what the two SDKs offer, where they diverge, and
-> what we patched on each side to reach functional parity.
+> AzureClaw now runs **Microsoft AGT AgentMesh exclusively**. The historical
+> vendored fork (`@agentmesh/sdk` plus `vendor/agentmesh-{sdk,relay,registry}/`)
+> was removed in Phase 5.2 after all gap-closing patches landed upstream in
+> **AGT PR #2090**. The former AGT gaps G1–G5 are fixed upstream, the
+> controller/router no longer expose `Provider::Vendored`, and Helm
+> `mesh.provider` is AGT-only.
+>
+> The OpenClaw runtime no longer imports a mesh SDK directly. It uses helpers
+> re-exported from `@azureclaw/mesh`: Node.js native `crypto` for identity,
+> signing, and verification, plus `@microsoft/agent-governance-sdk` for
+> transport.
+>
+> **Audience:** AzureClaw maintainers + AGT upstream team. The remainder of
+> this document is retained as historical migration context and patch-audit
+> evidence; do not treat its pre-Phase-5.2 provider-switch notes as current
+> operator guidance.
 
 ---
 
 ## TL;DR
 
-We currently ship two implementations of the AgentMesh protocol:
+Historically, AzureClaw compared two AgentMesh implementations while migrating
+to AGT:
 
-| Codename | Package | Source | Default? |
+| Codename | Package | Historical source | Current status |
 |---|---|---|---|
-| **A** (vendored) | `@agentmesh/sdk` v0.1.2 | `vendor/agentmesh-sdk/` (9 patches over upstream amitayks) | ✅ Yes |
-| **B** (AGT) | `@microsoft/agent-governance-sdk` v3.5.0+ | npm (Microsoft AGT) | Opt-in |
+| **A** (vendored) | `@agentmesh/sdk` v0.1.2 | `vendor/agentmesh-sdk/` plus vendored relay/registry forks | Removed in Phase 5.2 |
+| **B** (AGT) | `@microsoft/agent-governance-sdk` v3.5.0+ | npm (Microsoft AGT) + AGT relay/registry | Only supported provider |
 
-Set `AZURECLAW_MESH_PROVIDER=agt` in the sandbox environment to swap to B.
-The default (`vendored`) uses A. Anything else falls back to A.
+Phase 2 introduced the `IMeshTransport` seam and compatibility tests. Phase 5.2
+finished the migration: AzureClaw keeps the AGT adapter, removes the vendored
+adapter and provider switch, and deploys AGT relay/registry via
+`deploy/agentmesh-agt.yaml`.
 
-After Phase 2 the runtime never imports a transport class directly — it
-calls `createMeshTransport({...})` from `@azureclaw/mesh`, which decides
-which adapter to instantiate. Both adapters expose the **same**
-`IMeshTransport` interface so the rest of the runtime is provider-agnostic.
+> ### Audit verdict (superseded by Phase 5.2)
+>
+> The Phase 2 audit found 12 patches already fixed in AGT, 3 adapter-only
+> differences, 7 equivalent upstream fixes, and 5 real AGT gaps (G1–G5).
+> AGT PR #2090 merged the G1–G5 fixes and the remaining AzureClaw
+> compatibility hooks, enabling removal of the vendored fork.
 
-> ### ⚠️ Audit verdict (Phase 2 wrap-up)
->
-> The **swap mechanism is correct and tested**: factory + interface + both
-> adapters implement the contract; 16 compat tests pin parity at the API
-> shape level. Phase 2's goal — letting the runtime import a single
-> factory and stay provider-agnostic — is met.
->
-> A deep audit of every vendored patch (SDK #1-#18, relay #1-#4,
-> registry #1-#4) against AGT's full upstream stack found:
->
-> - **12 patches already fixed in AGT** — no porting needed.
-> - **3 patches that are adapter-only** (registry RPCs AGT deliberately
->   doesn't expose) — fixes landed in `agt-transport.ts` this commit.
-> - **7 patches with different-but-equivalent solutions** in AGT — no
->   functional regression.
-> - **5 real gaps in AGT** that blocked moving fully upstream:
->   - G1: receiver-side X3DH bootstrap (vendored #4b)
->   - G2: auto-reconnect loop (vendored #9)
->   - G3: decrypt-fail session teardown (vendored #13)
->   - G4: pre-KNOCK encrypted-message buffer (vendored #16)
->   - G5: eager ghost-connection close on relay rebind (vendored relay #2)
->
-> **All five gaps are fixed on the local AGT branch**
-> `azureclaw-meshclient-event-hooks` (G1+G2 commit `d75ea37b`, G3+G4+G5
-> commit `3a96a0f2`), held locally, NOT pushed pending coordination
-> with the AGT team for an upstream PR. Together with the 3 event hooks
-> already on that branch, this means the AGT SDK is feature-complete
-> for the upstream-only scenario from AzureClaw's perspective,
-> **including reliable chunked file-transfer (mesh_file_transfer)
-> which requires G3 + G4 to avoid silent stalls**. AGT TS test suite:
-> 405/405 pass. AGT Python relay test suite: 18/18 pass.
-> See [Patch-by-patch audit](#patch-by-patch-audit-vendored-vs-agt-upstream-stack).
-
----
 
 ## Surface-by-surface comparison
 
@@ -73,7 +55,7 @@ which adapter to instantiate. Both adapters expose the **same**
 | Derive AMID from signing pubkey | SHA-256 truncated to base32, `did:agentmesh:` prefix | Same algorithm | ✅ |
 | Verify Ed25519 signatures | `Identity.verifySignature(pubKey, payload, sig)` | `crypto.verifySignature(...)` (utility module) | ✅ (call site in runtime stays on A for now) |
 
-**Wiring:** `Identity` is generated **once** via the vendored SDK regardless of
+**Historical wiring:** `Identity` was generated once via the vendored SDK regardless of
 provider, then we extract the raw Ed25519 keys (`identity.toData()`) and
 hand them to the factory. The factory passes the raw bytes to AGT and the
 full `sdkIdentity` to the vendored adapter. This keeps signing keys
@@ -151,25 +133,18 @@ A and B speak the same wire protocol against it:
 | `/registry/feedback` | `POST` | A built-in; B via our adapter | Submit reputation score |
 | `/agents/search?q=name` | `GET` | Both | Discovery by display name |
 
-The registry was patched (`vendor/agentmesh-registry/`) for chrono RFC3339
-serialization (`Z` vs `+00:00` mismatch breaking signature verification).
-Both A and B benefit from this server-side fix; no SDK-side changes needed.
+The historical vendored registry carried a chrono RFC3339 serialization fix
+(`Z` vs `+00:00` mismatch breaking signature verification). AGT PR #2090
+upstreamed the corresponding behavior, so AzureClaw no longer carries a
+registry fork.
 
 ### 6. Relay (E2E encrypted message routing)
 
-Relay is a **service**, but A and B ship different relay implementations:
-- **A** uses our vendored Rust relay (`vendor/agentmesh-relay/`), per-frame
-  Ed25519-signed connect, raw-timestamp signature verification.
-- **B** uses AGT's Python FastAPI relay
-  (`agent-governance-python/agent-mesh/src/agentmesh/relay/app.py`),
-  shared-secret token auth (`AGENTMESH_RELAY_TOKEN`), no per-frame
-  signature verification.
-
-When we move fully upstream, the AGT relay replaces ours. The two
-relays are **wire-incompatible** (different connect frame schemas),
-which means A and B cannot share a single relay deployment. This is by
-design — each provider speaks to its matching server. See the audit
-below for per-feature gap analysis.
+Relay is a **service**. During the migration, A used the historical vendored
+Rust relay and B used AGT's Python FastAPI relay
+(`agent-governance-python/agent-mesh/src/agentmesh/relay/app.py`). Phase 5.2
+removed A, so AzureClaw deploys only the AGT relay. See the audit below for the
+pre-removal per-feature gap analysis.
 
 | Frame type | Direction | A | B |
 |---|---|---|---|
@@ -179,12 +154,9 @@ below for per-feature gap analysis.
 | `ack` | server→client | ✅ | ✅ |
 | `ping` / `pong` | bidirectional | ✅ | ✅ |
 
-Frames use serde-tagged JSON with `"type"` field. The vendored relay was
-patched for the same chrono RFC3339 issue (`vendor/agentmesh-relay/`) and
-for one additional fix: **"never give up" reconnect** — vendored A uses
-`maxReconnectAttempts = Infinity` with capped 60s backoff (vs upstream's
-5 attempts). We applied the same default on B's adapter side; AGT's
-`MeshClient` already has configurable reconnect.
+Frames use serde-tagged JSON with `"type"` field. The historical vendored
+relay carried chrono RFC3339 and reconnect fixes; AGT PR #2090 upstreamed the
+gap-closing behavior needed for AzureClaw's AGT-only runtime.
 
 ### 7. X3DH key exchange + Double Ratchet
 
@@ -197,10 +169,10 @@ for one additional fix: **"never give up" reconnect** — vendored A uses
 | Double Ratchet step | `Session.encrypt/decrypt` (patched — `initializeResponder` was using wrong keypair) | `Ratchet.encrypt/decrypt` | ✅ |
 | AEAD cipher | XSalsa20-Poly1305 (libsodium) | XSalsa20-Poly1305 (libsodium) | ✅ |
 
-The 5 cryptographic patches in `vendor/agentmesh-sdk/` brought A to
-correctness. B is upstream-clean — Microsoft's implementation is correct
-out of the box. **This is the primary motivation for the swap**: removing
-the maintenance burden of carrying 5 protocol-level patches.
+The 5 historical cryptographic patches brought A to correctness. B is
+upstream-clean — Microsoft's implementation is correct out of the box. This
+was the primary motivation for the swap: removing the maintenance burden of
+carrying protocol-level patches.
 
 ### 8. KNOCK protocol (session establishment)
 
@@ -246,50 +218,25 @@ surface. Both gaps are fixed on the local AGT branch.**
 
 ---
 
-## Wiring (the swapping mechanism)
+## Wiring (historical swapping mechanism)
 
-### Components
+Phase 2 used a provider factory to compare the vendored adapter with AGT. Phase
+5.2 removed that switch. Current wiring is single-provider:
 
-```
-┌─────────────────────────────────────────────────────┐
-│  runtimes/openclaw/src/index.ts                     │
-│  ─────────────────────────────                      │
-│  await createMeshTransport({                        │
-│    relayUrl, registryUrl, identity, displayName     │
-│  })                                                 │
-└────────────────┬────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────┐
-│  mesh-plugin/src/transport-factory.ts               │
-│  resolveMeshProvider(env)                           │
-│   ├── "agt"       → AgtTransport      (B)           │
-│   └── default     → MeshConnection    (A)           │
-└────────────┬───────────────────────┬────────────────┘
-             │                       │
-             ▼                       ▼
-┌──────────────────────┐  ┌──────────────────────────┐
-│  connection.ts       │  │  agt-transport.ts        │
-│  (vendored adapter)  │  │  (AGT adapter)           │
-│  delegates to        │  │  delegates to            │
-│  @agentmesh/sdk      │  │  @microsoft/agent-       │
-│  AgentMeshClient     │  │  governance-sdk          │
-│                      │  │  MeshClient              │
-└──────────────────────┘  └──────────────────────────┘
+```mermaid
+flowchart TD
+  Runtime[OpenClaw runtime] --> MeshPkg[@azureclaw/mesh]
+  MeshPkg --> Crypto[Node.js crypto helpers\nidentity/sign/verify]
+  MeshPkg --> Agt[AgtTransport]
+  Agt --> Sdk[@microsoft/agent-governance-sdk\nMeshClient]
+  Sdk --> Relay[AGT relay + registry]
 ```
 
 ### Environment variable
 
-```bash
-# Default — vendored SDK (current production)
-AZURECLAW_MESH_PROVIDER=vendored   # or unset
-
-# Opt-in — AGT SDK
-AZURECLAW_MESH_PROVIDER=agt
-```
-
-Anything else (typo, empty, missing) falls back to `vendored` so a
-mis-configured pod always boots on the safe path.
+There is no active provider switch after Phase 5.2. `AZURECLAW_MESH_PROVIDER`
+and Helm `mesh.provider` no longer select a vendored implementation; AGT is the
+only supported mesh provider.
 
 ### IMeshTransport contract
 
@@ -300,22 +247,15 @@ adapter regresses, the build fails.
 
 ### Optional dependency
 
-`@microsoft/agent-governance-sdk` is declared as an `optionalDependency`
-on `runtimes/openclaw`. The factory's dynamic `import()` is wrapped in
-try/catch so that:
-
-- Pods built without AGT installed → factory throws clearly when
-  `AZURECLAW_MESH_PROVIDER=agt` is set, but works fine on default.
-- Pods with AGT installed → can flip the env var freely.
+`@microsoft/agent-governance-sdk` is the AGT JavaScript SDK used by
+`mesh-plugin/src/agt-transport.ts`. `runtimes/openclaw` depends on
+`@azureclaw/mesh` rather than importing the AGT SDK directly.
 
 ### Identity sharing
 
-Both providers receive **the same Ed25519 keys** generated by vendored
-`Identity.generate()`. We extract via `identity.toData()`, strip the
-`ed25519:` / `x25519:` base64 prefixes, and hand raw bytes to the factory.
-The factory passes raw bytes to AGT's `MeshClient` constructor and the
-full `sdkIdentity` to vendored. **AMIDs do not change when you swap
-providers** — same signing key, same SHA-256, same AMID.
+Identity, signing, and verification now use Node.js native `crypto` helpers
+re-exported by `@azureclaw/mesh`. The AGT `MeshClient` receives the raw key
+material it needs; there is no vendored SDK identity object in the runtime.
 
 ---
 
@@ -324,9 +264,9 @@ providers** — same signing key, same SHA-256, same AMID.
 This audit answers the question: **when we move fully upstream to the
 AGT stack (AGT TS SDK + AGT Python relay + AGT Python registry), do we
 lose any correctness or robustness fixes that exist in our vendored
-patches?** AGT will eventually replace `vendor/agentmesh-{sdk,relay,registry}`
-entirely, so each vendored patch needs an equivalent on the AGT side or
-a documented decision that the issue doesn't apply.
+patches?** AGT has now replaced the historical vendored stack entirely. This audit records
+which vendored patches needed an equivalent on the AGT side or a documented
+decision that the issue did not apply.
 
 The AGT components audited:
 
@@ -641,15 +581,10 @@ Optional but recommended:
 - Relay-4 — distinct close codes for supersede vs ping-timeout vs network drop
 - SDK-#8 — defensive fast-fail handshake fix
 
-Once G1 + G2 land in `@microsoft/agent-governance-sdk`:
-
-1. Bump the `optionalDependencies` pin to the new minor.
-2. Verify in dev: B-only end-to-end works for spawn → KNOCK → encrypted reply roundtrip with the AGT relay+registry.
-3. Soak with `AZURECLAW_MESH_PROVIDER=agt` as default for ≥ 1 week.
-4. Drop `vendor/agentmesh-sdk/`, `vendor/agentmesh-relay/`, `vendor/agentmesh-registry/`.
-5. Drop `connection.ts` (vendored adapter); keep `agt-transport.ts` only.
-6. Remove `AZURECLAW_MESH_PROVIDER` env var (now single-provider).
-7. Switch dev infra to deploy AGT relay+registry instead of vendored ones.
+Phase 5.2 completed this plan after AGT PR #2090 landed the required fixes:
+AzureClaw bumped to the AGT-only path, verified B-only end-to-end mesh behavior,
+removed the historical vendored SDK/relay/registry forks and adapter, and kept
+`agt-transport.ts` as the single mesh transport.
 
 ---
 
@@ -659,13 +594,12 @@ Once G1 + G2 land in `@microsoft/agent-governance-sdk`:
 |---|---|---|
 | `mesh-plugin/src/transport-factory.test.ts` | Factory env-var resolution | 5 tests ✅ |
 | `mesh-plugin/src/transport-phase2-compat.test.ts` | Both adapters expose all 6 methods | 16 tests ✅ |
-| `mesh-plugin/src/connection.test.ts` | Vendored adapter end-to-end | 16 tests ✅ |
 | `mesh-plugin/src/agt-transport.test.ts` | AGT adapter unit tests | 8 tests ✅ |
 | `mesh-plugin/src/agt-transport.live.test.ts` | AGT against real services | 2 skipped (live-only) |
 | AGT `tests/mesh-client-event-hooks.test.ts` | New event hooks | 8 tests ✅ |
 
-Total: **97 mesh-plugin tests pass** (81 pre-Phase-2 + 16 compat).
-AGT side: **387/387 pass**.
+Historical total at Phase 2: **97 mesh-plugin tests passed** (81 pre-Phase-2 + 16 compat).
+AGT side at that point: **387/387 passed**.
 
 ---
 
@@ -688,21 +622,13 @@ AGT side: **387/387 pass**.
    directly to a B sandbox — both endpoints in any conversation must be
    the same provider.
 
-4. **AGT version pinning.** We pin `^3.5.0` in `optionalDependencies`.
-   Once the AGT team releases the version with our event hooks, bump to
-   that minor.
 
 ---
 
 ## References
 
 - `mesh-plugin/src/transport-interface.ts` — IMeshTransport contract
-- `mesh-plugin/src/transport-factory.ts` — provider selection
-- `mesh-plugin/src/connection.ts` — vendored adapter (A)
-- `mesh-plugin/src/agt-transport.ts` — AGT adapter (B)
-- `runtimes/openclaw/src/index.ts:478-560` — runtime swap point
-- `vendor/agentmesh-sdk/README.md` — list of 8 vendored patches
-- `vendor/agentmesh-relay/README.md` — relay-side chrono fix
-- `vendor/agentmesh-registry/README.md` — registry-side chrono fix
-- AGT branch `azureclaw-meshclient-event-hooks` (local, sha `e5f4346f`,
-  NOT pushed) — proposed upstream changes
+- `mesh-plugin/src/agt-transport.ts` — AGT adapter
+- `mesh-plugin/src/crypto.ts` — Node.js native crypto identity/sign/verify helpers
+- `deploy/agentmesh-agt.yaml` — AGT relay/registry deployment
+- AGT PR #2090 — upstreamed AzureClaw gap-closing patches
