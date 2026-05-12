@@ -8,6 +8,8 @@
 - **You want:** seconds of feedback. Real router code. Real policy decisions. Real audit format. Real frontier-model output (Claude Opus, GPT-5, Gemini) with a single `gh auth login`. No Azure subscription, no Foundry resource, no Kubernetes.
 - **You do not want:** to operate a kind cluster for every PR; to stand up Workload Identity locally; to maintain a parallel "dev mock" that drifts from production.
 
+> **Need real Kubernetes locally?** If you're changing the controller, the Helm chart, the CRDs, or the inference router sidecar wiring, see [Blueprint 02 — Local Kubernetes dev loop](02-local-k8s-dev-loop.md). It runs the same controller + router images on a kind cluster, with a Headlamp dashboard. Pick `azureclaw dev --target local-k8s` (or pick "Local Kubernetes" at the first-run prompt). For prompt-iteration and tool-policy work, this Docker loop is faster — start here.
+
 ## Topology
 
 One Docker container. Same image as the sandbox, just with the router co-located inside instead of a separate pod.

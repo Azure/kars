@@ -27,9 +27,23 @@ FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 FROM ${SANDBOX_BASE_IMAGE} AS cli-builder
 
 WORKDIR /build
+# mesh-plugin is a file: dep of runtimes/openclaw (npm resolves
+# `@azureclaw/mesh` to `../../mesh-plugin`). It must be present at
+# /build/mesh-plugin BEFORE `npm ci` runs, or tsc fails to resolve
+# the import. We copy the pre-built dist so npm doesn't need to run
+# mesh-plugin's `prepare` script (which needs tsc as a devDep).
+COPY mesh-plugin/package.json mesh-plugin/package-lock.json ./mesh-plugin/
+COPY mesh-plugin/dist/ ./mesh-plugin/dist/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/tsconfig.json ./runtimes/openclaw/
 COPY runtimes/openclaw/src/ ./runtimes/openclaw/src/
-RUN cd runtimes/openclaw && npm ci --ignore-scripts && npm run build
+# NPM_CONFIG_IGNORE_SCRIPTS=true propagates to nested installs of
+# file: deps; --ignore-scripts on the outer command alone does not.
+# Belt-and-braces: also strip mesh-plugin's `prepare` script, which
+# would otherwise try to invoke tsc (missing in this stage).
+RUN node -e "const f='./mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));" && \
+    cd runtimes/openclaw && \
+    NPM_CONFIG_IGNORE_SCRIPTS=true npm ci --ignore-scripts && \
+    npm run build
 
 # ─── Runtime Stage (overlay on base) ─────────────────────────────────────────
 
@@ -47,25 +61,43 @@ COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes
 COPY runtimes/openclaw/skills/ /opt/azureclaw-plugin/skills/
 COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
+# mesh-plugin is referenced by the runtime as a `file:../../mesh-plugin` dep.
+# `npm ci` below creates a symlink at
+# /opt/azureclaw-plugin/node_modules/@azureclaw/mesh → ../../../../mesh-plugin
+# which resolves to /mesh-plugin. Stage the prebuilt mesh-plugin there so the
+# symlink is not dangling at runtime. Without this the runtime falls back to
+# the vendored SDK silently (`mesh provider swap failed, staying on vendored`).
+COPY mesh-plugin/package.json /mesh-plugin/package.json
+COPY mesh-plugin/dist/ /mesh-plugin/dist/
+RUN node -e "const f='/mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));"
+
 # Install plugin runtime dependencies
 RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
 
-# Install vendored SDK with its dependencies (libsodium-wrappers etc.)
-COPY vendor/agentmesh-sdk/package.json vendor/agentmesh-sdk/package-lock.json vendor/agentmesh-sdk/tsup.config.ts /opt/azureclaw-vendored-sdk/
-COPY vendor/agentmesh-sdk/src/ /opt/azureclaw-vendored-sdk/src/
-COPY vendor/agentmesh-sdk/dist/ /opt/azureclaw-vendored-sdk/dist/
-RUN cd /opt/azureclaw-vendored-sdk && npm ci --omit=dev --ignore-scripts
-
-# Overlay vendored SDK into plugin node_modules (patched dist + deps)
-RUN mkdir -p /opt/azureclaw-plugin/node_modules/@agentmesh/sdk && \
-    cp -r /opt/azureclaw-vendored-sdk/dist /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
-    cp /opt/azureclaw-vendored-sdk/package.json /opt/azureclaw-plugin/node_modules/@agentmesh/sdk/ && \
-    cp -r /opt/azureclaw-vendored-sdk/node_modules/* /opt/azureclaw-plugin/node_modules/ 2>/dev/null || true
+# Optional: install upstream Microsoft AGT SDK when MESH_PROVIDER=agt build arg
+# is passed. Not installed by default so vendored builds stay slim and offline.
+# AGT_SDK_TARBALL: when set (dev mode pinning a locally-patched AGT branch) the
+# build context must contain `.agt-sdk/<tarball-name>`. The CLI stages this for
+# `azureclaw dev --mesh-provider agt --build`. The directory always exists with
+# at least a .keep file so the COPY never fails.
+ARG MESH_PROVIDER=vendored
+ARG AGT_SDK_TARBALL=
+COPY .agt-sdk/ /opt/azureclaw-agt-sdk/
+RUN cd /opt/azureclaw-plugin && \
+    if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ]; then \
+      echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
+      npm install --omit=dev --ignore-scripts --no-save \
+        "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ; \
+    else \
+      echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
+      npm install --omit=dev --ignore-scripts --no-save \
+        '@microsoft/agent-governance-sdk@^3.5.0' ; \
+    fi
 
 # Harden image-level code: root-owned, read-only — prevents agent from tampering
 # with the master copy that gets re-installed on every container start.
-RUN chmod -R a-w /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk && \
-    chmod -R a+rX /opt/azureclaw-plugin /opt/azureclaw-vendored-sdk
+RUN chmod -R a-w /opt/azureclaw-plugin && \
+    chmod -R a+rX /opt/azureclaw-plugin
 
 # Build a pruned dist-runtime/extensions/ tree mirroring dist/, but containing
 # only the 3 always-required runtime cores. Files are hardlinked (`cp -al`)

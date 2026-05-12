@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build": "tsc && cp -r skills dist/skills && cp openclaw.plugin.json dist/",
+    "prepare": "tsc && cp -r skills dist/skills && cp openclaw.plugin.json dist/",
     "test": "vitest run",
     "lint": "oxlint src/",
     "typecheck": "tsc --noEmit",
@@ -43,7 +44,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@agentmesh/sdk": "file:../vendor/agentmesh-sdk",
+    "@microsoft/agent-governance-sdk": "^3.6.0",
     "ws": "^8.18"
   },
   "devDependencies": {

@@ -26,12 +26,9 @@ Each sandbox pod has 2 containers + 1 init container:
 
 Agents never see API keys. The router authenticates via IMDS/Workload Identity.
 
-### Three AgentMesh repos (important context)
+### AgentMesh provider
 
-- `amitayks/agentmesh` — actual protocol implementation (relay, registry, SDK), published as `@agentmesh/sdk`
-- `microsoft/agent-governance-toolkit` (AGT) — governance layer depending on `@agentmesh/sdk`
-- Our `vendor/` directory contains patched forks of relay, registry, and SDK (8 bug fixes documented in `vendor/*/README.md`)
-- The sandbox Docker build installs `@agentmesh/sdk` via npm, then **overlays** with our vendored dist files
+AzureClaw uses Microsoft AGT AgentMesh exclusively. TypeScript transport is provided by `@microsoft/agent-governance-sdk` through the `@azureclaw/mesh` package, and AGT relay/registry are deployed via `deploy/agentmesh-agt.yaml`. The historical AgentMesh npm package and vendored relay/registry forks were removed in Phase 5.2 after AGT upstreamed AzureClaw's gap-closing patches.
 
 ## Build, Test, and Lint
 
@@ -95,13 +92,9 @@ OpenClaw loads the plugin twice (tool registry + agent session). The singleton g
 
 `entrypoint.sh` starts the OpenClaw gateway (port 18789) in the background, then starts a persistent `openclaw agent --local` session. This background session loads the plugin → connects to AGT relay → receives/replies to E2E messages. Without it, the sub-agent can't receive relay messages.
 
-### Vendored SDK patches
+### AGT mesh stack
 
-`vendor/` contains 8 bug fixes against upstream `@agentmesh/sdk` v0.1.2. The sandbox Dockerfile installs npm deps normally, then overlays vendored SDK files:
-```dockerfile
-COPY vendor/agentmesh-sdk/dist/ .../node_modules/@agentmesh/sdk/dist/
-```
-Vendored relay/registry need Rust 1.94+ (upstream's 1.83 is too old). All patches are documented in `vendor/*/README.md`.
+Do not add a second mesh provider or restore the removed vendored AgentMesh fork. Mesh transport changes should target `mesh-plugin/src/agt-transport.ts` and, when broadly applicable, be proposed upstream to Microsoft AGT first. The Rust crate named `agentmesh` is from Microsoft AGT and remains a valid dependency.
 
 ### Rust workspace
 
@@ -161,13 +154,9 @@ Node.js 22's built-in `fetch()` ignores `HTTPS_PROXY`. The sandbox uses `proxy-b
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "Cannot find module '@agentmesh/sdk'" | npm install failed silently in Docker | Check vendored SDK overlay in Dockerfile |
-| "SignatureVerificationFailed" in relay | Timestamp format mismatch (Z vs +00:00) | Apply `vendor/agentmesh-relay` patches |
-| "wrong secret key for the given ciphertext" | Ratchet key mismatch | Check `vendor/agentmesh-sdk` session.ts |
 | Duplicate messages in inbox | Plugin loaded twice without singleton | Check `__AGT_INITIALIZED` env guard |
 | Sub-agent doesn't receive relay messages | No background agent session | Check `entrypoint.sh` relay listener |
 | Old image served despite `:latest` push | AKS node cache | Use `imagePullPolicy: Always` or restart pods |
-| "Invalid character" in base64 | `x25519:`/`ed25519:` key prefix | Apply vendored base64Decode fix |
 | Node.js 22 fetch ignores HTTPS_PROXY | Built-in fetch doesn't use proxy env | Load `proxy-bootstrap.js` via `NODE_OPTIONS` |
 
 ## Implementation Quality

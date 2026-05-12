@@ -110,6 +110,27 @@ spec:
             # registration provisioned.
             - name: AZURECLAW_DISABLE_ENTRA_AUTH
               value: {{ if .Values.azure.entraAuth.enabled }}"0"{{ else }}"1"{{ end }}
+            # Mesh transport — passed through to every sandbox as
+            # AZURECLAW_MESH_PROVIDER. Only "agt" (upstream
+            # @microsoft/agent-governance-sdk + Microsoft AGT relay/registry,
+            # deploy/agentmesh-agt.yaml) is supported since Phase 5.2. The
+            # vendored fork was removed.
+            - name: AZURECLAW_MESH_PROVIDER
+              value: {{ .Values.mesh.provider | default "agt" | quote }}
+            # Strict-mode tool definitions: when enabled, sandbox openclaw
+            # containers receive AZURECLAW_STRICT_TOOLS=1, which causes the
+            # task-loop to emit OpenAI strict-mode tool schemas
+            # (`strict: true` + `additionalProperties: false` + all params
+            # required). Eliminates the multi-KB string-escape corruption
+            # failure class on tool-call arguments. The runtime additionally
+            # gates this on a GPT-family model (gpt-4o/4.1/5, o1/o3/o4) and
+            # non-slim provider, so Anthropic / Claude / Gemini deployments
+            # via Foundry's OpenAI-compat shim are auto-excluded. Default
+            # OFF for backward compatibility.
+            {{- if .Values.strictTools.enabled }}
+            - name: AZURECLAW_STRICT_TOOLS
+              value: "1"
+            {{- end }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

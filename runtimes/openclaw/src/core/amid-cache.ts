@@ -178,25 +178,15 @@ export async function resolveAmidByName(
   const base = opts.registryBase ?? routerUrl("/agt/registry");
   const timeoutMs = opts.timeoutMs ?? 5000;
   try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        `${base}/registry/search?capability=${encodeURIComponent(agentName)}`,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (res: any) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const results: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
+    // Use the provider-aware registry abstraction so we hit the right URL
+    // shape under AZURECLAW_MESH_PROVIDER=agt. When the caller pinned a
+    // custom base, we construct an explicit impl rather than the cached
+    // singleton (sub-agents override base via AGT_REGISTRY_URL).
+    const { getMeshRegistry } = await import("./mesh-registry.js");
+    const reg = getMeshRegistry(() => base);
+    const results = await reg.search(agentName, { timeoutMs });
     const match = pickFreshestRegistryMatch(results, agentName, opts.scopeFilter);
-    const amid: string | undefined = match?.amid || match?.id;
+    const amid: string | undefined = match?.amid || (match as { id?: string } | undefined)?.id;
     if (amid) {
       if (!opts.bypassCache) {
         setCachedAmid(agentName, amid);
@@ -217,24 +207,12 @@ export async function resolveAmidToName(
   const cached = amidToName.get(amid);
   if (cached) return cached;
   try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
-        (res) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    if (parsed.display_name) {
-      amidToName.set(amid, parsed.display_name);
-      nameToAmid.set(parsed.display_name, amid);
-      return parsed.display_name;
+    const { getMeshRegistry } = await import("./mesh-registry.js");
+    const rec = await getMeshRegistry(routerUrl).lookup(amid, { timeoutMs: 3000 });
+    if (rec?.display_name) {
+      amidToName.set(amid, rec.display_name);
+      nameToAmid.set(rec.display_name, amid);
+      return rec.display_name;
     }
   } catch { /* best effort */ }
   return "";
@@ -249,21 +227,9 @@ export async function resolveSigningKey(
   const cached = peerSigningKeys.get(amid);
   if (cached) return cached;
   try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        routerUrl(`/agt/registry/registry/lookup?amid=${amid}`),
-        (res) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    const key = parsed.signing_public_key || parsed.public_info?.signing_public_key || "";
+    const { getMeshRegistry } = await import("./mesh-registry.js");
+    const rec = await getMeshRegistry(routerUrl).lookup(amid, { timeoutMs: 3000 });
+    const key = rec?.signing_public_key || rec?.public_info?.signing_public_key || "";
     if (key) {
       peerSigningKeys.set(amid, key);
       return key;
@@ -470,23 +436,11 @@ async function registryLookupDisplayName(
   timeoutMs: number,
 ): Promise<string | undefined> {
   try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        `${base}/registry/lookup?amid=${encodeURIComponent(amid)}`,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (res: any) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    const name = parsed?.display_name;
-    return typeof name === "string" && name.length > 0 ? name : undefined;
+    const { getMeshRegistry } = await import("./mesh-registry.js");
+    // Use base override (some callers pin a specific registry endpoint).
+    const reg = getMeshRegistry(() => base);
+    const rec = await reg.lookup(amid, { timeoutMs });
+    return rec?.display_name;
   } catch {
     return undefined;
   }
@@ -498,23 +452,9 @@ async function registrySearchFreshestAmid(
   timeoutMs: number,
 ): Promise<string | undefined> {
   try {
-    const http = await import("node:http");
-    const body = await new Promise<string>((resolve, reject) => {
-      const req = http.get(
-        `${base}/registry/search?capability=${encodeURIComponent(name)}`,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (res: any) => {
-          let d = "";
-          res.on("data", (c: Buffer) => { d += c.toString(); });
-          res.on("end", () => resolve(d));
-        },
-      );
-      req.on("error", reject);
-      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
-    });
-    const parsed = JSON.parse(body);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const results: any[] = Array.isArray(parsed) ? parsed : (parsed?.results || []);
+    const { getMeshRegistry } = await import("./mesh-registry.js");
+    const reg = getMeshRegistry(() => base);
+    const results = await reg.search(name, { timeoutMs });
     // Authoritative match is the display_name field — the router enforces
     // a sandbox can only register its own SANDBOX_NAME there. Capability
     // self-assertion is a softer signal; we ignore it here.
@@ -524,7 +464,7 @@ async function registrySearchFreshestAmid(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (a: any) => a?.display_name === name,
     );
-    return match?.amid || match?.id;
+    return match?.amid || (match as { id?: string } | undefined)?.id;
   } catch {
     return undefined;
   }

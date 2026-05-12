@@ -30,9 +30,9 @@
 #     or as raw HTTP against this router.
 #   - No real router, relay, or registry. Real router integration tests
 #     live in inference-router/tests/ and spin everything up in-process.
-#   - Runs TypeScript directly via tsx so the stack is unaffected by the
-#     pre-existing @agentmesh/sdk resolution error in plugin.ts that
-#     currently blocks `npm run build`.
+#   - Runs TypeScript directly via tsx (kept after the @agentmesh/sdk
+#     dependency was removed in Phase 5.2; this isolates the dev stack
+#     from any future build changes too).
 # ─────────────────────────────────────────────────────────────────────────────
 services:
   fake-router:

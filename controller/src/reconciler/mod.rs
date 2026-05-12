@@ -128,6 +128,23 @@ struct Context {
     /// behaviour. Wired via `BYO_STRICT_MODE=1` env var (Helm value
     /// `controller.byoStrict`).
     byo_strict: bool,
+    /// Dev-mode credentials for non-AKS deployments. Forwarded to every
+    /// router sidecar when present. AKS production leaves all three
+    /// empty and the router falls back to workload identity.
+    /// - `dev_openai_api_key`: bearer key for Foundry / Azure OpenAI / GitHub Models.
+    /// - `dev_provider`: `AZURECLAW_PROVIDER` override (`github-models` |
+    ///   `github-copilot`). When unset the router uses standard Azure
+    ///   OpenAI dispatch.
+    /// - `dev_copilot_github_token`: GitHub PAT for the GitHub Copilot
+    ///   path (`inference-router/src/copilot_auth.rs`); only meaningful
+    ///   when `dev_provider == "github-copilot"`.
+    ///   All three are populated from the controller's own env at startup,
+    ///   which the local-k8s overlay sources from a `azureclaw-dev-creds`
+    ///   Secret in the `azureclaw-system` namespace. See
+    ///   `cli/src/commands/dev/local-k8s.ts`.
+    dev_openai_api_key: String,
+    dev_provider: String,
+    dev_copilot_github_token: String,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -1067,6 +1084,30 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
         }
 
+        // Strict-mode tool definitions: when the controller is launched with
+        // AZURECLAW_STRICT_TOOLS=1 (e.g. via the Helm chart's `strictTools`
+        // value), propagate it into every sandbox's openclaw container.
+        // The runtime additionally gates strict mode on (a) non-slim provider
+        // and (b) GPT-family model — see runtimes/openclaw/src/core/agt-task-tools.ts
+        // applyStrict(). Anthropic / Claude / Gemini deployments via Foundry's
+        // OpenAI-compat shim are auto-excluded at the runtime layer regardless
+        // of this flag, so it's safe to enable cluster-wide. Default OFF to
+        // preserve byte-identical behaviour for existing deployments.
+        if let Ok(strict_tools) = std::env::var("AZURECLAW_STRICT_TOOLS")
+            && (strict_tools == "1" || strict_tools.eq_ignore_ascii_case("true"))
+            && is_openclaw
+        {
+            openclaw_env.push(json!({"name": "AZURECLAW_STRICT_TOOLS", "value": "1"}));
+        }
+
+        // AGT is the only supported mesh provider in this phase. Keep the
+        // env var explicit so OpenClaw and the router agree on the protocol.
+        openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": "agt"}));
+        // The router container is separate from openclaw on AKS, and the
+        // router's own mesh code paths read AZURECLAW_MESH_PROVIDER. Push
+        // the same value into the router env so both containers agree.
+        router_agt_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": "agt"}));
+
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
             openclaw_env
@@ -1082,6 +1123,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             });
             if let Some(peers) = valid_peers {
                 openclaw_env.push(json!({"name": "AGT_TRUSTED_PEERS", "value": peers}));
+                // The first entry in trusted_peers is the parent (spawner
+                // seeds it that way — see inference-router spawn helper).
+                // Expose it as PARENT_SANDBOX so the openclaw runtime can
+                // alias the literal recipient name 'parent' (which LLMs
+                // routinely use for back-replies) to the parent's real
+                // display_name. Without this, `mesh_send(to_agent="parent")`
+                // hits the registry as the capability "parent" and resolves
+                // to 0 agents, breaking back-replies on AGT.
+                if let Some((first_name, _)) =
+                    peers.split(',').next().and_then(|p| p.split_once(':'))
+                {
+                    let first_name = first_name.trim();
+                    if !first_name.is_empty() {
+                        openclaw_env.push(json!({"name": "PARENT_SANDBOX", "value": first_name}));
+                    }
+                }
             }
             // Validate registry mode: must be "local" or "global"
             let reg_mode = match governance_config.registry_mode.as_deref() {
@@ -1208,7 +1265,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
             json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
             json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_model}),
-            json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}),
+            json!({"name": "AZURECLAW_AUTH_MODE", "value": if ctx.dev_openai_api_key.is_empty() { "workload-identity" } else { "api-key" }}),
             json!({"name": "CONTENT_SAFETY_ENABLED", "value": content_safety_enabled.to_string()}),
             json!({"name": "PROMPT_SHIELDS_ENABLED", "value": prompt_shields_enabled.to_string()}),
             json!({"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint}),
@@ -1219,6 +1276,30 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
         ];
         router_env.extend(router_agt_env);
+
+        // Local-k8s dev mode: when the controller has dev creds (set via
+        // `controller.extraEnv` referencing `azureclaw-dev-creds`
+        // Secret), forward them to the router so it short-circuits
+        // workload-identity auth. AKS production leaves these empty and
+        // the router falls back to IMDS.
+        if !ctx.dev_openai_api_key.is_empty() {
+            router_env.push(json!({
+                "name": "AZURE_OPENAI_API_KEY",
+                "value": &ctx.dev_openai_api_key,
+            }));
+        }
+        if !ctx.dev_provider.is_empty() {
+            router_env.push(json!({
+                "name": "AZURECLAW_PROVIDER",
+                "value": &ctx.dev_provider,
+            }));
+        }
+        if !ctx.dev_copilot_github_token.is_empty() {
+            router_env.push(json!({
+                "name": "COPILOT_GITHUB_TOKEN",
+                "value": &ctx.dev_copilot_github_token,
+            }));
+        }
 
         // ── Blocklist ConfigMap + env vars ──
         // The blocklist is always-on: router loads a seed file at startup, then
@@ -2270,6 +2351,22 @@ pub async fn run(client: Client) -> Result<()> {
         tracing::info!("BYO strict-mode enabled — invalid BYO contracts will be rejected");
     }
 
+    // Local-k8s dev mode: when `AZURE_OPENAI_API_KEY` is set on the
+    // controller (via Helm `controller.extraEnv` in
+    // `values-local-dev.yaml`), propagate it to every router sidecar.
+    // Production AKS deployments leave this unset and the router falls
+    // back to workload identity. See `inference-router/src/auth.rs`.
+    let dev_openai_api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
+    let dev_provider = std::env::var("AZURECLAW_PROVIDER").unwrap_or_default();
+    let dev_copilot_github_token = std::env::var("COPILOT_GITHUB_TOKEN").unwrap_or_default();
+    if !dev_openai_api_key.is_empty() || !dev_provider.is_empty() {
+        tracing::info!(
+            provider = %if dev_provider.is_empty() { "azure-openai" } else { dev_provider.as_str() },
+            copilot_token = if dev_copilot_github_token.is_empty() { "absent" } else { "present" },
+            "Dev-mode inference creds detected — router sidecars will receive API-key auth instead of workload identity"
+        );
+    }
+
     let ctx = Arc::new(Context {
         client,
         wi_client_id,
@@ -2283,6 +2380,9 @@ pub async fn run(client: Client) -> Result<()> {
         content_safety_endpoint,
         fedcred,
         byo_strict,
+        dev_openai_api_key,
+        dev_provider,
+        dev_copilot_github_token,
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

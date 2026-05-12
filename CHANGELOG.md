@@ -5,6 +5,34 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Phase 5 (AGT default + local-k8s mesh)
+
+### Changed
+
+- **Phase 5.2 completed the AGT-only mesh migration.** AzureClaw now runs
+  Microsoft AGT AgentMesh exclusively: the historical vendored AgentMesh SDK
+  and relay/registry forks were removed after upstream AGT PR #2090 merged
+  all 18 AzureClaw gap-closing patches.
+- The OpenClaw runtime and `mesh-plugin` no longer depend on `@agentmesh/sdk`;
+  identity, signing, and verification use Node.js native `crypto` helpers
+  re-exported by `@azureclaw/mesh`, while transport uses
+  `@microsoft/agent-governance-sdk`.
+- The controller and inference-router dropped the `Provider::Vendored` branch.
+  Helm `mesh.provider` is AGT-only and no longer documents or renders a
+  vendored provider path.
+
+### Added
+
+- `azureclaw dev --target local-k8s` now deploys the mesh stack into the
+  kind cluster. Previously the controller would start expecting
+  `agentmesh-relay:8765` in namespace `agentmesh` but the namespace
+  didn't exist locally. The new flow builds the AGT (or vendored) relay
+  and registry images, loads them into kind, rewrites the manifest's
+  ACR image refs to local tags + `imagePullPolicy=Never`, applies, and
+  waits for both rollouts before reporting the cluster ready.
+- `azureclaw dev --no-mesh` opt-out for pure controller smoke tests on
+  hardware without enough RAM for the full stack.
+
 ## [1.0.0-rc.1] — Release candidate (release engineering pass)
 
 First release candidate cut for the v1.0.0 line. No new feature surface beyond what shipped in `[Unreleased] — Phase 2`; this entry tracks the release-engineering, documentation, and hygiene work performed on `dev` before promoting to `main`.

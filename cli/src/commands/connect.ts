@@ -16,7 +16,8 @@ export function connectCommand(): Command {
     .option("--local", "Connect to local Docker sandbox (skip AKS)", false)
     .option("--cloud", "Connect to AKS cloud sandbox (skip Docker)", false)
     .option("--port <port>", "Local port for WebUI", "18789")
-    .action(async (name: string, options: { shell: boolean; web: boolean; local: boolean; cloud: boolean; port: string }) => {
+    .option("--reset", "Restart the openclaw deployment to clear gateway brute-force lockout (token is preserved)", false)
+    .action(async (name: string, options: { shell: boolean; web: boolean; local: boolean; cloud: boolean; port: string; reset: boolean }) => {
       const { execa } = await import("execa");
       const containerName = `azureclaw-${name}`;
       const namespace = `azureclaw-${name}`;
@@ -156,6 +157,31 @@ export function connectCommand(): Command {
           return;
         }
 
+        // --reset: rolling-restart the openclaw deployment to clear the
+        // gateway's in-process brute-force lockout. The gateway token
+        // Secret is reused across restarts (controller is idempotent),
+        // so the URL/token printed below will still be valid after the
+        // pod comes back. Useful when stale browser tabs from prior
+        // `dev`/`up` runs have spammed the gateway with old tokens
+        // and triggered "too many failed authentication attempts".
+        if (options.reset) {
+          console.log(chalk.yellow("  Resetting gateway lockout: restarting openclaw pod (token preserved)…"));
+          try {
+            await execa("kubectl", [
+              "rollout", "restart", "-n", namespace, `deploy/${name}`,
+            ], { stdio: "pipe" });
+            await execa("kubectl", [
+              "rollout", "status", "-n", namespace, `deploy/${name}`, "--timeout=120s",
+            ], { stdio: "inherit" });
+            console.log(chalk.green("  Gateway lockout cleared."));
+            console.log(chalk.dim("  Tip: close any open browser tabs pointing at localhost:" + localPort + " before reopening — they may auto-reconnect with a stale token and re-trigger the lockout."));
+            console.log();
+          } catch (e) {
+            console.log(chalk.red(`  Reset failed: ${(e as Error).message}`));
+            return;
+          }
+        }
+
         if (isKata) {
           // Kata VMs don't support kubectl port-forward — use shell mode instead
           console.log(chalk.yellow("  Note: Kata VM pods don't support port-forward (known limitation)."));
@@ -170,6 +196,55 @@ export function connectCommand(): Command {
             `deploy/${name}`, "-c", podContainer,
             "--", "/bin/bash", "--login",
           ], { stdio: "inherit" });
+          return;
+        }
+
+        // Detect an already-running port-forward (the most common cause
+        // of EADDRINUSE here is the user re-running `azureclaw connect`
+        // while a previous invocation is still alive in another terminal,
+        // or after `azureclaw dev` already opened the WebUI). If port
+        // 18789 is open AND speaks HTTP, just print the URL + open the
+        // browser instead of erroring out with a Node stack trace.
+        const isPortServingHttp = await (async (): Promise<boolean> => {
+          const net = await import("node:net");
+          const tcpOpen = await new Promise<boolean>((resolve) => {
+            const sock = net.createConnection({ host: "127.0.0.1", port: Number(localPort) });
+            const done = (v: boolean) => { sock.destroy(); resolve(v); };
+            sock.once("connect", () => done(true));
+            sock.once("error", () => done(false));
+            setTimeout(() => done(false), 500);
+          });
+          if (!tcpOpen) return false;
+          try {
+            // Any HTTP response (even 401/404) confirms it's an HTTP
+            // server. fetch() with a short AbortController timeout.
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 1500);
+            const r = await fetch(`http://127.0.0.1:${localPort}/`, { signal: ctrl.signal });
+            clearTimeout(t);
+            return r.status > 0;
+          } catch {
+            return false;
+          }
+        })();
+
+        if (isPortServingHttp) {
+          const url = `http://localhost:${localPort}/#token=${gatewayToken}`;
+          console.log();
+          console.log(chalk.dim(`  Port ${localPort} is already serving HTTP — reusing existing port-forward.`));
+          console.log();
+          console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(url)}`);
+          console.log();
+          console.log(chalk.dim(`  Gateway token: ${gatewayToken}`));
+          console.log(chalk.dim(`  If WebUI says "too many failed authentication attempts": run 'azureclaw connect ${name} --reset' to clear the gateway lockout (token is preserved).`));
+          console.log();
+          // Best-effort browser open; don't fail if it errors.
+          try {
+            const opener = process.platform === "darwin" ? "open"
+              : process.platform === "win32" ? "start"
+              : "xdg-open";
+            await execa(opener, [url], { stdio: "ignore", detached: true });
+          } catch { /* user can click the link */ }
           return;
         }
 

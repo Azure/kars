@@ -673,7 +673,18 @@ async function promptFoundry(
     },
   ]);
 
-  // Verify
+  // Verify (best-effort).
+  //
+  // We probe the classic Azure OpenAI shape `${endpoint}/openai/deployments/
+  // {model}/chat/completions`, which works against both `*.openai.azure.com`
+  // and `*.services.ai.azure.com`. It does NOT work against project-scoped
+  // Foundry endpoints (`/api/projects/<proj>`), and may fail for users whose
+  // model deployment name doesn't match `creds.model` even when their creds
+  // are valid for the runtime. We must not `process.exit(1)` here: the
+  // unique first-run UX bug is that aborting on verify failure leaves
+  // nothing saved, so `azureclaw dev` re-prompts forever for users with
+  // non-classic endpoint shapes. Save what we have, warn loudly, and let
+  // the runtime surface the real error against the real model at use time.
   if (!skipVerify) {
     const spinner = ora({ color: "cyan" }).start("Verifying credentials...");
     try {
@@ -687,16 +698,27 @@ async function promptFoundry(
       );
       if (!response.ok) {
         const body = await response.text();
-        spinner.fail("Credential verification failed");
-        console.log(chalk.red(`\n  ${response.status}: ${body}\n`));
-        console.log(chalk.yellow("  Check your endpoint, model deployment name, and API key.\n"));
-        process.exit(1);
+        spinner.warn(`Credential verification returned ${response.status} — saving anyway`);
+        console.log(chalk.dim(`    ${body.length > 240 ? body.slice(0, 240) + "…" : body}`));
+        console.log(
+          chalk.yellow(
+            "  Note: the verify probe uses the classic AOAI deployments path. " +
+              "If your endpoint is a Foundry project URL (.../api/projects/<name>) " +
+              "this 404/401 is expected — your creds may still be valid at runtime.",
+          ),
+        );
+      } else {
+        spinner.succeed("Credentials verified");
       }
-      spinner.succeed("Credentials verified");
     } catch (error) {
-      spinner.fail("Could not reach endpoint");
-      console.log(chalk.red(`\n  ${error instanceof Error ? error.message : String(error)}\n`));
-      process.exit(1);
+      const msg = error instanceof Error ? error.message : String(error);
+      spinner.warn(`Could not reach endpoint — saving anyway (${msg})`);
+      console.log(
+        chalk.yellow(
+          "  Note: network/TLS error during verify. Creds were saved; re-run " +
+            "`azureclaw credentials` if you need to correct them.",
+        ),
+      );
     }
   }
 
@@ -778,6 +800,31 @@ export function resetFirstRunFlag(): boolean {
   try {
     const config = JSON.parse(raw);
     delete config.firstRunCompleted;
+    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    chmodSync(CONFIG_FILE, 0o600);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Set the `firstRunCompleted` flag without re-prompting. Used when the
+ * user pre-configured credentials via `azureclaw credentials` and then
+ * runs `azureclaw dev` for the first time — we want to skip the
+ * credentials sub-prompt of the welcome flow but mark first-run done
+ * so subsequent runs don't re-display the welcome.
+ */
+export function markFirstRunCompleted(): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(CONFIG_FILE, "utf-8");
+  } catch {
+    return false;
+  }
+  try {
+    const config = JSON.parse(raw);
+    config.firstRunCompleted = true;
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
     chmodSync(CONFIG_FILE, 0o600);
     return true;

@@ -22,11 +22,11 @@ azureclaw up --resource-group <rg> --isolation confidential
 ## Image Registry (ACR: azureclawacr)
 | Image | Source | Purpose |
 |-------|--------|---------|
-| `openclaw-sandbox:latest` | `sandbox-images/openclaw/Dockerfile` | Agent container (OpenClaw + plugin + AGT SDK) |
+| `openclaw-sandbox:latest` | `sandbox-images/openclaw/Dockerfile` | Agent container (OpenClaw + AzureClaw mesh plugin) |
 | `azureclaw-inference-router:latest` | `inference-router/Dockerfile` | Per-pod proxy (AOAI, relay/registry, native AGT governance) |
 | `azureclaw-controller:latest` | `controller/Dockerfile` | K8s controller (CRD reconciler) |
-| `agentmesh-relay:latest` | `vendor/agentmesh-relay/Dockerfile` | WebSocket relay server |
-| `agentmesh-registry:latest` | `vendor/agentmesh-registry/Dockerfile` | Agent discovery + prekey storage |
+| `agentmesh-relay-agt:latest` | Microsoft AGT AgentMesh image | WebSocket relay server |
+| `agentmesh-registry-agt:latest` | Microsoft AGT AgentMesh image | Agent discovery + prekey storage |
 
 ## AKS Namespaces
 | Namespace | Purpose |
@@ -44,8 +44,8 @@ azureclaw up --resource-group <rg> --isolation confidential
 
 ## AgentMesh Infrastructure
 ```bash
-# Deploy agentmesh (relay + registry + postgres)
-kubectl apply -f deploy/agentmesh.yaml
+# Deploy Microsoft AGT AgentMesh (relay + registry + postgres)
+kubectl apply -f deploy/agentmesh-agt.yaml
 
 # Verify
 kubectl get pods -n agentmesh
@@ -56,6 +56,6 @@ kubectl get pods -n agentmesh
 - **Pod stuck Pending**: Check node pool capacity (`kubectl describe pod`)
 - **ImagePullBackOff**: ACR auth issue (`az acr login --name azureclawacr`)
 - **Controller not reconciling**: Check CRD (`kubectl get clawsandbox -A`) and controller logs
-- **Relay auth fails**: Check vendor/agentmesh-relay patches applied
-- **Registry 401 on prekey upload**: Check vendor/agentmesh-registry patches applied
+- **Relay auth fails**: Check the AGT relay token secret and relay logs
+- **Registry 401 on prekey upload**: Check AGT registry auth configuration and pod identity
 - **Old image cached on AKS**: Use `imagePullPolicy: Always` for `:latest` tags

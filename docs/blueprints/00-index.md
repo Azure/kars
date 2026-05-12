@@ -9,10 +9,11 @@ These are not mutually exclusive — one AzureClaw cluster can serve several of 
 | # | Blueprint | Audience | Where AzureClaw runs | Status |
 |---|---|---|---|---|
 | **[01](01-developer-inner-loop.md)** | Developer inner loop | Individual contributor | Laptop (`azureclaw dev` — single Docker container) | ✅ |
-| **[02](02-enterprise-self-hosted.md)** | Enterprise self-hosted | Platform team, single org | Customer-owned AKS, single tenant | ✅ |
-| **[03](03-managed-public-offload.md)** | Managed public offload | SaaS provider, many tenants | Provider-owned AKS, multi-tenant, optional Kata + AMD SEV-SNP | ✅ runtime · 🚧 productization |
-| **[04](04-cross-org-federation.md)** | Cross-org federation | Two or more orgs collaborating | Two AKS clusters, mesh + A2A across | ✅ |
-| **[05](05-sovereign-airgapped.md)** | Sovereign / air-gapped | Regulated / classified / disconnected | Isolated AKS, no public egress | 🚧 patterns documented |
+| **[02](02-local-k8s-dev-loop.md)** | Local Kubernetes dev loop | Maintainer / agent author | Laptop (`azureclaw dev --target local-k8s` — kind + Helm + Headlamp) | ✅ |
+| **[03](02-enterprise-self-hosted.md)** | Enterprise self-hosted | Platform team, single org | Customer-owned AKS, single tenant | ✅ |
+| **[04](03-managed-public-offload.md)** | Managed public offload | SaaS provider, many tenants | Provider-owned AKS, multi-tenant, optional Kata + AMD SEV-SNP | ✅ runtime · 🚧 productization |
+| **[05](04-cross-org-federation.md)** | Cross-org federation | Two or more orgs collaborating | Two AKS clusters, mesh + A2A across | ✅ |
+| **[06](05-sovereign-airgapped.md)** | Sovereign / air-gapped | Regulated / classified / disconnected | Isolated AKS, no public egress | 🚧 patterns documented |
 
 ## How to read each blueprint
 
