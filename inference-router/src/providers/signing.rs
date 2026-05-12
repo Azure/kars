@@ -9,8 +9,7 @@
 //! it to an internal handle.
 //!
 //! Implementations (Phase 1):
-//! - `VendoredSigningProvider` — today's Ed25519 path using the keys
-//!   emitted by `vendor/agentmesh-sdk`.
+//! - `InTreeSigningProvider` — today's Ed25519 path using agent-local keys.
 //! - `AgtSigningProvider` — shipped AGT Rust SDK.
 //! - `NullSigningProvider` — dev-only; always returns a deterministic
 //!   non-verifying signature labeled `ci:stub-ok`; admission rejects in
@@ -25,7 +24,7 @@
 
 /// Opaque reference to a signing key. The interpretation is
 /// provider-specific. Examples:
-/// - Vendored: `"agent:default"` resolves to the SDK-generated keypair.
+/// - In-tree: `"agent:default"` resolves to the agent-local keypair.
 /// - AGT: `"agt://tenant/agent#ed25519/<fingerprint>"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyRef(pub String);

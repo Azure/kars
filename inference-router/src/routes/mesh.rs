@@ -27,9 +27,8 @@ pub fn mesh_routes() -> Router<AppState> {
         // Inter-agent mesh (E2E encrypted via AGT relay only — no plaintext HTTP)
         .route("/agt/mesh/inbox", get(agt_mesh_inbox))
         // AGT relay proxy (WebSocket + HTTP registry)
-        // Both /agt/relay (vendored SDK convention) and /agt/relay/ws (AGT
-        // upstream MeshClient convention — appends "/ws" to relayUrl) are
-        // accepted so the same proxy serves both transports.
+        // Both /agt/relay and /agt/relay/ws are accepted so callers can pass
+        // either the proxy base URL or the upstream MeshClient `/ws` URL.
         .route("/agt/relay", get(agt_relay_proxy))
         .route("/agt/relay/ws", get(agt_relay_proxy))
         .route(
@@ -52,16 +51,8 @@ async fn agt_relay_proxy(State(state): State<AppState>, ws: WebSocketUpgrade) ->
         .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765".into());
 
     // AGT upstream relay (Python FastAPI) only accepts WS upgrades on /ws.
-    // The vendored Rust relay accepts /. Default behavior: append /ws when
-    // provider=agt OR when the URL has no path; vendored callers can opt out
-    // by setting AGT_RELAY_URL with an explicit path (e.g. ws://host:port/).
-    let provider = std::env::var("AZURECLAW_MESH_PROVIDER")
-        .unwrap_or_else(|_| "vendored".into())
-        .trim()
-        .to_lowercase();
-    let needs_ws_suffix = provider == "agt"
-        && !relay_base.trim_end_matches('/').ends_with("/ws")
-        && !relay_base.contains("/ws?");
+    let needs_ws_suffix =
+        !relay_base.trim_end_matches('/').ends_with("/ws") && !relay_base.contains("/ws?");
     let relay_url = if needs_ws_suffix {
         format!("{}/ws", relay_base.trim_end_matches('/'))
     } else {
@@ -215,9 +206,8 @@ async fn relay_websocket_bridge(
                 }
                 tungstenite::Message::Ping(p) => {
                     // CRITICAL: tokio-tungstenite client mode does NOT auto-Pong.
-                    // The relay (vendor/agentmesh-relay) sends Pings every
-                    // PING_INTERVAL_SECS and disconnects the agent at the next
-                    // tick if no Pong is received within PING_TIMEOUT_SECS.
+                    // Relay implementations may send WebSocket pings and close
+                    // the agent if no Pong is received quickly.
                     // We must respond on the upstream socket directly — the
                     // axum client side is not a viable Pong source because
                     // axum strips Pong frames from the application stream.
@@ -311,38 +301,18 @@ async fn agt_registry_proxy(
     let registry_url = std::env::var("AGT_REGISTRY_URL")
         .unwrap_or_else(|_| "http://agentmesh-registry.agentmesh.svc.cluster.local:8080".into());
 
-    // Allowlist valid registry API paths — prevent path traversal.
-    // Paths arrive as the wildcard after /agt/registry/, e.g.:
-    //   - "registry/search"  (vendored AgentMesh SDK convention)
-    //   - "v1/agents"        (AGT upstream RegistryClient convention)
-    let valid_prefixes = [
-        "registry/",
-        "lookup",
-        "search",
-        "register",
-        "prekeys",
-        "heartbeat",
-        "agents",
-        "health",
-        "sessions",
-        "v1/",
-    ];
+    // Allowlist valid AGT registry API paths — prevent path traversal.
+    // Paths arrive as the wildcard after /agt/registry/, e.g. "v1/agents".
+    let valid_prefixes = ["health", "v1/"];
     let path_valid =
         valid_prefixes.iter().any(|prefix| path.starts_with(prefix)) && !path.contains("..");
     if !path_valid {
         return errors::flat(StatusCode::BAD_REQUEST, "Invalid registry path").into_response();
     }
 
-    // Two callers reach this proxy with different conventions:
-    //   - vendored SDK: sends paths like "registry/register", "registry/prekeys"
-    //     → router prepends /v1/ to reach the vendored registry's /v1/registry/*.
-    //   - AGT SDK: sends fully-qualified "v1/agents", "v1/discover" etc.
-    //     → forward verbatim (AGT registry exposes /v1/agents, NOT /v1/v1/agents).
-    let mut url = if path.starts_with("v1/") || path == "health" {
-        format!("{}/{}", registry_url.trim_end_matches('/'), path)
-    } else {
-        format!("{}/v1/{}", registry_url.trim_end_matches('/'), path)
-    };
+    // AGT SDK sends fully-qualified "v1/agents", "v1/discover" etc.; forward
+    // verbatim because AGT registry exposes /v1/agents, NOT /v1/v1/agents.
+    let mut url = format!("{}/{}", registry_url.trim_end_matches('/'), path);
     // Forward query parameters (critical for search/lookup)
     if let Some(qs) = query.0 {
         url.push('?');
@@ -359,9 +329,7 @@ async fn agt_registry_proxy(
     // mutation through this router is gated to identities matching the
     // local SANDBOX_NAME. Self-asserted display_name + capability claims
     // from a compromised sandbox cannot impersonate a peer.
-    if method == axum::http::Method::POST
-        && (path == "registry/register" || path == "registry/capabilities")
-    {
+    if method == axum::http::Method::POST && path == "v1/agents" {
         if let Err((status, msg)) = enforce_identity_claim(&path, &body) {
             tracing::warn!(
                 path = %path,
@@ -372,9 +340,8 @@ async fn agt_registry_proxy(
         }
     }
 
-    // Defense-in-depth retry mirror of vendored SDK Patch #12. The plugin's
-    // SDK has a 3-attempt / 2s budget retry, but the router is the
-    // single network egress for sandboxes and benefits from its own retry
+    // Defense-in-depth retry. The SDK has a retry budget, but the router is
+    // the single network egress for sandboxes and benefits from its own retry
     // for two reasons:
     //   1. dev port-forward (host.docker.internal:18080) sometimes returns
     //      502 for the very first connection attempt after a kubectl
@@ -386,14 +353,7 @@ async fn agt_registry_proxy(
     // (idempotent registry endpoints) retry; transient statuses 408/429/
     // 502/503/504 + network errors. Cap 3 attempts, ~2s elapsed.
     const RETRY_STATUSES: &[u16] = &[408, 429, 502, 503, 504];
-    const POST_RETRY_PATHS: &[&str] = &[
-        "registry/register",
-        "registry/prekeys",
-        "registry/reputation",
-        "registry/status",
-        "registry/capabilities",
-        "registry/revocations/bulk",
-    ];
+    const POST_RETRY_PATHS: &[&str] = &["v1/agents", "v1/sessions"];
     let is_idempotent = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
     let post_retry = method == axum::http::Method::POST
         && POST_RETRY_PATHS
@@ -524,8 +484,7 @@ async fn agt_registry_proxy(
 /// AzureClaw mesh trust is name-based: receivers verify peers by resolving
 /// `display_name` through the registry and matching against a parent-seeded
 /// trust set. That guarantee only holds if a sandbox cannot register another
-/// sandbox's name. This function vets POST bodies for `registry/register` and
-/// `registry/capabilities`, allowing only:
+/// sandbox's name. This function vets `POST /v1/agents` bodies, allowing only:
 ///   - `display_name` equal to the router's `SANDBOX_NAME` env (or absent)
 ///   - `capabilities` drawn from `{SANDBOX_NAME, "azureclaw-agent",
 ///     "task-execution"}` plus any prefixed with `azureclaw:` (reserved for
@@ -560,7 +519,13 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
         }
     };
 
-    if let Some(name) = parsed.get("display_name").and_then(|v| v.as_str())
+    let claimed_display_name = parsed
+        .get("metadata")
+        .and_then(|m| m.get("display_name"))
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("display_name").and_then(|v| v.as_str()));
+
+    if let Some(name) = claimed_display_name
         && name != sandbox_name
     {
         return Err((
@@ -601,55 +566,14 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
     Ok(())
 }
 
-/// Look up an agent's AMID from the registry by searching for its sandbox name.
-///
-/// Provider-aware: uses AGT's `/v1/discover` when `AZURECLAW_MESH_PROVIDER=agt`,
-/// otherwise the vendored `/v1/registry/search` path. Without this dispatch
-/// the AGT registry returns 404 to every operator-panel/reputation refresh
-/// (~once/30s per agent) — cosmetic 404 spam in registry logs and a wasted
-/// round-trip on every call.
+/// Look up an agent's DID from the AGT registry by searching for its sandbox name.
 pub(super) async fn lookup_parent_amid(
     client: &reqwest::Client,
     registry_url: &str,
     sandbox_name: &str,
 ) -> Option<String> {
     let base = registry_url.trim_end_matches('/');
-    let provider = std::env::var("AZURECLAW_MESH_PROVIDER")
-        .unwrap_or_else(|_| "vendored".into())
-        .trim()
-        .to_lowercase();
-
-    if provider == "agt" {
-        return lookup_parent_amid_agt(client, base, sandbox_name).await;
-    }
-
-    let resp = client
-        .get(&format!(
-            "{}/v1/registry/search?capability={}",
-            base, sandbox_name
-        ))
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    resp.json::<serde_json::Value>().await.ok().and_then(|v| {
-        v.get("results")?
-            .as_array()?
-            .iter()
-            .filter(|a| a.get("display_name").and_then(|n| n.as_str()) == Some(sandbox_name))
-            .max_by_key(|a| {
-                a.get("last_seen")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .and_then(|a| a.get("amid").and_then(|v| v.as_str()).map(String::from))
-    })
+    lookup_parent_amid_agt(client, base, sandbox_name).await
 }
 
 /// AGT registry variant: `GET /v1/discover?capability=<name>` returns
@@ -801,7 +725,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            assert!(enforce_identity_claim("registry/register", &body).is_ok());
+            assert!(enforce_identity_claim("v1/agents", &body).is_ok());
         });
     }
 
@@ -815,7 +739,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            let err = enforce_identity_claim("registry/register", &body).unwrap_err();
+            let err = enforce_identity_claim("v1/agents", &body).unwrap_err();
             assert_eq!(err.0, StatusCode::FORBIDDEN);
             assert!(err.1.contains("display_name"));
         });
@@ -832,7 +756,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            let err = enforce_identity_claim("registry/register", &body).unwrap_err();
+            let err = enforce_identity_claim("v1/agents", &body).unwrap_err();
             assert_eq!(err.0, StatusCode::FORBIDDEN);
             assert!(err.1.contains("capability"));
         });
@@ -846,7 +770,7 @@ mod tests {
                 "display_name": "viz",
                 "capabilities": ["azureclaw-agent", "task-execution", "viz", "azureclaw:internal"],
             })).unwrap());
-            assert!(enforce_identity_claim("registry/register", &body).is_ok());
+            assert!(enforce_identity_claim("v1/agents", &body).is_ok());
         });
     }
 
@@ -861,7 +785,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            assert!(enforce_identity_claim("registry/capabilities", &body).is_ok());
+            assert!(enforce_identity_claim("v1/agents", &body).is_ok());
         });
     }
 
@@ -876,7 +800,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        let err = enforce_identity_claim("registry/register", &body).unwrap_err();
+        let err = enforce_identity_claim("v1/agents", &body).unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         if let Some(v) = prev {
             unsafe { std::env::set_var("SANDBOX_NAME", v) };
@@ -886,7 +810,7 @@ mod tests {
     #[test]
     fn enforce_passes_empty_body() {
         with_env("SANDBOX_NAME", "viz", || {
-            assert!(enforce_identity_claim("registry/register", &Bytes::new()).is_ok());
+            assert!(enforce_identity_claim("v1/agents", &Bytes::new()).is_ok());
         });
     }
 
@@ -895,7 +819,7 @@ mod tests {
         // Invalid JSON is forwarded so upstream registry can return its own error.
         with_env("SANDBOX_NAME", "viz", || {
             let body = Bytes::from_static(b"not json");
-            assert!(enforce_identity_claim("registry/register", &body).is_ok());
+            assert!(enforce_identity_claim("v1/agents", &body).is_ok());
         });
     }
 }
