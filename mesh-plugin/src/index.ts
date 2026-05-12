@@ -1832,4 +1832,12 @@ export const activate = register;
 // Re-export for consumers
 export { decodeToken } from "./pairing.js";
 export { createMeshTransport } from "./transport-factory.js";
+export {
+  generateIdentity,
+  loadIdentity,
+  loadOrCreateIdentity,
+  verifyEd25519Signature,
+  getIdentityPath,
+} from "./identity.js";
+export type { MeshIdentity } from "./identity.js";
 export type * from "./types.js";

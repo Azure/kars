@@ -256,3 +256,36 @@ export async function loadOrCreateIdentity(): Promise<MeshIdentity> {
 export function getIdentityPath(): string {
   return IDENTITY_FILE;
 }
+
+/**
+ * Verify an Ed25519 signature using Node.js native crypto.
+ *
+ * Accepts the public key as either a base64 string (with or without
+ * `ed25519:` prefix) or a raw 32-byte Buffer/Uint8Array. The signature
+ * accepts the same shapes (raw 64 bytes, or base64 string).
+ *
+ * Returns `true` on a valid signature, `false` on any failure (including
+ * malformed inputs). Never throws.
+ */
+export function verifyEd25519Signature(
+  publicKey: string | Uint8Array | Buffer,
+  data: Uint8Array | Buffer,
+  signature: string | Uint8Array | Buffer,
+): boolean {
+  try {
+    const pubRaw =
+      typeof publicKey === "string"
+        ? Buffer.from(publicKey.startsWith("ed25519:") ? publicKey.slice(8) : publicKey, "base64")
+        : Buffer.from(publicKey);
+    const sigRaw =
+      typeof signature === "string" ? Buffer.from(signature, "base64") : Buffer.from(signature);
+    if (pubRaw.length !== 32 || sigRaw.length !== 64) return false;
+    const pubKeyObj = crypto.createPublicKey({
+      key: { kty: "OKP", crv: "Ed25519", x: pubRaw.toString("base64url") },
+      format: "jwk",
+    });
+    return crypto.verify(null, Buffer.from(data), pubKeyObj, sigRaw);
+  } catch {
+    return false;
+  }
+}
