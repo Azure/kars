@@ -1,7 +1,10 @@
 # AGT vs Vendored AgentMesh SDK — Side-by-Side Analysis
 
-> **Status:** Phase 2 complete. Runtime can swap between the vendored
-> `@agentmesh/sdk` (default) and Microsoft's `@microsoft/agent-governance-sdk`
+> **Status:** Phase 5 complete — AGT is now the **default** provider
+> across the whole stack. Set `AZURECLAW_MESH_PROVIDER=vendored` (or
+> `--mesh-provider=vendored`) to opt back to the patched fork in
+> `vendor/` for legacy testing while the upstream AGT release catches
+> up to the full patch set.
 > via the `AZURECLAW_MESH_PROVIDER` environment variable.
 >
 > **Audience:** AzureClaw maintainers + AGT upstream team. This document is
@@ -20,7 +23,8 @@ We currently ship two implementations of the AgentMesh protocol:
 | **B** (AGT) | `@microsoft/agent-governance-sdk` v3.5.0+ | npm (Microsoft AGT) | Opt-in |
 
 Set `AZURECLAW_MESH_PROVIDER=agt` in the sandbox environment to swap to B.
-The default (`vendored`) uses A. Anything else falls back to A.
+The default (`agt`) uses B. Setting `AZURECLAW_MESH_PROVIDER=vendored`
+selects A; any other value also falls back to B.
 
 After Phase 2 the runtime never imports a transport class directly — it
 calls `createMeshTransport({...})` from `@azureclaw/mesh`, which decides

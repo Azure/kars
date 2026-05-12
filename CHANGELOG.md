@@ -5,6 +5,31 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Phase 5 (AGT default + local-k8s mesh)
+
+### Changed
+
+- **Default mesh provider is now `agt`** across the entire stack (helm
+  chart, controller, sandbox, CLI, runtime, mesh-plugin factory). The
+  patched vendored fork in `vendor/` remains available as an opt-in via
+  `AZURECLAW_MESH_PROVIDER=vendored` or `--mesh-provider=vendored`, but
+  fresh deploys go to Microsoft's upstream AGT Python relay+registry by
+  default. The dual-provider plumbing (`Provider` enum,
+  `createMeshTransport()` factory, both manifests, both adapters) stays
+  intact — only the default changes.
+
+### Added
+
+- `azureclaw dev --target local-k8s` now deploys the mesh stack into the
+  kind cluster. Previously the controller would start expecting
+  `agentmesh-relay:8765` in namespace `agentmesh` but the namespace
+  didn't exist locally. The new flow builds the AGT (or vendored) relay
+  and registry images, loads them into kind, rewrites the manifest's
+  ACR image refs to local tags + `imagePullPolicy=Never`, applies, and
+  waits for both rollouts before reporting the cluster ready.
+- `azureclaw dev --no-mesh` opt-out for pure controller smoke tests on
+  hardware without enough RAM for the full stack.
+
 ## [1.0.0-rc.1] — Release candidate (release engineering pass)
 
 First release candidate cut for the v1.0.0 line. No new feature surface beyond what shipped in `[Unreleased] — Phase 2`; this entry tracks the release-engineering, documentation, and hygiene work performed on `dev` before promoting to `main`.
