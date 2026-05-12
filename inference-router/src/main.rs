@@ -189,7 +189,8 @@ async fn main() -> Result<()> {
             .merge(routes::admin_routes())
             .merge(routes::egress_routes())
             .merge(routes::spawn_routes())
-            .merge(routes::sensitive_agt_routes());
+            .merge(routes::sensitive_agt_routes())
+            .merge(routes::internal_routes());
 
         let protected = if let Some(ref token) = admin_token {
             let token = token.clone();

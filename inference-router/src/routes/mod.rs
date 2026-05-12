@@ -22,6 +22,7 @@ use crate::egress_blocked::BlockedBuffer;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
+use crate::policy_status::PolicyStatusRegistry;
 use crate::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
 use crate::proxy::UpstreamConfig;
 
@@ -45,6 +46,9 @@ pub use mesh::mesh_routes;
 
 mod egress;
 pub use egress::egress_routes;
+
+mod internal;
+pub use internal::internal_routes;
 
 mod inference;
 pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
@@ -111,6 +115,12 @@ pub struct AppState {
     pub drain_state: DrainState,
     /// Pending handoff confirmation store (§9.9.9 two-stage gate).
     pub pending_handoff: PendingHandoffStore,
+    /// Per-CRD policy load status — populated by every consumer that
+    /// materializes a controller-published artifact into the router's
+    /// memory. Read by `GET /internal/policy-status`, which the
+    /// controller polls to confirm `Compiled → Ready` transitions
+    /// (Slice 1 of `crd-well-oiled-machine`).
+    pub policy_status: Arc<PolicyStatusRegistry>,
 }
 
 impl AppState {
@@ -126,8 +136,17 @@ impl AppState {
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
+        // Shared per-CRD policy load status registry. Constructed once
+        // and handed to both the AGT engine (which writes
+        // `PolicyKind::AgtProfile` on every successful reload) and
+        // `AppState` (read by `GET /internal/policy-status`).
+        let policy_status = Arc::new(PolicyStatusRegistry::new());
+
         // Initialize native AGT governance
-        let governance = Arc::new(Governance::new(&sandbox_name));
+        let governance = Arc::new(Governance::new_with_status(
+            &sandbox_name,
+            policy_status.clone(),
+        ));
 
         // Load policy YAML from AGT_POLICY_DIR if set
         let policy_dir = std::env::var("AGT_POLICY_DIR").ok();
@@ -201,6 +220,7 @@ impl AppState {
             handoff_session: HandoffSession::new(),
             drain_state: DrainState::new(),
             pending_handoff: PendingHandoffStore::new(),
+            policy_status,
         })
     }
 
