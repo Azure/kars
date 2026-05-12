@@ -466,6 +466,7 @@ Notes:
             meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "agt",
             agtRepo: options.agtRepo ?? process.env.AZURECLAW_AGT_REPO ?? DEFAULT_AGT_REPO,
             noMesh: options.noMesh === true,
+            globalRegistry: typeof options.globalRegistry === "string" ? options.globalRegistry : undefined,
           });
           return;
         } catch (e) {

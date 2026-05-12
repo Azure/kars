@@ -72,6 +72,14 @@ export interface LocalK8sOptions {
    * stack.
    */
   noMesh?: boolean;
+  /**
+   * External AgentMesh registry URL (e.g. `https://registry.example.com`
+   * or a port-forwarded `http://localhost:18080` from `azureclaw mesh
+   * promote --port-forward`). When set, the local-k8s flow skips the
+   * in-kind relay+registry deployment and the controller / sandbox env
+   * is wired to talk to this URL instead.
+   */
+  globalRegistry?: string;
 }
 
 /**
@@ -1001,10 +1009,26 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // the namespace doesn't exist on a fresh kind cluster — the controller
   // ends up in a WebSocket reconnect loop and sandboxes never get a
   // mesh peer. Phase 5 (AGT default) wires this in.
+  //
+  // Three skip-paths:
+  //   1. --no-mesh: pure controller smoke test, no relay/registry at all.
+  //   2. --global-registry: an external registry (port-forwarded from a
+  //      remote AKS cluster via `azureclaw mesh promote --port-forward`,
+  //      or a shared dev URL) is already reachable — no need to deploy
+  //      a second local copy. Federation/handoff scenarios live here.
+  //   3. Default: build + deploy AGT (or vendored) relay+registry into
+  //      the kind cluster.
   const meshProvider = opts.meshProvider ?? "agt";
   if (opts.noMesh === true) {
     stepper.step("Skipping agentmesh deployment (--no-mesh)…");
     stepper.done("mesh skipped — sandboxes will fail KNOCK / E2E");
+  } else if (opts.globalRegistry) {
+    stepper.step(
+      `Skipping in-kind agentmesh deployment — using external registry ${opts.globalRegistry}…`,
+    );
+    stepper.done(
+      `external registry: ${opts.globalRegistry} (no local relay/registry deployed)`,
+    );
   } else {
     stepper.step(
       `Deploying agentmesh-${meshProvider} (relay + registry) into kind…`,
