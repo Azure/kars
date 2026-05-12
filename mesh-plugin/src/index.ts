@@ -20,7 +20,11 @@ import {
   getDefaultPairing,
   type StoredPairing,
 } from "./pairing.js";
-import { MeshConnection } from "./connection.js";
+import {
+  createMeshTransport,
+  type MeshTransportConfig,
+} from "./transport-factory.js";
+import type { IMeshTransport } from "./transport-interface.js";
 import { TIMEOUTS, RETRIES } from "./timers.js";
 import type {
   PairRequestMessage,
@@ -45,9 +49,10 @@ import * as crypto from "node:crypto";
 // OpenClaw's plugin loader runs through this module twice in some setups
 // (tool-registry pass + agent-session pass), and a hot-reload during dev
 // re-imports it again. Without a singleton, each pass would build its own
-// `MeshConnection`, upload its own prekeys, and open its own WebSocket —
-// exactly the duplicate-message / "session already exists" bug pattern
-// documented in `vendor/agentmesh-sdk/README.md` patch #10.
+// transport, upload its own prekeys, and open its own WebSocket — exactly
+// the duplicate-message / "session already exists" bug pattern that the
+// vendored fork's patch #10 originally fixed (preserved here at the
+// adapter boundary).
 //
 // `Symbol.for(...)` lookups are process-global so all imports share the
 // same state object. Module-level `let`s mirror the singleton for the
@@ -56,7 +61,7 @@ import * as crypto from "node:crypto";
 // ---------------------------------------------------------------------------
 
 interface MeshPluginState {
-  connection: MeshConnection | null;
+  connection: IMeshTransport | null;
   meshIdentity: MeshIdentity | null;
   activePairing: StoredPairing | null;
   initialized: boolean;
@@ -84,7 +89,7 @@ const state: MeshPluginState = (() => {
 // Local view onto the singleton. Reads only — writes go through `state.*`
 // inside ensureInitialized (and are mirrored back here so legacy reads
 // see the same connection on subsequent invocations).
-let connection: MeshConnection | null = state.connection;
+let connection: IMeshTransport | null = state.connection;
 let meshIdentity: MeshIdentity | null = state.meshIdentity;
 let activePairing: StoredPairing | null = state.activePairing;
 let initialized: boolean = state.initialized;
@@ -606,11 +611,11 @@ async function ensureInitialized(): Promise<string | null> {
     try {
       const id = await loadOrCreateIdentity();
       const pairing = getDefaultPairing();
-      let conn: MeshConnection | null = null;
+      let conn: IMeshTransport | null = null;
 
       if (pairing) {
         try {
-          conn = new MeshConnection({
+          conn = await createMeshTransport({
             relayUrl: pairing.relayUrl,
             registryUrl: pairing.registryUrl,
             identity: id,
@@ -720,7 +725,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
 
   if (!reuseExisting) {
     try { await connection?.disconnect(); } catch { /* noop */ }
-    connection = new MeshConnection({
+    connection = await createMeshTransport({
       relayUrl: payload.relay_url,
       registryUrl: payload.registry_url,
       identity: meshIdentity,
@@ -930,7 +935,7 @@ function failOffload(err: string): void {
  * polls progress via offload_status.
  */
 async function runOffloadOrchestrator(
-  conn: MeshConnection,
+  conn: IMeshTransport,
   controllerAmid: string,
   request: OffloadRequestMessage,
   validFiles: string[],
@@ -1646,7 +1651,7 @@ async function meshInboxHandler(...args: any[]): Promise<string> {
     ? Math.min(Math.floor(params.timeout_seconds), 300)
     : 120;
 
-  const computeVisible = (): ReturnType<MeshConnection["getInbox"]> => {
+  const computeVisible = (): ReturnType<IMeshTransport["getInbox"]> => {
     const all = connection!.getInbox();
     return unreadOnly ? all.filter((m) => !m.read_at) : all;
   };
@@ -1827,4 +1832,13 @@ export const activate = register;
 
 // Re-export for consumers
 export { decodeToken } from "./pairing.js";
+export { createMeshTransport } from "./transport-factory.js";
+export {
+  generateIdentity,
+  loadIdentity,
+  loadOrCreateIdentity,
+  verifyEd25519Signature,
+  getIdentityPath,
+} from "./identity.js";
+export type { MeshIdentity } from "./identity.js";
 export type * from "./types.js";

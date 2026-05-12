@@ -87,15 +87,14 @@ admission deny. Distinct from CR-spec signing.
 
 ### MCP04 — Software supply chain & dependency tampering
 
-**Threat.** Compromised npm/crate dependency; tampered vendored SDK;
-dropped patch integrity.
+**Threat.** Compromised npm/crate dependency; tampered mesh SDK or
+relay/registry image; dropped patch integrity.
 
-**Today.** `vendor/agentmesh-sdk/`, `vendor/agentmesh-relay/`,
-`vendor/agentmesh-registry/` each carry a `README.md` enumerating the
-vendored fork. `ci/vendored-patch-audit.sh` forces a
-re-confirmation row in `docs/internal/agt-vendored-patch-audit.md` on every
-AGT SDK version bump — patches that become upstream-absorbed are
-documented as such rather than silently dropped.
+**Today.** AzureClaw uses Microsoft AGT AgentMesh only. The historical
+vendored AgentMesh fork was removed in Phase 5.2 after the gap-closing
+patches landed upstream, so dependency review focuses on the AGT SDK
+version, AGT relay/registry images, and regular SCA gates rather than local
+patch drift.
 
 **Plan.** v1.1 ships SBOM per release and SLSA-v1 provenance on CR
 specs (the v1.1 plan). `trivy` + `cosign-verify` + SCA gates enter

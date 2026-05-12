@@ -52,12 +52,19 @@ spec:
         - protocol: TCP
           port: 6443
     # AGT mesh peer connection — controller registers itself with the
-    # registry (TCP/8080) and connects to the relay (TCP/8765) to act
-    # as a fully-fledged mesh peer for cross-cluster trust propagation
-    # and operator-driven message injection. Without this rule the
-    # controller's `mesh_peer` task logs `Registry registration failed`
-    # forever while sandboxes connect successfully (their NetworkPolicy
-    # is rendered separately by the per-sandbox reconciler).
+    # registry and connects to the relay to act as a fully-fledged
+    # mesh peer for cross-cluster trust propagation and operator-driven
+    # message injection. Without this rule the controller's `mesh_peer`
+    # task logs `Registry registration failed` forever while sandboxes
+    # connect successfully (their NetworkPolicy is rendered separately
+    # by the per-sandbox reconciler).
+    #
+    # Ports listed cover both vendored (relay:8765, registry:8080) and
+    # AGT (relay-pod:8083, registry-pod:8082) backends. On AKS the
+    # Cilium dataplane evaluates NetworkPolicy egress against the
+    # BACKEND pod port (post-DNAT), not the Service port — so for AGT
+    # we must allow the pod ports 8082/8083 even though traffic targets
+    # service ports 8080/8765.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -67,4 +74,8 @@ spec:
           port: 8080
         - protocol: TCP
           port: 8765
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
 {{- end }}

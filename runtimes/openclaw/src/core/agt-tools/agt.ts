@@ -40,6 +40,7 @@ import {
 } from "../amid-cache.js";
 import { safeJson } from "../safe-json.js";
 import { validateMeshPayload } from "../mesh-payload-guard.js";
+import { getMeshRegistry } from "../mesh-registry.js";
 import type { HandoffProgress, AgtInboxEntry } from "../agt-handoff.js";
 
 // Re-suppress unused warnings for imports retained for symmetry with plugin.ts.
@@ -147,6 +148,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const status: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+      // routerCall does NOT throw on HTTP 4xx — it resolves with the parsed
+      // error body. When the sub-agent pod/container is gone the router
+      // returns 404 with { error: "Container '<name>' not found..." }. Without
+      // this check, status?.phase is undefined → "Unknown" → not in
+      // POD_DEAD_PHASES → the mesh_send retry loop spins forever polling
+      // /v1/discover every 2s for a dead peer, blocking the LLM event loop.
+      if (status && typeof status === "object" && typeof status.error === "string" && !status.phase) {
+        const errMsg: string = status.error;
+        if (/not found|no such container|HTTP 404/i.test(errMsg)) {
+          return { alive: false, reason: "sub-agent sandbox not found (deleted or never spawned)" };
+        }
+      }
       const phase: string = status?.phase || "Unknown";
       if (POD_DEAD_PHASES.has(phase)) {
         return { alive: false, phase, reason: `sub-agent phase is ${phase}` };
@@ -364,6 +377,49 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           spawnedRoster.set(agentName, "");
         }
 
+        // ── Roster refresh: push the COMPLETE updated roster to every
+        // existing sibling, so siblings that already received a stale task
+        // (with an incomplete roster, because they were spawned before the
+        // latest sibling) get an authoritative refresh in their inbox.
+        // Without this, the FIRST-spawned sibling refuses to talk to peers
+        // spawned AFTER its task was sent, because its task's "Peer roster"
+        // block lacks those later names. This is a follow-up control
+        // message — the sub-agent's LLM treats it as the latest source of
+        // truth for sibling names.
+        if (deps.meshClient() && spawnedRoster.size >= 2) {
+          const parentSandboxName = process.env.SANDBOX_NAME || "";
+          const refreshTargets: Array<{ name: string; amid: string }> = [];
+          for (const [siblingAmid, siblingName] of amidToName.entries()) {
+            if (siblingName === parentSandboxName) continue;
+            if (siblingName === agentName) continue; // new sibling already has full roster in its task
+            refreshTargets.push({ name: siblingName, amid: siblingAmid });
+          }
+          if (refreshTargets.length > 0) {
+            log.info(`AGT roster refresh: pushing updated roster to ${refreshTargets.length} existing sibling(s) after spawn of '${agentName}'`);
+            await Promise.allSettled(
+              refreshTargets.map(async (t) => {
+                try {
+                  const rosterLines: string[] = [];
+                  for (const [name, role] of spawnedRoster.entries()) {
+                    if (name === parentSandboxName) continue;
+                    if (name === t.name) continue; // exclude recipient
+                    rosterLines.push(role ? `  - ${name} — ${role}` : `  - ${name}`);
+                  }
+                  if (rosterLines.length === 0) return;
+                  const rosterText =
+                    "Peer roster UPDATE (AUTHORITATIVE — supersedes any earlier roster):\n" +
+                    rosterLines.join("\n") +
+                    `\n\nA new sibling ('${agentName}') was spawned after your task started. Use ONLY the names listed above for mesh_send / mesh_transfer_file. If your task references a peer you previously could not resolve (e.g. you reported 'ambiguous_task' to parent), resume now — the canonical name is in the list above.`;
+                  await deps.meshClient()!.send(t.amid, rosterText);
+                  log.info(`AGT roster refresh delivered to '${t.name}' (${t.amid.slice(0, 12)}...)`);
+                } catch (refreshErr: any) {
+                  log.warn(`AGT roster refresh to '${t.name}' failed: ${refreshErr?.message || refreshErr}`);
+                }
+              }),
+            );
+          }
+        }
+
         return { content: [{ type: "text", text: JSON.stringify({
           ...result,
           phase: "Running",
@@ -394,13 +450,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         // Best-effort registry probe — don't fail status on registry hiccups.
         let mesh_registered = false;
         try {
-          const search: any = await routerCall(
-            "GET",
-            `/agt/registry/registry/search?capability=${encodeURIComponent(name)}`,
-          );
-          const agents = (search && Array.isArray(search.results)) ? search.results : [];
+          const agents = await getMeshRegistry(routerUrl).search(name, { timeoutMs: 5000 });
           mesh_registered = agents.some(
-            (a: any) => a.display_name === name || (a.capabilities || []).includes(name),
+            (a) => a.display_name === name || (a.capabilities || []).includes(name),
           );
         } catch { /* registry unavailable — report as not-registered */ }
         const enriched = {
@@ -439,6 +491,41 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         agentName = "parent";
       }
 
+      // Alias 'parent' → actual parent sandbox display_name. Sub-agent LLMs
+      // routinely call mesh_send(to_agent="parent") for back-replies, but the
+      // AGT registry has no agent named/capability="parent" — discover returns
+      // 0 → "no prekey bundle" → send fails. The parent is the first entry in
+      // AGT_TRUSTED_PEERS (controller-seeded), exposed both as PARENT_SANDBOX
+      // env and as the agt-parent-name Symbol (set during runtime init from
+      // AGT_TRUSTED_PEERS[0]). Skip in offload mode — there 'parent' is a
+      // protocol-level routing token handled by the offload worker, not a
+      // mesh recipient name.
+      if (agentName === "parent" && !process.env.OFFLOAD_REQUEST_ID) {
+        const parentNameSym = (process as any)[Symbol.for("agt-parent-name")];
+        const parentDisplayName = process.env.PARENT_SANDBOX || parentNameSym;
+        if (parentDisplayName && typeof parentDisplayName === "string") {
+          log.info(`azureclaw_mesh_send: alias 'parent' → '${parentDisplayName}'`);
+          agentName = parentDisplayName;
+        } else {
+          // Root-agent guard. The top-level agent (the one the user is
+          // chatting with directly) has no PARENT_SANDBOX and no
+          // agt-parent-name symbol — there is nothing upstream to relay to.
+          // Without this fail-fast, the literal string 'parent' falls through
+          // to resolveAmidByName/registry, returns "not found", and the LLM
+          // narrates "delivery failed" to the user as if a peer were down.
+          // Observed live 2026-05-11: top-level test-aks-agtmesh repeatedly
+          // told the user "delivery to parent failed" when its own LLM tried
+          // to relay sibling clarification messages upstream. Return a clear
+          // structured error so the LLM stops trying to relay and instead
+          // replies directly to the user via its assistant message.
+          log.warn("azureclaw_mesh_send: 'parent' unresolvable — this agent has no PARENT_SANDBOX (it is the root)");
+          return { content: [{ type: "text", text: safeJson({
+            error: "no_parent",
+            message: "This agent IS the root — there is no upstream 'parent' to send to. Reply directly to the user via your final assistant message; do not attempt to relay messages to a non-existent parent. If you meant to message a sibling, pass its explicit name as to_agent.",
+          }) }] };
+        }
+      }
+
       // Peer-roster injection (deterministic, parent-side). When we have
       // 2+ spawned siblings, prepend a canonical roster block so the
       // recipient's LLM never has to guess which named peer maps to a role
@@ -450,16 +537,20 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       // when the content already starts with a `Peer roster:` block (idempotent).
       if (agentName !== "parent" && spawnedRoster.size >= 2 && !/^Peer roster:/im.test(msgContent || "")) {
         const rosterLines: string[] = [];
-        const myName = process.env.SANDBOX_NAME || "";
+        const parentSandboxName = process.env.SANDBOX_NAME || "";
         for (const [name, role] of spawnedRoster.entries()) {
-          if (name === myName) continue;
+          // Exclude both parent (sender) and the recipient itself from the
+          // listed peers — recipient seeing its own name in "Peer roster"
+          // confuses the LLM and triggers self-targeted mesh_send attempts.
+          if (name === parentSandboxName) continue;
+          if (name === agentName) continue;
           rosterLines.push(role ? `  - ${name} — ${role}` : `  - ${name}`);
         }
-        if (rosterLines.length >= 2) {
+        if (rosterLines.length >= 1) {
           const rosterBlock =
-            "Peer roster (use these EXACT agent names with mesh_send / mesh_transfer_file — never invent or substitute names):\n" +
+            "Peer roster (AUTHORITATIVE — use these EXACT agent names with mesh_send / mesh_transfer_file; never invent or substitute names):\n" +
             rosterLines.join("\n") +
-            "\n\nWhen your task references a peer by role/persona (e.g. 'the writer', 'the analyst', 'the graphic designer'), route to the corresponding name in the roster above. If the roster does not disambiguate, send one mesh_send to 'parent' asking for the canonical name and wait for the reply — do not guess.\n\n---\n\n";
+            "\n\nThe roster above is the SOLE source of truth for sibling names. Trust it over any discover() result, even if discover returns an empty/short list (sibling registrations race at spawn — the roster is correct even when the registry hasn't caught up). Do NOT call azureclaw_discover for sibling resolution when this roster is present; only use discover for agents OUTSIDE this spawn group. When your task references a peer by role/persona (e.g. 'the writer', 'the analyst', 'the graphic designer'), route to the corresponding name in the roster above. If the roster does not disambiguate a role reference, FIRST call azureclaw_discover(pattern='*') — a sibling spawned in parallel may have registered after this roster was built. Only after discover also fails to identify the canonical name, send one mesh_send to 'parent' asking for the canonical name and wait for the reply — do not guess.\n\n---\n\n";
           msgContent = rosterBlock + (msgContent || "");
         }
       }
@@ -554,7 +645,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               break;
             } catch (e: any) {
               const msg = (e && e.message) || "";
-              if (msg.includes("prekey")) {
+              // Only retry on transient "prekey bundle not yet published"
+              // errors — NOT on permanent X3DH/Signal failures (signature
+              // verification, bundle malformed, identity-key mismatch).
+              // Those need to bubble up so the caller sees the real cause
+              // instead of an infinite "waiting for prekeys" heartbeat.
+              const isTransientMissingBundle =
+                /no\s+pre[-_]?key\s+bundle/i.test(msg) ||
+                /prekey\s*bundle\s+not\s+(yet\s+)?(published|found|available)/i.test(msg) ||
+                /pre[-_]?keys?\s+not\s+(yet\s+)?(published|found|available)/i.test(msg) ||
+                /waiting\s+for\s+prekeys/i.test(msg) ||
+                /404/.test(msg);
+              if (isTransientMissingBundle) {
                 // Child registered but hasn't uploaded prekeys yet — keep waiting.
                 if (Date.now() >= nextHeartbeatAt) {
                   const elapsed = Math.round((Date.now() - waitStart) / 1000);
@@ -1225,6 +1327,27 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         agentName = "parent";
       }
 
+      // Alias 'parent' → actual parent sandbox display_name (same rationale
+      // as azureclaw_mesh_send above). Without this, file transfers to
+      // 'parent' from regular spawned sub-agents fail with no prekey bundle.
+      if (agentName === "parent" && !process.env.OFFLOAD_REQUEST_ID) {
+        const parentNameSym = (process as any)[Symbol.for("agt-parent-name")];
+        const parentDisplayName = process.env.PARENT_SANDBOX || parentNameSym;
+        if (parentDisplayName && typeof parentDisplayName === "string") {
+          log.info(`azureclaw_mesh_transfer_file: alias 'parent' → '${parentDisplayName}'`);
+          agentName = parentDisplayName;
+        } else {
+          // Root-agent guard — see azureclaw_mesh_send for full rationale.
+          // The top-level agent has no upstream parent; failing fast here
+          // prevents the LLM from looping on bogus "delivery failed" errors.
+          log.warn("azureclaw_mesh_transfer_file: 'parent' unresolvable — this agent has no PARENT_SANDBOX (it is the root)");
+          return { content: [{ type: "text", text: safeJson({
+            error: "no_parent",
+            message: "This agent IS the root — there is no upstream 'parent' to ship files to. Files produced at the root remain on the root's local filesystem; reference them in your assistant message instead. If you meant to ship to a sibling, pass its explicit name as to_agent.",
+          }) }] };
+        }
+      }
+
       if (!deps.meshClient() || !deps.identity()) {
         return { content: [{ type: "text", text: JSON.stringify({
           error: "AGT mesh not initialized — cannot transfer files",
@@ -1509,17 +1632,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     async execute(_id: string, params: Record<string, unknown>) {
       const query = (params.query as string) || "*";
       try {
-        const searchUrl = query === "*"
-          ? "/agt/registry/registry/search?capability=azureclaw-agent"
-          : `/agt/registry/registry/search?capability=${encodeURIComponent(query)}`;
-        const result = await routerCall("GET", searchUrl);
-        const agents = (result as any)?.results || [];
+        const searchCap = query === "*" ? "azureclaw-agent" : query;
+        const STALE_AFTER_MS = 90_000;
 
-        // Filter graveyard entries. The agentmesh registry (vendor/agentmesh-registry)
-        // does NOT prune offline agents from `search_capabilities` results — every
-        // sandbox that ever registered remains in the index until manually
-        // revoked, and the controller-side `azureclaw destroy` path was missing
-        // a deregistration call for a long time. Without filtering, a brand-new
+        // Filter graveyard entries. The agentmesh registry does NOT prune
+        // offline agents from `search_capabilities` results — every sandbox
+        // that ever registered remains in the index until manually revoked,
+        // and the controller-side `azureclaw destroy` path was missing a
+        // deregistration call for a long time. Without filtering, a brand-new
         // top-level agent calling discover sees ALL historical sandboxes (we've
         // observed 170+ stale entries in a single dev cluster), which:
         //   1. Confuses the LLM into trying to mesh_send to long-dead AMIDs
@@ -1529,16 +1649,59 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         // a 90s threshold (3× the SDK heartbeat interval) AND require status=online.
         // If the registry adds proper TTL eviction upstream this filter becomes
         // a cheap no-op. Empty/malformed last_seen falls through as stale.
-        const STALE_AFTER_MS = 90_000;
-        const now = Date.now();
-        const fresh = agents.filter((a: any) => {
+        const filterFresh = (agents: any[]) => agents.filter((a: any) => {
           if (typeof a?.status === "string" && a.status.toLowerCase() !== "online") return false;
           const ls = a?.last_seen;
           if (!ls) return false;
           const t = Date.parse(typeof ls === "string" ? ls : "");
           if (!Number.isFinite(t)) return false;
-          return (now - t) <= STALE_AFTER_MS;
+          return (Date.now() - t) <= STALE_AFTER_MS;
         });
+
+        // Registration-race retry. When sub-agents are spawned concurrently
+        // by a parent (analyst + viz + writer in one batch), each sub-agent
+        // races to register in the AGT registry. The first one up calls
+        // discover('*') seconds later and sees only itself + parent because
+        // the others' registry POSTs haven't landed yet. The LLM then trusts
+        // the empty result over the Peer roster it received in its task and
+        // reports "no siblings found" for the rest of the run.
+        //
+        // Vendored SDK Patch #5 covers the KNOCK race (~100ms) but the
+        // registry-presence race is seconds long: registration involves
+        // identity + prekey upload + signature, and concurrent spawns
+        // serialize on the single-replica registry. We retry up to 3 times
+        // with backoff when the result looks suspiciously empty (we see only
+        // ourselves or nothing) AND we're early in process lifetime (sub-agent
+        // boots < 90s ago — past that, an empty result is almost certainly
+        // real, not a race). The myName comparison guards against the case
+        // where SANDBOX_NAME isn't set (returned set may include ourselves
+        // as a non-empty result).
+        const myName = process.env.SANDBOX_NAME || "";
+        const isFreshBoot = process.uptime() < 90;
+        const isEnumerationQuery = query === "*";
+        const looksRaced = (fresh: any[]) => {
+          if (fresh.length === 0) return true;
+          if (fresh.length === 1 && myName && fresh[0]?.display_name === myName) return true;
+          return false;
+        };
+
+        const RETRY_DELAYS_MS = [2000, 4000, 6000];
+        let agents = await getMeshRegistry(routerUrl).search(searchCap, { timeoutMs: 5000 });
+        let fresh = filterFresh(agents);
+
+        if (isFreshBoot && isEnumerationQuery && looksRaced(fresh)) {
+          for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+            log.info(`azureclaw_discover: registration-race retry ${attempt + 1}/${RETRY_DELAYS_MS.length} (got ${fresh.length} fresh, ${agents.length} raw, uptime=${process.uptime().toFixed(1)}s)`);
+            await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+            agents = await getMeshRegistry(routerUrl).search(searchCap, { timeoutMs: 5000 });
+            fresh = filterFresh(agents);
+            if (!looksRaced(fresh)) {
+              log.info(`azureclaw_discover: registration-race resolved after ${attempt + 1} retries (${fresh.length} fresh agents)`);
+              break;
+            }
+          }
+        }
+
         const filteredOut = agents.length - fresh.length;
         const summary = fresh.map((a: any) => ({
           amid: a.amid,

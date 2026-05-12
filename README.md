@@ -156,7 +156,7 @@ When you are ready for the real thing:
 azureclaw up --name prod-agent --location swedencentral
 ```
 
-`azureclaw up` provisions the AKS cluster, ACR, Foundry resource, Foundry-side Content Safety, controller, A2A gateway, AgentMesh relay+registry, and your first sandbox — Workload Identity wired end-to-end. See **[`docs/getting-started.md`](docs/getting-started.md)** for the full walkthrough including how to bring your own AKS / Foundry / ACR.
+`azureclaw up` provisions the AKS cluster, ACR, Foundry resource, Foundry-side Content Safety, controller, A2A gateway, Microsoft AGT AgentMesh relay+registry, and your first sandbox — Workload Identity wired end-to-end. See **[`docs/getting-started.md`](docs/getting-started.md)** for the full walkthrough including how to bring your own AKS / Foundry / ACR.
 
 ---
 
@@ -198,7 +198,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) over a small relay/registry, KNOCK trust handshake, per-message forward secrecy. No plaintext fallback.
+- **AgentMesh** — Microsoft AGT relay/registry with Signal Protocol (X3DH + Double Ratchet), KNOCK trust handshake, per-message forward secrecy. No plaintext fallback.
 - **A2A 1.2 gateway** — public-ingress for peer-to-peer agent traffic with signed `AgentCard` verification, tenant routing, observability.
 - **CLI (`azureclaw …`)** — 26 commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `migrate`, `operator` (live TUI), `destroy`. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 

@@ -54,20 +54,6 @@ function buildImageList(acrLoginServer: string): ImageDef[] {
         `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
       ],
     },
-    {
-      name: "relay",
-      tag: "agentmesh-relay:latest",
-      dockerfile: "vendor/agentmesh-relay/Dockerfile",
-      context: "vendor/agentmesh-relay",
-      buildArgs: ["--build-arg", `CACHE_BUST=${now}`],
-    },
-    {
-      name: "registry",
-      tag: "agentmesh-registry:latest",
-      dockerfile: "vendor/agentmesh-registry/Dockerfile",
-      context: "vendor/agentmesh-registry",
-      buildArgs: ["--build-arg", `CACHE_BUST=${now}`],
-    },
   ];
 }
 
@@ -127,15 +113,15 @@ describe("ACR login server resolution", () => {
 });
 
 describe("image list", () => {
-  it("defines 6 images", () => {
+  it("defines 4 images", () => {
     const images = buildImageList("test.azurecr.io");
-    expect(images).toHaveLength(6);
+    expect(images).toHaveLength(4);
   });
 
   it("includes all expected image names", () => {
     const images = buildImageList("test.azurecr.io");
     const names = images.map((i) => i.name);
-    expect(names).toEqual(["controller", "router", "sandbox-base", "sandbox", "relay", "registry"]);
+    expect(names).toEqual(["controller", "router", "sandbox-base", "sandbox"]);
   });
 
   it("sandbox image references base image and router image from ACR", () => {
@@ -158,10 +144,9 @@ describe("image list", () => {
     );
   });
 
-  it("relay and registry have custom context paths", () => {
+  it("includes sandbox-base with custom build args", () => {
     const images = buildImageList("test.azurecr.io");
-    expect(images.find((i) => i.name === "relay")!.context).toBe("vendor/agentmesh-relay");
-    expect(images.find((i) => i.name === "registry")!.context).toBe("vendor/agentmesh-registry");
+    expect(images.find((i) => i.name === "sandbox-base")).toBeDefined();
   });
 
   it("controller has no buildArgs", () => {
@@ -175,7 +160,7 @@ describe("--only flag filtering", () => {
   const images = buildImageList("test.azurecr.io");
 
   it("returns all images when --only is not set", () => {
-    expect(filterImages(images)).toHaveLength(6);
+    expect(filterImages(images)).toHaveLength(4);
   });
 
   it("filters to single image when --only is set", () => {
@@ -230,16 +215,16 @@ describe("docker build command construction", () => {
     expect(args).toContain("ROUTER_CACHE_BUST=123");
   });
 
-  it("uses custom context path for relay", () => {
+  it("uses custom context path when set", () => {
     const img: ImageDef = {
-      name: "relay",
-      tag: "agentmesh-relay:latest",
-      dockerfile: "vendor/agentmesh-relay/Dockerfile",
-      context: "vendor/agentmesh-relay",
+      name: "sandbox",
+      tag: "openclaw-sandbox:latest",
+      dockerfile: "sandbox-images/openclaw/Dockerfile",
+      context: ".",
       buildArgs: ["--build-arg", "CACHE_BUST=123"],
     };
     const args = buildDockerArgs(img, acrLoginServer, repoRoot);
-    expect(args[args.length - 1]).toBe(path.join(repoRoot, "vendor/agentmesh-relay"));
+    expect(args[args.length - 1]).toBe(path.join(repoRoot, "."));
   });
 
   it("always includes --provenance=false and --sbom=false", () => {
@@ -255,13 +240,12 @@ describe("docker build command construction", () => {
 
   it("generates full ACR tag with login server prefix", () => {
     const img: ImageDef = {
-      name: "relay",
-      tag: "agentmesh-relay:latest",
-      dockerfile: "vendor/agentmesh-relay/Dockerfile",
-      context: "vendor/agentmesh-relay",
+      name: "controller",
+      tag: "azureclaw-controller:latest",
+      dockerfile: "controller/Dockerfile",
     };
     const args = buildDockerArgs(img, acrLoginServer, repoRoot);
-    expect(args).toContain("myacr.azurecr.io/agentmesh-relay:latest");
+    expect(args).toContain("myacr.azurecr.io/azureclaw-controller:latest");
   });
 });
 

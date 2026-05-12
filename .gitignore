@@ -432,31 +432,6 @@ cli/dist/
 # Docker
 .docker/
 
-#Vendor — allow vendored patches for agentmesh components
-# Only track src/, Cargo.toml, Dockerfile, README for each component
-vendor/agentmesh-sdk/node_modules/
-vendor/agentmesh-sdk/.turbo/
-vendor/agentmesh-sdk/dist/*.map
-vendor/agentmesh-sdk/dist/*.d.ts
-vendor/agentmesh-sdk/dist/*.d.cts
-vendor/agentmesh-sdk/dist/storage/*.map
-vendor/agentmesh-sdk/dist/storage/*.d.ts
-vendor/agentmesh-sdk/dist/storage/*.d.cts
-vendor/agentmesh-sdk/tests/
-vendor/agentmesh-sdk/examples/
-vendor/agentmesh-sdk/docs/
-vendor/agentmesh-sdk/openspec/
-vendor/agentmesh-sdk/AUDIT_REPORT.md
-vendor/agentmesh-sdk/vitest.config.ts
-# Lock file needed for reproducible Docker builds
-!vendor/agentmesh-sdk/package-lock.json
-vendor/agentmesh-registry/frontend/node_modules/
-vendor/agentmesh-registry/frontend/dist/
-# Lock file needed for reproducible Docker builds
-!vendor/agentmesh-registry/frontend/package-lock.json
-# Migrations needed for registry database setup
-!vendor/agentmesh-registry/migrations/
-
 # Internal planning docs (not for public repo)
 PLAN.md
 

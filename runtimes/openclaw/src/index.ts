@@ -8,9 +8,12 @@
  * and agent tools (spawn, mesh, inbox, destroy) within the OpenClaw
  * plugin system using the native definePluginEntry SDK.
  *
- * AGT Integration: Uses @agentmesh/sdk for tool-level policy evaluation,
- * trust scoring, and audit logging. AzureClaw's Rust router handles
- * infrastructure-level controls (mesh routing, content safety, token budgets).
+ * AGT Integration: identity, signing, and verification use Node's
+ * native `crypto` (via `@azureclaw/mesh`). Mesh transport delegates
+ * to the Microsoft Agent Governance Toolkit SDK. Tool-level policy
+ * evaluation runs inline against a small allow/deny table. AzureClaw's
+ * Rust router handles infrastructure-level controls (mesh routing,
+ * content safety, token budgets).
  *
  * Usage: openclaw azureclaw <command>
  */
@@ -110,6 +113,7 @@ import {
   verifyTrustedByName as _verifyTrustedByName,
   isAmidVerified,
 } from "./core/amid-cache.js";
+import { getMeshRegistry } from "./core/mesh-registry.js";
 
 // Thin wrappers so internal callers don't need to thread `routerUrl` through.
 async function resolveAmidByName(
@@ -136,9 +140,26 @@ export { redactSecrets };
 // Infrastructure controls (NetworkPolicy, token budgets) stay in Rust router.
 // ---------------------------------------------------------------------------
 
-let agtPolicy: any = null;
-let agtTrustStore: any = null;
-let agtAuditLogger: any = null;
+// Tool policy table — simple action allow/deny map. Replaces the legacy
+// `Policy().evaluate()` SDK call. Mesh-plugin's AGT MeshClient already
+// enforces KNOCK gating at the transport layer; this table is a
+// defense-in-depth check on the per-intent capability string carried in
+// KNOCK requests.
+const AGT_POLICY: ReadonlyMap<string, "allow" | "deny"> = new Map([
+  ["web_search", "allow"],
+  ["file_read", "allow"],
+  ["file_write", "allow"],
+  ["shell:ls", "allow"],
+  ["shell:cat", "allow"],
+  ["shell:python", "allow"],
+  ["shell:git", "allow"],
+  ["shell:curl", "allow"],
+  ["shell:rm -rf /", "deny"],
+  ["shell:chmod 777", "deny"],
+  ["shell:dd", "deny"],
+  ["shell:mkfs", "deny"],
+]);
+
 let agtMeshClient: any = null;
 let agtIdentity: any = null;
 let agtInitialized = false; // Module-level guard (supplemented by process-level guard below)
@@ -475,43 +496,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   // that check AGT_LOCK_KEY can always await it (fixes race where pending was undefined).
   const initPromise = (async () => {
   try {
-    // ESM import preferred; fall back to CJS require if extension loader context rejects it
-    let sdk: any;
-    try {
-      sdk = await import("@agentmesh/sdk");
-    } catch {
-      // ESM import failed — load CJS entry via createRequire
-      const { createRequire } = await import("node:module");
-      const _require = createRequire(import.meta.url);
-      sdk = _require("@agentmesh/sdk");
-    }
+    // Mesh transport — Microsoft Agent Governance Toolkit SDK, via the
+    // @azureclaw/mesh adapter (which also exposes node:crypto–based
+    // identity helpers so the runtime does not need a separate SDK
+    // dependency for keygen / verify).
+    const meshMod: any = await import("@azureclaw/mesh");
 
-    // Policy engine — tool allow/deny evaluation
-    agtPolicy = new sdk.Policy([
-      { action: "web_search", effect: "allow" },
-      { action: "file_read", effect: "allow" },
-      { action: "file_write", effect: "allow" },
-      { action: "shell:ls", effect: "allow" },
-      { action: "shell:cat", effect: "allow" },
-      { action: "shell:python", effect: "allow" },
-      { action: "shell:git", effect: "allow" },
-      { action: "shell:curl", effect: "allow" },
-      { action: "shell:rm -rf /", effect: "deny" },
-      { action: "shell:chmod 777", effect: "deny" },
-      { action: "shell:dd", effect: "deny" },
-      { action: "shell:mkfs", effect: "deny" },
-    ]);
-
-    // Trust store — 0-1000 scoring with tiers
-    agtTrustStore = sdk.createTrustStore();
-    // Audit logger — hash-chain append-only log
-    agtAuditLogger = sdk.createAuditLogger();
-
-    // Generate cryptographic identity (Ed25519 + X25519)
-    agtIdentity = await sdk.Identity.generate();
+    // Generate Ed25519 + X25519 identity. `generateIdentity` writes the
+    // encrypted envelope under ~/.azureclaw/identity.json and returns a
+    // facade with raw key buffers + amid/did.
+    const meshIdentity = await meshMod.generateIdentity();
+    agtIdentity = {
+      amid: meshIdentity.amid,
+      did: meshIdentity.did,
+      signingPublicKey: meshIdentity.signingPublicKey,
+    };
     log.info(`AGT identity: ${agtIdentity.amid}`);
 
-    // Create AgentMeshClient — ALWAYS connect through the router proxy.
+    // Mesh transport — ALWAYS connect through the router proxy.
     // The plugin (UID 1000) cannot reach external services directly (iptables blocks).
     // The router (UID 1001) proxies: /agt/relay → relay service, /agt/registry/* → registry service.
     // On AKS, router reads AGT_RELAY_URL/AGT_REGISTRY_URL to find the services.
@@ -519,11 +521,23 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     const registryUrl = routerUrl("/agt/registry");
     const relayUrl = routerWsUrl("/agt/relay");
 
-    agtMeshClient = new sdk.AgentMeshClient(agtIdentity, {
-      storage: new sdk.MemoryStorage(),
-      registryUrl,
-      relayUrl,
-    });
+    try {
+      agtMeshClient = await meshMod.createMeshTransport({
+        relayUrl,
+        registryUrl,
+        identity: {
+          amid: meshIdentity.amid,
+          did: meshIdentity.did,
+          signingPublicKey: meshIdentity.signingPublicKey,
+          signingPrivateKey: meshIdentity.signingPrivateKey,
+        },
+        displayName: agtSandboxName,
+      });
+      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @azureclaw/mesh)`);
+    } catch (swapErr: any) {
+      log.warn?.(`mesh transport init failed: ${swapErr?.message ?? swapErr}`);
+      throw swapErr;
+    }
 
     // ── Pre-seed name-based trust BEFORE connect() ───────────────────────
     // The KNOCK handler (registered just below) must see the trust set
@@ -620,13 +634,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         }
       }
 
-      // Policy evaluation
-      if (agtPolicy && intent !== '*') {
-        const decision = agtPolicy.evaluate({ action: intent });
-        if (decision && !decision.allowed) {
-          log.warn(`AGT KNOCK rejected by policy: ${fromAmid.slice(0, 12)} intent=${intent}`);
-          return { accept: false, reason: 'policy_denied' };
-        }
+      // Policy evaluation — small inline allow/deny table; default-allow for
+      // unknown intents. KNOCK transport already requires a valid handshake.
+      if (intent !== '*' && AGT_POLICY.get(intent) === 'deny') {
+        log.warn(`AGT KNOCK rejected by policy: ${fromAmid.slice(0, 12)} intent=${intent}`);
+        return { accept: false, reason: 'policy_denied' };
       }
 
       // KNOCK accepted — bootstrap trust for this peer.
@@ -749,12 +761,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           pushSigningCounter("rejected");
           pushTrustToRouter(fromName, -0.3);
         } else {
-          const sdk = await import("@agentmesh/sdk");
+          const mesh: any = await import("@azureclaw/mesh");
           const pubKey = await resolveSigningKey(senderAmid);
           if (pubKey) {
             try {
               const encoder = new TextEncoder();
-              const valid = await sdk.Identity.verifySignature(pubKey, encoder.encode(payloadStr), sigB64);
+              const valid = mesh.verifyEd25519Signature(pubKey, encoder.encode(payloadStr), sigB64);
               if (valid) {
                 pushSigningCounter("verified");
               } else {
@@ -829,9 +841,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // messages from anonymous-tier agents (not verified via OAuth/Entra).
           if (process.env.REQUIRE_VERIFIED_TIER === "true") {
             try {
-              const lookupResult = await _routerCall("GET",
-                `/agt/registry/v1/registry/lookup?amid=${encodeURIComponent(fromAmid)}`);
-              const senderTier = lookupResult?.tier || "anonymous";
+              const entry = await getMeshRegistry(routerUrl).lookup(fromAmid, { timeoutMs: 5000 });
+              const senderTier = (entry as { tier?: string } | null)?.tier || "anonymous";
               if (senderTier === "anonymous") {
                 log.warn(`AGT tier gate DENIED: '${fromName}' is anonymous (require_verified_tier=true)`);
                 if (agtMeshClient) {
@@ -1023,9 +1034,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           success = stat.size === buf.length;
           savedPath = destPath;
 
+          // Also promote to workspace root so the file is immediately visible to the
+          // agent without it needing to know about the incoming/ directory. This mirrors
+          // the handoff:workspace_inject behavior (~line 1314) and prevents the LLM from
+          // falling back to placeholder assets when real AGT-transferred files exist.
+          let promotedPath = "";
+          try {
+            const wsRoot = "/sandbox/.openclaw/workspace";
+            const rootDest = path.join(wsRoot, safeName);
+            if (!fs.existsSync(rootDest)) {
+              fs.copyFileSync(destPath, rootDest);
+              promotedPath = rootDest;
+            }
+          } catch { /* best effort */ }
+
           log.info(
             `📁 File received from '${fromName}': ${safeName} ` +
-            `(${(buf.length / 1024).toFixed(1)} KB) → ${destPath}`
+            `(${(buf.length / 1024).toFixed(1)} KB) → ${destPath}` +
+            (promotedPath ? ` (also at ${promotedPath})` : "")
           );
 
           // Update the inbox entry with save path (already pushed above)
@@ -1035,6 +1061,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               type: "file_transfer",
               file_name: safeName,
               saved_to: destPath,
+              workspace_path: promotedPath || destPath,
               size_bytes: buf.length,
               description: message.description || "",
               from_agent: fromName,
@@ -1741,13 +1768,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     const subStart = Date.now();
                     while (Date.now() - subStart < 90_000) {
                       try {
-                        const searchResult = await _routerCall("GET",
-                          `/agt/registry/registry/search?capability=${encodeURIComponent(spawned.name)}`);
-                        const candidates = (searchResult?.results || []).filter((a: any) =>
+                        const results = await getMeshRegistry(routerUrl).search(spawned.name, { timeoutMs: 5000 });
+                        const candidates = results.filter((a) =>
                           a.display_name === spawned.name && a.status === "online"
                         );
-                        // Pick the first candidate that is NOT a stale AMID
-                        const match = candidates.find((a: any) => !staleAmids.has(a.amid));
+                        const match = candidates.find((a) => !staleAmids.has(a.amid));
                         if (match?.amid) {
                           subAmid = match.amid;
                           log.info(`🔍 Found NEW AMID for '${spawned.name}': ${match.amid.slice(0, 12)}...${spawned.original_amid ? ` (old was ${spawned.original_amid.slice(0, 12)}...)` : ""}`);
@@ -2154,19 +2179,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             req.on("error", () => {});
             req.end();
           } catch { /* best effort */ }
-          // Registry heartbeat: update last_seen so other agents see us as online
+          // Registry heartbeat: update last_seen so other agents see us as online.
+          // Vendored registry exposes /registry/heartbeat; AGT uses WS liveness so
+          // the heartbeat impl is a no-op. The provider abstraction picks the right path.
           if (agtIdentity) {
             try {
-              const http = await import("node:http");
-              const body = JSON.stringify({ amid: agtIdentity.amid });
-              const req = http.request(routerUrl("/agt/registry/registry/heartbeat"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-                timeout: 3000,
-              }, () => {});
-              req.on("error", () => {});
-              req.write(body);
-              req.end();
+              await getMeshRegistry(routerUrl).heartbeat?.(agtIdentity.amid, []);
             } catch { /* best effort */ }
           }
         }
@@ -2187,15 +2205,16 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     }, 10_000);
     if (agtInboxNotifyTimer.unref) agtInboxNotifyTimer.unref();
 
-    log.info(`AGT SDK loaded (v${sdk.VERSION}) — identity, policy, trust, audit${connected ? ", mesh ACTIVE" : ", mesh OFFLINE (relay unreachable)"}`);
+    const _meshProvider = "agt";
+    log.info(`AGT mesh loaded (provider=${_meshProvider}, identity=${agtIdentity.amid}) — ${connected ? "mesh ACTIVE" : "mesh OFFLINE (relay unreachable)"}`);
     log.info("AGT timers started: reconnect (30s), inbox notify (10s)");
   } catch (e: any) {
     // Distinguish module-not-found from other errors
     const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
     if (isModuleError) {
-      log.warn(`AGT SDK not installed: ${e.message}. Install @agentmesh/sdk to enable inter-agent communication.`);
+      log.warn(`@azureclaw/mesh not installed: ${e.message}. Install the workspace package to enable inter-agent communication.`);
     } else {
-      log.warn(`AGT SDK init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
+      log.warn(`AGT mesh init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
     }
   }
   })(); // end of init IIFE
@@ -2352,6 +2371,17 @@ let revokeShutdownRegistered = false;
 function registerRevokeShutdownHook(log: { info: (m: string) => void; warn: (m: string) => void }) {
   if (revokeShutdownRegistered) return;
   revokeShutdownRegistered = true;
+  // AGT registry has no `/v1/registry/revoke` endpoint — agents are pruned
+  // via the relay's WS-disconnect path + 90s last_seen filter on the
+  // receiver side. Skip the hook entirely in AGT mode to avoid a 404
+  // (and the 2s shutdown delay it adds) on every pod termination.
+  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "agt")
+    .trim()
+    .toLowerCase();
+  if (provider === "agt") {
+    log.info("AGT self-revoke hook skipped (no revoke endpoint in AGT registry)");
+    return;
+  }
   let revokeInFlight = false;
   const revoke = async () => {
     if (revokeInFlight) return;
@@ -2807,14 +2837,16 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
-    // Skip Foundry tool catalog when running against GitHub Models. GH Models
-    // has a hard 16k input-token cap per request — registering all 9 Foundry
-    // tools (~25k bytes of schemas + skill prompts) blows past the cap on
-    // every chat turn, surfacing as alternating 413 errors. The Foundry tools
-    // require a real Azure project anyway, so they're pure dead weight in
-    // GH Models mode. Keep agt-governance + azureclaw-spawn (model-agnostic).
-    const ghModelsMode = process.env.AZURECLAW_PROVIDER === "github-models";
-    if (!ghModelsMode) {
+    // Skip Foundry tool catalog when running against GH-token providers
+    // (`github-models` or `github-copilot`). Foundry tools require an Azure
+    // project the GH-token paths don't have, so registering them is pure dead
+    // weight: in `github-models` mode they blow past the 16k input-token cap;
+    // in `github-copilot` mode they bloat sub-agent prompts (~25k bytes of
+    // schemas) and tempt the model to call tools that will 404. Keep
+    // agt-governance + azureclaw-spawn (model-agnostic).
+    const provider = process.env.AZURECLAW_PROVIDER;
+    const ghTokenMode = provider === "github-models" || provider === "github-copilot";
+    if (!ghTokenMode) {
       registerFoundryTools(api, {
         log,
         config,
@@ -2822,7 +2854,7 @@ const azureClawPlugin = definePluginEntry({
       });
       if (!bannerAlreadyPrinted) log.info("Foundry tools registered: foundry_code_execute, foundry_image_generation, foundry_web_search, foundry_file_search, foundry_memory, foundry_conversations, foundry_evaluations, foundry_deployments, foundry_agents");
     } else if (!bannerAlreadyPrinted) {
-      log.info("GitHub Models mode: Foundry tool catalog skipped (16k token cap; Foundry skills require an Azure project)");
+      log.info(`${provider} mode: Foundry tool catalog skipped (no Foundry project bound; skills require an Azure project)`);
     }
 
     registerOpenClawCommands(api, {
@@ -2831,9 +2863,9 @@ const azureClawPlugin = definePluginEntry({
       getFoundryProject: () => foundryProject,
       meshClient: () => agtMeshClient,
       identity: () => agtIdentity,
-      policy: () => agtPolicy,
-      trustStore: () => agtTrustStore,
-      auditLogger: () => agtAuditLogger,
+      policy: () => null,
+      trustStore: () => null,
+      auditLogger: () => null,
       memorySyncBuffer,
       syncToFoundryMemory,
     });

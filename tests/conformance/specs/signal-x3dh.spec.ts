@@ -15,8 +15,10 @@
  * submoduled):
  *   - libsignal-protocol test vectors
  *     https://github.com/signalapp/libsignal/tree/main/rust/protocol/tests
- *   - vendor/agentmesh-sdk/README.md (documents 8 patched bugs; each
- *     patch implies a negative test listed below).
+ *   - Phase 5.2 history: 8 prekey/X3DH bugs originally patched in the
+ *     vendored fork, all upstreamed into @microsoft/agent-governance-sdk
+ *     before the vendored fork was removed. Each historical patch implies
+ *     a negative test listed below.
  */
 import { describe, it } from "vitest";
 

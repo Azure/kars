@@ -28,12 +28,11 @@ We expect external contributions from:
 
 ### Out of Scope — We Will Not Merge
 
-- **New cross-cluster transports** — AgentMesh (via `vendor/agentmesh-{relay,registry,sdk}`) is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review. See ADR-0001 and `vendor/*/README.md` for the vendor-patch process.
+- **New cross-cluster transports** — Microsoft AGT AgentMesh is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review; AzureClaw no longer carries a vendored AgentMesh transport fork.
 - **Changes to sandbox isolation** — modifications to UID/GID, Landlock rules, seccomp profiles, or NetworkPolicy that weaken pod isolation or increase privilege
 - **Inference router / governance bypass** — any change that routes agent traffic outside the router, skips the governance chain, or adds unauthenticated API endpoints
 - **Direct cloud-side telemetry** — telemetry must remain opt-in via OpenTelemetry (see Data Collection notice in README). Direct Azure Monitor / Application Insights SDKs are not accepted.
 - **New top-level CRDs** without a published ADR in `docs/adr/` and an RFC issue
-- **Vendor patches without upstream PR** — all AgentMesh / third-party patches must attempt an upstream merge first (document in `vendor/*/README.md` why upstream rejected or didn't respond)
 
 ### Triage Cadence & Response Time
 
@@ -78,7 +77,6 @@ make lint     # clippy + oxlint
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
 | `deploy/seccomp/` | JSON | seccomp profile (`azureclaw-strict.json`) |
 | `sandbox-images/` | Dockerfile | Azure Linux 3 sandbox image + entrypoint |
-| `vendor/` | Rust + TS | Patched forks of AgentMesh relay, registry, SDK (8 bug fixes) |
 | `tests/e2e/` | Bash | E2E tests: Kind-based + live AKS infra tests |
 
 ## Development
@@ -112,7 +110,7 @@ azureclaw dev --build                      # build + run locally via Docker
 
 ```bash
 azureclaw push --only sandbox --apply      # build sandbox image, push to ACR, restart pods
-azureclaw push                             # build + push all images (controller, router, sandbox, relay, registry)
+azureclaw push                             # build + push all AzureClaw images (controller, router, sandbox)
 ```
 
 ### Docker Images (Makefile)
@@ -156,18 +154,11 @@ CLI flag → Docker env var → entrypoint auto-config → plugins.allow + plugi
 
 Credentials are stored in a K8s secret named `<sandbox-name>-credentials` in the sandbox namespace (`azureclaw-<name>`). The controller mounts it via `envFrom` with `optional: true` so pods start even if no credentials secret exists. Use `azureclaw credentials update <name> --telegram-token <token>` to create/update the secret.
 
-## Working with the vendored AgentMesh forks
+## AgentMesh provider changes
 
-`vendor/` contains patched forks of three AgentMesh components — `agentmesh-relay` (Rust), `agentmesh-registry` (Rust), and `@agentmesh/sdk` (TypeScript). Each subdirectory has a `README.md` documenting the upstream commit, the list of patches applied, and the upstream PR/issue link for each one (eight patches total at the time of writing).
+AzureClaw runs exclusively on Microsoft AGT AgentMesh (`@microsoft/agent-governance-sdk` plus the AGT relay/registry deployed by `deploy/agentmesh-agt.yaml`). The historical AgentMesh npm SDK dependency and vendored relay/registry/SDK forks were removed in Phase 5.2 after the gap-closing patches landed upstream.
 
-Two ground rules apply when touching vendored code:
-
-1. **Attempt the upstream merge first.** The `vendor/<component>/README.md` must show a link to the upstream PR (or a written explanation of why upstream rejected / didn't respond). PRs that add a vendored patch without that link will be asked to open the upstream change first.
-2. **Don't rebase on top of vendored files quietly.** The CI gate `ci/vendored-patch-audit.sh` fingerprints each patch and fails the build if a known patch goes missing — that's how we catch accidental upstream re-imports that drop our fixes. If you intentionally retire a patch (because upstream merged the fix), update `vendor/<component>/README.md` in the same PR.
-
-The sandbox Docker build installs `@agentmesh/sdk` from npm and then *overlays* with the vendored `dist/` files (see `sandbox-images/openclaw/Dockerfile`). When you change TS in `vendor/agentmesh-sdk/`, you must run `npm run build` inside that directory and commit the regenerated `dist/` so the overlay picks up your change. The Rust forks (`relay`, `registry`) are built directly via `cargo` and need Rust 1.94+ (upstream's pinned 1.83 toolchain is too old for our deps).
-
-Vendored code is excluded from the Microsoft copyright-header gate — do not add Microsoft headers to files under `vendor/`.
+Changes to mesh transport, identity, signing, or relay/registry behavior must be proposed upstream first when they belong in AGT, and must include an ADR plus security-audit notes when they affect AzureClaw's trust boundary.
 
 ## Pull Requests
 

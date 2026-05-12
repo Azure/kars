@@ -32,6 +32,12 @@ export interface AgentMeshDeployContext {
 export interface AgentMeshDeployOptions {
   globalRegistry?: string;
   exposeRegistry?: boolean;
+  /**
+   * Mesh stack to deploy. Only 'agt' is supported after Phase 5.2; the
+   * vendored Rust relay + Postgres registry have been removed. Kept as
+   * a flag for backward-compatible callers.
+   */
+  meshProvider?: "agt";
 }
 
 export interface AgentMeshDeployResult {
@@ -50,7 +56,7 @@ export async function deployAgentMesh(
   options: AgentMeshDeployOptions,
 ): Promise<AgentMeshDeployResult> {
   const { execa } = await import("execa");
-  const { repoRoot, acr, acrLoginServer, baseName, rg, stepper } = ctx;
+  const { repoRoot, acr: _acr, acrLoginServer, baseName, rg, stepper } = ctx;
 
   // Inspektor Gadget (eBPF observability) — non-fatal
   await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {});
@@ -72,47 +78,20 @@ export async function deployAgentMesh(
 
     stepper.done("AgentMesh: using external registry (skipped local deploy)");
   } else {
-    // Local registry mode — deploy relay + registry in-cluster
-    const agentmeshManifest = path.join(repoRoot, "deploy", "agentmesh.yaml");
+    // Local registry mode — deploy AGT relay + registry in-cluster.
+    const manifestName = "agentmesh-agt.yaml";
+    const agentmeshManifest = path.join(repoRoot, "deploy", manifestName);
     if (existsSync(agentmeshManifest)) {
-      // Import postgres image into ACR (Azure Policy blocks Docker Hub images)
-      stepper.update("Importing postgres image into ACR...");
-      await execa("az", [
-        "acr", "import",
-        "--name", acr,
-        "--source", "docker.io/library/postgres:16-alpine",
-        "--image", "postgres:16-alpine",
-        "--force",
-      ], { stdio: "pipe" }).catch(() => {
-        // May already exist — non-fatal
-      });
-
-      // Ensure the agentmesh namespace exists before creating the secret
+      // Ensure the agentmesh namespace exists
       await execa("kubectl", ["create", "namespace", "agentmesh"], { stdio: "pipe" }).catch(() => {});
-
-      // Auto-generate postgres credentials if the secret doesn't exist yet
-      const secretExists = await execa("kubectl", [
-        "get", "secret", "agentmesh-db-credentials", "-n", "agentmesh",
-      ], { stdio: "pipe" }).then(() => true).catch(() => false);
-
-      if (!secretExists) {
-        stepper.update("Generating AgentMesh database credentials...");
-        const { randomBytes } = await import("crypto");
-        const dbPassword = randomBytes(24).toString("base64url");
-        await execa("kubectl", [
-          "create", "secret", "generic", "agentmesh-db-credentials",
-          "-n", "agentmesh",
-          `--from-literal=POSTGRES_PASSWORD=${dbPassword}`,
-        ], { stdio: "pipe" });
-      }
 
       // Substitute ACR login server in the manifest
       const manifest = readFileSync(agentmeshManifest, "utf-8");
-      const patchedManifest = manifest.replace(
-        /azureclawacr\.azurecr\.io/g,
-        acrLoginServer
+      const patchedManifest = manifest.replaceAll(
+        "azureclawacr.azurecr.io",
+        acrLoginServer,
       );
-      const tmpManifest = path.join(repoRoot, ".tmp-agentmesh.yaml");
+      const tmpManifest = path.join(repoRoot, `.tmp-${manifestName}`);
       try {
         writeFileSync(tmpManifest, patchedManifest);
         await execa("kubectl", ["apply", "-f", tmpManifest], { stdio: "pipe" });
@@ -132,12 +111,12 @@ export async function deployAgentMesh(
           "--timeout=180s",
         ], { stdio: "pipe" }).catch(() => {});
 
-        stepper.done("AgentMesh infrastructure deployed");
+        stepper.done(`AgentMesh infrastructure deployed (agt)`);
       } finally {
         try { unlinkSync(tmpManifest); } catch { /* noop */ }
       }
     } else {
-      stepper.warn("AgentMesh manifest not found — skipping");
+      stepper.warn(`AgentMesh manifest not found (${manifestName}) — skipping`);
     }
 
     // Deploy AGIC Ingress if --expose-registry is set
