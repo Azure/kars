@@ -2,14 +2,15 @@
 // Licensed under the MIT License.
 
 /**
- * Mesh transport factory. Selects between the vendored AgentMesh SDK
- * (MeshConnection) and the upstream Microsoft AGT SDK (AgtTransport)
- * based on the AZURECLAW_MESH_PROVIDER environment variable.
+ * Mesh transport factory. Selects between the upstream Microsoft AGT SDK
+ * (AgtTransport) and the vendored AgentMesh SDK (MeshConnection) based on
+ * the AZURECLAW_MESH_PROVIDER environment variable.
  *
- * Default is "vendored" so the swap is opt-in and zero-risk for existing
- * deployments. Callers should treat the returned object as an IMeshTransport
- * — provider-specific extensions remain accessible by narrowing the type
- * if needed during the migration window.
+ * Default is "agt" (Phase 5). Operators can set AZURECLAW_MESH_PROVIDER=
+ * vendored to opt back to the @agentmesh/sdk fork in vendor/ while the
+ * upstream AGT release catches up to our patch set. Callers should treat
+ * the returned object as an IMeshTransport — provider-specific extensions
+ * remain accessible by narrowing the type if needed.
  */
 
 import type { IMeshIdentity, IMeshTransport } from "./transport-interface.js";
@@ -46,14 +47,15 @@ export interface MeshTransportFactoryConfig {
 export type MeshTransportConfig = MeshTransportFactoryConfig;
 
 /**
- * Resolve the provider from the environment. Anything other than "agt"
- * (case-insensitive) maps to "vendored" so typos fall back to the safe path.
+ * Resolve the provider from the environment. Anything other than "vendored"
+ * (case-insensitive) maps to "agt" — the Phase 5 default. This biases
+ * misconfigurations toward the new default rather than the legacy fork.
  */
 export function resolveMeshProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): MeshProvider {
   const raw = (env.AZURECLAW_MESH_PROVIDER || "").trim().toLowerCase();
-  return raw === "agt" ? "agt" : "vendored";
+  return raw === "vendored" ? "vendored" : "agt";
 }
 
 /**

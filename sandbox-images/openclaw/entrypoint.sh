@@ -1198,19 +1198,19 @@ if [ -d /opt/azureclaw-plugin ]; then
     cp -rL --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
     echo "[azureclaw] AGT SDK (@agentmesh/sdk) available"
   fi
-  # Mesh provider selector — Phase 2 of upstream-AGT migration. Defaults to
-  # the vendored AgentMesh SDK so existing deployments are unaffected. Set
-  # AZURECLAW_MESH_PROVIDER=agt at the pod env (via Helm value mesh.provider)
-  # to switch to @microsoft/agent-governance-sdk.
-  AZURECLAW_MESH_PROVIDER="${AZURECLAW_MESH_PROVIDER:-vendored}"
+  # Mesh provider selector — Phase 5 of upstream-AGT migration. Default is
+  # now `agt` (@microsoft/agent-governance-sdk). Set AZURECLAW_MESH_PROVIDER=
+  # vendored at the pod env (via Helm value mesh.provider=vendored) to opt
+  # back to the vendor/agentmesh-sdk fork. Unknown values fall back to agt.
+  AZURECLAW_MESH_PROVIDER="${AZURECLAW_MESH_PROVIDER:-agt}"
   case "${AZURECLAW_MESH_PROVIDER}" in
-    agt|AGT)
-      AZURECLAW_MESH_PROVIDER="agt"
-      echo "[azureclaw] mesh provider: agt (@microsoft/agent-governance-sdk)"
-      ;;
-    *)
+    vendored|VENDORED)
       AZURECLAW_MESH_PROVIDER="vendored"
       echo "[azureclaw] mesh provider: vendored (@agentmesh/sdk)"
+      ;;
+    *)
+      AZURECLAW_MESH_PROVIDER="agt"
+      echo "[azureclaw] mesh provider: agt (@microsoft/agent-governance-sdk)"
       ;;
   esac
   export AZURECLAW_MESH_PROVIDER

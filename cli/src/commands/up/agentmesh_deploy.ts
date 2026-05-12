@@ -80,7 +80,7 @@ export async function deployAgentMesh(
     stepper.done("AgentMesh: using external registry (skipped local deploy)");
   } else {
     // Local registry mode — deploy relay + registry in-cluster
-    const meshProvider = options.meshProvider ?? "vendored";
+    const meshProvider = options.meshProvider ?? "agt";
     const manifestName = meshProvider === "agt" ? "agentmesh-agt.yaml" : "agentmesh.yaml";
     const agentmeshManifest = path.join(repoRoot, "deploy", manifestName);
     if (existsSync(agentmeshManifest)) {

@@ -13,8 +13,19 @@ const agtUnifiedIdentity = {
 };
 
 describe("resolveMeshProvider", () => {
-  it("defaults to vendored when env var is unset", () => {
-    expect(resolveMeshProvider({})).toBe("vendored");
+  it("defaults to agt when env var is unset (Phase 5 default)", () => {
+    expect(resolveMeshProvider({})).toBe("agt");
+  });
+  it("returns vendored for AZURECLAW_MESH_PROVIDER=vendored (case-insensitive)", () => {
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "vendored" })).toBe(
+      "vendored",
+    );
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "VENDORED" })).toBe(
+      "vendored",
+    );
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: " vendored " })).toBe(
+      "vendored",
+    );
   });
   it("returns agt for AZURECLAW_MESH_PROVIDER=agt (case-insensitive)", () => {
     expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "agt" })).toBe("agt");
@@ -23,13 +34,11 @@ describe("resolveMeshProvider", () => {
       "agt",
     );
   });
-  it("falls back to vendored on unknown values", () => {
+  it("falls back to agt on unknown / empty values", () => {
     expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "fancy" })).toBe(
-      "vendored",
+      "agt",
     );
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "" })).toBe(
-      "vendored",
-    );
+    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "" })).toBe("agt");
   });
 });
 
@@ -79,7 +88,7 @@ describe("createMeshTransport", () => {
           registryUrl: "http://reg",
           identity: agtUnifiedIdentity,
         },
-        {},
+        { AZURECLAW_MESH_PROVIDER: "vendored" },
       ),
     ).rejects.toThrow(/sdkIdentity/);
   });

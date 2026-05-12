@@ -47,7 +47,7 @@ use agt_wire::{AgtFrame, AgtRegisterAgentRequest};
 
 /// Which AgentMesh implementation the controller should speak to.
 ///
-/// Selected at startup from `AZURECLAW_MESH_PROVIDER` (default `vendored`).
+/// Selected at startup from `AZURECLAW_MESH_PROVIDER` (default `agt`).
 /// The two providers use **incompatible wire protocols** — see
 /// [`agt_wire`] for the AGT envelope and [`RelayMessage`] for the vendored
 /// envelope. Every wire-touching helper in this module branches on
@@ -69,23 +69,25 @@ pub enum Provider {
 
 impl Provider {
     /// Read the provider selection from `AZURECLAW_MESH_PROVIDER`. Defaults
-    /// to `Vendored` for backward compatibility. Unknown values fall back
-    /// to `Vendored` with a warning so a typo doesn't silently break a
-    /// production cluster.
+    /// to `Agt` (upstream `@microsoft/agent-governance-sdk`) — Phase 5 of
+    /// the AGT migration. Unknown values fall back to `Agt` with a warning
+    /// so a typo doesn't silently break a production cluster. Set
+    /// `AZURECLAW_MESH_PROVIDER=vendored` to opt back to the
+    /// `vendor/agentmesh-sdk` fork.
     pub fn from_env() -> Self {
         match std::env::var("AZURECLAW_MESH_PROVIDER")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
         {
-            "agt" => Provider::Agt,
-            "" | "vendored" => Provider::Vendored,
+            "vendored" => Provider::Vendored,
+            "" | "agt" => Provider::Agt,
             other => {
                 tracing::warn!(
-                    "Unknown AZURECLAW_MESH_PROVIDER={other} — defaulting to vendored. \
-                     Valid values: vendored, agt."
+                    "Unknown AZURECLAW_MESH_PROVIDER={other} — defaulting to agt. \
+                     Valid values: agt, vendored."
                 );
-                Provider::Vendored
+                Provider::Agt
             }
         }
     }

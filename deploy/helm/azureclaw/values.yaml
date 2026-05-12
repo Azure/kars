@@ -138,7 +138,7 @@ meshPeer:
 # The chart only injects AZURECLAW_MESH_PROVIDER into sandbox pods via the
 # controller; operators must apply the matching mesh manifest separately.
 mesh:
-  provider: "vendored"      # "vendored" | "agt"
+  provider: "agt"           # "agt" (default) | "vendored". AGT = upstream @microsoft/agent-governance-sdk. Vendored = @agentmesh/sdk fork in vendor/ (kept for opt-out until vendored fork is removed).
 
 # Strict-mode tool definitions for sandbox agents.
 # When enabled, sandbox agents send OpenAI strict-mode tool schemas

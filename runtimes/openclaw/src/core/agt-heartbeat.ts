@@ -57,7 +57,7 @@ export async function recordMeshSession(
   // (see mesh-plugin agt-transport.ts) — this session-counter call is a
   // vendored-only artifact. Skipping avoids the 404 spam (once per mesh
   // reply, ~2/sec under load) in registry logs.
-  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "vendored")
+  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "agt")
     .trim()
     .toLowerCase();
   if (provider === "agt") return;

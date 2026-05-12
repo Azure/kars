@@ -109,8 +109,8 @@ NOT overwrite your saved credentials.
     // ── Mesh federation ───────────────────────────────────────────────
     .option(
       "--mesh-provider <provider>",
-      "Mesh stack: vendored (Rust + Postgres, default) or agt (Microsoft AGT Python, in-memory)",
-      "vendored"
+      "Mesh stack: agt (Microsoft AGT Python, in-memory, default) or vendored (Rust + Postgres, opt-in for legacy)",
+      "agt"
     )
     .option(
       "--agt-repo <path>",
@@ -119,6 +119,10 @@ NOT overwrite your saved credentials.
     .option(
       "--agt-sdk-tarball <path>",
       "Path to a locally-packed @microsoft/agent-governance-sdk .tgz to install in the sandbox image (test patched AGT SDK end-to-end). Only used with --mesh-provider=agt --build."
+    )
+    .option(
+      "--no-mesh",
+      "Skip mesh relay/registry deployment in --target local-k8s. The controller will start but cannot reach a relay; sandboxes lose KNOCK/E2E. Use only for pure controller smoke tests."
     )
     .option(
       "--global-registry <url>",
@@ -150,14 +154,14 @@ Flag groups:
                       --perplexity-api-key, --openai-api-key
 
 Mesh provider selection:
-  --mesh-provider=vendored (default): builds and runs the Rust relay +
-    Rust registry from vendor/ with a Postgres backing store. Uses the
-    8 vendored SDK patches for full E2E reliability.
-  --mesh-provider=agt: builds and runs the Microsoft AGT Python relay
-    + Python registry from the local agent-governance-toolkit checkout
-    (--agt-repo). Registry is in-memory (no Postgres). Combine with
-    --agt-sdk-tarball to test a locally-patched @microsoft/agent-governance-sdk
-    inside the sandbox image.
+  --mesh-provider=agt (default): builds and runs the Microsoft AGT
+    Python relay + Python registry from the local agent-governance-toolkit
+    checkout (--agt-repo). Registry is in-memory (no Postgres). Combine
+    with --agt-sdk-tarball to test a locally-patched
+    @microsoft/agent-governance-sdk inside the sandbox image.
+  --mesh-provider=vendored: builds and runs the Rust relay + Rust
+    registry from vendor/ with a Postgres backing store. Kept for
+    opt-out compatibility until the vendored fork is removed.
 
 Notes:
   - Channels, skills, and plugin API keys are OpenClaw-specific. For
@@ -417,15 +421,15 @@ Notes:
               message: "Mesh provider for inter-agent messaging:",
               choices: [
                 {
-                  name: "vendored — Rust relay + registry + Postgres (default, battle-tested)",
-                  value: "vendored",
-                },
-                {
-                  name: "agt — Microsoft Agent Governance Toolkit (Python, in-memory, upstream target)",
+                  name: "agt — Microsoft Agent Governance Toolkit (Python, in-memory, default, upstream target)",
                   value: "agt",
                 },
+                {
+                  name: "vendored — Rust relay + registry + Postgres (opt-in, kept for backward compat)",
+                  value: "vendored",
+                },
               ],
-              default: "vendored",
+              default: "agt",
             }]);
             options.meshProvider = provider;
           }
@@ -459,7 +463,9 @@ Notes:
             noBuild: false,
             forceRebuild: options.build === true,
             channels: typeof options.channels === "string" ? options.channels : undefined,
-            meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "vendored",
+            meshProvider: (options.meshProvider as "vendored" | "agt" | undefined) ?? "agt",
+            agtRepo: options.agtRepo ?? process.env.AZURECLAW_AGT_REPO ?? DEFAULT_AGT_REPO,
+            noMesh: options.noMesh === true,
           });
           return;
         } catch (e) {
@@ -474,7 +480,7 @@ Notes:
       const stepper = new Stepper({ totalSteps: 4 });
 
       // Resolve mesh provider now that all interactive prompts have run.
-      const meshProvider: MeshProvider = (options.meshProvider ?? "vendored") as MeshProvider;
+      const meshProvider: MeshProvider = (options.meshProvider ?? "agt") as MeshProvider;
       const meshPorts = MESH_PORTS[meshProvider];
       const agtRepo: string = options.agtRepo
         ?? process.env.AZURECLAW_AGT_REPO

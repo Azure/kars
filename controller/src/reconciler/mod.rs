@@ -1100,18 +1100,19 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AZURECLAW_STRICT_TOOLS", "value": "1"}));
         }
 
-        // Phase 4 of the agentmesh provider swap: propagate the controller's
+        // Phase 5 of the agentmesh provider swap: propagate the controller's
         // AZURECLAW_MESH_PROVIDER (set by Helm value `mesh.provider`) into
         // every sandbox pod. The mesh-plugin transport factory reads this
-        // env var to choose between the vendored and upstream AGT SDK.
-        // Default "vendored" preserves byte-identical behaviour for
-        // existing deployments. Unknown values fall back to vendored at
+        // env var to choose between the upstream AGT SDK and the vendored
+        // fork. Default "agt" — set AZURECLAW_MESH_PROVIDER=vendored (or
+        // helm value mesh.provider=vendored) to opt back to the
+        // vendor/agentmesh-sdk fork. Unknown values fall back to agt at
         // the plugin layer.
         let mesh_provider =
-            std::env::var("AZURECLAW_MESH_PROVIDER").unwrap_or_else(|_| "vendored".to_string());
+            std::env::var("AZURECLAW_MESH_PROVIDER").unwrap_or_else(|_| "agt".to_string());
         let mesh_provider_norm = match mesh_provider.to_ascii_lowercase().as_str() {
-            "agt" => "agt",
-            _ => "vendored",
+            "vendored" => "vendored",
+            _ => "agt",
         };
         openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": mesh_provider_norm}));
         // The router container is separate from openclaw on AKS, and the

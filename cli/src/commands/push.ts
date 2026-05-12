@@ -83,7 +83,7 @@ export function pushCommand(): Command {
             );
           }
         } else {
-          meshProvider = "vendored";
+          meshProvider = "agt";
         }
       }
 

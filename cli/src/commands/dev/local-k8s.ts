@@ -52,13 +52,26 @@ export interface LocalK8sOptions {
    */
   forceRebuild?: boolean;
   /**
-   * Mesh stack to deploy in the local kind cluster. 'vendored' (default)
-   * uses the Rust relay + Postgres registry; 'agt' uses the Microsoft
-   * AGT Python relay. The chosen value is forwarded to the helm chart
-   * via --set mesh.provider= so the controller spawns sandboxes with
-   * the matching AZURECLAW_MESH_PROVIDER env var.
+   * Mesh stack to deploy in the local kind cluster. 'agt' (default, Phase 5)
+   * uses the Microsoft AGT Python relay + registry; 'vendored' uses the
+   * patched Rust relay + Postgres registry. The chosen value is forwarded
+   * to the helm chart via --set mesh.provider= so the controller spawns
+   * sandboxes with the matching AZURECLAW_MESH_PROVIDER env var.
    */
   meshProvider?: "vendored" | "agt";
+  /**
+   * Path to the agent-governance-toolkit checkout, used to build AGT relay
+   * + registry images when meshProvider==="agt". Defaults to
+   * $AZURECLAW_AGT_REPO or the same fallback dev.ts uses.
+   */
+  agtRepo?: string;
+  /**
+   * Skip mesh-stack deployment entirely. The controller will start but
+   * sandboxes won't be able to reach relay/registry. Useful for pure
+   * controller smoke tests on hardware without enough RAM for the full
+   * stack.
+   */
+  noMesh?: boolean;
 }
 
 /**
@@ -643,8 +656,166 @@ async function provisionDevCreds(
   return overlayPath;
 }
 
+/**
+ * Build the AGT or vendored mesh relay+registry images locally, load them
+ * into the kind cluster, and `kubectl apply` the matching manifest with
+ * image refs rewritten to the local tags + imagePullPolicy=Never so the
+ * cluster does not try to pull from ACR.
+ *
+ * Both manifests use the same Service names (agentmesh-relay:8765,
+ * agentmesh-registry:8080) in namespace "agentmesh", so the controller's
+ * default env wiring resolves identically regardless of provider.
+ */
+async function deployAgentMesh(
+  tools: Tooling,
+  clusterName: string,
+  repoRoot: string,
+  meshProvider: "vendored" | "agt",
+  agtRepo: string | undefined,
+  archToken: string,
+): Promise<void> {
+  const platform = `linux/${archToken}`;
+  const localTag = (component: "relay" | "registry"): string =>
+    meshProvider === "agt"
+      ? `agentmesh-${component}-agt:dev`
+      : `agentmesh-${component}:dev`;
+
+  // ── Build relay + registry images locally ─────────────────────────
+  if (meshProvider === "agt") {
+    if (!agtRepo) {
+      throw new Error(
+        "--mesh-provider=agt requires --agt-repo or $AZURECLAW_AGT_REPO pointing at an agent-governance-toolkit checkout.",
+      );
+    }
+    const agtDockerfile = path.join(
+      agtRepo,
+      "agent-governance-python/agent-mesh/docker/Dockerfile",
+    );
+    if (!existsSync(agtDockerfile)) {
+      throw new Error(
+        `AGT Dockerfile not found at ${agtDockerfile}. Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.`,
+      );
+    }
+    for (const component of ["relay", "registry"] as const) {
+      console.log(chalk.dim(`  Building agentmesh-${component} (AGT Python)…`));
+      await execa(
+        tools.runtime,
+        [
+          "build",
+          "--platform",
+          platform,
+          "--build-arg",
+          `COMPONENT=${component}`,
+          "-t",
+          localTag(component),
+          "-f",
+          agtDockerfile,
+          agtRepo,
+        ],
+        { stdio: "inherit" },
+      );
+    }
+  } else {
+    for (const component of ["relay", "registry"] as const) {
+      console.log(chalk.dim(`  Building agentmesh-${component} (Rust)…`));
+      await execa(
+        tools.runtime,
+        [
+          "build",
+          "--platform",
+          platform,
+          "-t",
+          localTag(component),
+          path.join(repoRoot, `vendor/agentmesh-${component}`),
+        ],
+        { stdio: "inherit" },
+      );
+    }
+  }
+
+  // ── Load images into kind ─────────────────────────────────────────
+  for (const component of ["relay", "registry"] as const) {
+    const tag = localTag(component);
+    await execa(tools.kind, ["load", "docker-image", tag, "--name", clusterName], {
+      env: tools.env,
+      stdio: "inherit",
+    });
+  }
+
+  // ── Rewrite manifest: swap ACR image refs → local tags, set Never ──
+  const manifestPath =
+    meshProvider === "agt"
+      ? path.join(repoRoot, "deploy", "agentmesh-agt.yaml")
+      : path.join(repoRoot, "deploy", "agentmesh.yaml");
+  if (!existsSync(manifestPath)) {
+    throw new Error(`Mesh manifest not found at ${manifestPath}`);
+  }
+  let manifest = readFileSync(manifestPath, "utf8");
+  const acrPrefix = "azureclawacr.azurecr.io";
+  const repls: { from: RegExp; to: string }[] =
+    meshProvider === "agt"
+      ? [
+          { from: new RegExp(`${acrPrefix}/agentmesh-relay-agt:latest`, "g"), to: localTag("relay") },
+          { from: new RegExp(`${acrPrefix}/agentmesh-registry-agt:latest`, "g"), to: localTag("registry") },
+        ]
+      : [
+          { from: new RegExp(`${acrPrefix}/agentmesh-relay:latest`, "g"), to: localTag("relay") },
+          { from: new RegExp(`${acrPrefix}/agentmesh-registry:latest`, "g"), to: localTag("registry") },
+          // Vendored stack also pulls postgres from ACR mirror — fall back
+          // to the upstream image so kind can pull it directly.
+          { from: new RegExp(`${acrPrefix}/postgres:16-alpine`, "g"), to: "postgres:16-alpine" },
+        ];
+  for (const r of repls) {
+    manifest = manifest.replace(r.from, r.to);
+  }
+  // Pin imagePullPolicy=Never for the local images so kind never tries to
+  // reach a registry. Postgres in the vendored path is left as the default
+  // (IfNotPresent → upstream pull).
+  manifest = manifest.replace(
+    /(\n\s+image:\s+agentmesh-(?:relay|registry)(?:-agt)?:dev\b[^\n]*)/g,
+    `$1\n          imagePullPolicy: Never`,
+  );
+
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-mesh-"));
+  const rewritten = path.join(tmpDir, path.basename(manifestPath));
+  writeFileSync(rewritten, manifest);
+  try {
+    await execa(tools.kubectl, ["apply", "-f", rewritten], { stdio: "inherit" });
+  } finally {
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup.
+    }
+  }
+
+  // ── Wait for relay + registry rollout ─────────────────────────────
+  for (const deploy of ["registry", "relay"]) {
+    try {
+      await execa(
+        tools.kubectl,
+        [
+          "rollout",
+          "status",
+          "-n",
+          "agentmesh",
+          `deployment/${deploy}`,
+          "--timeout=120s",
+        ],
+        { stdio: "inherit" },
+      );
+    } catch {
+      console.warn(
+        chalk.yellow(
+          `  ⚠ agentmesh/${deploy} did not become ready within 120s — check 'kubectl describe deployment/${deploy} -n agentmesh'.`,
+        ),
+      );
+    }
+  }
+}
+
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 12 });
+  const stepper = new Stepper({ totalSteps: 13 });
 
   stepper.step("Checking local tooling (kind / kubectl / helm / container runtime)…");
   const tools = await ensureTooling();
@@ -808,7 +979,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // rollout (no second restart needed).
   const credsOverlay = await provisionDevCreds(tools.kubectl, creds);
   try {
-    const meshProvider = opts.meshProvider ?? "vendored";
+    const meshProvider = opts.meshProvider ?? "agt";
     await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir, [
       valuesOverlay,
       credsOverlay,
@@ -824,6 +995,31 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     }
   }
   stepper.done("chart applied");
+
+  // Deploy the mesh relay + registry. Without this the controller starts
+  // expecting to find agentmesh-relay:8765 in namespace 'agentmesh' but
+  // the namespace doesn't exist on a fresh kind cluster — the controller
+  // ends up in a WebSocket reconnect loop and sandboxes never get a
+  // mesh peer. Phase 5 (AGT default) wires this in.
+  const meshProvider = opts.meshProvider ?? "agt";
+  if (opts.noMesh === true) {
+    stepper.step("Skipping agentmesh deployment (--no-mesh)…");
+    stepper.done("mesh skipped — sandboxes will fail KNOCK / E2E");
+  } else {
+    stepper.step(
+      `Deploying agentmesh-${meshProvider} (relay + registry) into kind…`,
+    );
+    const archToken = hostDockerArch();
+    await deployAgentMesh(
+      tools,
+      opts.clusterName,
+      repoRoot,
+      meshProvider,
+      opts.agtRepo,
+      archToken,
+    );
+    stepper.done(`agentmesh-${meshProvider} ready`);
+  }
 
   stepper.step("Verifying controller deployment is rolling out…");
   // Force a rollout restart in case the deployment already existed (e.g.
