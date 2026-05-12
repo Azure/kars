@@ -33,7 +33,7 @@
     "commander": "^13.0.0"
   },
   "optionalDependencies": {
-    "@microsoft/agent-governance-sdk": "^3.5.0"
+    "@microsoft/agent-governance-sdk": "^3.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

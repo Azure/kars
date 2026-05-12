@@ -5,7 +5,9 @@ description: "AzureClaw AGT E2E encryption skill — how the Signal Protocol int
 # AGT E2E Encrypted Inter-Agent Communication
 
 ## Overview
-AzureClaw agents communicate via AgentMesh (amitayks/agentmesh) — a decentralized, E2E encrypted messaging protocol using Signal Protocol (X3DH + Double Ratchet).
+AzureClaw agents communicate via the official Microsoft Agent Governance Toolkit (AGT) — a decentralized, E2E encrypted messaging protocol using Signal Protocol (X3DH + Double Ratchet). Transport is provided through `@microsoft/agent-governance-sdk` (upstream) wrapped by the in-repo `@azureclaw/mesh` provider, selected at runtime via `createMeshTransport()`.
+
+> **History note:** Earlier releases used a vendored fork of `@agentmesh/sdk` with 8+ local patches under `vendor/`. All upstream-relevant fixes have landed in AGT (PRs through the toolkit's 3.x line) and the vendored tree has been removed. The bug table below is preserved as a regression checklist — if any of these symptoms reappear, treat as a regression in the official SDK.
 
 ## Protocol Flow
 ```
@@ -35,8 +37,8 @@ Parent Agent                    Sub-Agent
 - **Session**: KNOCK protocol for policy-gated session establishment
 - **Forward Secrecy**: Per-message key rotation via Double Ratchet
 
-## Vendor Patches (8 bugs fixed)
-All in `vendor/` directory with READMEs explaining each patch:
+## Historical bug catalogue (now-upstream regression checklist)
+All originally fixed via patches in `vendor/` (removed in 2026-05). Listed here as a regression-detection cheatsheet against the current official `@microsoft/agent-governance-sdk`:
 
 | Component | Bug | Fix |
 |-----------|-----|-----|
