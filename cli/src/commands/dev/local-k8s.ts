@@ -381,8 +381,52 @@ async function rebuildDevImages(
   repoRoot: string,
   archToken: string,
   forceAll: boolean,
+  agtRepo?: string,
 ): Promise<string[]> {
   const platform = `linux/${archToken}`;
+  // Resolve the AGT SDK tarball path. The Dockerfile's `AGT_SDK_TARBALL`
+  // build-arg, when non-empty, swaps the stock npm install of
+  // @microsoft/agent-governance-sdk@^3.5.0 (which is missing
+  // MeshClient.registerSelf / autoRegister / registry-client.js — i.e.
+  // sub-agents never POST /v1/agents, so peers cannot discover them and
+  // mesh communication silently fails) for a local tarball that ships
+  // those pieces. Mirrors the auto-discovery logic dev.ts uses for the
+  // docker target so local-k8s isn't second-class on the mesh path.
+  let agtSdkTarballBasename: string | undefined;
+  let agtSdkTarballHostPath: string | undefined;
+  if (agtRepo) {
+    try {
+      const fsMod = await import("node:fs");
+      const tsDir = path.join(agtRepo, "agent-governance-typescript");
+      const candidates = fsMod
+        .readdirSync(tsDir)
+        .filter((f) => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"))
+        .sort();
+      if (candidates.length > 0) {
+        const picked = candidates[candidates.length - 1];
+        const stagingDir = path.join(repoRoot, ".agt-sdk");
+        if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
+        // Clean previous staged tarballs so build context stays tight
+        for (const f of fsMod.readdirSync(stagingDir)) {
+          if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
+            fsMod.unlinkSync(path.join(stagingDir, f));
+          }
+        }
+        fsMod.copyFileSync(path.join(tsDir, picked), path.join(stagingDir, picked));
+        agtSdkTarballBasename = picked;
+        agtSdkTarballHostPath = path.join(tsDir, picked);
+      }
+    } catch {
+      // AGT repo not laid out as expected — fall through to npm fallback.
+    }
+  }
+  if (agtSdkTarballBasename) {
+    console.log(chalk.dim(`  Using patched AGT SDK tarball: ${agtSdkTarballHostPath}\n`));
+  } else if (agtRepo) {
+    console.log(chalk.yellow(
+      `  Warning: no microsoft-agent-governance-sdk-*.tgz found under ${path.join(agtRepo, "agent-governance-typescript")} — falling back to npm @^3.5.0 (mesh registration will not work).\n`,
+    ));
+  }
   type Spec = { name: string; tag: string; build: () => Promise<void> };
   const specs: Spec[] = [
     {
@@ -437,6 +481,10 @@ async function rebuildDevImages(
           "--platform", platform,
           "--build-arg", `SANDBOX_BASE_IMAGE=${baseTag}`,
           "--build-arg", `INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:dev`,
+          "--build-arg", `MESH_PROVIDER=agt`,
+          ...(agtSdkTarballBasename
+            ? ["--build-arg", `AGT_SDK_TARBALL=${agtSdkTarballBasename}`]
+            : []),
           "-t", "azureclaw-sandbox:dev",
           "-f", path.join(repoRoot, "sandbox-images/openclaw/Dockerfile"),
           repoRoot,
@@ -642,8 +690,12 @@ async function provisionDevCreds(
           "          key: api-key",
         ]
       : []),
+    // FOUNDRY_PROJECT_ENDPOINT is emitted by the chart from
+    // `foundry.projectEndpoint` (templates/controller-deployment.yaml).
+    // Setting it via extraEnv would collide on server-side apply with a
+    // "duplicate entries for key" error, so set the value here instead.
     ...(creds.foundryProjectEndpoint
-      ? ["    - name: FOUNDRY_PROJECT_ENDPOINT", `      value: "${creds.foundryProjectEndpoint}"`]
+      ? ["foundry:", `  projectEndpoint: "${creds.foundryProjectEndpoint}"`]
       : []),
     "inferenceRouter:",
     "  azure:",
@@ -838,6 +890,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       repoRootForBuild,
       archToken,
       opts.forceRebuild === true,
+      opts.agtRepo,
     );
     if (built.length === 0) {
       stepper.done(`images already match host arch (${archToken})`);
@@ -1189,10 +1242,22 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
   await execa(tools.helm, ["repo", "update", "headlamp"]);
 
   // Render-and-apply (consistent with how we apply the azureclaw chart).
+  //
+  // NOTE: the chart version is pinned. The AzureClaw Headlamp plugin
+  // (tools/headlamp-plugin) is built against @kinvolk/headlamp-plugin
+  // ^0.13.0 and depends on a specific `pluginLib` API surface
+  // (K8s.cluster.KubeObject, CommonComponents.SimpleTable/SectionBox/Link).
+  // Newer chart releases (0.42+) ship Headlamp images whose runtime API
+  // has drifted enough that our plugin fails to mount its sidebar entries
+  // or crashes in the list view. Pinning keeps `azureclaw dev` reproducible
+  // until we re-test against a newer version and bump intentionally.
+  const HEADLAMP_CHART_VERSION = "0.41.0";
   const { stdout } = await execa(tools.helm, [
     "template",
     "headlamp",
     "headlamp/headlamp",
+    "--version",
+    HEADLAMP_CHART_VERSION,
     "--namespace",
     "headlamp",
     "--set",
@@ -1556,6 +1621,34 @@ function resolveChannelTokens(
 }
 
 /**
+ * Look up the saved Telegram allow-from list (comma-separated numeric
+ * user IDs) from `azureclaw credentials`. Mirrors how docker mode
+ * resolves it (see `cli/src/commands/dev.ts` ~line 1260). Without
+ * this, local-k8s sandboxes start the Telegram channel unrestricted
+ * (any chat can DM the bot) while docker mode honours the allow-list,
+ * causing a confusing inconsistency between the two `dev --target`
+ * profiles.
+ */
+function resolveTelegramAllowFrom(channels: string | undefined): string | undefined {
+  if (!channels) return undefined;
+  const parts = String(channels)
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  for (const ch of parts) {
+    const dotIdx = ch.indexOf(".");
+    const base = dotIdx > 0 ? ch.slice(0, dotIdx) : ch;
+    const suffix = dotIdx > 0 ? ch.slice(dotIdx) : "";
+    if (base !== "telegram") continue;
+    const baseKey = "telegram-allow-from";
+    const v =
+      (suffix ? getSecret(baseKey + suffix) : undefined) ?? getSecret(baseKey);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+/**
  * Auto-create the sandbox in the cluster: a one-shot YAML bundle with
  * the namespace, optional credentials Secret (telegram/slack/discord
  * tokens), the InferencePolicy CR, and the ClawSandbox CR. Server-side
@@ -1581,6 +1674,7 @@ async function autoCreateSandbox(
   // / SLACK_BOT_TOKEN / DISCORD_BOT_TOKEN flow into the sandbox the
   // same way docker mode passes them via `-e`.
   const channelTokens = resolveChannelTokens(opts.channels);
+  const telegramAllowFrom = resolveTelegramAllowFrom(opts.channels);
   const credsBlock =
     Object.keys(channelTokens).length > 0
       ? [
@@ -1595,6 +1689,9 @@ async function autoCreateSandbox(
           ...(channelTokens.telegram
             ? [`  TELEGRAM_BOT_TOKEN: "${channelTokens.telegram}"`]
             : []),
+          ...(telegramAllowFrom
+            ? [`  TELEGRAM_ALLOW_FROM: "${telegramAllowFrom}"`]
+            : []),
           ...(channelTokens.slack
             ? [`  SLACK_BOT_TOKEN: "${channelTokens.slack}"`]
             : []),
@@ -1605,6 +1702,7 @@ async function autoCreateSandbox(
         ].join("\n")
       : "";
 
+  const toolPolicyName = `${opts.name}-toolpolicy`;
   const yaml = [
     "---",
     "apiVersion: v1",
@@ -1635,6 +1733,26 @@ async function autoCreateSandbox(
     "    dailyTokens: 500000",
     "    perRequestTokens: 128000",
     "---",
+    // Default ToolPolicy stub. The inference router unconditionally
+    // injects `governance.toolPolicyRef = "<parent>-toolpolicy"` into
+    // every spawned sub-agent CR (see inference-router/src/spawn/mod.rs
+    // build_sub_agent_crd). Without this stub, every spawn lands in
+    // Degraded with `ToolPolicyNotFound`. Permissive default — selector
+    // matches the parent's sandbox label only, no rate-limit, no
+    // approval, no commerce. Operators tighten via `azureclaw toolpolicy`.
+    "apiVersion: azureclaw.azure.com/v1alpha1",
+    "kind: ToolPolicy",
+    "metadata:",
+    `  name: ${toolPolicyName}`,
+    "  namespace: azureclaw-system",
+    "  labels:",
+    `    azureclaw.azure.com/sandbox: ${opts.name}`,
+    "spec:",
+    "  appliesTo:",
+    '    tool: "*"',
+    "    sandboxMatchLabels:",
+    `      azureclaw.azure.com/sandbox: ${opts.name}`,
+    "---",
     "apiVersion: azureclaw.azure.com/v1alpha1",
     "kind: ClawSandbox",
     "metadata:",
@@ -1660,9 +1778,32 @@ async function autoCreateSandbox(
     "      - /tmp",
     "  inferenceRef:",
     `    name: ${policyName}`,
+    // Enable AGT governance on the parent so the controller injects
+    // AGT_RELAY_URL / AGT_REGISTRY_URL / AGT_GOVERNANCE_ENABLED into both
+    // the openclaw + inference-router containers (controller/src/reconciler/
+    // mod.rs:1111). Without this the parent never joins the mesh and
+    // mesh sends from sub-agents back to the parent (and parent → child
+    // discovery) fail. Sub-agents are auto-enabled by the router spawn
+    // helper (inference-router/src/spawn/mod.rs:673); the parent must be
+    // enabled here because the dev YAML is the source of truth for it.
+    "  governance:",
+    "    enabled: true",
+    "    toolPolicyRef:",
+    `      name: ${toolPolicyName}`,
+    "    trustThreshold: 500",
+    "    registryMode: local",
+      // Dev profile: run egress in learn mode so the forward proxy
+    // (inference-router/src/forward_proxy.rs) logs new domains instead
+    // of blocking them. Without this, channel integrations (Telegram,
+    // Slack, Discord) fail at first run with
+    //   `Network request for 'deleteMyCommands' failed`
+    // because api.telegram.org / slack.com / discord.com aren't on the
+    // allowlist. Operators promote learned domains to a strict
+    // allowlist via `azureclaw policy allow` once they're happy.
     "  networkPolicy:",
     "    defaultDeny: true",
     "    approvalRequired: false",
+    "    learnEgress: true",
     "    allowedEndpoints: []",
     "",
   ].join("\n");
@@ -1763,33 +1904,39 @@ async function startSandboxConnect(
   const ns = `azureclaw-${name}`;
   const localPort = 18789;
 
-  // The token is written by entrypoint.sh AFTER plugin init + bashrc setup
-  // (~line 1229), which can take 60-120s on first run since openclaw also
-  // does a cold npm install. We wait up to 3 minutes — anything less and
-  // the auto-opened browser hits "unauthorized: gateway token missing"
-  // even though the gateway will start fine moments later.
+  // The token is provisioned by the controller as a K8s Secret named
+  // `gateway-token` in the sandbox namespace. The openclaw container reads
+  // it via the OPENCLAW_GATEWAY_TOKEN env var. We must NOT `kubectl exec
+  // cat /tmp/gateway-token` here — that path is blocked by the
+  // ValidatingAdmissionPolicy `azureclaw-sandbox-exec-ban` and silently
+  // 403s, causing this loop to time out after ~3 minutes even though the
+  // gateway is up.
+  //
+  // Reading the Secret matches `azureclaw connect`'s behavior (see
+  // cli/src/commands/connect.ts ~line 143) and is gated by namespaced
+  // RBAC on the Secret instead of a cluster-wide exec capability.
   let token = "";
-  const maxAttempts = 180;
+  const maxAttempts = 60;
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      const { stdout } = await execa(tools.kubectl, [
-        "exec",
+      const { stdout: tokenB64 } = await execa(tools.kubectl, [
+        "get",
+        "secret",
         "-n",
         ns,
-        `deploy/${name}`,
-        "-c",
-        "openclaw",
-        "--",
-        "cat",
-        "/tmp/gateway-token",
+        "gateway-token",
+        "-o",
+        "jsonpath={.data.token}",
       ]);
-      const trimmed = stdout.trim();
+      const trimmed = tokenB64.trim();
       if (trimmed) {
-        token = trimmed;
-        break;
+        token = Buffer.from(trimmed, "base64").toString("utf-8").trim();
+        if (token) {
+          break;
+        }
       }
     } catch {
-      // pod may still be starting; retry
+      // Secret may not exist yet — controller writes it as part of reconcile.
     }
     await new Promise(r => setTimeout(r, 1000));
   }
