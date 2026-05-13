@@ -97,22 +97,35 @@ describe("inspect — renderEntry", () => {
 });
 
 describe("inspect — POLICY_KIND_LABEL", () => {
-  it("maps every PolicyKind wire string we render today + the planned ones", () => {
-    // Today the router only emits `AgtProfile` + `InferencePolicy`
-    // (`inference-router/src/policy_status.rs::PolicyKind::as_str`).
-    // The CLI carries defensive mappings for the kinds Slice 1b/3/4/5
-    // will add (ToolPolicy/MemoryStore/Egress) so a partial-rollout
-    // cluster where the router is ahead of the CLI still prints
-    // sensible labels.
+  it("maps every PolicyKind wire string the router emits today", () => {
+    // Wire kinds emitted by
+    // `inference-router/src/policy_status.rs::PolicyKind::as_str`:
+    //   AgtProfile (Slice 1a) — controller-side AGT profile aggregate.
+    //   ToolPolicy (Slice 1b/c) — compiled ToolPolicy artifacts.
+    //   InferencePolicy (Slice 2a) — compiled InferencePolicy.
+    //   Egress (future) — defensive carry-over.
+    //   Memory (Slice 3a) — compiled ClawMemory binding.
+    //
+    // A partial-rollout cluster where the router is ahead of the CLI
+    // still prints sensible labels for the kinds the CLI knows.
     for (const wire of [
       "ToolPolicy",
       "AgtProfile",
       "InferencePolicy",
       "Egress",
-      "MemoryStore",
+      "Memory",
     ]) {
       expect(POLICY_KIND_LABEL[wire]).toBeTypeOf("string");
       expect(POLICY_KIND_LABEL[wire]).not.toBe("");
     }
+  });
+
+  it("renders the Slice 3a `Memory` wire kind as `ClawMemory`", () => {
+    // Slice 3a contract: the router emits `PolicyKind::Memory`
+    // (as_str="Memory") for the compiled binding mounted at
+    // `/etc/azureclaw/memory/binding.json`. The CLI must display
+    // the user-facing CRD name so `inspect` reads naturally next
+    // to `kubectl get clawmemory`.
+    expect(POLICY_KIND_LABEL["Memory"]).toBe("ClawMemory");
   });
 });

@@ -228,7 +228,11 @@ function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: Kube
   // Only the policy CRDs that the router actually loads carry these
   // fields. ClawSandbox, McpServer, etc. don't participate in the
   // digest-echo loop yet.
-  if (crd.plural !== "toolpolicies" && crd.plural !== "inferencepolicies") {
+  if (
+    crd.plural !== "toolpolicies" &&
+    crd.plural !== "inferencepolicies" &&
+    crd.plural !== "clawmemories"
+  ) {
     return null;
   }
   const status = getStatus(item);
