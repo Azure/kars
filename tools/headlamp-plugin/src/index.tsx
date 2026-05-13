@@ -184,6 +184,96 @@ function urlParams(re: RegExp): RegExpMatchArray | null {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Router policy-status panel (crd-well-oiled-machine Slice 1d.2)
+//
+// For policy CRDs that participate in the §3 "Ready ⇔ router echo"
+// loop, the controller stamps `status.compiledDigest` /
+// `status.agtProfileDigest` (the bytes the controller wrote) plus a
+// `status.loadedDigest` (the bytes the router actually loaded — only
+// populated once every referencing sandbox echoes the digest). The
+// `Ready` condition's `reason` carries the live confirmation state
+// (`RouterEnforcing` / `AwaitingRouterEnforcement` /
+// `NoSandboxesReferencing`). This panel surfaces all three in one
+// place so operators don't have to grep `status.conditions`.
+//
+// Pure read of fields the controller already writes — zero new API
+// traffic, no kube-apiserver proxy round-trips, no admin token
+// plumbing. Mirrors the data the `azureclaw inspect <sandbox>` CLI
+// surfaces (Slice 1d) but on the producer side.
+// ──────────────────────────────────────────────────────────────────────
+
+function shortDigest(digest: string | undefined): string {
+  if (!digest) return "—";
+  const colon = digest.indexOf(":");
+  if (colon < 0 || colon + 13 >= digest.length) return digest;
+  return `${digest.slice(0, colon + 1)}${digest.slice(colon + 1, colon + 13)}…`;
+}
+
+function reasonChip(reason: string | undefined) {
+  if (!reason) return <span>—</span>;
+  const success = reason === "RouterEnforcing" || reason === "AllDigestsMatch";
+  const neutral =
+    reason === "NoSandboxesReferencing" || reason === "AsExpected";
+  const status: StatusKind = success
+    ? "success"
+    : neutral
+      ? ""
+      : reason === "AwaitingRouterEnforcement"
+        ? "warning"
+        : "error";
+  return <StatusLabel status={status as any}>{reason}</StatusLabel>;
+}
+
+function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
+  // Only the policy CRDs that the router actually loads carry these
+  // fields. ClawSandbox, McpServer, etc. don't participate in the
+  // digest-echo loop yet.
+  if (crd.plural !== "toolpolicies" && crd.plural !== "inferencepolicies") {
+    return null;
+  }
+  const status = getStatus(item);
+  const conditions = (status.conditions as Array<Record<string, any>> | undefined) ?? [];
+  const ready = conditions.find(c => c.type === "Ready");
+  const compiled =
+    crd.plural === "toolpolicies"
+      ? (status.agtProfileDigest as string | undefined)
+      : (status.compiledDigest as string | undefined);
+  const loaded = status.loadedDigest as string | undefined;
+  const echo =
+    !compiled
+      ? "—"
+      : loaded && loaded === compiled
+        ? "✓ matches"
+        : loaded
+          ? "≠ mismatched"
+          : "(awaiting)";
+
+  return (
+    <SectionBox title="Router enforcement (data-plane echo)">
+      <SimpleTable
+        data={[
+          { k: "Compiled digest", v: shortDigest(compiled) },
+          { k: "Loaded digest", v: shortDigest(loaded) },
+          { k: "Echo", v: echo },
+          { k: "Confirmation", v: reasonChip(ready?.reason as string | undefined) },
+        ]}
+        columns={[
+          { label: "Field", getter: (r: any) => r.k },
+          { label: "Value", getter: (r: any) => r.v },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        The controller polls every referencing sandbox's router and promotes
+        <code> phase: Compiled → Ready </code> only when every router echoes
+        the exact compiled digest. While{" "}
+        <code>AwaitingRouterEnforcement</code>, the policy is parsed but
+        <strong> not</strong> live in the data plane.
+      </p>
+    </SectionBox>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Overview dashboard
 // ──────────────────────────────────────────────────────────────────────
 
@@ -613,6 +703,8 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
       </SectionBox>
 
       {crd.plural === "clawsandboxes" && <SandboxExtras item={item} />}
+
+      <RouterPolicyStatusPanel crd={crd} item={item} />
 
       <SectionBox title="Spec">
         <pre style={{ maxHeight: "400px", overflow: "auto" }}>
