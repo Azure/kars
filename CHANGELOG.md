@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1d.2 — Headlamp "Router enforcement" panel
+
+Companion to Slice 1d's CLI. Every ToolPolicy / InferencePolicy
+detail page in the Headlamp dashboard now carries a **Router
+enforcement (data-plane echo)** SectionBox that surfaces, in one
+glance, whether the policy is live in the data plane or merely
+compiled:
+
+* **Compiled digest** — the bytes the controller wrote.
+* **Loaded digest** — the bytes the router echoed back (only present
+  once §3 echo confirms).
+* **Echo** — `✓ matches` / `≠ mismatched` / `(awaiting)`.
+* **Confirmation** — the `Ready` condition's reason rendered as a
+  colored chip: `RouterEnforcing` (green), `NoSandboxesReferencing`
+  (neutral), `AwaitingRouterEnforcement` (amber), anything else
+  (red).
+
+Pure read of `status.compiledDigest` / `status.agtProfileDigest` /
+`status.loadedDigest` / `status.conditions` — fields the controller
+already writes. **Zero new API traffic, no kube-apiserver service
+proxy, no admin-token plumbing in the operator browser.** Mirrors
+the data the `azureclaw inspect <sandbox>` CLI surfaces, but on the
+producer side rather than the consumer side, so an operator can
+diagnose a Compiled-stuck-at-amber CR without leaving the dashboard.
+
+Defensive defaults: unknown phase or condition reason renders as
+amber/warning rather than success. Unknown digest format passes
+through unchanged (no slicing crash on non-sha256 algorithms).
+
 ### Slice 1d — `azureclaw inspect <sandbox>` CLI
 
 Operator-facing data-plane view of the policy CRDs a sandbox's
