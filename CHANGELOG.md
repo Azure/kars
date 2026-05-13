@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 4e — Slice 4 docs consolidation (DoD #8)
+
+Closes Slice 4 DoD #8 (*"CHANGELOG + `docs/api/mcpserver.md` updated"*).
+Per-CRD doc pages have been consolidated into
+[`docs/api/crd-reference.md`](docs/api/crd-reference.md) +
+[`docs/api/lifecycle.md`](docs/api/lifecycle.md) since Slice 1; the
+remaining gap was stale singular-form prose:
+
+- `docs/api/crd-reference.md`: `spec.mcpRefs` corrected to
+  `spec.mcpServerRefs`; `McpServer` section rewritten to reflect the
+  Slice 4 plural model — per-server `/etc/azureclaw/mcp/<name>/`
+  volumes, multi-issuer `OAuthVerifier`, namespaced
+  `{server}.{tool}` dispatch, `allowed_tools` semantics
+  (`["*"]` vs explicit subset vs empty = fail-closed).
+- `docs/api/lifecycle.md`: `/v1/mcp/*` proxy reference updated to
+  `/mcp` (the actual route); new "Plural binding (`mcpServerRefs`,
+  Slice 4)" subsection documents the per-server volume layout,
+  OAuth verifier population (4d.3), and namespaced forwarder
+  catalog (4d.4); `Ready` row gains plural-McpServer + ClawMemory
+  echo coverage. Stale-file sweep (DoD #6) explicitly documented
+  as producer-side: each reconcile rewrites the current ref set,
+  removed-server volumes disappear on next kubelet pod sync.
+
+No code changes. Closes Slice 4.
+
 ### Slice 4d.4 — namespaced MCP tool forwarder (DoD #3 — dispatch half)
 
 Closes the dispatch half of Slice 4 DoD #3 (*"…with namespaced tool

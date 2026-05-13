@@ -72,7 +72,7 @@ status:
 | `spec.inferenceRef.name` | LocalObjectReference | Bind to an `InferencePolicy` (model, tokens, region). If unset, the cluster default applies. |
 | `spec.policyRef.name` | LocalObjectReference | Bind to a `ToolPolicy`. If unset, the runtime ships with a deny-all default. |
 | `spec.memoryRef.name` | LocalObjectReference | Bind to a `ClawMemory`. |
-| `spec.mcpRefs` | `[]LocalObjectReference` | List of `McpServer` resources the agent may call. |
+| `spec.mcpServerRefs` | `[]LocalObjectReference` | List of `McpServer` resources the agent may call. The controller mirrors each referenced server's JWKS + signing keys into per-server volumes under `/etc/azureclaw/mcp/<name>/` (Slice 4d.2); the inference router builds a multi-issuer OAuth verifier and a namespaced tool catalog (`{server}.{tool}` — Slice 4d.3 / 4d.4) over those mounts. Up to 8 entries; unique by `name`. The deprecated singular `spec.mcpServerRef` (singular form) is still accepted as input but emits a `Warning` event and is folded into `mcpServerRefs` on reconcile. |
 | `spec.mesh.enabled` | bool | Register with AgentMesh. Defaults `false`. |
 | `spec.mesh.trustRef.name` | LocalObjectReference | Bind to a `TrustGraph` (cluster-scoped). |
 | `spec.governance.profile` | string | Name of a profile under `policy-engine/profiles/`. Defaults to `standard`. |
@@ -115,7 +115,7 @@ The `agentCard.trustAnchorRef` configures which signers' AgentCards the gateway 
 
 ## `McpServer` — declared MCP backend
 
-Declares an MCP server the sandbox may call. The router enforces — calls to an MCP host that is not declared are denied.
+Declares an MCP server the sandbox may call. The router enforces — calls to an MCP host that is not declared are denied. As of Slice 4, a `ClawSandbox` may bind up to 8 `McpServer`s via `spec.mcpServerRefs`; the controller mirrors per-server JWKS + signing keys into `/etc/azureclaw/mcp/<name>/{jwks.json,meta.json}` and the router exposes tools under the namespaced name `{server}.{tool}` (e.g. `github_mcp.repo_search`). Inbound MCP requests are verified against a multi-issuer `OAuthVerifier` keyed by `oauth.issuer`.
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -124,12 +124,20 @@ metadata:
   name: github-mcp
 spec:
   url: https://api.githubcopilot.com/mcp
-  auth:
-    kind: OAuth                    # or ApiKey | ServiceAccount | None
-    secretRef: { name: github-mcp-creds }
-  scopes: ["read:repo"]
-  contentSafety: required          # or optional | off
+  oauth:
+    issuer: https://github.com/login/oauth
+    audience: azureclaw-mcp
+  allowedTools: ["*"]                # or explicit list; empty list fails closed
+  contentSafety: required            # or optional | off
 ```
+
+| Field | Purpose |
+|---|---|
+| `spec.url` | Upstream MCP endpoint. The router proxies `tools/list` + `tools/call` over JSON-RPC. |
+| `spec.oauth.issuer` | OAuth 2.1 issuer URL. The controller fetches the JWKS and mirrors it to the sandbox; the router verifies inbound MCP-host bearer tokens against it. |
+| `spec.oauth.audience` | Optional. When set, the router enforces the `aud` claim. |
+| `spec.allowedTools` | Allow-list of tool names exposed to the agent. `["*"]` exposes the entire upstream catalog; an explicit list selects a subset; an **empty** list fails closed and the server is skipped with reason `allowed_tools is empty` on the registry. |
+| `spec.contentSafety` | `required` \| `optional` \| `off` — content-safety floor applied to MCP responses. |
 
 ---
 
