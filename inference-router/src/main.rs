@@ -298,6 +298,7 @@ async fn main() -> Result<()> {
             });
 
         let memory_binding_for_platform = state.memory_binding.clone();
+        let policy_status_for_platform = state.policy_status.clone();
         let merged = public
             .merge(protected)
             .merge(handoff_init)
@@ -305,7 +306,10 @@ async fn main() -> Result<()> {
             .merge(handoff_status)
             .with_state(state)
             .merge(build_mcp_router())
-            .merge(build_platform_mcp_router(Some(memory_binding_for_platform)));
+            .merge(build_platform_mcp_router(
+                Some(memory_binding_for_platform),
+                Some(policy_status_for_platform),
+            ));
 
         let merged = if let Some(a2a) = a2a_router_opt {
             merged.merge(a2a)
@@ -518,8 +522,11 @@ fn build_platform_mcp_router(
     memory_binding: Option<
         azureclaw_inference_router::memory_binding_loader::LoadedMemoryBindingHandle,
     >,
+    policy_status: Option<
+        std::sync::Arc<azureclaw_inference_router::policy_status::PolicyStatusRegistry>,
+    >,
 ) -> Router {
-    let state = routes::McpRouteState::platform(memory_binding);
+    let state = routes::McpRouteState::platform(memory_binding, policy_status);
     tracing::info!(
         "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"
     );
