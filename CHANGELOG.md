@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2b — InferencePolicy `tokenBudget.dailyTokens` / `monthlyTokens` enforcement + UTC-calendar persistence
+
+Second axis of `InferencePolicy` now actually enforced. Combined with
+Slice 2a's `perRequestTokens` gate, the router now rejects inference
+calls pre-forward when **either** the requested `max_tokens` overshoots
+the per-request cap, **or** the running sandbox-keyed daily / monthly
+counter has reached its policy-defined limit. Counters reset on
+**UTC-calendar** boundaries (daily at UTC midnight, monthly on the 1st
+of the month UTC) and survive router restarts via on-disk JSON
+persistence.
+
+**Router:**
+- `inference-router/src/budget.rs` rewritten (~300 LOC + 16 tests):
+  - `TokenBudgetTracker::check_budget(sandbox, daily, monthly)` now
+    takes the limits per-call so callers can source them from the
+    loaded `InferencePolicy` and policy hot-reload takes effect on
+    the next request without the tracker holding stale config.
+  - Daily / monthly counters keyed by `(day_key, month_key)` where
+    `day_key` is unix-days-since-CE and `month_key` is
+    `year*12 + month0` — both strictly monotonic, both roll over
+    cleanly across year boundaries (test
+    `year_boundary_rolls_both_counters` proves it).
+  - Injectable `Clock` trait (`SystemClock` in prod, `FixedClock` in
+    tests) drives all UTC-boundary tests deterministically.
+  - `with_persistence(daily_default, per_request, path)` ctor loads
+    counters on construction and writes atomically (write tmp → fsync
+    → rename) on every `record_usage`. Corrupt / missing file = empty
+    start (logged WARN; over-counting safer than under-counting).
+  - Legacy `check_budget(sandbox)` removed; `check_budget_legacy` kept
+    as a back-compat shim for tests / future-removed paths.
+- `inference-router/src/inference_policy_loader.rs`:
+  - `LoadedInferencePolicy` gains `daily_tokens` + `monthly_tokens`
+    fields (parsed from `tokenBudget.{dailyTokens,monthlyTokens}`).
+    Digest layout unchanged — the controller already hashed the whole
+    `tokenBudget` block, so existing Slice 2a digests stay byte-stable.
+  - New `current_daily_monthly_limits(handle) -> (Option<u64>,
+    Option<u64>)` helper called by all three inference handlers (chat,
+    inference, anthropic) so the budget-tracker lookup is one line at
+    each call site.
+- `routes/{chat_completions,inference,anthropic_messages}.rs` updated
+  to derive daily/monthly limits from the loaded policy before each
+  budget check. Env-driven `TOKEN_BUDGET_DAILY` stays as a fallback
+  default (back-compat) — applied only when no policy is loaded.
+- `routes/mod.rs` AppState init now uses `with_persistence` by default,
+  pointed at `/var/lib/azureclaw/token-budgets.json` (override via
+  `TOKEN_BUDGET_PERSIST_PATH=`; empty string disables persistence for
+  tests). `mkdir -p` is best-effort; falls back to in-memory if the
+  dir cannot be created.
+
+**Controller:**
+- No changes — the digest layout already covered daily/monthly bytes
+  because the canonical JSON serialises the full `tokenBudget` block.
+  Slice 2a's reconciler closure (echo poll → `Compiled → Ready`)
+  remains the authoritative §3 gate.
+
+**Tests + lint:**
+- 708 router lib tests (was 696; +12 budget tests covering UTC
+  rollover, monthly rollover, year boundary, per-sandbox isolation,
+  policy override semantics, persistence roundtrip, corrupt-file
+  recovery, legacy shim).
+- 531 controller tests (unchanged).
+- clippy `-D warnings` clean on both crates. fmt, helm_drift green.
+
+Closes Slice 2b of `docs/internal/crd-well-oiled-machine/slice-2-inference-policy.md`.
+Open follow-ups: Slice 2c (contentSafety floors + requirePromptShields)
+and Slice 2d (modelPreference failover + CLI inspect + Headlamp panel).
+
 ### Slice 2a — InferencePolicy `tokenBudget.perRequestTokens` enforcement + router-echo
 
 First end-to-end closure of principles.md §3 ("Ready ⇔ router echo")
