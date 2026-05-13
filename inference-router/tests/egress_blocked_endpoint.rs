@@ -137,3 +137,112 @@ async fn endpoint_returns_recorded_blocks() {
     assert_eq!(entries[1]["count"], 2);
     assert_eq!(entries[1]["source_sandbox"], "sb-test");
 }
+
+// ---------------------------------------------------------------------------
+// Slice 5a — `/internal/egress/blocked` + `/internal/egress/blocked/top`
+// ---------------------------------------------------------------------------
+
+fn internal_app(state: AppState) -> Router {
+    Router::new()
+        .merge(azureclaw_inference_router::routes::internal_routes())
+        .with_state(state)
+}
+
+#[tokio::test]
+async fn internal_blocked_returns_empty_when_no_blocks() {
+    let state = test_state();
+    let app = internal_app(state);
+    let (status, body) = get_json(&app, "/internal/egress/blocked").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["count"], 0);
+    assert_eq!(body["since_unix"], 0);
+    assert!(body["entries"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn internal_blocked_returns_entries_with_rfc3339_strings() {
+    let state = test_state();
+    state
+        .blocked_egress
+        .record("sb-test", "evil.example.com", 443);
+
+    let app = internal_app(state);
+    let (status, body) = get_json(&app, "/internal/egress/blocked").await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert_eq!(e["host"], "evil.example.com");
+    assert_eq!(e["port"], 443);
+    assert_eq!(e["count"], 1);
+    // RFC 3339 strings present alongside raw Unix seconds.
+    let first = e["first_seen"].as_str().unwrap();
+    assert!(first.ends_with('Z'), "first_seen should be RFC 3339 UTC");
+    assert!(e["last_seen"].as_str().unwrap().ends_with('Z'));
+    assert!(e["first_seen_unix"].as_u64().is_some());
+    assert!(e["last_seen_unix"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn internal_blocked_since_relative_filter() {
+    let state = test_state();
+    state
+        .blocked_egress
+        .record("sb-test", "old.example.com", 443);
+    state
+        .blocked_egress
+        .record("sb-test", "new.example.com", 443);
+
+    let app = internal_app(state);
+    // -1h relative: both records are <1h old → both returned.
+    let (status, body) = get_json(&app, "/internal/egress/blocked?since=-1h").await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    // since_unix is echoed and non-zero (now - 1h).
+    assert!(body["since_unix"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn internal_blocked_top_aggregates_and_truncates() {
+    let state = test_state();
+    state.blocked_egress.record("sb1", "a.example.com", 443);
+    state.blocked_egress.record("sb2", "a.example.com", 443);
+    state.blocked_egress.record("sb1", "b.example.com", 443);
+
+    let app = internal_app(state);
+    let (status, body) = get_json(&app, "/internal/egress/blocked/top?window=1h&n=10").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["window"], "1h");
+    let top = body["top"].as_array().unwrap();
+    assert_eq!(top.len(), 2);
+    // a.example.com has count 2 across two sandboxes → first.
+    assert_eq!(top[0]["host"], "a.example.com");
+    assert_eq!(top[0]["count"], 2);
+    assert_eq!(top[1]["host"], "b.example.com");
+    assert_eq!(top[1]["count"], 1);
+}
+
+#[tokio::test]
+async fn internal_blocked_top_defaults_n_and_window() {
+    let state = test_state();
+    state.blocked_egress.record("sb1", "h.example.com", 443);
+    let app = internal_app(state);
+    let (status, body) = get_json(&app, "/internal/egress/blocked/top").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["n"], 10);
+    assert_eq!(body["window"], "5m");
+    assert_eq!(body["top"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn internal_blocked_top_caps_n_at_100() {
+    let state = test_state();
+    let app = internal_app(state);
+    let (status, body) = get_json(&app, "/internal/egress/blocked/top?n=9999").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["n"], 100);
+}

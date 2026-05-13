@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5a — Surface blocked egress attempts (DoD #1)
+
+First slice in the Slice 5 "egress polish + observability" sequence.
+Closes Slice 5 DoD #1 (*"`azureclaw egress blocked` lists every host the
+agent attempted that the enforcement layer refused"*) by exposing the
+existing in-process `BlockedBuffer` over operator-facing surfaces.
+
+- `inference-router/src/egress_blocked.rs`: new `snapshot_since` +
+  `top_hosts` methods on `BlockedBuffer`. Newest-first ordering by
+  `last_seen_unix`; `top_hosts` aggregates across `(sandbox, port)` by
+  hostname with a deterministic secondary sort for tied counts. 7
+  unit tests cover filter cutoffs, dedup count carry-through,
+  aggregation across sandboxes/ports, `n=0` early return, and the
+  100-cap truncation.
+- `inference-router/src/routes/internal.rs`: two new endpoints
+  mounted on the admin-gated `protected` router:
+  - `GET /internal/egress/blocked?since=<rfc3339|unix|-Nm>` — full list.
+  - `GET /internal/egress/blocked/top?window=<duration>&n=<int>` —
+    top-N rolling-window aggregate.
+  Both emit `schema_version: 1` envelopes carrying RFC 3339 strings
+  alongside raw Unix seconds for downstream parsers. Hand-rolled
+  duration + RFC 3339 parsers (no `chrono` dep) with 7 unit + 6
+  integration tests covering bare seconds, `s/m/h/d` suffixes,
+  relative `-Nm` form, malformed input → `0`, the `n ≤ 100` cap, and
+  the `window` default of 5m.
+- `cli/src/commands/egress/blocked.ts`: new
+  `azureclaw egress blocked <sandbox> [--since 10m] [--top]
+  [--window 1h] [--n 20] [--watch] [--json]` subcommand. Mirrors
+  the `azureclaw inspect` token-resolution path
+  (`router-admin-token` secret first, in-pod `admin-token` file
+  fallback) and uses in-pod `kubectl exec curl` to avoid
+  port-forward collisions. `--watch` re-renders every 5s with VT
+  clear; `--top` overrides `--since` (window is its own filter).
+  13 vitest unit tests cover query-string composition, the renderer
+  surface (HOST/PORT/SANDBOX/LAST_SEEN/COUNT columns, empty-state
+  message, since-filter line, top-N window line) and the
+  `unixToIso(0) === "epoch"` sentinel.
+
+Producer→consumer loop is real and complete: the router has been
+populating `BlockedBuffer` from the forward proxy since S12.f; this
+slice just makes that surface visible to operators without giving
+the agent any new wire access.
+
 ### Slice 4e — Slice 4 docs consolidation (DoD #8)
 
 Closes Slice 4 DoD #8 (*"CHANGELOG + `docs/api/mcpserver.md` updated"*).

@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { getAdminToken, withAdminAuth } from "../router-admin.js";
+import { blockedCommand } from "./egress/blocked.js";
 import {
   EGRESS_ALLOWLIST_MEDIA_TYPE,
   autoDetectSignMode,
@@ -20,6 +21,11 @@ import {
 
 export function egressCommand(): Command {
   const cmd = new Command("egress");
+  // Slice 5a — `azureclaw egress blocked <sandbox>` subcommand surfaces
+  // the router's /internal/egress/blocked view. Kept as a subcommand
+  // rather than another top-level flag so --watch/--top/--since don't
+  // collide with the existing flat-options surface.
+  cmd.addCommand(blockedCommand());
 
   cmd
     .description("Manage network egress: allowlist, approvals, and learn mode")
