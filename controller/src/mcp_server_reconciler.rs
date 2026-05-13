@@ -595,6 +595,20 @@ pub struct McpServerMeta {
     /// in ToolPolicy).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
+    /// Slice 4d.4 — upstream MCP server URL the router forwards
+    /// `tools/call` requests to. Empty when the source `McpServerSpec`
+    /// has no `url` (defensive — admission CEL rejects empty URL but
+    /// be conservative). The router's forwarder skips servers with an
+    /// empty URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Slice 4d.4 — allowed-tools allowlist mirrored from
+    /// `McpServerSpec.allowedTools`. Empty list = no tools allowed
+    /// (fail-closed); `["*"]` = all tools the upstream advertises.
+    /// The router's forwarder filters its discovered catalog through
+    /// this list before exposing tools to the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
 }
 
 impl McpServerMeta {
@@ -611,6 +625,8 @@ impl McpServerMeta {
             issuer,
             audience,
             scopes: spec.scopes.clone(),
+            url: spec.url.clone(),
+            allowed_tools: spec.allowed_tools.clone(),
         }
     }
 }

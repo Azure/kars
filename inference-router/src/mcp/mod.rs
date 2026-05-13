@@ -46,6 +46,7 @@
 //! confusion, kid mismatch, expired token, replayed token.
 
 pub mod error;
+pub mod forwarder;
 pub mod initialize;
 pub mod jsonrpc;
 pub mod oauth;

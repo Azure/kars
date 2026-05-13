@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 /// `OAuthVerifierConfig` — `trusted_issuers` keyed by `issuer`,
 /// `expected_audiences` aggregated from all servers' optional
 /// audience fields.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredMcpServerMeta {
     pub issuer: String,
@@ -48,6 +48,20 @@ pub struct DiscoveredMcpServerMeta {
     pub audience: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
+    /// Slice 4d.4 — upstream MCP server URL the router's
+    /// [`crate::mcp::forwarder::RouterToolDispatcher`] forwards
+    /// `tools/call` requests to. Empty string when missing in
+    /// `meta.json` (pre-4d.4 mirrors) — the forwarder skips such
+    /// entries with a recorded reason.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Slice 4d.4 — allowed-tools allowlist mirrored from
+    /// `McpServerSpec.allowedTools`. Empty list = no tools advertised
+    /// to the agent (fail-closed); `["*"]` = expose every tool the
+    /// upstream advertises. Filtered against discovered upstream
+    /// catalog at startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
 }
 
 /// A single McpServer discovered under `MCP_JWKS_DIR`.

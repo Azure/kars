@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 4d.4 — namespaced MCP tool forwarder (DoD #3 — dispatch half)
+
+Closes the dispatch half of Slice 4 DoD #3 (*"…with namespaced tool
+names; tool calls route to the correct upstream"*). The router no
+longer serves only the in-tree `EchoDispatcher` at `/mcp` — when at
+least one McpServer is discovered with a usable upstream URL, traffic
+is dispatched to a new `RouterToolDispatcher` that proxies into the
+upstream MCP server declared by `McpServer.spec.url`.
+
+What this PR adds:
+
+- **Controller — `McpServerMeta` extension.** `mcp_server_reconciler.rs`
+  now writes two additional fields into the per-server `meta.json`
+  key alongside Slice 4d.3's OAuth metadata: `url` (the upstream MCP
+  server URL) and `allowedTools` (the per-server allow-list). Empty
+  fields are skipped via `skip_serializing_if` to keep the wire shape
+  forward-compatible.
+- **Router — `DiscoveredMcpServerMeta` extension.** `mcp::registry`'s
+  consumer-side struct gains the matching `url` + `allowed_tools`
+  fields. The struct now derives `Default` so future field additions
+  don't break test fixtures (4 existing test literals updated to use
+  `..Default::default()` trailing spread for forward-compat).
+- **Router — `mcp::forwarder` module (new).** Introduces
+  `RouterToolDispatcher` implementing `AsyncToolDispatcher`. At
+  startup, `RouterToolDispatcher::discover()` walks the registry and
+  for each server:
+    - POSTs JSON-RPC `tools/list` to `meta.url` (per-call timeout,
+      default 5 s, configurable via `MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS`).
+    - Filters the response through `meta.allowed_tools` (`["*"]`
+      exposes every upstream tool; an explicit list selects the
+      named subset; empty fails closed).
+    - Prefixes each tool with the server's snake_case name (so
+      `github-mcp` exposing `search` is advertised as
+      `github_mcp.search`).
+  Servers with empty URL, empty allow-list, an OAuth requirement
+  (deferred to Slice 4d.5), unreachable upstreams, or HTTP/JSON-RPC
+  errors during discovery are recorded in `skipped` with a human-
+  readable reason and excluded from the catalog. The router still
+  starts — operators see the gap via the structured logs at startup.
+- **Router — `mcp::tools::AsyncToolDispatcher` swap-in.**
+  `McpRouteState` gains a `with_tools()` builder. When the registry
+  is non-empty, `main::build_mcp_router()` swaps the default
+  `EchoDispatcher` for the forwarder via that builder; otherwise
+  the existing dev/echo behaviour is preserved untouched.
+- **Dispatch path.** On `tools/call`, `RouterToolDispatcher::invoke`
+  splits the namespaced name on the first `.` to find the
+  destination server, then forwards a JSON-RPC `tools/call`
+  envelope to the upstream URL. Upstream protocol errors surface
+  as `is_error: true` `ToolCallOutput`s; HTTP 5xx/4xx surface as
+  `DispatchError::ExecutionFailed`; missing prefixes / unknown
+  suffixes surface as `DispatchError::UnknownTool`.
+
+Outbound auth scope: **unauthenticated upstreams only.** Servers
+whose `meta.json` carries an `issuer` are deliberately skipped with
+`reason = "outbound OAuth unsupported in 4d.4 …"` — outbound OAuth
+(client-credentials / on-behalf-of) lands in Slice 4d.5 once we
+have a real credential source wired (sandbox-mounted secret per
+McpServer). This is the §5 anti-scaffolding boundary: the consumer
+that ships in 4d.4 is the one we can actually drive end-to-end.
+
+Test coverage (15 new unit tests in `mcp::forwarder::tests`,
+exercising both happy path and every skip-reason branch):
+
+- `server_name_to_prefix_converts_hyphens` — name→prefix mapping.
+- `split_namespaced_name_happy_and_edge` — dispatch parser including
+  multi-dot tool suffixes (`foundry.memory.update` survives intact).
+- `filter_by_allowlist_star_returns_all` / `_named_subset` — the
+  two allow-list semantics, asserted on real `ToolDefinition`s.
+- `discover_happy_path_builds_namespaced_catalog` — full end-to-end:
+  mock upstream `tools/list` → forwarder catalog carries the
+  prefixed names.
+- `discover_filters_by_allow_list` — same, with a non-`*` allow-list.
+- `discover_skips_servers_with_empty_url` /
+  `_requiring_outbound_oauth` / `_with_empty_allow_list` /
+  `_whose_upstream_returns_500` — each skip reason is recorded with
+  the expected substring (operator-actionable).
+- `invoke_forwards_call_and_returns_content` — `tools/call`
+  round-trips through the mock upstream and the agent sees the
+  upstream-provided content unchanged.
+- `invoke_unknown_tool_returns_unknown_tool` — three negative
+  branches (wrong prefix, unknown suffix, no `.` at all).
+- `invoke_surfaces_upstream_json_rpc_error_as_is_error` — JSON-RPC
+  errors collapse into `ToolCallOutput { is_error: true, ... }`
+  (per MCP spec: protocol errors vs. semantic errors).
+- `invoke_returns_execution_failed_on_upstream_5xx` — HTTP 5xx
+  surfaces as `DispatchError::ExecutionFailed` with the status in
+  the reason string.
+- `multi_server_namespaces_dispatch_correctly` — two mock upstreams,
+  the dispatcher routes each invocation to its own server's URL.
+
+Backward compatibility:
+
+- Registries with no `meta.json` files or no `url` fields fall
+  through to the existing `EchoDispatcher`, preserving the Slice 4d.3
+  / 4d.1 dev surface.
+- The single-issuer `MCP_JWKS_PATH` legacy path remains the third
+  fallback for production mode without a registry.
+
+Files touched:
+
+- `controller/src/mcp_server_reconciler.rs` — `McpServerMeta` gains
+  `url` + `allowed_tools`.
+- `inference-router/src/mcp/registry.rs` — `DiscoveredMcpServerMeta`
+  gains matching fields + `Default` derive.
+- `inference-router/src/mcp/forwarder.rs` — new module.
+- `inference-router/src/mcp/mod.rs` — wire module.
+- `inference-router/src/mcp/oauth.rs` — 4 test fixtures updated for
+  forward-compat with the new meta fields.
+- `inference-router/src/routes/mcp.rs` — `McpRouteState::with_tools`
+  builder; TODO comment for "future RouterToolDispatcher" deleted.
+- `inference-router/src/main.rs` — `build_mcp_router` now async,
+  discovers the forwarder catalog before mounting `/mcp`.
+
 ### Slice 4d.3 — multi-issuer OAuth verification (DoD #3 — OAuth half)
 
 Closes the OAuth half of Slice 4 DoD #3 (*"each McpServer has its own

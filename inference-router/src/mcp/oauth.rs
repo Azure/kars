@@ -1200,6 +1200,7 @@ mod tests {
                     issuer: "https://idp-a.example".to_string(),
                     audience: Some("api://server-a".to_string()),
                     scopes: vec!["tools.invoke".to_string()],
+                    ..Default::default()
                 }),
             },
         );
@@ -1212,6 +1213,7 @@ mod tests {
                     issuer: "https://idp-b.example".to_string(),
                     audience: Some("api://server-b".to_string()),
                     scopes: vec![],
+                    ..Default::default()
                 }),
             },
         );
@@ -1273,6 +1275,7 @@ mod tests {
                     issuer: issuer.clone(),
                     audience: Some("api://a".to_string()),
                     scopes: vec![],
+                    ..Default::default()
                 }),
             },
         );
@@ -1285,6 +1288,7 @@ mod tests {
                     issuer: issuer.clone(),
                     audience: Some("api://b".to_string()),
                     scopes: vec![],
+                    ..Default::default()
                 }),
             },
         );
