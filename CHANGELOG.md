@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 4a — durable JSONL audit sink (DoD #4)
+
+The router's audit chain has always been an in-memory `Vec<AuditEntry>`
+(via `agentmesh::AuditLogger`). On router restart, every audit row was
+lost — fine for the hash-chain receipt embedded in each response, but
+unworkable for the operator-facing audit story Slice 4 demands
+(`azureclaw audit tail`, remote sinks). This slice closes DoD #4 by
+mirroring every chain entry to a sandbox-local JSONL file as a
+side-effect of the existing `audit.log()` call.
+
+What this PR adds:
+
+- `inference-router/src/audit_jsonl.rs` — `JsonlAuditWriter` with
+  per-date file rotation (`{date_key}.jsonl`, date key derived from
+  the entry's RFC 3339 timestamp), `O_APPEND` writes (atomic for
+  lines ≤ `PIPE_BUF`), and graceful degrade when the directory is
+  not writable. 8 unit tests.
+- `Governance::audit_log(...)` helper — single chokepoint that
+  records into the in-memory chain *and* mirrors to JSONL. All 9
+  production callsites in `governance/mod.rs`,
+  `governance/trust_ops.rs`, and `providers/audit_impl.rs` go
+  through it. The handful of test-only `audit.log(...)` calls
+  remain direct.
+- New env var `AZURECLAW_AUDIT_DIR` (default
+  `/var/log/azureclaw/audit`, set to literal `"disabled"` to
+  short-circuit in tests).
+- JSONL failures degrade to warn-level logs — the audited request
+  is never denied because the disk filled up.
+
+Out of scope for 4a (queued for 4b / 4c):
+
+- `azureclaw audit tail` CLI subcommand → Slice 4b.
+- Remote audit sinks (Azure Monitor, Loki, Storage) →
+  Slice 4c.
+- McpServer plural migration + per-server JWKS + namespaced
+  tools → Slice 4d.
+
 ### Slice 2 DoD #6 — sub-agent parent-label inheritance
 
 When a parent `ClawSandbox` spawns a sub-agent (via the router's

@@ -93,6 +93,10 @@ pub struct Governance {
     pub trust: TrustManager,
     pub audit: AuditLogger,
     pub(crate) audit_dedup: crate::providers::audit_impl::AuditDedup,
+    /// Sandbox-local JSONL writer mirroring every chained audit entry to
+    /// disk (Slice 4 DoD #4). `None` when the audit directory cannot be
+    /// opened (e.g. unit tests without write access to `/var/log`).
+    pub(crate) audit_jsonl: Option<crate::audit_jsonl::JsonlAuditWriter>,
     pub redactor: CredentialRedactor,
     pub response_scanner: McpResponseScanner,
     pub tool_rate_limiter: McpSlidingRateLimiter,
@@ -218,6 +222,7 @@ impl Governance {
             trust: TrustManager::new(trust_config),
             audit: AuditLogger::new(),
             audit_dedup: crate::providers::audit_impl::AuditDedup::new(),
+            audit_jsonl: open_jsonl_writer(sandbox_name),
             redactor,
             response_scanner,
             tool_rate_limiter,
@@ -269,6 +274,29 @@ impl Governance {
         projection: crate::a2a::trust_graph_projection::TrustGraphProjection,
     ) {
         self.trust_graph = projection;
+    }
+
+    /// Append one entry to the in-memory hash chain **and** mirror it to
+    /// the sandbox-local JSONL writer (Slice 4 DoD #4). Every production
+    /// callsite goes through this helper so audit rows persist across
+    /// router restart. The chain entry is returned for callers that need
+    /// the receipt (e.g. [`crate::providers::audit_impl`]).
+    ///
+    /// JSONL failures are logged at `warn` and discarded — the in-memory
+    /// chain is authoritative for the lifetime of the process, and the
+    /// audited request must not be denied because the disk filled up.
+    pub fn audit_log(&self, agent_id: &str, action: &str, decision: &str) -> agentmesh::AuditEntry {
+        let entry = self.audit.log(agent_id, action, decision);
+        if let Some(writer) = &self.audit_jsonl
+            && let Err(e) = writer.write(&entry)
+        {
+            tracing::warn!(
+                sandbox = %self.sandbox_name,
+                error = %e,
+                "audit JSONL write failed (entry preserved in memory)"
+            );
+        }
+        entry
     }
 
     /// Load all YAML policy files from a directory.  Returns rule count.
@@ -443,7 +471,7 @@ impl Governance {
         // Rate limit check first (token bucket — not a capability denial)
         if !self.rate_limiter.allow(agent_id) {
             self.metrics.rate_limits.fetch_add(1, Ordering::Relaxed);
-            self.audit.log(agent_id, action, "denied");
+            self.audit_log(agent_id, action, "denied");
             let elapsed = start.elapsed();
             self.metrics
                 .eval_latency_sum_us
@@ -486,7 +514,7 @@ impl Governance {
             };
 
         let outcome = if allowed { "allow" } else { "deny" };
-        self.audit.log(agent_id, action, outcome);
+        self.audit_log(agent_id, action, outcome);
 
         // Rate-limited calls are not capability denials — don't feed them
         // into behavior monitoring (they'd inflate capability_denials and
@@ -577,7 +605,7 @@ impl Governance {
                 kinds = ?kinds,
                 "Credential redacted from output"
             );
-            self.audit.log(
+            self.audit_log(
                 &self.sandbox_name,
                 &format!("credential_redacted:{}", kinds.join(",")),
                 "sanitized",
@@ -632,7 +660,7 @@ impl Governance {
                         threats = ?types,
                         "Response threats detected"
                     );
-                    self.audit.log(
+                    self.audit_log(
                         &self.sandbox_name,
                         &format!("response_threat:{}", types.join(",")),
                         "flagged",
@@ -682,7 +710,7 @@ impl Governance {
                         retry_after = decision.retry_after_secs,
                         "Per-tool rate limit exceeded"
                     );
-                    self.audit.log(
+                    self.audit_log(
                         &self.sandbox_name,
                         &format!("tool_rate_limited:{tool}"),
                         "denied",
@@ -813,6 +841,41 @@ pub fn tier_label(score: u32) -> &'static str {
         "Observed"
     } else {
         "Anonymous"
+    }
+}
+
+/// Construct the [`crate::audit_jsonl::JsonlAuditWriter`] for a sandbox.
+///
+/// Honours `AZURECLAW_AUDIT_DIR` (defaults to `/var/log/azureclaw/audit`)
+/// and the test-convenience sentinel value `"disabled"` which short-circuits
+/// to `None` without touching the filesystem. Real-world failure (e.g. a
+/// read-only filesystem in unit tests) is also degraded to `None` with a
+/// warn-level log — the in-memory hash chain remains authoritative and
+/// every request continues to flow.
+fn open_jsonl_writer(sandbox_name: &str) -> Option<crate::audit_jsonl::JsonlAuditWriter> {
+    let dir =
+        std::env::var("AZURECLAW_AUDIT_DIR").unwrap_or_else(|_| "/var/log/azureclaw/audit".into());
+    if dir == "disabled" || dir.is_empty() {
+        return None;
+    }
+    match crate::audit_jsonl::JsonlAuditWriter::try_new(&dir, sandbox_name) {
+        Ok(w) => {
+            tracing::info!(
+                sandbox = sandbox_name,
+                dir = %dir,
+                "Durable audit JSONL writer initialized"
+            );
+            Some(w)
+        }
+        Err(e) => {
+            tracing::warn!(
+                sandbox = sandbox_name,
+                dir = %dir,
+                error = %e,
+                "Failed to open audit JSONL writer — audit will be in-memory only"
+            );
+            None
+        }
     }
 }
 

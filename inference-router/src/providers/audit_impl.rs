@@ -202,7 +202,7 @@ impl AuditSink for Governance {
         }
 
         let (agent_id, action, decision) = event_to_legacy_args(&event);
-        let entry = self.audit.log(&agent_id, &action, &decision);
+        let entry = self.audit_log(&agent_id, &action, &decision);
 
         let prev_hash_hex = if entry.previous_hash.is_empty() {
             None
