@@ -43,6 +43,20 @@ pub(super) async fn chat_completions(
         })
         .unwrap_or("unknown");
 
+    // Slice 2 DoD #7 — `inference_policy_digest` on the audit log
+    // surface. Snapshot the loaded `InferencePolicy` first so every
+    // structured log emitted from this handler (denial warns,
+    // budget rejects, per-request cap rejects, content-safety floor
+    // violations, forward success/fail) can carry the same digest
+    // field. Forensics can then map "request denied at 14:32" to
+    // "router was operating on policy digest X" without inferring
+    // the policy state from coincident time windows. The read is
+    // cheap (one `RwLock::read().await` over a snapshot type that
+    // clones in O(1)), so moving it above the AGT check costs nothing
+    // on the hot path. Slice 2c had this same read further down for
+    // budget enforcement only — DoD #7 unifies the timing.
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+
     // Foundry guardrails (DefaultV2) handle content safety and prompt shields
     // at inference time — no pre-flight calls needed. We parse the response
     // annotations after forwarding and report flags to AGT governance.
@@ -57,7 +71,15 @@ pub(super) async fn chat_completions(
         if let super::inference_policy::InferenceDecision::Deny(reason) =
             super::inference_policy::check(&state, sandbox_name, &action).await
         {
-            tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED inference (enforcing)");
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                inference_policy_digest = %policy.digest,
+                decision = "deny",
+                gate = "agt_policy",
+                %reason,
+                "AGT policy DENIED inference (enforcing)"
+            );
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -72,15 +94,10 @@ pub(super) async fn chat_completions(
         }
     }
 
-    // Slice 2c latency optimisation: take **one** snapshot of the
-    // loaded `InferencePolicy` at the top of the handler and reuse
-    // it for every downstream enforcement axis (daily/monthly tokens,
-    // perRequestTokens cap, contentSafety floor — both buffered and
-    // streaming branches). Previously the handler took three
-    // independent `RwLock::read().await`s per request; this
-    // consolidates them to one, removing two awaits from every
-    // forwarded request on the hot path.
-    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+    // Slice 2c latency optimisation kept its shape: `policy` snapshot
+    // is reused across every enforcement axis below (daily/monthly
+    // tokens, perRequestTokens cap, contentSafety floor — both
+    // buffered and streaming branches).
 
     // Check token budget before forwarding — daily/monthly limits
     // come from the loaded `InferencePolicy` (Slice 2b) with the
@@ -90,7 +107,14 @@ pub(super) async fn chat_completions(
         .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
         .await
     {
-        tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded: {msg}");
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "token_budget",
+            "Token budget exceeded: {msg}"
+        );
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
@@ -120,10 +144,13 @@ pub(super) async fn chat_completions(
             decide_per_request_gate(Some(cap), Some(requested))
     {
         tracing::warn!(
+            target: "inference.audit",
             sandbox = %sandbox_name,
             requested,
             cap,
-            digest = %policy.digest,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "per_request_tokens",
             "InferencePolicy perRequestTokens exceeded — rejecting"
         );
         return (
@@ -313,6 +340,7 @@ pub(super) async fn chat_completions(
         // for the in-flight request; acceptable since policies change
         // rarely vs. single-request lifetime.
         let stream_floor = policy.content_safety.clone();
+        let stream_policy_digest = policy.digest.clone();
         match proxy::forward_stream(
             state.auth.clone(),
             Some(state.copilot.clone()),
@@ -419,6 +447,7 @@ pub(super) async fn chat_completions(
                 // stream.
                 let stream_blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let floor_for_stream = stream_floor.clone();
+                let digest_for_stream = stream_policy_digest.clone();
                 let wrapped = stream.map(move |chunk| {
                     use std::sync::atomic::Ordering;
                     if stream_blocked.load(Ordering::Relaxed) {
@@ -461,8 +490,12 @@ pub(super) async fn chat_completions(
                                 {
                                     stream_blocked.store(true, Ordering::Relaxed);
                                     tracing::warn!(
+                                        target: "inference.audit",
                                         sandbox = %sandbox_for_flags,
                                         code = violation.code(),
+                                        inference_policy_digest = %digest_for_stream,
+                                        decision = "deny",
+                                        gate = "content_safety_floor_stream",
                                         "InferencePolicy contentSafety floor (stream): {}",
                                         violation.message()
                                     );
@@ -615,7 +648,14 @@ pub(super) async fn chat_completions(
                     state.budget.record_usage(sandbox_name, total).await;
 
                     if let Err(msg) = state.budget.check_per_request(total) {
-                        tracing::warn!(sandbox = %sandbox_name, "Per-request limit: {msg}");
+                        tracing::warn!(
+                            target: "inference.audit",
+                            sandbox = %sandbox_name,
+                            inference_policy_digest = %policy.digest,
+                            decision = "post_response_warn",
+                            gate = "per_request_tokens",
+                            "Per-request limit: {msg}"
+                        );
                     }
                 }
 
@@ -665,8 +705,12 @@ pub(super) async fn chat_completions(
                             safety::enforce_floor(&body_json, &policy.content_safety)
                         {
                             tracing::warn!(
+                                target: "inference.audit",
                                 sandbox = %sandbox_name,
                                 code = violation.code(),
+                                inference_policy_digest = %policy.digest,
+                                decision = "deny",
+                                gate = "content_safety_floor",
                                 "InferencePolicy contentSafety floor: {}",
                                 violation.message()
                             );
@@ -709,8 +753,15 @@ pub(super) async fn chat_completions(
                             if let super::inference_policy::InferenceDecision::Deny(reason) =
                                 super::inference_policy::check(&state, sandbox_name, &action).await
                             {
-                                tracing::warn!(sandbox = %sandbox_name, %reason,
-                                    "AGT: model response blocked by output policy");
+                                tracing::warn!(
+                                    target: "inference.audit",
+                                    sandbox = %sandbox_name,
+                                    %reason,
+                                    inference_policy_digest = %policy.digest,
+                                    decision = "deny",
+                                    gate = "output_policy",
+                                    "AGT: model response blocked by output policy"
+                                );
                                 return (
                                     axum::http::StatusCode::FORBIDDEN,
                                     Body::from(
