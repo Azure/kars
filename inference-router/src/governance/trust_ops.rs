@@ -83,7 +83,7 @@ impl Governance {
                     projection_version = %self.trust_graph.version_hash(),
                     "AGT trust bootstrapped from TrustGraph projection edge"
                 );
-                self.audit.log(
+                self.audit_log(
                     agent_id,
                     &format!("trustgraph_bootstrap:{}", score),
                     "success",
@@ -166,7 +166,7 @@ impl Governance {
     /// The SDK TrustManager has no delete method, so we set score to 0.
     pub fn delete_trust(&self, agent_id: &str) -> Value {
         self.trust.set_trust(agent_id, 0);
-        self.audit.log(agent_id, "trust_delete", "success");
+        self.audit_log(agent_id, "trust_delete", "success");
         metrics::AGT_KNOWN_AGENTS.set(self.trust.all_agents().len() as i64);
         serde_json::json!({
             "ok": true,
@@ -205,7 +205,7 @@ impl Governance {
             .collect::<Vec<_>>()
             .join(",");
 
-        self.audit.log(
+        self.audit_log(
             agent_id,
             &format!("content_flag:{}", flag_summary),
             "flagged",
