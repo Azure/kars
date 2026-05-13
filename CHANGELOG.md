@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3b.4 — `AuthMisconfigured` Degraded condition for ClawMemory
+
+When a referencing sandbox's router reports an upstream authentication
+failure on the compiled ClawMemory binding (today: Foundry Memory Store
+returning 403 on `foundry.memory.{search,update}` because the
+project MI is missing `Azure AI User` on the resource group — see the
+`azureclaw-deployment` skill notes), the controller now elevates the
+status to `Degraded=True / reason=AuthMisconfigured / Ready=False`
+instead of folding it into a generic
+`Awaiting / AwaitingRouterEnforcement` message. Auth misconfigs are
+not transient digest gaps; operators need a clear pointer at RBAC.
+
+- New reason constant `reason::AUTH_MISCONFIGURED` and shared
+  wire-prefix `conditions::AUTH_MISCONFIGURED_PREFIX = "AuthMisconfigured:"`
+  in `controller/src/status/conditions.rs`. The prefix is the
+  producer↔consumer wire contract: routers prepend it to
+  `PolicyStatusRegistry::record_error` messages on the `Memory`
+  policy kind, the controller scans for it on the
+  `/internal/policy-status` echo.
+- `claw_memory_reconciler::first_auth_misconfigured_message` is a
+  pure helper over `&[(String, Result<PolicyStatusResponse,
+  ConfirmError>)]` that scans **before** `decide_enforcement_state`
+  collapses per-sandbox structure into the aggregated Awaiting
+  message. Returns a deterministic `"<sandbox>: <error>"` (with a
+  trailing `(+N more sandbox(es) affected)` when multiple). Skips
+  unrelated `last_error` strings and other policy kinds.
+- Pre-scan runs in `reconcile` after `poll_referencing_sandboxes`;
+  on hit, `degraded = Some((reason::AUTH_MISCONFIGURED, msg))` and
+  the enforcement state short-circuits to `NotApplicable`, which
+  flows naturally through the existing `build_conditions` degraded
+  branch (Ready=False, Degraded=True, Progressing=False/Failed).
+- Controller-side only — the router-side producer (emitting the
+  `AuthMisconfigured:` prefix from the Foundry 403 path in
+  `mcp/platform.rs::post_json`) is a future slice. The contract is
+  pinned now so both sides land additively when the producer ships.
+- 5 new reconciler unit tests: detector returns `None` on clean polls,
+  ignores non-prefixed errors, ignores other policy kinds, returns the
+  first-match with multi-hit annotation, and skips failed polls. Plus
+  a `build_conditions` test asserting the final condition shape.
+
+Verified: 543 controller tests pass (+5 from 538 prior), clippy
+`-D warnings` clean across workspace, fmt clean.
+
 ### Slice 3b.3 — `foundry.memory` MCP tool reads ClawMemory binding
 
 The first **real consumer** of the Slice 3a ClawMemory binding: when

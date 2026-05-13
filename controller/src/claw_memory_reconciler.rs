@@ -205,6 +205,17 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
     // router, and let the result drive both `phase` and the `Ready`
     // condition. The `compiled_digest` we just wrote is the value
     // every router must echo before we promote to Ready.
+    //
+    // Slice 3b.4 — auth probe surfacing. The pre-aggregation
+    // `results` carry per-sandbox `last_error` strings. We scan them
+    // for the router-side `AuthMisconfigured:` prefix (wire contract
+    // pinned in `crate::status::conditions::AUTH_MISCONFIGURED_PREFIX`)
+    // *before* the aggregator collapses them into the Awaiting
+    // message. When any sandbox surfaces an auth failure, we elevate
+    // `degraded` directly so the resulting `Degraded=True` /
+    // `reason=AuthMisconfigured` condition jumps to the top instead
+    // of getting buried inside a generic Awaiting message — RBAC
+    // misconfigs are not transient.
     let enforcement_state = if degraded.is_some() {
         RouterEnforcementState::NotApplicable
     } else {
@@ -225,7 +236,12 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
             }
         };
         let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
-        decide_enforcement_state(&compiled_digest, "Memory", &results)
+        if let Some(msg) = first_auth_misconfigured_message(&results) {
+            degraded = Some((conditions::reason::AUTH_MISCONFIGURED, msg));
+            RouterEnforcementState::NotApplicable
+        } else {
+            decide_enforcement_state(&compiled_digest, "Memory", &results)
+        }
     };
 
     let loaded_digest: Option<String> = match &enforcement_state {
@@ -317,6 +333,45 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
 fn rfc3339_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Slice 3b.4 — scan the per-sandbox poll outcomes for a router-side
+/// `AuthMisconfigured:` `last_error` on the `Memory` policy kind. If
+/// any referencing sandbox surfaces one, return a deterministic
+/// message attributing the failure to that sandbox so the controller
+/// can elevate it to a `Degraded=True / reason=AuthMisconfigured`
+/// condition instead of folding it into a generic Awaiting message.
+///
+/// Returns the first match (sandbox iteration order is preserved by
+/// the upstream pollers, so this is stable across reconciles).
+/// Multiple-sandbox cases are flagged in the message tail.
+fn first_auth_misconfigured_message(
+    results: &[(
+        String,
+        Result<
+            crate::status::router_confirmation::PolicyStatusResponse,
+            crate::status::router_confirmation::ConfirmError,
+        >,
+    )],
+) -> Option<String> {
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for (sandbox, outcome) in results {
+        if let Ok(resp) = outcome
+            && let Some(err) = resp.find_last_error("Memory")
+            && err.starts_with(conditions::AUTH_MISCONFIGURED_PREFIX)
+        {
+            hits.push((sandbox.clone(), err.to_string()));
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    let (first_sb, first_err) = &hits[0];
+    let mut msg = format!("{first_sb}: {first_err}");
+    if hits.len() > 1 {
+        msg.push_str(&format!(" (+{} more sandbox(es) affected)", hits.len() - 1));
+    }
+    Some(msg)
 }
 
 fn build_conditions(
@@ -760,6 +815,121 @@ mod tests {
         let (domain, key) = FINALIZER.split_once('/').unwrap();
         assert_eq!(domain, "azureclaw.azure.com");
         assert!(!key.is_empty());
+    }
+
+    fn ok_resp(kind: &str, last_error: Option<&str>) -> router_confirmation::PolicyStatusResponse {
+        router_confirmation::PolicyStatusResponse {
+            schema_version: router_confirmation::SUPPORTED_SCHEMA_VERSION,
+            count: 1,
+            entries: vec![router_confirmation::PolicyStatusEntry {
+                kind: kind.to_string(),
+                digest: Some("sha256:dead".to_string()),
+                source_path: "/etc/azureclaw/memory/binding.json".to_string(),
+                loaded_at: "1970-01-01T00:00:00Z".to_string(),
+                last_error: last_error.map(str::to_string),
+            }],
+        }
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_none_when_no_errors() {
+        let results = vec![
+            ("sb-a".to_string(), Ok(ok_resp("Memory", None))),
+            ("sb-b".to_string(), Ok(ok_resp("Memory", None))),
+        ];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_ignores_unrelated_errors() {
+        // A non-prefixed `last_error` on Memory must not trip the
+        // AuthMisconfigured detector — generic transient errors stay
+        // in the Awaiting bucket.
+        let results = vec![(
+            "sb-a".to_string(),
+            Ok(ok_resp("Memory", Some("upstream 500"))),
+        )];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_ignores_other_kinds() {
+        // Router echoed AuthMisconfigured on a different policy kind
+        // — the ClawMemory reconciler must scope its scan to
+        // `kind == "Memory"`.
+        let results = vec![(
+            "sb-a".to_string(),
+            Ok(ok_resp(
+                "InferencePolicy",
+                Some("AuthMisconfigured: 403 from Foundry"),
+            )),
+        )];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_returns_first_hit() {
+        let results = vec![
+            (
+                "sb-a".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("AuthMisconfigured: 403 search_memories"),
+                )),
+            ),
+            (
+                "sb-b".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("AuthMisconfigured: 403 update_memories"),
+                )),
+            ),
+        ];
+        let msg = first_auth_misconfigured_message(&results).unwrap();
+        assert!(msg.starts_with("sb-a: AuthMisconfigured: 403 search_memories"));
+        assert!(msg.contains("+1 more sandbox(es) affected"));
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_skips_failed_polls() {
+        // Poll failures (Err) don't carry a router-reported
+        // last_error, so the detector must ignore them and not
+        // misattribute the failure as AuthMisconfigured.
+        let results = vec![(
+            "sb-a".to_string(),
+            Err(router_confirmation::ConfirmError::HttpStatus(503)),
+        )];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn build_conditions_auth_misconfigured_sets_degraded_true_with_reason() {
+        // Slice 3b.4 — when the reconciler pre-scan elevates an
+        // AuthMisconfigured router error to `degraded`, the resulting
+        // conditions must surface that reason on Degraded (not a
+        // generic Awaiting) so operators get a clear pointer at the
+        // RBAC misconfig rather than a transient-looking digest gap.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some((
+                reason::AUTH_MISCONFIGURED,
+                "sb-a: AuthMisconfigured: 403 from Foundry",
+            )),
+            &RouterEnforcementState::NotApplicable,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::TRUE);
+        assert_eq!(degraded.reason, reason::AUTH_MISCONFIGURED);
+        assert!(degraded.message.contains("AuthMisconfigured: 403"));
     }
 
     #[test]
