@@ -860,8 +860,11 @@ pub struct GovernanceConfig {
     /// `ClawSandbox`. Required — the controller resolves the target at
     /// reconcile time; missing target → `Degraded` with reason
     /// `ToolPolicyNotFound` (no inline-fallback path post-S13). The
-    /// resolved CR's `metadata.name` doubles as the AGT policy profile
-    /// name carried into the sandbox via `AGT_POLICY_PROFILE`.
+    /// resolved CR's `metadata.name` is used as the ConfigMap name
+    /// suffix (`toolpolicy-<name>-profile`) the sandbox pod mounts at
+    /// `/etc/agt/policies`. Post-Slice-1e the AGT engine reads only
+    /// from that mount; the legacy bundled `AGT_POLICY_PROFILE`
+    /// env-var path has been removed.
     #[serde(default)]
     pub tool_policy_ref: LocalObjectRef,
     /// Minimum trust score (0-1000) for inter-agent communication.

@@ -62,9 +62,10 @@ pod_ns_b=$(pod_ns_for "$name_b")
 # the patch and `with()`/passthrough for the rest.
 #
 # Admission requires `spec.governance.toolPolicyRef.name` whenever
-# `governance.enabled=true`, so we apply a sibling ToolPolicy CR
-# (minimum-valid: just `appliesTo: {}`) into the same CR namespace
-# and reference it by name.
+# `governance.enabled=true`. Post-Slice-1e (phase 2) the controller
+# also hard-fails ToolPolicies that lack `spec.agtProfile.inline`,
+# so we inject a permissive allow-all AGT profile (these tests
+# exercise the mesh wire-up, not per-tool governance enforcement).
 _apply_mesh_toolpolicy() {
     local cr_ns="$1"
     local tp_name="$2"
@@ -78,6 +79,15 @@ metadata:
     azureclaw.azure.com/test-suite: manual-e2e
 spec:
   appliesTo: {}
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: e2e-allow-all
+      policies:
+        - name: allow-all
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1
 YAML
 }
 

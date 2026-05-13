@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1e §2 — remove bundled `AGT_POLICY_PROFILE` env-var fallback
+
+Phase 2 of Slice 1e closes the deprecation window opened in phase 1 and
+makes `ToolPolicy.spec.agtProfile.inline` the *only* AGT policy source.
+With no live deployments yet, no soft-fail window is needed — missing
+inline now degrades the reconcile with `SpecInvalid`.
+
+**Controller**
+
+* `reconciler/mod.rs` — drop the bundled-profile fallback. If a
+  resolved ToolPolicy lacks `spec.agtProfile.inline`, the sandbox is
+  marked `Degraded / SpecInvalid` (was previously a soft warning that
+  fell back to a profile bundled into the sandbox image).
+* `reconciler/mod.rs` — stop pushing `AGT_POLICY_PROFILE` into the
+  sandbox env at the two former mount points.
+* `status/conditions.rs` — remove `TYPE_BUNDLED_PROFILE_IN_USE`
+  condition type, `BUNDLED_PROFILE_FALLBACK` reason, and the two
+  associated unit tests. The condition is no longer reachable.
+* `mesh_peer/offload.rs` — embed the offload-tier profile at compile
+  time via `include_str!("../../../cli/profiles/agt/azureclaw-offload.yaml")`
+  and inline it into the auto-minted ToolPolicy when honouring a
+  cross-tenant offload request. One source of truth shared with the
+  CLI; no duplication.
+* `crd.rs`, `tool_policy.rs` — rustdoc refreshed: ConfigMap name suffix
+  `toolpolicy-<name>-profile`, AGT reads only from the mount, legacy
+  env-var path documented as removed.
+
+**Sandbox image**
+
+* `entrypoint.sh` — collapse the AGT_POLICY_DIR resolution block to the
+  happy-path-only mount check at `/etc/agt/policies/agt-profile.yaml`;
+  remove the `AGT_POLICY_PROFILE` elif branch entirely.
+* `Dockerfile` (sandbox + controller) — drop the `COPY cli/policies/`
+  step; bundled profiles are no longer baked into images.
+
+**CLI**
+
+* `cli/policies/` moved to `cli/profiles/agt/` to match the existing
+  `cli/profiles/seccomp/` layout; covered by the existing
+  `cp -r profiles dist/profiles` build step.
+* `refs.ts` — new `loadAgtProfile(profile)` helper resolves
+  `azureclaw-<profile>.yaml` from either the `dist/` or `src/` profile
+  directory (depending on how the CLI is invoked). Falls back to
+  `default` on unknown profile names with a console warning; throws a
+  clear error if the assets directory is missing entirely.
+* `refs.ts::buildToolPolicy`, `commands/handoff.ts`, and
+  `migrate/from_kagent.ts` — every CLI-minted ToolPolicy now populates
+  `spec.agtProfile.inline` via `loadAgtProfile()`. The
+  `azureclaw.azure.com/profile` annotation is written unconditionally.
+* `tests/e2e-manual/scenarios/cross_runtime_mesh.sh` and
+  `tests/e2e-manual/scenarios/agt_mesh.sh` — ToolPolicy heredocs gained
+  a minimal allow-all `agtProfile.inline` so they remain reconcilable
+  post-phase-2 (those scenarios exercise mesh wire-up, not per-tool
+  governance).
+
+**Helm**
+
+* `crd-toolpolicy.yaml` regenerated from the updated rustdoc via the
+  `DUMP_TOOLPOLICY_CRD_YAML=1` workflow documented at the top of the
+  file. `helm_drift::tests::helm_toolpolicy_crd_matches_rust_schema`
+  is back to green.
+* `crd.yaml` (ClawSandbox — hand-maintained, no drift check) prose
+  updated for `toolPolicyRef` to drop the stale `AGT_POLICY_PROFILE`
+  mention.
+
+**Behavioural surface**
+
+* No live deployments → no soft-fail / `Compiled-but-not-Ready` window
+  was needed. Hard-fail on missing inline keeps the policy-point story
+  honest: every sandbox either has an explicit policy or doesn't run.
+* Sub-agent spawn is unaffected — `inference-router/src/spawn/mod.rs`
+  references the parent's ToolPolicy by name (`{parent}-toolpolicy`)
+  rather than minting a new CR, so children inherit the parent's
+  profile automatically.
+
 ### Slice 5 §7 — docs reframe: router is the policy point, NetworkPolicy + egress-guard are safety nets
 
 Closes one of the eight Slice 5 sub-items (the only one in that slice

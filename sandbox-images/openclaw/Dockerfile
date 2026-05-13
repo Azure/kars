@@ -59,7 +59,6 @@ COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/
 COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/azureclaw-plugin/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/azureclaw-plugin/
 COPY runtimes/openclaw/skills/ /opt/azureclaw-plugin/skills/
-COPY cli/policies/ /opt/azureclaw-plugin/policies/
 
 # mesh-plugin is referenced by the runtime as a `file:../../mesh-plugin` dep.
 # `npm ci` below creates a symlink at
