@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+<<<<<<< HEAD
+### Slice 4d.2 — per-server McpServer mount scheme + router discovery (DoD #1 + #6)
+
+Closes Slice 4 DoD #1 (*"≥ 3 plural McpServers reachable e2e"*) at the
+mount-and-discovery layer, and DoD #6 (*"stale-file sweep on ref
+removal"*) via reconciler-driven volume rebuild. Multi-JWKS OAuth
+verification and namespaced tool dispatch (DoD #3) follow in **Slice
+4d.3** — this slice ships the producer-side mount layout and the
+router-side discovery surface that 4d.3 will consume.
+
+What this PR adds:
+
+- **Controller — per-server volume scheme.** `reconciler/mod.rs`
+  McpServer mirror block now iterates the full
+  `governance_config.effective_mcp_server_refs()` list instead of
+  short-circuiting at length > 1. Each ref produces its own
+  ConfigMap/Secret pair mounted at per-name subdirectories:
+  - `/etc/azureclaw/mcp/<name>/jwks.json` (from `mcp-<name>-jwks` CM)
+  - `/etc/azureclaw/mcp-signing/<name>/...` (from `mcp-<name>-signing` Secret)
+
+  Volume names follow `mcp-jwks-<name>` / `mcp-signing-<name>`. The
+  CRD's `maxItems: 8` on `mcpServerRefs` plus the DNS-1123 constraint
+  on ref names keeps total volume names ≤ 63 chars.
+
+- **Legacy env-var contract preserved.** The first entry (idx 0)
+  continues to set `MCP_JWKS_PATH=/etc/azureclaw/mcp/<name0>/jwks.json`
+  and `MCP_SIGNING_KEY_DIR=/etc/azureclaw/mcp-signing/<name0>` so the
+  existing single-JWKS OAuth verifier in
+  `inference-router/src/main.rs::build_mcp_router()` keeps working
+  unchanged. New env `MCP_JWKS_DIR=/etc/azureclaw/mcp` is set once
+  per pod whenever any McpServer ref mirrored — the discovery hook
+  consumes it.
+
+- **`inject_container_env` helper** in
+  `controller/src/reconciler/governance_mounts.rs:362` — idempotent
+  env-var injection on a named container without requiring a volume
+  mount. Used to land `MCP_JWKS_DIR` after per-server volumes have
+  been added in a loop. 4 dedicated unit tests cover happy path,
+  idempotence, missing-env-array creation, and absent-container
+  no-op.
+
+- **Router — startup discovery scan.** New `inference-router/src/mcp/registry.rs`
+  with `scan(dir)` + `discover_from_env()`. At process start `main.rs`
+  reads `MCP_JWKS_DIR`, enumerates immediate subdirectories that
+  contain a parseable RFC-7517-shaped `jwks.json`, and emits:
+
+  ```text
+  Discovered 3 McpServer JWKS file(s)
+    mcp_jwks_dir = "/etc/azureclaw/mcp"
+    count = 3
+    servers = ["foundry-builtins", "github", "internal-knowledge"]
+  ```
+
+  Candidates that fail validation (missing `jwks.json`, malformed JSON,
+  missing `keys` array) are surfaced via `tracing::warn!` with the
+  exact rejection reason — never silently dropped (principles §3). 7
+  unit tests cover empty dir, missing dir, three-server happy path,
+  empty-subdir skip, malformed JSON skip, top-level file ignore, and
+  path correctness.
+
+- **Stale-file sweep (DoD #6) by reconcile.** Each reconciliation
+  pass rebuilds the Deployment pod-spec from the *current*
+  `effective_mcp_server_refs()`. Refs removed from the CR produce no
+  volume/mount in the next SSA patch — kube-apiserver-side
+  reconciliation naturally drops them. No explicit sweep code
+  needed; in-process hot removal (without pod restart) is a 4d.3
+  enrichment when the inotify watcher arrives.
+
+- **Removed `PLURAL_MCP_SERVERS_UNSUPPORTED_YET`** condition reason
+  constant — its single call site disappeared with the loop
+  refactor. The 4d.1 placeholder did its job; the gap it described
+  is closed.
+
+- **CRD doc comment** on `mcp_server_refs` now describes the 4d.2
+  mount layout and forward-references 4d.3 for multi-JWKS OAuth +
+  namespaced tool dispatch.
+
+What is explicitly **not** in this slice (deferred to Slice 4d.3):
+
+- Multi-JWKS OAuth verification (`/mcp` route still validates against
+  the first ref's `jwks.json` via the legacy `MCP_JWKS_PATH`).
+- Namespaced tool dispatch (`{server}.{tool}` routing).
+- In-process inotify-driven hot reload of the registry.
+- Per-server signing-key selection for outbound tool calls.
+
+The discovery log surface is the operator-facing closure of DoD #1:
+operators apply a `ClawSandbox` with N `mcpServerRefs`, then verify
+via `kubectl logs` that the inference router enumerates exactly N
+server names. This is a real consumer (principles §5 — no
+scaffolding) even though OAuth verification is single-JWKS today.
+
+Verified: 559 controller + 804 router tests pass, clippy
+`-D warnings` clean across workspace, `cargo fmt --check` clean.
+
+=======
+>>>>>>> origin/dev
 ### Slice 4d.1 — `mcpServerRefs` plural (DoD #2 deprecation)
 
 Slice 4 DoD #2 says: *"`mcpServerRef` (singular) emits a Warning event
@@ -61,7 +157,10 @@ Out of scope for 4d.1 (queued for 4d.2):
 - Router-side `McpServerRegistry` for namespaced tool dispatch.
 - Stale-file sweep (DoD #6).
 - e2e fixture with ≥ 3 servers (DoD #1).
+<<<<<<< HEAD
+=======
 
+>>>>>>> origin/dev
 ### Slice 4c — Azure Monitor remote audit sink (DoD #5)
 
 Slice 4a (PR #287) shipped the sandbox-local JSONL audit log. Slice 4b
