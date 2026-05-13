@@ -519,11 +519,7 @@ mod tests {
         // Schema-drifted file with no `endpoints` array — controller
         // would never emit this, but the router must not crash.
         let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("allowlist.json"),
-            br#"{"schemaVersion":1}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("allowlist.json"), br#"{"schemaVersion":1}"#).unwrap();
         let reg = PolicyStatusRegistry::new();
         let LoadOutcome::Loaded(bundle) =
             load_egress_allowlist_from_dir(dir.path().to_str().unwrap(), &reg)

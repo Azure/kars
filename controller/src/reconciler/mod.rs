@@ -963,14 +963,12 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .as_deref()
             .unwrap_or(&[])
             .to_vec();
-        let allowlist_doc =
-            crate::egress_allowlist_compile::compile_to_doc(&endpoints_for_compile);
+        let allowlist_doc = crate::egress_allowlist_compile::compile_to_doc(&endpoints_for_compile);
         // Compact (no whitespace) so the bytes the router reads from
         // the mount are byte-for-byte what the controller hashed.
         let allowlist_body = serde_json::to_string(&allowlist_doc)?;
-        let allowlist_digest = crate::egress_allowlist_compile::egress_allowlist_digest(
-            allowlist_body.as_bytes(),
-        );
+        let allowlist_digest =
+            crate::egress_allowlist_compile::egress_allowlist_digest(allowlist_body.as_bytes());
 
         let mut data: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();

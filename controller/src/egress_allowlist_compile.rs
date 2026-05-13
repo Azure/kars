@@ -271,9 +271,11 @@ mod tests {
 
     #[test]
     fn equivalent_endpoint_sets_produce_equal_digests() {
-        let a =
-            serde_json::to_vec(&compile_to_doc(&[ep("A.example", Some(443)), ep("b.example", None)]))
-                .unwrap();
+        let a = serde_json::to_vec(&compile_to_doc(&[
+            ep("A.example", Some(443)),
+            ep("b.example", None),
+        ]))
+        .unwrap();
         let b = serde_json::to_vec(&compile_to_doc(&[
             ep("b.example", Some(443)),
             ep("a.example", None),
