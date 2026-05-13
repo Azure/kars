@@ -93,10 +93,12 @@ pub struct Governance {
     pub trust: TrustManager,
     pub audit: AuditLogger,
     pub(crate) audit_dedup: crate::providers::audit_impl::AuditDedup,
-    /// Sandbox-local JSONL writer mirroring every chained audit entry to
-    /// disk (Slice 4 DoD #4). `None` when the audit directory cannot be
-    /// opened (e.g. unit tests without write access to `/var/log`).
-    pub(crate) audit_jsonl: Option<crate::audit_jsonl::JsonlAuditWriter>,
+    /// Sandbox-wide audit sink (Slice 4 DoD #4, #5). Composite over the
+    /// always-on local JSONL writer (Slice 4a) and any configured remote
+    /// sinks (Slice 4c — Azure Monitor today). `None` when neither
+    /// local nor remote sinks could be initialized — the in-memory
+    /// `audit` chain remains authoritative.
+    pub(crate) audit_sink: Option<std::sync::Arc<dyn crate::audit_sink::AuditSink>>,
     pub redactor: CredentialRedactor,
     pub response_scanner: McpResponseScanner,
     pub tool_rate_limiter: McpSlidingRateLimiter,
@@ -222,7 +224,10 @@ impl Governance {
             trust: TrustManager::new(trust_config),
             audit: AuditLogger::new(),
             audit_dedup: crate::providers::audit_impl::AuditDedup::new(),
-            audit_jsonl: open_jsonl_writer(sandbox_name),
+            audit_sink: crate::audit_sink::build_sink_from_env(
+                sandbox_name,
+                std::sync::Arc::new(crate::auth::WorkloadIdentityAuth::new()),
+            ),
             redactor,
             response_scanner,
             tool_rate_limiter,
@@ -287,14 +292,8 @@ impl Governance {
     /// audited request must not be denied because the disk filled up.
     pub fn audit_log(&self, agent_id: &str, action: &str, decision: &str) -> agentmesh::AuditEntry {
         let entry = self.audit.log(agent_id, action, decision);
-        if let Some(writer) = &self.audit_jsonl
-            && let Err(e) = writer.write(&entry)
-        {
-            tracing::warn!(
-                sandbox = %self.sandbox_name,
-                error = %e,
-                "audit JSONL write failed (entry preserved in memory)"
-            );
+        if let Some(sink) = &self.audit_sink {
+            sink.write(&entry);
         }
         entry
     }
@@ -844,40 +843,9 @@ pub fn tier_label(score: u32) -> &'static str {
     }
 }
 
-/// Construct the [`crate::audit_jsonl::JsonlAuditWriter`] for a sandbox.
-///
-/// Honours `AZURECLAW_AUDIT_DIR` (defaults to `/var/log/azureclaw/audit`)
-/// and the test-convenience sentinel value `"disabled"` which short-circuits
-/// to `None` without touching the filesystem. Real-world failure (e.g. a
-/// read-only filesystem in unit tests) is also degraded to `None` with a
-/// warn-level log — the in-memory hash chain remains authoritative and
-/// every request continues to flow.
-fn open_jsonl_writer(sandbox_name: &str) -> Option<crate::audit_jsonl::JsonlAuditWriter> {
-    let dir =
-        std::env::var("AZURECLAW_AUDIT_DIR").unwrap_or_else(|_| "/var/log/azureclaw/audit".into());
-    if dir == "disabled" || dir.is_empty() {
-        return None;
-    }
-    match crate::audit_jsonl::JsonlAuditWriter::try_new(&dir, sandbox_name) {
-        Ok(w) => {
-            tracing::info!(
-                sandbox = sandbox_name,
-                dir = %dir,
-                "Durable audit JSONL writer initialized"
-            );
-            Some(w)
-        }
-        Err(e) => {
-            tracing::warn!(
-                sandbox = sandbox_name,
-                dir = %dir,
-                error = %e,
-                "Failed to open audit JSONL writer — audit will be in-memory only"
-            );
-            None
-        }
-    }
-}
+// Audit-sink construction lives in `crate::audit_sink::build_sink_from_env`.
+// Slice 4c moved the helper out of this module so the local JSONL writer
+// and the Azure Monitor remote sink can share configuration logic.
 
 #[cfg(test)]
 mod tests {
