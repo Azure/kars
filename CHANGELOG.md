@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
-### Slice 4a — durable JSONL audit sink (DoD #4)
+### Slice 4b — `azureclaw audit tail` CLI (DoD #7)
+
+Slice 4a wrote a durable JSONL audit log to
+`/var/log/azureclaw/audit/{YYYY-MM-DD}.jsonl` inside the
+`inference-router` container. Slice 4b gives operators a first-class
+way to read it — no port-forward, no `kubectl exec` incantation
+memorisation, no jq pipelines on a 50 KB-line file.
+
+What this PR adds:
+
+- New `cli/src/commands/audit.ts` — `azureclaw audit tail <sandbox>`
+  shells into the sandbox pod's `inference-router` container and
+  `tail`s the day-keyed JSONL file. Supports `--follow` for live
+  streams, `--lines N` (cap 10000), `--decision`, `--agent`,
+  `--action` substring filters, `--date YYYY-MM-DD` for historical
+  files, `--json` for machine-readable output, and `--dir` to
+  override the in-pod audit directory when the operator has changed
+  `AZURECLAW_AUDIT_DIR`.
+- Pretty render colours by decision (`allowed`/`success` green,
+  `denied`/`flagged`/`rejected` red, `sanitized` yellow); truncates
+  long agent_ids and actions with `…`; aligns columns for grep.
+- `--date` input is regex-validated (`^\d{4}-\d{2}-\d{2}$`) before
+  the shell escape — shell-metacharacter attempts via `--date` are
+  rejected at the CLI boundary.
+- Wired into `cli.ts` under the Observability command group
+  (`trace`, `eval`, `operator`, `audit`).
+- 26 new vitest cases cover line parsing, filter combinations,
+  date-key validation, lines bounds, pretty rendering, and graceful
+  handling of malformed input lines (the tail keeps going).
+
+**DoD coverage:** Slice 4 DoD #7 satisfied. Remaining 4b deferrals
+(historical multi-day search, jq-friendly raw-row alias) tracked
+under Slice 4c.
+
+
 
 The router's audit chain has always been an in-memory `Vec<AuditEntry>`
 (via `agentmesh::AuditLogger`). On router restart, every audit row was
