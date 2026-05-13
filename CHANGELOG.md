@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3b.4-producer — router records `AuthMisconfigured:` on Foundry Memory Store 401/403
+
+Closes the wire contract opened in Slice 3b.4. The inference router's
+`foundry.memory.{search,update}` MCP tool now records an
+`AuthMisconfigured:` prefixed `last_error` on the `Memory` policy
+kind when the upstream Foundry Memory Store returns HTTP 401 or 403.
+The controller's Slice 3b.4 consumer-side scan then elevates the
+ClawMemory status to `Degraded=True / AuthMisconfigured`.
+
+- `PlatformDispatcher` gains an optional
+  `policy_status: Arc<PolicyStatusRegistry>` handle wired via a new
+  `with_policy_status` builder. When absent (e.g. legacy unit tests),
+  the producer hook is a silent no-op — additive only.
+- `post_json` and `envelope` are now thin wrappers over new
+  `*_with_status` variants that return `(Option<u16>, ToolCallOutput)`.
+  `None` status means a transport error (DNS/TCP/TLS/serialise) that
+  cannot be classified as auth.
+- Only HTTP 401 and 403 trigger the recording. 5xx and 429 are
+  transient and would over-promote a brief outage to a hard Degraded;
+  they remain unrecorded.
+- `PolicyStatusRegistry::record_error` already preserves the prior
+  entry's `digest` (only `last_error` updates), so the producer hook
+  does not wipe the `Memory` digest the controller is comparing
+  against in `decide_enforcement_state`. The controller's pre-scan
+  elevates `Degraded` before checking enforcement state, so a digest
+  match (Confirmed) is correctly overridden.
+- `McpRouteState::platform` now takes
+  `(memory_binding, policy_status)` and `build_platform_mcp_router`
+  threads the registry through from `main.rs`.
+- 5 new wiremock tests in `mcp/platform.rs` cover the 403/401/500/200
+  matrix and the legacy no-handle path. 771 router lib tests
+  (was 766).
+
 ### Slice 3b.4 — `AuthMisconfigured` Degraded condition for ClawMemory
 
 When a referencing sandbox's router reports an upstream authentication

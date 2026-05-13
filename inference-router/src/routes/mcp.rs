@@ -93,12 +93,22 @@ impl McpRouteState {
     /// dispatcher's `foundry.memory` calls can prefer the CRD-driven
     /// `store_name` over the chart-fed env. `None` keeps the legacy
     /// env-only behaviour (for sandboxes without `spec.memoryRef`).
+    ///
+    /// Slice 3b.4: takes an optional `PolicyStatusRegistry` handle so
+    /// the dispatcher can surface upstream Foundry Memory Store
+    /// 401/403s as `AuthMisconfigured:` prefixed `last_error` entries
+    /// on `PolicyKind::Memory`. Without this, 403s still propagate to
+    /// the agent envelope but never reach the ClawMemory CRD status.
     pub fn platform(
         memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
+        policy_status: Option<Arc<crate::policy_status::PolicyStatusRegistry>>,
     ) -> Self {
         let mut dispatcher = crate::mcp::PlatformDispatcher::standard();
         if let Some(handle) = memory_binding {
             dispatcher = dispatcher.with_memory_binding(handle);
+        }
+        if let Some(registry) = policy_status {
+            dispatcher = dispatcher.with_policy_status(registry);
         }
         Self {
             config: Arc::new(InitializeConfig::default()),
@@ -446,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn platform_state_publishes_nine_foundry_tools() {
-        let s = McpRouteState::platform(None);
+        let s = McpRouteState::platform(None, None);
         assert_eq!(
             s.tools.catalog().tools().len(),
             9,
