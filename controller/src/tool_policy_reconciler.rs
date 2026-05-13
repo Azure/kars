@@ -45,9 +45,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
+use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
 use crate::tool_policy::{ToolPolicy, ToolPolicyStatus};
-use crate::tool_policy_compile::{compile_to_profile, version_hash};
+use crate::tool_policy_compile::{
+    AGT_PROFILE_FILENAME, agt_profile_digest, compile_to_profile, version_hash,
+};
 
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
@@ -84,6 +86,7 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    phase_reporter: PhaseEventReporter,
 }
 
 async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -128,11 +131,38 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let profile = compile_to_profile(&tp.spec);
     let v_hash = version_hash(&profile);
 
+    // 1b. Customer AGT profile (Slice 1b). When `spec.agtProfile.inline`
+    // is set, the controller publishes the raw bytes alongside the
+    // compiled `profile.json` under key `agt-profile.yaml` so the
+    // sandbox inference-router can load it via the existing
+    // `Governance::load_policies_from_dir` (which filters `*.yaml`).
+    // We also compute the wire-contract length-prefixed sha256 digest
+    // here so the controller-side annotation matches what the router
+    // will echo on `GET /internal/policy-status` — the comparator
+    // that closes principles.md §3 (Slice 1c).
+    let agt_profile_inline: Option<&str> = tp
+        .spec
+        .agt_profile
+        .as_ref()
+        .and_then(|p| p.inline.as_deref())
+        .filter(|s| !s.is_empty());
+    let agt_digest: Option<String> = agt_profile_inline.map(agt_profile_digest);
+
     // 2. Persist as ConfigMap.
     let cm_name = format!("toolpolicy-{name}-profile");
     let mut degraded: Option<(&'static str, String)> = None;
 
-    match ensure_profile_configmap(&configmaps, &cm_name, &name, &profile, &v_hash).await {
+    match ensure_profile_configmap(
+        &configmaps,
+        &cm_name,
+        &name,
+        &profile,
+        &v_hash,
+        agt_profile_inline,
+        agt_digest.as_deref(),
+    )
+    .await
+    {
         Ok(()) => {
             tracing::info!(
                 toolpolicy = %name,
@@ -142,6 +172,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 has_commerce = tp.spec.commerce.is_some(),
                 has_rate_limit = tp.spec.rate_limit.is_some(),
                 has_approval = tp.spec.approval.is_some(),
+                has_agt_profile = agt_profile_inline.is_some(),
                 "ToolPolicyCompiled"
             );
         }
@@ -162,20 +193,49 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         degraded
             .as_ref()
             .map(|(reason, msg)| (*reason, msg.as_str())),
+        agt_profile_inline.is_some(),
     );
     let phase = if degraded.is_some() {
         PHASE_DEGRADED
+    } else if agt_profile_inline.is_some() {
+        // Slice 1b honesty rule: when the customer supplies an AGT
+        // profile via `spec.agtProfile.inline`, the artifact is
+        // mounted into the inference-router but the controller
+        // cannot yet observe that the router has loaded it (the
+        // Slice 1c router-confirmation poller closes that loop).
+        // Stamp `Compiled` + `Ready=False /
+        // AwaitingRouterEnforcement` per principles.md §3.
+        PHASE_COMPILED
     } else {
-        // Slice 0 honesty rule: ToolPolicy keeps `Ready` today
-        // because its enforcement is **runtime-side** (openclaw
-        // plugin allow/deny via AGT profile); the controller is the
-        // SoT for the profile bytes and the runtime consumes them
-        // directly. No router-side data plane is in the loop, so
-        // there is nothing to await. If/when Slice 4 introduces a
-        // controller→router push for tool policies, flip to
-        // `PHASE_COMPILED` + emit a `PolicyNotEnforced` event.
+        // Back-compat: ToolPolicies without `agtProfile` continue to
+        // stamp `Ready` — their enforcement surface (commerce caps,
+        // rate limit, approval) is the AGT runtime plugin
+        // already consuming `profile.json` in-process, and the
+        // ConfigMap write is the data-plane action.
         PHASE_READY
     };
+
+    if degraded.is_none()
+        && agt_profile_inline.is_some()
+        && let Err(e) = ctx
+            .phase_reporter
+            .warn_policy_not_enforced(
+                tp.as_ref(),
+                "CompileAgtProfile",
+                "ToolPolicy.spec.agtProfile.inline parsed and published to the compiled \
+                 ConfigMap, but the controller has not yet polled the inference-router \
+                 to confirm it loaded the digest. Ready=False/AwaitingRouterEnforcement \
+                 until the Slice 1c router-confirmation poller lands. Tracking: \
+                 crd-well-oiled-machine slice-1c-router-confirmation.",
+            )
+            .await
+    {
+        tracing::warn!(
+            toolpolicy = %name,
+            error = %e,
+            "ToolPolicyEventPublishFailed"
+        );
+    }
 
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
@@ -187,6 +247,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             observed_generation,
             conditions: Some(new_conditions),
             last_compiled_at: Some(rfc3339_now()),
+            agt_profile_digest: agt_digest,
         }
     });
     api.patch_status(
@@ -198,6 +259,10 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
+    } else if agt_profile_inline.is_some() {
+        // Short cadence while awaiting router-side echo so Slice 1c's
+        // poller (when it lands) sees recent state.
+        Ok(Action::requeue(Duration::from_secs(15)))
     } else {
         Ok(Action::requeue(REQUEUE_OK))
     }
@@ -210,10 +275,19 @@ fn rfc3339_now() -> String {
 /// Build the Conditions vector preserving prior `lastTransitionTime`
 /// where status hasn't flipped. Always emits `Ready`, `Progressing`,
 /// `Degraded`.
+///
+/// `awaiting_router` is `true` when the spec has an `agtProfile`
+/// section — the controller cannot yet observe data-plane enforcement
+/// of that artifact (Slice 1c closes that loop), so per principles.md
+/// §3 we honestly report `Ready=False /
+/// reason=AwaitingRouterEnforcement` rather than the optimistic
+/// `Ready=True` we still stamp for the back-compat (no-agtProfile)
+/// path.
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
     degraded: Option<(&str, &str)>,
+    awaiting_router: bool,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -244,6 +318,33 @@ fn build_conditions(
                 cond_status::TRUE,
                 reason_value,
                 message,
+                observed_generation,
+            ));
+        }
+        None if awaiting_router => {
+            out.push(conditions::preserve_transition_time(
+                prior_ready,
+                conditions::TYPE_READY,
+                cond_status::FALSE,
+                reason::AWAITING_ROUTER_ENFORCEMENT,
+                "agt-profile.yaml published to compiled ConfigMap; \
+                 router-side digest confirmation lands in Slice 1c",
+                observed_generation,
+            ));
+            out.push(conditions::preserve_transition_time(
+                prior_progressing,
+                conditions::TYPE_PROGRESSING,
+                cond_status::TRUE,
+                reason::AWAITING_ROUTER_ENFORCEMENT,
+                "awaiting router-side enforcement",
+                observed_generation,
+            ));
+            out.push(conditions::preserve_transition_time(
+                prior_degraded,
+                conditions::TYPE_DEGRADED,
+                cond_status::FALSE,
+                reason::RECONCILED,
+                "no errors",
                 observed_generation,
             ));
         }
@@ -283,15 +384,30 @@ async fn ensure_profile_configmap(
     owner: &str,
     profile: &serde_json::Value,
     v_hash: &str,
+    agt_profile_inline: Option<&str>,
+    agt_profile_digest: Option<&str>,
 ) -> Result<(), ReconcileError> {
     let json_str = serde_json::to_string_pretty(profile)?;
     let mut data: BTreeMap<String, String> = BTreeMap::new();
     data.insert("profile.json".into(), json_str);
+    // Slice 1b: when the customer supplies an AGT profile, publish
+    // the raw bytes under the wire-contract filename. The sandbox
+    // mirror picks the whole ConfigMap into the sandbox namespace,
+    // and the inference-router's existing `Governance` loader
+    // (filters `*.yaml`/`*.yml`) auto-discovers the new key —
+    // no router-side change required for the Slice 1b producer
+    // path. Slice 1c adds the controller-side confirmation poller.
+    if let Some(inline) = agt_profile_inline {
+        data.insert(AGT_PROFILE_FILENAME.into(), inline.into());
+    }
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
         "azureclaw.azure.com/toolpolicy-version-hash".into(),
         v_hash.into(),
     );
+    if let Some(d) = agt_profile_digest {
+        annotations.insert("azureclaw.azure.com/agt-profile-digest".into(), d.into());
+    }
     let cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),
@@ -386,7 +502,10 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let ctx = Arc::new(Ctx {
+        client: client.clone(),
+        phase_reporter: PhaseEventReporter::new(client, "ToolPolicy"),
+    });
     Controller::new(tps, kube::runtime::watcher::Config::default())
         .run(
             |x, ctx| async move {
@@ -443,7 +562,7 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_success() {
-        let conds = build_conditions(&[], Some(1), None);
+        let conds = build_conditions(&[], Some(1), None, false);
         assert_eq!(conds.len(), 3);
         let types: Vec<&str> = conds.iter().map(|c| c.type_.as_str()).collect();
         assert!(types.contains(&conditions::TYPE_READY));
@@ -465,7 +584,7 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_failure() {
-        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")));
+        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")), false);
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -482,8 +601,8 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_when_status_unchanged() {
-        let first = build_conditions(&[], Some(1), None);
-        let second = build_conditions(&first, Some(2), None);
+        let first = build_conditions(&[], Some(1), None, false);
+        let second = build_conditions(&first, Some(2), None, false);
         let r1 = first
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
@@ -496,6 +615,48 @@ mod tests {
             r1.last_transition_time, r2.last_transition_time,
             "transition time must not move when status stays True"
         );
+    }
+
+    #[test]
+    fn build_conditions_awaiting_router_branch_is_ready_false_with_reason() {
+        let conds = build_conditions(&[], Some(1), None, true);
+        assert_eq!(conds.len(), 3);
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
+        assert_eq!(progressing.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::FALSE);
+    }
+
+    #[test]
+    fn build_conditions_degraded_overrides_awaiting_router() {
+        // A ConfigMap write failure must surface as Degraded even
+        // when the spec carries an agtProfile — the data plane
+        // could not have loaded what we failed to publish.
+        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")), true);
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, "ProfileWriteFailed");
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::TRUE);
     }
 
     #[test]

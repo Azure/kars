@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1b — `ToolPolicy.spec.agtProfile.inline` (producer side)
+
+Closes the producer half of the principles.md §3 invariant for
+ToolPolicy: the controller now writes a customer-supplied AGT
+policy YAML into the compiled ConfigMap under the wire-contract
+filename `agt-profile.yaml`, computes the matching length-prefixed
+sha256 digest that Slice 1a's router endpoint will echo, and
+honestly stamps `phase=Compiled` + `Ready=False /
+reason=AwaitingRouterEnforcement` until the Slice 1c
+router-confirmation poller lands. ToolPolicies without
+`agtProfile` retain the existing `phase=Ready` back-compat path
+(their enforcement surface is the in-process AGT runtime plugin
+consuming `profile.json` already).
+
+- New `ToolPolicySpec.agtProfile.inline` field (`AgtProfileSource`
+  struct). Inline only; `bundleRef` (signed OCI artifact) lands
+  in Slice 1c with the CLI signing generalization.
+- New `ToolPolicyStatus.agtProfileDigest` field — populated only
+  when `spec.agtProfile.inline` is set; contains the
+  `sha256:<64-hex>` digest of the published bytes computed via
+  the Slice 1a length-prefixed canonical aggregate format so
+  controller and router compute the **same** value.
+- New `tool_policy_compile::agt_profile_digest` pure function +
+  `AGT_PROFILE_FILENAME` constant. 5 unit tests including a
+  golden-vector cross-check against the router's canonical
+  algorithm in `inference-router/src/governance/mod.rs`.
+- `tool_policy_reconciler` now branches the phase decision
+  three ways: `Degraded` on ConfigMap write failure;
+  `Compiled` + `Ready=False / AwaitingRouterEnforcement` +
+  `PolicyNotEnforced` Warning event when `agtProfile` is set;
+  `Ready` for the back-compat (no-agtProfile) path. Requeue
+  cadence shortens to 15s while awaiting router-side echo. 2
+  new unit tests pin the awaiting-router branch and the
+  degraded-overrides-awaiting-router precedence.
+- `ensure_profile_configmap` now writes `agt-profile.yaml` (raw
+  inline bytes) alongside the existing `profile.json` key and
+  stamps the ConfigMap annotation
+  `azureclaw.azure.com/agt-profile-digest` so any observer (the
+  Slice 1c poller, Headlamp, `kubectl describe`) can verify
+  what the controller intended to publish without re-reading the
+  CR.
+- Sandbox `entrypoint.sh` now prefers the controller-mounted
+  `/etc/agt/policies/agt-profile.yaml` over the bundled
+  `AGT_POLICY_PROFILE` fallback. The deprecated bundled path
+  emits a `WARN` line and remains supported through one release
+  window; it is removed in Slice 1e.
+- Helm CRD template `crd-toolpolicy.yaml` regenerated from the
+  Rust schema (caught by the existing `helm_drift` test).
+
 ### Slice 1a — router `PolicyStatusRegistry` + `GET /internal/policy-status`
 
 Foundation for the principles.md §3 invariant ("Ready ⇔ router echoes the

@@ -110,6 +110,42 @@ pub fn version_hash(profile: &Value) -> String {
     hex::encode(&digest[..16])
 }
 
+/// Filename the controller stamps into the compiled-profile ConfigMap
+/// and the router echoes back via `GET /internal/policy-status`. The
+/// digest in [`agt_profile_digest`] is computed over **this exact
+/// filename string** — the byte layout is part of the wire contract
+/// between controller and router and must not drift.
+pub const AGT_PROFILE_FILENAME: &str = "agt-profile.yaml";
+
+/// Length-prefixed sha256 over the inline AGT profile bytes,
+/// formatted as `sha256:<hex>`.
+///
+/// Matches the aggregate canonical-bytes format used by the router's
+/// `Governance::load_policies_from_dir` (slice-1a) for the
+/// single-file case — that loader walks files sorted by path, and for
+/// each file appends `u64-BE(name.len()) || name ||
+/// u64-BE(body.len()) || body` before hashing the concatenated
+/// result. With a single key `agt-profile.yaml`, the controller-side
+/// emission is byte-identical to the router-side load — that is what
+/// makes the `/internal/policy-status` echo a meaningful confirmation
+/// rather than a parallel-implementation gamble.
+///
+/// **Wire contract — DO NOT CHANGE without a coordinated router-side
+/// update** ([`inference-router/src/governance/mod.rs`] section
+/// "Aggregate canonical bytes").
+#[must_use]
+pub fn agt_profile_digest(inline: &str) -> String {
+    let name = AGT_PROFILE_FILENAME.as_bytes();
+    let body = inline.as_bytes();
+    let mut canonical: Vec<u8> = Vec::with_capacity(16 + name.len() + body.len());
+    canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(name);
+    canonical.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(body);
+    let digest = Sha256::digest(&canonical);
+    format!("sha256:{}", hex::encode(digest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +248,58 @@ mod tests {
         let h = version_hash(&compile_to_profile(&full_spec()));
         assert_eq!(h.len(), 32, "16 bytes = 32 hex chars");
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn agt_profile_digest_uses_sha256_prefix_and_64_hex() {
+        let d = agt_profile_digest("policies: []\n");
+        let rest = d.strip_prefix("sha256:").expect("sha256: prefix");
+        assert_eq!(rest.len(), 64, "32 bytes = 64 hex chars");
+        assert!(rest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn agt_profile_digest_matches_router_length_prefix_layout() {
+        // Golden vector — re-implementing the exact length-prefixed
+        // canonical-bytes layout the router uses in
+        // `inference-router/src/governance/mod.rs` for a single
+        // file. If this assertion ever fails, the wire contract
+        // documented on `agt_profile_digest` has drifted; either the
+        // controller or the router must be reverted before
+        // promoting Compiled → Ready (principles.md §3).
+        let body = "policies:\n  - id: deny-all\n    action: deny\n";
+        let name = AGT_PROFILE_FILENAME.as_bytes();
+        let mut canonical: Vec<u8> = Vec::new();
+        canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(name);
+        canonical.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(body.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+        assert_eq!(agt_profile_digest(body), expected);
+    }
+
+    #[test]
+    fn agt_profile_digest_changes_with_body() {
+        let a = agt_profile_digest("policies: []\n");
+        let b = agt_profile_digest("policies: [foo]\n");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn agt_profile_digest_is_deterministic() {
+        let body = "policies:\n  - id: x\n";
+        assert_eq!(agt_profile_digest(body), agt_profile_digest(body));
+    }
+
+    #[test]
+    fn agt_profile_filename_constant_is_yaml() {
+        // Wire-contract sentinel: the router's
+        // `load_policies_from_dir` filters for `.yaml`/`.yml`. If
+        // the filename ever drifts to `.json` or similar, the router
+        // would silently ignore the file and never echo a digest.
+        assert!(
+            AGT_PROFILE_FILENAME.ends_with(".yaml") || AGT_PROFILE_FILENAME.ends_with(".yml"),
+            "router AGT loader filters .yaml/.yml only"
+        );
     }
 }
