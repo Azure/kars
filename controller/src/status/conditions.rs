@@ -272,16 +272,6 @@ pub mod reason {
     /// to Ready. Slice 4d.2 wires the per-server file scheme that the
     /// plural form unlocks; Slice 4-final removes the singular field.
     pub const MCP_SINGULAR_DEPRECATED: &str = "McpSingularDeprecated";
-
-    /// `crd-well-oiled-machine` Slice 4d.1 — `PluralMcpServersUnsupportedYet`:
-    /// the ClawSandbox declared more than one `mcpServerRefs` entry,
-    /// but the router-side per-server JWKS/tools file scheme that
-    /// makes plural servers actually addressable lands in Slice 4d.2.
-    /// Until then the controller mirrors only the first entry and
-    /// stamps `Degraded=True` with this reason so the operator sees
-    /// the gap honestly (principles §3: typed contract with truthful
-    /// "not-yet-enforced" signal — never silently drop entries 2..N).
-    pub const PLURAL_MCP_SERVERS_UNSUPPORTED_YET: &str = "PluralMcpServersUnsupportedYet";
 }
 
 /// Slice 3b.4 wire-contract prefix routers attach to

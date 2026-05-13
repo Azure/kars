@@ -916,13 +916,12 @@ pub struct GovernanceConfig {
     /// (enforced via admission CEL). Mutually exclusive with the
     /// deprecated singular `mcpServerRef`.
     ///
-    /// **Slice 4d.1** introduces the typed field. The controller's
-    /// reconciler iterates `effective_mcp_server_refs()` when mirroring
-    /// JWKS + signing ConfigMaps + Secrets. Plural lengths > 1 are
-    /// recognised at admission but flagged at reconcile time with a
-    /// `PluralMcpServersUnsupportedYet` Degraded condition until
-    /// **Slice 4d.2** ships per-server file scheme + router-side
-    /// `McpServerRegistry` + stale-file sweep (DoD #1 + #3 + #6).
+    /// **Slice 4d.1** introduced the typed field + admission CEL +
+    /// reconciler shim. **Slice 4d.2** wires per-server CM/Secret
+    /// mounts at `/etc/azureclaw/mcp/{name}/` and
+    /// `/etc/azureclaw/mcp-signing/{name}/` (DoD #1 + #6). Multi-JWKS
+    /// OAuth verification + namespaced tool dispatch land in
+    /// **Slice 4d.3** (DoD #3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_server_refs: Vec<LocalObjectRef>,
 }

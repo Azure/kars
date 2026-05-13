@@ -1742,18 +1742,27 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
-        // McpServer (optional): if the sandbox references one or more,
-        // mirror each one's JWKS ConfigMap + signing-key Secret and
-        // mount them.
+        // McpServer (optional, plural): for each entry in `mcpServerRefs`,
+        // mirror its JWKS ConfigMap + signing-key Secret and mount them
+        // at per-name subdirectories so the router can address them
+        // individually.
         //
-        // Slice 4d.1 — plural `mcpServerRefs` is the preferred field.
-        // The legacy singular `mcpServerRef` is still honored as a
-        // length-1 alias; when set, we emit a deprecation warning
-        // (operator-facing via `tracing::warn` + sandbox-event-style
-        // log line). Slice 4d.2 wires the per-server file scheme that
-        // makes more than one entry actually addressable in the router;
-        // until then, len > 1 → Degraded with `PluralMcpServersUnsupportedYet`
-        // so the operator sees the gap honestly (principles §3).
+        // Mount layout (Slice 4d.2):
+        //   - JWKS:    /etc/azureclaw/mcp/{name}/jwks.json
+        //   - signing: /etc/azureclaw/mcp-signing/{name}/{keys...}
+        //
+        // Env vars set on `inference-router`:
+        //   - `MCP_JWKS_DIR`: parent dir for all per-server JWKS subdirs.
+        //     Router scans this dir to discover servers (Slice 4d.2
+        //     startup log). Multi-JWKS OAuth verification + namespaced
+        //     tool dispatch land in Slice 4d.3.
+        //   - `MCP_JWKS_PATH`: legacy single-file pointer, kept for
+        //     backwards compatibility with existing OAuth code in
+        //     `inference-router/src/main.rs::build_mcp_router()`. Points
+        //     at the FIRST entry's `jwks.json` (deterministic ordering
+        //     given the CEL-enforced unique-by-name).
+        //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
+        //     first entry; namespaced replacement TBD in 4d.3.
         let mcp_refs = governance_config.effective_mcp_server_refs();
         if governance_config.uses_singular_mcp_server_ref() {
             tracing::warn!(
@@ -1763,111 +1772,121 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                  spec.governance.mcpServerRefs (Slice 4d.1)",
             );
         }
-        if mcp_refs.len() > 1 {
-            tracing::warn!(
-                sandbox = %name,
-                count = mcp_refs.len(),
-                reason = crate::status::conditions::reason::PLURAL_MCP_SERVERS_UNSUPPORTED_YET,
-                "more than one mcpServerRefs entry declared; router-side \
-                 per-server file scheme lands in Slice 4d.2 — refusing to \
-                 reconcile until spec is reduced to ≤ 1 entry",
-            );
-            degrade!(
-                crate::status::conditions::reason::PLURAL_MCP_SERVERS_UNSUPPORTED_YET,
-                format!(
-                    "spec.governance.mcpServerRefs has {} entries, but the \
-                     router-side per-server addressing scheme lands in Slice 4d.2; \
-                     reduce to ≤ 1 entry to unblock reconciliation",
-                    mcp_refs.len()
-                )
-            );
-        }
-        if let Some(mcp_ref) = mcp_refs.first() {
+        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(mcp_refs.len());
+        for (idx, mcp_ref) in mcp_refs.iter().enumerate() {
             let mcp_name = mcp_ref.name.trim();
-            if !mcp_name.is_empty() {
-                let jwks_cm = format!("mcp-{mcp_name}-jwks");
-                let signing_secret = format!("mcp-{mcp_name}-signing");
-                match governance_mounts::mirror_configmap(
-                    client,
-                    &jwks_cm,
-                    &sandbox_self_ns,
-                    &sandbox_ns,
-                    &name,
-                    "McpServer",
-                )
-                .await
-                {
-                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                        governance_mounts::inject_configmap_mount(
-                            &mut pod_spec,
-                            "inference-router",
-                            &jwks_cm,
-                            "mcp-jwks",
-                            governance_mounts::paths::MCP_JWKS_DIR,
-                            Some(("MCP_JWKS_PATH", "/etc/azureclaw/mcp/jwks.json")),
-                        );
-                    }
-                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                        tracing::warn!(
-                            sandbox = %name,
-                            cm = %jwks_cm,
-                            reason = %reason,
-                            "McpServer JWKS ConfigMap not mirrored; \
-                             router will not advertise customer MCP",
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            sandbox = %name,
-                            cm = %jwks_cm,
-                            "McpServer JWKS mirror failed",
-                        );
-                        return Ok(Action::requeue(Duration::from_secs(15)));
-                    }
+            if mcp_name.is_empty() {
+                continue;
+            }
+            let jwks_cm = format!("mcp-{mcp_name}-jwks");
+            let signing_secret = format!("mcp-{mcp_name}-signing");
+            let jwks_volume = format!("mcp-jwks-{mcp_name}");
+            let signing_volume = format!("mcp-signing-{mcp_name}");
+            let jwks_mount = format!("{}/{}", governance_mounts::paths::MCP_JWKS_DIR, mcp_name);
+            let signing_mount =
+                format!("{}/{}", governance_mounts::paths::MCP_SIGNING_DIR, mcp_name);
+
+            match governance_mounts::mirror_configmap(
+                client,
+                &jwks_cm,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "McpServer",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    // First-entry only: keep legacy single-file env var
+                    // pointing at this server's jwks.json so the existing
+                    // single-JWKS OAuth verifier keeps working unchanged.
+                    let legacy_env = if idx == 0 {
+                        Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
+                    } else {
+                        None
+                    };
+                    governance_mounts::inject_configmap_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &jwks_cm,
+                        &jwks_volume,
+                        &jwks_mount,
+                        legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
+                    );
+                    mirrored_mcp_names.push(mcp_name.to_string());
                 }
-                match governance_mounts::mirror_secret(
-                    client,
-                    &signing_secret,
-                    &sandbox_self_ns,
-                    &sandbox_ns,
-                    &name,
-                    "McpServer",
-                )
-                .await
-                {
-                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                        governance_mounts::inject_secret_mount(
-                            &mut pod_spec,
-                            "inference-router",
-                            &signing_secret,
-                            "mcp-signing",
-                            governance_mounts::paths::MCP_SIGNING_DIR,
-                            Some((
-                                "MCP_SIGNING_KEY_DIR",
-                                governance_mounts::paths::MCP_SIGNING_DIR,
-                            )),
-                        );
-                    }
-                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                        tracing::warn!(
-                            sandbox = %name,
-                            secret = %signing_secret,
-                            reason = %reason,
-                            "McpServer signing-key Secret not mirrored",
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            sandbox = %name,
-                            secret = %signing_secret,
-                            "McpServer signing Secret mirror failed",
-                        );
-                        return Ok(Action::requeue(Duration::from_secs(15)));
-                    }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        cm = %jwks_cm,
+                        reason = %reason,
+                        "McpServer JWKS ConfigMap not mirrored; \
+                         router will not advertise this MCP",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        cm = %jwks_cm,
+                        "McpServer JWKS mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             }
+            match governance_mounts::mirror_secret(
+                client,
+                &signing_secret,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "McpServer",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    let legacy_env = if idx == 0 {
+                        Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
+                    } else {
+                        None
+                    };
+                    governance_mounts::inject_secret_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &signing_secret,
+                        &signing_volume,
+                        &signing_mount,
+                        legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
+                    );
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        secret = %signing_secret,
+                        reason = %reason,
+                        "McpServer signing-key Secret not mirrored",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        secret = %signing_secret,
+                        "McpServer signing Secret mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            }
+        }
+        // Set MCP_JWKS_DIR (parent) once if any McpServer was mirrored.
+        // Router uses this to discover all servers at startup.
+        if !mirrored_mcp_names.is_empty() {
+            governance_mounts::inject_container_env(
+                &mut pod_spec,
+                "inference-router",
+                "MCP_JWKS_DIR",
+                governance_mounts::paths::MCP_JWKS_DIR,
+            );
         }
 
         // A2AAgent (optional): when A2A is enabled, mirror the signed

@@ -63,6 +63,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("AzureClaw Inference Router starting");
 
+    // Slice 4d.2: surface per-server McpServer JWKS mounts at startup
+    // so operators can verify that all `mcpServerRefs` on the sandbox
+    // landed correctly inside the pod. Discovery is read-only and
+    // pre-config — it cannot fail startup.
+    let _mcp_registry = azureclaw_inference_router::mcp::registry::discover_from_env();
+
     let config = config::Config::from_env()?;
 
     // Log registry mode — informs whether handoff is available.
