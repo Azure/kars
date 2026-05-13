@@ -46,10 +46,10 @@ The router still runs the same code path it does in prod. So the policies, the c
 ### Prod mode (`azureclaw up` / Helm install)
 
 - **Pod shape:** multi-container Kubernetes pod.
-  - `init: egress-guard` — installs iptables rules so only the router's UID can reach the outside.
+  - `init: egress-guard` — installs iptables rules so the agent UID can only reach the router on localhost. **Safety net**, not the policy point — the router is.
   - `agent` — the runtime, **UID 1000**, no direct egress.
-  - `inference-router` — the Rust router, **UID 1001**, listens on `127.0.0.1:8443` (HTTP) and `127.0.0.1:8444` (forward proxy).
-- **Isolation:** Kubernetes NetworkPolicy on the namespace pins egress to exactly DNS, Foundry, the AgentMesh relay, and the A2A gateway. Optionally Kata + AMD SEV-SNP for hardware-enforced isolation.
+  - `inference-router` — the Rust router, **UID 1001**, listens on `127.0.0.1:8443` (HTTP) and `127.0.0.1:8444` (forward proxy). This is where egress, governance, content-safety, token-budget, and audit are actually enforced.
+- **Isolation:** The router enforces the egress allowlist on every outbound request. A Kubernetes NetworkPolicy on the namespace is generated as a **safety net** that limits blast radius if the router process is bypassed or compromised; it pins egress to DNS, Foundry, the AgentMesh relay, and the A2A gateway. Optionally Kata + AMD SEV-SNP for hardware-enforced isolation.
 - **Identity:** Workload Identity. The router exchanges the projected service-account token for a federated AAD token. No keys on disk.
 - **What it is for:** real workloads, multi-tenant fleets, anything that touches customer data.
 
@@ -110,7 +110,7 @@ sequenceDiagram
 
 In prose:
 
-1. The agent SDK is configured (by the runtime adapter) to point at `http://127.0.0.1:8443`. There is no way for it to reach the model directly — `egress-guard` would drop the packet.
+1. The agent SDK is configured (by the runtime adapter) to point at `http://127.0.0.1:8443`. The router is the policy point — it decides whether an outbound call is allowed; `egress-guard` iptables and the K8s NetworkPolicy are safety nets that drop the packet only if the router is bypassed.
 2. The router receives the request. It asks the **governance** layer (`InferencePolicy` + AGT `PolicyDecisionProvider`) whether this call is allowed. Deny → 403.
 3. It checks the **token budget** for the tenant. Over → 429.
 4. It branches by provider (read from `~/.azureclaw/config.json` → `provider`):

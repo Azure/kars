@@ -49,8 +49,8 @@ It is built for three audiences:
                     │  └─────────────────┬──────────────────┘     │
                     │                    │                        │
                     │            init: egress-guard               │
-                    │       (iptables: only the router            │
-                    │        can talk to the outside)             │
+                    │      (iptables safety net: agent UID         │
+                    │       can only reach the router locally)     │
                     └────────────────────┼────────────────────────┘
                                          │
                             Workload Identity (no keys)
@@ -72,7 +72,7 @@ It is built for three audiences:
            └─────────────────┘
 ```
 
-**The agent has no network of its own.** Every byte that leaves the pod leaves through the router. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
+**The agent has no network of its own.** Every byte that leaves the pod leaves through the router — that's the policy point where egress, governance, content-safety, token budgets, and audit are enforced. The K8s `NetworkPolicy` and the `egress-guard` iptables init container are **safety nets** that contain blast radius if the router is bypassed or compromised — they are not the policy layer. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
 
 **Pluggable inference backend.** Three providers are wired in today:
 
@@ -94,7 +94,7 @@ You write the same `ClawSandbox` YAML for both. The difference is where it runs 
 |---|---|---|
 | Where | One Docker container on your laptop | An AKS cluster in your subscription |
 | Pod shape | **Single container** — agent + router co-located in one image | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
-| Network isolation | Docker network, no egress guard | NetworkPolicy + `egress-guard` initContainer + per-namespace isolation |
+| Network isolation | Docker network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` initContainer act as safety nets containing blast radius |
 | Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | Workload Identity (federated, no keys on disk) |
 | Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) |
 | Use it for | Inner-loop dev, plugin authoring, demos | Real workloads, multi-tenant, production |
