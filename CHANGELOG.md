@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3b.3 — `foundry.memory` MCP tool reads ClawMemory binding
+
+The first **real consumer** of the Slice 3a ClawMemory binding: when
+a sandbox attaches a `ClawMemory` via `spec.memoryRef`, the compiled
+binding's `store_name` now wins over the chart-fed
+`FOUNDRY_MEMORY_STORE_ID` env on every `foundry.memory.{search,update}`
+call. CRD is the source of truth; env stays as the backward-compatible
+fallback for sandboxes without `spec.memoryRef`.
+
+- `PlatformDispatcher` gains an optional
+  `memory_binding: LoadedMemoryBindingHandle` field +
+  `with_memory_binding(handle)` builder +
+  `effective_memory_store_id()` resolver. `foundry.memory` calls
+  switched from `self.memory_store_id` direct to the resolver.
+- Resolver precedence: binding loaded with non-empty `store_name` →
+  use binding; otherwise (no handle, no binding loaded, empty/whitespace
+  `store_name`) → fall back to env-fed `memory_store_id`. Other 8
+  Foundry tools are unaffected.
+- `McpRouteState::platform(memory_binding)` and the
+  `build_platform_mcp_router` helper in `main.rs` now thread the
+  handle from `AppState.memory_binding` (clone before `with_state`)
+  into the dispatcher. The handle is the same `Arc<RwLock<…>>` the
+  Slice 3a loader writes into, so a controller-driven re-mirror
+  flips routing on the very next request without restarting the
+  dispatcher.
+- Three new dispatcher tests:
+  `memory_binding_store_name_overrides_env_store_id`,
+  `memory_empty_binding_store_name_falls_back_to_env`,
+  `memory_without_binding_handle_uses_env_store_id`. All against
+  `wiremock`. Lib tests now 766 (+3 above Slice 3b.2 baseline 763).
+
+No CRD/Helm/controller change. Pure router-side consumer of the
+binding contract Slice 3a published.
+
 ### Slice 3b.2 — ClawMemory no-inherit invariant for sub-agent spawn
 
 Pins the design rule that ClawMemory bindings are scoped to the agent
