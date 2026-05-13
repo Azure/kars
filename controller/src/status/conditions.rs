@@ -121,6 +121,26 @@ pub const TYPE_ALLOWLIST_AUTHORITATIVE: &str = "AllowlistAuthoritative";
 ///   the resolution before it disappears from status.
 pub const TYPE_ALLOWLIST_DRIFT: &str = "AllowlistDrift";
 
+/// `crd-well-oiled-machine` Slice 1e (phase 1) — `BundledProfileInUse`:
+/// the sandbox has `governance.enabled=true` and **no**
+/// `governance.toolPolicyRef`, so the runtime falls back to the bundled
+/// `AGT_POLICY_PROFILE` env-var path (`/opt/azureclaw-plugin/policies/`
+/// inside the sandbox image). This path is deprecated and will be
+/// removed once every cluster in scope has migrated to inline
+/// `ToolPolicy.spec.agtProfile.inline`. Stamping the condition on the
+/// CR surfaces the deprecation in `kubectl describe` rather than only
+/// in entrypoint logs, so operators see it on the same status panel
+/// as `Suspended` / `Ready`.
+///
+/// Reasons:
+/// - `BundledProfileFallback` (status=True) — fallback path active.
+///   Operators should create a `ToolPolicy` CR with
+///   `spec.agtProfile.inline` and set `spec.governance.toolPolicyRef`.
+/// - The condition is dropped (not stamped False) once a
+///   `toolPolicyRef` is set, since `ToolPolicyNotFound` /
+///   `AwaitingRouterEnforcement` already cover the migrated state.
+pub const TYPE_BUNDLED_PROFILE_IN_USE: &str = "BundledProfileInUse";
+
 /// `status` canonical values.
 pub mod status {
     pub const TRUE: &str = "True";
@@ -187,6 +207,12 @@ pub mod reason {
     /// kept visible briefly so operators see the cleanup before it is
     /// dropped from status.
     pub const INLINE_CLEARED: &str = "InlineCleared";
+    /// `crd-well-oiled-machine` Slice 1e — `BundledProfileFallback`:
+    /// governance is enabled but no `toolPolicyRef` is set; the runtime
+    /// falls back to the bundled `AGT_POLICY_PROFILE` env-var path
+    /// (`/opt/azureclaw-plugin/policies/`). Deprecated; operators
+    /// should migrate to `ToolPolicy.spec.agtProfile.inline`.
+    pub const BUNDLED_PROFILE_FALLBACK: &str = "BundledProfileFallback";
     /// Phase 2 S5 — `AwaitingFoundryProvisioning`: the controller has
     /// successfully compiled and published the binding ConfigMap, but
     /// the upstream Azure AI Foundry Memory Store is created by the
@@ -480,5 +506,41 @@ mod tests {
     fn observed_generation_propagates_from_none() {
         let c = new_condition(TYPE_READY, status::TRUE, reason::RECONCILED, "ok", None);
         assert_eq!(c.observed_generation, None);
+    }
+
+    #[test]
+    fn bundled_profile_in_use_constants_are_stable() {
+        // Slice 1e (phase 1): the dashboards / Headlamp panel / a future
+        // controller release that ships the actual removal all key off
+        // these exact wire values. Pin them so a rename doesn't silently
+        // orphan downstream consumers.
+        assert_eq!(TYPE_BUNDLED_PROFILE_IN_USE, "BundledProfileInUse");
+        assert_eq!(reason::BUNDLED_PROFILE_FALLBACK, "BundledProfileFallback");
+    }
+
+    #[test]
+    fn bundled_profile_in_use_preserves_transition_time_on_repeat() {
+        // The condition must persist across reconciles without churning
+        // its lastTransitionTime — operators watching `kubectl get
+        // clawsandbox` should see a stable "since" age rather than a
+        // timestamp that resets every 30s. Mirrors the suspension
+        // pattern in the reconciler.
+        let prior = new_condition(
+            TYPE_BUNDLED_PROFILE_IN_USE,
+            status::TRUE,
+            reason::BUNDLED_PROFILE_FALLBACK,
+            "msg",
+            Some(1),
+        );
+        let next = preserve_transition_time(
+            Some(&prior),
+            TYPE_BUNDLED_PROFILE_IN_USE,
+            status::TRUE,
+            reason::BUNDLED_PROFILE_FALLBACK,
+            "msg",
+            Some(2),
+        );
+        assert_eq!(next.last_transition_time, prior.last_transition_time);
+        assert_eq!(next.observed_generation, Some(2));
     }
 }

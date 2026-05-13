@@ -550,6 +550,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // is authoritative; missing target → Degraded with reason
     // `ToolPolicyNotFound`. The resolved CR's `metadata.name` doubles as
     // the AGT policy profile name carried into the sandbox.
+    //
+    // Slice 1e (phase 1): also detect the bundled-profile fallback path
+    // — governance enabled, toolPolicyRef set, but the referenced
+    // ToolPolicy has no `spec.agtProfile.inline`. That sandbox will run
+    // off `/opt/azureclaw-plugin/policies/azureclaw-<profile>.yaml`
+    // inside the image. We surface the condition so operators see the
+    // deprecation in `kubectl describe`, not just in entrypoint logs.
+    let mut bundled_profile_in_use = false;
     let tool_policy_profile: String = if governance_config.enabled {
         let tp_ref_name = governance_config.tool_policy_ref.name.clone();
         if tp_ref_name.is_empty() {
@@ -562,7 +570,24 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let tp_api: Api<crate::tool_policy::ToolPolicy> =
             Api::namespaced(client.clone(), &sandbox_self_ns);
         match tp_api.get(&tp_ref_name).await {
-            Ok(_) => tp_ref_name,
+            Ok(tp) => {
+                let inline_empty = tp
+                    .spec
+                    .agt_profile
+                    .as_ref()
+                    .and_then(|p| p.inline.as_deref())
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true);
+                bundled_profile_in_use = inline_empty;
+                if inline_empty {
+                    tracing::warn!(
+                        sandbox = %name,
+                        tool_policy = %tp_ref_name,
+                        "ToolPolicy has no agtProfile.inline; sandbox will use deprecated bundled AGT profile path (Slice 1e: migrate to ToolPolicy.spec.agtProfile.inline)",
+                    );
+                }
+                tp_ref_name
+            }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 tracing::error!(
                     sandbox = %name,
@@ -2231,6 +2256,33 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // empty list when `networkPolicy` itself is unset). The
         // fetcher itself short-circuits before any network IO.
         let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
+
+        // Slice 1e (phase 1): surface the bundled AGT profile fallback as
+        // a status condition so operators see the deprecation in
+        // `kubectl describe`. Only stamped when the fallback is actually
+        // active — once the operator adds `agtProfile.inline` to the
+        // referenced ToolPolicy, the condition is dropped (not stamped
+        // False) on the next reconcile so dashboards don't accumulate
+        // stale-but-resolved deprecation noise.
+        if bundled_profile_in_use {
+            let prior_conditions_for_bundled = sandbox
+                .status
+                .as_ref()
+                .map(|s| s.conditions.as_slice())
+                .unwrap_or(&[]);
+            let prior_bundled = crate::status::conditions::find(
+                prior_conditions_for_bundled,
+                crate::status::conditions::TYPE_BUNDLED_PROFILE_IN_USE,
+            );
+            extras.push(crate::status::conditions::preserve_transition_time(
+                prior_bundled,
+                crate::status::conditions::TYPE_BUNDLED_PROFILE_IN_USE,
+                crate::status::conditions::status::TRUE,
+                crate::status::conditions::reason::BUNDLED_PROFILE_FALLBACK,
+                "ToolPolicy lacks spec.agtProfile.inline; sandbox is using the deprecated bundled AGT profile path (/opt/azureclaw-plugin/policies/). Migrate to ToolPolicy.spec.agtProfile.inline before the bundled path is removed.",
+                sandbox.metadata.generation,
+            ));
+        }
 
         // Phase G P1 #4: stamp Suspended condition when spec.suspended
         // is true, or surface Suspended=False/Active when there is a

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1e (phase 1) — `BundledProfileInUse` deprecation condition
+
+Surfaces the deprecated bundled `AGT_POLICY_PROFILE` env-var
+fallback as a Kubernetes status condition on `ClawSandbox` CRs, so
+operators see it in `kubectl describe` / Headlamp / dashboards
+rather than only as a one-line warning buried in entrypoint logs.
+
+**Detection logic** (controller): `governance.enabled=true`,
+`toolPolicyRef` resolves, but the referenced `ToolPolicy` has no
+`spec.agtProfile.inline` (or it's whitespace-only). That sandbox
+runs off `/opt/azureclaw-plugin/policies/azureclaw-<profile>.yaml`
+baked into the image — exactly the path Slice 1e phase 2 will
+remove.
+
+**Wire contract:**
+
+* `Type: BundledProfileInUse`
+* `Status: True`
+* `Reason: BundledProfileFallback`
+* `Message: ToolPolicy lacks spec.agtProfile.inline; sandbox is
+  using the deprecated bundled AGT profile path (…). Migrate to
+  ToolPolicy.spec.agtProfile.inline before the bundled path is
+  removed.`
+
+When the operator adds `agtProfile.inline` to the ToolPolicy, the
+condition is **dropped** on the next reconcile rather than stamped
+`False` — dashboards don't accumulate stale-but-resolved
+deprecation noise (mirrors the §3 "only stamp Suspended=False if
+ever suspended" pattern).
+
+Phase 2 (actual fallback removal) is deferred: existing sandboxes
+without `agtProfile.inline` still function. This phase only adds
+the visibility surface so operators can drive migration on their
+own schedule.
+
 ### Slice 1d.2 — Headlamp "Router enforcement" panel
 
 Companion to Slice 1d's CLI. Every ToolPolicy / InferencePolicy
