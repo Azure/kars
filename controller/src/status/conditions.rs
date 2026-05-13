@@ -206,6 +206,22 @@ pub mod reason {
     /// informer deletes the corresponding call site (§5 "delete on
     /// contact").
     pub const AWAITING_ROUTER_ENFORCEMENT: &str = "AwaitingRouterEnforcement";
+
+    /// The data-plane router has confirmed it loaded the exact policy
+    /// digest the controller published. This closes the principles.md
+    /// §3 invariant ("Ready ⇔ router echo") for ToolPolicy's AGT
+    /// profile. Slice 1c is the first user; later slices reuse it for
+    /// InferencePolicy, ClawMemory, and McpServer plural.
+    pub const ROUTER_ENFORCING: &str = "RouterEnforcing";
+
+    /// A ToolPolicy with `spec.agtProfile.inline` set has no
+    /// referencing `ClawSandbox` — no router exists to confirm
+    /// enforcement. The controller stamps `phase=Compiled` with
+    /// this reason rather than `Ready` because there is no consumer
+    /// to honor the policy yet. As soon as a sandbox references the
+    /// policy, the reconciler retries and (on success) promotes to
+    /// `Ready` / `RouterEnforcing`.
+    pub const NO_SANDBOXES_REFERENCING: &str = "NoSandboxesReferencing";
 }
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.

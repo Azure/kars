@@ -11,6 +11,7 @@
 
 pub mod conditions;
 pub mod phase;
+pub mod router_confirmation;
 
 use crate::crd::ClawSandbox;
 use kube::ResourceExt;
