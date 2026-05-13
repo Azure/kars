@@ -29,6 +29,7 @@ mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
 mod crd_validations;
+mod egress_allowlist_compile;
 mod fedcred;
 mod fedcred_reaper;
 mod field_managers;

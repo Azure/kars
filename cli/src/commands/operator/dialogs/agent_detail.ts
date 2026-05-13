@@ -86,7 +86,7 @@ export function collectAttachments(state: ClusterState, sandbox: string): RowEnt
     rows.push({
       category: "Tool policy", kind: "toolpolicies",
       name: tp.name, namespace: tp.namespace,
-      summary: `rules=${tp.ruleCount ?? 0}  approval=${tp.approvalRequired ? "yes" : "no"}  rl=${tp.rateLimitPerMin ?? "-"}`,
+      summary: `rules=${tp.ruleCount ?? 0}  rl=${tp.rateLimitPerMin ?? "-"}`,
     });
   }
 

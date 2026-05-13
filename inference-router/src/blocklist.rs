@@ -52,38 +52,16 @@ pub struct Blocklist {
     learn_mode: Arc<AtomicBool>,
     /// Domains observed during learn mode (for generating an allowlist later).
     learned_domains: Arc<RwLock<HashSet<String>>>,
-    /// Allowlist: explicitly approved domains for egress proxy.
-    /// Only domains on this list can be fetched via /egress/fetch (unless learn mode is on).
+    /// Egress allowlist (L7 hostname filter). Populated by the
+    /// `egress_allowlist_loader` from the signed bundle compiled by
+    /// the controller (Slice 5c.1) — the in-memory state is **fully
+    /// derived from the mount** and is replaced atomically on every
+    /// hot-reload via [`Blocklist::replace_allowlist`]. There is no
+    /// HTTP endpoint that can mutate this set; the in-process
+    /// `POST /egress/approve` admin path (and its `PendingApproval`
+    /// surface) was removed alongside this slice — see
+    /// `docs/internal/crd-well-oiled-machine/slice-5-egress-polish-and-observability.md`.
     allowlist: Arc<RwLock<HashSet<String>>>,
-    /// Pending approval requests: domains the agent tried to reach but aren't allowlisted.
-    /// Capped at MAX_PENDING to prevent unbounded memory growth (#13).
-    pending_approvals: Arc<RwLock<Vec<PendingApproval>>>,
-}
-
-/// Maximum pending approval entries to prevent unbounded memory growth.
-const MAX_PENDING: usize = 1000;
-
-/// A pending egress approval request.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct PendingApproval {
-    pub id: String,
-    pub domain: String,
-    pub url: String,
-    pub sandbox: String,
-    pub timestamp: String,
-    /// "pending" = normal allowlist request, "🛑 ech" = ECH block,
-    /// "🛑 no-sni" = missing SNI, "🛑 dns-rebind" = private IP resolution,
-    /// "🛑 ssrf" = SSRF attempt via egress fetch.
-    #[serde(default = "default_kind")]
-    pub kind: String,
-    /// Human-readable explanation of why this was blocked.
-    #[serde(default)]
-    pub reason: String,
-}
-
-#[allow(dead_code)]
-fn default_kind() -> String {
-    "pending".into()
 }
 
 impl Blocklist {
@@ -97,7 +75,6 @@ impl Blocklist {
             learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
-            pending_approvals: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -130,7 +107,6 @@ impl Blocklist {
             learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
-            pending_approvals: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -334,9 +310,21 @@ impl Blocklist {
 
     // ── Allowlist (for egress proxy) ──
 
-    /// Check egress access: blocklist → allowlist → pending approval.
-    /// Returns Ok(()) if allowed, Err(reason) if denied.
-    pub async fn check_egress(&self, url: &str, sandbox: &str) -> Result<(), String> {
+    /// Check egress access: blocklist → learn-mode bypass → allowlist
+    /// (with parent-domain match). Returns `Ok(())` if allowed,
+    /// `Err(reason)` if denied.
+    ///
+    /// Slice 5c.1 removed the in-process "pending approval" side
+    /// effect that used to fire here. The allowlist is now fully
+    /// derived from the controller-published bundle mounted at
+    /// `${EGRESS_ALLOWLIST_DIR}/allowlist.json` — operator-driven
+    /// approvals will land in Slice 5c.2 as a separate
+    /// `EgressApproval` CRD with its own mount; the runtime path
+    /// merges `bundle ∪ approvals` here, not via a privileged HTTP
+    /// endpoint. The `sandbox` arg is preserved so callers (the
+    /// `BlockedBuffer` observability surface in `forward_proxy`) can
+    /// continue to attribute denials.
+    pub async fn check_egress(&self, url: &str, _sandbox: &str) -> Result<(), String> {
         // 1. Blocklist: hard deny
         let block_result = self.is_blocked(url).await;
         if block_result.is_blocked() {
@@ -367,59 +355,36 @@ impl Blocklist {
             }
         }
 
-        // 4. Not allowlisted → create pending approval (dedup by domain, capped)
-        {
-            let mut pending = self.pending_approvals.write().await;
-            let already_pending = pending.iter().any(|p| p.domain == domain);
-            if !already_pending && pending.len() < MAX_PENDING {
-                let id = format!("{:x}", hash_for_id(&format!("{}{}", domain, sandbox)));
-                pending.push(PendingApproval {
-                    id,
-                    domain: domain.clone(),
-                    url: url.to_string(),
-                    sandbox: sandbox.to_string(),
-                    timestamp: format!(
-                        "{}Z",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                    ),
-                    kind: "pending".into(),
-                    reason: format!(
-                        "Domain '{}' not on allowlist — awaiting operator approval",
-                        domain
-                    ),
-                });
-            }
-        }
-
+        // 4. Not allowlisted → deny. Observability is recorded by the
+        //    forward-proxy caller into the slice-5a `BlockedBuffer`
+        //    (`GET /egress/blocked`); there is no longer an
+        //    in-process "approve this domain" surface.
         Err(format!(
-            "Domain '{}' not on allowlist — pending operator approval",
+            "Domain '{}' not on signed allowlist — operator must apply an EgressApproval (Slice 5c.2) or update the bundle",
             domain
         ))
     }
 
-    /// Add a domain to the allowlist.
-    pub async fn allow_domain(&self, domain: &str) {
-        let domain = domain.to_lowercase();
-        self.allowlist.write().await.insert(domain.clone());
-        // Remove from pending approvals
-        self.pending_approvals
-            .write()
-            .await
-            .retain(|p| p.domain != domain);
-        tracing::info!(domain = %domain, "Domain added to egress allowlist");
-    }
-
-    /// Remove a domain from the allowlist.
-    pub async fn deny_domain(&self, domain: &str) {
-        let domain = domain.to_lowercase();
-        self.allowlist.write().await.remove(&domain);
-        self.pending_approvals
-            .write()
-            .await
-            .retain(|p| p.domain != domain);
+    /// Atomically replace the egress allowlist with `domains`. Called
+    /// by `egress_allowlist_loader` on startup and on every hot-reload
+    /// — the loader holds the authoritative bundle digest, so the
+    /// router-side view is always exactly what the controller
+    /// published. `domains` are lower-cased before insertion to
+    /// match the lookup path in [`Blocklist::check_egress`].
+    ///
+    /// The replacement is performed under a single write-lock so
+    /// concurrent readers never observe a partial allowlist (mid-add
+    /// or mid-remove).
+    pub async fn replace_allowlist(&self, domains: Vec<String>) {
+        let normalized: HashSet<String> = domains
+            .into_iter()
+            .map(|d| d.trim().to_ascii_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect();
+        let count = normalized.len();
+        let mut al = self.allowlist.write().await;
+        *al = normalized;
+        tracing::info!(count, "Egress allowlist replaced from signed bundle");
     }
 
     /// Get the current allowlist.
@@ -428,46 +393,6 @@ impl Blocklist {
         domains.sort();
         domains
     }
-
-    /// Get pending approval requests.
-    pub async fn get_pending_approvals(&self) -> Vec<PendingApproval> {
-        self.pending_approvals.read().await.clone()
-    }
-
-    /// Record a proxy-level block (ECH, missing SNI, private IP resolution).
-    /// Surfaces in the pending approvals queue so operators can see what was blocked
-    /// and why, rather than silently dropping connections.
-    pub async fn record_proxy_block(&self, domain: &str, kind: &str, reason: &str, sandbox: &str) {
-        let mut pending = self.pending_approvals.write().await;
-        // Dedup by domain + kind
-        let already = pending.iter().any(|p| p.domain == domain && p.kind == kind);
-        if !already && pending.len() < MAX_PENDING {
-            let id = format!("{:x}", hash_for_id(&format!("proxy:{}:{}", domain, kind)));
-            pending.push(PendingApproval {
-                id,
-                domain: domain.to_string(),
-                url: String::new(),
-                sandbox: sandbox.to_string(),
-                timestamp: format!(
-                    "{}Z",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                ),
-                kind: kind.to_string(),
-                reason: reason.to_string(),
-            });
-        }
-    }
-}
-
-/// Simple hash for generating approval IDs (SipHash via DefaultHasher).
-fn hash_for_id(input: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    input.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Result of a blocklist check.

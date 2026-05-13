@@ -315,7 +315,13 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   }
 
   // ── Actions (extracted to operator/actions.ts) ────────────────────
-  const { approveDomain, denyDomain, enforceEgress, learnEgress } = createActions({
+  // Slice 5c.1: approveDomain/denyDomain removed — the egress
+  // allowlist is now signed and published by the controller, not
+  // mutated by operator key chords. `a`/`A` keys deleted; `d` keeps
+  // its delete-agent meaning. `e` (enforce) and `l` (learn) flip the
+  // CRD `egressMode` field; the controller-published allowlist
+  // remains the authority on which hosts L7 actually permits.
+  const { enforceEgress, learnEgress } = createActions({
     getSandboxes: () => sandboxes,
     activityLog,
     kubeContext,
@@ -668,44 +674,12 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   screen.key(["S-p"], async () => { await panelsOverlay.toggle(); });
 
   // Egress actions
-  screen.key(["a"], async () => {
-    if (dialogOpen) return;
-    if (focusedPanel !== "egress") return;
-    const domains = selectedEgressDomains();
-    if (domains.length === 0) return;
-    const idx = (egressList as any).selected ?? 0;
-    const domain = domains[idx];
-    if (domain && domain.state === "learned") {
-      await approveDomain(domain);
-      await refresh();
-    }
-  });
+  // Slice 5c.1: `a` / `Shift-A` (approve) and `d`-when-egress-focused
+  // (deny) were removed — there is no longer an in-memory side door
+  // for the allowlist. The `d` key now always means "delete agent".
   screen.key(["d"], async () => {
     if (dialogOpen) return;
-    if (focusedPanel === "egress") {
-      // Deny selected domain
-      const domains = selectedEgressDomains();
-      if (domains.length === 0) return;
-      const idx = (egressList as any).selected ?? 0;
-      const domain = domains[idx];
-      if (domain && domain.state === "learned") {
-        await denyDomain(domain);
-        await refresh();
-      }
-    } else {
-      // Delete selected agent
-      deleteSelectedAgent();
-    }
-  });
-  // Approve all learned domains for selected agent
-  screen.key(["S-a"], async () => {
-    const domains = selectedEgressDomains().filter((d) => d.state === "learned");
-    if (domains.length === 0) return;
-    const sb = sandboxes[(agentTable as any).rows?.selected ?? 0];
-    activityLog.log(`{cyan-fg}⏳ Approving ${domains.length} domain(s) for {bold}${sb?.name}{/bold}...{/}`);
-    screen.render();
-    for (const d of domains) { await approveDomain(d); }
-    await refresh();
+    deleteSelectedAgent();
   });
   screen.key(["e"], async () => {
     if (dialogOpen) return;

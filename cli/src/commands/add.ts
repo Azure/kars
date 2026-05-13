@@ -159,7 +159,6 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           },
           networkPolicy: {
             defaultDeny: true,
-            approvalRequired: true,
             allowedEndpoints: [
               { host: "github.com", port: 443 },
               { host: "api.github.com", port: 443 },

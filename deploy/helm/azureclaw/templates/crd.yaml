@@ -576,9 +576,6 @@ spec:
                     defaultDeny:
                       type: boolean
                       default: true
-                    approvalRequired:
-                      type: boolean
-                      default: true
                     egressMode:
                       type: string
                       enum: [Strict, Learn]
@@ -704,8 +701,6 @@ spec:
                       type: integer
                     output:
                       type: integer
-                pendingApprovals:
-                  type: integer
                 foundryAgentId:
                   type: string
                   description: "Foundry Agent Service agent ID (created by controller)"

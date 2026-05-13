@@ -169,12 +169,13 @@ fn safe_domain(domain: &str) -> String {
 
 /// Resolve a domain and validate the result is not a private IP.
 /// Returns the resolved socket address string (ip:port) on success.
-/// On private IP detection, records the block in the blocklist pending queue.
+/// On private IP detection, records the block on the `BlockedBuffer`
+/// (slice-5a observability surface, served at `GET /egress/blocked`).
 async fn resolve_and_validate(
     domain: &str,
     port: u16,
-    blocklist: &Blocklist,
     sandbox: &str,
+    blocked_egress: &BlockedBuffer,
 ) -> anyhow::Result<String> {
     let target = format!("{domain}:{port}");
     let addrs: Vec<_> = tokio::net::lookup_host(&target).await?.collect();
@@ -187,19 +188,7 @@ async fn resolve_and_validate(
     if is_private_ip(&addr.ip()) {
         tracing::warn!(domain = %domain, resolved_ip = %addr.ip(),
             "DNS rebinding blocked: domain resolves to private IP");
-        blocklist
-            .record_proxy_block(
-                domain,
-                "🛑 dns-rebind",
-                &format!(
-                    "DNS rebinding — domain '{}' resolves to private/internal IP {}. \
-                This could be a DNS rebinding attack targeting internal services.",
-                    domain,
-                    addr.ip()
-                ),
-                sandbox,
-            )
-            .await;
+        blocked_egress.record(sandbox, domain, port);
         anyhow::bail!(
             "domain {domain} resolves to private/internal IP {}",
             addr.ip()
@@ -299,7 +288,7 @@ async fn handle_connect(
     }
 
     // Resolve DNS immediately after policy check and validate against private IPs
-    let resolved = match resolve_and_validate(&domain, port, blocklist, sandbox).await {
+    let resolved = match resolve_and_validate(&domain, port, sandbox, blocked_egress).await {
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(domain = %log_dom, error = %e, "CONNECT: DNS validation failed");
@@ -382,7 +371,7 @@ async fn handle_http(
 
     // Resolve + validate (prevents DNS rebinding to private IPs)
     let (host, port) = parse_host_port(&domain, 80);
-    let resolved = match resolve_and_validate(&host, port, blocklist, sandbox).await {
+    let resolved = match resolve_and_validate(&host, port, sandbox, blocked_egress).await {
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(domain = %log_dom, error = %e, "HTTP: DNS validation failed");
@@ -430,20 +419,8 @@ async fn handle_tls_redirect(
         let outer_sni = sni.as_deref().unwrap_or("unknown");
         tracing::warn!(outer_sni = %outer_sni,
             "TLS redirect: Encrypted Client Hello (ECH) detected, rejecting — \
-            cannot verify destination domain. Outer SNI visible in pending approvals.");
+            cannot verify destination domain.");
         blocked_egress.record(sandbox, outer_sni, 443);
-        blocklist
-            .record_proxy_block(
-                outer_sni,
-                "🛑 ech",
-                &format!(
-                    "ECH (Encrypted Client Hello) — real destination hidden behind outer SNI '{}'. \
-                If this domain is a trusted CDN, contact your security team.",
-                    outer_sni
-                ),
-                sandbox,
-            )
-            .await;
         return Ok(());
     }
 
@@ -453,13 +430,7 @@ async fn handle_tls_redirect(
         // No SNI — actively reject instead of silently dropping.
         // Modern TLS clients always send SNI; absence is suspicious.
         tracing::warn!("TLS redirect: no SNI in ClientHello, rejecting connection");
-        blocklist.record_proxy_block(
-            "<no-sni>",
-            "🛑 no-sni",
-            "TLS connection without SNI (Server Name Indication). Cannot determine destination domain. \
-                This may indicate a misconfigured client or an attempt to bypass egress policy.",
-            sandbox,
-        ).await;
+        blocked_egress.record(sandbox, "<no-sni>", 443);
         return Ok(());
     }
 
@@ -473,7 +444,7 @@ async fn handle_tls_redirect(
     }
 
     // Resolve + validate (prevents DNS rebinding to private IPs)
-    let resolved = match resolve_and_validate(&domain, 443, blocklist, sandbox).await {
+    let resolved = match resolve_and_validate(&domain, 443, sandbox, blocked_egress).await {
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(domain = %log_dom, error = %e, "TLS redirect: DNS validation failed");

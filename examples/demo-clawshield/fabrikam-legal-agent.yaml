@@ -70,7 +70,6 @@ spec:
 
   networkPolicy:
     defaultDeny: true
-    approvalRequired: true
     allowedEndpoints:
       # Fabrikam internal APIs only
       - host: "docs.fabrikam.com"

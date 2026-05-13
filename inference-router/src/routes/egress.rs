@@ -18,6 +18,16 @@ use super::AppState;
 use crate::errors;
 
 pub fn egress_routes() -> Router<AppState> {
+    // Slice 5c.1 removed the in-process approval surface:
+    //   POST /egress/approve, POST /egress/deny, GET /egress/pending,
+    //   and POST /egress/enforce (it mutated the runtime allowlist
+    //   bypassing the signed bundle). The allowlist is now exclusively
+    //   sourced from the controller-published, cosign-verified bundle
+    //   mounted at `${EGRESS_ALLOWLIST_DIR}/allowlist.json`. The
+    //   slice-5a `BlockedBuffer` (`GET /egress/blocked` via
+    //   `/egress/learned/blocked`) remains the observability surface.
+    //   Operator-driven runtime approvals will land in Slice 5c.2 as a
+    //   separate `EgressApproval` CRD.
     Router::new()
         .route("/egress/learn", post(egress_learn_toggle))
         .route("/egress/learned", get(egress_learned))
@@ -25,10 +35,6 @@ pub fn egress_routes() -> Router<AppState> {
         .route("/egress/learned/blocked", get(egress_learned_blocked))
         .route("/egress/fetch", post(egress_fetch))
         .route("/egress/allowlist", get(egress_allowlist))
-        .route("/egress/approve", post(egress_approve))
-        .route("/egress/deny", post(egress_deny))
-        .route("/egress/pending", get(egress_pending))
-        .route("/egress/enforce", post(egress_enforce))
 }
 
 /// GET /egress/learned/blocked — list blocked egress attempts captured in
@@ -269,106 +275,6 @@ async fn egress_allowlist(State(state): State<AppState>) -> impl IntoResponse {
         "count": domains.len(),
         "domains": domains,
     }))
-}
-
-/// GET /egress/pending — list pending approval requests.
-async fn egress_pending(State(state): State<AppState>) -> impl IntoResponse {
-    let pending = state.blocklist.get_pending_approvals().await;
-    Json(serde_json::json!({
-        "count": pending.len(),
-        "pending": pending,
-    }))
-}
-
-/// POST /egress/approve — approve a domain for egress.
-/// Body: { "domain": "api.telegram.org" }
-async fn egress_approve(
-    State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
-    if domain.is_empty() {
-        return errors::flat(StatusCode::BAD_REQUEST, "Missing 'domain' field").into_response();
-    }
-    state.blocklist.allow_domain(domain).await;
-    tracing::info!(domain = %domain, "Egress domain approved");
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "approved",
-            "domain": domain,
-        })),
-    )
-        .into_response()
-}
-
-/// POST /egress/deny — deny and remove a pending domain request.
-/// Body: { "domain": "evil.example.com" }
-async fn egress_deny(
-    State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
-    if domain.is_empty() {
-        return errors::flat(StatusCode::BAD_REQUEST, "Missing 'domain' field").into_response();
-    }
-    state.blocklist.deny_domain(domain).await;
-    tracing::info!(domain = %domain, "Egress domain denied");
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "denied",
-            "domain": domain,
-        })),
-    )
-        .into_response()
-}
-
-/// POST /egress/enforce — graduate from learn mode to enforcement.
-/// Promotes all learned domains into the allowlist, disables learn mode,
-/// and clears the learned set. After this, only allowlisted and non-blocklisted
-/// domains pass through. New domains go to pending approval.
-async fn egress_enforce(State(state): State<AppState>) -> impl IntoResponse {
-    let learned = state.blocklist.get_learned_domains().await;
-    if learned.is_empty() && !state.blocklist.is_learn_mode() {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "already_enforcing",
-                "learn_mode": false,
-                "allowlist_count": state.blocklist.get_allowlist().await.len(),
-            })),
-        )
-            .into_response();
-    }
-
-    // Promote each learned domain to the allowlist
-    for domain in &learned {
-        state.blocklist.allow_domain(domain).await;
-    }
-
-    // Disable learn mode and clear the learned set
-    state.blocklist.set_learn_mode(false);
-    state.blocklist.clear_learned().await;
-
-    let allowlist = state.blocklist.get_allowlist().await;
-
-    tracing::info!(
-        promoted = learned.len(),
-        total_allowlist = allowlist.len(),
-        "Egress enforcement activated — learned domains promoted to allowlist"
-    );
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "enforcing",
-            "promoted": learned.len(),
-            "allowlist_count": allowlist.len(),
-            "allowlist": allowlist,
-        })),
-    )
-        .into_response()
 }
 
 // ==========================================================================

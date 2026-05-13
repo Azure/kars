@@ -840,7 +840,6 @@ pub(crate) fn build_offload_sandbox_crd(
         },
         "networkPolicy": {
             "defaultDeny": true,
-            "approvalRequired": true,
             "egressMode": "Learn",
         },
         "governance": {

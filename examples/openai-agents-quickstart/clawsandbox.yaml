@@ -77,7 +77,6 @@ spec:
 
   networkPolicy:
     defaultDeny: true
-    approvalRequired: true
     allowedEndpoints: []
 
   azureServices:

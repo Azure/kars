@@ -74,7 +74,6 @@ export function fixtureToolPolicy(): ToolPolicyItem {
     age: "2h",
     appliesToSandbox: "sb-1",
     commerce: { mandates: true, floorUsd: 5 },
-    approvalRequired: true,
     rateLimitPerMin: 30,
     ruleCount: 6,
     conditions: [

@@ -27,6 +27,7 @@ pub mod copilot_auth;
 pub mod deployment_health;
 pub mod egress_blocked;
 pub mod errors;
+pub mod egress_allowlist_loader;
 pub mod failover;
 pub mod forward_proxy;
 pub mod governance;

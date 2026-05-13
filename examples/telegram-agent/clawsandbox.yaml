@@ -69,7 +69,6 @@ spec:
   # Egress rules — Telegram Bot API + optional Bing search
   networkPolicy:
     defaultDeny: true
-    approvalRequired: true
     allowedEndpoints:
       # Telegram Bot API (required for channel)
       - host: "api.telegram.org"

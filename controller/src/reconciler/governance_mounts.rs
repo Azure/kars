@@ -78,6 +78,16 @@ pub mod paths {
     /// (Slice 3a). Must match the router-side default in
     /// `inference-router/src/memory_binding_loader.rs::MEMORY_BINDING_DIR_DEFAULT`.
     pub const MEMORY_BINDING_DIR: &str = "/etc/azureclaw/memory";
+    /// Signed egress allowlist (JSON). Compiled by the controller
+    /// from the verified `spec.networkPolicy.allowlistRef` (or inline
+    /// `allowedEndpoints` when no ref is set); loaded by the
+    /// inference-router's `egress_allowlist_loader` which seeds the
+    /// L7 hostname filter (`Blocklist.allowlist`). Digest is echoed
+    /// via `/internal/policy-status` under `PolicyKind::EgressAllowlist`
+    /// to close the §3 Ready ⇔ router-echo loop (Slice 5c.1). Must
+    /// match the router-side default in
+    /// `inference-router/src/egress_allowlist_loader.rs::EGRESS_ALLOWLIST_DIR_DEFAULT`.
+    pub const EGRESS_ALLOWLIST_DIR: &str = "/etc/azureclaw/egress";
     /// McpServer JWKS (used by the customer-MCP OAuth verifier).
     pub const MCP_JWKS_DIR: &str = "/etc/azureclaw/mcp";
     /// A2AAgent compiled signed AgentCard.

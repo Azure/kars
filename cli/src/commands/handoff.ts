@@ -473,7 +473,6 @@ export function handoffCommand(): Command {
               inferenceRef: { name: targetInferenceRef },
               networkPolicy: {
                 defaultDeny: true,
-                approvalRequired: true,
                 egressMode: sourceLearnEgress ? "Learn" : "Strict",
               },
               sandbox: {

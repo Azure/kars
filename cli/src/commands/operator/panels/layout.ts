@@ -316,7 +316,6 @@ function buildRows(state: ClusterState): CrdRow[] {
     const parts: string[] = [];
     parts.push(`appliesTo=${t.appliesToSandbox ?? "<all>"}`);
     if (t.ruleCount !== undefined) parts.push(`rules=${t.ruleCount}`);
-    parts.push(`approval=${t.approvalRequired ? "yes" : "no"}`);
     if (t.rateLimitPerMin !== undefined) parts.push(`rate=${t.rateLimitPerMin}/min`);
     rows.push({
       index: next(), kind: "ToolPolicy",

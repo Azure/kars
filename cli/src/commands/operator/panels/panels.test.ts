@@ -158,11 +158,10 @@ describe("S14 panels — mcpserver", () => {
 });
 
 describe("S14 panels — toolpolicy", () => {
-  it("renders appliesTo + commerce + approval + rate-limit", () => {
+  it("renders appliesTo + commerce + rate-limit", () => {
     const out = toolPolicyPanel.render(fullFixture());
     expect(out).toContain("appliesTo");
     expect(out).toContain("sb-1");
-    expect(out).toContain("approval=yes");
     expect(out).toContain("rate-limit=30/min");
     expect(out).toContain("commerce");
     expect(out).toContain("$5.00");
