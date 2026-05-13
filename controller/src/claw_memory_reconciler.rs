@@ -239,6 +239,16 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
         if let Some(msg) = first_auth_misconfigured_message(&results) {
             degraded = Some((conditions::reason::AUTH_MISCONFIGURED, msg));
             RouterEnforcementState::NotApplicable
+        } else if let Some(msg) = first_memory_store_missing_message(&results) {
+            // Slice 3b.5 — `MemoryStoreMissing:` is the second-tier
+            // Degraded signal. `AuthMisconfigured:` is checked first
+            // (RBAC dominates: if we can't read the store, we can't
+            // even tell if it's missing). A 404 means the bound
+            // store does not exist on the upstream — operator-
+            // visible until Slice 3c's router-side auto-provision
+            // ships.
+            degraded = Some((conditions::reason::MEMORY_STORE_MISSING, msg));
+            RouterEnforcementState::NotApplicable
         } else {
             decide_enforcement_state(&compiled_digest, "Memory", &results)
         }
@@ -354,11 +364,51 @@ fn first_auth_misconfigured_message(
         >,
     )],
 ) -> Option<String> {
+    first_prefixed_memory_error(results, conditions::AUTH_MISCONFIGURED_PREFIX)
+}
+
+/// Slice 3b.5 — scan the per-sandbox poll outcomes for a router-side
+/// `MemoryStoreMissing:` `last_error` on the `Memory` policy kind.
+/// Mirrors [`first_auth_misconfigured_message`] but matches the
+/// missing-store prefix.
+///
+/// Lower precedence than auth misconfigs: callers must check
+/// AuthMisconfigured first. 404 only tells you the store does not
+/// exist *given* the operator has access to ask; if RBAC is broken
+/// (403) the controller cannot trust a 404 result at all.
+fn first_memory_store_missing_message(
+    results: &[(
+        String,
+        Result<
+            crate::status::router_confirmation::PolicyStatusResponse,
+            crate::status::router_confirmation::ConfirmError,
+        >,
+    )],
+) -> Option<String> {
+    first_prefixed_memory_error(results, conditions::MEMORY_STORE_MISSING_PREFIX)
+}
+
+/// Shared scan-for-prefixed-error helper used by Slice 3b.4
+/// (`AuthMisconfigured:`) and Slice 3b.5 (`MemoryStoreMissing:`).
+/// Walks per-sandbox `PolicyStatusResponse` results, looks for
+/// `find_last_error("Memory")` starting with `prefix`, and returns a
+/// deterministic `"<sandbox>: <error>"` message with a tail when
+/// multiple sandboxes are affected.
+fn first_prefixed_memory_error(
+    results: &[(
+        String,
+        Result<
+            crate::status::router_confirmation::PolicyStatusResponse,
+            crate::status::router_confirmation::ConfirmError,
+        >,
+    )],
+    prefix: &str,
+) -> Option<String> {
     let mut hits: Vec<(String, String)> = Vec::new();
     for (sandbox, outcome) in results {
         if let Ok(resp) = outcome
             && let Some(err) = resp.find_last_error("Memory")
-            && err.starts_with(conditions::AUTH_MISCONFIGURED_PREFIX)
+            && err.starts_with(prefix)
         {
             hits.push((sandbox.clone(), err.to_string()));
         }
@@ -930,6 +980,112 @@ mod tests {
         assert_eq!(degraded.status, cond_status::TRUE);
         assert_eq!(degraded.reason, reason::AUTH_MISCONFIGURED);
         assert!(degraded.message.contains("AuthMisconfigured: 403"));
+    }
+
+    // ----- Slice 3b.5: MemoryStoreMissing detector + condition -----
+
+    #[test]
+    fn first_memory_store_missing_message_none_when_no_errors() {
+        let results = vec![
+            ("sb-a".to_string(), Ok(ok_resp("Memory", None))),
+            ("sb-b".to_string(), Ok(ok_resp("Memory", None))),
+        ];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_ignores_unrelated_errors() {
+        // A generic transient error and an AuthMisconfigured error
+        // must not trip the MemoryStoreMissing detector — those
+        // belong to other buckets (Awaiting / AuthMisconfigured).
+        let results = vec![
+            (
+                "sb-a".to_string(),
+                Ok(ok_resp("Memory", Some("upstream 500"))),
+            ),
+            (
+                "sb-b".to_string(),
+                Ok(ok_resp("Memory", Some("AuthMisconfigured: 403 search"))),
+            ),
+        ];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_ignores_other_kinds() {
+        // Router echoed `MemoryStoreMissing:` against a different
+        // policy kind. The ClawMemory reconciler scans only Memory.
+        let results = vec![(
+            "sb-a".to_string(),
+            Ok(ok_resp(
+                "InferencePolicy",
+                Some("MemoryStoreMissing: 404 search_memories"),
+            )),
+        )];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_returns_first_hit() {
+        let results = vec![
+            (
+                "sb-a".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("MemoryStoreMissing: 404 search_memories"),
+                )),
+            ),
+            (
+                "sb-b".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("MemoryStoreMissing: 404 update_memories"),
+                )),
+            ),
+        ];
+        let msg = first_memory_store_missing_message(&results).unwrap();
+        assert!(msg.starts_with("sb-a: MemoryStoreMissing: 404 search_memories"));
+        assert!(msg.contains("+1 more sandbox(es) affected"));
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_skips_failed_polls() {
+        let results = vec![(
+            "sb-a".to_string(),
+            Err(router_confirmation::ConfirmError::HttpStatus(503)),
+        )];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn build_conditions_memory_store_missing_sets_degraded_true_with_reason() {
+        // Slice 3b.5 — when the reconciler pre-scan elevates a
+        // MemoryStoreMissing router error to `degraded`, the
+        // resulting conditions must surface that reason on Degraded
+        // (not Awaiting, not AuthMisconfigured) so operators get a
+        // clear pointer at the missing-store fact rather than a
+        // transient-looking digest gap.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some((
+                reason::MEMORY_STORE_MISSING,
+                "sb-a: MemoryStoreMissing: 404 from Foundry",
+            )),
+            &RouterEnforcementState::NotApplicable,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::TRUE);
+        assert_eq!(degraded.reason, reason::MEMORY_STORE_MISSING);
+        assert!(degraded.message.contains("MemoryStoreMissing: 404"));
     }
 
     #[test]
